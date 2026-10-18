@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   collapseLineBreaks,
+  encodeHtmlEntities,
   escapeLinkDestination,
   escapeMarkdown,
+  neutraliseAutolinks,
   safeHttpUrl,
 } from '../../../utils/webhooks/markdown';
+import { bareLinkRuns } from './bareLinkRuns';
 
 const BS = String.fromCharCode(0x5c); // a single backslash, spelled out
 const chr = (cp: number) => String.fromCharCode(cp);
@@ -57,6 +60,78 @@ describe('collapseLineBreaks', () => {
   it('turns each run of line breaks into one space and leaves the rest', () => {
     expect(collapseLineBreaks(`a\r\n\nb${chr(0x2028)}c`)).toBe('a b c');
     expect(collapseLineBreaks('no breaks *here*')).toBe('no breaks *here*');
+  });
+});
+
+describe('encodeHtmlEntities', () => {
+  it('writes &, < and > as entities, the & first (an entity typed by the sender stays literal)', () => {
+    expect(encodeHtmlEntities('a<b && c>d')).toBe('a&lt;b &amp;&amp; c&gt;d');
+    expect(encodeHtmlEntities('&lt;b&gt;')).toBe('&amp;lt;b&amp;gt;');
+    expect(encodeHtmlEntities('plain')).toBe('plain');
+  });
+});
+
+describe('neutraliseAutolinks', () => {
+  it.each([
+    ['https://evil.example/login', '`https://evil.example/login`'],
+    ['http://evil.example', '`http://evil.example`'],
+    ['HTTPS://EVIL.EXAMPLE', '`HTTPS://EVIL.EXAMPLE`'],
+    ['www.evil.example', '`www.evil.example`'],
+    ['(www.evil.example)', `${BS}(\`www.evil.example\`${BS})`],
+    ['_www.evil.example', `${BS}_\`www.evil.example\``],
+    ['x@evil.example', '`x@evil.example`'],
+    ['mailto:x@evil.example', 'mailto:`x@evil.example`'],
+    ['x_y.z+tag@mail.evil-host.example', '`x_y.z+tag@mail.evil-host.example`'],
+  ])('wraps %s in a code span', (input, expected) => {
+    expect(neutraliseAutolinks(input)).toBe(expected);
+  });
+
+  it('escapes the text around the runs, never inside them (a URL reads verbatim)', () => {
+    expect(neutraliseAutolinks('*see* https://github.com/a/b/issues/12#issuecomment-1_x [now]'))
+      .toBe(`${BS}*see${BS}* \`https://github.com/a/b/issues/12#issuecomment-1_x\` ${BS}[now${BS}]`);
+  });
+
+  it('applies the given escape to the text around the runs', () => {
+    expect(neutraliseAutolinks('a<b https://x.example c>d', (part) => part.toUpperCase())).toBe('A<B `https://x.example` C>D');
+  });
+
+  it('replaces a backtick inside a run (it would end the span), and a run ends at one', () => {
+    expect(neutraliseAutolinks('x@evil.example`y')).toBe(`\`x@evil.example\`${BS}\`y`);
+    expect(neutraliseAutolinks('https://evil.example/a`b')).toBe(`\`https://evil.example/a\`${BS}\`b`);
+  });
+
+  it('ends a URL run at whitespace or an angle bracket, which never sit raw in a span', () => {
+    expect(neutraliseAutolinks('https://a.example<b>c https://d.example>e', encodeHtmlEntities))
+      .toBe('`https://a.example`&lt;b&gt;c `https://d.example`&gt;e');
+  });
+
+  it('keeps trailing punctuation and an unmatched ) out of the span, a balanced ) in it', () => {
+    expect(neutraliseAutolinks('https://a.example/x.')).toBe('`https://a.example/x`.');
+    expect(neutraliseAutolinks('https://a.example/x),')).toBe(`\`https://a.example/x\`${BS}),`);
+    expect(neutraliseAutolinks('https://a.example/Foo_(bar)')).toBe('`https://a.example/Foo_(bar)`');
+    expect(neutraliseAutolinks('www.a.example!?')).toBe('`www.a.example`!?');
+  });
+
+  it('leaves text without an address alone apart from the escape, and does not wrap look-alikes', () => {
+    expect(neutraliseAutolinks('a.example and ftp-ish stuff, awww.x')).toBe('a.example and ftp-ish stuff, awww.x');
+    expect(neutraliseAutolinks('no @ here, and @[user-1]')).toBe(`no @ here, and @${BS}[user-1${BS}]`);
+  });
+
+  it('collapses line breaks first, so a run never spans two lines', () => {
+    expect(neutraliseAutolinks('see\nhttps://a.example')).toBe('see `https://a.example`');
+  });
+
+  it('wraps several runs and leaves nothing autolinkable outside a span', () => {
+    const out = neutraliseAutolinks('https://a.example then www.b.example then c@d.example, end');
+    expect(out).toBe('`https://a.example` then `www.b.example` then `c@d.example`, end');
+    expect(bareLinkRuns(out)).toEqual([]);
+  });
+
+  it('stays linear on a long run of address characters without an @', () => {
+    const started = Date.now();
+    neutraliseAutolinks('a'.repeat(200_000));
+    neutraliseAutolinks(`https://${')'.repeat(200_000)}`);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });
 

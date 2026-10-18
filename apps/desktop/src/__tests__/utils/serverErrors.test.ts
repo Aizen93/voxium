@@ -52,7 +52,7 @@ describe('translateServerError — incoming webhooks', () => {
       ['You do not have permission to manage webhooks', 'webhookNoPermission'],
       ['Webhooks can only post to text channels', 'webhookTextOnly'],
       ['Invalid webhook type', 'webhookInvalidType'],
-      ['GitHub webhooks are not available yet', 'webhookGithubUnavailable'],
+      ['GitHub webhooks are not configured on this server', 'webhookGithubNotConfigured'],
       ['channelId is required', 'webhookChannelRequired'],
       ['No fields to update', 'webhookNoFields'],
       ['enabled must be a boolean', 'webhookEnabledBoolean'],
@@ -63,6 +63,14 @@ describe('translateServerError — incoming webhooks', () => {
       expect(translateServerError(message, t).startsWith(`serverErrors.${key}|`), message).toBe(true);
       expect(WEBHOOK_ERROR_KEYS).toContain(key);
     }
+  });
+
+  it('GitHub: the no-encryption-key 503 is mapped; the step-2 refusal is gone with its key', () => {
+    expect(translateServerError('GitHub webhooks are not configured on this server', t))
+      .toBe(`serverErrors.webhookGithubNotConfigured|${JSON.stringify({ defaultValue: 'GitHub webhooks are not configured on this server' })}`);
+    // the server no longer answers it: no mapping left behind, no dead key in the parity list
+    expect(translateServerError('GitHub webhooks are not available yet', t)).toBe('GitHub webhooks are not available yet');
+    expect(WEBHOOK_ERROR_KEYS).not.toContain('webhookGithubUnavailable');
   });
 
   it('the shared name validator: the length message carries the limit as {{max}}', () => {

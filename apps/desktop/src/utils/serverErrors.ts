@@ -167,7 +167,8 @@ const ERROR_MAP: Record<string, string> = {
   'You do not have permission to manage webhooks': 'webhookNoPermission',
   'Webhooks can only post to text channels': 'webhookTextOnly',
   'Invalid webhook type': 'webhookInvalidType',
-  'GitHub webhooks are not available yet': 'webhookGithubUnavailable',
+  // A GitHub webhook's secret is stored encrypted: no key on the server, no GitHub webhooks
+  'GitHub webhooks are not configured on this server': 'webhookGithubNotConfigured',
   'channelId is required': 'webhookChannelRequired',
   'No fields to update': 'webhookNoFields',
   'enabled must be a boolean': 'webhookEnabledBoolean',
@@ -214,7 +215,7 @@ export const DISCOVERY_ERROR_KEYS: readonly string[] = [
 /** The incoming-webhooks subset (exact strings AND patterns), for the locale parity test. */
 export const WEBHOOK_ERROR_KEYS: readonly string[] = [
   'webhooksDisabled', 'webhookDisabled', 'webhookNotFound', 'webhookNoPermission', 'webhookTextOnly', 'webhookInvalidType',
-  'webhookGithubUnavailable', 'webhookChannelRequired', 'webhookNoFields', 'webhookEnabledBoolean', 'webhookNameEmpty',
+  'webhookGithubNotConfigured', 'webhookChannelRequired', 'webhookNoFields', 'webhookEnabledBoolean', 'webhookNameEmpty',
   'webhookNameTooLong', 'webhookCap', 'channelNotFound',
 ];
 

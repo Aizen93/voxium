@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import crypto from 'crypto';
+import fs from 'fs';
 import http from 'http';
+import path from 'path';
 import express, { type Request } from 'express';
 import request from 'supertest';
 import { LIMITS } from '@voxium/shared';
@@ -22,10 +24,13 @@ const limiters = vi.hoisted(() => ({
     order.push(`webhookLimiter:${req.params.webhookId}`);
     next();
   }),
+  // refundRateLimit(name, key): gives a charged point back
+  refund: vi.fn(async (_name: string, _key: string) => {}),
 }));
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitWebhookExecuteIp: (...a: any[]) => limiters.ip(...a),
   rateLimitWebhookExecute: (...a: any[]) => limiters.perWebhook(...a),
+  refundRateLimit: (...a: [string, string]) => limiters.refund(...a),
 }));
 
 // requireFeature stays REAL; only the flag lookup is mocked (and recorded)
@@ -53,6 +58,7 @@ vi.mock('../../websocket/socketServer', () => ({ getIO: () => io }));
 
 import { webhookExecuteRouter, LAST_USED_THROTTLE_MS } from '../../routes/webhookExecute';
 import { errorHandler } from '../../middleware/errorHandler';
+import { sealSecret } from '../../utils/secretBox';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -718,25 +724,6 @@ describe('POST /webhooks/:id/:token — webhook types', () => {
     }
   });
 
-  it('a GitHub-type webhook answers 400 "GitHub webhooks are not supported yet" (step 3 replaces it)', async () => {
-    prismaMock.webhook.findUnique.mockResolvedValueOnce(webhookRow({ type: 'github', secretEnc: 'enc:00:00:00' }));
-
-    const res = await post().set('X-GitHub-Event', 'push').send({ ref: 'refs/heads/main' });
-
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ success: false, error: 'GitHub webhooks are not supported yet' });
-    expect(prismaMock.message.create).not.toHaveBeenCalled();
-  });
-
-  it('a GitHub-type webhook answers the same 400 to a Discord-shaped body', async () => {
-    prismaMock.webhook.findUnique.mockResolvedValueOnce(webhookRow({ type: 'github' }));
-
-    const res = await post().send({ content: 'hello' });
-
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ success: false, error: 'GitHub webhooks are not supported yet' });
-  });
-
   it('an unknown webhook type answers 400 "Unsupported webhook type"', async () => {
     prismaMock.webhook.findUnique.mockResolvedValueOnce(webhookRow({ type: 'gitlab' }));
 
@@ -744,6 +731,466 @@ describe('POST /webhooks/:id/:token — webhook types', () => {
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ success: false, error: 'Unsupported webhook type' });
+  });
+});
+
+// ─── GitHub deliveries ──────────────────────────────────────────────────────
+
+describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
+  // A real seal under a test key: the route opens it with the real secretBox
+  const TEST_KEY = '7f'.repeat(32);
+  const GH_SECRET = 'a1b2'.repeat(16);
+  const FIXTURES = path.resolve(__dirname, '../fixtures/github');
+  const PUSH_RAW = fs.readFileSync(path.join(FIXTURES, 'push-branch.json'), 'utf8');
+  const STAR_RAW = fs.readFileSync(path.join(FIXTURES, 'star.json'), 'utf8');
+  const PING_RAW = fs.readFileSync(path.join(FIXTURES, 'ping.json'), 'utf8');
+  const PUSH_LINES = [
+    '**wile-e** pushed 3 commits to `main` in [acme/rocket](https://github.com/acme/rocket/compare/a29932870447...4a35f9f0701e)',
+    '[`6f3eb10`](https://github.com/acme/rocket/commit/6f3eb107528fc9654bcd9008e6dbcb097a74755e) Add launch countdown timer',
+  ];
+
+  let savedKey: string | undefined;
+  let sealed: string;
+
+  const sign = (raw: string | Buffer, secret = GH_SECRET) =>
+    `sha256=${crypto.createHmac('sha256', secret).update(raw).digest('hex')}`;
+
+  /** A delivery as GitHub sends it: event header, signature over the exact bytes. */
+  function deliver(raw: string, opts: { event?: string | null; signature?: string | null; url?: string } = {}) {
+    let req = post(opts.url ?? URL_OK);
+    const event = opts.event === undefined ? 'push' : opts.event;
+    if (event !== null) req = req.set('X-GitHub-Event', event);
+    const signature = opts.signature === undefined ? sign(raw) : opts.signature;
+    if (signature !== null) req = req.set('X-Hub-Signature-256', signature);
+    return req.set('X-GitHub-Delivery', '72d3162e-cc78-11e3-81ab-4c9367dc0958').send(raw);
+  }
+
+  function githubRow(overrides: Record<string, unknown> = {}) {
+    return webhookRow({ type: 'github', name: 'GitHub', secretEnc: sealed, ...overrides });
+  }
+
+  function expectNothingPosted() {
+    expect(prismaMock.message.create).not.toHaveBeenCalled();
+    expect(io.emit).not.toHaveBeenCalled();
+  }
+
+  beforeEach(() => {
+    savedKey = process.env.TOTP_ENCRYPTION_KEY;
+    process.env.TOTP_ENCRYPTION_KEY = TEST_KEY;
+    sealed = sealSecret(GH_SECRET);
+    prismaMock.webhook.findUnique.mockImplementation(async () => {
+      order.push('findUnique');
+      return githubRow();
+    });
+  });
+
+  afterEach(() => {
+    // The secret and the signatures are credentials too: never on a log line
+    for (const method of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+      const logged = JSON.stringify(vi.mocked(console[method]).mock.calls);
+      expect(logged).not.toContain(GH_SECRET);
+      expect(logged).not.toContain(sign(PUSH_RAW).slice(7));
+      expect(logged).not.toContain('acme/rocket');
+    }
+    if (savedKey === undefined) delete process.env.TOTP_ENCRYPTION_KEY;
+    else process.env.TOTP_ENCRYPTION_KEY = savedKey;
+  });
+
+  it('a validly signed push posts the formatted lines under the webhook name and broadcasts them', async () => {
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(204);
+    expect(prismaMock.message.create).toHaveBeenCalledTimes(1);
+    const data = prismaMock.message.create.mock.calls[0][0].data;
+    expect(data).toEqual({
+      content: expect.any(String),
+      channelId: 'ch-1',
+      webhookId: WEBHOOK_ID,
+      webhookName: 'GitHub',
+    });
+    const lines = (data.content as string).split('\n');
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toBe(PUSH_LINES[0]);
+    expect(lines[1].startsWith(PUSH_LINES[1])).toBe(true);
+
+    expect(io.to).toHaveBeenCalledWith('channel:ch-1');
+    expect(io.emit).toHaveBeenCalledTimes(1);
+    const [event, payload] = io.emit.mock.calls[0];
+    expect(event).toBe('message:new');
+    expect(payload).toMatchObject({ content: data.content, webhookName: 'GitHub', mentions: [], serverId: 'srv-1' });
+    expect(payload.author).toMatchObject({ id: `webhook:${WEBHOOK_ID}`, username: 'GitHub', isWebhook: true });
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a username in a GitHub body (no name override)', async () => {
+    const raw = JSON.stringify({ ...JSON.parse(PING_RAW), username: 'Impostor' });
+
+    const res = await deliver(raw, { event: 'ping' });
+
+    expect(res.status).toBe(204);
+    expect(prismaMock.message.create.mock.calls[0][0].data).toMatchObject({
+      content: 'Connected to **acme/rocket**',
+      webhookName: 'GitHub',
+    });
+  });
+
+  it('?wait=true answers 200 with the created message', async () => {
+    const res = await deliver(PUSH_RAW, { url: `${URL_OK}?wait=true` });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.content.split('\n')[0]).toBe(PUSH_LINES[0]);
+    expect(res.body.data.webhookName).toBe('GitHub');
+  });
+
+  it('a missing signature answers 401 "Invalid signature" and posts nothing', async () => {
+    const res = await deliver(PUSH_RAW, { signature: null });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
+    expectNothingPosted();
+    expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a signature made with another secret answers 401', async () => {
+    const res = await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
+    expectNothingPosted();
+  });
+
+  it('a body changed after signing answers 401', async () => {
+    const tampered = PUSH_RAW.replace('"login": "wile-e"', '"login": "wile-f"');
+    expect(tampered).not.toBe(PUSH_RAW);
+
+    const res = await deliver(tampered, { signature: sign(PUSH_RAW) });
+
+    expect(res.status).toBe(401);
+    expectNothingPosted();
+  });
+
+  it('a malformed signature header answers 401', async () => {
+    for (const signature of [sign(PUSH_RAW).slice(7), `sha1=${'0'.repeat(40)}`, 'sha256=', 'garbage']) {
+      const res = await deliver(PUSH_RAW, { signature });
+      expect(res.status).toBe(401);
+    }
+    expectNothingPosted();
+  });
+
+  it('an empty body without a signature answers 401, never 500', async () => {
+    const res = await post().set('X-GitHub-Event', 'push');
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
+    expectNothingPosted();
+  });
+
+  it('the signature is checked before the event is looked at: an unsigned ignored event is still a 401', async () => {
+    const res = await deliver(STAR_RAW, { event: 'star', signature: null });
+
+    expect(res.status).toBe(401);
+    expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+  });
+
+  // ── The signature is checked over the raw bytes BEFORE anything is parsed ──
+
+  it('malformed JSON with a wrong signature answers 401, not 400: the body is never parsed', async () => {
+    const raw = '{"ref": "refs/heads/main", "SECRET_FRAGMENT":';
+    let captured: Request | undefined;
+    const capturingApp = createApp((req) => {
+      captured = req;
+    });
+    const parse = vi.spyOn(JSON, 'parse');
+
+    const res = await request(capturingApp)
+      .post(URL_OK)
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-Hub-Signature-256', sign(raw, 'not-the-secret'))
+      .send(raw);
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
+    // JSON.parse never saw the request bytes (supertest parses only the reply)
+    expect(parse.mock.calls.some(([text]) => text === raw)).toBe(false);
+    expect(captured?.body).toBeUndefined();
+    expect(Buffer.isBuffer(captured?.rawBody)).toBe(true);
+    expect(res.text).not.toContain('SECRET_FRAGMENT');
+    expectNothingPosted();
+  });
+
+  it('a valid signature over a body whose JSON is malformed answers 400 "Malformed JSON body"', async () => {
+    const raw = '{"ref": "refs/heads/main",';
+
+    const res = await deliver(raw);
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Malformed JSON body' });
+    expect(limiters.refund).not.toHaveBeenCalled();
+    expectNothingPosted();
+  });
+
+  it('the verify-hook 401 goes through the real error handler in the house shape: the AppError survives body-parser', async () => {
+    const res = await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
+
+    // body-parser wraps a thrown verify error with http-errors, which keeps
+    // the instance (and its 401): not the 403 "Invalid request" a plain
+    // error thrown there would become
+    expect(res.status).toBe(401);
+    expect(res.headers['content-type']).toMatch(/^application\/json/);
+    expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
+    // the AppError branch answers without logging (no stack, no body)
+    expect(console.warn).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it('charges the per-webhook limiter, then REFUNDS it on a 401: an unsigned flood costs the per-IP bucket only', async () => {
+    const res = await deliver(PUSH_RAW, { signature: null });
+
+    expect(res.status).toBe(401);
+    expect(limiters.ip).toHaveBeenCalledTimes(1);
+    expect(order).toContain(`webhookLimiter:${WEBHOOK_ID}`);
+    expect(limiters.refund).toHaveBeenCalledTimes(1);
+    expect(limiters.refund).toHaveBeenCalledWith('webhookExecute', WEBHOOK_ID);
+  });
+
+  it('fails closed when the verify hook never saw the body: a body read before the route gets 401, refunded', async () => {
+    // A body already consumed upstream (a parser mounted ahead of the route)
+    // leaves the route's own parser nothing to read, so its verify hook never
+    // runs: the handler must not take a valid-looking signature on trust
+    const readsFirst = express();
+    readsFirst.use(express.raw({ type: '*/*', limit: '2mb' }));
+    readsFirst.use('/api/v1/webhooks', webhookExecuteRouter);
+    readsFirst.use(errorHandler);
+
+    const res = await request(readsFirst)
+      .post(URL_OK)
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-Hub-Signature-256', sign(PUSH_RAW))
+      .send(PUSH_RAW);
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
+    expect(limiters.refund).toHaveBeenCalledWith('webhookExecute', WEBHOOK_ID);
+    expectNothingPosted();
+  });
+
+  it('a delivery that is posted, ignored or refused by the formatter is never refunded', async () => {
+    await deliver(PUSH_RAW);
+    await deliver(STAR_RAW, { event: 'star' });
+    await deliver('[{"ref":"refs/heads/main"}]');
+
+    expect(limiters.refund).not.toHaveBeenCalled();
+  });
+
+  it('drops the secret from res.locals once the hook has used it', async () => {
+    let captured: Request | undefined;
+    const capturingApp = createApp((req) => {
+      captured = req;
+    });
+
+    const res = await request(capturingApp)
+      .post(URL_OK)
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-Hub-Signature-256', sign(PUSH_RAW))
+      .send(PUSH_RAW);
+
+    expect(res.status).toBe(204);
+    expect(captured?.res?.locals.webhookSecret).toBeUndefined();
+    expect(captured?.res?.locals.signatureVerified).toBe(true);
+  });
+
+  it('an empty X-GitHub-Event header is treated as missing (400 that says so)', async () => {
+    const res = await deliver(PUSH_RAW, { event: '' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      success: false,
+      error: 'This is a GitHub webhook; send GitHub deliveries (missing X-GitHub-Event)',
+    });
+    expectNothingPosted();
+  });
+
+  it('a missing secret answers 503 before the per-webhook limiter and the parser: a 2 MB body gets 503, not 413', async () => {
+    prismaMock.webhook.findUnique.mockImplementationOnce(async () => {
+      order.push('findUnique');
+      return githubRow({ secretEnc: null });
+    });
+    const body = JSON.stringify({ pad: 'p'.repeat(2 * 1024 * 1024) });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(LIMITS.WEBHOOK_BODY_MAX_BYTES);
+
+    const res = await rawJsonPost(URL_OK, body);
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.body)).toEqual({ success: false, error: 'Webhook secret is not configured' });
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup']);
+    expectNothingPosted();
+  });
+
+  it('a secret that will not open answers 503 before the per-webhook limiter too', async () => {
+    delete process.env.TOTP_ENCRYPTION_KEY;
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(503);
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.refund).not.toHaveBeenCalled();
+  });
+
+  it('a generic webhook never meets the signature check: its raw bytes are kept, nothing is refunded', async () => {
+    prismaMock.webhook.findUnique.mockResolvedValueOnce(webhookRow());
+
+    const res = await post().set('X-Hub-Signature-256', 'sha256=garbage').send({ content: 'hello' });
+
+    expect(res.status).toBe(204);
+    expect(prismaMock.message.create).toHaveBeenCalledTimes(1);
+    expect(limiters.refund).not.toHaveBeenCalled();
+  });
+
+  it('a missing X-GitHub-Event answers 400 that says so (a plain Discord-shaped body, even signed)', async () => {
+    const raw = JSON.stringify({ content: 'hello' });
+
+    const res = await deliver(raw, { event: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      success: false,
+      error: 'This is a GitHub webhook; send GitHub deliveries (missing X-GitHub-Event)',
+    });
+    expectNothingPosted();
+  });
+
+  it('an ignored event (star) answers 204, posts and broadcasts nothing, but records lastUsedAt', async () => {
+    const res = await deliver(STAR_RAW, { event: 'star' });
+
+    expect(res.status).toBe(204);
+    expect(res.text).toBe('');
+    expectNothingPosted();
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+    const { where, data } = prismaMock.webhook.updateMany.mock.calls[0][0];
+    expect(where.id).toBe(WEBHOOK_ID);
+    expect(where.OR[0]).toEqual({ lastUsedAt: null });
+    expect(where.OR[1].lastUsedAt.lt).toBeInstanceOf(Date);
+    expect(data.lastUsedAt).toBeInstanceOf(Date);
+  });
+
+  it('?wait=true on an ignored event answers 200 { success: true, data: null }', async () => {
+    const res = await deliver(STAR_RAW, { event: 'star', url: `${URL_OK}?wait=true` });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: null });
+    expectNothingPosted();
+  });
+
+  it('an ignored action of a rendered event (pull_request synchronize) is ignored the same way', async () => {
+    const raw = fs.readFileSync(path.join(FIXTURES, 'pull_request-synchronize.json'), 'utf8');
+
+    const res = await deliver(raw, { event: 'pull_request' });
+
+    expect(res.status).toBe(204);
+    expectNothingPosted();
+  });
+
+  it('a failed lastUsedAt write on an ignored event is only warned about', async () => {
+    prismaMock.webhook.updateMany.mockRejectedValueOnce(new Error('connection reset'));
+
+    const res = await deliver(STAR_RAW, { event: 'star' });
+
+    expect(res.status).toBe(204);
+    expect(console.warn).toHaveBeenCalledWith('[Webhooks] Could not record lastUsedAt', { webhookId: WEBHOOK_ID, error: 'connection reset' });
+  });
+
+  it("a signed body the formatter refuses answers 400 with the formatter's error", async () => {
+    const raw = '[{"ref":"refs/heads/main"}]';
+
+    const res = await deliver(raw);
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Body must be a JSON object' });
+    expectNothingPosted();
+  });
+
+  it('a row without a secret answers 503 "Webhook secret is not configured" and logs the webhook id only', async () => {
+    prismaMock.webhook.findUnique.mockResolvedValueOnce(githubRow({ secretEnc: null }));
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ success: false, error: 'Webhook secret is not configured' });
+    expect(console.error).toHaveBeenCalledWith('[Webhooks] GitHub webhook has no secret', { webhookId: WEBHOOK_ID });
+    expectNothingPosted();
+  });
+
+  it('a secret that will not open (key missing) answers 503 "Webhook secret is unavailable"', async () => {
+    delete process.env.TOTP_ENCRYPTION_KEY;
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ success: false, error: 'Webhook secret is unavailable' });
+    expect(console.error).toHaveBeenCalledWith('[Webhooks] Could not open a GitHub webhook secret', {
+      webhookId: WEBHOOK_ID,
+      error: expect.stringContaining('TOTP_ENCRYPTION_KEY'),
+    });
+    expectNothingPosted();
+  });
+
+  it('a tampered sealed value, or one sealed under another key, answers the same 503', async () => {
+    const parts = sealed.split(':');
+    const flipped = `${parts[3][0] === '0' ? '1' : '0'}${parts[3].slice(1)}`;
+    prismaMock.webhook.findUnique.mockResolvedValueOnce(githubRow({ secretEnc: [...parts.slice(0, 3), flipped].join(':') }));
+    const tampered = await deliver(PUSH_RAW);
+
+    process.env.TOTP_ENCRYPTION_KEY = '3c'.repeat(32);
+    const otherKey = await deliver(PUSH_RAW);
+
+    prismaMock.webhook.findUnique.mockResolvedValueOnce(githubRow({ secretEnc: GH_SECRET }));
+    const plaintext = await deliver(PUSH_RAW);
+
+    for (const res of [tampered, otherKey, plaintext]) {
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ success: false, error: 'Webhook secret is unavailable' });
+    }
+    expect(console.error).toHaveBeenCalledWith('[Webhooks] Could not open a GitHub webhook secret', {
+      webhookId: WEBHOOK_ID,
+      error: 'Sealed value failed authentication',
+    });
+    expectNothingPosted();
+  });
+
+  it('a GitHub row still answers the not-found 404 to a wrong token, before any of this', async () => {
+    const res = await deliver(PUSH_RAW, { url: `/api/v1/webhooks/${WEBHOOK_ID}/not-the-token` });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
+    expect(prismaMock.channel.findUnique).not.toHaveBeenCalled();
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+    expectNothingPosted();
+  });
+
+  it('a disabled GitHub row answers 403 before the secret is opened', async () => {
+    prismaMock.webhook.findUnique.mockResolvedValueOnce(githubRow({ enabled: false, secretEnc: null }));
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ success: false, error: 'Webhook is disabled' });
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it('logs the delivery id at debug level, and nothing from the body or the signature', async () => {
+    await deliver(PUSH_RAW);
+
+    expect(console.debug).toHaveBeenCalledWith('[Webhooks] GitHub delivery', {
+      webhookId: WEBHOOK_ID,
+      delivery: '72d3162e-cc78-11e3-81ab-4c9367dc0958',
+    });
+    // the suite's afterEach asserts the secret, the signature and the body never reached a log line
   });
 });
 

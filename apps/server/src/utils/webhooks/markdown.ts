@@ -34,6 +34,85 @@ export function escapeMarkdown(text: string): string {
 }
 
 /**
+ * `&`, `<` and `>` as HTML entities (`&` first, so an entity the sender typed
+ * stays literal). Markdown decodes them back, so the reader sees the
+ * characters as typed — `Option<T>` stays `Option<T>`, `&lt;b&gt;` stays
+ * `&lt;b&gt;` — and no raw angle bracket of a field reaches a later
+ * tag-stripping pass over the whole content, where a `<` in one field and a
+ * `>` in another would be stripped as one "tag" across the markup between.
+ */
+export function encodeHtmlEntities(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// A run remark-gfm would turn into a link on its own (a GFM autolink
+// literal): an http(s):// or www. address, or an e-mail address (which also
+// covers the mailto:/xmpp: forms, whose address part it matches). Broader
+// than GFM on purpose — any case, no rule about the character before
+// `https://`, and `www.` after anything but a letter or digit: wrapping a run
+// GFM would have left alone costs a code span, missing one costs a link. A
+// URL run ends at whitespace, an angle bracket or a backtick: GFM's own URL
+// ends at whitespace or `<`, and none of the three may sit raw in the span.
+// An address starts only where a run of address characters starts (the
+// lookbehind): a match found inside such a run also starts at its beginning,
+// and without it a long run without an `@` is rescanned from every position.
+const AUTOLINK_RUN_RE =
+  /(?:https?:\/\/|(?<![A-Za-z0-9])www\.)[^\s<>`]*|(?<![A-Za-z0-9._+-])[A-Za-z0-9._+-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+/gi;
+// Punctuation GFM leaves out of the end of an autolink; kept out of the span
+// too, so `see https://x.example/1.` reads as the address and a full stop
+const TRAILING_PUNCTUATION = new Set(['.', ',', ':', ';', '!', '?', '*', '_', '~', "'", '"']);
+
+/** The run without trailing punctuation, nor a trailing `)` that has no `(` to close. */
+function trimRunEnd(run: string): string {
+  let opens = 0;
+  let closes = 0;
+  for (const ch of run) {
+    if (ch === '(') opens += 1;
+    else if (ch === ')') closes += 1;
+  }
+  let end = run.length;
+  while (end > 0) {
+    const ch = run[end - 1];
+    if (TRAILING_PUNCTUATION.has(ch)) {
+      end -= 1;
+    } else if (ch === ')' && closes > opens) {
+      closes -= 1;
+      end -= 1;
+    } else {
+      break;
+    }
+  }
+  return run.slice(0, end);
+}
+
+/**
+ * A SINGLE-LINE field for interpolation into markdown OUTSIDE a link label:
+ * every run remark-gfm would autolink by itself (a bare URL, a `www.` host,
+ * an e-mail address) goes into an inline code span, verbatim — no escape
+ * works inside a span (an escape there would show as a backslash, and a
+ * backslash escape inside an autolink ends up in its address), and a
+ * backtick would end the span early, so backticks are replaced with `'`.
+ * A URL inside a code span is never linked: a sender string cannot add a
+ * link to any host. Everything around the runs goes through `escapeRest`
+ * (markdown escapes by default). Line breaks are collapsed first.
+ *
+ * Not for a link label (GFM never autolinks inside a link, and the label
+ * would read as code), nor for free text kept as the sender wrote it.
+ */
+export function neutraliseAutolinks(text: string, escapeRest: (segment: string) => string = escapeMarkdown): string {
+  const line = collapseLineBreaks(text);
+  let out = '';
+  let from = 0;
+  for (const match of line.matchAll(AUTOLINK_RUN_RE)) {
+    const run = trimRunEnd(match[0]);
+    if (run === '') continue;
+    out += `${escapeRest(line.slice(from, match.index))}\`${run.replace(/`/g, "'")}\``;
+    from = match.index + run.length;
+  }
+  return out + escapeRest(line.slice(from));
+}
+
+/**
  * The URL in its normalised form (`new URL(url).href`) when it parses and is
  * http(s), else null — `javascript:`, `data:`, relative paths and garbage
  * never become a link target. The normalised form is returned rather than the

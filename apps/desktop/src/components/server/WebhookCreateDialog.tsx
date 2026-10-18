@@ -19,8 +19,10 @@ interface Props {
 /**
  * "New webhook": a name (the author label its messages carry), the channel
  * it posts to and its type. The name runs through the shared validator before
- * the request. GitHub stays selectable even while the server refuses it (step
- * 3 of the plan lifts that); the refusal comes back translated.
+ * the request. A GitHub webhook's answer also carries its signing secret,
+ * which the copy-once panel shows once with the GitHub setup steps; a server
+ * without the key GitHub secrets are encrypted with refuses one (503), and
+ * that refusal comes back translated.
  */
 export function WebhookCreateDialog({ channels, busy, onCreate, onClose }: Props) {
   const { t } = useTranslation();

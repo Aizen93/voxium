@@ -6,10 +6,19 @@ import type { Prisma } from '../generated/prisma/client';
 import { prisma } from '../utils/prisma';
 import { getIO } from '../websocket/socketServer';
 import { requireFeature } from '../middleware/requireFeature';
-import { rateLimitWebhookExecute, rateLimitWebhookExecuteIp } from '../middleware/rateLimiter';
-import { BadRequestError, ForbiddenError, NotFoundError, UnsupportedMediaTypeError } from '../utils/errors';
+import { rateLimitWebhookExecute, rateLimitWebhookExecuteIp, refundRateLimit } from '../middleware/rateLimiter';
+import {
+  BadRequestError,
+  ForbiddenError,
+  NotFoundError,
+  ServiceUnavailableError,
+  UnauthorizedError,
+  UnsupportedMediaTypeError,
+} from '../utils/errors';
 import { shapeMessageRow } from '../utils/messageAuthor';
+import { openSecret } from '../utils/secretBox';
 import { renderDiscordPayload, type RenderedWebhookMessage } from '../utils/webhooks/discordPayload';
+import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/githubFormatter';
 
 /**
  * The PUBLIC incoming-webhook execute route: `POST /api/v1/webhooks/:webhookId/:token`.
@@ -22,7 +31,11 @@ import { renderDiscordPayload, type RenderedWebhookMessage } from '../utils/webh
  *
  *   [router level] kill switch → per-IP limiter
  *   [route]        JSON content type → token check (one query) → channel
- *                  → per-webhook limiter → body parser → render + insert + broadcast
+ *                  → GitHub only: open the sealed secret
+ *                  → per-webhook limiter
+ *                  → body parser (GitHub only: the signature over the raw
+ *                    bytes, checked BEFORE they are parsed)
+ *                  → render + insert + broadcast
  *
  * The kill switch and the per-IP limiter are ROUTER-level on purpose: the
  * router decodes the route params while matching the route, and a bad
@@ -35,6 +48,28 @@ import { renderDiscordPayload, type RenderedWebhookMessage } from '../utils/webh
  * constant time, an unknown id and a wrong token cost the same single query
  * and answer the identical 404, and the access log redacts it
  * (utils/redactUrl.ts). Neither the token nor the body is ever logged.
+ *
+ * The handler renders by webhook TYPE, chosen at creation (never guessed
+ * from the body, so a mismatch is reported instead of failing silently):
+ * - generic: the Discord shape (utils/webhooks/discordPayload.ts); a delivery
+ *   carrying X-GitHub-Event is refused with a 400 that says so.
+ * - github: the token check also opens the webhook's sealed secret (503
+ *   when it is missing or cannot be opened: a server-side fault, not the
+ *   sender's, answered before a byte of the body is read). The body parser's
+ *   verify hook then checks X-Hub-Signature-256 against the HMAC-SHA256 of
+ *   the raw bytes BEFORE JSON.parse runs: a mismatch (or no signature) is 401
+ *   'Invalid signature', nothing is parsed or posted, and the per-webhook
+ *   point is REFUNDED — whoever holds the URL but not the secret pays the
+ *   per-IP bucket only, and cannot starve GitHub's real deliveries. (A
+ *   request without any body is a 415 before the token check; a body the
+ *   parser does not read, being consumed upstream, never meets the hook, so
+ *   the handler fails closed with the same 401.)
+ *   Then X-GitHub-Event is required (missing or empty: a 400 that says so, as
+ *   a plain Discord-shaped body gets), then the GitHub formatter
+ *   (utils/webhooks/githubFormatter.ts). An event or action it ignores
+ *   answers 204 (200 with data: null under ?wait=true) and posts nothing, but
+ *   still moves lastUsedAt: the delivery was authentic. The secret, the
+ *   signature and the body are never logged.
  */
 
 type ExecuteParams = { webhookId: string; token: string };
@@ -75,6 +110,19 @@ type WebhookChannel = Prisma.ChannelGetPayload<{ select: typeof channelSelect }>
 
 /** What res.locals.webhook carries past the token check: the row and its channel. */
 export type ExecutableWebhook = WebhookRow & { channel: WebhookChannel };
+
+/** What the route's guards leave on res.locals for the ones after them. */
+interface ExecuteLocals {
+  webhook?: ExecutableWebhook;
+  /** A GitHub row's opened secret: set by loadWebhook, used (then dropped) by the parser's verify hook. */
+  webhookSecret?: string;
+  /** Set by the verify hook once X-Hub-Signature-256 matched the raw bytes. */
+  signatureVerified?: boolean;
+}
+
+function localsOf(res: Response | ServerResponse): ExecuteLocals {
+  return (res as Response).locals as ExecuteLocals;
+}
 
 // The one path shape this router serves, as the route matches it (two
 // segments, an optional trailing slash). The router-level guards run for it
@@ -117,9 +165,60 @@ function isForeignKeyViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2003';
 }
 
-/** Keeps the exact request bytes for the GitHub signature check (step 3). */
-function keepRawBody(req: IncomingMessage, _res: ServerResponse, buf: Buffer): void {
-  (req as Request).rawBody = buf;
+/**
+ * A GitHub row always gets a sealed secret at creation and on rotate: its
+ * absence, or a value that will not open (key missing or changed, value
+ * tampered with), is the server's fault, never the sender's. Logs the
+ * webhook id and the error message only.
+ */
+function openGitHubSecret(row: WebhookRow): string {
+  if (row.secretEnc === null) {
+    console.error('[Webhooks] GitHub webhook has no secret', { webhookId: row.id });
+    throw new ServiceUnavailableError('Webhook secret is not configured');
+  }
+  try {
+    return openSecret(row.secretEnc);
+  } catch (err) {
+    console.error('[Webhooks] Could not open a GitHub webhook secret', {
+      webhookId: row.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw new ServiceUnavailableError('Webhook secret is unavailable');
+  }
+}
+
+/**
+ * The 401 for a GitHub delivery whose signature does not match, after giving
+ * back the per-webhook point it was charged: a failure must not count
+ * against the webhook (refundRateLimit never throws; the reply does not wait
+ * for it).
+ */
+function invalidSignature(webhookId: string): UnauthorizedError {
+  void refundRateLimit('webhookExecute', webhookId);
+  return new UnauthorizedError('Invalid signature');
+}
+
+/**
+ * The body parser's verify hook: runs on the exact request bytes BEFORE they
+ * are parsed. Keeps them on req.rawBody; for a GitHub row, checks
+ * X-Hub-Signature-256 over them and throws the 401 on a mismatch, so nothing
+ * a sender without the secret sends is ever parsed. body-parser hands the
+ * thrown error on as the same instance (http-errors keeps it and its 401
+ * status), and the error handler answers it in the house shape.
+ */
+function verifyRawBody(req: IncomingMessage, res: ServerResponse, buf: Buffer): void {
+  const request = req as Request;
+  request.rawBody = buf;
+  const locals = localsOf(res);
+  const webhook = locals.webhook;
+  if (webhook?.type !== 'github') return;
+  const secret = locals.webhookSecret;
+  // Needed for this check alone: not kept for the rest of the request
+  delete locals.webhookSecret;
+  if (secret === undefined || !verifyGitHubSignature(buf, request.get('x-hub-signature-256'), secret)) {
+    throw invalidSignature(webhook.id);
+  }
+  locals.signatureVerified = true;
 }
 
 /**
@@ -161,15 +260,45 @@ async function loadWebhook(req: Request<ExecuteParams>, res: Response, next: Nex
     if (!row.enabled) throw new ForbiddenError('Webhook is disabled');
 
     const webhook: ExecutableWebhook = { ...row, channel };
-    res.locals.webhook = webhook;
+    const locals = localsOf(res);
+    locals.webhook = webhook;
+    // The parser's verify hook checks a GitHub signature before anything is
+    // parsed, so the secret must be in hand first — and a secret that will
+    // not open is answered here, before a byte of the body is read
+    if (row.type === 'github') locals.webhookSecret = openGitHubSecret(row);
     next();
   } catch (err) {
     next(err);
   }
 }
 
-/** The message content and name for this delivery, by webhook type. */
-function renderDelivery(req: Request<ExecuteParams>, webhook: ExecutableWebhook): RenderedWebhookMessage {
+/**
+ * A GitHub delivery: signature (already checked by the parser's verify
+ * hook), event header, then the formatter, in that order, so nothing a
+ * sender without the secret sends is ever looked at. Null when the event (or
+ * its action) is acknowledged but posts nothing. The message posts under the
+ * webhook's name: GitHub has no username override.
+ */
+function renderGitHubDelivery(req: Request<ExecuteParams>, res: Response, webhook: ExecutableWebhook): RenderedWebhookMessage | null {
+  // Fail closed: a body the parser skipped (consumed upstream) never met the
+  // verify hook, so no signature was checked over it
+  if (localsOf(res).signatureVerified !== true) throw invalidSignature(webhook.id);
+
+  // An empty header is no event either
+  const event = req.get('x-github-event');
+  if (!event) {
+    throw new BadRequestError('This is a GitHub webhook; send GitHub deliveries (missing X-GitHub-Event)');
+  }
+
+  const result = renderGitHubEvent(event, req.body);
+  if ('error' in result) throw new BadRequestError(result.error);
+  if ('ignored' in result) return null;
+  return { content: result.content };
+}
+
+/** The message content and name for this delivery, by webhook type; null
+ *  when the delivery is acknowledged but posts nothing. */
+function renderDelivery(req: Request<ExecuteParams>, res: Response, webhook: ExecutableWebhook): RenderedWebhookMessage | null {
   switch (webhook.type) {
     case 'generic': {
       if (req.get('x-github-event') !== undefined) {
@@ -180,11 +309,31 @@ function renderDelivery(req: Request<ExecuteParams>, webhook: ExecutableWebhook)
       return result;
     }
     case 'github':
-      // Step 3 replaces this branch: X-Hub-Signature-256 verified over
-      // req.rawBody with the opened secret, then the GitHub formatter
-      throw new BadRequestError('GitHub webhooks are not supported yet');
+      return renderGitHubDelivery(req, res, webhook);
     default:
       throw new BadRequestError('Unsupported webhook type');
+  }
+}
+
+/**
+ * Throttled: one conditional write, a no-op within a minute of the last.
+ * Runs only for an accepted delivery, after its message (if any) went out,
+ * so a failure here is only logged.
+ */
+async function recordLastUsed(webhookId: string): Promise<void> {
+  try {
+    await prisma.webhook.updateMany({
+      where: {
+        id: webhookId,
+        OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: new Date(Date.now() - LAST_USED_THROTTLE_MS) } }],
+      },
+      data: { lastUsedAt: new Date() },
+    });
+  } catch (err) {
+    console.warn('[Webhooks] Could not record lastUsedAt', {
+      webhookId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -199,7 +348,18 @@ async function executeWebhook(req: Request<ExecuteParams>, res: Response, next: 
       console.debug('[Webhooks] GitHub delivery', { webhookId: webhook.id, delivery: delivery.slice(0, 64) });
     }
 
-    const rendered = renderDelivery(req, webhook);
+    const rendered = renderDelivery(req, res, webhook);
+    if (rendered === null) {
+      // Authentic but nothing to post (a GitHub event or action the formatter
+      // ignores): no insert, no broadcast, but the list's "last used" moves
+      await recordLastUsed(webhook.id);
+      if (req.query.wait === 'true') {
+        res.status(200).json({ success: true, data: null });
+        return;
+      }
+      res.status(204).end();
+      return;
+    }
     const webhookName = rendered.nameOverride ?? webhook.name;
 
     // No authorId (the webhook is the author), type stays 'user', no replyTo,
@@ -233,22 +393,7 @@ async function executeWebhook(req: Request<ExecuteParams>, res: Response, next: 
     };
     getIO().to(`channel:${webhook.channelId}`).emit('message:new', payload as unknown as Message);
 
-    // Throttled: one conditional write, a no-op within a minute of the last.
-    // The message is already delivered, so a failure here is only logged
-    try {
-      await prisma.webhook.updateMany({
-        where: {
-          id: webhook.id,
-          OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: new Date(Date.now() - LAST_USED_THROTTLE_MS) } }],
-        },
-        data: { lastUsedAt: new Date() },
-      });
-    } catch (err) {
-      console.warn('[Webhooks] Could not record lastUsedAt', {
-        webhookId: webhook.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    await recordLastUsed(webhook.id);
 
     if (req.query.wait === 'true') {
       res.status(200).json({ success: true, data: message });
@@ -275,7 +420,8 @@ webhookExecuteRouter.post(
   // attacker-controlled until loadWebhook has checked the token
   rateLimitWebhookExecute,
   // Last guard before the handler: a body is read and parsed only for a
-  // valid token (req.rawBody still exists for the handler's signature check)
-  express.json({ limit: LIMITS.WEBHOOK_BODY_MAX_BYTES, verify: keepRawBody }),
+  // valid token, and a GitHub body only once its signature matched the raw
+  // bytes (the verify hook runs between the read and the parse)
+  express.json({ limit: LIMITS.WEBHOOK_BODY_MAX_BYTES, verify: verifyRawBody }),
   executeWebhook,
 );

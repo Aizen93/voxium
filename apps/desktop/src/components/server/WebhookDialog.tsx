@@ -85,7 +85,7 @@ export function WebhookDialog({
         aria-modal="true"
         aria-labelledby={labelledBy}
         tabIndex={-1}
-        className="w-full max-w-lg rounded-2xl border border-vox-border bg-vox-bg-secondary p-5 shadow-2xl outline-none animate-slide-up"
+        className="max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-2xl border border-vox-border bg-vox-bg-secondary p-5 shadow-2xl outline-none animate-slide-up"
         data-testid={testId}
       >
         {children}

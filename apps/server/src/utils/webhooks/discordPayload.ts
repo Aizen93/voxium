@@ -1,6 +1,13 @@
 import { LIMITS, validateMessageContent } from '@voxium/shared';
 import { sanitizeText } from '../sanitize';
-import { collapseLineBreaks, escapeLinkDestination, escapeMarkdown, safeHttpUrl } from './markdown';
+import {
+  collapseLineBreaks,
+  encodeHtmlEntities,
+  escapeLinkDestination,
+  escapeMarkdown,
+  neutraliseAutolinks,
+  safeHttpUrl,
+} from './markdown';
 
 /**
  * The generic incoming-webhook renderer: a Discord-shaped body
@@ -57,11 +64,12 @@ const ISO_TIMESTAMP_RE =
 
 type Encode = (text: string) => string;
 const asIs: Encode = (text) => text;
-// After per-string sanitising, a '<' left in a sender string has no '>' after
-// it WITHIN that string — but the final sanitizeText() pass over the combined
-// content would then eat from it to the next '>' of OUR markup (a blockquote
-// marker), destroying the layout and the text in between. On that (rare) path
-// residual '<' are written as the entity '&lt;', which markdown displays as '<'.
+// After per-string sanitising, a '<' left in a free-text string has no '>'
+// after it WITHIN that string — but the final sanitizeText() pass over the
+// combined content would then eat from it to the next '>' of OUR markup (a
+// blockquote marker), destroying the layout and the text in between. On that
+// (rare) path residual '<' are written as the entity '&lt;', which markdown
+// displays as '<'. (Single-line fields never carry a raw '<': see labelText.)
 const encodeLt: Encode = (text) => text.replace(/</g, '&lt;');
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -74,10 +82,33 @@ function freeText(value: unknown): string {
   return sanitizeText(value.replace(ANGLE_AUTOLINK_RE, '$1'));
 }
 
-/** A single-line field interpolated into markup: sanitised, then escaped. */
+/** A single-line field as one line: angle-bracket autolinks unwrapped, line breaks collapsed, trimmed. */
+function inlineRaw(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return collapseLineBreaks(value.replace(ANGLE_AUTOLINK_RE, '$1')).trim();
+}
+
+/**
+ * A single-line field inside a link label (an embed title with a url): `&`,
+ * `<` and `>` as entities — rendered as the characters as typed, so nothing
+ * is stripped out of `CPU > 90% on <host>` and no raw angle bracket reaches
+ * the final pass over the content — then the markdown escape, so the label
+ * cannot close its link early. GFM never autolinks inside a link.
+ */
+function labelText(raw: string): string {
+  return escapeMarkdown(encodeHtmlEntities(raw));
+}
+
+/**
+ * A single-line field anywhere else (a title without a url, the author name,
+ * a field name, the footer text): like a label, except that every run GFM
+ * would autolink by itself sits verbatim in a code span — a field the
+ * renderer wraps in its own markup cannot add a link. Free text (content,
+ * description, field values) is NOT passed through this: it stays as the
+ * sender wrote it, like any human message.
+ */
 function inlineText(value: unknown): string {
-  const text = freeText(value);
-  return text === '' ? '' : escapeMarkdown(text).trim();
+  return neutraliseAutolinks(inlineRaw(value), labelText);
 }
 
 /** `YYYY-MM-DD HH:mm` in UTC, or '' for anything that is not a valid ISO 8601 timestamp. */
@@ -112,10 +143,12 @@ function renderEmbed(embed: Record<string, unknown>, enc: Encode): string[] {
   const authorName = isObject(embed.author) ? inlineText(embed.author.name) : '';
   if (authorName) lines.push(`_${enc(authorName)}_`);
 
-  const title = inlineText(embed.title);
+  const title = inlineRaw(embed.title);
   if (title) {
     const href = safeHttpUrl(embed.url);
-    lines.push(href ? `**[${enc(title)}](${escapeLinkDestination(href)})**` : `**${enc(title)}**`);
+    lines.push(href
+      ? `**[${enc(labelText(title))}](${escapeLinkDestination(href)})**`
+      : `**${enc(neutraliseAutolinks(title, labelText))}**`);
   }
 
   const description = freeText(embed.description);

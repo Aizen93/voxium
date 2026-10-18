@@ -433,7 +433,10 @@ export function IntegrationsTab({ serverId }: Props) {
           <ConfirmDialog
             id="webhook-rotate-title"
             title={t('webhooks.rotate.title')}
-            body={t('webhooks.rotate.body', { name: confirmRotate.name })}
+            // a GitHub webhook's rotation also replaces its signing secret
+            body={confirmRotate.type === 'github'
+              ? t('webhooks.rotate.bodyGithub', { name: confirmRotate.name })
+              : t('webhooks.rotate.body', { name: confirmRotate.name })}
             confirmLabel={busyIds.has(confirmRotate.id) ? t('webhooks.rotate.rotating') : t('webhooks.rotate.confirm')}
             busy={busyIds.has(confirmRotate.id)}
             onConfirm={() => void handleRotate(confirmRotate)}

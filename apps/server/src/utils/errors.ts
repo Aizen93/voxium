@@ -52,6 +52,13 @@ export class TooManyRequestsError extends AppError {
   }
 }
 
+/** The server cannot serve this request as configured (e.g. a missing encryption key). */
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string) {
+    super(message, 503);
+  }
+}
+
 /** Parse a date string query parameter, throwing BadRequestError if invalid. */
 export function parseDateParam(value: string, name = 'date'): Date {
   const date = new Date(value);

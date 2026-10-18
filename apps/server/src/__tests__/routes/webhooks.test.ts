@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import crypto from 'crypto';
@@ -102,6 +102,7 @@ vi.mock('../../websocket/socketServer', () => ({
 import { webhookRouter } from '../../routes/webhooks';
 import { errorHandler } from '../../middleware/errorHandler';
 import { getEffectiveLimits } from '../../utils/serverLimits';
+import { openSecret } from '../../utils/secretBox';
 
 function createApp() {
   const app = express();
@@ -415,7 +416,7 @@ describe('POST /servers/:serverId/webhooks', () => {
     const args = prismaMock.webhook.create.mock.calls[0][0];
     expect(args.data).toEqual({
       serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic',
-      tokenHash: expect.stringMatching(HEX64_RE), createdById: 'user-1',
+      tokenHash: expect.stringMatching(HEX64_RE), secretEnc: null, createdById: 'user-1',
     });
     expect(args.data.tokenHash).toBe(sha256(token));
     expect(JSON.stringify(args)).not.toContain(token);
@@ -453,11 +454,88 @@ describe('POST /servers/:serverId/webhooks', () => {
     expect(h.limiterCalls).toEqual(['webhookManage']);
   });
 
-  it('refuses GitHub webhooks in this step', async () => {
-    const res = await create({ channelId: 'ch-1', name: 'GH', type: 'github' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('GitHub webhooks are not available yet');
-    expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+  describe('GitHub webhooks (a signing secret, sealed at rest, shown once)', () => {
+    const TEST_KEY = '5e'.repeat(32);
+    let savedKey: string | undefined;
+
+    beforeEach(() => {
+      savedKey = process.env.TOTP_ENCRYPTION_KEY;
+      process.env.TOTP_ENCRYPTION_KEY = TEST_KEY;
+    });
+
+    afterEach(() => {
+      if (savedKey === undefined) delete process.env.TOTP_ENCRYPTION_KEY;
+      else process.env.TOTP_ENCRYPTION_KEY = savedKey;
+    });
+
+    it('201 with a 43-char token AND a 64-hex secret; only the hash and the SEALED secret are stored', async () => {
+      const res = await create({ channelId: 'ch-1', name: 'GH', type: 'github' });
+      expect(res.status).toBe(201);
+
+      const { token, secret } = res.body.data;
+      expect(token).toMatch(TOKEN_RE);
+      expect(secret).toMatch(HEX64_RE);
+
+      const args = prismaMock.webhook.create.mock.calls[0][0];
+      expect(args.data).toEqual({
+        serverId: 'srv-1', channelId: 'ch-1', name: 'GH', type: 'github',
+        tokenHash: sha256(token), secretEnc: expect.stringMatching(/^enc:/), createdById: 'user-1',
+      });
+      // The stored value is the seal of exactly the secret shown, never the plaintext
+      expect(openSecret(args.data.secretEnc)).toBe(secret);
+      expect(JSON.stringify(args)).not.toContain(secret);
+      expect(JSON.stringify(args)).not.toContain(token);
+      expect(args.select).not.toHaveProperty('secretEnc');
+
+      expect(res.body).toEqual({
+        success: true,
+        data: {
+          id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'GH', type: 'github', enabled: true,
+          createdBy: { id: 'user-1', username: 'alice', displayName: 'Alice' },
+          createdAt: CREATED_AT.toISOString(), lastUsedAt: null,
+          token, secret,
+        },
+      });
+      expect(res.body.data).not.toHaveProperty('secretEnc');
+    });
+
+    it('every create mints a fresh secret, and neither secret nor seal rides a socket', async () => {
+      const a = await create({ channelId: 'ch-1', name: 'A', type: 'github' });
+      const b = await create({ channelId: 'ch-1', name: 'B', type: 'github' });
+      expect(a.body.data.secret).not.toBe(b.body.data.secret);
+      const seals = prismaMock.webhook.create.mock.calls.map((c: any[]) => c[0].data.secretEnc);
+      expect(seals[0]).not.toBe(seals[1]);
+      const wire = JSON.stringify(h.emitted);
+      expect(wire).not.toContain(a.body.data.secret);
+      expect(wire).not.toContain(seals[0]);
+    });
+
+    it('503 when the server has no usable encryption key, before the cap, the channel or the create', async () => {
+      delete process.env.TOTP_ENCRYPTION_KEY;
+      const res = await create({ channelId: 'ch-1', name: 'GH', type: 'github' });
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ success: false, error: 'GitHub webhooks are not configured on this server' });
+      expect(prismaMock.webhook.count).not.toHaveBeenCalled();
+      expect(getEffectiveLimits).not.toHaveBeenCalled();
+      expect(prismaMock.channel.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+      expect(h.emitted).toHaveLength(0);
+    });
+
+    it('a key of the wrong length counts as no key', async () => {
+      process.env.TOTP_ENCRYPTION_KEY = 'ab'.repeat(16);
+      const res = await create({ channelId: 'ch-1', name: 'GH', type: 'github' });
+      expect(res.status).toBe(503);
+      expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+    });
+
+    it('a generic webhook needs no key: it is created without one, with no secret', async () => {
+      delete process.env.TOTP_ENCRYPTION_KEY;
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(201);
+      expect(res.body.data).not.toHaveProperty('secret');
+      expect(prismaMock.webhook.create.mock.calls[0][0].data.secretEnc).toBeNull();
+    });
   });
 
   it.each([
@@ -835,6 +913,82 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
 
     expect(res.body.data).toMatchObject({ id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic' });
     expect(res.body.data).not.toHaveProperty('tokenHash');
+    // A generic webhook has no secret to renew or show
+    expect(res.body.data).not.toHaveProperty('secret');
+    expect(args.data).not.toHaveProperty('secretEnc');
+  });
+
+  it("loads the webhook's type with its ownership fields, never a credential", async () => {
+    await rotate();
+    expect(prismaMock.webhook.findUnique).toHaveBeenCalledWith({
+      where: { id: 'wh-1' },
+      select: { id: true, serverId: true, channelId: true, type: true },
+    });
+  });
+
+  describe('a GitHub webhook: rotation renews both the token and the secret', () => {
+    const TEST_KEY = '5e'.repeat(32);
+    let savedKey: string | undefined;
+
+    beforeEach(() => {
+      savedKey = process.env.TOTP_ENCRYPTION_KEY;
+      process.env.TOTP_ENCRYPTION_KEY = TEST_KEY;
+      prismaMock.webhook.findUnique.mockResolvedValue({ id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', type: 'github' });
+      prismaMock.webhook.update.mockImplementation(async () => webhookRow({ type: 'github', name: 'GH' }));
+    });
+
+    afterEach(() => {
+      if (savedKey === undefined) delete process.env.TOTP_ENCRYPTION_KEY;
+      else process.env.TOTP_ENCRYPTION_KEY = savedKey;
+    });
+
+    it('one update stores the new hash and a fresh seal; the response shows the new token and secret once', async () => {
+      const res = await rotate();
+      expect(res.status).toBe(200);
+
+      const { token, secret } = res.body.data;
+      expect(token).toMatch(TOKEN_RE);
+      expect(secret).toMatch(HEX64_RE);
+
+      expect(prismaMock.webhook.update).toHaveBeenCalledTimes(1);
+      const args = prismaMock.webhook.update.mock.calls[0][0];
+      expect(args.where).toEqual({ id: 'wh-1' });
+      expect(args.data).toEqual({ tokenHash: sha256(token), secretEnc: expect.stringMatching(/^enc:/) });
+      expect(openSecret(args.data.secretEnc)).toBe(secret);
+      expect(JSON.stringify(args)).not.toContain(secret);
+      expect(args.select).not.toHaveProperty('secretEnc');
+
+      expect(res.body.data).toMatchObject({ id: 'wh-1', type: 'github', name: 'GH' });
+      expect(res.body.data).not.toHaveProperty('secretEnc');
+      expect(JSON.stringify(h.emitted)).not.toContain(secret);
+      expectChangedOnce();
+    });
+
+    it('two rotations give two different secrets and seals', async () => {
+      const a = await rotate();
+      const b = await rotate();
+      expect(a.body.data.secret).not.toBe(b.body.data.secret);
+      const seals = prismaMock.webhook.update.mock.calls.map((c: any[]) => c[0].data.secretEnc);
+      expect(seals[0]).not.toBe(seals[1]);
+    });
+
+    it('503 without a usable key: nothing rotated (the old token and secret keep working), nothing emitted', async () => {
+      delete process.env.TOTP_ENCRYPTION_KEY;
+      const res = await rotate();
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ success: false, error: 'GitHub webhooks are not configured on this server' });
+      expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+      expect(h.emitted).toHaveLength(0);
+    });
+
+    it('a GitHub webhook of another server is still a 404, before the key is consulted', async () => {
+      delete process.env.TOTP_ENCRYPTION_KEY;
+      prismaMock.webhook.findUnique.mockResolvedValueOnce({ id: 'wh-9', serverId: 'srv-2', channelId: 'ch-9', type: 'github' });
+      const res = await rotate('wh-9');
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Webhook not found');
+      expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+    });
   });
 
   it('two rotations give two different tokens (the previous one is dead)', async () => {
@@ -873,7 +1027,7 @@ describe('DELETE /servers/:serverId/webhooks/:webhookId', () => {
     expect(res.body).toEqual({ success: true, data: { deletedMessages: 0 } });
     expect(prismaMock.webhook.findUnique).toHaveBeenCalledWith({
       where: { id: 'wh-1' },
-      select: { id: true, serverId: true, channelId: true },
+      select: { id: true, serverId: true, channelId: true, type: true },
     });
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(txMock.webhook.delete).toHaveBeenCalledWith({ where: { id: 'wh-1' } });

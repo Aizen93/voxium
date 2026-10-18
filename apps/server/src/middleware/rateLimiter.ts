@@ -405,7 +405,7 @@ export const chargeRegistrationBudgets = async (req: Request, res: Response, nex
   if (rejection) {
     // Everything taken, back out: the caller is not registering today, so it
     // must cost them nothing on either bucket.
-    await Promise.all(charged.map((c) => refund(c.name, c.key)));
+    await Promise.all(charged.map((c) => refundRateLimit(c.name, c.key)));
     res.set('Retry-After', String(Math.ceil(rejection.msBeforeNext / 1000)));
     res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
     return;
@@ -418,17 +418,24 @@ export const chargeRegistrationBudgets = async (req: Request, res: Response, nex
   res.on('finish', () => {
     const created = res.statusCode >= 200 && res.statusCode < 300;
     if (created) return;
-    void Promise.all(charged.map((c) => refund(c.name, c.key)));
+    void Promise.all(charged.map((c) => refundRateLimit(c.name, c.key)));
   });
   next();
 };
 
-async function refund(name: string, key: string): Promise<void> {
+/**
+ * Give back one point of the `name` bucket for `key`: the house way to stop a
+ * counter charging a request that failed (consume atomically, then reward on
+ * the non-success path — never swap the consume for a read). Fail-open like
+ * the limiters: never throws, a store error is only warned about.
+ */
+export async function refundRateLimit(name: string, key: string): Promise<void> {
   try {
     await getLimiter(name).reward(key);
   } catch (err) {
-    // An unrefunded point costs one signup from that address today — noisy for
-    // the user, never a security failure, so it is only worth logging.
+    // An unrefunded point costs the caller one request from that bucket (one
+    // signup from that address today, one delivery this minute) — noisy, never
+    // a security failure, so it is only worth logging.
     console.warn(`[RateLimit] ${name} refund failed:`, err instanceof Error ? err.message : err);
   }
 }

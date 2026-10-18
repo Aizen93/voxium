@@ -47,6 +47,7 @@ vi.mock('../../stores/serverStore', () => {
 });
 
 import { api } from '../../services/api';
+import { toast } from '../../stores/toastStore';
 import { IntegrationsTab } from '../../components/server/IntegrationsTab';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -61,6 +62,8 @@ const channel = (id: string, name: string, extra: Partial<Channel> = {}): Channe
 });
 
 const DAY = 86_400_000;
+const SECRET = 'a3f1'.repeat(16);
+const SECRET_ROTATED = '9e0c'.repeat(16);
 const hook = (id: string, extra: Partial<Webhook> = {}): Webhook => ({
   id, serverId: 'srv-1', channelId: 'ch-1', name: id === 'wh-1' ? 'CI' : 'Deploy bot', type: 'generic', enabled: true,
   createdBy: { id: 'u-1', username: 'alice', displayName: 'Alice' }, createdAt: '2026-10-01T00:00:00.000Z', lastUsedAt: null, ...extra,
@@ -332,6 +335,9 @@ describe('IntegrationsTab — create and the copy-once panel', () => {
     expect(q('[data-testid="webhook-reveal"]')!.textContent).toContain('webhooks.reveal.worksWith');
     expect(q('[data-testid="webhook-reveal-curl"]')!.textContent).toBe(`curl -H 'content-type: application/json' -d '{"content":"hello from cron"}' ${url}`);
     expect(q('[data-testid="webhook-reveal-secret"]')).toBeNull();
+    // no secret, no GitHub setup: the generic hint and the curl line stay
+    expect(q('[data-testid="github-setup"]')).toBeNull();
+    expect(q('[data-testid="webhook-reveal"]')!.textContent).not.toContain('webhooks.reveal.github.');
     // the list came from the server again, not from the 201
     expect(listCalls()).toBe(2);
 
@@ -360,13 +366,66 @@ describe('IntegrationsTab — create and the copy-once panel', () => {
     warn.mockRestore();
   });
 
-  it('a GitHub secret in the answer is shown with the URL', async () => {
-    mockPost.mockResolvedValue({ data: { success: true, data: { ...hook('wh-gh', { type: 'github' }), token: 'tok-gh', secret: 's3cret' } } });
+  it('a GitHub webhook: the secret, then GitHub\'s settings field by field, and no curl line', async () => {
+    mockPost.mockResolvedValue({ data: { success: true, data: { ...hook('wh-gh', { type: 'github', name: 'Repo' }), token: 'tok-gh', secret: SECRET } } });
     await render();
     await click(q('[data-testid="webhook-new"]'));
     await type(q('#webhook-name') as HTMLInputElement, 'Repo');
+    await click(q('[data-testid="webhook-type-github"]'));
     await click(q('[data-testid="webhook-create-submit"]'));
-    expect(q('[data-testid="webhook-reveal-secret"]')!.textContent).toBe('s3cret');
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/webhooks', { channelId: 'ch-1', name: 'Repo', type: 'github' });
+
+    const url = 'http://api.test/api/v1/webhooks/wh-gh/tok-gh';
+    const panel = q('[data-testid="webhook-reveal"]')!;
+    expect(q('#webhook-reveal-title')!.textContent).toBe('webhooks.reveal.title{"name":"Repo"}');
+    // both are shown once, and the warning says so
+    expect(q('[data-testid="webhook-reveal-warning"]')!.textContent).toBe('webhooks.reveal.github.copyNow');
+    expect(q('[data-testid="webhook-reveal-url"]')!.textContent).toBe(url);
+    expect(q('[data-testid="webhook-reveal-secret"]')!.textContent).toBe(SECRET);
+    // GitHub wording instead of the Discord hint, and no curl line: an unsigned POST is refused
+    expect(panel.textContent).toContain('webhooks.reveal.github.urlHint');
+    expect(panel.textContent).not.toContain('webhooks.reveal.worksWith');
+    expect(q('[data-testid="webhook-reveal-curl"]')).toBeNull();
+    expect(panel.textContent).not.toContain('webhooks.reveal.curlHint');
+    expect(panel.textContent).not.toContain('curl ');
+
+    const setup = q('[data-testid="github-setup"]')!;
+    expect(setup).not.toBeNull();
+    expect(setup.querySelector('h3')!.textContent).toBe('webhooks.reveal.github.title');
+    expect(setup.textContent).toContain('webhooks.reveal.github.intro');
+    // the exact settings in the order of GitHub's form, each a label then its value
+    expect([...setup.querySelectorAll('ol > li')].map((li) => li.getAttribute('data-testid'))).toEqual([
+      'github-setup-url', 'github-setup-content-type', 'github-setup-secret', 'github-setup-ssl', 'github-setup-events',
+    ]);
+    const step = (id: string) => setup.querySelector(`[data-testid="github-setup-${id}"]`)!.textContent;
+    expect(step('url')).toBe(`webhooks.reveal.github.payloadUrl${url}`);
+    expect(step('content-type')).toBe('webhooks.reveal.github.contentTypeapplication/json');
+    expect(step('secret')).toBe(`webhooks.reveal.github.secret${SECRET}`);
+    expect(step('ssl')).toBe('webhooks.reveal.github.sslwebhooks.reveal.github.sslValue');
+    const events = setup.querySelector('[data-testid="github-setup-events"]')!;
+    expect(events.textContent).toContain('webhooks.reveal.github.events');
+    expect(events.textContent).toContain('webhooks.reveal.github.eventsValue');
+    expect([...events.querySelectorAll('ul > li')].map((li) => li.textContent)).toEqual([
+      'webhooks.reveal.github.eventPushes', 'webhooks.reveal.github.eventPullRequests',
+      'webhooks.reveal.github.eventIssues', 'webhooks.reveal.github.eventReleases',
+    ]);
+    // the ping GitHub sends on save is the immediate check; the secret is not optional
+    expect(q('[data-testid="github-setup-check"]')!.textContent).toBe('webhooks.reveal.github.ping');
+    expect(setup.textContent).not.toContain('webhooks.reveal.github.rotatedCheck');
+    expect(q('[data-testid="github-setup-secret-required"]')!.textContent).toBe('webhooks.reveal.github.secretRequired');
+    // the URL and the secret are referenced, not offered again: the only copy buttons are the blocks above
+    expect(setup.querySelectorAll('button')).toHaveLength(0);
+    expect(document.activeElement).toBe(q('[data-testid="webhook-reveal-url-copy"]'));
+
+    await click(q('[data-testid="webhook-reveal-secret-copy"]'));
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(SECRET);
+    expect(toastSuccess).toHaveBeenLastCalledWith('webhooks.reveal.copied');
+
+    // closing drops both: neither is anywhere on the page any more
+    await click(q('[data-testid="webhook-reveal-done"]'));
+    expect(q('[data-testid="webhook-reveal"]')).toBeNull();
+    expect(document.body.innerHTML).not.toContain(SECRET);
+    expect(document.body.innerHTML).not.toContain('tok-gh');
   });
 
   it('the name is validated before the request: an empty one never reaches the server', async () => {
@@ -379,17 +438,20 @@ describe('IntegrationsTab — create and the copy-once panel', () => {
     expect(q('[data-testid="webhook-create-dialog"]')).not.toBeNull();
   });
 
-  it('GitHub stays selectable; the server\'s 400 comes back as a translated toast and the dialog stays open', async () => {
-    mockPost.mockRejectedValue(axiosError(400, 'GitHub webhooks are not available yet'));
+  it('GitHub on a server with no encryption key: its 503 comes back as a translated toast and the dialog stays open', async () => {
+    mockPost.mockRejectedValue(axiosError(503, 'GitHub webhooks are not configured on this server'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await render();
     await click(q('[data-testid="webhook-new"]'));
     await type(q('#webhook-name') as HTMLInputElement, 'Repo');
     await click(q('[data-testid="webhook-type-github"]'));
     await click(q('[data-testid="webhook-create-submit"]'));
     expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/webhooks', { channelId: 'ch-1', name: 'Repo', type: 'github' });
-    expect(toastError).toHaveBeenCalledWith(expect.stringContaining('serverErrors.webhookGithubUnavailable'));
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/^serverErrors\.webhookGithubNotConfigured\{/));
     expect(q('[data-testid="webhook-create-dialog"]')).not.toBeNull();
     expect(q('[data-testid="webhook-reveal"]')).toBeNull();
+    warn.mockRestore();
   });
 
   it('the variable cap message is translated with the server\'s number', async () => {
@@ -429,7 +491,40 @@ describe('IntegrationsTab — rotate, enable/disable, delete', () => {
     expect(q('[data-testid="webhook-rotate-dialog"]')).toBeNull();
     expect(q('[data-testid="webhook-reveal"]')!.textContent).toContain('webhooks.reveal.rotatedTitle{"name":"CI"}');
     expect(q('[data-testid="webhook-reveal-url"]')!.textContent).toBe('http://api.test/api/v1/webhooks/wh-1/tok-rotated');
+    expect(q('[data-testid="github-setup"]')).toBeNull();
+    expect(q('[data-testid="webhook-reveal-curl"]')).not.toBeNull();
     expect(listCalls()).toBe(2);
+  });
+
+  it('rotating a GitHub webhook: the confirm says the secret goes too; the panel shows the new URL AND secret with the update steps', async () => {
+    mockPost.mockResolvedValue({ data: { success: true, data: { ...hook('wh-2', { type: 'github' }), token: 'tok-gh2', secret: SECRET_ROTATED } } });
+    await render();
+    await click(inRow('wh-2', 'webhook-rotate'));
+    const confirmText = q('[data-testid="webhook-rotate-dialog"]')!.textContent;
+    expect(confirmText).toContain('webhooks.rotate.bodyGithub{"name":"Deploy bot"}');
+    expect(confirmText).not.toContain('webhooks.rotate.body{');
+    await click(q('[data-testid="webhook-rotate-dialog-confirm"]'));
+    expect(mockPost).toHaveBeenCalledWith('/servers/srv-1/webhooks/wh-2/rotate');
+
+    const url = 'http://api.test/api/v1/webhooks/wh-2/tok-gh2';
+    // the heading says both changed
+    expect(q('#webhook-reveal-title')!.textContent).toBe('webhooks.reveal.github.rotatedTitle{"name":"Deploy bot"}');
+    expect(q('[data-testid="webhook-reveal-warning"]')!.textContent).toBe('webhooks.reveal.github.copyNow');
+    expect(q('[data-testid="webhook-reveal-url"]')!.textContent).toBe(url);
+    expect(q('[data-testid="webhook-reveal-secret"]')!.textContent).toBe(SECRET_ROTATED);
+    const setup = q('[data-testid="github-setup"]')!;
+    // ...and GitHub's settings must take both
+    expect(setup.querySelector('h3')!.textContent).toBe('webhooks.reveal.github.updateTitle');
+    expect(setup.textContent).toContain('webhooks.reveal.github.rotatedIntro');
+    expect(setup.textContent).not.toContain('webhooks.reveal.github.intro');
+    expect(setup.querySelector('[data-testid="github-setup-url"]')!.textContent).toBe(`webhooks.reveal.github.payloadUrl${url}`);
+    expect(setup.querySelector('[data-testid="github-setup-secret"]')!.textContent).toBe(`webhooks.reveal.github.secret${SECRET_ROTATED}`);
+    // GitHub sends no ping when a hook is edited: the panel does not promise one
+    expect(q('[data-testid="github-setup-check"]')!.textContent).toBe('webhooks.reveal.github.rotatedCheck');
+    expect(setup.textContent).not.toContain('webhooks.reveal.github.ping');
+    expect(q('[data-testid="github-setup-secret-required"]')).not.toBeNull();
+    expect(q('[data-testid="webhook-reveal-curl"]')).toBeNull();
+    expect(document.activeElement).toBe(q('[data-testid="webhook-reveal-url-copy"]'));
   });
 
   it('cancelling the rotate confirm sends nothing', async () => {
@@ -734,6 +829,58 @@ describe('IntegrationsTab — requests in flight on several rows', () => {
     await act(async () => { answers[1](ok({ ...hook('wh-1'), token: 'tok-new' })); });
     await flush();
     expect(q('[data-testid="webhook-reveal-url"]')!.textContent).toBe('http://api.test/api/v1/webhooks/wh-1/tok-new');
+  });
+});
+
+describe('IntegrationsTab — a GitHub secret stays on the panel', () => {
+  /** What a console or toast call would print: an Error by its message and stack, anything else as text. */
+  const printed = (args: unknown[]) => args
+    .map((a) => (a instanceof Error ? `${a.message} ${a.stack ?? ''}` : typeof a === 'string' ? a : JSON.stringify(a)))
+    .join(' ');
+
+  it('never reaches a toast or the console: a create, copies, a failed copy, a rotation, a refused rotation', async () => {
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+    mockPost.mockResolvedValueOnce({ data: { success: true, data: { ...hook('wh-gh', { type: 'github', name: 'Repo' }), token: 'tok-gh', secret: SECRET } } });
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    await type(q('#webhook-name') as HTMLInputElement, 'Repo');
+    await click(q('[data-testid="webhook-type-github"]'));
+    await click(q('[data-testid="webhook-create-submit"]'));
+    expect(q('[data-testid="webhook-reveal-secret"]')!.textContent).toBe(SECRET);
+    await click(q('[data-testid="webhook-reveal-secret-copy"]'));
+    await click(q('[data-testid="webhook-reveal-url-copy"]'));
+    (navigator.clipboard.writeText as Mock).mockRejectedValue(new Error('denied'));
+    await click(q('[data-testid="webhook-reveal-secret-copy"]'));
+    expect(toastError).toHaveBeenCalledWith('webhooks.reveal.copyFailed');
+    (navigator.clipboard.writeText as Mock).mockResolvedValue(undefined);
+    await click(q('[data-testid="webhook-reveal-done"]'));
+
+    mockPost.mockResolvedValueOnce({ data: { success: true, data: { ...hook('wh-2', { type: 'github' }), token: 'tok-gh2', secret: SECRET_ROTATED } } });
+    await click(inRow('wh-2', 'webhook-rotate'));
+    await click(q('[data-testid="webhook-rotate-dialog-confirm"]'));
+    expect(q('[data-testid="webhook-reveal-secret"]')!.textContent).toBe(SECRET_ROTATED);
+    await click(q('[data-testid="webhook-reveal-secret-copy"]'));
+    await click(q('[data-testid="webhook-reveal-done"]'));
+
+    mockPost.mockRejectedValueOnce(axiosError(404, 'Webhook not found'));
+    await click(inRow('wh-2', 'webhook-rotate'));
+    await click(q('[data-testid="webhook-rotate-dialog-confirm"]'));
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining('serverErrors.webhookNotFound'));
+
+    // the failed copy and the refused rotation were logged, so there is output to search
+    expect(spies[2]).toHaveBeenCalledTimes(2);
+    const outputs = [
+      ...toastSuccess.mock.calls, ...toastError.mock.calls,
+      ...(toast.info as unknown as Mock).mock.calls, ...(toast.warning as unknown as Mock).mock.calls,
+      ...spies.flatMap((spy) => spy.mock.calls),
+    ].map(printed);
+    expect(outputs.length).toBeGreaterThan(5);
+    for (const out of outputs) {
+      expect(out).not.toContain(SECRET);
+      expect(out).not.toContain(SECRET_ROTATED);
+      expect(out).not.toContain('tok-gh');
+    }
+    spies.forEach((spy) => spy.mockRestore());
   });
 });
 

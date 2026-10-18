@@ -7,6 +7,7 @@ import {
   NotFoundError,
   ConflictError,
   UnsupportedMediaTypeError,
+  ServiceUnavailableError,
   parseDateParam,
 } from '../../utils/errors';
 
@@ -136,6 +137,20 @@ describe('UnsupportedMediaTypeError', () => {
 
   it('is an operational AppError', () => {
     const err = new UnsupportedMediaTypeError('x');
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.isOperational).toBe(true);
+  });
+});
+
+describe('ServiceUnavailableError', () => {
+  it('has statusCode 503 and the provided message', () => {
+    const err = new ServiceUnavailableError('Webhook secret is unavailable');
+    expect(err.statusCode).toBe(503);
+    expect(err.message).toBe('Webhook secret is unavailable');
+  });
+
+  it('is an operational AppError', () => {
+    const err = new ServiceUnavailableError('x');
     expect(err).toBeInstanceOf(AppError);
     expect(err.isOperational).toBe(true);
   });

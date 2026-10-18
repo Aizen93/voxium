@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { RateLimiterRedis } from 'rate-limiter-flexible';
+import { getRedis } from '../../utils/redis';
 
 // Minimal Redis mock — getAllRateLimits and socketRateLimit never touch Redis,
 // so the client getters can simply throw if anything reaches for them.
@@ -13,6 +15,7 @@ vi.mock('../../utils/redis', () => ({
 import {
   socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, consumeMailCap,
   rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookManage, rateLimitWebhookRead, rateLimitByKey,
+  refundRateLimit,
 } from '../../middleware/rateLimiter';
 
 describe('normalizeIp — one spelling of an address for every keyed control', () => {
@@ -181,6 +184,46 @@ describe('incoming-webhook limiters', () => {
       expect(next).toHaveBeenCalledWith();
     }
     expect(res.status).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe('refundRateLimit — give a charged point back, fail-open', () => {
+  it("rewards ONE point of the named limiter's bucket for the key", async () => {
+    // A store client the limiter can be built on (the module-level mock throws)
+    vi.mocked(getRedis).mockReturnValueOnce({} as ReturnType<typeof getRedis>);
+    const seen: Array<{ prefix: string; key: string; points: unknown }> = [];
+    const reward = vi.spyOn(RateLimiterRedis.prototype, 'reward').mockImplementation(async function (this: RateLimiterRedis, key, points) {
+      seen.push({ prefix: this.keyPrefix, key: String(key), points });
+      return undefined as never;
+    });
+
+    await expect(refundRateLimit('webhookExecute', 'wh-1')).resolves.toBeUndefined();
+
+    // no points argument: the limiter's default, one point
+    expect(seen).toEqual([{ prefix: 'rl:whexec', key: 'wh-1', points: undefined }]);
+    reward.mockRestore();
+  });
+
+  it('swallows a store error with a warning, never throws', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const reward = vi.spyOn(RateLimiterRedis.prototype, 'reward').mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    // A limiter built on a store whose reward fails (webhookRead: built
+    // nowhere else in this file, so it is created here, on this client)
+    vi.mocked(getRedis).mockReturnValueOnce({} as ReturnType<typeof getRedis>);
+    await expect(refundRateLimit('webhookRead', 'user-1')).resolves.toBeUndefined();
+    expect(reward).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookRead refund failed:', 'ECONNREFUSED');
+
+    // No store at all (the module-level mock throws while building the limiter)
+    await expect(refundRateLimit('webhookExecuteIp', '203.0.113.7')).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookExecuteIp refund failed:', 'Redis not available in unit tests');
+
+    // An unknown limiter name is a warning too, not a throw
+    await expect(refundRateLimit('noSuchLimiter', 'k')).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith('[RateLimit] noSuchLimiter refund failed:', 'Unknown rate limiter: noSuchLimiter');
+    reward.mockRestore();
     warn.mockRestore();
   });
 });

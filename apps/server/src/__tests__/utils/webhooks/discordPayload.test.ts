@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { LIMITS } from '@voxium/shared';
 import { renderDiscordPayload, formatEmbedTimestamp } from '../../../utils/webhooks/discordPayload';
+import { bareLinkRuns, outsideCodeSpans } from './bareLinkRuns';
 
 const BS = String.fromCharCode(0x5c); // one backslash
 const DOT = String.fromCharCode(0xb7); // the footer separator's middle dot
@@ -342,6 +343,84 @@ describe('renderDiscordPayload — embeds', () => {
 
   it('does not turn @[userId] into anything (mentions are never resolved for webhooks)', () => {
     expect(ok({ content: 'hey @[user-123]' }).content).toBe('hey @[user-123]');
+  });
+});
+
+describe('renderDiscordPayload — runs remark-gfm would autolink by itself', () => {
+  it('puts every address in a single-line field in a code span: a title without url, the author, field names, the footer', () => {
+    const content = ok({
+      embeds: [{
+        author: { name: 'ops@evil.example' },
+        title: 'Down: https://evil.example/login',
+        fields: [{ name: 'www.evil.example' }, { name: 'Mirror HTTP://EVIL.EXAMPLE/x.' }],
+        footer: { text: 'via https://evil.example/a_(b)' },
+      }],
+    }).content;
+    expect(content).toBe(
+      `> _\`ops@evil.example\`_${BR}`
+      + `> **Down: \`https://evil.example/login\`**${BR}`
+      + `> **\`www.evil.example\`**${BR}`
+      + `> **Mirror \`HTTP://EVIL.EXAMPLE/x\`.**${BR}`
+      + `> _via \`https://evil.example/a_(b)\`_`,
+    );
+    expect(bareLinkRuns(content)).toEqual([]);
+  });
+
+  it('keeps an address verbatim in its span: no backslash lands inside it, a backtick is replaced', () => {
+    const content = ok({ embeds: [{ title: 'See https://ci.example/run#12_a*b and x_y@ci.example`z' }] }).content;
+    expect(content).toBe(`> **See \`https://ci.example/run#12_a*b\` and \`x_y@ci.example\`${BS}\`z**`);
+    expect(bareLinkRuns(content)).toEqual([]);
+  });
+
+  it('unwraps a Discord <https://...> in a single-line field into a code span too', () => {
+    expect(ok({ embeds: [{ footer: { text: 'status <https://status.example.com/7>' } }] }).content)
+      .toBe('> _status `https://status.example.com/7`_');
+  });
+
+  it('a title WITH a url is a link label: GFM never autolinks inside a link, so its text is only escaped', () => {
+    expect(ok({ embeds: [{ title: 'Build https://ci.example/42', url: 'https://ci.example/42' }] }).content)
+      .toBe('> **[Build https://ci.example/42](https://ci.example/42)**');
+  });
+
+  it('leaves a bare URL in content, a description and a field value as the sender wrote it (free text)', () => {
+    const content = ok({
+      content: 'Incident at https://status.example.com/incident/7',
+      embeds: [{ description: 'Details at https://status.example.com/d and ops@status.example', fields: [{ name: 'Runbook', value: 'www.status.example/rb' }] }],
+    }).content;
+    expect(content).toBe(
+      'Incident at https://status.example.com/incident/7\n\n'
+      + `> Details at https://status.example.com/d and ops@status.example${BR}`
+      + '> **Runbook**: www.status.example/rb',
+    );
+  });
+});
+
+describe('renderDiscordPayload — single-line fields keep their characters', () => {
+  it('writes < > & in a title, the author, a field name and the footer as entities: shown as typed, nothing stripped', () => {
+    const content = ok({
+      embeds: [{
+        title: 'Option<T> for a<b and c>d',
+        url: 'https://ci.example/1',
+        author: { name: '<b>CI</b>' },
+        fields: [{ name: 'R&D', value: 'v' }],
+        footer: { text: 'CPU > 90% on <host>' },
+      }],
+    }).content;
+    expect(content).toBe(
+      `> _&lt;b&gt;CI&lt;/b&gt;_${BR}`
+      + `> **[Option&lt;T&gt; for a&lt;b and c&gt;d](https://ci.example/1)**${BR}`
+      + `> **R&amp;D**: v${BR}`
+      + '> _CPU &gt; 90% on &lt;host&gt;_',
+    );
+    expect(outsideCodeSpans(content.replace(/^> /gm, ''))).not.toMatch(/[<>]/);
+  });
+
+  it('a title typed with entities shows them as typed (the & is encoded first)', () => {
+    expect(ok({ embeds: [{ title: '&lt;b&gt; &amp;' }] }).content).toBe('> **&amp;lt;b&amp;gt; &amp;amp;**');
+  });
+
+  it('a single-line field made only of a tag is no longer stripped to nothing', () => {
+    expect(ok({ embeds: [{ title: '<p></p>' }] }).content).toBe('> **&lt;p&gt;&lt;/p&gt;**');
   });
 });
 

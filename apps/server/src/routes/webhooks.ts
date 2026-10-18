@@ -4,8 +4,9 @@ import { authenticate, requireVerifiedEmail, requireConsent } from '../middlewar
 import { requireFeature } from '../middleware/requireFeature';
 import { rateLimitWebhookManage, rateLimitWebhookRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
+import { isSecretBoxConfigured, sealSecret } from '../utils/secretBox';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission, hasChannelPermission, filterVisibleChannels } from '../utils/permissionCalculator';
 import { getIO } from '../websocket/socketServer';
@@ -34,6 +35,13 @@ import {
  * The token is the credential: 256 random bits, only its SHA-256 is stored,
  * and the plaintext leaves the server exactly twice: in the create and in the
  * rotate response. Never in a list, an edit, a socket event or a log line.
+ *
+ * A GitHub webhook also has a signing secret (the HMAC key GitHub signs each
+ * delivery with): 32 random bytes as hex, generated here, stored ONLY sealed
+ * (utils/secretBox.ts, AES-256-GCM under TOTP_ENCRYPTION_KEY) and shown under
+ * the same rule as the token: in the create and the rotate response, nowhere
+ * else. Without a usable key the server stores nothing and refuses (503)
+ * before any write.
  */
 export const webhookRouter = Router({ mergeParams: true });
 
@@ -108,6 +116,19 @@ function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+const GITHUB_UNCONFIGURED = 'GitHub webhooks are not configured on this server';
+
+/** 503 unless a GitHub secret can be sealed: checked BEFORE anything is written. */
+function assertSecretBox(): void {
+  if (!isSecretBoxConfigured()) throw new ServiceUnavailableError(GITHUB_UNCONFIGURED);
+}
+
+/** A fresh GitHub signing secret (32 random bytes, 64 hex) and its sealed form. */
+function newSecret(): { secret: string; secretEnc: string } {
+  const secret = crypto.randomBytes(32).toString('hex');
+  return { secret, secretEnc: sealSecret(secret) };
+}
+
 function isWebhookType(value: unknown): value is WebhookType {
   return typeof value === 'string' && (WEBHOOK_TYPES as readonly string[]).includes(value);
 }
@@ -150,10 +171,14 @@ async function assertChannel(userId: string, serverId: string, channelId: string
  * omits webhooks of hidden channels, and rotate would otherwise hand out a
  * working credential for a channel the caller cannot see.
  */
-async function loadOwnWebhook(userId: string, serverId: string, webhookId: string): Promise<{ id: string; serverId: string; channelId: string }> {
+async function loadOwnWebhook(
+  userId: string,
+  serverId: string,
+  webhookId: string,
+): Promise<{ id: string; serverId: string; channelId: string; type: string }> {
   const webhook = await prisma.webhook.findUnique({
     where: { id: webhookId },
-    select: { id: true, serverId: true, channelId: true },
+    select: { id: true, serverId: true, channelId: true, type: true },
   });
   if (!webhook || webhook.serverId !== serverId) throw new NotFoundError('Webhook');
   if (!await hasChannelPermission(userId, webhook.channelId, serverId, Permissions.VIEW_CHANNEL)) {
@@ -222,10 +247,8 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
 
     const type = body.type;
     if (!isWebhookType(type)) throw new BadRequestError('Invalid webhook type');
-    // Step 3 of the webhooks plan lifts this: a GitHub webhook needs its HMAC
-    // secret generated (and sealed with utils/secretBox.ts) here and on rotate,
-    // plus the signature check on the execute route. Until then it is refused.
-    if (type === 'github') throw new BadRequestError('GitHub webhooks are not available yet');
+    // Before the cap and the create: an unconfigured server consumes nothing
+    if (type === 'github') assertSecretBox();
 
     const name = sanitizeText(body.name);
     const nameErr = validateWebhookName(name);
@@ -244,8 +267,18 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
     }
 
     const token = newToken();
+    // A generic webhook has no secret; a GitHub one stores only the sealed form
+    const signing = type === 'github' ? newSecret() : null;
     const row = await prisma.webhook.create({
-      data: { serverId, channelId, name, type, tokenHash: hashToken(token), createdById: userId },
+      data: {
+        serverId,
+        channelId,
+        name,
+        type,
+        tokenHash: hashToken(token),
+        secretEnc: signing ? signing.secretEnc : null,
+        createdById: userId,
+      },
       select: webhookSelect,
     });
 
@@ -254,7 +287,9 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
     // The public URL is composed by the CLIENT from its own API base
     // (`${VITE_API_URL}/webhooks/${id}/${token}`): the server does not know
     // its public origin, and deriving it from the request depends on proxies.
-    const data: WebhookCreated = { ...toWebhook(row), token };
+    const data: WebhookCreated = signing
+      ? { ...toWebhook(row), token, secret: signing.secret }
+      : { ...toWebhook(row), token };
     res.status(201).json({ success: true, data });
   } catch (err) {
     next(err);
@@ -306,23 +341,32 @@ webhookRouter.patch('/:webhookId', rateLimitWebhookManage, async (req: Request<{
   }
 });
 
-// Rotate the token. Only the hash is stored, so the old token stops matching
-// the moment this update commits.
+// Rotate the token, and for a GitHub webhook its signing secret too:
+// rotation renews both, in one update. Only the hash and the sealed secret
+// are stored, so the old credentials stop working the moment it commits.
 webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Request<{ serverId: string; webhookId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, webhookId } = req.params;
-    await loadOwnWebhook(req.user!.userId, serverId, webhookId);
+    const webhook = await loadOwnWebhook(req.user!.userId, serverId, webhookId);
+    const isGitHub = webhook.type === 'github';
+    // Before the update: without a key nothing is rotated, the old pair stays
+    if (isGitHub) assertSecretBox();
 
     const token = newToken();
+    const signing = isGitHub ? newSecret() : null;
     const row = await prisma.webhook.update({
       where: { id: webhookId },
-      data: { tokenHash: hashToken(token) },
+      data: signing
+        ? { tokenHash: hashToken(token), secretEnc: signing.secretEnc }
+        : { tokenHash: hashToken(token) },
       select: webhookSelect,
     });
 
     emitChanged(serverId);
 
-    const data: WebhookCreated = { ...toWebhook(row), token };
+    const data: WebhookCreated = signing
+      ? { ...toWebhook(row), token, secret: signing.secret }
+      : { ...toWebhook(row), token };
     res.json({ success: true, data });
   } catch (err) {
     next(err);
