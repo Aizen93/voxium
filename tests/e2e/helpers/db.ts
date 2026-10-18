@@ -227,3 +227,19 @@ export async function deleteSeededUsers(prefix: string): Promise<number> {
   const { count } = await db.user.deleteMany({ where: { username: { startsWith: prefix } } });
   return count;
 }
+
+/**
+ * Delete, straight from the database, the servers called exactly `name` whose
+ * owner's username starts with `ownerPrefix` (every relation of a server
+ * cascades: channels, members, messages, webhooks). The fallback of a spec
+ * whose API delete failed (an access token that expired during a long run):
+ * `Server.owner` is Restrict, so a server left behind would also block
+ * `deleteSeededUsers` for its owner.
+ */
+export async function deleteServersNamed(name: string, ownerPrefix: string): Promise<number> {
+  const db = getPrisma();
+  const { count } = await db.server.deleteMany({
+    where: { name, owner: { username: { startsWith: ownerPrefix } } },
+  });
+  return count;
+}

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   LIMITS,
   WEBHOOK_TYPES,
@@ -10,6 +10,9 @@ import {
   PERMISSION_LIST,
   validateWebhookName,
   type WebhookType,
+  type AuditAction,
+  type AdminWebhook,
+  type Webhook,
 } from '@voxium/shared';
 
 // The shared surface of incoming webhooks (docs/local/webhooks-plan.html):
@@ -92,5 +95,27 @@ describe('webhook socket events', () => {
   it('names the two events', () => {
     expect(WS_EVENTS.WEBHOOK_CHANGED).toBe('webhook:changed');
     expect(WS_EVENTS.MESSAGE_BULK_DELETED).toBe('message:bulk_deleted');
+  });
+});
+
+describe('webhook moderation (platform admins)', () => {
+  it('names the three audited admin actions', () => {
+    // Typed AuditAction[] (and expectTypeOf) for type-aware runs; server
+    // tests are outside `tsc`, so the binding compile-time pin is the admin's
+    // exhaustive `ACTION_LABELS: Record<AuditAction, string>`, which fails
+    // admin typecheck both for a missing label and for a label of no action
+    const actions: AuditAction[] = ['webhook.disable', 'webhook.enable', 'webhook.delete'];
+    expect(actions).toEqual(['webhook.disable', 'webhook.enable', 'webhook.delete']);
+    expectTypeOf<'webhook.disable' | 'webhook.enable' | 'webhook.delete'>().toMatchTypeOf<AuditAction>();
+  });
+
+  it('the admin list row is the Webhook shape plus a nullable channel name', () => {
+    expectTypeOf<AdminWebhook>().toMatchTypeOf<Webhook>();
+    expectTypeOf<AdminWebhook['channelName']>().toEqualTypeOf<string | null>();
+    const row: AdminWebhook = {
+      id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: true,
+      createdBy: null, createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: null, channelName: null,
+    };
+    expect(row.channelName).toBeNull();
   });
 });

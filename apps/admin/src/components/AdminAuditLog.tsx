@@ -31,6 +31,9 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'ratelimit.clear_user': 'User Rate Limits Cleared',
   'feature_flag.update': 'Feature Flag Updated',
   'feature_flag.reset': 'Feature Flag Reset',
+  'webhook.disable': 'Webhook Disabled',
+  'webhook.enable': 'Webhook Enabled',
+  'webhook.delete': 'Webhook Deleted',
 };
 
 const ACTION_COLORS: Record<string, string> = {
@@ -60,6 +63,9 @@ const ACTION_COLORS: Record<string, string> = {
   'ratelimit.clear_user': 'bg-cyan-500/20 text-cyan-400',
   'feature_flag.update': 'bg-purple-500/20 text-purple-400',
   'feature_flag.reset': 'bg-yellow-500/20 text-yellow-400',
+  'webhook.disable': 'bg-orange-500/20 text-orange-400',
+  'webhook.enable': 'bg-green-500/20 text-green-400',
+  'webhook.delete': 'bg-red-500/20 text-red-400',
 };
 
 function formatMetadata(action: AuditAction, metadata: Record<string, unknown> | null): string {
@@ -96,6 +102,15 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
         + `in ${metadata.durationMs}ms`;
     case 'feature_flag.update':
       return `${metadata.enabled ? 'Enabled' : 'Disabled'}`;
+    case 'webhook.disable':
+    case 'webhook.enable':
+      return metadata.name ? `"${metadata.name}" (server ${metadata.serverId})` : '';
+    case 'webhook.delete': {
+      const parts: string[] = [];
+      if (metadata.name) parts.push(`"${metadata.name}" (server ${metadata.serverId})`);
+      parts.push(metadata.purge ? `${metadata.deletedMessages ?? 0} message(s) deleted` : 'messages kept');
+      return parts.join(' | ');
+    }
     default:
       return '';
   }
@@ -131,6 +146,7 @@ const ALL_ACTIONS: AuditAction[] = [
   'ratelimit.update', 'ratelimit.reset', 'ratelimit.clear_user',
   'feature_flag.update', 'feature_flag.reset',
   'registration.hygiene_sweep',
+  'webhook.disable', 'webhook.enable', 'webhook.delete',
 ];
 
 export function AdminAuditLog() {

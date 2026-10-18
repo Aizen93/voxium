@@ -9,11 +9,17 @@ import { sanitizeText } from '../utils/sanitize';
 import { isSecretBoxConfigured, sealSecret } from '../utils/secretBox';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission, hasChannelPermission, filterVisibleChannels } from '../utils/permissionCalculator';
-import { getIO } from '../websocket/socketServer';
+import {
+  webhookSelect,
+  toWebhook,
+  isPurgeRequested,
+  emitWebhookChanged,
+  deleteWebhookWithPurge,
+  emitWebhookDeletion,
+} from '../utils/webhookLifecycle';
 import {
   Permissions,
   WEBHOOK_TYPES,
-  WS_EVENTS,
   validateWebhookName,
   type WebhookType,
   // The shared DTO is aliased: Prisma's generated client exports a `Webhook`
@@ -62,48 +68,9 @@ webhookRouter.use(async (req: Request<{ serverId: string }>, _res: Response, nex
 });
 
 // ─── Internals ──────────────────────────────────────────────────────────────
-
-/** What any management response may show. NEVER tokenHash, NEVER secretEnc. */
-const webhookSelect = {
-  id: true,
-  serverId: true,
-  channelId: true,
-  name: true,
-  type: true,
-  enabled: true,
-  createdAt: true,
-  lastUsedAt: true,
-  createdBy: { select: { id: true, username: true, displayName: true } },
-} as const;
-
-interface WebhookRow {
-  id: string;
-  serverId: string;
-  channelId: string;
-  name: string;
-  type: string;
-  enabled: boolean;
-  createdAt: Date;
-  lastUsedAt: Date | null;
-  createdBy: { id: string; username: string; displayName: string } | null;
-}
-
-function toWebhook(row: WebhookRow): WebhookDto {
-  return {
-    id: row.id,
-    serverId: row.serverId,
-    channelId: row.channelId,
-    name: row.name,
-    // Only this router writes the column, and only WEBHOOK_TYPES values
-    type: row.type as WebhookType,
-    enabled: row.enabled,
-    createdBy: row.createdBy
-      ? { id: row.createdBy.id, username: row.createdBy.username, displayName: row.createdBy.displayName }
-      : null,
-    createdAt: row.createdAt.toISOString(),
-    lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
-  };
-}
+// The response shape (webhookSelect / toWebhook), the refetch hint and the
+// delete transaction live in utils/webhookLifecycle.ts: the platform-admin
+// routes (routes/admin.ts) share them.
 
 /** 32 random bytes = 43 base64url characters (URL-safe, no padding). */
 function newToken(): string {
@@ -188,13 +155,18 @@ async function loadOwnWebhook(
 }
 
 /**
- * Refetch hint for open Integrations tabs. The payload carries the server id
- * and NOTHING else: `channel:{id}` is the VIEW_CHANNEL boundary, and a
- * restricted channel's id (or a webhook's name) must never reach the
- * server-wide room. The token never travels on a socket.
+ * The write after loadOwnWebhook. A webhook deleted between that read and
+ * this update (an admin delete racing an owner's rotate, or two moderators)
+ * is Prisma's P2025: answer the missing webhook it now is, never a 500 with
+ * a logged stack. The idiom of the admin PATCH (routes/admin.ts).
  */
-function emitChanged(serverId: string): void {
-  getIO().to(`server:${serverId}`).emit(WS_EVENTS.WEBHOOK_CHANGED, { serverId });
+async function updateOrMissing<T>(write: Promise<T>): Promise<T> {
+  try {
+    return await write;
+  } catch (err) {
+    if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Webhook');
+    throw err;
+  }
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -282,7 +254,7 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
       select: webhookSelect,
     });
 
-    emitChanged(serverId);
+    emitWebhookChanged(serverId);
 
     // The public URL is composed by the CLIENT from its own API base
     // (`${VITE_API_URL}/webhooks/${id}/${token}`): the server does not know
@@ -326,13 +298,13 @@ webhookRouter.patch('/:webhookId', rateLimitWebhookManage, async (req: Request<{
     await loadOwnWebhook(userId, serverId, webhookId);
     if (data.channelId !== undefined) await assertChannel(userId, serverId, data.channelId);
 
-    const row = await prisma.webhook.update({
+    const row = await updateOrMissing(prisma.webhook.update({
       where: { id: webhookId },
       data,
       select: webhookSelect,
-    });
+    }));
 
-    emitChanged(serverId);
+    emitWebhookChanged(serverId);
 
     const out: WebhookDto = toWebhook(row);
     res.json({ success: true, data: out });
@@ -354,15 +326,15 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
 
     const token = newToken();
     const signing = isGitHub ? newSecret() : null;
-    const row = await prisma.webhook.update({
+    const row = await updateOrMissing(prisma.webhook.update({
       where: { id: webhookId },
       data: signing
         ? { tokenHash: hashToken(token), secretEnc: signing.secretEnc }
         : { tokenHash: hashToken(token) },
       select: webhookSelect,
-    });
+    }));
 
-    emitChanged(serverId);
+    emitWebhookChanged(serverId);
 
     const data: WebhookCreated = signing
       ? { ...toWebhook(row), token, secret: signing.secret }
@@ -376,60 +348,21 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
 // Delete a webhook; `?purge=1` (or `true`) also deletes EVERY message it
 // posted, in every channel (PATCH may have moved it since), in the same
 // transaction. Without purge its messages stay, labelled with the stored
-// webhookName (webhookId SetNull).
+// webhookName (webhookId SetNull). The transaction (row lock first) and the
+// receipts are utils/webhookLifecycle.ts, shared with the admin delete.
 webhookRouter.delete('/:webhookId', rateLimitWebhookManage, async (req: Request<{ serverId: string; webhookId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, webhookId } = req.params;
-    const purge = req.query.purge === '1' || req.query.purge === 'true';
+    const purge = isPurgeRequested(req.query.purge);
     const webhook = await loadOwnWebhook(req.user!.userId, serverId, webhookId);
 
-    // No blob cleanup: the execute path never creates attachments, reactions
-    // cascade with the message and replies SetNull. The purge (like the FK's
-    // SET NULL action) finds the rows through the messages(webhook_id) index.
-    const result = await prisma.$transaction(async (tx) => {
-      // Lock the webhook row FIRST. A concurrent delivery's INSERT takes a KEY
-      // SHARE lock on it (the FK check), so it waits for this commit and then
-      // fails its FK: no message can land between the purge and the delete.
-      // No row: a concurrent delete won the lock and already committed.
-      const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM webhooks WHERE id = ${webhook.id} FOR UPDATE`;
-      if (locked.length === 0) throw new NotFoundError('Webhook');
+    const result = await deleteWebhookWithPurge(webhook.id, purge);
+    // No locked row: a concurrent delete won the lock and already committed
+    if (!result) throw new NotFoundError('Webhook');
 
-      let channels: Array<{ channelId: string; count: number }> = [];
-      let count = 0;
-      if (purge) {
-        const groups = await tx.message.groupBy({
-          by: ['channelId'],
-          where: { webhookId: webhook.id },
-          _count: { _all: true },
-        });
-        // channelId is nullable on Message, but a webhook only posts to a
-        // server channel (a DM row never carries webhook_id)
-        channels = groups.flatMap((g) => (g.channelId ? [{ channelId: g.channelId, count: g._count._all }] : []));
-        count = (await tx.message.deleteMany({ where: { webhookId: webhook.id } })).count;
-      }
-      await tx.webhook.delete({ where: { id: webhook.id } });
-      return { channels, count };
-    });
+    emitWebhookDeletion(result, purge);
 
-    if (purge) {
-      // One receipt per channel that lost rows, each to that channel's own
-      // room (the VIEW_CHANNEL audience). With nothing deleted, one count-0
-      // receipt to the current channel: the client handler is idempotent and
-      // the event is the purge's receipt.
-      const receipts = result.channels.length > 0
-        ? result.channels
-        : [{ channelId: webhook.channelId, count: 0 }];
-      for (const r of receipts) {
-        getIO().to(`channel:${r.channelId}`).emit(WS_EVENTS.MESSAGE_BULK_DELETED, {
-          channelId: r.channelId,
-          webhookId: webhook.id,
-          count: r.count,
-        });
-      }
-    }
-    emitChanged(serverId);
-
-    res.json({ success: true, data: { deletedMessages: result.count } });
+    res.json({ success: true, data: { deletedMessages: result.deletedMessages } });
   } catch (err) {
     next(err);
   }

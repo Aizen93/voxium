@@ -314,6 +314,14 @@ export interface Webhook {
  *  signing secret) are shown exactly once. */
 export type WebhookCreated = Webhook & { token: string; secret?: string };
 
+/** A row of the platform-admin webhook list (GET /admin/servers/:id/webhooks):
+ *  every webhook of the server, plus its channel's name. `null` for a secure
+ *  channel, which a webhook never targets (the create and move checks refuse
+ *  one): should a row ever point at one, its name stays off the dashboard. */
+export interface AdminWebhook extends Webhook {
+  channelName: string | null;
+}
+
 export interface SendMessageRequest {
   content: string;
 }
@@ -1033,7 +1041,8 @@ export type AuditAction =
   | 'report.resolve' | 'report.dismiss'
   | 'support.claim' | 'support.close'
   | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
-  | 'feature_flag.update' | 'feature_flag.reset';
+  | 'feature_flag.update' | 'feature_flag.reset'
+  | 'webhook.disable' | 'webhook.enable' | 'webhook.delete';
 
 // ─── Announcements ─────────────────────────────────────────────────────────
 

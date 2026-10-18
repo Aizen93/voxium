@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { AxiosError } from 'axios';
-import type { AdminServer } from '@voxium/shared';
+import type { AdminServer, AdminWebhook, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
 
 /**
  * Directory curation from the admin server list: the Directory column, the
@@ -22,14 +22,22 @@ const store = vi.hoisted(() => ({
   setServersListedOnly: vi.fn(),
   setServerDiscovery: vi.fn(),
   deleteServer: vi.fn(),
-  globalLimits: null,
-  serverLimits: null,
-  serverLimitsServerId: null,
+  globalLimits: null as ResourceLimits | null,
+  serverLimits: null as ServerResourceLimits | null,
+  serverLimitsServerId: null as string | null,
   fetchGlobalLimits: vi.fn(),
   updateGlobalLimits: vi.fn(),
   fetchServerLimits: vi.fn(),
   updateServerLimits: vi.fn(),
   resetServerLimits: vi.fn(),
+  // the webhooks modal (AdminServerWebhooksModal) reads the same store
+  serverWebhooks: [] as AdminWebhook[],
+  serverWebhooksServerId: null as string | null,
+  serverWebhooksLoading: false,
+  serverWebhooksError: false,
+  fetchServerWebhooks: vi.fn(),
+  setServerWebhookEnabled: vi.fn(),
+  deleteServerWebhook: vi.fn(),
 }));
 vi.mock('../../stores/adminStore', () => ({ useAdminStore: Object.assign(() => store, { getState: () => store }) }));
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
@@ -67,6 +75,11 @@ beforeEach(() => {
   store.servers = [LISTED, FEATURED, BLOCKED, LOCKED];
   store.serversTotal = 4;
   store.serversListedOnly = false;
+  store.globalLimits = null;
+  store.serverLimits = null;
+  store.serverLimitsServerId = null;
+  store.serverWebhooks = [];
+  store.serverWebhooksServerId = null;
   store.setServerDiscovery.mockResolvedValue({ id: 'x', discoverable: true, discoveryListed: true, featuredAt: null, discoveryBlockedAt: null });
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -196,5 +209,65 @@ describe('AdminServerList — directory column and curation', () => {
     await act(async () => { buttonByText('Block').click(); });
     // a blocked server no longer belongs on a "listed only" page
     expect(store.fetchServers.mock.calls.length).toBe(calls + 1);
+  });
+});
+
+describe('AdminServerList — webhooks and the webhook limit', () => {
+  const GLOBAL: ResourceLimits = {
+    maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 10,
+  };
+  const inputUnder = (labelText: string) => {
+    const label = qa('label').find((l) => l.textContent?.startsWith(labelText))!;
+    expect(label).toBeTruthy();
+    return label.parentElement!.querySelector('input') as HTMLInputElement;
+  };
+
+  it('every row has a Webhooks button that opens the webhooks modal of that server; Close closes it', async () => {
+    await render();
+    expect(q('[data-testid="server-webhooks-modal"]')).toBeNull();
+    for (const s of store.servers) {
+      const button = rowOf(s.id).querySelector('[data-testid="server-webhooks"]') as HTMLButtonElement;
+      expect(button).not.toBeNull();
+      expect(button.title).toBe('Webhooks');
+    }
+
+    await act(async () => { (rowOf('blocked').querySelector('[data-testid="server-webhooks"]') as HTMLButtonElement).click(); });
+    const modal = q('[data-testid="server-webhooks-modal"]')!;
+    expect(modal).not.toBeNull();
+    expect(modal.textContent).toContain('Spam Hub');
+    expect(store.fetchServerWebhooks).toHaveBeenCalledWith('blocked');
+
+    await act(async () => { buttonByText('Close').click(); });
+    expect(q('[data-testid="server-webhooks-modal"]')).toBeNull();
+  });
+
+  it('the global limits editor carries Max Webhooks / Server, 0 to 100 (0 freezes creation)', async () => {
+    store.globalLimits = GLOBAL;
+    await render();
+    await act(async () => { qa('button').find((b) => b.textContent?.includes('Global Resource Limits'))!.click(); });
+    const input = inputUnder('Max Webhooks / Server');
+    expect(input.min).toBe('0');
+    expect(input.max).toBe('100');
+    expect(input.value).toBe('10');
+    expect(document.body.textContent).toContain('Maximum incoming webhooks per server (0 freezes creation)');
+  });
+
+  it('the per-server limits modal offers the webhook override and sends it (empty = global)', async () => {
+    store.globalLimits = GLOBAL;
+    store.serverLimits = {
+      maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: 0,
+    };
+    store.serverLimitsServerId = 'listed';
+    store.updateServerLimits.mockResolvedValue(undefined);
+    await render();
+    await act(async () => { (rowOf('listed').querySelector('[title="Configure limits"]') as HTMLButtonElement).click(); });
+    const input = inputUnder('Max Webhooks / Server');
+    expect(input.min).toBe('0');
+    expect(input.max).toBe('100');
+    expect(input.value).toBe('0');
+    expect(input.placeholder).toBe('10');
+
+    await act(async () => { buttonByText('Save').click(); });
+    expect(store.updateServerLimits).toHaveBeenCalledWith('listed', expect.objectContaining({ maxWebhooksPerServer: 0, maxChannelsPerServer: null }));
   });
 });

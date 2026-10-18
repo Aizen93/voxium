@@ -20,11 +20,14 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode, Server } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode, Server, AdminWebhook } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
 import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
 import { serverSelect } from '../utils/serverSelect';
+import {
+  webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion,
+} from '../utils/webhookLifecycle';
 
 export const adminRouter = Router();
 
@@ -1025,6 +1028,104 @@ adminRouter.patch('/servers/:serverId/discovery', async (req: Request<{ serverId
       success: true,
       data: { id: serverId, discoverable: updated.discoverable, discoveryListed, featuredAt, discoveryBlockedAt },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Webhooks (moderation) ──────────────────────────────────────────────────
+// A platform admin's view of a server's incoming webhooks: EVERY one of them
+// (no VIEW_CHANNEL filter: an admin holds no server role here), with disable /
+// enable and delete (+ purge). The shapes are the owner's
+// (utils/webhookLifecycle.ts): never the token hash nor the sealed secret, and
+// the token itself exists nowhere server-side to send. Every mutation is
+// audited and announces itself to open Integrations tabs exactly like an
+// owner's (the delete runs the owner's transaction, row lock first).
+
+// Bounded by the per-server cap (admin maximum 100), like the owner's list:
+// unpaginated, so `total` is its length.
+adminRouter.get('/servers/:serverId/webhooks', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const [server, rows] = await Promise.all([
+      prisma.server.findUnique({ where: { id: serverId }, select: { id: true } }),
+      prisma.webhook.findMany({
+        where: { serverId },
+        orderBy: { createdAt: 'asc' },
+        select: { ...webhookSelect, channel: { select: { name: true, secure: true } } },
+      }),
+    ]);
+    if (!server) throw new NotFoundError('Server');
+
+    const data: AdminWebhook[] = rows.map((row) => ({
+      ...toWebhook(row),
+      // A webhook never targets a secure channel (the create and move checks
+      // refuse one); should a row ever, its name stays off the dashboard
+      channelName: row.channel.secure ? null : row.channel.name,
+    }));
+    res.json({ success: true, data, total: rows.length });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Disable / enable. The execute route answers a disabled webhook 403
+// `Webhook is disabled`; its messages stay.
+adminRouter.patch('/webhooks/:webhookId', async (req: Request<{ webhookId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { webhookId } = req.params;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.enabled === undefined) throw new BadRequestError('Provide enabled');
+    if (typeof body.enabled !== 'boolean') throw new BadRequestError('enabled must be a boolean');
+    const enabled = body.enabled;
+
+    let row;
+    try {
+      row = await prisma.webhook.update({ where: { id: webhookId }, data: { enabled }, select: webhookSelect });
+    } catch (err) {
+      if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Webhook');
+      throw err;
+    }
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: enabled ? 'webhook.enable' : 'webhook.disable',
+      targetType: 'webhook',
+      targetId: row.id,
+      metadata: { serverId: row.serverId, channelId: row.channelId, name: row.name },
+    });
+    emitWebhookChanged(row.serverId);
+
+    res.json({ success: true, data: toWebhook(row) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Delete; `?purge=1` (or `true`) also deletes every message it posted.
+adminRouter.delete('/webhooks/:webhookId', async (req: Request<{ webhookId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const purge = isPurgeRequested(req.query.purge);
+    const result = await deleteWebhookWithPurge(req.params.webhookId, purge);
+    // No locked row: no such webhook, or a concurrent delete already committed
+    if (!result) throw new NotFoundError('Webhook');
+
+    emitWebhookDeletion(result, purge);
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'webhook.delete',
+      targetType: 'webhook',
+      targetId: result.webhookId,
+      metadata: {
+        serverId: result.serverId,
+        channelId: result.channelId,
+        name: result.name,
+        purge,
+        deletedMessages: result.deletedMessages,
+      },
+    });
+
+    res.json({ success: true, data: { deletedMessages: result.deletedMessages } });
   } catch (err) {
     next(err);
   }

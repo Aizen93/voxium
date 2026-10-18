@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Search, Trash2, Settings2, RotateCcw, Save, X, Star, StarOff, Ban, ShieldOff } from 'lucide-react';
+import { Search, Trash2, Settings2, RotateCcw, Save, X, Star, StarOff, Ban, ShieldOff, Webhook } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { DirectoryChips } from './DirectoryChips';
+import { AdminServerWebhooksModal } from './AdminServerWebhooksModal';
 import { toast } from '../stores/toastStore';
 import { apiErrorMessage } from '../utils/apiError';
 import type { AdminServer, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
@@ -13,6 +14,7 @@ const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; descriptio
   { key: 'maxVoiceUsersPerChannel', label: 'Max Voice Users / Channel', description: 'Maximum users in a single voice channel', min: 1, max: 500 },
   { key: 'maxCategoriesPerServer', label: 'Max Categories / Server', description: 'Maximum channel categories per server', min: 1, max: 200 },
   { key: 'maxMembersPerServer', label: 'Max Members / Server', description: 'Maximum members per server (0 = unlimited)', min: 0, max: 100000 },
+  { key: 'maxWebhooksPerServer', label: 'Max Webhooks / Server', description: 'Maximum incoming webhooks per server (0 freezes creation)', min: 0, max: 100 },
 ];
 
 // Directory curation (server discovery). Featured is a hand-picked row on the
@@ -61,6 +63,7 @@ export function AdminServerList() {
   const [editingServer, setEditingServer] = useState<{ id: string; name: string } | null>(null);
   const [showGlobalLimits, setShowGlobalLimits] = useState(false);
   const [curation, setCuration] = useState<{ server: AdminServer; action: CurationAction } | null>(null);
+  const [webhooksServer, setWebhooksServer] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     fetchServers(1);
@@ -85,7 +88,7 @@ export function AdminServerList() {
     { key: 'channels', label: 'Channels', width: '80px' },
     { key: 'messages', label: 'Messages', width: '100px' },
     { key: 'created', label: 'Created', width: '120px' },
-    { key: 'actions', label: '', width: '150px' },
+    { key: 'actions', label: '', width: '180px' },
   ];
 
   const rows = servers.map((server) => ({
@@ -143,6 +146,14 @@ export function AdminServerList() {
           title="Configure limits"
         >
           <Settings2 size={14} />
+        </button>
+        <button
+          onClick={() => setWebhooksServer({ id: server.id, name: server.name })}
+          className="p-1 rounded text-vox-text-muted hover:text-vox-accent-info"
+          title="Webhooks"
+          data-testid="server-webhooks"
+        >
+          <Webhook size={14} />
         </button>
         <button
           onClick={() => setDeleteTarget({ id: server.id, name: server.name })}
@@ -229,6 +240,14 @@ export function AdminServerList() {
           onSave={(limits) => updateServerLimits(editingServer.id, limits)}
           onReset={() => resetServerLimits(editingServer.id)}
           onClose={() => setEditingServer(null)}
+        />
+      )}
+
+      {webhooksServer && (
+        <AdminServerWebhooksModal
+          serverId={webhooksServer.id}
+          serverName={webhooksServer.name}
+          onClose={() => setWebhooksServer(null)}
         />
       )}
 

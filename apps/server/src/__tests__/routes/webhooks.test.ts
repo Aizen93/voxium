@@ -62,7 +62,9 @@ vi.mock('../../utils/serverLimits', async (importOriginal) => {
 const txMock = {
   $queryRaw: vi.fn(),
   message: { groupBy: vi.fn(), deleteMany: vi.fn() },
-  webhook: { delete: vi.fn() },
+  // findUnique: the shared delete (utils/webhookLifecycle.ts) reads the row
+  // again under its lock; see the beforeEach
+  webhook: { delete: vi.fn(), findUnique: vi.fn() },
 };
 
 const prismaMock: Record<string, any> = {
@@ -152,6 +154,15 @@ const FULL_LIMITS = {
   maxMembersPerServer: 0,
 };
 
+/** What Prisma throws when the row to update is gone (a concurrent delete). */
+function recordNotFound() {
+  return Object.assign(new Error('Record to update not found.'), {
+    name: 'PrismaClientKnownRequestError',
+    code: 'P2025',
+    clientVersion: '7.0.0',
+  });
+}
+
 function eventsNamed(event: string) {
   return h.emitted.filter((e) => e.event === event);
 }
@@ -204,6 +215,14 @@ beforeEach(() => {
   txMock.message.groupBy.mockResolvedValue([]);
   txMock.message.deleteMany.mockResolvedValue({ count: 0 });
   txMock.webhook.delete.mockResolvedValue({ id: 'wh-1' });
+  // Under the lock the delete re-reads the row the route already loaded: a
+  // real database returns the same row to both reads, so answer whatever the
+  // root client's last findUnique answered (a test's mockResolvedValueOnce
+  // included)
+  txMock.webhook.findUnique.mockImplementation(async () => {
+    const last = prismaMock.webhook.findUnique.mock.results.at(-1);
+    return last ? { name: 'CI', type: 'generic', ...(await last.value) } : null;
+  });
 
   app = createApp();
 });
@@ -888,6 +907,27 @@ describe('PATCH /servers/:serverId/webhooks/:webhookId', () => {
     expect(res.body.error).toBe('Webhook not found');
     expect(prismaMock.channel.findUnique).not.toHaveBeenCalled();
   });
+
+  it('a webhook deleted between the ownership read and the update (P2025) is 404 "Webhook not found": no stack logged, nothing emitted', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.webhook.update.mockRejectedValueOnce(recordNotFound());
+    const res = await patch({ enabled: false });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
+    expect(prismaMock.webhook.update).toHaveBeenCalledTimes(1);
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('any other update failure is still a 500, and emits nothing', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.webhook.update.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'P1017' }));
+    const res = await patch({ enabled: false });
+    expect(res.status).toBe(500);
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
 });
 
 // ─── POST /:webhookId/rotate ────────────────────────────────────────────────
@@ -1013,6 +1053,28 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
     expect(res.body.error).toBe('Webhook not found');
     expect(prismaMock.webhook.update).not.toHaveBeenCalled();
     expect(h.emitted).toHaveLength(0);
+  });
+
+  it('a webhook deleted between the ownership read and the update (an admin delete racing the rotate, P2025) is 404 "Webhook not found": no credential, no stack, nothing emitted', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.webhook.update.mockRejectedValueOnce(recordNotFound());
+    const res = await rotate();
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
+    expect(prismaMock.webhook.update).toHaveBeenCalledTimes(1);
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('any other update failure during a rotate is still a 500, and emits nothing', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.webhook.update.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'P1017' }));
+    const res = await rotate();
+    expect(res.status).toBe(500);
+    expect(res.body).not.toHaveProperty('data');
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
   });
 });
 
