@@ -200,15 +200,55 @@ describe('renderGitHubEvent — fixtures', () => {
     expect(renderGitHubEvent(event, fixture(name))).toEqual({ ignored: true });
   });
 
-  it('every link any fixture renders points at https://github.com', () => {
-    let links = 0;
-    for (const [event, name] of RENDERED_FIXTURES) {
-      for (const target of linkTargets(render(event, fixture(name)))) {
-        links += 1;
-        expect(new URL(target).origin).toBe('https://github.com');
-      }
+  // How many links each fixture must render, read off the fixture itself
+  const EXPECTED_LINKS: Record<string, number> = {
+    // a ping names the repository (or org) in bold, no link
+    'ping': 0,
+    'ping-org': 0,
+    // the compare link on the headline + one link per listed commit (3 commits)
+    'push-branch': 4,
+    // the compare link + the 5 commits listed of 7 ("… and 2 more" is no link)
+    'push-many': 6,
+    // a branch created or deleted, a tag pushed: one line, no commits, no compare link
+    'push-created': 0,
+    'push-deleted': 0,
+    'push-tag': 0,
+    // every compare and commit url is foreign (or javascript:): none survives the pin
+    'push-hostile': 0,
+    // one link each: the pull request, the issue, the release
+    'pull_request-opened': 1,
+    'pull_request-draft': 1,
+    'pull_request-merged': 1,
+    'pull_request-closed': 1,
+    'pull_request-reopened': 1,
+    'pull_request-ready': 1,
+    'issues-opened': 1,
+    'issues-closed': 1,
+    'issues-reopened': 1,
+    'release-published': 1,
+  };
+
+  it('the expected-link table covers exactly the rendered fixtures', () => {
+    expect(Object.keys(EXPECTED_LINKS).sort()).toEqual(RENDERED_FIXTURES.map(([, name]) => name).sort());
+  });
+
+  it('a push renders one link per listed commit, plus the compare link (read off the fixtures)', () => {
+    for (const name of ['push-branch', 'push-many']) {
+      const payload = fixture(name) as { commits: unknown[] };
+      const md = render('push', payload);
+      const listed = md.split('\n').filter((line) => line.startsWith('[`')).length;
+      // the formatter lists the first 5 commits (COMMITS_SHOWN), then "… and N more"
+      expect(listed, name).toBe(Math.min(payload.commits.length, 5));
+      expect(linkTargets(md), name).toHaveLength(listed + 1);
     }
-    expect(links).toBe(20);
+  });
+
+  it.each(RENDERED_FIXTURES)('%s (%s) renders exactly its expected links, every one on https://github.com', (event, name) => {
+    const targets = linkTargets(render(event, fixture(name)));
+    expect(targets).toHaveLength(EXPECTED_LINKS[name]);
+    for (const target of targets) {
+      expect(new URL(target).origin).toBe('https://github.com');
+    }
   });
 
   it.each(RENDERED_FIXTURES)('%s (%s) leaves no autolinkable run outside a code span', (event, name) => {

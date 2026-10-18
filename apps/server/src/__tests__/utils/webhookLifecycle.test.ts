@@ -14,7 +14,9 @@ const txMock = {
 };
 
 const prismaMock: Record<string, any> = {
-  // Only a transaction: every statement of the delete runs on its client
+  // The one write on the root client is the disable committed BEFORE the
+  // transaction; every statement of the delete itself runs on the tx client
+  webhook: { updateMany: vi.fn() },
   $transaction: vi.fn(),
 };
 vi.mock('../../utils/prisma', () => ({
@@ -46,6 +48,7 @@ const LOCKED_ROW = { serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'gi
 beforeEach(() => {
   vi.clearAllMocks();
   h.emitted.length = 0;
+  prismaMock.webhook.updateMany.mockResolvedValue({ count: 1 });
   prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof txMock) => unknown) => cb(txMock));
   txMock.$queryRaw.mockResolvedValue([{ id: 'wh-1' }]);
   txMock.webhook.findUnique.mockResolvedValue(LOCKED_ROW);
@@ -171,6 +174,46 @@ describe('deleteWebhookWithPurge', () => {
     expect(txMock.message.groupBy).not.toHaveBeenCalled();
     expect(txMock.message.deleteMany).not.toHaveBeenCalled();
     expect(txMock.webhook.delete).not.toHaveBeenCalled();
+  });
+
+  it('runs the transaction with the long budget (60 s timeout, 10 s maxWait), not Prisma\'s 5 s default', async () => {
+    await deleteWebhookWithPurge('wh-1', true);
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.$transaction.mock.calls[0][1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
+  });
+
+  it('commits enabled: false BEFORE the transaction is entered (deliveries 403 instead of queueing on the lock)', async () => {
+    let disabledBeforeTx = false;
+    prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof txMock) => unknown) => {
+      disabledBeforeTx = prismaMock.webhook.updateMany.mock.calls.length === 1;
+      return cb(txMock);
+    });
+
+    await deleteWebhookWithPurge('wh-1', false);
+
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledWith({ where: { id: 'wh-1' }, data: { enabled: false } });
+    expect(disabledBeforeTx).toBe(true);
+    expect(prismaMock.webhook.updateMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.$transaction.mock.invocationCallOrder[0]);
+    expect(prismaMock.webhook.updateMany.mock.invocationCallOrder[0]).toBeLessThan(txMock.$queryRaw.mock.invocationCallOrder[0]);
+  });
+
+  it('a vanished row: the disable matches nothing (count 0), the lock finds nothing, null', async () => {
+    prismaMock.webhook.updateMany.mockResolvedValue({ count: 0 });
+    txMock.$queryRaw.mockResolvedValue([]);
+
+    await expect(deleteWebhookWithPurge('wh-0', true)).resolves.toBeNull();
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(txMock.webhook.delete).not.toHaveBeenCalled();
+  });
+
+  it('a failed disable aborts before the transaction (nothing deleted)', async () => {
+    prismaMock.webhook.updateMany.mockRejectedValue(new Error('connection reset'));
+
+    await expect(deleteWebhookWithPurge('wh-1', true)).rejects.toThrow('connection reset');
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
   });
 
   it('rejects when a statement fails (the transaction rolls back; nothing is announced)', async () => {

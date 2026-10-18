@@ -35,6 +35,7 @@ import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
+import { notificationAuthorName } from '../../utils/notificationAuthor';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import { useAnnotationStore } from '../../stores/annotationStore';
@@ -233,7 +234,8 @@ export function MainLayout() {
           }
         }
         if (settings.enableDesktopNotifications) {
-          const authorName = message.author?.displayName || message.author?.username || 'Someone';
+          // A webhook's name carries the APP marker: it picks its own name per post
+          const authorName = notificationAuthorName(message.author, i18n.t);
           const serverName = message.serverName || 'Unknown Server';
           const channelName = message.channelName || 'unknown';
           const readable = formatNotificationBody(message.content, message.mentions);

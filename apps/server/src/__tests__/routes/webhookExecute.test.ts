@@ -24,7 +24,10 @@ const limiters = vi.hoisted(() => ({
     order.push(`webhookLimiter:${req.params.webhookId}`);
     next();
   }),
-  // refundRateLimit(name, key): gives a charged point back
+  // refundRateLimit(name, key): the route must NEVER call it (nothing is
+  // charged before a GitHub signature matched, so nothing needs giving back).
+  // Kept in the mock so a refund that creeps back in fails a test, not a
+  // module lookup
   refund: vi.fn(async (_name: string, _key: string) => {}),
 }));
 vi.mock('../../middleware/rateLimiter', () => ({
@@ -584,14 +587,38 @@ describe('POST /webhooks/:id/:token — token check', () => {
 // ─── Middleware order and limiters ──────────────────────────────────────────
 
 describe('POST /webhooks/:id/:token — middleware order', () => {
-  it('flag → per-IP limiter → lookup → channel → per-webhook limiter (keyed on the validated id) → insert', async () => {
+  it('generic row: flag → per-IP limiter → lookup → channel → per-webhook limiter → insert (asserts the ORDER only; the limiter KEY is pinned in rateLimiter.test.ts)', async () => {
     const res = await post().send({ content: 'hello' });
 
     expect(res.status).toBe(204);
     expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `webhookLimiter:${WEBHOOK_ID}`, 'create']);
   });
 
-  it('the body is parsed only AFTER the per-webhook limiter: a per-webhook 429 never reads the body', async () => {
+  it('generic row: charged exactly once, BEFORE the parser (the limiter sees no body yet)', async () => {
+    const bodyUnreadWhenCharged: boolean[] = [];
+    limiters.perWebhook.mockImplementationOnce((req: any, _res: any, next: any) => {
+      order.push(`webhookLimiter:${req.params.webhookId}`);
+      bodyUnreadWhenCharged.push(req.body === undefined && req.rawBody === undefined);
+      next();
+    });
+
+    const res = await post().send({ content: 'hello' });
+
+    expect(res.status).toBe(204);
+    expect(limiters.perWebhook).toHaveBeenCalledTimes(1);
+    expect(bodyUnreadWhenCharged).toEqual([true]);
+  });
+
+  it('generic row: a parser failure keeps its charge (its URL is its whole credential)', async () => {
+    const res = await post().set('Content-Type', 'application/json; charset=latin1').send('{"content":"hello"}');
+
+    expect(res.status).toBe(415);
+    expect(res.body).toEqual({ success: false, error: 'Unsupported request encoding' });
+    expect(limiters.perWebhook).toHaveBeenCalledTimes(1);
+    expect(limiters.refund).not.toHaveBeenCalled();
+  });
+
+  it('generic row: the body is parsed only AFTER the per-webhook limiter: a per-webhook 429 never reads the body', async () => {
     let captured: Request | undefined;
     const capturingApp = createApp((req) => {
       captured = req;
@@ -724,13 +751,14 @@ describe('POST /webhooks/:id/:token — webhook types', () => {
     }
   });
 
-  it('an unknown webhook type answers 400 "Unsupported webhook type"', async () => {
+  it('an unknown webhook type answers 400 "Unsupported webhook type" (charged before the parser, like generic: never free)', async () => {
     prismaMock.webhook.findUnique.mockResolvedValueOnce(webhookRow({ type: 'gitlab' }));
 
     const res = await post().send({ content: 'hello' });
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ success: false, error: 'Unsupported webhook type' });
+    expect(limiters.perWebhook).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -927,6 +955,8 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ success: false, error: 'Malformed JSON body' });
+    // the parse fails after the hook but before the post-parser charge
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -945,17 +975,98 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(console.error).not.toHaveBeenCalled();
   });
 
-  it('charges the per-webhook limiter, then REFUNDS it on a 401: an unsigned flood costs the per-IP bucket only', async () => {
+  // ── The per-webhook bucket is charged only AFTER the signature matched ──
+  // (whoever holds the URL but not the secret pays the per-IP bucket only,
+  // whatever the parser makes of the request, so GitHub's real deliveries
+  // are never starved into 429s, which GitHub does not redeliver)
+
+  it('a missing signature is a 401 and NEVER charges the per-webhook bucket (and nothing is refunded)', async () => {
     const res = await deliver(PUSH_RAW, { signature: null });
 
     expect(res.status).toBe(401);
     expect(limiters.ip).toHaveBeenCalledTimes(1);
-    expect(order).toContain(`webhookLimiter:${WEBHOOK_ID}`);
-    expect(limiters.refund).toHaveBeenCalledTimes(1);
-    expect(limiters.refund).toHaveBeenCalledWith('webhookExecute', WEBHOOK_ID);
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(order).not.toContain(`webhookLimiter:${WEBHOOK_ID}`);
+    expect(limiters.refund).not.toHaveBeenCalled();
   });
 
-  it('fails closed when the verify hook never saw the body: a body read before the route gets 401, refunded', async () => {
+  it('a wrong signature is a 401, not charged, not refunded', async () => {
+    const res = await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.refund).not.toHaveBeenCalled();
+    expectNothingPosted();
+  });
+
+  it('a body-parser 415 before the hook runs (Content-Type charset=latin1) is never charged', async () => {
+    const res = await deliver(PUSH_RAW).set('Content-Type', 'application/json; charset=latin1');
+
+    expect(res.status).toBe(415);
+    expect(res.body).toEqual({ success: false, error: 'Unsupported request encoding' });
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.refund).not.toHaveBeenCalled();
+    expectNothingPosted();
+  });
+
+  it('a body-parser 415 for an unknown Content-Encoding is never charged', async () => {
+    const res = await post()
+      .set('Content-Encoding', 'x-unknown')
+      .set('X-GitHub-Event', 'push')
+      .set('X-Hub-Signature-256', sign(PUSH_RAW))
+      .send(PUSH_RAW);
+
+    expect(res.status).toBe(415);
+    expect(res.body).toEqual({ success: false, error: 'Unsupported request encoding' });
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expectNothingPosted();
+  });
+
+  it('a body-parser 413 (a 2 MB Content-Length) is never charged', async () => {
+    const body = JSON.stringify({ pad: 'p'.repeat(2 * 1024 * 1024) });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(LIMITS.WEBHOOK_BODY_MAX_BYTES);
+
+    const res = await rawJsonPost(URL_OK, body);
+
+    expect(res.status).toBe(413);
+    expect(JSON.parse(res.body)).toEqual({ success: false, error: 'Request body too large' });
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.refund).not.toHaveBeenCalled();
+    expectNothingPosted();
+  });
+
+  it('a valid signature is charged exactly once, AFTER the parser (body parsed, signature verified) and before the insert', async () => {
+    const stateWhenCharged: Array<{ parsed: boolean; raw: boolean; verified: unknown }> = [];
+    limiters.perWebhook.mockImplementationOnce((req: any, res: any, next: any) => {
+      order.push(`webhookLimiter:${req.params.webhookId}`);
+      stateWhenCharged.push({ parsed: req.body !== undefined, raw: Buffer.isBuffer(req.rawBody), verified: res.locals.signatureVerified });
+      next();
+    });
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(204);
+    expect(limiters.perWebhook).toHaveBeenCalledTimes(1);
+    expect(stateWhenCharged).toEqual([{ parsed: true, raw: true, verified: true }]);
+    expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `webhookLimiter:${WEBHOOK_ID}`, 'create']);
+    expect(limiters.refund).not.toHaveBeenCalled();
+  });
+
+  it('a valid signature over a spent per-webhook budget answers the 429: no insert, no broadcast, no lastUsedAt', async () => {
+    limiters.perWebhook.mockImplementationOnce((_req: any, res: any) => {
+      res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    });
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(429);
+    expect(res.body).toEqual({ success: false, error: 'Too many requests. Please try again later.' });
+    expectNothingPosted();
+    expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the verify hook never saw the body: a body read before the route gets 401, uncharged', async () => {
     // A body already consumed upstream (a parser mounted ahead of the route)
     // leaves the route's own parser nothing to read, so its verify hook never
     // runs: the handler must not take a valid-looking signature on trust
@@ -973,15 +1084,17 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
 
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
-    expect(limiters.refund).toHaveBeenCalledWith('webhookExecute', WEBHOOK_ID);
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
 
-  it('a delivery that is posted, ignored or refused by the formatter is never refunded', async () => {
+  it('a signed delivery that is posted, ignored or refused by the formatter is charged once each, never refunded', async () => {
     await deliver(PUSH_RAW);
     await deliver(STAR_RAW, { event: 'star' });
     await deliver('[{"ref":"refs/heads/main"}]');
 
+    expect(limiters.perWebhook).toHaveBeenCalledTimes(3);
     expect(limiters.refund).not.toHaveBeenCalled();
   });
 

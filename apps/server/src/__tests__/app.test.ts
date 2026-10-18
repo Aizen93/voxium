@@ -341,6 +341,53 @@ describe('app.ts — lazy morgan middleware', () => {
     }
   });
 
+  it('json access log redacts an absolute-form execute target (Express routes it; originalUrl is the whole URL)', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    const lines: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+    try {
+      // The proxy form of the request line: POST http://host/path HTTP/1.1
+      const res = await request(app, 'POST', 'http://voxium.test/api/v1/webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      await new Promise((r) => setTimeout(r, 50));
+
+      // the execute router really answered it: the absolute form is live
+      expect(res.status).toBe(200);
+      const logged = lines.join('');
+      expect(logged).toContain('http://voxium.test/api/v1/webhooks/wh_abc/[redacted]');
+      expect(logged).not.toContain('SECRETTOKEN');
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('json access log redacts double-slash execute URLs (not executed, but still logged)', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    const lines: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+    try {
+      await request(app, 'POST', '/api/v1//webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      await request(app, 'POST', '//api/v1/webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      await new Promise((r) => setTimeout(r, 50));
+
+      const logged = lines.join('');
+      expect(logged).toContain('/api/v1//webhooks/wh_abc/[redacted]');
+      expect(logged).toContain('//api/v1/webhooks/wh_abc/[redacted]');
+      expect(logged).not.toContain('SECRETTOKEN');
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
   it('the dev access log redacts the webhook token too', async () => {
     delete process.env.LOG_FORMAT;
     delete process.env.NODE_ENV;

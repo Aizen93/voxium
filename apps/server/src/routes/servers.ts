@@ -5,6 +5,7 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors'
 import {
   validateServerName, validateNickname, validateBanReason, validateServerDescription, validateDiscoveryTags, dedupeDiscoveryTags,
   LIMITS, MEMBER_LIST, MEMBER_DIRECTORY_ROLE_FILTERS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, SERVER_JOIN_MODES, permissionsToString,
+  OPAQUE_ID_RE,
 } from '@voxium/shared';
 import type { MemberRole, Server, ServerBan, ServerJoinRequest, ServerMember, ServerPeople, MemberDirectoryPage } from '@voxium/shared';
 import { Prisma } from '../generated/prisma/client';
@@ -308,8 +309,8 @@ function directoryWhere(serverId: string, q: string, role: string): Prisma.Sql {
   return Prisma.join(parts, ' AND ');
 }
 
-/** The charset of every id a client may hand us (cuids, role ids, user ids). */
-const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// The charset of every id a client may hand us (cuids, role ids, user ids) is
+// the shared OPAQUE_ID_RE: a synthesised `webhook:{id}` author can never pass it
 /** A C0 control character (a NUL among them) in search text: Postgres refuses
  *  the parameter, which would be a 500 with a stack trace instead of a 400. */
 const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}]`);

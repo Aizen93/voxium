@@ -7,6 +7,8 @@ import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from './MessageItem';
 import { isNewDay, daySeparatorFor } from '../../utils/dateSeparator';
 import { startsMessageGroup } from '../../utils/messageGrouping';
+import { useServerPermissions } from '../../hooks/useServerPermissions';
+import { Permissions, hasPermission } from '@voxium/shared';
 import { ArrowDown } from 'lucide-react';
 
 /** Virtual index of the oldest loadable message; leaves room to page upward. */
@@ -30,7 +32,7 @@ function DaySeparatorRow({ iso }: { iso: string }) {
 export function MessageList() {
   const { t } = useTranslation();
   const { messages, hasMore, hasMoreAfter, isLoading, fetchMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
-  const { activeChannelId, members, channels } = useServerStore();
+  const { activeChannelId, activeServerId, members, channels } = useServerStore();
   const { user } = useAuthStore();
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fetchingRef = useRef(false);
@@ -38,6 +40,11 @@ export function MessageList() {
 
   const currentMember = members.find((m) => m.userId === user?.id);
   const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
+  // A custom role can carry MANAGE_MESSAGES: the legacy role field alone
+  // would hide Delete from a moderator the server lets delete (a webhook's
+  // posts included — they are deleted only this way)
+  const serverPerms = useServerPermissions(activeServerId, user?.id);
+  const canManageMessages = serverPerms !== null && hasPermission(serverPerms, Permissions.MANAGE_MESSAGES);
   // SECURE channels: moderation is membership-derived, never role-derived —
   // the channel CREATOR moderates (MANAGE_MESSAGES in the fixed creator set),
   // and a server admin/owner who is a plain member (or no member at all) does
@@ -45,7 +52,7 @@ export function MessageList() {
   const activeChannel = channels.find((c) => c.id === activeChannelId);
   const canModerate = activeChannel?.secure
     ? activeChannel.createdById === user?.id
-    : isAdmin;
+    : isAdmin || canManageMessages;
 
   // Scroll to bottom on channel change
   useEffect(() => {

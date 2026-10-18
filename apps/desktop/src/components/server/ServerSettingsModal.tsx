@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -15,6 +15,7 @@ import { BannedSection } from './BannedSection';
 import { MembersDirectory } from './MembersDirectory';
 import { api } from '../../services/api';
 import { getTranslatedError } from '../../utils/serverErrors';
+import { permissionsFingerprint } from '../../hooks/useServerPermissions';
 
 interface Props {
   serverId: string;
@@ -36,13 +37,27 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   const currentUser = useAuthStore((s) => s.user);
   const server = servers.find((s) => s.id === serverId);
   const isOwner = server?.ownerId === currentUser?.id;
-  const [effectivePerms, setEffectivePerms] = useState<string | null>(null);
+  // Tagged with the server they were fetched for: after a switch, the previous
+  // server's bits must not open (or keep open) a tab on this one while the
+  // new answer is on its way
+  const [effectivePerms, setEffectivePerms] = useState<{ serverId: string; bits: string } | null>(null);
+
+  // Everything that can change the viewer's own permissions here (legacy
+  // role, assigned roles, those roles' bitmasks): a live role edit refetches,
+  // so a revoked bit closes its tab (see `tab` below)
+  const allMembers = useServerStore((s) => s.members);
+  const viewerMember = allMembers.find((m) => m.userId === currentUser?.id);
+  const permsKey = useMemo(() => permissionsFingerprint(viewerMember, roles), [viewerMember, roles]);
 
   useEffect(() => {
-    fetchEffectivePermissions(serverId).then(setEffectivePerms).catch((err) => { console.warn('[ServerSettings] Failed to fetch permissions:', err); });
-  }, [serverId, fetchEffectivePermissions]);
+    let cancelled = false;
+    fetchEffectivePermissions(serverId)
+      .then((bits) => { if (!cancelled) setEffectivePerms({ serverId, bits }); })
+      .catch((err) => { console.warn('[ServerSettings] Failed to fetch permissions:', err); });
+    return () => { cancelled = true; };
+  }, [serverId, permsKey, fetchEffectivePermissions]);
 
-  const perms = effectivePerms !== null ? permissionsFromString(effectivePerms) : null;
+  const perms = effectivePerms !== null && effectivePerms.serverId === serverId ? permissionsFromString(effectivePerms.bits) : null;
   const canManageRoles = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_ROLES));
   // Discovery tab: MANAGE_SERVER. Join requests + Banned: KICK_MEMBERS ("Manage members").
   const canManageServer = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_SERVER));
@@ -55,7 +70,22 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
   const defaultTab: Tab = canManageServer
     ? 'general'
     : canManageWebhooks && !canModerateMembers && !canManageRoles ? 'integrations' : 'members';
-  const tab: Tab = activeTab ?? defaultTab;
+  // A picked tab holds only while the viewer may still open it: a revoked
+  // bit (a live role edit) or another server falls back to the default
+  const permitted = (candidate: Tab): boolean => {
+    switch (candidate) {
+      case 'general':
+      case 'discovery':
+        return canManageServer;
+      case 'integrations':
+        return canManageWebhooks;
+      case 'roles':
+        return canManageRoles;
+      default:
+        return true;
+    }
+  };
+  const tab: Tab = activeTab !== null && permitted(activeTab) ? activeTab : defaultTab;
 
   // The Members tab badge is fed by the socket events and by the list fetch;
   // until step 4 wires the events, and on the first open of a session, the

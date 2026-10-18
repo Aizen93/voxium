@@ -248,3 +248,110 @@ describe('ServerSettingsModal — the Integrations tab (MANAGE_WEBHOOKS)', () =>
     expect(membersRow!.querySelector('span')!.textContent).toBe('serverSettings.limits.unlimited');
   });
 });
+
+describe('ServerSettingsModal — a picked tab holds only while it is permitted', () => {
+  const tabButton = (label: string) => [...container.querySelectorAll('button')].find((b) => b.textContent === label) as HTMLButtonElement | undefined;
+  const role = (permissions: bigint) => ({
+    id: 'r-1', serverId: 'srv-1', name: 'Helper', color: null, position: 1, permissions: permissions.toString(), isDefault: false, createdAt: '2026-01-01T00:00:00.000Z',
+  });
+  const effectiveCalls = () => mockGet.mock.calls.filter(([url]) => String(url).includes('/roles/permissions/effective')).length;
+
+  /** A live role edit: the viewer's role changes in the store, the server answers the new bits. */
+  async function revokeTo(permissions: bigint) {
+    apiWith(permissions, 0);
+    await act(async () => {
+      const edited = role(permissions);
+      useServerStore.setState({ roles: [edited], members: [member('owner-1', 'owner'), { ...member('me', 'member'), roles: [edited] }] });
+    });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+  }
+
+  it('Integrations open, MANAGE_WEBHOOKS revoked by a role edit: the permissions are refetched and the modal falls back to Members', async () => {
+    const start = Permissions.VIEW_CHANNEL | Permissions.MANAGE_WEBHOOKS | Permissions.KICK_MEMBERS;
+    useServerStore.setState({ roles: [role(start)], members: [member('owner-1', 'owner'), { ...member('me', 'member'), roles: [role(start)] }] });
+    apiWith(start, 0);
+    await render();
+    await act(async () => { q('[data-testid="tab-integrations"]')!.click(); });
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+    const before = effectiveCalls();
+
+    await revokeTo(Permissions.VIEW_CHANNEL | Permissions.KICK_MEMBERS);
+    expect(effectiveCalls()).toBe(before + 1);
+    expect(q('[data-testid="tab-integrations"]')).toBeNull();
+    expect(q('[data-testid="integrations-tab"]')).toBeNull();
+    expect(q('[data-testid="join-requests"]')).not.toBeNull();
+  });
+
+  it('Discovery open, MANAGE_SERVER revoked: back to the default tab, not a tab the strip no longer shows', async () => {
+    const start = Permissions.VIEW_CHANNEL | Permissions.MANAGE_SERVER;
+    useServerStore.setState({ roles: [role(start)], members: [member('owner-1', 'owner'), { ...member('me', 'member'), roles: [role(start)] }] });
+    apiWith(start, 0);
+    await render();
+    await act(async () => { q('[data-testid="tab-discovery"]')!.click(); });
+    expect(q('[data-testid="discovery-tab"]')).not.toBeNull();
+
+    await revokeTo(Permissions.VIEW_CHANNEL);
+    expect(q('[data-testid="discovery-tab"]')).toBeNull();
+    expect(q('[data-testid="members-directory"]')).not.toBeNull();
+  });
+
+  it('Roles open, MANAGE_ROLES revoked: back to Members', async () => {
+    const start = Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES;
+    useServerStore.setState({ roles: [role(start)], members: [member('owner-1', 'owner'), { ...member('me', 'member'), roles: [role(start)] }] });
+    apiWith(start, 0);
+    await render();
+    await act(async () => { tabButton('serverSettings.tabs.roles')!.click(); });
+    expect(q('[data-testid="members-directory"]')).toBeNull();
+
+    await revokeTo(Permissions.VIEW_CHANNEL);
+    expect(tabButton('serverSettings.tabs.roles')).toBeUndefined();
+    expect(q('[data-testid="members-directory"]')).not.toBeNull();
+  });
+
+  it('the read-only tabs (Members, Limits) stay picked whatever the bits', async () => {
+    const start = Permissions.VIEW_CHANNEL | Permissions.MANAGE_SERVER;
+    useServerStore.setState({ roles: [role(start)], members: [member('owner-1', 'owner'), { ...member('me', 'member'), roles: [role(start)] }] });
+    apiWith(start, 0);
+    await render();
+    await act(async () => { tabButton('serverSettings.tabs.limits')!.click(); });
+    await revokeTo(Permissions.VIEW_CHANNEL);
+    expect(tabButton('serverSettings.tabs.limits')!.className).toContain('border-vox-accent-primary');
+  });
+
+  it('another server: the previous server\'s bits never keep Integrations open while the new answer is on its way', async () => {
+    useServerStore.setState({ servers: [server('owner-1'), { ...server('owner-2'), id: 'srv-2', name: 'Other' }] });
+    apiWith(Permissions.VIEW_CHANNEL | Permissions.MANAGE_WEBHOOKS | Permissions.KICK_MEMBERS, 0);
+    await render();
+    await act(async () => { q('[data-testid="tab-integrations"]')!.click(); });
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+
+    // srv-2's permissions are slow to answer
+    let answer!: (v: unknown) => void;
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes('/roles/permissions/effective')) return new Promise((r) => { answer = r; });
+      if (url.endsWith('/join-requests')) return Promise.resolve({ data: { data: [], total: 0, hasMore: false } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    await act(async () => { root.render(<ServerSettingsModal serverId="srv-2" onClose={() => {}} />); });
+    expect(mockGet).toHaveBeenCalledWith('/servers/srv-2/roles/permissions/effective');
+    expect(q('[data-testid="integrations-tab"]')).toBeNull();
+    expect(q('[data-testid="tab-integrations"]')).toBeNull();
+
+    // and when it lands without the bit, the picked tab is still not honoured
+    await act(async () => { answer({ data: { data: { permissions: Permissions.VIEW_CHANNEL.toString() } } }); });
+    await act(async () => { await Promise.resolve(); });
+    expect(q('[data-testid="integrations-tab"]')).toBeNull();
+    expect(q('[data-testid="members-directory"]')).not.toBeNull();
+  });
+
+  it('a permitted pick survives a refetch that keeps the bit', async () => {
+    const start = Permissions.VIEW_CHANNEL | Permissions.MANAGE_WEBHOOKS | Permissions.KICK_MEMBERS;
+    useServerStore.setState({ roles: [role(start)], members: [member('owner-1', 'owner'), { ...member('me', 'member'), roles: [role(start)] }] });
+    apiWith(start, 0);
+    await render();
+    await act(async () => { q('[data-testid="tab-integrations"]')!.click(); });
+    await revokeTo(start | Permissions.SEND_MESSAGES);
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+  });
+});

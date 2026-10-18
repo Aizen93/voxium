@@ -50,11 +50,88 @@ describe('webhookUrl', () => {
     expect(webhookUrl('wh-1', 'tok')).toBe('https://voxium.test/api/v1/webhooks/wh-1/tok');
   });
 
-  it('the curl line posts a JSON content payload to exactly that URL', () => {
-    const url = webhookUrl('wh-1', 'tok');
-    expect(webhookCurlCommand(url)).toBe(`curl -H 'content-type: application/json' -d '{"content":"hello from cron"}' ${url}`);
+  it('the curl line posts a JSON content payload to exactly that URL, single-quoted', () => {
+    const url = webhookUrl('wh-1', 'tok')!;
+    expect(webhookCurlCommand(url)).toBe(`curl -H 'content-type: application/json' -d '{"content":"hello from cron"}' '${url}'`);
+  });
+
+  it('accepts what a cuid id and a base64url token are made of', () => {
+    expect(webhookUrl('cmgx1a2b3c0000abcdefghij', 'AbC_dEf-123')).toBe('https://voxium.test/api/v1/webhooks/cmgx1a2b3c0000abcdefghij/AbC_dEf-123');
+  });
+
+  it.each([
+    ['a slash in the id (another route)', '../admin', 'tok'],
+    ['a slash in the token', 'wh-1', 'tok/../../x'],
+    ['a query in the token', 'wh-1', 'tok?next=https://evil.example'],
+    ['a fragment in the id', 'wh-1#x', 'tok'],
+    ['a dot-dot id', '..', 'tok'],
+    ['a quote in the token (breaks out of the curl line)', 'wh-1', "tok';rm -rf ~;'"],
+    ['a space in the token', 'wh-1', 'tok en'],
+    ['a newline in the token', 'wh-1', 'tok\nx'],
+    ['a percent-encoded slash', 'wh-1', 'tok%2F..'],
+    ['an empty id', '', 'tok'],
+    ['an empty token', 'wh-1', ''],
+  ])('refuses %s: null, never a URL', (_label, id, token) => {
+    expect(webhookUrl(id, token)).toBeNull();
+  });
+
+  it('refuses a non-string id or token (a malformed answer) instead of printing "undefined"', () => {
+    expect(webhookUrl(undefined as unknown as string, 'tok')).toBeNull();
+    expect(webhookUrl('wh-1', 42 as unknown as string)).toBeNull();
+  });
+
+  it('a quote in the configured base cannot leave the single-quoted word', () => {
+    base.value = "https://voxium.test/a'b";
+    const url = webhookUrl('wh-1', 'tok')!;
+    expect(url).toBe("https://voxium.test/a'b/webhooks/wh-1/tok");
+    const line = webhookCurlCommand(url);
+    expect(line.endsWith(` 'https://voxium.test/a'"'"'b/webhooks/wh-1/tok'`)).toBe(true);
+    // what a POSIX shell makes of the line: six words, the last one the URL verbatim
+    expect(shellWords(line)).toEqual(['curl', '-H', 'content-type: application/json', '-d', '{"content":"hello from cron"}', url]);
+  });
+
+  it('shell metacharacters in the base stay inside the URL word', () => {
+    base.value = 'https://voxium.test/$(id);`id`&x|y';
+    const url = webhookUrl('wh-1', 'tok')!;
+    const words = shellWords(webhookCurlCommand(url));
+    expect(words).toHaveLength(6);
+    expect(words[5]).toBe(url);
   });
 });
+
+/** Characters a POSIX shell acts on when they stand outside quotes (the last one is a backslash). */
+const UNQUOTED_SPECIAL = new Set([';', '&', '|', '$', '`', '<', '>', '(', ')', '*', '?', '[', ']', '#', '~', '{', '}', '!', String.fromCharCode(92)]);
+
+/**
+ * The words a POSIX shell splits `line` into, for the quoting the curl line
+ * uses: single- and double-quoted segments glued together, blanks between
+ * words. A segment left open, or a metacharacter outside quotes (something
+ * the shell would RUN or expand), is an error.
+ */
+function shellWords(line: string): string[] {
+  const words: string[] = [];
+  let word: string | null = null;
+  let i = 0;
+  while (i < line.length) {
+    const c = line[i];
+    if (c === ' ') {
+      if (word !== null) words.push(word);
+      word = null;
+      i += 1;
+    } else if (c === "'" || c === '"') {
+      const end = line.indexOf(c, i + 1);
+      if (end === -1) throw new Error(`unterminated ${c} at ${i}`);
+      word = (word ?? '') + line.slice(i + 1, end);
+      i = end + 1;
+    } else {
+      if (UNQUOTED_SPECIAL.has(c)) throw new Error(`unquoted ${c} at ${i}`);
+      word = (word ?? '') + c;
+      i += 1;
+    }
+  }
+  if (word !== null) words.push(word);
+  return words;
+}
 
 describe('isWebhooksOff', () => {
   it('is true for the flag-off 403 and its exact message only', () => {

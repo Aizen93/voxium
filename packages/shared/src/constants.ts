@@ -75,6 +75,23 @@ export const WEBHOOK_TYPES = ['generic', 'github'] as const;
 export type WebhookType = (typeof WEBHOOK_TYPES)[number];
 
 /**
+ * The exact message every webhook route answers (403) while the `webhooks`
+ * feature flag is off. The desktop's Integrations tab keys its "disabled"
+ * state on this sentence, so the server and the client must share one copy.
+ */
+export const WEBHOOKS_DISABLED_MESSAGE = 'Webhooks are currently disabled';
+
+/**
+ * The charset of every id a client may hand the server (cuids, role ids, user
+ * ids): what `/servers/:id/members/lookup` and the directory's role filter
+ * accept, and what the webhook execute route requires of a webhook id before
+ * it spends a query. A synthesised webhook author id (`webhook:{id}`) can
+ * NEVER pass it, on purpose: the colon keeps it out of every member lookup.
+ * No `g` flag, so `.test()` carries no `lastIndex` state between calls.
+ */
+export const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
  * Max serialized dm:voice:signal payload the server will relay (UTF-16 chars,
  * matching the JSON.stringify length check). Signals are opaque olm1 envelopes
  * after the E2E cutover — the cap must fit a base64-inflated audio SDP with

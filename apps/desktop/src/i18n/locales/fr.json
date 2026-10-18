@@ -1199,7 +1199,8 @@
     "webhookNameEmpty": "Le nom du webhook ne peut pas être vide",
     "webhookNameTooLong": "Le nom du webhook ne peut pas dépasser {{max}} caractères",
     "webhookCap": "Ce serveur a atteint sa limite de webhooks (maximum {{max}})",
-    "channelNotFound": "Salon introuvable"
+    "channelNotFound": "Salon introuvable",
+    "tooManyRequests": "Trop de requêtes. Veuillez réessayer plus tard."
   },
   "e2e": {
     "badgeTitle": "Chiffré de bout en bout — voir le numéro de sécurité",
@@ -1573,6 +1574,7 @@
       "copySecret": "Copier le secret",
       "copied": "Copié dans le presse-papiers",
       "copyFailed": "Impossible de copier dans le presse-papiers",
+      "invalidUrl": "Le serveur a renvoyé une URL de webhook malformée : elle n’est pas affichée. Renouvelez-la pour en obtenir une nouvelle.",
       "done": "Terminé",
       "github": {
         "title": "Configurez-le dans GitHub",

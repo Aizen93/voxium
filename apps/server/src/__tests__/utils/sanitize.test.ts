@@ -61,8 +61,11 @@ describe('stripHtml — identical to the old /<[^>]*>/g replace, in linear time'
     }
   });
 
-  it('a 1 MiB run of < completes in well under a second (the old regex took minutes)', () => {
-    const input = '<'.repeat(1_048_576);
+  // 64 KiB, not the 1 MiB a webhook body may carry: the old backtracking regex
+  // is quadratic, so it takes over a second here (failing the bound) where
+  // 1 MiB would hang a regressed run for ~7 minutes before failing
+  it('a 64 KiB run of < completes in well under 200 ms (the old regex took over a second)', () => {
+    const input = '<'.repeat(65_536);
 
     const start = performance.now();
     const result = stripHtml(input);
@@ -72,8 +75,8 @@ describe('stripHtml — identical to the old /<[^>]*>/g replace, in linear time'
     expect(elapsed).toBeLessThan(200);
   });
 
-  it('a 1 MiB run of < through sanitizeText is just as fast', () => {
-    const input = `x${'<'.repeat(1_048_576)}`;
+  it('a 64 KiB run of < through sanitizeText is just as fast', () => {
+    const input = `x${'<'.repeat(65_536)}`;
 
     const start = performance.now();
     const result = sanitizeText(input);

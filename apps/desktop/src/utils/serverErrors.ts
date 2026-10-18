@@ -176,6 +176,11 @@ const ERROR_MAP: Record<string, string> = {
   'Webhook name cannot be empty': 'webhookNameEmpty',
   [`Webhook name must be at most ${LIMITS.WEBHOOK_NAME_MAX} characters`]: 'webhookNameTooLong',
 
+  // ─── Rate limits ───────────────────────────────────────────────────────
+  // The one body every limiter answers its 429 with (middleware/rateLimiter.ts),
+  // e.g. webhookManage's 30 changes an hour
+  'Too many requests. Please try again later.': 'tooManyRequests',
+
   // ─── Admin ─────────────────────────────────────────────────────────────
   'Cannot ban yourself': 'cannotBanSelf',
   'Cannot ban a super admin': 'cannotBanSuperAdmin',

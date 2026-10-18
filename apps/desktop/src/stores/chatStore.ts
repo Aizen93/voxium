@@ -479,8 +479,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   removeWebhookMessages: (channelId: string, webhookId: string) => {
     // BOTH ids must match: chatStore is shared with DMs, and another
     // webhook's rows (or a human's) in the same channel stay
+    const quotedAuthorId = `webhook:${webhookId}`;
     set((state) => ({
-      messages: state.messages.filter((m) => !(m.channelId === channelId && m.webhookId === webhookId)),
+      messages: state.messages
+        .filter((m) => !(m.channelId === channelId && m.webhookId === webhookId))
+        // A reply quoting one of the purged rows loses its quote, as the
+        // server's SetNull leaves it (a reply lives in its parent's channel).
+        // Untouched rows keep their identity.
+        .map((m) => (m.channelId === channelId && m.replyTo?.author.id === quotedAuthorId
+          ? { ...m, replyTo: null, replyToId: null }
+          : m)),
     }));
   },
 

@@ -54,3 +54,26 @@ describe('MainLayout wires message:bulk_deleted to the guarded handler', () => {
     expect(body).toMatch(/channelId === serverState\.activeChannelId/);
   });
 });
+
+describe('MainLayout labels a webhook author in a desktop notification', () => {
+  /** The server-channel message handler: from `messageNew:` to the next handler. */
+  function messageNewHandler(): string {
+    const start = source.indexOf('messageNew: async');
+    expect(start, 'messageNew handler not found in MainLayout').toBeGreaterThan(-1);
+    const end = source.indexOf('messageUpdate:', start);
+    expect(end, 'end of messageNew not found in MainLayout').toBeGreaterThan(start);
+    return source.slice(start, end);
+  }
+
+  it('imports notificationAuthorName from utils/notificationAuthor', () => {
+    expect(source).toMatch(/import \{[^}]*\bnotificationAuthorName\b[^}]*\} from '\.\.\/\.\.\/utils\/notificationAuthor';/);
+  });
+
+  it('the notification author comes from notificationAuthorName(message.author, i18n.t), never the bare name', () => {
+    const handler = messageNewHandler();
+    expect(handler).toMatch(/const authorName = notificationAuthorName\(\s*message\.author\s*,\s*i18n\.t\s*\)/);
+    expect(handler).not.toMatch(/message\.author\?\.displayName\s*\|\|/);
+    // and that name is what both the title and the body print
+    expect(handler).toMatch(/notify\(title, `\$\{authorName\}: \$\{body\}`/);
+  });
+});

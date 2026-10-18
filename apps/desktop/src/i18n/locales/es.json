@@ -1199,7 +1199,8 @@
     "webhookNameEmpty": "El nombre del webhook no puede estar vacío",
     "webhookNameTooLong": "El nombre del webhook no puede superar los {{max}} caracteres",
     "webhookCap": "Este servidor alcanzó su límite de webhooks (máximo {{max}})",
-    "channelNotFound": "Canal no encontrado"
+    "channelNotFound": "Canal no encontrado",
+    "tooManyRequests": "Demasiadas solicitudes. Inténtalo de nuevo más tarde."
   },
   "e2e": {
     "badgeTitle": "Cifrado de extremo a extremo — ver número de seguridad",
@@ -1573,6 +1574,7 @@
       "copySecret": "Copiar secreto",
       "copied": "Copiado al portapapeles",
       "copyFailed": "No se pudo copiar al portapapeles",
+      "invalidUrl": "El servidor envió una URL de webhook mal formada, así que no se muestra. Renuévala para obtener una nueva.",
       "done": "Listo",
       "github": {
         "title": "Configúralo en GitHub",

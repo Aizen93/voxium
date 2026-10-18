@@ -1199,7 +1199,8 @@
     "webhookNameEmpty": "Webhook name cannot be empty",
     "webhookNameTooLong": "Webhook name must be at most {{max}} characters",
     "webhookCap": "This server has reached its webhook limit (maximum {{max}})",
-    "channelNotFound": "Channel not found"
+    "channelNotFound": "Channel not found",
+    "tooManyRequests": "Too many requests. Please try again later."
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
@@ -1573,6 +1574,7 @@
       "copySecret": "Copy secret",
       "copied": "Copied to clipboard",
       "copyFailed": "Could not copy to the clipboard",
+      "invalidUrl": "The server sent a malformed webhook URL, so it is not shown. Rotate the webhook to get a new one.",
       "done": "Done",
       "github": {
         "title": "Set it up in GitHub",

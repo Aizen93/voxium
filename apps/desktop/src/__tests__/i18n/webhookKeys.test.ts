@@ -25,6 +25,10 @@ const SOURCES = [
   // the message side (step 2b): the APP tag and the deleted-webhook label
   fileURLToPath(new URL('../../components/chat/MessageItem.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/chat/MessageList.tsx', import.meta.url)),
+  // the APP tag itself (header, reply quote, search hit) and the
+  // notification's APP marker
+  fileURLToPath(new URL('../../components/common/AppTag.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../utils/notificationAuthor.ts', import.meta.url)),
 ];
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 
@@ -118,6 +122,8 @@ describe('incoming-webhook translation keys', () => {
     expect(keys).toContain('webhooks.delete.deletedMessages');        // the delete confirm (plural)
     expect(keys).toContain('webhooks.create.typeGithubHint');         // the create dialog
     expect(keys).toContain('webhooks.reveal.copyNow');                // the copy-once panel
+    expect(keys).toContain('webhooks.reveal.invalidUrl');             // a malformed create/rotate answer
+    expect(keys).toContain('messageItem.appTag');                     // AppTag / the notification marker
     expect(keys).toContain('webhooks.toggleFailed');                  // a fallback key, no t( call names it
     expect(keys).toContain('serverSettings.tabs.integrations');       // the modal's tab
     expect(keys).toContain('serverSettings.limits.maxWebhooksDesc');  // the Limits row

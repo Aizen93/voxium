@@ -12,6 +12,7 @@ import { useMaskLayoutStore, resetMaskLayoutModuleState } from './maskLayoutStor
 import { useDiscoveryStore, resetDiscoveryModuleState } from './discoveryStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { stopE2EDeviceListWatch } from './e2eStore';
+import { resetServerPermissionsCache } from '../hooks/useServerPermissions';
 
 /**
  * Account-scoped stores that MUST be wiped on logout. Without this, the next
@@ -84,6 +85,8 @@ export function resetAccountStores(): void {
   // and so is a directory page still in flight
   resetMemberLookupState();
   retireDirectory();
+  // The effective-permission answers are the leaving account's too
+  resetServerPermissionsCache();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).

@@ -1199,7 +1199,8 @@
     "webhookNameEmpty": "Der Webhook-Name darf nicht leer sein",
     "webhookNameTooLong": "Der Webhook-Name darf höchstens {{max}} Zeichen lang sein",
     "webhookCap": "Dieser Server hat sein Webhook-Limit erreicht (maximal {{max}})",
-    "channelNotFound": "Kanal nicht gefunden"
+    "channelNotFound": "Kanal nicht gefunden",
+    "tooManyRequests": "Zu viele Anfragen. Bitte versuche es später erneut."
   },
   "e2e": {
     "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",
@@ -1573,6 +1574,7 @@
       "copySecret": "Secret kopieren",
       "copied": "In die Zwischenablage kopiert",
       "copyFailed": "Kopieren in die Zwischenablage fehlgeschlagen",
+      "invalidUrl": "Der Server hat eine fehlerhafte Webhook-URL gesendet, daher wird sie nicht angezeigt. Erneuere sie, um eine neue zu erhalten.",
       "done": "Fertig",
       "github": {
         "title": "In GitHub einrichten",

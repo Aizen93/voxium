@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { WEBHOOKS_DISABLED_MESSAGE } from '@voxium/shared';
 import type { Webhook, WebhookCreated, WebhookType } from '@voxium/shared';
 import { api, API_BASE } from './api';
 
@@ -24,7 +25,8 @@ export interface UpdateWebhookInput {
 }
 
 /** The flag-off answer of every management route (403). */
-export const WEBHOOKS_DISABLED_MESSAGE = 'Webhooks are currently disabled';
+// The sentence the server's kill switch answers with: ONE copy, in @voxium/shared
+export { WEBHOOKS_DISABLED_MESSAGE };
 
 const base = (serverId: string) => `/servers/${serverId}/webhooks`;
 
@@ -74,16 +76,37 @@ export async function deleteWebhook(serverId: string, webhookId: string, purge: 
 }
 
 /**
+ * What a webhook id (a cuid) and its token (base64url) are made of. Anything
+ * else in a create/rotate answer is a server that should not be trusted with
+ * the URL: a `/`, `?`, `#` or `..` would point the copied URL somewhere else,
+ * and a quote or `;` would break out of the curl line below.
+ */
+const URL_SEGMENT_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
  * The public execute URL. Composed HERE, from the client's own API base: the
  * server does not know its public origin (proxies), so it never builds it.
+ * `null` when the id or the token is not a plain URL segment: the caller
+ * says so (a toast) instead of showing a URL that goes somewhere else.
  */
-export function webhookUrl(webhookId: string, token: string): string {
+export function webhookUrl(webhookId: string, token: string): string | null {
+  if (typeof webhookId !== 'string' || typeof token !== 'string') return null;
+  if (!URL_SEGMENT_RE.test(webhookId) || !URL_SEGMENT_RE.test(token)) return null;
   return `${API_BASE.replace(/\/+$/, '')}/webhooks/${webhookId}/${token}`;
 }
 
-/** The one-liner the copy-once panel offers to try the URL from a terminal. */
+/** `value` as ONE single-quoted POSIX shell word: nothing inside is interpreted. */
+function shellQuote(value: string): string {
+  return `'${value.split("'").join(`'"'"'`)}'`;
+}
+
+/**
+ * The one-liner the copy-once panel offers to try the URL from a terminal.
+ * The URL is single-quoted: the API base is configuration, and nothing in it
+ * may run in the user's shell when the line is pasted.
+ */
 export function webhookCurlCommand(url: string): string {
-  return `curl -H 'content-type: application/json' -d '{"content":"hello from cron"}' ${url}`;
+  return `curl -H 'content-type: application/json' -d '{"content":"hello from cron"}' ${shellQuote(url)}`;
 }
 
 /** The flag-off answer is a STATE (the tab's "turned off" view), not an error to toast. */

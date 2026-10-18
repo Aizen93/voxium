@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { RateLimiterRedis } from 'rate-limiter-flexible';
@@ -225,6 +225,76 @@ describe('refundRateLimit — give a charged point back, fail-open', () => {
     expect(warn).toHaveBeenCalledWith('[RateLimit] noSuchLimiter refund failed:', 'Unknown rate limiter: noSuchLimiter');
     reward.mockRestore();
     warn.mockRestore();
+  });
+});
+
+// AFTER the refund block on purpose: limiter instances are cached per name for
+// the whole file, and the refund block relies on webhookExecuteIp never having
+// been built (and on webhookRead being built there, on its own client).
+describe('incoming-webhook limiters — the bucket each one charges, and its KEY', () => {
+  const THROWING_REDIS = () => { throw new Error('Redis not available in unit tests'); };
+  const TOKEN = 'SECRET-TOKEN-zM9vYmFy';
+  let seen: Array<{ prefix: string; key: string }>;
+  let consume: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // A store client the limiters can be built on (the module-level mock throws)
+    vi.mocked(getRedis).mockImplementation(() => ({}) as ReturnType<typeof getRedis>);
+    seen = [];
+    consume = vi.spyOn(RateLimiterRedis.prototype, 'consume').mockImplementation(async function (this: RateLimiterRedis, key) {
+      seen.push({ prefix: this.keyPrefix, key: String(key) });
+      return {} as never;
+    });
+  });
+
+  afterEach(() => {
+    consume.mockRestore();
+    vi.mocked(getRedis).mockImplementation(THROWING_REDIS);
+  });
+
+  /** One request carrying every key a limiter could wrongly pick: the URL's
+   *  webhook id AND token, an address, a user. */
+  function executeRequest(extra: Record<string, unknown> = {}) {
+    return { params: { webhookId: 'wh-1', token: TOKEN }, ip: '203.0.113.7', socket: {}, ...extra } as any;
+  }
+
+  async function charge(mw: (req: any, res: any, next: any) => Promise<void>, req: any) {
+    const res = { set: vi.fn(), status: vi.fn(() => ({ json: vi.fn() })) } as any;
+    const next = vi.fn();
+    await mw(req, res, next);
+    expect(next).toHaveBeenCalledWith();
+    expect(res.status).not.toHaveBeenCalled();
+  }
+
+  it('rateLimitWebhookExecute charges rl:whexec keyed on the webhook id: never the IP, never the token', async () => {
+    await charge(rateLimitWebhookExecute, executeRequest());
+
+    expect(seen).toEqual([{ prefix: 'rl:whexec', key: 'wh-1' }]);
+    expect(JSON.stringify(seen)).not.toContain(TOKEN);
+  });
+
+  it('rateLimitWebhookExecuteIp charges rl:whexecip keyed on the (normalised) address: never the id, never the token', async () => {
+    await charge(rateLimitWebhookExecuteIp, executeRequest());
+    await charge(rateLimitWebhookExecuteIp, executeRequest({ ip: '::FFFF:203.0.113.7' }));
+
+    expect(seen).toEqual([
+      { prefix: 'rl:whexecip', key: '203.0.113.7' },
+      { prefix: 'rl:whexecip', key: '203.0.113.7' },
+    ]);
+    expect(JSON.stringify(seen)).not.toContain(TOKEN);
+  });
+
+  it('rateLimitWebhookManage and rateLimitWebhookRead charge rl:whmanage / rl:whread keyed on the user id', async () => {
+    const req = executeRequest({ params: { serverId: 'srv-1', webhookId: 'wh-1', token: TOKEN }, user: { userId: 'user-9' } });
+
+    await charge(rateLimitWebhookManage, req);
+    await charge(rateLimitWebhookRead, req);
+
+    expect(seen).toEqual([
+      { prefix: 'rl:whmanage', key: 'user-9' },
+      { prefix: 'rl:whread', key: 'user-9' },
+    ]);
+    expect(JSON.stringify(seen)).not.toContain(TOKEN);
   });
 });
 

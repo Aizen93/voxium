@@ -5,7 +5,7 @@ import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { pinSecure, isPinnedSecure, claimDowngradeWarning } from '../utils/securePins';
-import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST } from '@voxium/shared';
+import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST, OPAQUE_ID_RE } from '@voxium/shared';
 import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 
@@ -152,13 +152,12 @@ export const EMPTY_DIRECTORY: DirectoryState = { serverId: null, rows: [], total
 export const MEMBER_LOOKUP_DEBOUNCE_MS = 300;
 /**
  * The shape `/members/lookup` accepts for every id (identical to the
- * server's OPAQUE_ID_RE, routes/servers.ts). Anything else never enters the
+ * server's, both from @voxium/shared's OPAQUE_ID_RE). Anything else never enters the
  * queue: one bad id 400s the WHOLE batch, and three failures in a row drop
  * the queue for every human author in it. A webhook-authored message carries
  * `webhook:<id>` / `webhook:deleted` — the colon is there on purpose so it can
  * never be a user id — and it must not cost the real authors their rows.
  */
-const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** After a failed lookup, how long before the next one may go out. */
 const MEMBER_LOOKUP_BACKOFF_MS = 10_000;
 /** Known rows past this many: offline rows are dropped, oldest first (the viewer is online while here). */

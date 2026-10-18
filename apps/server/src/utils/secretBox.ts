@@ -2,13 +2,14 @@ import crypto from 'crypto';
 
 /**
  * AES-256-GCM secret box for small server-held secrets (the GitHub signing
- * secret of an incoming webhook), lifted from services/totpService.ts and
- * keyed by the same TOTP_ENCRYPTION_KEY (64 hex chars = 32 bytes).
+ * secret of an incoming webhook), copied from services/totpService.ts (which
+ * keeps its own, with its legacy leniencies) and keyed by the same
+ * TOTP_ENCRYPTION_KEY (64 hex chars = 32 bytes).
  *
  * Stored format, byte-identical to what totpService writes:
  *   enc:<iv hex (12 bytes)>:<auth tag hex (16 bytes)>:<ciphertext hex>
  *
- * Two TOTP-only leniencies are deliberately NOT lifted:
+ * Two TOTP-only leniencies are deliberately NOT copied:
  * - sealSecret() never falls back to plaintext, in any environment: without a
  *   usable key it throws SecretBoxUnavailableError and the caller stores
  *   nothing (dev without a key simply cannot create such secrets).

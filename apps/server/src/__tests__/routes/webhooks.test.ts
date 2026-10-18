@@ -60,22 +60,25 @@ vi.mock('../../utils/serverLimits', async (importOriginal) => {
 });
 
 const txMock = {
+  // The row locks: the delete's on the webhook row, the create's on the server row
   $queryRaw: vi.fn(),
   message: { groupBy: vi.fn(), deleteMany: vi.fn() },
   // findUnique: the shared delete (utils/webhookLifecycle.ts) reads the row
-  // again under its lock; see the beforeEach
-  webhook: { delete: vi.fn(), findUnique: vi.fn() },
+  // again under its lock; see the beforeEach. count + create: the create's
+  // cap check and insert, under the server-row lock
+  webhook: { delete: vi.fn(), findUnique: vi.fn(), count: vi.fn(), create: vi.fn() },
 };
 
 const prismaMock: Record<string, any> = {
   webhook: {
     findMany: vi.fn(),
     findUnique: vi.fn(),
-    count: vi.fn(),
-    create: vi.fn(),
     update: vi.fn(),
-    // Deliberately no `delete` here and no `message` model: the delete must
-    // run on the transaction client, never on the root client.
+    // The disable the shared delete commits BEFORE its transaction
+    updateMany: vi.fn(),
+    // Deliberately no `delete`, `count` or `create` here and no `message`
+    // model: the delete and the capped create must run on the transaction
+    // client, never on the root client.
   },
   channel: { findUnique: vi.fn() },
   globalConfig: { findUnique: vi.fn() },
@@ -154,11 +157,21 @@ const FULL_LIMITS = {
   maxMembersPerServer: 0,
 };
 
-/** What Prisma throws when the row to update is gone (a concurrent delete). */
+/** What Prisma throws when the row to update is gone (a concurrent delete),
+ *  or no longer matches the write's extra filter (a concurrent move). */
 function recordNotFound() {
   return Object.assign(new Error('Record to update not found.'), {
     name: 'PrismaClientKnownRequestError',
     code: 'P2025',
+    clientVersion: '7.0.0',
+  });
+}
+
+/** What Prisma throws when a written channel id no longer exists (the FK). */
+function foreignKeyViolation() {
+  return Object.assign(new Error('Foreign key constraint violated on the constraint: `webhooks_channel_id_fkey`'), {
+    name: 'PrismaClientKnownRequestError',
+    code: 'P2003',
     clientVersion: '7.0.0',
   });
 }
@@ -198,10 +211,11 @@ beforeEach(() => {
 
   prismaMock.webhook.findMany.mockResolvedValue([]);
   prismaMock.webhook.findUnique.mockResolvedValue({ id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1' });
-  prismaMock.webhook.count.mockResolvedValue(0);
-  prismaMock.webhook.create.mockImplementation(async ({ data }: any) => webhookRow({
+  txMock.webhook.count.mockResolvedValue(0);
+  txMock.webhook.create.mockImplementation(async ({ data }: any) => webhookRow({
     name: data.name, channelId: data.channelId, type: data.type,
   }));
+  prismaMock.webhook.updateMany.mockResolvedValue({ count: 1 });
   prismaMock.webhook.update.mockImplementation(async ({ data }: any) => webhookRow({
     ...(data.name !== undefined ? { name: data.name } : {}),
     ...(data.channelId !== undefined ? { channelId: data.channelId } : {}),
@@ -288,7 +302,7 @@ describe('router guards', () => {
     expect(h.hasServerPermission).toHaveBeenCalledWith('user-1', 'srv-9', Permissions.MANAGE_WEBHOOKS);
   });
 
-  it('owner and ADMINISTRATOR pass (the calculator answers true for them)', async () => {
+  it('a caller the calculator allows passes (owner and ADMINISTRATOR are the calculator\'s business, mocked here)', async () => {
     h.hasServerPermission.mockResolvedValue(true);
     const res = await request(app).get(BASE);
     expect(res.status).toBe(200);
@@ -432,7 +446,7 @@ describe('POST /servers/:serverId/webhooks', () => {
     const token: string = res.body.data.token;
     expect(token).toMatch(TOKEN_RE);
 
-    const args = prismaMock.webhook.create.mock.calls[0][0];
+    const args = txMock.webhook.create.mock.calls[0][0];
     expect(args.data).toEqual({
       serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic',
       tokenHash: expect.stringMatching(HEX64_RE), secretEnc: null, createdById: 'user-1',
@@ -495,7 +509,7 @@ describe('POST /servers/:serverId/webhooks', () => {
       expect(token).toMatch(TOKEN_RE);
       expect(secret).toMatch(HEX64_RE);
 
-      const args = prismaMock.webhook.create.mock.calls[0][0];
+      const args = txMock.webhook.create.mock.calls[0][0];
       expect(args.data).toEqual({
         serverId: 'srv-1', channelId: 'ch-1', name: 'GH', type: 'github',
         tokenHash: sha256(token), secretEnc: expect.stringMatching(/^enc:/), createdById: 'user-1',
@@ -522,7 +536,7 @@ describe('POST /servers/:serverId/webhooks', () => {
       const a = await create({ channelId: 'ch-1', name: 'A', type: 'github' });
       const b = await create({ channelId: 'ch-1', name: 'B', type: 'github' });
       expect(a.body.data.secret).not.toBe(b.body.data.secret);
-      const seals = prismaMock.webhook.create.mock.calls.map((c: any[]) => c[0].data.secretEnc);
+      const seals = txMock.webhook.create.mock.calls.map((c: any[]) => c[0].data.secretEnc);
       expect(seals[0]).not.toBe(seals[1]);
       const wire = JSON.stringify(h.emitted);
       expect(wire).not.toContain(a.body.data.secret);
@@ -534,10 +548,10 @@ describe('POST /servers/:serverId/webhooks', () => {
       const res = await create({ channelId: 'ch-1', name: 'GH', type: 'github' });
       expect(res.status).toBe(503);
       expect(res.body).toEqual({ success: false, error: 'GitHub webhooks are not configured on this server' });
-      expect(prismaMock.webhook.count).not.toHaveBeenCalled();
+      expect(txMock.webhook.count).not.toHaveBeenCalled();
       expect(getEffectiveLimits).not.toHaveBeenCalled();
       expect(prismaMock.channel.findUnique).not.toHaveBeenCalled();
-      expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
       expect(h.emitted).toHaveLength(0);
     });
 
@@ -545,7 +559,7 @@ describe('POST /servers/:serverId/webhooks', () => {
       process.env.TOTP_ENCRYPTION_KEY = 'ab'.repeat(16);
       const res = await create({ channelId: 'ch-1', name: 'GH', type: 'github' });
       expect(res.status).toBe(503);
-      expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
     });
 
     it('a generic webhook needs no key: it is created without one, with no secret', async () => {
@@ -553,7 +567,7 @@ describe('POST /servers/:serverId/webhooks', () => {
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(201);
       expect(res.body.data).not.toHaveProperty('secret');
-      expect(prismaMock.webhook.create.mock.calls[0][0].data.secretEnc).toBeNull();
+      expect(txMock.webhook.create.mock.calls[0][0].data.secretEnc).toBeNull();
     });
   });
 
@@ -566,7 +580,7 @@ describe('POST /servers/:serverId/webhooks', () => {
     const res = await create({ channelId: 'ch-1', name: 'CI', type });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Invalid webhook type');
-    expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+    expect(txMock.webhook.create).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -599,7 +613,7 @@ describe('POST /servers/:serverId/webhooks', () => {
     const res = await create({ channelId: 'ch-1', name, type: 'generic' });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Webhook name cannot be empty');
-    expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+    expect(txMock.webhook.create).not.toHaveBeenCalled();
   });
 
   it('400 for a 65-character name, 201 for 64', async () => {
@@ -614,7 +628,7 @@ describe('POST /servers/:serverId/webhooks', () => {
   it('sanitises the name before validating and storing it', async () => {
     const res = await create({ channelId: 'ch-1', name: '  <b>x</b>  ', type: 'generic' });
     expect(res.status).toBe(201);
-    expect(prismaMock.webhook.create.mock.calls[0][0].data.name).toBe('x');
+    expect(txMock.webhook.create.mock.calls[0][0].data.name).toBe('x');
   });
 
   it('looks the channel up with a minimal select', async () => {
@@ -674,7 +688,7 @@ describe('POST /servers/:serverId/webhooks', () => {
       expect(h.hasChannelPermission).toHaveBeenCalledWith('user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL);
       const expected = await notFoundBody();
       expect(res.text).toBe(JSON.stringify(expected));
-      expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
     });
 
     it('a hidden VOICE channel is a 404, not the text-only 400 (VIEW is decided before the type)', async () => {
@@ -696,24 +710,179 @@ describe('POST /servers/:serverId/webhooks', () => {
     it('a rejected channel creates nothing and emits nothing', async () => {
       prismaMock.channel.findUnique.mockResolvedValueOnce({ ...textChannel, secure: true });
       await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
-      expect(prismaMock.webhook.create).not.toHaveBeenCalled();
-      expect(prismaMock.webhook.count).not.toHaveBeenCalled();
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
+      expect(txMock.webhook.count).not.toHaveBeenCalled();
       expect(h.emitted).toHaveLength(0);
     });
+
+    // ── SEND_MESSAGES: a webhook must not become a way around it ──
+
+    /** VIEW granted, SEND_MESSAGES refused (a read-only announcements channel). */
+    function viewButNoSend() {
+      h.hasChannelPermission.mockImplementation(async (...args: unknown[]) => args[3] !== Permissions.SEND_MESSAGES);
+    }
+
+    it('a channel the caller can VIEW but not SEND in: 403 with the messages.ts sentence, nothing created', async () => {
+      viewButNoSend();
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ success: false, error: 'You do not have permission to send messages in this channel' });
+      expect(h.hasChannelPermission).toHaveBeenCalledWith('user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES);
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
+      expect(h.emitted).toHaveLength(0);
+    });
+
+    it('VIEW and SEND granted: created, with VIEW asked first, then SEND', async () => {
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(201);
+      expect(h.hasChannelPermission.mock.calls).toEqual([
+        ['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL],
+        ['user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES],
+      ]);
+    });
+
+    it('a secure channel is still the 404 first: no permission is asked, SEND or otherwise', async () => {
+      viewButNoSend();
+      prismaMock.channel.findUnique.mockResolvedValueOnce({ ...textChannel, secure: true });
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ success: false, error: 'Channel not found' });
+      expect(h.hasChannelPermission).not.toHaveBeenCalled();
+    });
+
+    it('a hidden channel is the 404 before SEND is asked (no "exists, read-only" leak)', async () => {
+      h.hasChannelPermission.mockResolvedValue(false);
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Channel not found');
+      expect(h.hasChannelPermission.mock.calls).toEqual([['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL]]);
+    });
+
+    it('SEND is decided before the type: a visible read-only voice channel is the 403, not the text-only 400', async () => {
+      viewButNoSend();
+      prismaMock.channel.findUnique.mockResolvedValueOnce({ ...textChannel, type: 'voice' });
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(403);
+    });
+  });
+
+  it('a channel deleted between the checks and the insert (P2003) answers 404 "Channel not found": no stack, nothing emitted', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    txMock.webhook.create.mockRejectedValueOnce(foreignKeyViolation());
+    const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Channel not found' });
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('any other insert failure is still a 500, and emits nothing', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    txMock.webhook.create.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'P1017' }));
+    const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+    expect(res.status).toBe(500);
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
   });
 
   describe('per-server cap', () => {
     it('counts this server only', async () => {
       await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
-      expect(prismaMock.webhook.count).toHaveBeenCalledWith({ where: { serverId: 'srv-1' } });
+      expect(txMock.webhook.count).toHaveBeenCalledWith({ where: { serverId: 'srv-1' } });
       expect(getEffectiveLimits).toHaveBeenCalledWith('srv-1');
     });
 
+    it('counts and creates in ONE transaction whose FIRST statement locks the server row', async () => {
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(201);
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);
+      const [strings, ...values] = txMock.$queryRaw.mock.calls[0];
+      expect((strings as string[]).join('?')).toBe('SELECT id FROM servers WHERE id = ? FOR UPDATE');
+      expect(values).toEqual(['srv-1']);
+      const lock = txMock.$queryRaw.mock.invocationCallOrder[0];
+      const count = txMock.webhook.count.mock.invocationCallOrder[0];
+      const insert = txMock.webhook.create.mock.invocationCallOrder[0];
+      expect(lock).toBeLessThan(count);
+      expect(count).toBeLessThan(insert);
+    });
+
+    it('announces webhook:changed only once the transaction has committed', async () => {
+      const emittedInside: number[] = [];
+      prismaMock.$transaction.mockImplementationOnce(async (cb: (tx: typeof txMock) => unknown) => {
+        const out = await cb(txMock);
+        emittedInside.push(h.emitted.length);
+        return out;
+      });
+      await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(emittedInside).toEqual([0]);
+      expectChangedOnce();
+    });
+
+    it('two parallel creates against a cap of 1: the server-row lock serialises them, exactly one is created', async () => {
+      prismaMock.globalConfig.findUnique.mockResolvedValue({ ...FULL_LIMITS, maxWebhooksPerServer: 1 });
+      // A database in miniature: the lock statement waits for the previous
+      // holder and holds until its transaction ends; count reads the rows
+      // committed so far
+      let rows = 0;
+      let held: Promise<void> = Promise.resolve();
+      prismaMock.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+        let release: (() => void) | undefined;
+        const tx = {
+          ...txMock,
+          $queryRaw: vi.fn(async () => {
+            const previous = held;
+            held = new Promise<void>((resolve) => { release = resolve; });
+            await previous;
+            return [{ id: 'srv-1' }];
+          }),
+          webhook: {
+            ...txMock.webhook,
+            count: vi.fn(async () => rows),
+            create: vi.fn(async ({ data }: any) => {
+              // yield first, as a real insert would: the other request runs meanwhile
+              await new Promise((resolve) => setTimeout(resolve, 5));
+              rows += 1;
+              return webhookRow({ name: data.name });
+            }),
+          },
+        };
+        try {
+          return await cb(tx);
+        } finally {
+          release?.();
+        }
+      });
+
+      const [a, b] = await Promise.all([
+        create({ channelId: 'ch-1', name: 'A', type: 'generic' }),
+        create({ channelId: 'ch-1', name: 'B', type: 'generic' }),
+      ]);
+
+      expect([a.status, b.status].sort()).toEqual([201, 400]);
+      expect([a.body.error, b.body.error]).toContain('Server can have at most 1 webhooks');
+      expect(rows).toBe(1);
+    });
+
+    it('the cap refusal is raised INSIDE the transaction (rolled back): same 400 text, nothing created or emitted', async () => {
+      txMock.webhook.count.mockResolvedValue(10);
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ success: false, error: 'Server can have at most 10 webhooks' });
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
+      expect(h.emitted).toHaveLength(0);
+    });
+
     it('hardcoded default (no GlobalConfig row): 10, refused at the 10th existing', async () => {
-      prismaMock.webhook.count.mockResolvedValue(9);
+      txMock.webhook.count.mockResolvedValue(9);
       expect((await create({ channelId: 'ch-1', name: 'CI', type: 'generic' })).status).toBe(201);
 
-      prismaMock.webhook.count.mockResolvedValue(10);
+      txMock.webhook.count.mockResolvedValue(10);
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(400);
       expect(res.body).toEqual({ success: false, error: 'Server can have at most 10 webhooks' });
@@ -721,7 +890,7 @@ describe('POST /servers/:serverId/webhooks', () => {
 
     it('global layer: GlobalConfig.maxWebhooksPerServer applies', async () => {
       prismaMock.globalConfig.findUnique.mockResolvedValue({ ...FULL_LIMITS, maxWebhooksPerServer: 3 });
-      prismaMock.webhook.count.mockResolvedValue(3);
+      txMock.webhook.count.mockResolvedValue(3);
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('Server can have at most 3 webhooks');
@@ -733,7 +902,7 @@ describe('POST /servers/:serverId/webhooks', () => {
         maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null,
         maxMembersPerServer: null, maxWebhooksPerServer: 1,
       });
-      prismaMock.webhook.count.mockResolvedValue(1);
+      txMock.webhook.count.mockResolvedValue(1);
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('Server can have at most 1 webhooks');
@@ -745,9 +914,9 @@ describe('POST /servers/:serverId/webhooks', () => {
         maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null,
         maxMembersPerServer: null, maxWebhooksPerServer: null,
       });
-      prismaMock.webhook.count.mockResolvedValue(4);
+      txMock.webhook.count.mockResolvedValue(4);
       expect((await create({ channelId: 'ch-1', name: 'CI', type: 'generic' })).status).toBe(201);
-      prismaMock.webhook.count.mockResolvedValue(5);
+      txMock.webhook.count.mockResolvedValue(5);
       expect((await create({ channelId: 'ch-1', name: 'CI', type: 'generic' })).body.error)
         .toBe('Server can have at most 5 webhooks');
     });
@@ -757,11 +926,11 @@ describe('POST /servers/:serverId/webhooks', () => {
         maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null,
         maxMembersPerServer: null, maxWebhooksPerServer: 0,
       });
-      prismaMock.webhook.count.mockResolvedValue(0);
+      txMock.webhook.count.mockResolvedValue(0);
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('Server can have at most 0 webhooks');
-      expect(prismaMock.webhook.create).not.toHaveBeenCalled();
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
       expect(h.emitted).toHaveLength(0);
     });
 
@@ -783,7 +952,7 @@ describe('PATCH /servers/:serverId/webhooks/:webhookId', () => {
     const res = await patch({ name: ' <i>Deploys</i> ' });
     expect(res.status).toBe(200);
     const args = prismaMock.webhook.update.mock.calls[0][0];
-    expect(args.where).toEqual({ id: 'wh-1' });
+    expect(args.where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
     expect(args.data).toEqual({ name: 'Deploys' });
     expect(args.select).not.toHaveProperty('tokenHash');
     expect(args.select).not.toHaveProperty('secretEnc');
@@ -928,6 +1097,60 @@ describe('PATCH /servers/:serverId/webhooks/:webhookId', () => {
     expect(h.emitted).toHaveLength(0);
     spy.mockRestore();
   });
+
+  it('a move is conditional on the OLD channel (the one VIEW was checked on); the data carries the new one', async () => {
+    prismaMock.webhook.findUnique.mockResolvedValueOnce({ id: 'wh-1', serverId: 'srv-1', channelId: 'ch-7' });
+    prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-2' });
+    const res = await patch({ channelId: 'ch-2' });
+    expect(res.status).toBe(200);
+    const args = prismaMock.webhook.update.mock.calls[0][0];
+    expect(args.where).toEqual({ id: 'wh-1', channelId: 'ch-7' });
+    expect(args.data).toEqual({ channelId: 'ch-2' });
+  });
+
+  it('a webhook moved by someone else after the VIEW check: the conditional write matches nothing → 404, nothing emitted', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The row now posts to ch-hidden: a write conditional on the checked ch-1 finds no row (P2025)
+    prismaMock.webhook.update.mockImplementationOnce(async ({ where }: any) => {
+      if (where.channelId !== 'ch-hidden') throw recordNotFound();
+      return webhookRow({ channelId: 'ch-hidden' });
+    });
+    const res = await patch({ name: 'Renamed' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
+    expect(prismaMock.webhook.update.mock.calls[0][0].where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('a target channel deleted between its checks and the move (P2003) is 404 "Channel not found", nothing emitted', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-2' });
+    prismaMock.webhook.update.mockRejectedValueOnce(foreignKeyViolation());
+    const res = await patch({ channelId: 'ch-2' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Channel not found' });
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('moving into a channel the caller can see but not SEND in is the 403; nothing updated or emitted', async () => {
+    prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-ro' });
+    h.hasChannelPermission.mockImplementation(async (...args: unknown[]) => !(args[1] === 'ch-ro' && args[3] === Permissions.SEND_MESSAGES));
+    const res = await patch({ channelId: 'ch-ro' });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ success: false, error: 'You do not have permission to send messages in this channel' });
+    expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('a rename or toggle never asks SEND_MESSAGES (only a move binds a channel)', async () => {
+    await patch({ name: 'New', enabled: false });
+    const asked = h.hasChannelPermission.mock.calls.map((c: unknown[]) => c[3]);
+    expect(asked).toEqual([Permissions.VIEW_CHANNEL]);
+  });
 });
 
 // ─── POST /:webhookId/rotate ────────────────────────────────────────────────
@@ -936,7 +1159,9 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
   const rotate = (id = 'wh-1') => request(app).post(`${BASE}/${id}/rotate`);
 
   it('mints a new token and stores only its hash, replacing the old one', async () => {
+    // The stored row carries a known hash: the update must replace it, never copy it
     const oldHash = sha256('the-old-token');
+    prismaMock.webhook.findUnique.mockResolvedValueOnce({ id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', type: 'generic', tokenHash: oldHash });
     const res = await rotate();
     expect(res.status).toBe(200);
 
@@ -944,7 +1169,7 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
     expect(token).toMatch(TOKEN_RE);
 
     const args = prismaMock.webhook.update.mock.calls[0][0];
-    expect(args.where).toEqual({ id: 'wh-1' });
+    expect(args.where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
     expect(args.data).toEqual({ tokenHash: sha256(token) });
     expect(args.data.tokenHash).toMatch(HEX64_RE);
     expect(args.data.tokenHash).not.toBe(oldHash);
@@ -992,7 +1217,7 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
 
       expect(prismaMock.webhook.update).toHaveBeenCalledTimes(1);
       const args = prismaMock.webhook.update.mock.calls[0][0];
-      expect(args.where).toEqual({ id: 'wh-1' });
+      expect(args.where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
       expect(args.data).toEqual({ tokenHash: sha256(token), secretEnc: expect.stringMatching(/^enc:/) });
       expect(openSecret(args.data.secretEnc)).toBe(secret);
       expect(JSON.stringify(args)).not.toContain(secret);
@@ -1062,6 +1287,22 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
     expect(prismaMock.webhook.update).toHaveBeenCalledTimes(1);
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('a webhook moved by someone else after the VIEW check (maybe into a hidden channel): 404, NO token handed out, nothing emitted', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.webhook.update.mockImplementationOnce(async ({ where }: any) => {
+      if (where.channelId !== 'ch-hidden') throw recordNotFound();
+      return webhookRow({ channelId: 'ch-hidden' });
+    });
+    const res = await rotate();
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Webhook not found' });
+    expect(prismaMock.webhook.update.mock.calls[0][0].where).toEqual({ id: 'wh-1', channelId: 'ch-1' });
+    expect(res.text).not.toMatch(/"token"/);
     expect(spy).not.toHaveBeenCalled();
     expect(h.emitted).toHaveLength(0);
     spy.mockRestore();

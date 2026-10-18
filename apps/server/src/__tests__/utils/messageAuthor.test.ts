@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+// The opaque-id check routes/servers.ts applies to every member lookup:
+// anything that passes it could be looked up as a user id
+import { OPAQUE_ID_RE } from '@voxium/shared';
 import {
   isWebhookRow,
   shapeMessageAuthor,
@@ -6,10 +9,6 @@ import {
   WEBHOOK_AUTHOR_FALLBACK_NAME,
   WEBHOOK_AUTHOR_ID_PREFIX,
 } from '../../utils/messageAuthor';
-
-// The server's opaque-id check (routes/servers.ts OPAQUE_ID_RE): anything that
-// passes it could be looked up as a user id
-const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 const sevenFieldAuthor = {
   id: 'user-1',

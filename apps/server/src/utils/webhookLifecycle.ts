@@ -91,8 +91,19 @@ export interface WebhookDeletion {
  * No blob cleanup: the execute path never creates attachments, reactions
  * cascade with the message and replies SetNull. The purge (like the FK's SET
  * NULL action) finds the rows through the messages(webhook_id) index.
+ *
+ * The webhook is DISABLED first, in its own committed write, before the
+ * transaction: the delete may hold the row lock for a long time (see the
+ * timeout below), and a delivery arriving meanwhile then answers 403 at the
+ * execute route's token check (it reads `enabled` without a lock) instead of
+ * queueing an INSERT on that lock, one held connection per delivery. A
+ * vanished row makes this a count-0 no-op: the lock below then finds nothing
+ * and the caller answers 404. If the transaction fails, the webhook stays
+ * disabled: the safe direction for a webhook someone asked to delete.
  */
 export async function deleteWebhookWithPurge(webhookId: string, purge: boolean): Promise<WebhookDeletion | null> {
+  await prisma.webhook.updateMany({ where: { id: webhookId }, data: { enabled: false } });
+
   return prisma.$transaction(async (tx) => {
     // Lock the webhook row FIRST. A concurrent delivery's INSERT takes a KEY
     // SHARE lock on it (the FK check), so it waits for this commit and then
@@ -133,6 +144,16 @@ export async function deleteWebhookWithPurge(webhookId: string, purge: boolean):
       deletedMessages,
       perChannel,
     };
+  }, {
+    // Deleting the row makes the FK's ON DELETE SET NULL rewrite EVERY message
+    // the webhook ever posted (each update touching every messages index, the
+    // pg_trgm GIN included), and a purge deletes them all; a busy webhook has
+    // tens of thousands. Prisma's default 5s interactive budget is a deadline
+    // these statements never had, and blowing it rolls the whole delete back
+    // (P2028, a 500), on every retry: the webhook could never be deleted.
+    // The same budget as utils/accountDeletion.ts.
+    timeout: 60_000,
+    maxWait: 10_000,
   });
 }
 

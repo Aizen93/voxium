@@ -16,6 +16,7 @@ import { clsx } from 'clsx';
 import type { Message } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
+import { AppTag } from '../common/AppTag';
 import { ReportModal } from './ReportModal';
 import { useAuthStore } from '../../stores/authStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -149,6 +150,10 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   const isWebhook = message.author.isWebhook === true && !message.encrypted && !conversationId;
   // The webhook was deleted since (its rows keep the name they were posted under)
   const isDeletedWebhook = isWebhook && message.webhookId == null;
+  // The quoted message is a webhook's: the same two locks as above (a quote
+  // on an encrypted or DM row, or an encrypted quote, is never a webhook's)
+  const quotesWebhook = message.replyTo?.author.isWebhook === true
+    && !message.replyTo.encrypted && !message.encrypted && !conversationId;
 
   // The author's membership row, for the nickname and the role color (server
   // context only). On a big server the client may not hold it: the hook asks
@@ -207,6 +212,9 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
           {/* Plain text, never a hover target: the quoted author may be a
               webhook (`webhook:` id, no profile), and the quote shows no badges */}
           <span className="font-semibold text-vox-text-secondary">{message.replyTo.author.displayName}</span>
+          {/* ...but a quoted webhook keeps its APP tag: it picks its own name,
+              and a bare "alice" here would pass for the member */}
+          {quotesWebhook && <AppTag />}
           <span className="truncate">{truncated}</span>
         </div>
       );
@@ -339,12 +347,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                     </UserHoverTarget>
                   )}
                   {isWebhook ? (
-                    <span
-                      data-testid="app-tag"
-                      className="inline-flex items-center px-1 py-0.5 rounded text-[10px] font-semibold bg-vox-accent-primary/20 text-vox-accent-primary"
-                    >
-                      {t('messageItem.appTag')}
-                    </span>
+                    <AppTag />
                   ) : (
                     <>
                       {(message.author.role === 'admin' || message.author.role === 'superadmin') && <StaffBadge />}

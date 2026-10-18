@@ -40,7 +40,8 @@ const NO_BUSY: ReadonlySet<string> = new Set();
  * Server settings → Integrations: the server's incoming webhooks (needs
  * MANAGE_WEBHOOKS). The list is the SERVER's: fetched on mount, refetched
  * after every local mutation and on `webhook:changed` for this server (a
- * fellow moderator's edit). Mutation responses are never written into the
+ * fellow moderator's edit) or `channel:deleted` (a cascade that emits no
+ * hint); the cap reloads with it. Mutation responses are never written into the
  * list — the create and rotate answers are read ONCE, for the token shown in
  * the copy-once panel, and dropped with it. No store: nothing outlives the tab.
  */
@@ -83,7 +84,23 @@ export function IntegrationsTab({ serverId }: Props) {
   // Monotonic id of the latest list fetch: a slow earlier answer (the
   // mutation's own refetch racing the socket hint) never lands on a newer one.
   const fetchSeq = useRef(0);
+  // The cap, from the member-facing limits route (same source as the Limits
+  // tab). Reloaded with every list fetch, so an admin's change (0 ↔ 10)
+  // shows on the next hint or reconnect; numbered like the list.
+  const capSeq = useRef(0);
+  const loadCap = useCallback(async () => {
+    const seq = ++capSeq.current;
+    try {
+      const { data } = await api.get<{ success: boolean; data: ResourceLimits }>(`/servers/${serverId}/limits`);
+      if (!mounted.current || seq !== capSeq.current) return;
+      setMax(data.data.maxWebhooksPerServer);
+    } catch (err) {
+      console.warn('[Integrations] Failed to load limits:', err instanceof Error ? err.message : err);
+    }
+  }, [serverId]);
+
   const refetch = useCallback(async () => {
+    void loadCap();
     const seq = ++fetchSeq.current;
     try {
       const list = await listWebhooks(serverId);
@@ -99,24 +116,20 @@ export function IntegrationsTab({ serverId }: Props) {
       toast.error(getTranslatedError(err, t, 'webhooks.failedToLoad'));
       setLoadFailed(true);
     }
-  }, [serverId, t]);
+  }, [serverId, t, loadCap]);
 
   useEffect(() => { void refetch(); }, [refetch]);
 
-  // The cap, from the member-facing limits route (same source as the Limits tab)
-  useEffect(() => {
-    let cancelled = false;
-    api.get<{ success: boolean; data: ResourceLimits }>(`/servers/${serverId}/limits`)
-      .then(({ data }) => { if (!cancelled) setMax(data.data.maxWebhooksPerServer); })
-      .catch((err) => { console.warn('[Integrations] Failed to load limits:', err instanceof Error ? err.message : err); });
-    return () => { cancelled = true; };
-  }, [serverId]);
-
   // `webhook:changed` is the refetch hint; it reaches the whole server room,
-  // so it is filtered to THIS server. A reconnect may have missed some (and
-  // may hand us a new socket): re-attach and refetch.
+  // so it is filtered to THIS server. Deleting a channel deletes its webhooks
+  // by cascade and emits no `webhook:changed`: `channel:deleted` for this
+  // server refetches too. A reconnect may have missed some (and may hand us
+  // a new socket): re-attach and refetch.
   useEffect(() => {
     const onChanged = (data: { serverId: string }) => {
+      if (data && data.serverId === serverId) void refetch();
+    };
+    const onChannelDeleted = (data: { channelId: string; serverId: string }) => {
       if (data && data.serverId === serverId) void refetch();
     };
     let attached: ReturnType<typeof getSocket> = null;
@@ -124,13 +137,16 @@ export function IntegrationsTab({ serverId }: Props) {
       const socket = getSocket();
       if (socket === attached) return;
       attached?.off('webhook:changed', onChanged);
+      attached?.off('channel:deleted', onChannelDeleted);
       socket?.on('webhook:changed', onChanged);
+      socket?.on('channel:deleted', onChannelDeleted);
       attached = socket;
     };
     attach();
     const unsubscribe = onSocketReconnect(() => { attach(); void refetch(); });
     return () => {
       attached?.off('webhook:changed', onChanged);
+      attached?.off('channel:deleted', onChannelDeleted);
       unsubscribe();
     };
   }, [serverId, refetch]);
@@ -188,10 +204,20 @@ export function IntegrationsTab({ serverId }: Props) {
   const shownTokenSeq = useRef(0);
   const showToken = (seq: number, created: WebhookCreated, rotated: boolean) => {
     if (seq < shownTokenSeq.current) return;
+    // Moves forward even for an answer it cannot show: an OLDER answer
+    // landing after this one would carry a token this request already killed
     shownTokenSeq.current = seq;
+    const url = webhookUrl(created.id, created.token);
+    if (url === null) {
+      // An id or token that is not a plain URL segment: no panel, no URL that
+      // points somewhere else. Logged without either value (the token is a credential).
+      console.warn('[Integrations] The server answered a malformed webhook id or token; the URL is not shown');
+      toast.error(t('webhooks.reveal.invalidUrl'));
+      return;
+    }
     setReveal({
       name: created.name,
-      url: webhookUrl(created.id, created.token),
+      url,
       ...(created.secret ? { secret: created.secret } : {}),
       rotated,
     });

@@ -463,8 +463,30 @@ describe('formatEmbedTimestamp', () => {
   });
 
   it('reads a date-time without an offset as UTC, whatever the server time zone', () => {
-    expect(formatEmbedTimestamp('2026-10-17T09:58')).toBe('2026-10-17 09:58');
-    expect(formatEmbedTimestamp('2026-10-17T23:59:59')).toBe('2026-10-17 23:59');
+    // Under TZ=UTC (CI) a local-time reading would pass too: pin a zone far
+    // from UTC for this test. Node re-reads process.env.TZ when it is
+    // assigned; deleting it does NOT reset the zone, so an unset original is
+    // restored by assigning the system zone back first.
+    const savedTz = process.env.TZ;
+    const systemZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    process.env.TZ = 'Pacific/Auckland';
+    try {
+      // The zone really is live (NZDT, UTC+13, on that date): a local-time
+      // reading would land on the previous day
+      expect(new Date(2026, 9, 17, 9, 58).getTimezoneOffset()).toBe(-780);
+      expect(new Date('2026-10-17T09:58').toISOString()).toBe('2026-10-16T20:58:00.000Z');
+
+      expect(formatEmbedTimestamp('2026-10-17T09:58')).toBe('2026-10-17 09:58');
+      expect(formatEmbedTimestamp('2026-10-17T23:59:59')).toBe('2026-10-17 23:59');
+      expect(formatEmbedTimestamp('2026-10-17T00:30:00.250')).toBe('2026-10-17 00:30');
+    } finally {
+      if (savedTz === undefined) {
+        process.env.TZ = systemZone;
+        delete process.env.TZ;
+      } else {
+        process.env.TZ = savedTz;
+      }
+    }
   });
 
   it('returns empty for invalid timestamps', () => {

@@ -1284,7 +1284,7 @@ describe('Message Routes', () => {
       expect(emitted.author).toEqual(webhookAuthor);
     });
 
-    it('POST: a human row still resolves its mentions (the skip is keyed on webhookId alone)', async () => {
+    it('POST: a human row still resolves its mentions (the skip is keyed on isWebhookRow: webhookId, webhookName or a null authorId)', async () => {
       const token = makeToken();
       mockSendChannel();
       vi.mocked(extractMentionIds).mockReturnValue(['user-2']);

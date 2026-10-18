@@ -1198,7 +1198,8 @@
     "webhookNameEmpty": "Webhook 名称不能为空",
     "webhookNameTooLong": "Webhook 名称最多 {{max}} 个字符",
     "webhookCap": "此服务器已达到 Webhook 数量上限（最多 {{max}} 个）",
-    "channelNotFound": "未找到频道"
+    "channelNotFound": "未找到频道",
+    "tooManyRequests": "请求过多，请稍后再试。"
   },
   "e2e": {
     "badgeTitle": "已端到端加密 — 查看安全码",
@@ -1566,6 +1567,7 @@
       "copySecret": "复制密钥",
       "copied": "已复制到剪贴板",
       "copyFailed": "无法复制到剪贴板",
+      "invalidUrl": "服务器返回的 Webhook URL 格式无效，因此未显示。请重新生成以获取新的 URL。",
       "done": "完成",
       "github": {
         "title": "在 GitHub 中设置",

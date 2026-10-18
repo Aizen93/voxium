@@ -1,7 +1,9 @@
-import { describe, it, expect, expectTypeOf } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   LIMITS,
   WEBHOOK_TYPES,
+  WEBHOOKS_DISABLED_MESSAGE,
+  OPAQUE_ID_RE,
   WS_EVENTS,
   Permissions,
   ALL_PERMISSIONS,
@@ -10,10 +12,8 @@ import {
   PERMISSION_LIST,
   validateWebhookName,
   type WebhookType,
-  type AuditAction,
-  type AdminWebhook,
-  type Webhook,
 } from '@voxium/shared';
+import { WEBHOOK_AUTHOR_ID_PREFIX } from '../../utils/messageAuthor';
 
 // The shared surface of incoming webhooks (docs/local/webhooks-plan.html):
 // constants the routes and the client size themselves on, the 22nd permission
@@ -98,24 +98,42 @@ describe('webhook socket events', () => {
   });
 });
 
-describe('webhook moderation (platform admins)', () => {
-  it('names the three audited admin actions', () => {
-    // Typed AuditAction[] (and expectTypeOf) for type-aware runs; server
-    // tests are outside `tsc`, so the binding compile-time pin is the admin's
-    // exhaustive `ACTION_LABELS: Record<AuditAction, string>`, which fails
-    // admin typecheck both for a missing label and for a label of no action
-    const actions: AuditAction[] = ['webhook.disable', 'webhook.enable', 'webhook.delete'];
-    expect(actions).toEqual(['webhook.disable', 'webhook.enable', 'webhook.delete']);
-    expectTypeOf<'webhook.disable' | 'webhook.enable' | 'webhook.delete'>().toMatchTypeOf<AuditAction>();
+// The audited admin actions and the AdminWebhook row are TYPES: server tests
+// run outside `tsc`, so a literal written here could only pin itself. Their
+// binding pins are compile-time: the admin's exhaustive
+// `ACTION_LABELS: Record<AuditAction, string>` (fails admin typecheck for a
+// missing label and for a label of no action) and the admin store/list code
+// that reads `AdminWebhook`.
+
+describe('WEBHOOKS_DISABLED_MESSAGE', () => {
+  it('is the exact sentence the kill switch answers (the desktop keys its off state on it)', () => {
+    expect(WEBHOOKS_DISABLED_MESSAGE).toBe('Webhooks are currently disabled');
+  });
+});
+
+describe('OPAQUE_ID_RE', () => {
+  it('accepts the ids a client may hand the server (cuids, role ids, user ids), 1 to 64 characters', () => {
+    for (const id of ['cmg8x2k4f0000qz8h1abc2def', 'user-1', 'role_42', 'A', 'x'.repeat(64)]) {
+      expect(OPAQUE_ID_RE.test(id), id).toBe(true);
+    }
   });
 
-  it('the admin list row is the Webhook shape plus a nullable channel name', () => {
-    expectTypeOf<AdminWebhook>().toMatchTypeOf<Webhook>();
-    expectTypeOf<AdminWebhook['channelName']>().toEqualTypeOf<string | null>();
-    const row: AdminWebhook = {
-      id: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic', enabled: true,
-      createdBy: null, createdAt: '2026-10-18T10:00:00.000Z', lastUsedAt: null, channelName: null,
-    };
-    expect(row.channelName).toBeNull();
+  it('refuses everything else: empty, too long, separators, whitespace', () => {
+    for (const id of ['', 'x'.repeat(65), 'a/b', 'a.b', 'a b', 'a?b', 'a%20b', 'é']) {
+      expect(OPAQUE_ID_RE.test(id), id).toBe(false);
+    }
+  });
+
+  it('can NEVER pass a synthesised webhook author id (the colon keeps it out of member lookups)', () => {
+    expect(WEBHOOK_AUTHOR_ID_PREFIX).toContain(':');
+    for (const id of [`${WEBHOOK_AUTHOR_ID_PREFIX}cmg8x2k4f0000qz8h1abc2def`, `${WEBHOOK_AUTHOR_ID_PREFIX}deleted`]) {
+      expect(OPAQUE_ID_RE.test(id), id).toBe(false);
+    }
+  });
+
+  it('is stateless across calls (no g flag, so no lastIndex carried between tests)', () => {
+    expect(OPAQUE_ID_RE.flags).toBe('');
+    expect(OPAQUE_ID_RE.test('user-1')).toBe(true);
+    expect(OPAQUE_ID_RE.test('user-1')).toBe(true);
   });
 });

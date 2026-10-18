@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import { readdirSync, readFileSync } from 'fs';
+import { join } from 'path';
 import type { TFunction } from 'i18next';
 import { LIMITS } from '@voxium/shared';
 import { translateServerError, getTranslatedError, DISCOVERY_ERROR_KEYS, WEBHOOK_ERROR_KEYS } from '../../utils/serverErrors';
@@ -86,5 +88,38 @@ describe('translateServerError — incoming webhooks', () => {
     // anchored: a lookalike is not rewritten, and the channel cap stays raw
     expect(translateServerError('Server can have at most 3 webhooks!', t)).toBe('Server can have at most 3 webhooks!');
     expect(translateServerError('Server can have at most many webhooks', t)).toBe('Server can have at most many webhooks');
+  });
+});
+
+describe('translateServerError — the rate-limit 429', () => {
+  // Every limiter answers with this one body (middleware/rateLimiter.ts):
+  // webhookManage's 30 changes an hour showed it as raw English
+  const BODY = 'Too many requests. Please try again later.';
+
+  it('maps the exact limiter body to serverErrors.tooManyRequests, no extra values', () => {
+    expect(translateServerError(BODY, t)).toBe(`serverErrors.tooManyRequests|${JSON.stringify({ defaultValue: BODY })}`);
+  });
+
+  it('reaches it from an axios 429 the way every catch block does', () => {
+    const err = Object.assign(new Error('Request failed with status code 429'), {
+      isAxiosError: true,
+      response: { status: 429, data: { success: false, error: BODY } },
+    });
+    expect(getTranslatedError(err, t, 'webhooks.create.failed')).toMatch(/^serverErrors\.tooManyRequests\|/);
+  });
+
+  it('is exact: a lookalike stays raw', () => {
+    expect(translateServerError('Too many requests', t)).toBe('Too many requests');
+  });
+
+  it('is translated in all 11 locales (the key is reached through a template no scan sees)', () => {
+    const dir = join(__dirname, '..', '..', 'i18n', 'locales');
+    const langs = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    expect(langs).toHaveLength(11);
+    for (const file of langs) {
+      const bundle = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as { serverErrors?: Record<string, unknown> };
+      const text = bundle.serverErrors?.tooManyRequests;
+      expect(typeof text === 'string' && text.length > 0, `${file} → serverErrors.tooManyRequests`).toBe(true);
+    }
   });
 });

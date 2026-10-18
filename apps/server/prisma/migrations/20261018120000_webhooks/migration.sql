@@ -22,18 +22,25 @@
 -- and the NOT NULL DEFAULT constant on the singleton global_config are
 -- catalog-only on PostgreSQL 11+, and the new table is empty. The one
 -- statement that is NOT catalog-only is the messages_webhook_id_idx build:
--- one full pass over messages, under a SHARE lock that blocks writes to
--- messages until it finishes. Besides it, the messages_webhook_id_fkey ADD
+-- one full pass over messages. Besides it, the messages_webhook_id_fkey ADD
 -- CONSTRAINT reads existing rows: PostgreSQL validates it with a single
 -- read-only pass (every webhook_id is NULL, nothing is written).
 --
--- NOTE: on a very large `messages` table, during a maintenance window:
--- build the index with `CREATE INDEX CONCURRENTLY "messages_webhook_id_idx"
--- ON "messages"("webhook_id")` OUTSIDE the migration transaction
--- (CONCURRENTLY cannot run inside one), and run the ADD CONSTRAINT as
--- `... NOT VALID` followed by `ALTER TABLE "messages" VALIDATE CONSTRAINT
--- "messages_webhook_id_fkey"` in a separate transaction (VALIDATE does not
--- block writes); then mark this migration applied with
+-- Locks: Prisma runs this file as ONE implicit transaction, so the ACCESS
+-- EXCLUSIVE lock that the ALTER TABLE "messages" below takes is held until
+-- the commit, through the index build and the FK validation: while the
+-- migration runs, reads of messages block as well as writes. Harmless under
+-- maintenance mode; an online or rolling deploy takes the route below.
+--
+-- NOTE: for an online or rolling deploy, or a very large `messages` table:
+-- run the catalog-only statements in their own short transaction (the
+-- ACCESS EXCLUSIVE lock is then held for the catalog change only), build
+-- the index with `CREATE INDEX CONCURRENTLY "messages_webhook_id_idx"
+-- ON "messages"("webhook_id")` OUTSIDE any transaction (CONCURRENTLY cannot
+-- run inside one), and run the ADD CONSTRAINT as `... NOT VALID` followed
+-- by `ALTER TABLE "messages" VALIDATE CONSTRAINT "messages_webhook_id_fkey"`
+-- in a separate transaction (VALIDATE does not block writes); then mark
+-- this migration applied with
 -- `prisma migrate resolve --applied 20261018120000_webhooks`.
 
 -- AlterTable

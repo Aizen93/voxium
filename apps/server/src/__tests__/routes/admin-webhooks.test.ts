@@ -29,8 +29,9 @@ const prismaMock: Record<string, any> = {
   user: { findUnique: vi.fn() },
   server: { findUnique: vi.fn(), update: vi.fn(), findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
   // Deliberately no `delete` and no `message` model on the root client: the
-  // delete runs on the transaction client only
-  webhook: { findMany: vi.fn(), update: vi.fn() },
+  // delete runs on the transaction client only (updateMany: the disable the
+  // shared delete commits BEFORE its transaction)
+  webhook: { findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
   channel: { findMany: vi.fn().mockResolvedValue([]) },
   serverMember: { findMany: vi.fn().mockResolvedValue([]) },
   auditLog: { create: vi.fn().mockResolvedValue({}) },
@@ -167,6 +168,7 @@ beforeEach(() => {
   prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1' });
   prismaMock.webhook.findMany.mockResolvedValue([]);
   prismaMock.webhook.update.mockImplementation(async ({ where, data }: any) => webhookRow({ id: where.id, ...data }));
+  prismaMock.webhook.updateMany.mockResolvedValue({ count: 1 });
   prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof txMock) => unknown) => cb(txMock));
   txMock.$queryRaw.mockResolvedValue([{ id: 'wh-1' }]);
   txMock.webhook.findUnique.mockResolvedValue({ serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'generic' });
@@ -190,6 +192,7 @@ function withAuth(req: request.Test, token?: string): request.Test {
 function expectNothingTouched() {
   expect(prismaMock.webhook.findMany).not.toHaveBeenCalled();
   expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+  expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
   expect(prismaMock.$transaction).not.toHaveBeenCalled();
   expect(mockLogAuditEvent).not.toHaveBeenCalled();
   expect(h.emitted).toHaveLength(0);

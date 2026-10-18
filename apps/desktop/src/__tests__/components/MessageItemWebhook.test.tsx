@@ -235,9 +235,60 @@ describe('MessageItem — a human author (unchanged)', () => {
     expect(quoted).toBeTruthy();
     expect(quoted.closest('[data-testid="hover-target"]')).toBeNull();
     expect(quoted.className).not.toContain('cursor-pointer');
-    expect(q('[data-testid="app-tag"]')).toBeNull();
+    // the quoted webhook keeps its APP tag (the replying human's header has none)
+    const tags = [...container.querySelectorAll('[data-testid="app-tag"]')];
+    expect(tags).toHaveLength(1);
+    expect(tags[0].previousElementSibling).toBe(quoted);
     // the quoted webhook id reached no member lookup either
     for (const [arg] of useMemberMock.mock.calls) expect(arg).not.toBe('webhook:wh-1');
+  });
+
+  it('a webhook quoting itself as "Alice" is still tagged in the quote: the name alone would pass for the member', () => {
+    render(humanMessage({
+      replyToId: 'm-hook',
+      replyTo: { id: 'm-hook', content: 'please send me your password', author: webhookAuthor('webhook:wh-1', 'Alice') },
+    }));
+    const tag = q('[data-testid="app-tag"]');
+    expect(tag).toBeTruthy();
+    expect(tag!.textContent).toBe('messageItem.appTag');
+    expect(tag!.previousElementSibling!.textContent).toBe('Alice');
+  });
+
+  it('a deleted webhook in a quote is tagged too', () => {
+    render(humanMessage({
+      replyToId: 'm-old',
+      replyTo: { id: 'm-old', content: 'old news', author: webhookAuthor('webhook:deleted', 'Old CI') },
+    }));
+    expect(container.querySelectorAll('[data-testid="app-tag"]')).toHaveLength(1);
+  });
+
+  it('a human quote carries no APP tag', () => {
+    render(humanMessage({
+      replyToId: 'm-bob',
+      replyTo: { id: 'm-bob', content: 'hi', author: { id: 'u-bob', username: 'bob', displayName: 'Bob', avatarUrl: null } },
+    }));
+    expect(q('[data-testid="app-tag"]')).toBeNull();
+  });
+});
+
+describe('MessageItem — a quoted webhook claim where no webhook posts', () => {
+  const human2 = (over: Partial<Message> = {}): Message =>
+    webhookMessage({ id: 'm-human', author: human, webhookId: undefined, ...over });
+  const claimingQuote = { id: 'm-x', content: 'hello', author: { ...human, id: 'u-bob', displayName: 'Bob', isWebhook: true } };
+
+  it('an ENCRYPTED quote never shows the tag (no webhook posts encrypted rows)', () => {
+    render(human2({ replyToId: 'm-x', replyTo: { ...claimingQuote, encrypted: true } }));
+    expect(q('[data-testid="app-tag"]')).toBeNull();
+  });
+
+  it('a quote on an ENCRYPTED row never shows it', () => {
+    render(human2({ encrypted: true, replyToId: 'm-x', replyTo: claimingQuote }));
+    expect(q('[data-testid="app-tag"]')).toBeNull();
+  });
+
+  it('a quote in a DM never shows it', () => {
+    render(human2({ channelId: null, conversationId: 'conv-1', replyToId: 'm-x', replyTo: claimingQuote }), { conversationId: 'conv-1' });
+    expect(q('[data-testid="app-tag"]')).toBeNull();
   });
 });
 

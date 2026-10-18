@@ -1,12 +1,12 @@
 import crypto from 'crypto';
 import type { IncomingMessage, ServerResponse } from 'http';
 import express, { Router, type Request, type Response, type NextFunction } from 'express';
-import { LIMITS, type Message } from '@voxium/shared';
+import { LIMITS, OPAQUE_ID_RE, WEBHOOKS_DISABLED_MESSAGE, type Message } from '@voxium/shared';
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from '../utils/prisma';
 import { getIO } from '../websocket/socketServer';
 import { requireFeature } from '../middleware/requireFeature';
-import { rateLimitWebhookExecute, rateLimitWebhookExecuteIp, refundRateLimit } from '../middleware/rateLimiter';
+import { rateLimitWebhookExecute, rateLimitWebhookExecuteIp } from '../middleware/rateLimiter';
 import {
   BadRequestError,
   ForbiddenError,
@@ -32,9 +32,12 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
  *   [router level] kill switch → per-IP limiter
  *   [route]        JSON content type → token check (one query) → channel
  *                  → GitHub only: open the sealed secret
- *                  → per-webhook limiter
+ *                  → generic only: per-webhook limiter (the URL is the
+ *                    whole credential)
  *                  → body parser (GitHub only: the signature over the raw
  *                    bytes, checked BEFORE they are parsed)
+ *                  → GitHub only: per-webhook limiter, once the signature
+ *                    matched
  *                  → render + insert + broadcast
  *
  * The kill switch and the per-IP limiter are ROUTER-level on purpose: the
@@ -58,12 +61,20 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
  *   sender's, answered before a byte of the body is read). The body parser's
  *   verify hook then checks X-Hub-Signature-256 against the HMAC-SHA256 of
  *   the raw bytes BEFORE JSON.parse runs: a mismatch (or no signature) is 401
- *   'Invalid signature', nothing is parsed or posted, and the per-webhook
- *   point is REFUNDED — whoever holds the URL but not the secret pays the
- *   per-IP bucket only, and cannot starve GitHub's real deliveries. (A
- *   request without any body is a 415 before the token check; a body the
- *   parser does not read, being consumed upstream, never meets the hook, so
- *   the handler fails closed with the same 401.)
+ *   'Invalid signature', nothing is parsed or posted. The per-webhook bucket
+ *   is charged only AFTER that match, so whoever holds the URL but not the
+ *   secret pays the per-IP bucket only, whatever the parser makes of the
+ *   request: the 401, or a failure the parser answers BEFORE its hook ever
+ *   runs (415 for an unsupported charset or Content-Encoding, 413 for an
+ *   oversized Content-Length, 400 for an aborted upload). Charged before the
+ *   parser, those kept the point (a refund on the 401 alone could not reach
+ *   them), and anyone holding the URL could hold the bucket full: GitHub's
+ *   real deliveries would then get 429s, which GitHub does not redeliver.
+ *   The price: a sender without the secret can make the server read and
+ *   HMAC a body, bounded by the per-IP bucket. (A request without any body
+ *   is a 415 before the token check; a body the parser does not read, being
+ *   consumed upstream, never meets the hook, so the request fails closed
+ *   with the same 401, uncharged.)
  *   Then X-GitHub-Event is required (missing or empty: a 400 that says so, as
  *   a plain Discord-shaped body gets), then the GitHub formatter
  *   (utils/webhooks/githubFormatter.ts). An event or action it ignores
@@ -128,8 +139,8 @@ function localsOf(res: Response | ServerResponse): ExecuteLocals {
 // segments, an optional trailing slash). The router-level guards run for it
 // alone; any other request leaves the router untouched
 const EXECUTE_PATH_RE = /^\/[^/]+\/[^/]+\/?$/;
-// Ids are cuids; anything else cannot exist, so it is a miss without a query
-const WEBHOOK_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// Ids are cuids: anything outside the shared opaque-id charset (OPAQUE_ID_RE)
+// cannot exist, so it is a miss without a query
 const TOKEN_HASH_RE = /^[0-9a-fA-F]{64}$/;
 // What a miss is compared against, so an unknown id costs the same hash and
 // the same constant-time compare as a wrong token (64 hex zeros, decoded)
@@ -138,7 +149,7 @@ const DUMMY_TOKEN_DIGEST = Buffer.alloc(32);
 // at most one write per webhook per minute
 export const LAST_USED_THROTTLE_MS = 60_000;
 
-const DISABLED_MESSAGE = 'Webhooks are currently disabled';
+const INVALID_SIGNATURE = 'Invalid signature';
 
 /** 415 unless the body is declared JSON (a `; charset=utf-8` suffix is fine).
  *  express.json() would silently skip any other type and leave req.body
@@ -188,23 +199,14 @@ function openGitHubSecret(row: WebhookRow): string {
 }
 
 /**
- * The 401 for a GitHub delivery whose signature does not match, after giving
- * back the per-webhook point it was charged: a failure must not count
- * against the webhook (refundRateLimit never throws; the reply does not wait
- * for it).
- */
-function invalidSignature(webhookId: string): UnauthorizedError {
-  void refundRateLimit('webhookExecute', webhookId);
-  return new UnauthorizedError('Invalid signature');
-}
-
-/**
  * The body parser's verify hook: runs on the exact request bytes BEFORE they
  * are parsed. Keeps them on req.rawBody; for a GitHub row, checks
  * X-Hub-Signature-256 over them and throws the 401 on a mismatch, so nothing
  * a sender without the secret sends is ever parsed. body-parser hands the
  * thrown error on as the same instance (http-errors keeps it and its 401
- * status), and the error handler answers it in the house shape.
+ * status), and the error handler answers it in the house shape. Nothing has
+ * been charged to the per-webhook bucket yet (see the route), so there is
+ * nothing to give back.
  */
 function verifyRawBody(req: IncomingMessage, res: ServerResponse, buf: Buffer): void {
   const request = req as Request;
@@ -216,9 +218,47 @@ function verifyRawBody(req: IncomingMessage, res: ServerResponse, buf: Buffer): 
   // Needed for this check alone: not kept for the rest of the request
   delete locals.webhookSecret;
   if (secret === undefined || !verifyGitHubSignature(buf, request.get('x-hub-signature-256'), secret)) {
-    throw invalidSignature(webhook.id);
+    throw new UnauthorizedError(INVALID_SIGNATURE);
   }
   locals.signatureVerified = true;
+}
+
+/**
+ * The per-webhook charge for a webhook whose URL IS its whole credential:
+ * generic, and any type this file does not know (charged rather than free;
+ * the handler then refuses it). Runs BEFORE the body parser, so a webhook
+ * over its budget never has a body read. A GitHub row passes through
+ * uncharged: it is charged after its signature matched.
+ */
+function chargeWebhookBeforeBody(req: Request, res: Response, next: NextFunction): void | Promise<void> {
+  if (localsOf(res).webhook?.type === 'github') {
+    next();
+    return;
+  }
+  return rateLimitWebhookExecute(req, res, next);
+}
+
+/**
+ * The per-webhook charge for a GitHub row: AFTER the body parser, and only
+ * once its verify hook has matched X-Hub-Signature-256 over the raw bytes.
+ * Anything the parser refused (the hook's 401, or a 413/415/400 answered
+ * before the hook ever ran) never reached this point, so a sender without
+ * the secret cannot spend the webhook's budget. A body the parser skipped
+ * (consumed upstream) never met the hook: refused here with the same 401,
+ * uncharged (renderGitHubDelivery re-checks, as defence in depth). Any other
+ * type was charged before the parser and passes through.
+ */
+function chargeGitHubWebhookAfterSignature(req: Request, res: Response, next: NextFunction): void | Promise<void> {
+  const locals = localsOf(res);
+  if (locals.webhook?.type !== 'github') {
+    next();
+    return;
+  }
+  if (locals.signatureVerified !== true) {
+    next(new UnauthorizedError(INVALID_SIGNATURE));
+    return;
+  }
+  return rateLimitWebhookExecute(req, res, next);
 }
 
 /**
@@ -233,7 +273,7 @@ async function loadWebhook(req: Request<ExecuteParams>, res: Response, next: Nex
     const { webhookId, token } = req.params;
     const presented = crypto.createHash('sha256').update(token, 'utf8').digest();
 
-    const row = WEBHOOK_ID_RE.test(webhookId)
+    const row = OPAQUE_ID_RE.test(webhookId)
       ? await prisma.webhook.findUnique({ where: { id: webhookId }, select: webhookSelect })
       : null;
 
@@ -279,10 +319,11 @@ async function loadWebhook(req: Request<ExecuteParams>, res: Response, next: Nex
  * its action) is acknowledged but posts nothing. The message posts under the
  * webhook's name: GitHub has no username override.
  */
-function renderGitHubDelivery(req: Request<ExecuteParams>, res: Response, webhook: ExecutableWebhook): RenderedWebhookMessage | null {
-  // Fail closed: a body the parser skipped (consumed upstream) never met the
+function renderGitHubDelivery(req: Request<ExecuteParams>, res: Response): RenderedWebhookMessage | null {
+  // Fail closed (defence in depth: chargeGitHubWebhookAfterSignature already
+  // refused it): a body the parser skipped (consumed upstream) never met the
   // verify hook, so no signature was checked over it
-  if (localsOf(res).signatureVerified !== true) throw invalidSignature(webhook.id);
+  if (localsOf(res).signatureVerified !== true) throw new UnauthorizedError(INVALID_SIGNATURE);
 
   // An empty header is no event either
   const event = req.get('x-github-event');
@@ -309,7 +350,7 @@ function renderDelivery(req: Request<ExecuteParams>, res: Response, webhook: Exe
       return result;
     }
     case 'github':
-      return renderGitHubDelivery(req, res, webhook);
+      return renderGitHubDelivery(req, res);
     default:
       throw new BadRequestError('Unsupported webhook type');
   }
@@ -409,19 +450,26 @@ export const webhookExecuteRouter = Router();
 
 // Router level, so they run even when the route's param decoding throws
 webhookExecuteRouter.use(executeRequestsOnly);
-webhookExecuteRouter.use(requireFeature('webhooks', DISABLED_MESSAGE));
+webhookExecuteRouter.use(requireFeature('webhooks', WEBHOOKS_DISABLED_MESSAGE));
 webhookExecuteRouter.use(rateLimitWebhookExecuteIp);
 
 webhookExecuteRouter.post(
   '/:webhookId/:token',
   requireJson,
   loadWebhook,
-  // Only now, on a validated token: its key is req.params.webhookId, which is
-  // attacker-controlled until loadWebhook has checked the token
-  rateLimitWebhookExecute,
-  // Last guard before the handler: a body is read and parsed only for a
-  // valid token, and a GitHub body only once its signature matched the raw
-  // bytes (the verify hook runs between the read and the parse)
+  // The per-webhook bucket is keyed on req.params.webhookId, which is
+  // attacker-controlled until loadWebhook has checked the token: it is never
+  // charged before this point. A generic row is charged HERE, before its
+  // body is read (its URL is its whole credential, so whoever holds it may
+  // spend its budget)
+  chargeWebhookBeforeBody,
+  // A body is read and parsed only for a valid token, and a GitHub body only
+  // once its signature matched the raw bytes (the verify hook runs between
+  // the read and the parse)
   express.json({ limit: LIMITS.WEBHOOK_BODY_MAX_BYTES, verify: verifyRawBody }),
+  // A GitHub row is charged HERE, only once its signature matched: whatever
+  // a sender without the secret sends fails before it (in the parser, or as
+  // the hook's 401) and never touches the webhook's budget
+  chargeGitHubWebhookAfterSignature,
   executeWebhook,
 );

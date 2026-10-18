@@ -8,8 +8,8 @@
  * here and a webhook row gets a synthesised author instead of `null`.
  *
  * The synthesised id is `webhook:{webhookId}` (or `webhook:deleted`). The colon
- * is deliberate: it can never pass the server's opaque-id check
- * (`/^[A-Za-z0-9_-]{1,64}$/`, routes/servers.ts), so it can never be mistaken
+ * is deliberate: it can never pass the opaque-id check (`OPAQUE_ID_RE`,
+ * @voxium/shared, applied by routes/servers.ts), so it can never be mistaken
  * for — or looked up as — a user id.
  */
 

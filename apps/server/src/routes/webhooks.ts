@@ -20,6 +20,7 @@ import {
 import {
   Permissions,
   WEBHOOK_TYPES,
+  WEBHOOKS_DISABLED_MESSAGE,
   validateWebhookName,
   type WebhookType,
   // The shared DTO is aliased: Prisma's generated client exports a `Webhook`
@@ -52,7 +53,7 @@ import {
 export const webhookRouter = Router({ mergeParams: true });
 
 webhookRouter.use(authenticate, requireVerifiedEmail, requireConsent);
-webhookRouter.use(requireFeature('webhooks', 'Webhooks are currently disabled'));
+webhookRouter.use(requireFeature('webhooks', WEBHOOKS_DISABLED_MESSAGE));
 
 // A non-member gets the same 403 as a member without the bit (the calculator
 // answers 0n for non-members). Server existence is not secret on this route,
@@ -107,8 +108,8 @@ function bodyOf(body: unknown): Record<string, unknown> {
 }
 
 /**
- * A webhook may only target a TEXT channel of THIS server that is not secure
- * and that the caller can SEE.
+ * A webhook may only target a TEXT channel of THIS server that is not secure,
+ * that the caller can SEE, and that the caller may SEND messages in.
  *
  * - A secure channel answers exactly like a nonexistent one (secure-channel
  *   opacity).
@@ -116,8 +117,13 @@ function bodyOf(body: unknown): Record<string, unknown> {
  *   management route (channels.ts): a webhook URL is write access to its
  *   channel, and MANAGE_WEBHOOKS must not become a way to post into a
  *   staff-only channel its holder cannot see.
- * - Both are decided BEFORE the type check, so a hidden voice channel cannot
- *   leak "exists, but is voice".
+ * - A channel the caller can see but not post in (a read-only announcements
+ *   channel) is a 403 with the sentence routes/messages.ts answers: a webhook
+ *   posts there under any name its sender picks, so MANAGE_WEBHOOKS must not
+ *   become a way around SEND_MESSAGES either. Owner and ADMINISTRATOR pass
+ *   through the calculator.
+ * - All three are decided BEFORE the type check, so a hidden voice channel
+ *   cannot leak "exists, but is voice".
  */
 async function assertChannel(userId: string, serverId: string, channelId: string): Promise<void> {
   const channel = await prisma.channel.findUnique({
@@ -128,6 +134,9 @@ async function assertChannel(userId: string, serverId: string, channelId: string
   if (channel.secure === true) throw new NotFoundError('Channel');
   if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
     throw new NotFoundError('Channel');
+  }
+  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.SEND_MESSAGES)) {
+    throw new ForbiddenError('You do not have permission to send messages in this channel');
   }
   if (channel.type !== 'text') throw new BadRequestError('Webhooks can only post to text channels');
 }
@@ -154,18 +163,40 @@ async function loadOwnWebhook(
   return webhook;
 }
 
+/** Prisma's error code, when the error carries one. */
+function prismaCode(err: unknown): unknown {
+  return typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+}
+
 /**
- * The write after loadOwnWebhook. A webhook deleted between that read and
- * this update (an admin delete racing an owner's rotate, or two moderators)
- * is Prisma's P2025: answer the missing webhook it now is, never a 500 with
- * a logged stack. The idiom of the admin PATCH (routes/admin.ts).
+ * P2003 on a write that sets a channel id: the target channel was deleted
+ * between assertChannel and the write (the webhook FK). Answer the missing
+ * channel it now is, never a 500 with a logged stack.
+ */
+function channelGoneAsNotFound(err: unknown): never {
+  if (prismaCode(err) === 'P2003') throw new NotFoundError('Channel');
+  throw err;
+}
+
+/**
+ * The write after loadOwnWebhook, made CONDITIONAL on the channel that read
+ * checked VIEW on (`where: { id, channelId }`; Prisma accepts extra filters
+ * beside the unique id). Its P2025 is answered as the missing webhook it now
+ * is, never a 500 with a logged stack (the idiom of the admin PATCH,
+ * routes/admin.ts), for either race:
+ * - the webhook was deleted meanwhile (an admin delete racing an owner's
+ *   rotate, or two moderators);
+ * - another moderator MOVED it meanwhile, maybe into a channel this caller
+ *   cannot see: the write matches nothing, so a rotate never hands out a
+ *   working token for a hidden channel, and a PATCH never edits one.
+ * A P2003 is a PATCH's target channel deleted meanwhile (channelGoneAsNotFound).
  */
 async function updateOrMissing<T>(write: Promise<T>): Promise<T> {
   try {
     return await write;
   } catch (err) {
-    if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Webhook');
-    throw err;
+    if (prismaCode(err) === 'P2025') throw new NotFoundError('Webhook');
+    return channelGoneAsNotFound(err);
   }
 }
 
@@ -228,31 +259,35 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
 
     await assertChannel(userId, serverId, channelId);
 
-    // Count-then-create, like the channel cap (channels.ts): two concurrent
-    // creates can overshoot the cap by one. A cap of 0 freezes creation.
-    const [count, limits] = await Promise.all([
-      prisma.webhook.count({ where: { serverId } }),
-      getEffectiveLimits(serverId),
-    ]);
-    if (count >= limits.maxWebhooksPerServer) {
-      throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);
-    }
-
+    const limits = await getEffectiveLimits(serverId);
     const token = newToken();
     // A generic webhook has no secret; a GitHub one stores only the sealed form
     const signing = type === 'github' ? newSecret() : null;
-    const row = await prisma.webhook.create({
-      data: {
-        serverId,
-        channelId,
-        name,
-        type,
-        tokenHash: hashToken(token),
-        secretEnc: signing ? signing.secretEnc : null,
-        createdById: userId,
-      },
-      select: webhookSelect,
-    });
+
+    // Count-then-create under a row lock on the SERVER, so concurrent creates
+    // for one server run one after the other and each counts the ones before
+    // it: the cap holds exactly (a cap of 0 freezes creation). The channel
+    // cap (channels.ts) has the same count-then-create race and is left
+    // alone; a webhook is a public write endpoint, so its cap must hold.
+    const row = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      const count = await tx.webhook.count({ where: { serverId } });
+      if (count >= limits.maxWebhooksPerServer) {
+        throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);
+      }
+      return tx.webhook.create({
+        data: {
+          serverId,
+          channelId,
+          name,
+          type,
+          tokenHash: hashToken(token),
+          secretEnc: signing ? signing.secretEnc : null,
+          createdById: userId,
+        },
+        select: webhookSelect,
+      });
+    }).catch(channelGoneAsNotFound);
 
     emitWebhookChanged(serverId);
 
@@ -295,11 +330,12 @@ webhookRouter.patch('/:webhookId', rateLimitWebhookManage, async (req: Request<{
     }
     if (Object.keys(data).length === 0) throw new BadRequestError('No fields to update');
 
-    await loadOwnWebhook(userId, serverId, webhookId);
+    const webhook = await loadOwnWebhook(userId, serverId, webhookId);
     if (data.channelId !== undefined) await assertChannel(userId, serverId, data.channelId);
 
+    // Only if it still posts to the channel loadOwnWebhook checked VIEW on
     const row = await updateOrMissing(prisma.webhook.update({
-      where: { id: webhookId },
+      where: { id: webhookId, channelId: webhook.channelId },
       data,
       select: webhookSelect,
     }));
@@ -326,8 +362,11 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
 
     const token = newToken();
     const signing = isGitHub ? newSecret() : null;
+    // Only if it still posts to the channel loadOwnWebhook checked VIEW on:
+    // a webhook moved meanwhile into a channel this caller cannot see must
+    // not hand them a working token for it
     const row = await updateOrMissing(prisma.webhook.update({
-      where: { id: webhookId },
+      where: { id: webhookId, channelId: webhook.channelId },
       data: signing
         ? { tokenHash: hashToken(token), secretEnc: signing.secretEnc }
         : { tokenHash: hashToken(token) },

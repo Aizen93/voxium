@@ -1198,7 +1198,8 @@
     "webhookNameEmpty": "ウェブフック名を入力してください",
     "webhookNameTooLong": "ウェブフック名は{{max}}文字以内にしてください",
     "webhookCap": "このサーバーはウェブフックの上限に達しました（最大{{max}}）",
-    "channelNotFound": "チャンネルが見つかりません"
+    "channelNotFound": "チャンネルが見つかりません",
+    "tooManyRequests": "リクエストが多すぎます。しばらくしてからもう一度お試しください。"
   },
   "e2e": {
     "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",
@@ -1566,6 +1567,7 @@
       "copySecret": "シークレットをコピー",
       "copied": "クリップボードにコピーしました",
       "copyFailed": "クリップボードにコピーできませんでした",
+      "invalidUrl": "サーバーから不正な形式のウェブフックURLが返されたため、表示されません。再発行して新しいURLを取得してください。",
       "done": "完了",
       "github": {
         "title": "GitHubで設定する",

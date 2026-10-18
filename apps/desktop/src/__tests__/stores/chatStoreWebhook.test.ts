@@ -78,3 +78,51 @@ describe('chatStore.removeWebhookMessages', () => {
     expect(useChatStore.getState().messages).toEqual(before);
   });
 });
+
+describe('chatStore.removeWebhookMessages — quotes of the purged rows', () => {
+  // The server deletes the webhook's rows and SetNulls `replyToId` on every
+  // reply to them: a loaded reply must not keep quoting a message that is gone
+  const quoteOf = (parent: Message) => ({ id: parent.id, content: parent.content, author: parent.author });
+  const replyToA = msg('r-a', { replyToId: 'a1', replyTo: quoteOf(fromHookA) });
+  const replyToB = msg('r-b', { replyToId: 'b1', replyTo: quoteOf(fromHookB) });
+  const replyToHuman = msg('r-h', { replyToId: 'h1', replyTo: quoteOf(fromHuman) });
+  const replyElsewhere = msg('r-other', { channelId: 'ch-2', replyToId: 'a-other', replyTo: quoteOf(fromHookAElsewhere) });
+
+  beforeEach(() => {
+    useChatStore.setState({ messages: [fromHookA, fromHuman, fromHookB, replyToA, replyToB, replyToHuman, replyElsewhere] });
+  });
+
+  it('a reply quoting the purged webhook loses its quote (replyTo AND replyToId null), the reply itself stays', () => {
+    useChatStore.getState().removeWebhookMessages('ch-1', 'wh-a');
+    const after = useChatStore.getState().messages;
+    expect(after.map((m) => m.id)).toEqual(['h1', 'b1', 'r-a', 'r-b', 'r-h', 'r-other']);
+    const reply = after.find((m) => m.id === 'r-a')!;
+    expect(reply.replyTo).toBeNull();
+    expect(reply.replyToId).toBeNull();
+    // everything else on the row is as it was
+    expect({ ...reply, replyTo: replyToA.replyTo, replyToId: replyToA.replyToId }).toEqual(replyToA);
+  });
+
+  it('quotes of another webhook, of a human, and of the same webhook in ANOTHER channel stay — the same objects', () => {
+    useChatStore.getState().removeWebhookMessages('ch-1', 'wh-a');
+    const after = useChatStore.getState().messages;
+    expect(after.find((m) => m.id === 'r-b')).toBe(replyToB);
+    expect(after.find((m) => m.id === 'r-h')).toBe(replyToHuman);
+    expect(after.find((m) => m.id === 'r-other')).toBe(replyElsewhere);
+  });
+
+  it('is immutable: the reply is a new object, the one in the old array untouched', () => {
+    const before = useChatStore.getState().messages;
+    useChatStore.getState().removeWebhookMessages('ch-1', 'wh-a');
+    expect(before.find((m) => m.id === 'r-a')).toBe(replyToA);
+    expect(replyToA.replyTo).not.toBeNull();
+    expect(replyToA.replyToId).toBe('a1');
+    expect(useChatStore.getState().messages.find((m) => m.id === 'r-a')).not.toBe(replyToA);
+  });
+
+  it('a quote of the purged webhook whose parent was never loaded is cleared too', () => {
+    useChatStore.setState({ messages: [replyToA] });
+    useChatStore.getState().removeWebhookMessages('ch-1', 'wh-a');
+    expect(useChatStore.getState().messages[0].replyTo).toBeNull();
+  });
+});
