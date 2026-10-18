@@ -1079,12 +1079,14 @@ adminRouter.get('/limits/global', async (_req: Request, res: Response, next: Nex
 // Update global resource limits
 adminRouter.put('/limits/global', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer } = req.body;
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer } = req.body;
     const data: Record<string, number> = {};
     if (maxChannelsPerServer !== undefined) data.maxChannelsPerServer = Math.max(1, Math.min(500, Number(maxChannelsPerServer)));
     if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = Math.max(1, Math.min(500, Number(maxVoiceUsersPerChannel)));
     if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = Math.max(1, Math.min(200, Number(maxCategoriesPerServer)));
     if (maxMembersPerServer !== undefined) data.maxMembersPerServer = Math.max(0, Math.min(100000, Number(maxMembersPerServer)));
+    // 0 is a real value here: it freezes webhook creation (existing ones keep working)
+    if (maxWebhooksPerServer !== undefined) data.maxWebhooksPerServer = Math.max(0, Math.min(100, Number(maxWebhooksPerServer)));
 
     const config = await prisma.globalConfig.upsert({
       where: { id: 'global' },
@@ -1097,6 +1099,7 @@ adminRouter.put('/limits/global', async (req: Request, res: Response, next: Next
       maxVoiceUsersPerChannel: config.maxVoiceUsersPerChannel,
       maxCategoriesPerServer: config.maxCategoriesPerServer,
       maxMembersPerServer: config.maxMembersPerServer,
+      maxWebhooksPerServer: config.maxWebhooksPerServer,
     }});
   } catch (err) { next(err); }
 });
@@ -1110,11 +1113,13 @@ adminRouter.get('/limits/servers/:serverId', async (req: Request<{ serverId: str
       maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
       maxCategoriesPerServer: limits.maxCategoriesPerServer,
       maxMembersPerServer: limits.maxMembersPerServer,
+      maxWebhooksPerServer: limits.maxWebhooksPerServer,
     } : {
       maxChannelsPerServer: null,
       maxVoiceUsersPerChannel: null,
       maxCategoriesPerServer: null,
       maxMembersPerServer: null,
+      maxWebhooksPerServer: null,
     }});
   } catch (err) { next(err); }
 });
@@ -1125,7 +1130,7 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
     const server = await prisma.server.findUnique({ where: { id: req.params.serverId }, select: { id: true } });
     if (!server) throw new NotFoundError('Server');
 
-    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer } = req.body;
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer } = req.body;
     const toInt = (v: unknown): number | null => {
       if (v === null || v === undefined || v === '') return null;
       const n = Number(v);
@@ -1137,6 +1142,8 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
       maxVoiceUsersPerChannel: maxVoiceUsersPerChannel !== undefined ? (toInt(maxVoiceUsersPerChannel) !== null ? Math.max(1, Math.min(500, toInt(maxVoiceUsersPerChannel)!)) : null) : undefined,
       maxCategoriesPerServer: maxCategoriesPerServer !== undefined ? (toInt(maxCategoriesPerServer) !== null ? Math.max(1, Math.min(200, toInt(maxCategoriesPerServer)!)) : null) : undefined,
       maxMembersPerServer: maxMembersPerServer !== undefined ? (toInt(maxMembersPerServer) !== null ? Math.max(0, Math.min(100000, toInt(maxMembersPerServer)!)) : null) : undefined,
+      // 0 freezes webhook creation on this one server; null falls back to global
+      maxWebhooksPerServer: maxWebhooksPerServer !== undefined ? (toInt(maxWebhooksPerServer) !== null ? Math.max(0, Math.min(100, toInt(maxWebhooksPerServer)!)) : null) : undefined,
     };
 
     // Remove undefined keys
@@ -1153,6 +1160,7 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
       maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
       maxCategoriesPerServer: limits.maxCategoriesPerServer,
       maxMembersPerServer: limits.maxMembersPerServer,
+      maxWebhooksPerServer: limits.maxWebhooksPerServer,
     }});
   } catch (err) { next(err); }
 });

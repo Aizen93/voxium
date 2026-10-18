@@ -13,7 +13,9 @@ export interface RateLimitConfig {
 
 interface RateLimitDef extends RateLimitConfig {
   keyPrefix: string;
-  keyType: 'ip' | 'userId';
+  /** What the bucket is keyed on: a client address, a user, or (incoming
+   *  webhooks) a webhook id that has already passed token validation. */
+  keyType: 'ip' | 'userId' | 'webhook';
   label: string;
 }
 
@@ -142,6 +144,19 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // bucket: setting up several devices costs a publish plus one approval
   // each, and a 429 mid-approval leaves a device half-approved.
   e2eApprove:     { keyPrefix: 'rl:e2eappr',   points: 30,  duration: 3600, blockDuration: 0,  keyType: 'userId', label: 'E2E Approval' },
+  // Incoming webhooks. The execute endpoint is public and unauthenticated, so
+  // it carries two buckets. Per WEBHOOK: 30/min, keyed on a webhook id that
+  // has ALREADY passed token validation — an unvalidated id from the URL would
+  // let anyone drain a real webhook's budget (or mint unbounded keys) without
+  // knowing its token. Per IP: deliberately generous, because GitHub's
+  // deliveries for the whole platform arrive from a handful of shared egress
+  // addresses, so a tight per-IP cap would throttle every repository at once;
+  // it only bounds a single hostile address spraying the endpoint.
+  webhookExecute:   { keyPrefix: 'rl:whexec',   points: 30,   duration: 60,   blockDuration: 0, keyType: 'webhook', label: 'Webhook Execute (per webhook)' },
+  webhookExecuteIp: { keyPrefix: 'rl:whexecip', points: 1200, duration: 60,   blockDuration: 0, keyType: 'ip',      label: 'Webhook Execute (per IP)' },
+  // Management (create, edit, rotate, delete) and the moderators' list reads.
+  webhookManage:    { keyPrefix: 'rl:whmanage', points: 30,   duration: 3600, blockDuration: 0, keyType: 'userId',  label: 'Webhook Manage' },
+  webhookRead:      { keyPrefix: 'rl:whread',   points: 60,   duration: 60,   blockDuration: 0, keyType: 'userId',  label: 'Webhook Read' },
 };
 
 // Overrides loaded from Redis on init, updated via admin API
@@ -340,6 +355,11 @@ function canonicalIPv6(h: number[]): string {
 
 const byIp = (req: Request) => normalizeIp(req.ip || req.socket.remoteAddress || 'unknown');
 const byUserId = (req: Request) => req.user?.userId || req.ip || 'unknown';
+// Only meaningful AFTER the execute route has validated the token for this id
+const byWebhookId = (req: Request) => {
+  const id = req.params.webhookId;
+  return typeof id === 'string' ? id : 'unknown';
+};
 
 /**
  * Charge the daily registration budgets, then REFUND them unless the request
@@ -603,6 +623,18 @@ export const rateLimitE2EBundle = createMiddleware('e2eBundle', byUserId);
 export const rateLimitE2EStatus = createMiddleware('e2eStatus', byUserId);
 export const rateLimitE2EShares = createMiddleware('e2eShares', byUserId);
 export const rateLimitE2EApprove = createMiddleware('e2eApprove', byUserId);
+// Incoming webhooks. Mount the per-IP bucket FIRST on the execute route; mount
+// rateLimitWebhookExecute ONLY AFTER the token has been validated — its key is
+// req.params.webhookId, which is attacker-controlled until then.
+export const rateLimitWebhookExecuteIp = createMiddleware('webhookExecuteIp', byIp);
+export const rateLimitWebhookExecute = createMiddleware('webhookExecute', byWebhookId);
+export const rateLimitWebhookManage = createMiddleware('webhookManage', byUserId);
+export const rateLimitWebhookRead = createMiddleware('webhookRead', byUserId);
+
+/** A limiter middleware for a registry row keyed by any request property
+ *  (`rateLimitByKey('<row name>', (req) => key)`); same 429 shape and fail-open
+ *  behaviour as every exported limiter. */
+export const rateLimitByKey = createMiddleware;
 
 // ─── Socket.IO rate limiting ─────────────────────────────────────────────────
 

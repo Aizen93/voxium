@@ -87,6 +87,7 @@ model User {
   serverBansIssued      ServerBan[]         @relation("ServerBanActor")
   joinRequests          ServerJoinRequest[] @relation("JoinRequestUser")
   joinRequestsDecided   ServerJoinRequest[] @relation("JoinRequestDecider")
+  createdWebhooks       Webhook[]           @relation("WebhookCreator")
 
   @@map("users")
 }
@@ -142,6 +143,7 @@ model Server {
   limits     ServerLimits?
   bans         ServerBan[]
   joinRequests ServerJoinRequest[]
+  webhooks     Webhook[]
 
   // One index per directory sort, each ending in id so a keyset cursor is a
   // single index range scan at any table size. No partial indexes: Prisma
@@ -217,6 +219,7 @@ model GlobalConfig {
   maxVoiceUsersPerChannel Int      @default(12) @map("max_voice_users_per_channel")
   maxCategoriesPerServer  Int      @default(12) @map("max_categories_per_server")
   maxMembersPerServer     Int      @default(0) @map("max_members_per_server") // 0 = unlimited
+  maxWebhooksPerServer    Int      @default(10) @map("max_webhooks_per_server")
   updatedAt               DateTime @updatedAt @map("updated_at")
 
   @@map("global_config")
@@ -228,6 +231,7 @@ model ServerLimits {
   maxVoiceUsersPerChannel Int?     @map("max_voice_users_per_channel")
   maxCategoriesPerServer  Int?     @map("max_categories_per_server")
   maxMembersPerServer     Int?     @map("max_members_per_server")
+  maxWebhooksPerServer    Int?     @map("max_webhooks_per_server")
   updatedAt               DateTime @updatedAt @map("updated_at")
 
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -364,6 +368,7 @@ model Channel {
   reads    ChannelRead[]
   permissionOverrides ChannelPermissionOverride[]
   members  ChannelMember[]
+  webhooks Webhook[]
 
   @@index([serverId])
   @@index([categoryId])
@@ -398,14 +403,22 @@ model Message {
   type           String    @default("user")
   channelId      String?   @map("channel_id")
   conversationId String?   @map("conversation_id")
-  authorId       String    @map("author_id")
+  // Null ONLY for a webhook-authored row (then webhookId/webhookName are set at
+  // write time). Every reader shapes the author through shapeMessageAuthor()
+  // (utils/messageAuthor.ts), so the wire type keeps a non-null author.
+  authorId       String?   @map("author_id")
+  // Incoming webhooks: the webhook that posted the row, and its name frozen at
+  // post time (the label survives a rename or a deleted webhook — SetNull).
+  webhookId      String?   @map("webhook_id")
+  webhookName    String?   @map("webhook_name")
   replyToId      String?   @map("reply_to_id")
   editedAt       DateTime? @map("edited_at")
   createdAt      DateTime  @default(now()) @map("created_at")
 
   channel      Channel?           @relation(fields: [channelId], references: [id], onDelete: Cascade)
   conversation Conversation?      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  author       User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  author       User?              @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  webhook      Webhook?           @relation(fields: [webhookId], references: [id], onDelete: SetNull)
   replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
   replies      Message[]          @relation("MessageReply")
   reactions    MessageReaction[]
@@ -416,11 +429,42 @@ model Message {
   @@index([conversationId, createdAt])
   @@index([replyToId])
   @@index([authorId])
+  // The webhook FK's ON DELETE SET NULL and the webhook-delete purge both find rows by webhook_id
+  @@index([webhookId])
   @@index([createdAt])
   // Trigram GIN index (pg_trgm) accelerating ILIKE '%q%' message search —
   // without it every search scans the whole messages table (MED-14)
   @@index([content(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("messages")
+}
+
+// ─── Incoming Webhooks ───────────────────────────────────────────────────────
+
+/// A channel's incoming webhook: anything that POSTs JSON to its secret URL
+/// creates a message authored by the webhook (no user). Only the token's
+/// SHA-256 is stored; the plaintext is shown once at creation.
+model Webhook {
+  id          String    @id @default(cuid())
+  serverId    String    @map("server_id")
+  channelId   String    @map("channel_id")
+  name        String                              // 1..LIMITS.WEBHOOK_NAME_MAX, sanitizeText
+  type        String    @default("generic")       // "generic" | "github" (WEBHOOK_TYPES)
+  tokenHash   String    @map("token_hash")        // sha256(token), hex
+  secretEnc   String?   @map("secret_enc")        // github only: AES-256-GCM via TOTP_ENCRYPTION_KEY
+  enabled     Boolean   @default(true)
+  createdById String?   @map("created_by_id")
+  lastUsedAt  DateTime? @map("last_used_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  server    Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  channel   Channel   @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation("WebhookCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  messages  Message[]
+
+  @@index([serverId])
+  @@index([channelId])
+  @@map("webhooks")
 }
 
 // ─── Message Attachments ───────────────────────────────────────────────────

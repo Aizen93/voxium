@@ -366,6 +366,10 @@
       "name": "创建安全频道",
       "description": "允许成员创建仅限邀请的端到端加密频道"
     },
+    "MANAGE_WEBHOOKS": {
+      "name": "管理 Webhook",
+      "description": "允许成员创建、编辑和删除传入 Webhook"
+    },
     "CREATE_INVITES": {
       "name": "创建邀请",
       "description": "允许成员创建服务器邀请链接"

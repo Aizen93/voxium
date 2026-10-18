@@ -366,6 +366,10 @@
       "name": "Create Secure Channels",
       "description": "Allows members to create invite-only end-to-end encrypted channels"
     },
+    "MANAGE_WEBHOOKS": {
+      "name": "Manage Webhooks",
+      "description": "Allows members to create, edit, and delete incoming webhooks"
+    },
     "CREATE_INVITES": {
       "name": "Create Invites",
       "description": "Allows members to create server invite links"

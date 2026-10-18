@@ -6,6 +6,7 @@ import { BadRequestError, ForbiddenError, parseDateParam } from '../utils/errors
 import { validateSearchQuery, LIMITS } from '@voxium/shared';
 import { sanitizeText } from '../utils/sanitize';
 import { filterVisibleChannels } from '../utils/permissionCalculator';
+import { shapeMessageAuthor } from '../utils/messageAuthor';
 
 export const searchRouter = Router();
 
@@ -96,12 +97,15 @@ searchRouter.get('/servers/:serverId/messages', async (req: Request<{ serverId: 
     const hasMore = messages.length > limit;
     if (hasMore) messages.pop();
 
+    // `include` returns every scalar, so webhookId/webhookName are on the row:
+    // a webhook-posted match gets its synthesised author (utils/messageAuthor.ts)
     const data = messages.map((m) => ({
       id: m.id,
       content: m.content,
       type: m.type,
       channelId: m.channelId,
-      author: m.author,
+      author: shapeMessageAuthor(m),
+      webhookId: m.webhookId,
       createdAt: m.createdAt,
       editedAt: m.editedAt,
       channelName: m.channel?.name,

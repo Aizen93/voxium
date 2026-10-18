@@ -61,7 +61,18 @@ export const LIMITS = {
   DISCOVERY_MAX_TAGS: 5,
   SERVER_BAN_REASON_MAX: 300,
   JOIN_REQUEST_MESSAGE_MAX: 300,
+  // Incoming webhooks (docs/local/webhooks-plan.html)
+  MAX_WEBHOOKS_PER_SERVER: 10,
+  WEBHOOK_NAME_MAX: 64,
+  WEBHOOK_BODY_MAX_BYTES: 1_048_576, // 1 MiB, the execute route's own body parser
+  WEBHOOK_EMBEDS_MAX: 10,
+  WEBHOOK_EMBED_FIELDS_MAX: 25,
 } as const;
+
+/** Incoming webhook kinds: "generic" takes the Discord-shaped payload,
+ *  "github" verifies X-Hub-Signature-256 and formats GitHub events. */
+export const WEBHOOK_TYPES = ['generic', 'github'] as const;
+export type WebhookType = (typeof WEBHOOK_TYPES)[number];
 
 /**
  * Max serialized dm:voice:signal payload the server will relay (UTF-16 chars,
@@ -394,6 +405,10 @@ export const WS_EVENTS = {
   THEME_PUBLISHED: 'theme:published',
   THEME_UPDATED: 'theme:updated',
   THEME_REMOVED: 'theme:removed',
+  // Incoming webhooks: the server's webhook list changed (moderators refetch);
+  // a webhook's messages were purged from one channel in one statement.
+  WEBHOOK_CHANGED: 'webhook:changed',
+  MESSAGE_BULK_DELETED: 'message:bulk_deleted',
 } as const;
 
 export const THEME_COLOR_KEYS = [

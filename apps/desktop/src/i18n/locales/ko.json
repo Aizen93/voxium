@@ -366,6 +366,10 @@
       "name": "보안 채널 만들기",
       "description": "멤버가 초대 전용 종단간 암호화 채널을 만들 수 있도록 허용합니다"
     },
+    "MANAGE_WEBHOOKS": {
+      "name": "웹후크 관리",
+      "description": "멤버가 수신 웹후크를 생성, 편집 및 삭제할 수 있도록 허용합니다"
+    },
     "CREATE_INVITES": {
       "name": "초대 만들기",
       "description": "멤버가 서버 초대 링크를 만들 수 있도록 허용합니다"

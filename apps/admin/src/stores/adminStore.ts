@@ -154,7 +154,7 @@ interface AdminState {
   rateLimits: Array<{
     name: string;
     label: string;
-    keyType: 'ip' | 'userId';
+    keyType: 'ip' | 'userId' | 'webhook';
     keyPrefix: string;
     points: number;
     duration: number;
@@ -939,7 +939,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
   resetServerLimits: async (serverId) => {
     await api.delete(`/admin/limits/servers/${serverId}`);
-    set({ serverLimits: { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null } });
+    set({ serverLimits: { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null } });
     toast.success('Server limits reset to global defaults');
   },
 

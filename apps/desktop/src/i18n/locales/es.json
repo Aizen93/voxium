@@ -366,6 +366,10 @@
       "name": "Crear canales seguros",
       "description": "Permite a los miembros crear canales cifrados de extremo a extremo solo por invitación"
     },
+    "MANAGE_WEBHOOKS": {
+      "name": "Gestionar webhooks",
+      "description": "Permite a los miembros crear, editar y eliminar webhooks entrantes"
+    },
     "CREATE_INVITES": {
       "name": "Crear invitaciones",
       "description": "Permite a los miembros crear enlaces de invitación al servidor"

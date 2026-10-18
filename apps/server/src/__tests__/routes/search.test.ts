@@ -119,6 +119,41 @@ describe('Search routes — server search respects visibility and encryption', (
     expect(prisma.message.findMany).not.toHaveBeenCalled();
   });
 
+  it('returns a webhook-posted match with its synthesised author (never a null author), a human match unchanged', async () => {
+    vi.mocked(prisma.channel.findMany).mockResolvedValueOnce([{ id: 'ch-1', secure: false }] as any);
+    mockFilterVisibleChannels.mockResolvedValueOnce([{ id: 'ch-1', secure: false }]);
+    const human = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null };
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([
+      {
+        id: 'msg-hook', content: 'deploy hello', type: 'user', channelId: 'ch-1', authorId: null,
+        webhookId: 'wh-1', webhookName: 'CI', author: null, channel: { name: 'general' },
+        createdAt: new Date('2026-10-18T12:00:00Z'), editedAt: null,
+      },
+      {
+        id: 'msg-gone', content: 'old hello', type: 'user', channelId: 'ch-1', authorId: null,
+        webhookId: null, webhookName: 'Old bot', author: null, channel: { name: 'general' },
+        createdAt: new Date('2026-10-17T12:00:00Z'), editedAt: null,
+      },
+      {
+        id: 'msg-human', content: 'hello', type: 'user', channelId: 'ch-1', authorId: 'user-2',
+        webhookId: null, webhookName: null, author: human, channel: { name: 'general' },
+        createdAt: new Date('2026-10-16T12:00:00Z'), editedAt: null,
+      },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/search/servers/srv-1/messages?q=hello');
+
+    expect(res.status).toBe(200);
+    const [hook, gone, person] = res.body.data;
+    expect(hook.author).toEqual({ id: 'webhook:wh-1', username: 'CI', displayName: 'CI', avatarUrl: null, isWebhook: true });
+    expect(hook.webhookId).toBe('wh-1');
+    expect(hook.channelName).toBe('general');
+    expect(gone.author).toEqual({ id: 'webhook:deleted', username: 'Old bot', displayName: 'Old bot', avatarUrl: null, isWebhook: true });
+    expect(gone.webhookId).toBeNull();
+    expect(person.author).toEqual(human);
+    expect(person.webhookId).toBeNull();
+  });
+
   it('rejects a channelId the member cannot VIEW with the same generic error', async () => {
     vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({
       id: 'ch-hidden', serverId: 'srv-1', type: 'text', secure: false,

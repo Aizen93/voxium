@@ -366,6 +366,10 @@
       "name": "Sichere Kanäle erstellen",
       "description": "Erlaubt Mitgliedern, Ende-zu-Ende-verschlüsselte Kanäle nur auf Einladung zu erstellen"
     },
+    "MANAGE_WEBHOOKS": {
+      "name": "Webhooks verwalten",
+      "description": "Erlaubt Mitgliedern, eingehende Webhooks zu erstellen, zu bearbeiten und zu löschen"
+    },
     "CREATE_INVITES": {
       "name": "Einladungen erstellen",
       "description": "Erlaubt Mitgliedern, Server-Einladungslinks zu erstellen"

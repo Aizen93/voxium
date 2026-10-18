@@ -366,6 +366,10 @@
       "name": "Créer des salons sécurisés",
       "description": "Permet aux membres de créer des salons chiffrés de bout en bout accessibles uniquement sur invitation"
     },
+    "MANAGE_WEBHOOKS": {
+      "name": "Gérer les webhooks",
+      "description": "Permet aux membres de créer, modifier et supprimer des webhooks entrants"
+    },
     "CREATE_INVITES": {
       "name": "Créer des invitations",
       "description": "Permet aux membres de créer des liens d'invitation au serveur"

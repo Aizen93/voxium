@@ -6,7 +6,7 @@ import { getTierThresholds, tierOf } from '../utils/discoveryTiers';
 import { getRedis } from '../utils/redis';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
-import { isFeatureEnabled } from '../utils/featureFlags';
+import { requireFeature } from '../middleware/requireFeature';
 import { joinServerMember } from '../utils/serverJoin';
 import { serverSelect } from '../utils/serverSelect';
 import { emitToModerators } from '../utils/moderatorAudience';
@@ -33,13 +33,7 @@ discoveryRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 // The kill switch: off turns the whole directory off cluster-wide. Invites,
 // bans and existing memberships are unaffected; profiles and pending requests
 // are kept for when it returns.
-discoveryRouter.use((_req: Request, _res: Response, next: NextFunction) => {
-  if (!isFeatureEnabled('server_discovery')) {
-    next(new ForbiddenError('Server discovery is currently disabled'));
-    return;
-  }
-  next();
-});
+discoveryRouter.use(requireFeature('server_discovery', 'Server discovery is currently disabled'));
 
 /** Page cache TTL — the public part of a page; per-user flags are never cached. */
 export const DISCOVERY_PAGE_CACHE_TTL_S = 60;

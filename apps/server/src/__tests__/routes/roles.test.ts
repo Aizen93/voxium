@@ -1115,7 +1115,7 @@ describe('Role Routes', () => {
       expect(mockEmit).not.toHaveBeenCalled();
     });
 
-    it('strips CREATE_SECURE_CHANNELS (like ADMINISTRATOR) from override masks', async () => {
+    it('strips CREATE_SECURE_CHANNELS and MANAGE_WEBHOOKS (like ADMINISTRATOR) from override masks', async () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity);
       prismaMock.channel.findFirst.mockResolvedValue({
@@ -1136,7 +1136,7 @@ describe('Role Routes', () => {
         .put('/api/v1/servers/srv1/roles/channels/ch1/permissions/r2')
         .send({
           allow: permissionsToString(
-            Permissions.SEND_MESSAGES | Permissions.CREATE_SECURE_CHANNELS,
+            Permissions.SEND_MESSAGES | Permissions.CREATE_SECURE_CHANNELS | Permissions.MANAGE_WEBHOOKS,
           ),
           deny: '0',
         });
@@ -1147,6 +1147,41 @@ describe('Role Routes', () => {
           update: {
             allow: permissionsToString(Permissions.SEND_MESSAGES),
             deny: '0',
+          },
+        }),
+      );
+    });
+
+    it('strips MANAGE_WEBHOOKS from the DENY mask too (server-level only)', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      prismaMock.channel.findFirst.mockResolvedValue({
+        id: 'ch1',
+        serverId: 'srv1',
+        secure: false,
+      });
+      prismaMock.role.findFirst.mockResolvedValue({
+        id: 'r2',
+        serverId: 'srv1',
+        position: 2,
+        isDefault: false,
+      });
+      prismaMock.channelPermissionOverride.upsert.mockResolvedValue({});
+      prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .put('/api/v1/servers/srv1/roles/channels/ch1/permissions/r2')
+        .send({
+          allow: '0',
+          deny: permissionsToString(Permissions.ATTACH_FILES | Permissions.MANAGE_WEBHOOKS),
+        });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.channelPermissionOverride.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: {
+            allow: '0',
+            deny: permissionsToString(Permissions.ATTACH_FILES),
           },
         }),
       );

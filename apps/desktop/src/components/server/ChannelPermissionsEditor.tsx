@@ -28,11 +28,13 @@ interface OverrideState {
 
 const CATEGORY_KEYS = ['general', 'membership', 'text', 'voice'] as const;
 
-// ADMINISTRATOR (special) and CREATE_SECURE_CHANNELS are not valid channel
-// overrides — the server strips both from override masks, so offering them
-// here would render tri-states that silently do nothing
+// ADMINISTRATOR (special), CREATE_SECURE_CHANNELS and MANAGE_WEBHOOKS are not
+// valid channel overrides — the server strips all three from override masks
+// (server-level only), so offering them here would render tri-states that
+// silently do nothing
+const SERVER_LEVEL_ONLY_KEYS = new Set(['CREATE_SECURE_CHANNELS', 'MANAGE_WEBHOOKS']);
 const CHANNEL_PERMISSIONS = PERMISSION_LIST.filter(
-  (p) => p.category !== 'special' && p.key !== 'CREATE_SECURE_CHANNELS',
+  (p) => p.category !== 'special' && !SERVER_LEVEL_ONLY_KEYS.has(p.key),
 );
 
 function getTriState(flag: bigint, override: OverrideState): TriState {

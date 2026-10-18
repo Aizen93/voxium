@@ -366,6 +366,10 @@
       "name": "Criar canais seguros",
       "description": "Permite que os membros criem canais criptografados de ponta a ponta apenas por convite"
     },
+    "MANAGE_WEBHOOKS": {
+      "name": "Gerenciar webhooks",
+      "description": "Permite que os membros criem, editem e excluam webhooks de entrada"
+    },
     "CREATE_INVITES": {
       "name": "Criar convites",
       "description": "Permite que os membros criem links de convite para o servidor"

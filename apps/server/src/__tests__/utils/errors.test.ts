@@ -6,6 +6,7 @@ import {
   ForbiddenError,
   NotFoundError,
   ConflictError,
+  UnsupportedMediaTypeError,
   parseDateParam,
 } from '../../utils/errors';
 
@@ -123,6 +124,20 @@ describe('ConflictError', () => {
 
   it('is an instance of AppError', () => {
     expect(new ConflictError('x')).toBeInstanceOf(AppError);
+  });
+});
+
+describe('UnsupportedMediaTypeError', () => {
+  it('has statusCode 415 and the provided message', () => {
+    const err = new UnsupportedMediaTypeError('Send application/json');
+    expect(err.statusCode).toBe(415);
+    expect(err.message).toBe('Send application/json');
+  });
+
+  it('is an operational AppError', () => {
+    const err = new UnsupportedMediaTypeError('x');
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.isOperational).toBe(true);
   });
 });
 

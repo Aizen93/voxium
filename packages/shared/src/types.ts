@@ -1,5 +1,5 @@
 import type { AnnotationOp, AnnotationScene, AnnotationLiveEvent } from './annotations.js';
-import type { ServerJoinMode, DiscoveryTier } from './constants.js';
+import type { ServerJoinMode, DiscoveryTier, WebhookType } from './constants.js';
 
 // ─── User ────────────────────────────────────────────────────────────────────
 
@@ -268,7 +268,12 @@ export interface Message {
     encrypted?: boolean;
     author: MessageAuthor;
   } | null;
+  /** Always present: for a webhook-authored row the server synthesises it
+   *  (`isWebhook: true`, id `webhook:{webhookId}` — never a user id). */
   author: MessageAuthor;
+  /** Set when an incoming webhook posted the message (null once the webhook
+   *  is deleted: the message stays, labelled with the name it posted under). */
+  webhookId?: string | null;
   mentions?: MessageAuthor[];
   attachments?: Attachment[];
   createdAt: string;
@@ -284,7 +289,30 @@ export interface MessageAuthor {
   role?: UserRole;
   isSupporter?: boolean;
   supporterTier?: SupporterTier;
+  /** A synthesised author for a webhook-posted message: there is no user
+   *  behind it (no profile, no DM, no mention). */
+  isWebhook?: boolean;
 }
+
+// ─── Incoming Webhooks ───────────────────────────────────────────────────────
+
+/** A webhook as the management API lists it. Never carries the token, its
+ *  hash or the GitHub secret. */
+export interface Webhook {
+  id: string;
+  serverId: string;
+  channelId: string;
+  name: string;
+  type: WebhookType;
+  enabled: boolean;
+  createdBy: { id: string; username: string; displayName: string } | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** The create/rotate answer: the plaintext token (and, for "github", the
+ *  signing secret) are shown exactly once. */
+export type WebhookCreated = Webhook & { token: string; secret?: string };
 
 export interface SendMessageRequest {
   content: string;
@@ -403,6 +431,8 @@ export interface ServerToClientEvents {
   'message:new': (message: Message) => void;
   'message:update': (message: Message) => void;
   'message:delete': (data: { messageId: string; channelId: string }) => void;
+  'message:bulk_deleted': (data: { channelId: string; webhookId: string; count: number }) => void;
+  'webhook:changed': (data: { serverId: string }) => void;
   'channel:created': (channel: Channel) => void;
   'channel:updated': (channel: Channel) => void;
   'channel:deleted': (data: { channelId: string; serverId: string }) => void;
@@ -838,6 +868,7 @@ export interface ResourceLimits {
   maxVoiceUsersPerChannel: number;
   maxCategoriesPerServer: number;
   maxMembersPerServer: number; // 0 = unlimited
+  maxWebhooksPerServer: number;
 }
 
 export interface ServerResourceLimits {
@@ -845,6 +876,7 @@ export interface ServerResourceLimits {
   maxVoiceUsersPerChannel: number | null;
   maxCategoriesPerServer: number | null;
   maxMembersPerServer: number | null;
+  maxWebhooksPerServer: number | null;
 }
 
 // ─── Storage ─────────────────────────────────────────────────────────────────

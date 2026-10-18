@@ -10,7 +10,10 @@ vi.mock('../../utils/redis', () => ({
   getRedisConfigSub: vi.fn(() => { throw new Error('Redis not available in unit tests'); }),
 }));
 
-import { socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, consumeMailCap } from '../../middleware/rateLimiter';
+import {
+  socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, consumeMailCap,
+  rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookManage, rateLimitWebhookRead, rateLimitByKey,
+} from '../../middleware/rateLimiter';
 
 describe('normalizeIp — one spelling of an address for every keyed control', () => {
   it.each([
@@ -133,6 +136,52 @@ describe('getAllRateLimits (key types)', () => {
 
     expect(general).toBeDefined();
     expect(general).toMatchObject({ name: 'general', keyType: 'ip' });
+  });
+});
+
+describe('incoming-webhook limiters', () => {
+  const byName = (name: string) => getAllRateLimits().find((l) => l.name === name);
+
+  it('registers the four webhook rows under rl: with their key types and budgets', () => {
+    expect(byName('webhookExecute')).toMatchObject({
+      keyPrefix: 'rl:whexec', points: 30, duration: 60, blockDuration: 0, keyType: 'webhook', label: 'Webhook Execute (per webhook)',
+    });
+    expect(byName('webhookExecuteIp')).toMatchObject({
+      keyPrefix: 'rl:whexecip', points: 1200, duration: 60, blockDuration: 0, keyType: 'ip', label: 'Webhook Execute (per IP)',
+    });
+    expect(byName('webhookManage')).toMatchObject({
+      keyPrefix: 'rl:whmanage', points: 30, duration: 3600, blockDuration: 0, keyType: 'userId', label: 'Webhook Manage',
+    });
+    expect(byName('webhookRead')).toMatchObject({
+      keyPrefix: 'rl:whread', points: 60, duration: 60, blockDuration: 0, keyType: 'userId', label: 'Webhook Read',
+    });
+  });
+
+  it('keeps every key prefix distinct (two rows on one prefix would share a bucket)', () => {
+    const prefixes = getAllRateLimits().map((l) => l.keyPrefix);
+    expect(new Set(prefixes).size).toBe(prefixes.length);
+  });
+
+  it('exports the four middlewares and the generic rateLimitByKey factory', () => {
+    for (const mw of [rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookManage, rateLimitWebhookRead]) {
+      expect(typeof mw).toBe('function');
+      expect(mw.length).toBe(3); // (req, res, next)
+    }
+    expect(typeof rateLimitByKey).toBe('function');
+    expect(typeof rateLimitByKey('webhookExecute', () => 'k')).toBe('function');
+  });
+
+  it('fails OPEN like every other limiter when the store is unreachable (the module-level Redis mock throws)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const req = { params: { webhookId: 'wh-1' }, ip: '203.0.113.7', socket: {} } as any;
+    const res = { set: vi.fn(), status: vi.fn(() => ({ json: vi.fn() })) } as any;
+    for (const mw of [rateLimitWebhookExecuteIp, rateLimitWebhookExecute]) {
+      const next = vi.fn();
+      await mw(req, res, next);
+      expect(next).toHaveBeenCalledWith();
+    }
+    expect(res.status).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 

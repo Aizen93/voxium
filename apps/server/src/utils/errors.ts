@@ -40,6 +40,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class UnsupportedMediaTypeError extends AppError {
+  constructor(message: string) {
+    super(message, 415);
+  }
+}
+
 export class TooManyRequestsError extends AppError {
   constructor(message = 'Too many requests. Please try again later.') {
     super(message, 429);

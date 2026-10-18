@@ -183,7 +183,7 @@ export function AdminRateLimits() {
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
                       rule.keyType === 'ip' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
                     }`}>
-                      {rule.keyType === 'ip' ? 'IP' : 'User'}
+                      {rule.keyType === 'ip' ? 'IP' : rule.keyType === 'webhook' ? 'Webhook' : 'User'}
                     </span>
                   </td>
                   <td className="px-4 py-3">

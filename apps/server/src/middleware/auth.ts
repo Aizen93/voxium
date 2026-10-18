@@ -23,6 +23,9 @@ declare global {
       user?: AuthPayload;
       /** Unique request identifier for log correlation (set by X-Request-ID middleware) */
       id?: string;
+      /** The exact request bytes, kept by the incoming-webhook execute route's
+       *  own JSON parser (routes/webhookExecute.ts) for signature checks. */
+      rawBody?: Buffer;
     }
   }
 }

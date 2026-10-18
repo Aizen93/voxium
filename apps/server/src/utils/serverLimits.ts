@@ -8,6 +8,7 @@ const DEFAULTS: ResourceLimits = {
   maxVoiceUsersPerChannel: LIMITS.MAX_VOICE_USERS_PER_CHANNEL,
   maxCategoriesPerServer: LIMITS.MAX_CATEGORIES_PER_SERVER,
   maxMembersPerServer: 0, // unlimited
+  maxWebhooksPerServer: LIMITS.MAX_WEBHOOKS_PER_SERVER,
 };
 
 /**
@@ -24,6 +25,7 @@ export async function getGlobalLimits(): Promise<ResourceLimits> {
     maxVoiceUsersPerChannel: config.maxVoiceUsersPerChannel,
     maxCategoriesPerServer: config.maxCategoriesPerServer,
     maxMembersPerServer: config.maxMembersPerServer,
+    maxWebhooksPerServer: config.maxWebhooksPerServer,
   };
 }
 
@@ -43,6 +45,7 @@ export async function getEffectiveLimits(serverId: string): Promise<ResourceLimi
         maxVoiceUsersPerChannel: globalConfig.maxVoiceUsersPerChannel,
         maxCategoriesPerServer: globalConfig.maxCategoriesPerServer,
         maxMembersPerServer: globalConfig.maxMembersPerServer,
+        maxWebhooksPerServer: globalConfig.maxWebhooksPerServer,
       }
     : DEFAULTS;
 
@@ -53,5 +56,6 @@ export async function getEffectiveLimits(serverId: string): Promise<ResourceLimi
     maxVoiceUsersPerChannel: serverLimits.maxVoiceUsersPerChannel ?? global.maxVoiceUsersPerChannel,
     maxCategoriesPerServer: serverLimits.maxCategoriesPerServer ?? global.maxCategoriesPerServer,
     maxMembersPerServer: serverLimits.maxMembersPerServer ?? global.maxMembersPerServer,
+    maxWebhooksPerServer: serverLimits.maxWebhooksPerServer ?? global.maxWebhooksPerServer,
   };
 }
