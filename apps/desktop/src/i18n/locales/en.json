@@ -1550,6 +1550,7 @@
     "creatorRemoved": "Disabled on {{date}}: the member who held its URL was removed from the server. Whoever still holds the URL could post with it; rotate the URL before enabling it.",
     "creatorRemovedUndated": "Disabled: the member who held its URL was removed from the server. Whoever still holds the URL could post with it; rotate the URL before enabling it.",
     "actions": {
+      "edit": "Edit",
       "rotate": "Rotate URL",
       "enable": "Enable",
       "disable": "Disable",
@@ -1569,6 +1570,19 @@
       "submit": "Create webhook",
       "creating": "Creating…",
       "failed": "Failed to create the webhook"
+    },
+    "edit": {
+      "title": "Edit webhook",
+      "description": "Its URL stays the same, so the tools that use it need no change.",
+      "name": "Name",
+      "channel": "Channel",
+      "current": "{{channel}} (current)",
+      "loadingChannels": "Loading channels…",
+      "pickGone": "The channel you picked is no longer available. Pick another, or the webhook stays where it is.",
+      "moveNote": "Moving it only changes where its next messages go: the ones it already posted stay where they are.",
+      "saving": "Saving…",
+      "saved": "{{name}} updated",
+      "failed": "Failed to save the webhook"
     },
     "reveal": {
       "title": "{{name}} is ready",

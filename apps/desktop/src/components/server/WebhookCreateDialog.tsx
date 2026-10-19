@@ -1,11 +1,12 @@
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, X } from 'lucide-react';
-import { LIMITS, WEBHOOK_TYPES, validateWebhookName } from '@voxium/shared';
+import { WEBHOOK_TYPES, validateWebhookName } from '@voxium/shared';
 import type { WebhookTarget, WebhookType } from '@voxium/shared';
 import { translateServerError } from '../../utils/serverErrors';
 import type { CreateWebhookInput } from '../../services/webhooks';
 import { WebhookDialog } from './WebhookDialog';
+import { WebhookNameField } from './WebhookNameField';
 
 interface Props {
   /**
@@ -68,27 +69,16 @@ export function WebhookCreateDialog({ channels, busy, onCreate, onClose }: Props
           </button>
         </div>
 
-        <label htmlFor="webhook-name" className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
-          {t('webhooks.create.name')}
-        </label>
-        <input
-          ref={nameRef}
+        <WebhookNameField
           id="webhook-name"
-          type="text"
+          label={t('webhooks.create.name')}
           value={name}
-          onChange={(e) => { setName(e.target.value); if (error) setError(null); }}
-          maxLength={LIMITS.WEBHOOK_NAME_MAX}
+          onChange={(value) => { setName(value); if (error) setError(null); }}
+          error={error}
+          inputRef={nameRef}
           placeholder={t('webhooks.create.namePlaceholder')}
-          autoComplete="off"
-          aria-invalid={error ? true : undefined}
-          aria-describedby={error ? 'webhook-name-error' : undefined}
-          className="w-full rounded-lg border border-vox-border bg-vox-bg-primary px-3 py-2 text-sm text-vox-text-primary placeholder:text-vox-text-muted focus:border-vox-accent-primary focus:outline-none"
-          data-testid="webhook-create-name"
+          testId="webhook-create-name"
         />
-        <div className="mt-1 flex items-start justify-between gap-2 text-[11px]">
-          <span id="webhook-name-error" className="text-vox-accent-danger" role={error ? 'alert' : undefined} data-testid="webhook-name-error">{error}</span>
-          <span className="shrink-0 text-vox-text-muted">{name.length}/{LIMITS.WEBHOOK_NAME_MAX}</span>
-        </div>
 
         <label htmlFor="webhook-channel" className="mb-1.5 mt-3 block text-xs font-semibold uppercase tracking-wide text-vox-text-secondary">
           {t('webhooks.create.channel')}

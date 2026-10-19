@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import { apiErrorMessage } from '../utils/apiError';
+import { apiErrorMessage, logMessage } from '../utils/apiError';
 import type { AdminWebhook, ServerJoinMode, AdminUser, AdminIpRecord, AdminServer, AdminServerExport, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
 
 // Untyped socket interface for admin-specific events not in the shared event maps
@@ -492,7 +492,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       set({ users: data.data, usersTotal: data.total, usersPage: p });
     } catch (err) {
       // Fetchers must not reject unhandled — surface and log instead
-      console.error('Failed to fetch users:', err);
+      console.error('Failed to fetch users:', logMessage(err));
       toast.error('Failed to load users');
     } finally {
       set({ loading: false });
@@ -570,7 +570,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     } catch (err) {
       if (seq !== serversFetchSeq) return;
       // Fetchers must not reject unhandled — surface and log instead
-      console.error('Failed to fetch servers:', err);
+      console.error('Failed to fetch servers:', logMessage(err));
       toast.error('Failed to load servers');
     } finally {
       if (seq === serversFetchSeq) set({ loading: false });
@@ -983,7 +983,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       set({ serverWebhooks: data.data as AdminWebhook[] });
     } catch (err) {
       if (seq !== serverWebhooksFetchSeq) return;
-      console.error('Failed to fetch server webhooks:', err);
+      console.error('Failed to fetch server webhooks:', logMessage(err));
       set({ serverWebhooksError: true });
       toast.error(apiErrorMessage(err, 'Failed to load webhooks'));
     } finally {
@@ -996,7 +996,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       await api.patch(`/admin/webhooks/${webhookId}`, { enabled });
       toast.success(enabled ? 'Webhook enabled' : 'Webhook disabled');
     } catch (err) {
-      console.error('Failed to update webhook:', err);
+      console.error('Failed to update webhook:', logMessage(err));
       // e.g. "Webhook not found" when its owner deleted it meanwhile
       toast.error(apiErrorMessage(err, 'Failed to update the webhook'));
     }
@@ -1010,7 +1010,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       const deleted = Number(data?.data?.deletedMessages ?? 0);
       toast.success(purge ? `Webhook deleted with ${deleted} message${deleted === 1 ? '' : 's'}` : 'Webhook deleted');
     } catch (err) {
-      console.error('Failed to delete webhook:', err);
+      console.error('Failed to delete webhook:', logMessage(err));
       toast.error(apiErrorMessage(err, 'Failed to delete the webhook'));
     }
     const serverId = get().serverWebhooksServerId;
@@ -1067,7 +1067,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       const { data } = await api.get('/admin/infra-servers');
       set({ infraServers: data.data });
     } catch (err) {
-      console.error('[Admin] Failed to fetch infrastructure servers:', err);
+      console.error('[Admin] Failed to fetch infrastructure servers:', logMessage(err));
     }
   },
 

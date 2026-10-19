@@ -7,6 +7,7 @@ import { AdminConfirmModal } from './AdminConfirmModal';
 import { AdminDeleteUserModal } from './AdminDeleteUserModal';
 import { DirectoryChips } from './DirectoryChips';
 import { toast } from '../stores/toastStore';
+import { logMessage } from '../utils/apiError';
 
 interface Props {
   userId: string;
@@ -38,7 +39,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
     fetchUserOwnedServers(userId)
       .then((list) => { if (!cancelled) setOwnedServers(list); })
       .catch((err) => {
-        console.error('Failed to load owned servers:', err);
+        console.error('Failed to load owned servers:', logMessage(err));
         if (!cancelled) { setOwnedServers([]); toast.error('Failed to load owned servers'); }
       });
     return () => { cancelled = true; };

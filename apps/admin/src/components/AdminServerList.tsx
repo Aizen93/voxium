@@ -6,7 +6,7 @@ import { AdminConfirmModal } from './AdminConfirmModal';
 import { DirectoryChips } from './DirectoryChips';
 import { AdminServerWebhooksModal } from './AdminServerWebhooksModal';
 import { toast } from '../stores/toastStore';
-import { apiErrorMessage } from '../utils/apiError';
+import { apiErrorMessage, logMessage } from '../utils/apiError';
 import type { AdminServer, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
 
 const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; description: string; min: number; max: number }> = [
@@ -367,7 +367,7 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
     try {
       await onSave(values);
     } catch (err) {
-      console.error('Failed to save global limits:', err instanceof Error ? err.message : err);
+      console.error('Failed to save global limits:', logMessage(err));
       toast.error(apiErrorMessage(err, 'Failed to save limits'));
     }
     setSaving(false);
@@ -469,7 +469,7 @@ function ServerLimitsModal({
     try {
       await onSave(updates);
     } catch (err) {
-      console.error('Failed to save server limits:', err instanceof Error ? err.message : err);
+      console.error('Failed to save server limits:', logMessage(err));
       toast.error(apiErrorMessage(err, 'Failed to save server limits'));
     }
     setSaving(false);
@@ -481,7 +481,7 @@ function ServerLimitsModal({
       await onReset();
       setDraft(emptyOverrides());
     } catch (err) {
-      console.error('Failed to reset server limits:', err instanceof Error ? err.message : err);
+      console.error('Failed to reset server limits:', logMessage(err));
       toast.error(apiErrorMessage(err, 'Failed to reset limits'));
     }
     setSaving(false);

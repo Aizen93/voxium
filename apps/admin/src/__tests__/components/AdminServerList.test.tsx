@@ -353,12 +353,14 @@ describe('AdminServerList — the limits editors take whole numbers only', () =>
     });
 
     it('a server refusal shows its own reason', async () => {
-      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
       await openGlobal();
       store.updateGlobalLimits.mockRejectedValueOnce(refusal('maxWebhooksPerServer must be an integer'));
       await typeInto(inputUnder('Max Webhooks / Server'), '5');
       await save();
       expect(toast.error).toHaveBeenCalledWith('maxWebhooksPerServer must be an integer');
+      // the console gets the sentence, never the axios error (it carries the request headers)
+      expect(spy).toHaveBeenCalledWith('Failed to save global limits:', 'maxWebhooksPerServer must be an integer');
     });
   });
 
@@ -405,6 +407,32 @@ describe('AdminServerList — the limits editors take whole numbers only', () =>
       await typeInto(inputUnder('Max Webhooks / Server'), '0');
       await save();
       expect(store.updateServerLimits).toHaveBeenCalledWith('listed', { ...NO_OVERRIDES, maxWebhooksPerServer: 0 });
+    });
+
+    // the console gets the label and the server's sentence, never the axios
+    // error (it carries the request headers, the admin's token included)
+    it('a refused save shows and logs only the server’s reason', async () => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await openServer(NO_OVERRIDES);
+      store.updateServerLimits.mockRejectedValueOnce(refusal('maxMembers must be an integer'));
+      await typeInto(inputUnder('Max Webhooks / Server'), '5');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('maxMembers must be an integer');
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith('Failed to save server limits:', 'maxMembers must be an integer');
+      spy.mockRestore();
+    });
+
+    it('a refused reset shows and logs only the server’s reason', async () => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await openServer({ ...NO_OVERRIDES, maxWebhooksPerServer: 4 });
+      store.resetServerLimits.mockRejectedValueOnce(refusal('Server not found'));
+      await act(async () => { buttonByText('Reset to Global').click(); });
+      expect(store.resetServerLimits).toHaveBeenCalledWith('listed');
+      expect(toast.error).toHaveBeenCalledWith('Server not found');
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith('Failed to reset server limits:', 'Server not found');
+      spy.mockRestore();
     });
   });
 });

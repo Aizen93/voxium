@@ -1550,6 +1550,7 @@
     "creatorRemoved": "Desativado em {{date}}: o membro que tinha a URL foi removido do servidor. Quem ainda tiver a URL poderia publicar com ela; renove a URL antes de ativá-lo.",
     "creatorRemovedUndated": "Desativado: o membro que tinha a URL foi removido do servidor. Quem ainda tiver a URL poderia publicar com ela; renove a URL antes de ativá-lo.",
     "actions": {
+      "edit": "Editar",
       "rotate": "Renovar URL",
       "enable": "Ativar",
       "disable": "Desativar",
@@ -1569,6 +1570,19 @@
       "submit": "Criar webhook",
       "creating": "Criando…",
       "failed": "Falha ao criar o webhook"
+    },
+    "edit": {
+      "title": "Editar webhook",
+      "description": "A URL dele não muda, então as ferramentas que a usam não precisam de nenhuma alteração.",
+      "name": "Nome",
+      "channel": "Canal",
+      "current": "{{channel}} (atual)",
+      "loadingChannels": "Carregando canais…",
+      "pickGone": "O canal que você escolheu não está mais disponível. Escolha outro, ou o webhook fica onde está.",
+      "moveNote": "Movê-lo muda apenas para onde vão as próximas mensagens: as que ele já publicou ficam onde estão.",
+      "saving": "Salvando…",
+      "saved": "{{name}} atualizado",
+      "failed": "Falha ao salvar o webhook"
     },
     "reveal": {
       "title": "{{name}} está pronto",

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Hash, Plus, Power, PowerOff, RefreshCw, Trash2, Webhook as WebhookIcon, X } from 'lucide-react';
+import { AlertTriangle, Hash, Pencil, Plus, Power, PowerOff, RefreshCw, Trash2, Webhook as WebhookIcon, X } from 'lucide-react';
 import type { ResourceLimits, Webhook, WebhookCreated, WebhookTarget, WebhookType } from '@voxium/shared';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
@@ -21,6 +21,7 @@ import { getTranslatedError } from '../../utils/serverErrors';
 import { WebhookCreateDialog } from './WebhookCreateDialog';
 import { WebhookCreatedPanel } from './WebhookCreatedPanel';
 import { WebhookDialog } from './WebhookDialog';
+import { WebhookEditDialog, type WebhookEditPatch } from './WebhookEditDialog';
 
 interface Props {
   serverId: string;
@@ -38,21 +39,24 @@ interface Reveal {
 const NO_BUSY: ReadonlySet<string> = new Set();
 
 /**
- * The create picker's channels: the server's answer (what its create check
- * accepts for THIS caller), the store-derived fallback after a failed fetch,
- * or still loading.
+ * The create and edit pickers' channels: the server's answer (what its
+ * create/move check accepts for THIS caller), the store-derived fallback
+ * after a failed fetch, or still loading.
  */
 type Targets = { state: 'loading' } | { state: 'ready'; list: WebhookTarget[] } | { state: 'fallback' };
 
 /**
  * Server settings → Integrations: the server's incoming webhooks (needs
- * MANAGE_WEBHOOKS). The list is the SERVER's: fetched on mount, refetched
- * after every local mutation and on `webhook:changed` for this server (a
- * fellow moderator's edit) or `channel:deleted` (a cascade that emits no
- * hint); the cap reloads with it. Mutation responses are never written into the
- * list — the create and rotate answers are read ONCE, for the token shown in
- * the copy-once panel, and dropped with it. No store: nothing outlives the tab.
- * The create picker's channels are the server's too (`/webhooks/targets`).
+ * MANAGE_WEBHOOKS). The list is the SERVER's: fetched on mount, on
+ * `webhook:changed` for this server (a fellow moderator's change, or this
+ * tab's own) and on `channel:deleted` (a cascade that emits no hint), and
+ * refetched right after a create, rotate, enable/disable or delete; an edit
+ * (rename, move) does not refetch, it waits for the `webhook:changed` its
+ * PATCH emits. The cap reloads with the list. Mutation responses are never
+ * written into it — the create and rotate answers are read ONCE, for the token
+ * shown in the copy-once panel, and dropped with it. No store: nothing
+ * outlives the tab. The create and edit pickers' channels are the server's
+ * too (`/webhooks/targets`).
  */
 export function IntegrationsTab({ serverId }: Props) {
   const { t, i18n } = useTranslation();
@@ -69,6 +73,20 @@ export function IntegrationsTab({ serverId }: Props) {
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
   const [targets, setTargets] = useState<Targets>({ state: 'loading' });
+  // The webhook whose edit dialog is open, by id: the dialog shows the row as
+  // the list has it NOW (a fellow moderator's change reaches it) and closes
+  // when the row leaves the list
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // The same id, current between commits: a save's answer can land after a
+  // refetch closed the dialog but before React committed it, and must then
+  // see it closed. Written ONLY through `setEditing`, never apart from the state.
+  const editingIdRef = useRef<string | null>(null);
+  const setEditing = useCallback((id: string | null) => {
+    editingIdRef.current = id;
+    setEditingId(id);
+  }, []);
+  // A refusal of a save, for the dialog of THAT webhook only
+  const [editError, setEditError] = useState<{ id: string; message: string } | null>(null);
   const [reveal, setReveal] = useState<Reveal | null>(null);
   const [confirmRotate, setConfirmRotate] = useState<Webhook | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Webhook | null>(null);
@@ -105,7 +123,7 @@ export function IntegrationsTab({ serverId }: Props) {
       if (!mounted.current || seq !== capSeq.current) return;
       setMax(data.data.maxWebhooksPerServer);
     } catch (err) {
-      console.warn('[Integrations] Failed to load limits:', err instanceof Error ? err.message : err);
+      console.warn('[Integrations] Failed to load limits:', err instanceof Error ? err.message : String(err));
     }
   }, [serverId]);
 
@@ -116,25 +134,31 @@ export function IntegrationsTab({ serverId }: Props) {
       const list = await listWebhooks(serverId);
       if (!mounted.current || seq !== fetchSeq.current) return;
       setWebhooks(list.webhooks);
+      // The edited webhook left the list (deleted, or moved into a channel
+      // this viewer cannot see): its dialog goes with it
+      const editedId = editingIdRef.current;
+      if (editedId !== null && !list.webhooks.some((w) => w.id === editedId)) setEditing(null);
       setTotal(list.total);
       setLoadFailed(false);
       setOff(false);
     } catch (err) {
       if (!mounted.current || seq !== fetchSeq.current) return;
-      if (isWebhooksOff(err)) { setOff(true); return; }
-      console.warn('[Integrations] Failed to load webhooks:', err instanceof Error ? err.message : err);
+      // The edit dialog does not wait behind the OFF view to reopen when the feature is back
+      if (isWebhooksOff(err)) { setOff(true); setEditing(null); return; }
+      console.warn('[Integrations] Failed to load webhooks:', err instanceof Error ? err.message : String(err));
       toast.error(getTranslatedError(err, t, 'webhooks.failedToLoad'));
       setLoadFailed(true);
     }
-  }, [serverId, t, loadCap]);
+  }, [serverId, t, loadCap, setEditing]);
 
   useEffect(() => { void refetch(); }, [refetch]);
 
-  // The create picker's list, from the server: only the channels this caller
-  // can VIEW and SEND in, which no client-side filter can know (role and
-  // channel overrides). Fetched each time the dialog opens; numbered like the
-  // list. A failure falls back to the visible text channels: the server's
-  // check on the create stays the authority, and its refusal is toasted.
+  // The create and edit pickers' list, from the server: only the channels
+  // this caller can VIEW and SEND in, which no client-side filter can know
+  // (role and channel overrides). Fetched each time a dialog opens; numbered
+  // like the list. A failure falls back to the visible text channels: the
+  // server's check on the create or move stays the authority, and its
+  // refusal is shown.
   const targetsSeq = useRef(0);
   const loadTargets = useCallback(async () => {
     const seq = ++targetsSeq.current;
@@ -146,11 +170,11 @@ export function IntegrationsTab({ serverId }: Props) {
       if (!mounted.current || seq !== targetsSeq.current) return;
       // The flag went off: the tab shows its off state, and the dialog must
       // not stay open on a spinner that nothing will ever resolve
-      if (isWebhooksOff(err)) { setOff(true); setCreating(false); return; }
-      console.warn('[Integrations] Failed to load webhook targets, offering the visible text channels:', err instanceof Error ? err.message : err);
+      if (isWebhooksOff(err)) { setOff(true); setCreating(false); setEditing(null); return; }
+      console.warn('[Integrations] Failed to load webhook targets, offering the visible text channels:', err instanceof Error ? err.message : String(err));
       setTargets({ state: 'fallback' });
     }
-  }, [serverId]);
+  }, [serverId, setEditing]);
 
   const openCreate = () => {
     setTargets({ state: 'loading' });
@@ -158,9 +182,19 @@ export function IntegrationsTab({ serverId }: Props) {
     void loadTargets();
   };
 
-  // Read by the socket handlers below without re-subscribing on every open
-  const creatingRef = useRef(false);
-  useEffect(() => { creatingRef.current = creating; }, [creating]);
+  // The same loader as the create picker: a move is asked exactly what a
+  // create is (text, not secure, VIEW and SEND_MESSAGES on the target)
+  const openEdit = (webhook: Webhook) => {
+    setTargets({ state: 'loading' });
+    setEditError(null);
+    setEditing(webhook.id);
+    void loadTargets();
+  };
+
+  // Read by the socket handlers below without re-subscribing on every open:
+  // whether a picker (create or edit) is on screen
+  const pickerOpenRef = useRef(false);
+  useEffect(() => { pickerOpenRef.current = creating || editingId !== null; }, [creating, editingId]);
 
   // `webhook:changed` is the refetch hint; it reaches the whole server room,
   // so it is filtered to THIS server. Deleting a channel deletes its webhooks
@@ -176,7 +210,7 @@ export function IntegrationsTab({ serverId }: Props) {
       void refetch();
       // The open picker's list is the server's: ask again rather than offer a
       // dead channel (the dialog keeps the current list until the answer)
-      if (creatingRef.current) void loadTargets();
+      if (pickerOpenRef.current) void loadTargets();
     };
     let attached: ReturnType<typeof getSocket> = null;
     const attach = () => {
@@ -192,7 +226,7 @@ export function IntegrationsTab({ serverId }: Props) {
     const unsubscribe = onSocketReconnect(() => {
       attach();
       void refetch();
-      if (creatingRef.current) void loadTargets();
+      if (pickerOpenRef.current) void loadTargets();
     });
     return () => {
       attached?.off('webhook:changed', onChanged);
@@ -211,6 +245,10 @@ export function IntegrationsTab({ serverId }: Props) {
     [serverChannels],
   );
   const channelName = (id: string) => serverChannels.find((c) => c.id === id)?.name ?? null;
+  // What either picker offers: the server's answer, the fallback, or `null` while it loads
+  const pickerChannels = targets.state === 'ready' ? targets.list : targets.state === 'fallback' ? eligibleChannels : null;
+  // The edited webhook as the list has it NOW
+  const editing = editingId !== null && webhooks !== null ? webhooks.find((w) => w.id === editingId) ?? null : null;
 
   // The server's count, not the visible rows: the cap counts webhooks on
   // channels this viewer cannot see too (listWebhooks falls back to the
@@ -253,8 +291,9 @@ export function IntegrationsTab({ serverId }: Props) {
   /** A refusal: the flag-off answer flips the tab to its OFF state, anything else is logged and toasted. */
   const fail = (err: unknown, fallbackKey: string) => {
     if (isWebhooksOff(err)) { setOff(true); return; }
-    // An axios message ("Request failed with status code 404") never carries the token
-    console.warn('[Integrations] Webhook action failed:', err instanceof Error ? err.message : err);
+    // An axios message ("Request failed with status code 404") never carries the
+    // token; the error object itself would (its config holds the Authorization header)
+    console.warn('[Integrations] Webhook action failed:', err instanceof Error ? err.message : String(err));
     toast.error(getTranslatedError(err, t, fallbackKey));
   };
 
@@ -339,6 +378,34 @@ export function IntegrationsTab({ serverId }: Props) {
         clearBusy(webhook.id);
         void refetch();
       }
+    }
+  };
+
+  // A rename and/or a move, the changed fields only. The list is NOT refetched
+  // here and the answer is not written into it: the PATCH emits
+  // `webhook:changed`, whose refetch shows the server's row. A refusal stays
+  // in the dialog, next to the values it refused.
+  const handleEdit = async (webhook: Webhook, patch: WebhookEditPatch) => {
+    markBusy(webhook.id);
+    setEditError(null);
+    try {
+      await updateWebhook(serverId, webhook.id, patch);
+      if (!mounted.current) return;
+      // Only THIS webhook's dialog: the row may have left the list meanwhile
+      // and the user opened another one, which this answer must not close
+      if (editingIdRef.current === webhook.id) setEditing(null);
+      toast.success(t('webhooks.edit.saved', { name: patch.name ?? webhook.name }));
+    } catch (err) {
+      if (!mounted.current) return;
+      if (isWebhooksOff(err)) { setEditing(null); setOff(true); return; }
+      // The message only (never the token); never the error object (its config holds the Authorization header)
+      console.warn('[Integrations] Webhook action failed:', err instanceof Error ? err.message : String(err));
+      const message = getTranslatedError(err, t, 'webhooks.edit.failed');
+      // The dialog may be gone meanwhile (the row left the list): toasted then, never lost
+      if (editingIdRef.current === webhook.id) setEditError({ id: webhook.id, message });
+      else toast.error(message);
+    } finally {
+      if (mounted.current) clearBusy(webhook.id);
     }
   };
 
@@ -517,6 +584,10 @@ export function IntegrationsTab({ serverId }: Props) {
                       </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
+                      {/* Offered on an administrator's lock too: a rename or a move is not an enable */}
+                      <RowAction label={t('webhooks.actions.edit')} disabled={busy} onClick={() => openEdit(w)} testId="webhook-edit">
+                        <Pencil size={14} />
+                      </RowAction>
                       <RowAction label={t('webhooks.actions.rotate')} disabled={busy} onClick={() => setConfirmRotate(w)} testId="webhook-rotate">
                         <RefreshCw size={14} />
                       </RowAction>
@@ -569,10 +640,24 @@ export function IntegrationsTab({ serverId }: Props) {
 
         {creating && (
           <WebhookCreateDialog
-            channels={targets.state === 'ready' ? targets.list : targets.state === 'fallback' ? eligibleChannels : null}
+            channels={pickerChannels}
             busy={createBusy}
             onCreate={(input) => void handleCreate(input)}
             onClose={() => setCreating(false)}
+          />
+        )}
+
+        {editing && (
+          <WebhookEditDialog
+            // One draft per webhook: nothing typed for one ever shows on another
+            key={editing.id}
+            webhook={editing}
+            channels={pickerChannels}
+            busy={busyIds.has(editing.id)}
+            error={editError?.id === editing.id ? editError.message : null}
+            onDismissError={() => setEditError(null)}
+            onSave={(patch) => void handleEdit(editing, patch)}
+            onClose={() => setEditing(null)}
           />
         )}
 

@@ -1366,3 +1366,368 @@ describe('IntegrationsTab — the last rotation', () => {
     expect(inRow('wh-2', 'webhook-name')!.textContent).toBe('Deploy bot');
   });
 });
+
+describe('IntegrationsTab — edit (rename, move)', () => {
+  const AT = '2026-10-18T09:00:00.000Z';
+  const dialog = () => q('[data-testid="webhook-edit-dialog"]');
+  const editName = () => q('[data-testid="webhook-edit-name"]') as HTMLInputElement;
+  const editChannel = () => q('[data-testid="webhook-edit-channel"]') as HTMLSelectElement;
+  const editSave = () => q('[data-testid="webhook-edit-save"]') as HTMLButtonElement;
+  const editOptions = () => [...editChannel().options].map((o) => [o.value, o.textContent]);
+  const deletedHandler = () => socket.on.mock.calls.filter(([e]) => e === 'channel:deleted').map(([, h]) => h as (d: { channelId: string; serverId: string }) => void)[0];
+  const saved = (extra: Partial<Webhook>) => ({ data: { success: true, data: hook('wh-1', extra) } });
+
+  it('every row offers it, named for assistive tech, an administrator-locked one too', async () => {
+    list = [hook('wh-1'), hook('wh-2', { enabled: false, adminDisabledAt: AT })];
+    await render();
+    for (const id of ['wh-1', 'wh-2']) {
+      const edit = inRow(id, 'webhook-edit') as HTMLButtonElement;
+      expect(edit.getAttribute('aria-label')).toBe('webhooks.actions.edit');
+      expect(edit.disabled).toBe(false);
+    }
+    // the lock still holds the enable
+    expect((inRow('wh-2', 'webhook-toggle') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('opens on the row with the targets fetched then (not before): the name prefilled, the current channel selected and marked', async () => {
+    await render();
+    expect(targetsCalls()).toBe(0);
+    await click(inRow('wh-1', 'webhook-edit'));
+    expect(targetsCalls()).toBe(1);
+    expect(dialog()).not.toBeNull();
+    expect(editName().value).toBe('CI');
+    expect(document.activeElement).toBe(editName());
+    expect(editChannel().value).toBe('ch-1');
+    expect(editOptions()).toEqual([['ch-1', 'webhooks.edit.current{"channel":"#general"}'], ['ch-2', '#deploys']]);
+    expect(editSave().disabled).toBe(true);
+    // nothing token-shaped on the way
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('while the targets load: the current channel alone and a status line; the answer fills the list', async () => {
+    let answer!: (v: unknown) => void;
+    targetsAnswer = () => new Promise((r) => { answer = r; });
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    expect(q('[data-testid="webhook-edit-channels-loading"]')).not.toBeNull();
+    expect(editOptions()).toEqual([['ch-1', 'webhooks.edit.current{"channel":"#general"}']]);
+    await act(async () => { answer({ data: { success: true, data: [target('ch-1', 'general'), target('ch-2', 'deploys', 1)] } }); });
+    await flush();
+    expect(q('[data-testid="webhook-edit-channels-loading"]')).toBeNull();
+    expect(editOptions()).toEqual([['ch-1', 'webhooks.edit.current{"channel":"#general"}'], ['ch-2', '#deploys']]);
+  });
+
+  it('the current channel the caller may no longer bind stays on offer, first and marked', async () => {
+    targets = [target('ch-2', 'deploys')];
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    expect(editOptions()).toEqual([['ch-1', 'webhooks.edit.current{"channel":"#general"}'], ['ch-2', '#deploys']]);
+    expect(editChannel().options[0].getAttribute('data-current')).toBe('true');
+    expect(editChannel().value).toBe('ch-1');
+  });
+
+  it('a failed targets fetch falls back to the visible plaintext text channels (logged, not toasted)', async () => {
+    targetsAnswer = () => Promise.reject(axiosError(500, 'boom'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    expect(editOptions()).toEqual([['ch-1', 'webhooks.edit.current{"channel":"#general"}'], ['ch-2', '#deploys']]);
+    expect(toastError).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('a rename PATCHes { name } only, closes, toasts, and the list waits for webhook:changed (the answer is never written into it)', async () => {
+    // the PATCH answers the renamed row: it must not reach the list
+    mockPatch.mockResolvedValue(saved({ name: 'Nightly' }));
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), '  Nightly ');
+    await click(editSave());
+    expect(mockPatch).toHaveBeenCalledTimes(1);
+    expect(mockPatch.mock.calls[0]).toStrictEqual(['/servers/srv-1/webhooks/wh-1', { name: 'Nightly' }]);
+    expect(dialog()).toBeNull();
+    expect(toastSuccess).toHaveBeenCalledWith('webhooks.edit.saved{"name":"Nightly"}');
+    expect(inRow('wh-1', 'webhook-name')!.textContent).toBe('CI');
+    expect(listCalls()).toBe(1);
+
+    // the hint the PATCH emitted: the refetch shows the server's row
+    list = [hook('wh-1', { name: 'Nightly' }), list[1]];
+    const [handler] = changedHandlers();
+    await act(async () => { handler({ serverId: 'srv-1' }); });
+    await flush();
+    expect(listCalls()).toBe(2);
+    expect(inRow('wh-1', 'webhook-name')!.textContent).toBe('Nightly');
+  });
+
+  it('a move PATCHes { channelId } only; the toast names the webhook as it is', async () => {
+    mockPatch.mockResolvedValue(saved({ channelId: 'ch-2' }));
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await pick(editChannel(), 'ch-2');
+    await click(editSave());
+    expect(mockPatch.mock.calls[0]).toStrictEqual(['/servers/srv-1/webhooks/wh-1', { channelId: 'ch-2' }]);
+    expect(dialog()).toBeNull();
+    expect(toastSuccess).toHaveBeenCalledWith('webhooks.edit.saved{"name":"CI"}');
+    expect(inRow('wh-1', 'webhook-channel')!.textContent).toBe('general');
+    expect(listCalls()).toBe(1);
+  });
+
+  it('both changed: one PATCH with both', async () => {
+    mockPatch.mockResolvedValue(saved({ name: 'Deploys', channelId: 'ch-2' }));
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), 'Deploys');
+    await pick(editChannel(), 'ch-2');
+    await click(editSave());
+    expect(mockPatch.mock.calls[0]).toStrictEqual(['/servers/srv-1/webhooks/wh-1', { name: 'Deploys', channelId: 'ch-2' }]);
+  });
+
+  it('an invalid name never reaches the server', async () => {
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), '   ');
+    await click(editSave());
+    expect(mockPatch).not.toHaveBeenCalled();
+    expect(q('[data-testid="webhook-edit-name-error"]')!.textContent).toMatch(/^serverErrors\.webhookNameEmpty\{/);
+    expect(dialog()).not.toBeNull();
+  });
+
+  it.each([
+    [403, 'You do not have permission to send messages in this channel', 'noPermissionSendMessages'],
+    [404, 'Channel not found', 'channelNotFound'],
+    [400, 'Webhooks can only post to text channels', 'webhookTextOnly'],
+  ])('a %i refusal of the move ("%s") stays in the open dialog, inline and translated, never toasted', async (status, error, mapped) => {
+    mockPatch.mockRejectedValue(axiosError(status, error));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await pick(editChannel(), 'ch-2');
+    await click(editSave());
+    expect(dialog()).not.toBeNull();
+    const inline = q('[data-testid="webhook-edit-error"]')!;
+    expect(inline.textContent).toMatch(new RegExp(`^serverErrors\\.${mapped}\\{`));
+    expect(inline.getAttribute('role')).toBe('alert');
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
+    // logged with the message only
+    expect(warn).toHaveBeenCalledWith('[Integrations] Webhook action failed:', 'Request failed');
+    // the request is over: the draft is still there, Save can try again
+    expect(editChannel().value).toBe('ch-2');
+    expect(editSave().disabled).toBe(false);
+    expect((inRow('wh-1', 'webhook-edit') as HTMLButtonElement).disabled).toBe(false);
+    warn.mockRestore();
+  });
+
+  it('a refusal goes when a field changes, and is not there on the next opening', async () => {
+    mockPatch.mockRejectedValue(axiosError(403, 'You do not have permission to send messages in this channel'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await pick(editChannel(), 'ch-2');
+    await click(editSave());
+    expect(q('[data-testid="webhook-edit-error"]')).not.toBeNull();
+    await type(editName(), 'Renamed');
+    expect(q('[data-testid="webhook-edit-error"]')).toBeNull();
+
+    await click(editSave());
+    expect(q('[data-testid="webhook-edit-error"]')).not.toBeNull();
+    await key('Escape');
+    expect(dialog()).toBeNull();
+    await click(inRow('wh-1', 'webhook-edit'));
+    expect(q('[data-testid="webhook-edit-error"]')).toBeNull();
+    // and a fresh draft
+    expect(editName().value).toBe('CI');
+    warn.mockRestore();
+  });
+
+  it('the webhooks-off 403 closes the dialog and shows the OFF state, with no toast; it does not come back with the feature', async () => {
+    mockPatch.mockRejectedValue(axiosError(403, 'Webhooks are currently disabled'));
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), 'Nightly');
+    await click(editSave());
+    expect(q('[data-testid="integrations-off"]')).not.toBeNull();
+    expect(dialog()).toBeNull();
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
+
+    // back on (a reconnect refetches): the tab returns, the dialog does not
+    await act(async () => { reconnect.callbacks[0](); });
+    await flush();
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+    expect(dialog()).toBeNull();
+  });
+
+  it('the flag-off 403 on the targets fetch closes it too; the feature coming back does not reopen it', async () => {
+    targetsAnswer = () => Promise.reject(axiosError(403, 'Webhooks are currently disabled'));
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    expect(q('[data-testid="integrations-off"]')).not.toBeNull();
+    expect(dialog()).toBeNull();
+
+    // back on: a reconnect refetches, the tab returns without the dialog
+    targetsAnswer = null;
+    await act(async () => { reconnect.callbacks[0](); });
+    await flush();
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+    expect(dialog()).toBeNull();
+  });
+
+  it('a list refetch answering the flag-off 403 closes it too; the feature coming back does not reopen it', async () => {
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), 'Nightly');
+    listAnswer = () => Promise.reject(axiosError(403, 'Webhooks are currently disabled'));
+    const [handler] = changedHandlers();
+    await act(async () => { handler({ serverId: 'srv-1' }); });
+    await flush();
+    expect(q('[data-testid="integrations-off"]')).not.toBeNull();
+    expect(dialog()).toBeNull();
+
+    listAnswer = null;
+    await act(async () => { reconnect.callbacks[0](); });
+    await flush();
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+    expect(row('wh-1')).not.toBeNull();
+    expect(dialog()).toBeNull();
+    expect(mockPatch).not.toHaveBeenCalled();
+  });
+
+  it('busy while the PATCH is in flight: Save disabled, the fields frozen, Escape keeps it open, the row\'s actions wait', async () => {
+    let answer!: (v: unknown) => void;
+    mockPatch.mockImplementation(() => new Promise((r) => { answer = r; }));
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), 'Nightly');
+    await click(editSave());
+    expect(editSave().disabled).toBe(true);
+    expect(editSave().textContent).toBe('webhooks.edit.saving');
+    expect(editName().readOnly).toBe(true);
+    expect(editChannel().getAttribute('aria-disabled')).toBe('true');
+    expect((inRow('wh-1', 'webhook-rotate') as HTMLButtonElement).disabled).toBe(true);
+    await key('Escape');
+    expect(dialog()).not.toBeNull();
+    await act(async () => { answer(saved({ name: 'Nightly' })); });
+    await flush();
+    expect(dialog()).toBeNull();
+    expect((inRow('wh-1', 'webhook-rotate') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('channel:deleted and a reconnect while it is open ask for the targets again; once closed, they do not', async () => {
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await pick(editChannel(), 'ch-2');
+    targets = [target('ch-1', 'general')];
+    await act(async () => { deletedHandler()({ channelId: 'ch-2', serverId: 'srv-1' }); });
+    await flush();
+    expect(targetsCalls()).toBe(2);
+    // the picked channel is gone: back to staying put, nothing to save, and the dialog says so
+    expect(editChannel().value).toBe('ch-1');
+    expect(editSave().disabled).toBe(true);
+    expect(q('[data-testid="webhook-edit-pick-gone"]')!.textContent).toBe('webhooks.edit.pickGone');
+    await act(async () => { reconnect.callbacks[0](); });
+    await flush();
+    expect(targetsCalls()).toBe(3);
+
+    await key('Escape');
+    await act(async () => { deletedHandler()({ channelId: 'ch-1', serverId: 'srv-1' }); });
+    await act(async () => { reconnect.callbacks[0](); });
+    await flush();
+    expect(targetsCalls()).toBe(3);
+  });
+
+  it("follows the row: a fellow moderator's rename reaches the untouched name, and a row that leaves the list closes the dialog", async () => {
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    const [handler] = changedHandlers();
+    list = [hook('wh-1', { name: 'CI v2' }), list[1]];
+    await act(async () => { handler({ serverId: 'srv-1' }); });
+    await flush();
+    expect(editName().value).toBe('CI v2');
+    expect(editSave().disabled).toBe(true);
+
+    // deleted, or moved into a channel this viewer cannot see
+    list = [list[1]];
+    await act(async () => { handler({ serverId: 'srv-1' }); });
+    await flush();
+    expect(dialog()).toBeNull();
+    expect(q('[data-testid="webhook-row-wh-1"]')).toBeNull();
+  });
+
+  it('a refusal that lands after the row left the list is toasted, not lost', async () => {
+    let fail!: (e: unknown) => void;
+    mockPatch.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), 'Nightly');
+    await click(editSave());
+    list = [list[1]];
+    const [handler] = changedHandlers();
+    await act(async () => { handler({ serverId: 'srv-1' }); });
+    await flush();
+    expect(dialog()).toBeNull();
+    await act(async () => { fail(axiosError(404, 'Webhook not found')); });
+    await flush();
+    expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/^serverErrors\.webhookNotFound\{/));
+    warn.mockRestore();
+  });
+
+  it('a refusal landing in the same tick as the refetch that closed the dialog (before React commits) is toasted too', async () => {
+    let fail!: (e: unknown) => void;
+    mockPatch.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), 'Nightly');
+    await click(editSave());
+    list = [list[1]];
+    const [handler] = changedHandlers();
+    // one act scope: the refetch's close and the rejection both run before any commit
+    await act(async () => {
+      handler({ serverId: 'srv-1' });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      fail(axiosError(404, 'Webhook not found'));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    await flush();
+    expect(dialog()).toBeNull();
+    expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/^serverErrors\.webhookNotFound\{/));
+    warn.mockRestore();
+  });
+
+  it("a save's answer closes only its own dialog: wh-1 left the list, wh-2's dialog opened meanwhile keeps its draft", async () => {
+    let answer!: (v: unknown) => void;
+    mockPatch.mockImplementation(() => new Promise((r) => { answer = r; }));
+    await render();
+    await click(inRow('wh-1', 'webhook-edit'));
+    await type(editName(), 'Nightly');
+    await click(editSave());
+    list = [list[1]];
+    const [handler] = changedHandlers();
+    await act(async () => { handler({ serverId: 'srv-1' }); });
+    await flush();
+    expect(dialog()).toBeNull();
+
+    await click(inRow('wh-2', 'webhook-edit'));
+    await type(editName(), 'Deploy bot 2');
+    await act(async () => { answer(saved({ name: 'Nightly' })); });
+    await flush();
+    expect(toastSuccess).toHaveBeenCalledWith('webhooks.edit.saved{"name":"Nightly"}');
+    expect(dialog()).not.toBeNull();
+    expect(editName().value).toBe('Deploy bot 2');
+    expect(editSave().disabled).toBe(false);
+  });
+
+  it('Escape closes it and focus returns to its Edit button', async () => {
+    await render();
+    const opener = inRow('wh-1', 'webhook-edit')!;
+    opener.focus();
+    await click(opener);
+    expect(document.activeElement).toBe(editName());
+    await key('Escape');
+    expect(dialog()).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    expect(mockPatch).not.toHaveBeenCalled();
+  });
+});

@@ -17,6 +17,9 @@ import { WEBHOOK_ERROR_KEYS } from '../../utils/serverErrors';
 const SOURCES = [
   fileURLToPath(new URL('../../components/server/IntegrationsTab.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/WebhookCreateDialog.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/server/WebhookEditDialog.tsx', import.meta.url)),
+  // the name field both dialogs share (its label comes from the caller today)
+  fileURLToPath(new URL('../../components/server/WebhookNameField.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/WebhookCreatedPanel.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/WebhookDialog.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/ServerSettingsModal.tsx', import.meta.url)),
@@ -121,6 +124,7 @@ describe('incoming-webhook translation keys', () => {
     expect(keys).toContain('webhooks.off.title');                     // its OFF state
     expect(keys).toContain('webhooks.delete.deletedMessages');        // the delete confirm (plural)
     expect(keys).toContain('webhooks.create.typeGithubHint');         // the create dialog
+    expect(keys).toContain('webhooks.edit.moveNote');                 // the edit dialog
     expect(keys).toContain('webhooks.reveal.copyNow');                // the copy-once panel
     expect(keys).toContain('webhooks.reveal.invalidUrl');             // a malformed create/rotate answer
     expect(keys).toContain('messageItem.appTag');                     // AppTag / the notification marker

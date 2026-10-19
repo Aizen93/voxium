@@ -1550,6 +1550,7 @@
     "creatorRemoved": "Désactivé le {{date}} : le membre qui détenait son URL a été retiré du serveur. Quiconque détient encore l’URL pourrait publier avec ; renouvelez l’URL avant de le réactiver.",
     "creatorRemovedUndated": "Désactivé : le membre qui détenait son URL a été retiré du serveur. Quiconque détient encore l’URL pourrait publier avec ; renouvelez l’URL avant de le réactiver.",
     "actions": {
+      "edit": "Modifier",
       "rotate": "Renouveler l’URL",
       "enable": "Activer",
       "disable": "Désactiver",
@@ -1569,6 +1570,19 @@
       "submit": "Créer le webhook",
       "creating": "Création…",
       "failed": "Impossible de créer le webhook"
+    },
+    "edit": {
+      "title": "Modifier le webhook",
+      "description": "Son URL ne change pas : les outils qui l’utilisent n’ont rien à mettre à jour.",
+      "name": "Nom",
+      "channel": "Salon",
+      "current": "{{channel}} (actuel)",
+      "loadingChannels": "Chargement des salons…",
+      "pickGone": "Le salon choisi n’est plus disponible. Choisissez-en un autre, sinon le webhook reste où il est.",
+      "moveNote": "Le déplacer ne change que la destination de ses prochains messages : ceux qu’il a déjà publiés restent où ils sont.",
+      "saving": "Enregistrement…",
+      "saved": "{{name}} mis à jour",
+      "failed": "Impossible d’enregistrer le webhook"
     },
     "reveal": {
       "title": "{{name}} est prêt",

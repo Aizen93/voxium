@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { AxiosError } from 'axios';
+import { AxiosError, AxiosHeaders, type InternalAxiosRequestConfig } from 'axios';
 import type { AdminServer, AdminWebhook } from '@voxium/shared';
 
 /**
@@ -250,5 +250,55 @@ describe('adminStore — server webhooks (moderation)', () => {
     api.delete.mockRejectedValueOnce(new Error('network'));
     await useAdminStore.getState().deleteServerWebhook('wh-1', false);
     expect(toast.error).toHaveBeenLastCalledWith('Failed to delete the webhook');
+  });
+});
+
+describe('adminStore — a failed request logs a sentence, never the request', () => {
+  // An axios error carries its request config, and the admin's token rides in
+  // its headers: what reaches the console must be text, never that object.
+  const config: InternalAxiosRequestConfig = { headers: new AxiosHeaders({ Authorization: 'Bearer SECRET' }) };
+  const serverRefusal = () => new AxiosError('Request failed with status code 500', 'ERR_BAD_RESPONSE', config, undefined, {
+    status: 500, statusText: '', headers: {}, config, data: { success: false, error: 'Internal server error' },
+  });
+  const networkFailure = () => new AxiosError('Network Error', 'ERR_NETWORK', config);
+  // Not an Error at all, yet holding the same config: the fallback must not print it either
+  const bareObject = () => ({ config, response: { status: 500, config } });
+
+  beforeEach(() => {
+    useAdminStore.setState({ serverWebhooksServerId: null });
+  });
+
+  const SITES = [
+    { label: 'Failed to fetch users:', method: 'get', run: () => useAdminStore.getState().fetchUsers(1) },
+    { label: 'Failed to fetch servers:', method: 'get', run: () => useAdminStore.getState().fetchServers(1) },
+    { label: 'Failed to fetch server webhooks:', method: 'get', run: () => useAdminStore.getState().fetchServerWebhooks('srv-1') },
+    { label: 'Failed to update webhook:', method: 'patch', run: () => useAdminStore.getState().setServerWebhookEnabled('wh-1', false) },
+    { label: 'Failed to delete webhook:', method: 'delete', run: () => useAdminStore.getState().deleteServerWebhook('wh-1', false) },
+    { label: '[Admin] Failed to fetch infrastructure servers:', method: 'get', run: () => useAdminStore.getState().fetchInfraServers() },
+  ] as const;
+
+  it.each(SITES)('$label logs the reason as a string without the Bearer token', async ({ label, method, run }) => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    api[method].mockRejectedValueOnce(serverRefusal());
+    await run();
+    expect(spy).toHaveBeenLastCalledWith(label, 'Internal server error');
+
+    api[method].mockRejectedValueOnce(networkFailure());
+    await run();
+    expect(spy).toHaveBeenLastCalledWith(label, 'Network Error');
+
+    api[method].mockRejectedValueOnce(bareObject());
+    await run();
+    expect(spy).toHaveBeenLastCalledWith(label, expect.any(String));
+
+    expect(spy).toHaveBeenCalledTimes(3);
+    for (const args of spy.mock.calls) {
+      for (const arg of args) {
+        expect(typeof arg).toBe('string');
+        expect(arg).not.toContain('Bearer');
+        expect(arg).not.toContain('SECRET');
+      }
+    }
   });
 });

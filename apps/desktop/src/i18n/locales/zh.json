@@ -1543,6 +1543,7 @@
     "creatorRemoved": "已于 {{date}} 停用：持有此 URL 的成员已被移出服务器。仍持有该 URL 的人都可以用它发帖；启用前请先更换 URL。",
     "creatorRemovedUndated": "已停用：持有此 URL 的成员已被移出服务器。仍持有该 URL 的人都可以用它发帖；启用前请先更换 URL。",
     "actions": {
+      "edit": "编辑",
       "rotate": "重新生成 URL",
       "enable": "启用",
       "disable": "停用",
@@ -1562,6 +1563,19 @@
       "submit": "创建 Webhook",
       "creating": "创建中…",
       "failed": "无法创建 Webhook"
+    },
+    "edit": {
+      "title": "编辑 Webhook",
+      "description": "它的 URL 保持不变，使用它的工具无需任何更改。",
+      "name": "名称",
+      "channel": "频道",
+      "current": "{{channel}}（当前）",
+      "loadingChannels": "正在加载频道…",
+      "pickGone": "你选择的频道已不可用。请另选一个频道，否则 Webhook 将留在原处。",
+      "moveNote": "移动只会改变它之后消息的发布位置，已发布的消息仍留在原处。",
+      "saving": "正在保存…",
+      "saved": "已更新 {{name}}",
+      "failed": "无法保存 Webhook"
     },
     "reveal": {
       "title": "{{name}} 已就绪",

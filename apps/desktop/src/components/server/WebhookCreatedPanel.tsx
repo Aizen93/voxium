@@ -46,7 +46,7 @@ export function WebhookCreatedPanel({ name, url, secret, rotated = false, onClos
       await copyToClipboard(text);
       toast.success(t('webhooks.reveal.copied'));
     } catch (err) {
-      console.warn('[Integrations] Clipboard write failed:', err instanceof Error ? err.message : err);
+      console.warn('[Integrations] Clipboard write failed:', err instanceof Error ? err.message : String(err));
       toast.error(t('webhooks.reveal.copyFailed'));
     }
   };

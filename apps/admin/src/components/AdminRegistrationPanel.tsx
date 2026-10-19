@@ -3,6 +3,7 @@ import { UserPlus, RefreshCw, AlertTriangle, Trash2, Eye } from 'lucide-react';
 import { api } from '../services/api';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { toast } from '../stores/toastStore';
+import { logMessage } from '../utils/apiError';
 
 interface RegistrationStats {
   lastHour: number;
@@ -61,7 +62,7 @@ export function AdminRegistrationPanel() {
       setStats(statsRes.data.data);
       setHygiene(hygieneRes.data.data);
     } catch (err) {
-      console.error('Failed to load registration stats:', err);
+      console.error('Failed to load registration stats:', logMessage(err));
     } finally {
       setRefreshing(false);
     }
