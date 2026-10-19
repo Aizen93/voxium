@@ -18,6 +18,8 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
 const prismaMock: Record<string, any> = {
+  // the platform-ban disarm (utils/webhookLifecycle.ts): holds none unless a test says so
+  webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
   serverJoinRequest: { findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn().mockReturnValue({ op: 'request.deleteMany' }) },
   user: {
     findUnique: vi.fn(),
@@ -195,8 +197,42 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     prismaMock.serverMember.findMany.mockResolvedValue([]);
     prismaMock.ipRecord.findMany.mockResolvedValue([]);
     prismaMock.ipBan.createMany.mockResolvedValue({ count: 0 });
+    prismaMock.webhook.findMany.mockResolvedValue([]);
+    prismaMock.webhook.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.$transaction.mockImplementation((ops: Promise<unknown>[]) => Promise.all(ops));
     app = createApp();
+  });
+
+  it('disarms the incoming-webhook URLs the banned account holds, in every server, and tells those servers', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.webhook.findMany.mockResolvedValue([{ serverId: 's-1' }, { serverId: 's-2' }]);
+    prismaMock.webhook.updateMany.mockResolvedValue({ count: 3 });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledWith({
+      where: { OR: [{ lastRotatedById: 'target-1' }, { lastRotatedAt: null, createdById: 'target-1' }] },
+      data: { enabled: false, creatorRemovedAt: expect.any(Date) },
+    });
+    expect(mockTo).toHaveBeenCalledWith('server:s-1');
+    expect(mockTo).toHaveBeenCalledWith('server:s-2');
+    expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 's-1' });
+    expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 's-2' });
+  });
+
+  it('a banned account holding no webhook: nothing written, nothing told', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalledWith('webhook:changed', expect.anything());
   });
 
   it('banIps=true bans account + all known IPs in ONE transaction', async () => {

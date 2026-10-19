@@ -14,9 +14,12 @@ const txMock = {
 };
 
 const prismaMock: Record<string, any> = {
-  // The one write on the root client is the disable committed BEFORE the
-  // transaction; every statement of the delete itself runs on the tx client
-  webhook: { updateMany: vi.fn() },
+  // On the root client: the disable committed BEFORE the transaction, the
+  // history batches (each statement its own short transaction) and the
+  // platform-ban disarm; the locked delete itself runs on the tx client
+  webhook: { updateMany: vi.fn(), findMany: vi.fn() },
+  $executeRaw: vi.fn(),
+  $queryRaw: vi.fn(),
   $transaction: vi.fn(),
 };
 vi.mock('../../utils/prisma', () => ({
@@ -38,6 +41,7 @@ import {
   emitWebhookChanged,
   deleteWebhookWithPurge,
   emitWebhookDeletion,
+  disarmWebhooksHeldBy,
   type WebhookDeletion,
 } from '../../utils/webhookLifecycle';
 
@@ -49,6 +53,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.emitted.length = 0;
   prismaMock.webhook.updateMany.mockResolvedValue({ count: 1 });
+  prismaMock.webhook.findMany.mockResolvedValue([]);
+  // the history batches: nothing to detach or delete unless a test says so
+  prismaMock.$executeRaw.mockResolvedValue(0);
+  prismaMock.$queryRaw.mockResolvedValue([]);
   prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof txMock) => unknown) => cb(txMock));
   txMock.$queryRaw.mockResolvedValue([{ id: 'wh-1' }]);
   txMock.webhook.findUnique.mockResolvedValue(LOCKED_ROW);
@@ -252,6 +260,84 @@ describe('deleteWebhookWithPurge', () => {
     txMock.message.deleteMany.mockResolvedValue({ count: 3 });
     txMock.webhook.delete.mockRejectedValue(new Error('deadlock'));
     await expect(deleteWebhookWithPurge('wh-1', true)).rejects.toThrow('deadlock');
+    expect(h.emitted).toHaveLength(0);
+  });
+});
+
+describe('deleteWebhookWithPurge — the history goes in batches with no lock held', () => {
+  const sqlOf = (call: unknown[]) => (call[0] as string[]).join('?').replace(/\s+/g, ' ').trim();
+
+  it('without purge: detaches 5000 rows per UPDATE until one changes nothing, all BEFORE the transaction, none inside it', async () => {
+    prismaMock.$executeRaw.mockResolvedValueOnce(5000).mockResolvedValueOnce(5000).mockResolvedValueOnce(120).mockResolvedValueOnce(0);
+    const result = await deleteWebhookWithPurge('wh-1', false);
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(4);
+    const [strings, ...values] = prismaMock.$executeRaw.mock.calls[0];
+    expect(sqlOf([strings])).toBe('UPDATE messages SET webhook_id = NULL WHERE id IN (SELECT id FROM messages WHERE webhook_id = ? LIMIT ?)');
+    expect(values).toEqual(['wh-1', 5000]);
+    const lastBatch = prismaMock.$executeRaw.mock.invocationCallOrder[3];
+    expect(lastBatch).toBeLessThan(prismaMock.$transaction.mock.invocationCallOrder[0]);
+    // the disable is committed before the first batch
+    expect(prismaMock.webhook.updateMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.$executeRaw.mock.invocationCallOrder[0]);
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+    expect(result!.deletedMessages).toBe(0);
+    expect(result!.perChannel).toEqual([]);
+  });
+
+  it('with purge: deletes in batches RETURNING channel_id until none, and the receipts merge the batches with what the transaction still found', async () => {
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ channel_id: 'ch-1' }, { channel_id: 'ch-1' }, { channel_id: 'ch-old' }, { channel_id: null }])
+      .mockResolvedValueOnce([{ channel_id: 'ch-1' }])
+      .mockResolvedValueOnce([]);
+    // one row landed between the batches and the lock
+    txMock.message.groupBy.mockResolvedValue([{ channelId: 'ch-1', _count: { _all: 1 } }]);
+    txMock.message.deleteMany.mockResolvedValue({ count: 1 });
+
+    const result = await deleteWebhookWithPurge('wh-1', true);
+
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(3);
+    const [strings, ...values] = prismaMock.$queryRaw.mock.calls[0];
+    expect(sqlOf([strings])).toBe('DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE webhook_id = ? LIMIT ?) RETURNING channel_id');
+    expect(values).toEqual(['wh-1', 5000]);
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
+    expect(result!.deletedMessages).toBe(5);
+    expect(result!.perChannel).toEqual([{ channelId: 'ch-1', count: 4 }, { channelId: 'ch-old', count: 1 }]);
+  });
+
+  it('a failing batch aborts before the lock (the webhook stays disabled, nothing announced)', async () => {
+    prismaMock.$executeRaw.mockRejectedValueOnce(new Error('db down'));
+    await expect(deleteWebhookWithPurge('wh-1', false)).rejects.toThrow('db down');
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+  });
+});
+
+describe('disarmWebhooksHeldBy — a platform ban stops the URLs the account holds', () => {
+  const HELD = { OR: [{ lastRotatedById: 'u-1' }, { lastRotatedAt: null, createdById: 'u-1' }] };
+
+  it('disables and marks every held webhook in every server (enabled or not), then one refetch hint per server', async () => {
+    prismaMock.webhook.findMany.mockResolvedValue([{ serverId: 'srv-1' }, { serverId: 'srv-2' }]);
+    prismaMock.webhook.updateMany.mockResolvedValue({ count: 3 });
+
+    const servers = await disarmWebhooksHeldBy('u-1');
+
+    expect(prismaMock.webhook.findMany).toHaveBeenCalledWith({ where: HELD, select: { serverId: true }, distinct: ['serverId'] });
+    const args = prismaMock.webhook.updateMany.mock.calls[0][0];
+    expect(args.where).toEqual(HELD);
+    expect(args.data.enabled).toBe(false);
+    expect(args.data.creatorRemovedAt).toBeInstanceOf(Date);
+    expect(JSON.stringify(args.where)).not.toContain('enabled');
+    expect(servers).toEqual(['srv-1', 'srv-2']);
+    expect(h.emitted).toEqual([
+      { room: 'server:srv-1', event: 'webhook:changed', payload: { serverId: 'srv-1' } },
+      { room: 'server:srv-2', event: 'webhook:changed', payload: { serverId: 'srv-2' } },
+    ]);
+  });
+
+  it('holds none: no write, no event', async () => {
+    const servers = await disarmWebhooksHeldBy('u-9');
+    expect(servers).toEqual([]);
+    expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
     expect(h.emitted).toHaveLength(0);
   });
 });

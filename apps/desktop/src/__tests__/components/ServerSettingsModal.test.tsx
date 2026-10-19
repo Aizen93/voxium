@@ -31,7 +31,18 @@ vi.mock('../../stores/toastStore', () => ({ toast: { success: vi.fn(), error: vi
 vi.mock('../../components/common/ImageUploadButton', () => ({ ImageUploadButton: () => null }));
 vi.mock('../../components/server/RoleEditor', () => ({ RoleEditor: () => null }));
 vi.mock('../../components/server/DiscoveryTab', () => ({ DiscoveryTab: () => <div data-testid="discovery-tab" /> }));
-vi.mock('../../components/server/IntegrationsTab', () => ({ IntegrationsTab: () => <div data-testid="integrations-tab" /> }));
+// The Integrations tab counts its mounts: the copy-once token lives in its
+// state, so a remount across a permission refetch would lose it
+const tabCounts = vi.hoisted(() => ({ mount: 0, unmount: 0 }));
+vi.mock('../../components/server/IntegrationsTab', async () => {
+  const { useEffect } = await import('react');
+  return {
+    IntegrationsTab: () => {
+      useEffect(() => { tabCounts.mount++; return () => { tabCounts.unmount++; }; }, []);
+      return <div data-testid="integrations-tab" />;
+    },
+  };
+});
 vi.mock('../../components/server/JoinRequestsSection', () => ({ JoinRequestsSection: () => <div data-testid="join-requests" /> }));
 vi.mock('../../components/server/BannedSection', () => ({ BannedSection: () => <div data-testid="banned-section" /> }));
 vi.mock('../../components/server/MembersDirectory', () => ({ MembersDirectory: () => <div data-testid="members-directory" /> }));
@@ -86,6 +97,8 @@ async function render() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  tabCounts.mount = 0;
+  tabCounts.unmount = 0;
   // The hook caches an answer per account, server and fingerprint: a test must never see the previous one's
   resetServerPermissionsCache();
   useServerStore.setState({
@@ -356,5 +369,70 @@ describe('ServerSettingsModal — a picked tab holds only while it is permitted'
     await act(async () => { q('[data-testid="tab-integrations"]')!.click(); });
     await revokeTo(start | Permissions.SEND_MESSAGES);
     expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+  });
+});
+
+describe('ServerSettingsModal — a live permission edit never remounts the open Integrations tab', () => {
+  type RoleRow = import('@voxium/shared').Role;
+  const role = (bits: bigint): RoleRow => ({
+    id: 'r-hooks', serverId: 'srv-1', name: 'Integrators', color: null, position: 1, permissions: bits.toString(), isDefault: false, createdAt: '2026-10-01T00:00:00.000Z',
+  } as unknown as RoleRow);
+  const viewer = (r: RoleRow): ServerMember => ({ ...member('me', 'member'), roles: [r] } as ServerMember);
+
+  /** The permissions GET answers `bits`; while `hold` is set, the answer waits until release() */
+  function permissionsAnswering(bits: () => bigint, hold: { release: (() => void) | null; pending: boolean }) {
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes('/roles/permissions/effective')) {
+        const answer = { data: { data: { permissions: bits().toString() } } };
+        if (!hold.pending) return Promise.resolve(answer);
+        return new Promise((resolve) => { hold.release = () => resolve(answer); });
+      }
+      if (url.endsWith('/join-requests')) return Promise.resolve({ data: { data: [], total: 0, hasMore: false } });
+      if (url.endsWith('/limits')) return Promise.resolve({ data: { success: true, data: LIMITS_ANSWER } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+  }
+
+  it('a role edit that KEEPS Manage Webhooks leaves the tab mounted while the refetch is in flight (the copy-once token survives)', async () => {
+    let bits = Permissions.VIEW_CHANNEL | Permissions.MANAGE_WEBHOOKS;
+    const hold = { release: null as (() => void) | null, pending: false };
+    permissionsAnswering(() => bits, hold);
+    useServerStore.setState({ roles: [role(bits)], members: [member('owner-1', 'owner'), viewer(role(bits))] });
+    await render();
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+    expect(tabCounts).toEqual({ mount: 1, unmount: 0 });
+
+    // Another admin adds SEND_MESSAGES to the viewer's role: the fingerprint changes, the refetch is slow
+    bits = bits | Permissions.SEND_MESSAGES;
+    hold.pending = true;
+    await act(async () => { useServerStore.setState({ roles: [role(bits)], members: [member('owner-1', 'owner'), viewer(role(bits))] }); });
+    expect(q('[data-testid="integrations-tab"]'), 'still the Integrations tab while the answer is pending').not.toBeNull();
+    expect(q('[data-testid="members-directory"]')).toBeNull();
+    expect(tabCounts).toEqual({ mount: 1, unmount: 0 });
+
+    await act(async () => { hold.release!(); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+    expect(tabCounts).toEqual({ mount: 1, unmount: 0 });
+  });
+
+  it('a role edit that REVOKES Manage Webhooks closes the tab once the fresh answer lands, not before', async () => {
+    let bits = Permissions.VIEW_CHANNEL | Permissions.MANAGE_WEBHOOKS;
+    const hold = { release: null as (() => void) | null, pending: false };
+    permissionsAnswering(() => bits, hold);
+    useServerStore.setState({ roles: [role(bits)], members: [member('owner-1', 'owner'), viewer(role(bits))] });
+    await render();
+    expect(q('[data-testid="integrations-tab"]')).not.toBeNull();
+
+    bits = Permissions.VIEW_CHANNEL;
+    hold.pending = true;
+    await act(async () => { useServerStore.setState({ roles: [role(bits)], members: [member('owner-1', 'owner'), viewer(role(bits))] }); });
+    expect(q('[data-testid="integrations-tab"]'), 'the stale answer holds until the server has spoken').not.toBeNull();
+
+    await act(async () => { hold.release!(); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(q('[data-testid="integrations-tab"]')).toBeNull();
+    expect(q('[data-testid="members-directory"]')).not.toBeNull();
+    expect(tabCounts).toEqual({ mount: 1, unmount: 1 });
   });
 });

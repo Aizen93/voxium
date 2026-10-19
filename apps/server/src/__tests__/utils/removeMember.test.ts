@@ -104,7 +104,7 @@ describe('removeMemberFromServer', () => {
   it('with a ban: the ServerBan upsert rides FIRST in the same transaction, carrying who and why', async () => {
     await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: 'spam' } });
 
-    expect(prismaMock.$transaction).toHaveBeenCalledWith([BAN, REQ, DEL, DEC, HOOKS]);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([HOOKS, BAN, REQ, DEL, DEC]);
     expect(prismaMock.serverBan.upsert).toHaveBeenCalledWith({
       where: { serverId_userId: { serverId: 's-1', userId: 'u-1' } },
       create: { serverId: 's-1', userId: 'u-1', bannedById: 'mod-1', reason: 'spam' },
@@ -194,11 +194,11 @@ describe('removeMemberFromServer: a kick disables the removed creator\'s webhook
     expect(args.data.creatorRemovedAt.getTime()).toBeGreaterThanOrEqual(before);
   });
 
-  it('rides LAST in the SAME transaction as the membership delete (a removal never commits without it)', async () => {
+  it('rides FIRST in the SAME transaction as the membership delete (a removal never commits without it; the row lock of a purge is waited for before the server row is taken)', async () => {
     txResults(1);
     await removeMemberFromServer('u-1', 's-1', KICK);
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-    expect(prismaMock.$transaction).toHaveBeenCalledWith([BAN, REQ, DEL, DEC, HOOKS]);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([HOOKS, BAN, REQ, DEL, DEC]);
   });
 
   it('when it disabled any: one webhook:changed with the server id alone, AFTER member:left (the removed member is out of the room)', async () => {

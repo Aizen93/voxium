@@ -1044,5 +1044,36 @@ describe('filterVisibleChannelsForUsers', () => {
       expect(await filterChannelsWithPermissions('user1', 'srv1', channels, BIND)).toEqual([{ id: 'vault', secure: true }, { id: 'plain', secure: false }]);
       expect(await filterChannelsWithPermissions('user1', 'srv1', channels, Permissions.MANAGE_MESSAGES)).toEqual([{ id: 'plain', secure: false }]);
     });
+
+    it('a secure VOICE channel holds the voice member set: VIEW | CONNECT passes, VIEW | SEND does not; a text one the reverse', async () => {
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'user1' });
+      prismaMock.channelMember.findMany.mockResolvedValue([{ channelId: 'sv' }, { channelId: 'st' }]);
+      const channels = [{ id: 'sv', secure: true, type: 'voice' }, { id: 'st', secure: true, type: 'text' }];
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, Permissions.VIEW_CHANNEL | Permissions.CONNECT)).toEqual([channels[0]]);
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES)).toEqual([channels[1]]);
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, Permissions.VIEW_CHANNEL)).toEqual(channels);
+    });
+
+    it('a role ALLOW override grants a bit @everyone lacks, under a mask (override aggregation)', async () => {
+      prismaMock.role.findFirst.mockResolvedValue(everyone(Permissions.VIEW_CHANNEL));
+      prismaMock.memberRole.findMany.mockResolvedValue([{ roleId: 'mods', role: { id: 'mods', permissions: permissionsToString(Permissions.VIEW_CHANNEL) } }]);
+      prismaMock.channelPermissionOverride.findMany.mockResolvedValue([
+        { channelId: 'ann', roleId: 'mods', allow: permissionsToString(Permissions.SEND_MESSAGES), deny: permissionsToString(0n) },
+      ]);
+      const channels = [{ id: 'ann' }, { id: 'general' }];
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, BIND)).toEqual([{ id: 'ann' }]);
+    });
+
+    it('an ADMINISTRATOR is not a member of a secure channel they were not invited to, whatever the mask', async () => {
+      prismaMock.role.findFirst.mockResolvedValue(everyone(0n));
+      prismaMock.memberRole.findMany.mockResolvedValue([{ roleId: 'adm', role: { id: 'adm', permissions: permissionsToString(Permissions.ADMINISTRATOR) } }]);
+      const channels = [{ id: 'vault', secure: true }, { id: 'plain' }];
+      expect(await filterChannelsWithPermissions('user1', 'srv1', channels, Permissions.VIEW_CHANNEL)).toEqual([{ id: 'plain' }]);
+    });
+
+    it('a missing server answers nothing', async () => {
+      prismaMock.server.findUnique.mockResolvedValue(null);
+      expect(await filterChannelsWithPermissions('user1', 'srv-gone', [{ id: 'a' }], BIND)).toEqual([]);
+    });
   });
 });

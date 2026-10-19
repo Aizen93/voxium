@@ -183,6 +183,14 @@ describe('renderDiscordPayload — username', () => {
     expect(ok({ content: 'x', username: '   ' })).toEqual({ content: 'x' });
     expect(ok({ content: 'x', username: '<img src=x>' })).toEqual({ content: 'x' });
   });
+
+  it('strips bidi and zero-width characters from the username (the stored name refuses them; a delivery is not failed for it)', () => {
+    const rtl = String.fromCharCode(0x202e);
+    const zw = String.fromCharCode(0x200b);
+    expect(ok({ content: 'x', username: `Ali${rtl}ce` }).nameOverride).toBe('Alice');
+    expect(ok({ content: 'x', username: `Al${zw}${zw}ice ${rtl}` }).nameOverride).toBe('Alice');
+    expect(ok({ content: 'x', username: `${rtl}${zw}` })).toEqual({ content: 'x' });
+  });
 });
 
 describe('renderDiscordPayload — embeds', () => {

@@ -99,3 +99,37 @@ describe('schema.prisma mirrors the migration', () => {
     expect(schema).toMatch(/maxWebhooksPerServer\s+Int\?\s+@map\("max_webhooks_per_server"\)/);
   });
 });
+
+describe('webhook owner-decisions migration (20261019090000)', () => {
+  const sql2 = readFileSync(resolve(REPO, 'apps/server/prisma/migrations/20261019090000_webhook_owner_decisions/migration.sql'), 'utf8');
+
+  it('adds exactly the four nullable columns the decisions need, on webhooks only', () => {
+    expect(sql2).toMatch(/ALTER TABLE "webhooks"\s+ADD COLUMN "admin_disabled_at" TIMESTAMP\(3\),/);
+    expect(sql2).toMatch(/ADD COLUMN "creator_removed_at" TIMESTAMP\(3\),/);
+    expect(sql2).toMatch(/ADD COLUMN "last_rotated_at" TIMESTAMP\(3\),/);
+    expect(sql2).toMatch(/ADD COLUMN "last_rotated_by_id" TEXT;/);
+    expect(sql2.match(/ADD COLUMN/g)).toHaveLength(4);
+    expect(sql2).not.toMatch(/NOT NULL|DEFAULT/);
+    expect(sql2.match(/ALTER TABLE "(\w+)"/g)?.every((m) => m.includes('"webhooks"'))).toBe(true);
+  });
+
+  it('the rotator link dies with the account (SET NULL), like the creator link', () => {
+    expect(sql2).toMatch(/ADD CONSTRAINT "webhooks_last_rotated_by_id_fkey"\s+FOREIGN KEY \("last_rotated_by_id"\) REFERENCES "users"\("id"\) ON DELETE SET NULL ON UPDATE CASCADE/);
+  });
+
+  it('is additive: no DROP, no UPDATE, no DELETE, no index rebuild', () => {
+    // statement by statement: the FK's own "ON DELETE SET NULL ON UPDATE CASCADE" is neither a DELETE nor an UPDATE
+    const statements = sql2.split('\n').filter((l) => !l.startsWith('--')).join('\n').split(';').map((st) => st.trim()).filter(Boolean);
+    expect(statements).toHaveLength(2);
+    for (const st of statements) expect(st).not.toMatch(/^(DROP|UPDATE|DELETE|CREATE INDEX|REINDEX)\b/);
+  });
+
+  it('schema.prisma mirrors it: the four fields, the WebhookRotator relation with SetNull, the back-relation on User', () => {
+    expect(schema).toMatch(/adminDisabledAt\s+DateTime\? @map\("admin_disabled_at"\)/);
+    expect(schema).toMatch(/creatorRemovedAt\s+DateTime\? @map\("creator_removed_at"\)/);
+    expect(schema).toMatch(/lastRotatedAt\s+DateTime\? @map\("last_rotated_at"\)/);
+    expect(schema).toMatch(/lastRotatedById\s+String\?\s+@map\("last_rotated_by_id"\)/);
+    expect(schema).toMatch(/lastRotatedBy User\? @relation\("WebhookRotator", fields: \[lastRotatedById\], references: \[id\], onDelete: SetNull\)/);
+    expect(schema).toMatch(/rotatedWebhooks\s+Webhook\[\]\s+@relation\("WebhookRotator"\)/);
+  });
+});

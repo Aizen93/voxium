@@ -26,7 +26,7 @@ import { logAuditEvent } from '../utils/auditLog';
 import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
 import { serverSelect } from '../utils/serverSelect';
 import {
-  webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion,
+  webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhooksHeldBy,
 } from '../utils/webhookLifecycle';
 
 export const adminRouter = Router();
@@ -456,6 +456,10 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
     // think about it (owner.bannedAt is one of the listing column's inputs).
     await recomputeListedForOwner(targetId);
 
+    // The incoming-webhook URLs the account holds stop posting with it, in
+    // every server (the kick rule one level up; utils/webhookLifecycle.ts)
+    const webhooksDisarmed = (await disarmWebhooksHeldBy(targetId)).length;
+
     for (const { serverId } of pendingRequests) {
       await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: targetId, outcome: 'cancelled' });
     }
@@ -479,7 +483,7 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       targetId: targetId,
       // knownIps distinguishes "user had no IPs" from "all IPs already banned"
       // (createMany with skipDuplicates only counts NEWLY inserted bans)
-      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned, knownIps: ipRecords.length },
+      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned, knownIps: ipRecords.length, webhooksDisarmed },
     });
 
     const message = !banIps
@@ -2630,8 +2634,10 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       });
 
       // Same as the canonical ban route: a banned owner's servers leave the
-      // directory, and their pending join requests are withdrawn.
+      // directory, their pending join requests are withdrawn, and the webhook
+      // URLs they hold stop posting.
       await recomputeListedForOwner(banTarget.id);
+      const webhooksDisarmed = (await disarmWebhooksHeldBy(banTarget.id)).length;
       const bannedPending = await prisma.serverJoinRequest.findMany({
         where: { userId: banTarget.id, status: 'pending' },
         select: { serverId: true },
@@ -2659,7 +2665,7 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         action: 'user.ban',
         targetType: 'user',
         targetId: banTarget.id,
-        metadata: { reason: `Report resolved: ${sanitizedResolution}` },
+        metadata: { reason: `Report resolved: ${sanitizedResolution}`, webhooksDisarmed },
       });
     }
 

@@ -83,7 +83,9 @@ export async function removeMemberFromServer(
     });
   }
 
-  // A kick only. LAST in the transaction, so its result is the last element
+  // A kick only. FIRST in the transaction: a 60 s purge-delete may hold one
+  // of these webhook rows, and waiting for it must happen before this
+  // transaction takes the server row (every create and join touches it)
   const disableWebhooks = opts.ban
     ? prisma.webhook.updateMany({
         where: {
@@ -100,6 +102,7 @@ export async function removeMemberFromServer(
   let disabledWebhooks = 0;
   try {
     const results = await prisma.$transaction([
+      ...(disableWebhooks ? [disableWebhooks] : []),
       ...(opts.ban
         ? [
             prisma.serverBan.upsert({
@@ -121,10 +124,9 @@ export async function removeMemberFromServer(
         where: { id: serverId, memberCount: { gt: 0 } },
         data: { memberCount: { decrement: 1 } },
       }),
-      ...(disableWebhooks ? [disableWebhooks] : []),
     ]);
-    const last = disableWebhooks ? results[results.length - 1] : undefined;
-    if (last && 'count' in last) disabledWebhooks = last.count;
+    const first = disableWebhooks ? results[0] : undefined;
+    if (first && 'count' in first) disabledWebhooks = first.count;
   } catch (err) {
     // The member left (or was removed) between the caller's membership check
     // and this transaction: serverMember.delete is the only statement here

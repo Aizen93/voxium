@@ -332,3 +332,32 @@ describe('AdminServerWebhooksModal — admin lock, creator removal, rotation', (
     expect(body).not.toContain('admin lock');
   });
 });
+
+describe('AdminServerWebhooksModal — Lock on a disabled, unlocked row', () => {
+  const REMOVED_AT2 = '2026-10-19T08:00:00.000Z';
+  const ORPHANED2 = webhook({ id: 'wh-7', name: 'Builds', enabled: false, creatorRemovedAt: REMOVED_AT2 });
+  const LOCKED2 = webhook({ id: 'wh-8', name: 'Alerts', enabled: false, adminDisabledAt: REMOVED_AT2 });
+  const badgeIn = (name: string, testId: string) => rowNamed(name).querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  it('offers Lock only where it adds something: a disabled row without the admin lock', async () => {
+    store.serverWebhooks = [ORPHANED2, LOCKED2, CI];
+    await render();
+    expect(badgeIn('Builds', 'webhook-lock')).not.toBeNull();
+    expect(badgeIn('Alerts', 'webhook-lock')).toBeNull();
+    expect(badgeIn('CI', 'webhook-lock')).toBeNull();
+    // Enable stays beside it
+    expect(badgeIn('Builds', 'webhook-enable')).not.toBeNull();
+  });
+
+  it('confirming Lock sends { enabled: false } straight away: no Enable in between, the removal mark kept', async () => {
+    store.serverWebhooks = [ORPHANED2];
+    await render();
+    await clickIn('Builds', 'webhook-lock');
+    const body = q('[data-testid="webhook-lock-confirm"]')!.textContent!;
+    expect(body).toContain('already disabled');
+    expect(body).toContain('URL holder removed');
+    await clickButton('Lock Webhook');
+    expect(store.setServerWebhookEnabled).toHaveBeenCalledTimes(1);
+    expect(store.setServerWebhookEnabled).toHaveBeenCalledWith('wh-7', false);
+  });
+});

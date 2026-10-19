@@ -36,6 +36,9 @@ const prismaMock: Record<string, any> = {
   serverMember: { findMany: vi.fn().mockResolvedValue([]) },
   auditLog: { create: vi.fn().mockResolvedValue({}) },
   $transaction: vi.fn(),
+  // the history batches of the shared delete (root client): nothing to move by default
+  $executeRaw: vi.fn().mockResolvedValue(0),
+  $queryRaw: vi.fn().mockResolvedValue([]),
   $queryRawUnsafe: vi.fn().mockResolvedValue([]),
 };
 vi.mock('../../utils/prisma', () => ({

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { X, Trash2, Power, PowerOff, RotateCcw } from 'lucide-react';
+import { X, Trash2, Power, PowerOff, RotateCcw, Lock } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import type { AdminWebhook, WebhookType } from '@voxium/shared';
@@ -14,7 +14,9 @@ import type { AdminWebhook, WebhookType } from '@voxium/shared';
  *
  * An admin's Disable is a LOCK (`adminDisabledAt`): the owner's own enable
  * answers 403 until an admin enables the webhook again, so the row says so and
- * the Enable button says it lifts the lock. "URL holder removed" marks a
+ * the Enable button says it lifts the lock; a row that is disabled but not yet
+ * locked offers Lock (the same disable, without an Enable in between that
+ * would re-arm the URL for a moment). "URL holder removed" marks a
  * webhook a kick or ban disabled because the member who held its live URL (its
  * creator, or whoever rotated it last) is gone: the URL may have left with
  * them, which is why the Enable confirm points at a rotation.
@@ -46,6 +48,11 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
   } = useAdminStore();
   const [deleteTarget, setDeleteTarget] = useState<AdminWebhook | null>(null);
   const [toggleTarget, setToggleTarget] = useState<AdminWebhook | null>(null);
+  // A row the owner (or a kick) already disabled, not yet locked: Lock sends
+  // the same { enabled: false } the server turns into the sticky lock, with
+  // no Enable in between (which would re-arm the URL for a moment and clear
+  // the "URL holder removed" mark)
+  const [lockTarget, setLockTarget] = useState<AdminWebhook | null>(null);
   const [purgeMessages, setPurgeMessages] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -66,6 +73,16 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
     } finally {
       setBusyId(null);
       setToggleTarget(null);
+    }
+  };
+
+  const lock = async (webhook: AdminWebhook) => {
+    setBusyId(webhook.id);
+    try {
+      await setServerWebhookEnabled(webhook.id, false);
+    } finally {
+      setBusyId(null);
+      setLockTarget(null);
     }
   };
 
@@ -176,6 +193,17 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex gap-1 justify-end">
+                          {!webhook.enabled && !webhook.adminDisabledAt && (
+                            <button
+                              onClick={() => setLockTarget(webhook)}
+                              disabled={busyId === webhook.id}
+                              className="p-1 rounded text-vox-text-muted disabled:opacity-30 hover:text-orange-400"
+                              title="Lock webhook (the owner cannot re-enable it)"
+                              data-testid="webhook-lock"
+                            >
+                              <Lock size={14} />
+                            </button>
+                          )}
                           <button
                             onClick={() => setToggleTarget(webhook)}
                             disabled={busyId === webhook.id}
@@ -231,6 +259,23 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
           variant={toggleTarget.enabled ? 'danger' : 'primary'}
           onConfirm={() => toggle(toggleTarget)}
           onCancel={() => setToggleTarget(null)}
+        />
+      )}
+
+      {lockTarget && (
+        <AdminConfirmModal
+          title="Lock Webhook"
+          message={(
+            <p data-testid="webhook-lock-confirm">
+              Lock the webhook &quot;{lockTarget.name}&quot;? It is already disabled; the lock keeps it so: the server owner
+              cannot re-enable it until an admin&apos;s Enable lifts the lock. Nothing is re-armed in between
+              {lockTarget.creatorRemovedAt && ', and its "URL holder removed" mark stays'}.
+            </p>
+          )}
+          confirmLabel="Lock Webhook"
+          variant="danger"
+          onConfirm={() => lock(lockTarget)}
+          onCancel={() => setLockTarget(null)}
         />
       )}
 

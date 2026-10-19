@@ -114,9 +114,18 @@ export interface WebhookDeletion {
  * vanished row makes this a count-0 no-op: the lock below then finds nothing
  * and the caller answers 404. If the transaction fails, the webhook stays
  * disabled: the safe direction for a webhook someone asked to delete.
+ *
+ * Then the HISTORY goes in bounded batches with NO lock held (see
+ * detachOrPurgeInBatches): a busy webhook posts 43k rows a day at its cap, and
+ * rewriting or deleting hundreds of thousands of rows inside the locked
+ * transaction would blow its 60 s budget on every retry (P2028), leaving a
+ * webhook that can never be deleted. The transaction below then meets only
+ * the rows that were in flight.
  */
 export async function deleteWebhookWithPurge(webhookId: string, purge: boolean): Promise<WebhookDeletion | null> {
   await prisma.webhook.updateMany({ where: { id: webhookId }, data: { enabled: false } });
+
+  const batched = await detachOrPurgeInBatches(webhookId, purge);
 
   return prisma.$transaction(async (tx) => {
     // Lock the webhook row FIRST. A concurrent delivery's INSERT takes a KEY
@@ -133,8 +142,11 @@ export async function deleteWebhookWithPurge(webhookId: string, purge: boolean):
     });
     if (!row) return null;
 
-    let perChannel: Array<{ channelId: string; count: number }> = [];
+    // What the batches already removed, plus whatever landed since (a
+    // delivery that passed the token check before the disable committed)
+    const counts = new Map(batched);
     let deletedMessages = 0;
+    for (const n of counts.values()) deletedMessages += n;
     if (purge) {
       const groups = await tx.message.groupBy({
         by: ['channelId'],
@@ -143,9 +155,12 @@ export async function deleteWebhookWithPurge(webhookId: string, purge: boolean):
       });
       // channelId is nullable on Message, but a webhook only posts to a
       // server channel (a DM row never carries webhook_id)
-      perChannel = groups.flatMap((g) => (g.channelId ? [{ channelId: g.channelId, count: g._count._all }] : []));
-      deletedMessages = (await tx.message.deleteMany({ where: { webhookId } })).count;
+      for (const g of groups) {
+        if (g.channelId) counts.set(g.channelId, (counts.get(g.channelId) ?? 0) + g._count._all);
+      }
+      deletedMessages += (await tx.message.deleteMany({ where: { webhookId } })).count;
     }
+    const perChannel = Array.from(counts, ([channelId, count]) => ({ channelId, count }));
     await tx.webhook.delete({ where: { id: webhookId } });
 
     return {
@@ -159,16 +174,71 @@ export async function deleteWebhookWithPurge(webhookId: string, purge: boolean):
       perChannel,
     };
   }, {
-    // Deleting the row makes the FK's ON DELETE SET NULL rewrite EVERY message
-    // the webhook ever posted (each update touching every messages index, the
-    // pg_trgm GIN included), and a purge deletes them all; a busy webhook has
-    // tens of thousands. Prisma's default 5s interactive budget is a deadline
-    // these statements never had, and blowing it rolls the whole delete back
-    // (P2028, a 500), on every retry: the webhook could never be deleted.
-    // The same budget as utils/accountDeletion.ts.
+    // Deleting the row makes the FK's ON DELETE SET NULL rewrite every message
+    // still pointing at the webhook (each update touching every messages
+    // index, the pg_trgm GIN included), and a purge deletes them. The batches
+    // above leave only in-flight rows for this, but Prisma's default 5 s
+    // interactive budget is still a deadline these statements never had, and
+    // blowing it rolls the whole delete back (P2028, a 500). The same budget
+    // as utils/accountDeletion.ts.
     timeout: 60_000,
     maxWait: 10_000,
   });
+}
+
+/** Rows per statement: large enough to finish a 100k-row history in a few
+ *  dozen round trips, small enough that each statement holds its row locks
+ *  for milliseconds and never blocks a reader for long. */
+const HISTORY_BATCH = 5000;
+
+/**
+ * The webhook's history, in bounded single-statement batches, each its own
+ * short transaction, with no lock on the webhook row: with `purge` the rows
+ * are deleted (reactions cascade; the execute path never creates attachments),
+ * without it `webhook_id` is set NULL as the FK's ON DELETE would, so the
+ * messages keep their stored `webhook_name`. Returns what purge deleted per
+ * channel, for the `message:bulk_deleted` receipts. Safe to run at any time
+ * (idempotent), and the webhook is already disabled so new rows stop; the
+ * locked transaction catches the few that were in flight.
+ */
+async function detachOrPurgeInBatches(webhookId: string, purge: boolean): Promise<Map<string, number>> {
+  const perChannel = new Map<string, number>();
+  for (;;) {
+    if (purge) {
+      const rows = (await prisma.$queryRaw<Array<{ channel_id: string | null }>>`
+        DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE webhook_id = ${webhookId} LIMIT ${HISTORY_BATCH})
+        RETURNING channel_id`) ?? [];
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        if (r.channel_id) perChannel.set(r.channel_id, (perChannel.get(r.channel_id) ?? 0) + 1);
+      }
+    } else {
+      const changed = Number(await prisma.$executeRaw`
+        UPDATE messages SET webhook_id = NULL WHERE id IN (SELECT id FROM messages WHERE webhook_id = ${webhookId} LIMIT ${HISTORY_BATCH})`) || 0;
+      if (changed === 0) break;
+    }
+  }
+  return perChannel;
+}
+
+/**
+ * A PLATFORM ban (routes/admin.ts): the server-level kick rule one level up.
+ * Every webhook whose live URL the banned account holds, in every server
+ * (created by it and never rotated by another, or last rotated by it), is
+ * disabled and marked `creatorRemovedAt`, so a banned abuser's URLs stop
+ * posting the moment the account does; each server's owner reviews, rotates
+ * or re-enables (any enable clears the mark). Rows already disabled get the
+ * mark too, so a later enable is warned. Returns the servers that held one,
+ * after their refetch hint went out. An unban does not re-arm them.
+ */
+export async function disarmWebhooksHeldBy(userId: string): Promise<string[]> {
+  const held = { OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }] };
+  const rows = await prisma.webhook.findMany({ where: held, select: { serverId: true }, distinct: ['serverId'] });
+  if (rows.length === 0) return [];
+  await prisma.webhook.updateMany({ where: held, data: { enabled: false, creatorRemovedAt: new Date() } });
+  const serverIds = rows.map((r) => r.serverId);
+  for (const serverId of serverIds) emitWebhookChanged(serverId);
+  return serverIds;
 }
 
 /**

@@ -43,11 +43,17 @@ export function useServerPermissions(serverId: string | null | undefined, userId
   const fetchEffectivePermissions = useServerStore((s) => s.fetchEffectivePermissions);
   const member = userId ? members.find((m) => m.userId === userId) : undefined;
   const fingerprint = useMemo(() => permissionsFingerprint(member, roles), [member, roles]);
-  const key = serverId && userId ? `${userId}|${serverId}|${fingerprint}` : null;
+  const scope = serverId && userId ? `${userId}|${serverId}` : null;
+  const key = scope ? `${scope}|${fingerprint}` : null;
 
-  // The answer, tagged with the key it is for: a stale one never applies to
-  // another server or another set of roles
-  const [answer, setAnswer] = useState<{ key: string; bits: string } | null>(null);
+  // The answer, tagged with the key it is for and the account+server it
+  // belongs to. A different SERVER or ACCOUNT never sees it; a different
+  // FINGERPRINT (a live role edit) keeps it in force while the refetch is in
+  // flight: answering null for that one render would close every surface the
+  // bits gate (the Integrations tab, with the copy-once token it may be
+  // showing) although the viewer may well still hold the bit. A revoked bit
+  // still closes them: the fresh answer lands within a round trip.
+  const [answer, setAnswer] = useState<{ key: string; scope: string; bits: string } | null>(null);
 
   useEffect(() => {
     if (!key || !serverId) return;
@@ -60,7 +66,7 @@ export function useServerPermissions(serverId: string | null | undefined, userId
           if (oldest !== undefined) cache.delete(oldest);
         }
         cache.set(key, bits);
-        if (!cancelled) setAnswer({ key, bits });
+        if (!cancelled) setAnswer({ key, scope: scope!, bits });
       })
       .catch((err) => {
         console.warn('[Permissions] Failed to fetch effective permissions:', err instanceof Error ? err.message : err);
@@ -68,7 +74,11 @@ export function useServerPermissions(serverId: string | null | undefined, userId
     return () => { cancelled = true; };
   }, [key, serverId, fetchEffectivePermissions]);
 
-  if (!key) return null;
-  const bits = cache.get(key) ?? (answer?.key === key ? answer.bits : undefined);
-  return bits === undefined ? null : permissionsFromString(bits);
+  if (!key || !scope) return null;
+  const cached = cache.get(key);
+  if (cached !== undefined) return permissionsFromString(cached);
+  // A cache miss with a previous answer for the SAME account and server: the
+  // fingerprint changed, the refetch is in flight; keep the last bits meanwhile
+  if (answer && answer.scope === scope) return permissionsFromString(answer.bits);
+  return null;
 }

@@ -254,7 +254,7 @@ export async function getEffectivePermissions(
  * (at the admin's channel cap that would be thousands of queries per call).
  * `filterVisibleChannels` is this with `VIEW_CHANNEL`.
  */
-export async function filterChannelsWithPermissions<T extends { id: string; secure?: boolean }>(
+export async function filterChannelsWithPermissions<T extends { id: string; secure?: boolean; type?: string }>(
   userId: string,
   serverId: string,
   channels: T[],
@@ -262,9 +262,13 @@ export async function filterChannelsWithPermissions<T extends { id: string; secu
 ): Promise<T[]> {
   // Secure channels: membership-derived, decided BEFORE the owner/ADMINISTRATOR
   // fast paths below, which only ever apply to the plaintext partition. A
-  // member holds exactly SECURE_MEMBER_PERMISSIONS there, so the mask must fit
-  // in it. Callers that select channels without the `secure` field fail open
-  // here, so every caller must include it.
+  // member holds exactly SECURE_MEMBER_PERMISSIONS in a secure text channel
+  // and SECURE_VOICE_MEMBER_PERMISSIONS in a secure voice channel (callers
+  // that select `type` get the right set; without it, the text set), so the
+  // mask must fit in it; the creator's extra MANAGE_MESSAGES is not modelled
+  // here (no caller asks for it: a mask with it excludes secure channels).
+  // Callers that select channels without the `secure` field fail open here,
+  // so every caller must include it.
   const secureIds = channels.filter((c) => c.secure).map((c) => c.id);
   let secureMemberships: Set<string> | null = null;
   if (secureIds.length > 0) {
@@ -275,7 +279,8 @@ export async function filterChannelsWithPermissions<T extends { id: string; secu
     secureMemberships = new Set(rows.map((r) => r.channelId));
   }
   const secureAllowed = (c: T) =>
-    (secureMemberships ? secureMemberships.has(c.id) : false) && hasFlag(SECURE_MEMBER_PERMISSIONS, required);
+    (secureMemberships ? secureMemberships.has(c.id) : false)
+    && hasFlag(c.type === 'voice' ? SECURE_VOICE_MEMBER_PERMISSIONS : SECURE_MEMBER_PERMISSIONS, required);
   const plainChannels = channels.filter((c) => !c.secure);
 
   // Owner holds every permission in every plaintext channel
