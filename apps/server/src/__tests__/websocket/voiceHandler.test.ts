@@ -2467,13 +2467,15 @@ describe('voiceHandler — getVoiceStateForServers', () => {
 // ─── Occupancy replay (connect, and joining a server) ───────────────────────
 
 describe('voiceHandler — replayVoiceState', () => {
-  /** Drive the two pipelined exec() calls: channel→server, then the user hashes. */
-  function mockMirror(entries: Array<{ channelId: string; serverId: string; users: Record<string, string> }>) {
+  /** Drive the three pipelined exec() calls: channel→server, the user hashes,
+   *  then the sharers (one per entry, null without a share). */
+  function mockMirror(entries: Array<{ channelId: string; serverId: string; users: Record<string, string>; sharer?: string }>) {
     mockVoiceRedis.sMembers.mockResolvedValueOnce(entries.map((e) => e.channelId));
     const chain = mockVoiceRedis.multi();
     chain.exec
       .mockResolvedValueOnce(entries.map((e) => e.serverId))
-      .mockResolvedValueOnce(entries.map((e) => e.users));
+      .mockResolvedValueOnce(entries.map((e) => e.users))
+      .mockResolvedValueOnce(entries.map((e) => e.sharer ?? null));
   }
 
   function target() {
@@ -2482,7 +2484,6 @@ describe('voiceHandler — replayVoiceState', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockVoiceRedis.get.mockResolvedValue(null);
     vi.mocked(prisma.user.findMany).mockResolvedValue([
       { id: 'u-1', username: 'one', displayName: 'One', avatarUrl: null },
       { id: 'u-2', username: 'two', displayName: 'Two', avatarUrl: null },
@@ -2552,14 +2553,22 @@ describe('voiceHandler — replayVoiceState', () => {
     expect(t.emit.mock.calls[0][1]).toMatchObject({ channelId: 'vc-public' });
   });
 
-  it('adds the screen-share state of a channel with a sharer', async () => {
-    mockMirror([{ channelId: 'vc', serverId: 'srv-1', users: { 'u-1': JSON.stringify({ selfMute: false, selfDeaf: false }) } }]);
-    mockVoiceRedis.get.mockImplementation(async (key: string) => (key === 'voice:screen:vc' ? 'u-1' : null));
+  it('adds the screen-share state of a channel with a sharer, read in ONE pipelined round trip (connect hot path)', async () => {
+    mockMirror([
+      { channelId: 'vc', serverId: 'srv-1', users: { 'u-1': JSON.stringify({ selfMute: false, selfDeaf: false }) }, sharer: 'u-1' },
+      { channelId: 'vc-quiet', serverId: 'srv-1', users: { 'u-2': JSON.stringify({ selfMute: false, selfDeaf: false }) } },
+    ]);
     const t = target();
 
-    await replayVoiceState(t, ['srv-1'], new Set(['vc']));
+    await replayVoiceState(t, ['srv-1'], new Set(['vc', 'vc-quiet']));
 
     expect(t.emit).toHaveBeenCalledWith('voice:screen_share:state', { channelId: 'vc', sharingUserId: 'u-1' });
+    expect(t.emit).not.toHaveBeenCalledWith('voice:screen_share:state', expect.objectContaining({ channelId: 'vc-quiet' }));
+    // Never a GET per channel
+    expect(mockVoiceRedis.get).not.toHaveBeenCalled();
+    const chain = mockVoiceRedis.multi();
+    expect(chain.get).toHaveBeenCalledWith('voice:screen:vc');
+    expect(chain.get).toHaveBeenCalledWith('voice:screen:vc-quiet');
   });
 
   it('emits nothing when no visible channel has occupants', async () => {

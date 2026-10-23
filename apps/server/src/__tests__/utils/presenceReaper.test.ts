@@ -2,17 +2,24 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
-const { mockClearPresenceState, mockRedisSet } = vi.hoisted(() => ({
+const { mockClearPresenceState, mockRedisSet, mockRedisEval } = vi.hoisted(() => ({
   mockClearPresenceState: vi.fn(),
   mockRedisSet: vi.fn(),
+  mockRedisEval: vi.fn(),
 }));
 
+// withClusterLock (utils/dailySchedule.ts) stays REAL: the lock's token, hold
+// and release semantics are the rule this job must follow
 vi.mock('../../utils/redis', () => ({
   clearPresenceState: mockClearPresenceState,
-  getRedis: () => ({ set: mockRedisSet }),
+  getRedis: () => ({ set: mockRedisSet, eval: mockRedisEval }),
+  NODE_ID: () => 'node-1',
 }));
 
-import { reapStalePresence, startPresenceReaper, stopPresenceReaper, PRESENCE_REAP_INTERVAL_MS } from '../../utils/presenceReaper';
+import {
+  reapStalePresence, startPresenceReaper, stopPresenceReaper,
+  PRESENCE_REAP_INTERVAL_MS, PRESENCE_REAP_LOCK_TTL_S, PRESENCE_REAP_LOCK_KEY,
+} from '../../utils/presenceReaper';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -36,36 +43,63 @@ describe('presenceReaper — reapStalePresence', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockRedisSet.mockResolvedValue('OK');
+    mockRedisEval.mockResolvedValue(1);
     mockClearPresenceState.mockResolvedValue({ skipped: false, offlineUserIds: [] });
   });
 
-  it('runs the SCOPED sweep (never the full wipe): this node is serving', async () => {
+  it('runs the SCOPED sweep (never the full wipe) and demands ONE adapter snapshot: this node is serving every minute', async () => {
     const io = makeIO();
     const db = makeDb();
 
     await reapStalePresence(io as never, db);
 
-    expect(mockClearPresenceState).toHaveBeenCalledWith(db, io, { allowFullWipe: false });
+    expect(mockClearPresenceState).toHaveBeenCalledWith(db, io, { allowFullWipe: false, requireSnapshot: true });
   });
 
-  it('takes a short cluster lock first and sweeps nothing when another node holds it', async () => {
+  it('takes the shared cluster lock with a per-acquisition token, and sweeps nothing when another node holds it', async () => {
     // Every node runs the interval; one sweep per tick is enough and the
     // socket:users hash is read whole each time
     mockRedisSet.mockResolvedValueOnce(null);
     const io = makeIO();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     const reaped = await reapStalePresence(io as never, makeDb());
 
-    expect(mockRedisSet).toHaveBeenCalledWith('lock:presencereap', '1', { NX: true, EX: expect.any(Number) });
+    expect(mockRedisSet).toHaveBeenCalledWith(PRESENCE_REAP_LOCK_KEY, expect.stringMatching(/^node-1:/), { NX: true, EX: PRESENCE_REAP_LOCK_TTL_S });
     expect(mockClearPresenceState).not.toHaveBeenCalled();
     expect(reaped).toBe(0);
+    log.mockRestore();
   });
 
-  it('the lock expires before the next tick, so a crashed holder cannot stall the sweep for good', async () => {
+  it('HOLDS the lock after a successful sweep (never released: the TTL is the exclusivity window)', async () => {
     await reapStalePresence(makeIO() as never, makeDb());
 
-    const ttl = (mockRedisSet.mock.calls[0][2] as { EX: number }).EX;
-    expect(ttl * 1000).toBeLessThan(PRESENCE_REAP_INTERVAL_MS);
+    expect(mockRedisEval).not.toHaveBeenCalled();
+  });
+
+  it('the hold expires before the next tick, so a crashed holder cannot stall the sweep for good', () => {
+    expect(PRESENCE_REAP_LOCK_TTL_S * 1000).toBeLessThan(PRESENCE_REAP_INTERVAL_MS);
+  });
+
+  it('releases the lock (if still its own) when the sweep throws, so the next attempt is not blocked', async () => {
+    mockClearPresenceState.mockRejectedValueOnce(new Error('redis down'));
+
+    await expect(reapStalePresence(makeIO() as never, makeDb())).rejects.toThrow('redis down');
+
+    // Compare-and-delete on the token this run wrote
+    const owner = mockRedisSet.mock.calls[0][1] as string;
+    expect(mockRedisEval).toHaveBeenCalledWith(expect.stringContaining('del'), { keys: [PRESENCE_REAP_LOCK_KEY], arguments: [owner] });
+  });
+
+  it('fails CLOSED when Redis cannot answer the lock: no sweep, nothing reaped', async () => {
+    mockRedisSet.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const reaped = await reapStalePresence(makeIO() as never, makeDb());
+
+    expect(reaped).toBe(0);
+    expect(mockClearPresenceState).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it('tells every server and DM room of a reaped user that they are offline, and reports the count', async () => {
@@ -130,6 +164,7 @@ describe('presenceReaper — interval', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     mockRedisSet.mockResolvedValue('OK');
+    mockRedisEval.mockResolvedValue(1);
     mockClearPresenceState.mockResolvedValue({ skipped: false, offlineUserIds: [] });
   });
 

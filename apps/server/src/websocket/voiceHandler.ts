@@ -2158,15 +2158,21 @@ export async function replayVoiceState(
     .filter(({ channelId }) => visibleChannelIds.has(channelId));
   if (voiceStates.length === 0) return;
 
-  // Single user-info query across all visible voice channels
+  // Single user-info query across all visible voice channels, and ONE Redis
+  // round trip for every channel's sharer (this runs on the connect hot path)
   const allVoiceUserIds = [...new Set(voiceStates.flatMap((v) => v.userIds))];
-  const userInfos = await prisma.user.findMany({
-    where: { id: { in: allVoiceUserIds } },
-    select: { id: true, username: true, displayName: true, avatarUrl: true },
-  });
+  const sharePipeline = getRedis().multi();
+  for (const { channelId } of voiceStates) sharePipeline.get(`voice:screen:${channelId}`);
+  const [userInfos, sharersRaw] = await Promise.all([
+    prisma.user.findMany({
+      where: { id: { in: allVoiceUserIds } },
+      select: { id: true, username: true, displayName: true, avatarUrl: true },
+    }),
+    sharePipeline.exec(),
+  ]);
   const userInfoById = new Map(userInfos.map((u) => [u.id, u]));
 
-  for (const { channelId, serverId, userIds, userStates } of voiceStates) {
+  for (const [i, { channelId, serverId, userIds, userStates }] of voiceStates.entries()) {
     const voiceUsers = userIds
       .map((uid) => userInfoById.get(uid))
       .filter((u): u is NonNullable<typeof u> => !!u)
@@ -2190,9 +2196,10 @@ export async function replayVoiceState(
       });
     target.emit('voice:channel_users', { channelId, serverId, users: voiceUsers });
 
-    // Send screen share state if someone is sharing in this channel
-    const sharingUserId = await getScreenShareState(channelId);
-    if (sharingUserId) {
+    // Send screen share state if someone is sharing in this channel (the
+    // pipeline's reply type is opaque; a sharer is a non-empty user id)
+    const sharingUserId: unknown = sharersRaw[i];
+    if (typeof sharingUserId === 'string' && sharingUserId.length > 0) {
       target.emit('voice:screen_share:state', { channelId, sharingUserId });
     }
   }

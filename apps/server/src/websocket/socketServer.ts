@@ -335,6 +335,21 @@ export function initSocketServer(httpServer: HttpServer) {
           for (const c of dmConversations) {
             socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'offline' });
           }
+
+          // The re-check and the write are two steps: a registration landing
+          // between them leaves the user online in Redis and offline in the
+          // column (the new socket's own write was a no-op while the row still
+          // read online) and announced offline. Look once more and put it
+          // right: the column back online, and every room told so.
+          if (await isUserOnline(userId)) {
+            await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'online' } }, data: { status: 'online' } });
+            for (const m of membershipList) {
+              socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
+            }
+            for (const c of dmConversations) {
+              socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
+            }
+          }
         }
       } catch (err) {
         console.error(`[WS] Error during disconnect cleanup for ${userId}:`, err);
@@ -364,6 +379,13 @@ export function initSocketServer(httpServer: HttpServer) {
       presenceRegistered();
     }
 
+    // A socket that dropped during the registration has already been unwound
+    // by its disconnect handler: there is nothing left to set up for it, and a
+    // room joined now would hold its dead id (socket.io's join() does not
+    // check, and the adapter's cleanup for this socket already ran). Checked
+    // again before every later step, the same way.
+    if (socket.disconnected) return;
+
     // Upsert IP record
     const connectIp = getSocketIp(socket);
     if (connectIp) {
@@ -386,6 +408,7 @@ export function initSocketServer(httpServer: HttpServer) {
         where: { userId },
         select: { serverId: true },
       });
+      if (socket.disconnected) return;
       for (const m of memberships) {
         socket.join(`server:${m.serverId}`);
       }
@@ -405,12 +428,14 @@ export function initSocketServer(httpServer: HttpServer) {
       });
       const { filterVisibleChannelsMulti } = await import('../utils/permissionCalculator');
       visibleChannels = await filterVisibleChannelsMulti(userId, allChannels);
+      if (socket.disconnected) return;
       for (const ch of visibleChannels) {
         socket.join(`channel:${ch.id}`);
       }
     } catch (err) {
       console.error(`[WS] Error joining server/channel rooms for ${userId}:`, err);
     }
+    if (socket.disconnected) return;
 
     // Send existing voice channel users for all servers (reads from Redis for
     // cross-node visibility), right after the channel rooms are joined: every
@@ -428,6 +453,7 @@ export function initSocketServer(httpServer: HttpServer) {
     } catch (err) {
       console.error(`[WS] Error replaying voice state for ${userId}:`, err);
     }
+    if (socket.disconnected) return;
 
     // Auto-join all conversation rooms for DMs
     let conversations: Array<{ id: string }> = [];
@@ -436,6 +462,7 @@ export function initSocketServer(httpServer: HttpServer) {
         where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
         select: { id: true },
       });
+      if (socket.disconnected) return;
       for (const conv of conversations) {
         socket.join(`dm:${conv.id}`);
       }
@@ -448,13 +475,12 @@ export function initSocketServer(httpServer: HttpServer) {
     // a socket that disconnected during the setup has already been unwound by
     // its disconnect handler, and announcing it online now would leave every
     // contact showing a user who is gone.
-    if (!socket.disconnected) {
-      for (const m of memberships) {
-        socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
-      }
-      for (const c of conversations) {
-        socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
-      }
+    if (socket.disconnected) return;
+    for (const m of memberships) {
+      socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
+    }
+    for (const c of conversations) {
+      socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
     }
 
     // Compute unread counts across all text channels in a single query.

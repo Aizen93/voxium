@@ -1,12 +1,13 @@
 import type { Server as SocketServer } from 'socket.io';
 import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
-import { clearPresenceState, getRedis } from './redis';
+import { clearPresenceState } from './redis';
+import { withClusterLock, wasSkipped } from './dailySchedule';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
 /** The subset of the Prisma client the sweep reads and writes. */
 export interface PresenceReaperDb {
-  user: { updateMany: (args: { where: { status: string; id?: { in: string[] } }; data: { status: string } }) => Promise<unknown> };
+  user: { updateMany: (args: { where: { status?: string; id?: { in: string[] } }; data: { status: string } }) => Promise<unknown> };
   serverMember: { findMany: (args: { where: { userId: string }; select: { serverId: true } }) => Promise<Array<{ serverId: string }>> };
   conversation: {
     findMany: (args: { where: { OR: Array<{ user1Id: string } | { user2Id: string }> }; select: { id: true } }) => Promise<Array<{ id: string }>>;
@@ -14,10 +15,11 @@ export interface PresenceReaperDb {
 }
 
 export const PRESENCE_REAP_INTERVAL_MS = 60_000;
-// Shorter than the interval so the next tick can take it; long enough that
+// The lock is HELD for this long after a successful sweep (holdOnSuccess):
+// shorter than the interval so the next tick can claim it, long enough that
 // two nodes whose timers fire a few seconds apart do not both sweep.
-const PRESENCE_REAP_LOCK_TTL_S = 45;
-const PRESENCE_REAP_LOCK_KEY = 'lock:presencereap';
+export const PRESENCE_REAP_LOCK_TTL_S = 45;
+export const PRESENCE_REAP_LOCK_KEY = 'lock:presencereap';
 
 let reaperTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -34,21 +36,28 @@ let reaperTimer: ReturnType<typeof setInterval> | null = null;
  * 60 s dead-node reaper since multi-node; this is the presence side's.
  *
  * It is the boot sweep's scoped path (`allowFullWipe: false`: this node is
- * serving, so only sockets missing from the cluster snapshot are reaped, and
- * a snapshot that cannot see every live peer is refused), under a short
- * cluster lock so one node sweeps per tick. A reaped user's contacts are told
- * the way the disconnect handler tells them: `presence:update` to every
- * server they are in and every DM room they are part of.
+ * serving, so only sockets missing from the cluster snapshot are reaped;
+ * `requireSnapshot`: a tick without an adapter snapshot is skipped rather
+ * than walked socket by socket), under the shared cluster lock
+ * (`withClusterLock`, per-acquisition token, fail closed on a Redis error,
+ * held until the TTL after a success) so one node sweeps per tick. A reaped
+ * user's contacts are told the way the disconnect handler tells them:
+ * `presence:update` to every server they are in and every DM room they are
+ * part of.
  *
  * Returns how many users were taken offline (0 when the lock was held, the
  * snapshot refused, or nothing was stale).
  */
 export async function reapStalePresence(io: IO, db: PresenceReaperDb): Promise<number> {
-  const redis = getRedis();
-  const claimed = await redis.set(PRESENCE_REAP_LOCK_KEY, '1', { NX: true, EX: PRESENCE_REAP_LOCK_TTL_S });
-  if (claimed !== 'OK') return 0;
+  const result = await withClusterLock(
+    { key: PRESENCE_REAP_LOCK_KEY, ttlSeconds: PRESENCE_REAP_LOCK_TTL_S, tag: '[Presence]', holdOnSuccess: true },
+    () => sweepAndAnnounce(io, db),
+  );
+  return wasSkipped(result) ? 0 : result;
+}
 
-  const { skipped, offlineUserIds } = await clearPresenceState(db, io, { allowFullWipe: false });
+async function sweepAndAnnounce(io: IO, db: PresenceReaperDb): Promise<number> {
+  const { skipped, offlineUserIds } = await clearPresenceState(db, io, { allowFullWipe: false, requireSnapshot: true });
   if (skipped || offlineUserIds.length === 0) return 0;
 
   for (const userId of offlineUserIds) {

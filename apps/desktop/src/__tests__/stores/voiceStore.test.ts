@@ -71,6 +71,28 @@ vi.mock('../../stores/dmStore', () => ({
   useDMStore: { getState: () => ({ conversations: [] }) },
 }));
 
+// The secure-voice keying module, reached by dynamic import from the store:
+// the re-announcement gate in addUserToChannel decides whether a peer is
+// keyed again, and these tests pin it
+const svk = vi.hoisted(() => ({
+  isSecureVoiceSupported: vi.fn(() => true),
+  beginSecureVoiceSession: vi.fn(async (_channelId: string) => ({
+    frames: { onFatal: vi.fn() },
+    deviceId: 'device-me000001',
+    epoch: 'epochME000001',
+  })),
+  endSecureVoiceSessionFor: vi.fn(),
+  endSecureVoiceSession: vi.fn(),
+  getSecureVoiceSession: vi.fn(() => null),
+  onParticipantJoined: vi.fn(),
+  onParticipantLeft: vi.fn(),
+  rotateFresh: vi.fn(),
+  confirmMembership: vi.fn(),
+  handleInboundKey: vi.fn(),
+  handleKeyRequest: vi.fn(),
+}));
+vi.mock('../../services/e2e/secureVoiceKeys', () => svk);
+
 // joinChannel resolves the channel record (the `secure` flag decides the join
 // shape and an unresolvable channel fails closed) — give it the test channels.
 vi.mock('../../stores/serverStore', () => ({
@@ -1376,5 +1398,63 @@ describe('voiceStore — addUserToChannel re-announcement of a listed participan
 
     expect(useVoiceStore.getState().channelUsers.get('ch-ok')!.map((u) => u.id)).toEqual(['peer', 'other']);
     expect(useVoiceStore.getState().channelServers.get('ch-ok')).toBe('srv-1');
+  });
+});
+
+describe('voiceStore — secure voice re-announcement keying (spec 21)', () => {
+  const socket = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
+
+  beforeEach(async () => {
+    useVoiceStore.getState().leaveChannel();
+    vi.mocked(getSocket).mockReset();
+    vi.mocked(getSocket).mockReturnValue(socket as never);
+    svk.onParticipantJoined.mockClear();
+    useVoiceStore.setState({ localUserId: 'me', activeChannelId: null, selfMute: false, selfDeaf: false, channelUsers: new Map() });
+    // A live secure session on ch-sec: the join path registers it
+    await useVoiceStore.getState().joinChannel('ch-sec', 'srv-1', { secure: true });
+    expect(useVoiceStore.getState().activeChannelId).toBe('ch-sec');
+  });
+
+  afterEach(() => {
+    useVoiceStore.getState().leaveChannel();
+  });
+
+  it('a same-session re-announcement refreshes the row but NEVER keys the peer again', async () => {
+    const peer = vu('peer', { deviceId: 'device-peer0001', epoch: 'epochPEER0001' });
+    useVoiceStore.getState().addUserToChannel('ch-sec', peer, 'srv-1');
+    await flushAsync();
+    expect(svk.onParticipantJoined).toHaveBeenCalledTimes(1);
+    expect(svk.onParticipantJoined).toHaveBeenCalledWith('ch-sec', peer, { initialReplay: false });
+
+    useVoiceStore.getState().addUserToChannel('ch-sec', { ...peer, selfMute: true }, 'srv-1');
+    await flushAsync();
+
+    expect(svk.onParticipantJoined).toHaveBeenCalledTimes(1);
+    const list = useVoiceStore.getState().channelUsers.get('ch-sec')!;
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id: 'peer', selfMute: true, deviceId: 'device-peer0001', epoch: 'epochPEER0001' });
+  });
+
+  it('a re-announcement with a NEW device or epoch keys the peer again (their re-pin must run)', async () => {
+    const peer = vu('peer', { deviceId: 'device-peer0001', epoch: 'epochPEER0001' });
+    useVoiceStore.getState().addUserToChannel('ch-sec', peer, 'srv-1');
+    await flushAsync();
+
+    const rejoined = { ...peer, epoch: 'epochPEER0002' };
+    useVoiceStore.getState().addUserToChannel('ch-sec', rejoined, 'srv-1');
+    await flushAsync();
+
+    expect(svk.onParticipantJoined).toHaveBeenCalledTimes(2);
+    expect(svk.onParticipantJoined).toHaveBeenLastCalledWith('ch-sec', rejoined, { initialReplay: false });
+    const list = useVoiceStore.getState().channelUsers.get('ch-sec')!;
+    expect(list).toHaveLength(1);
+    expect(list[0].epoch).toBe('epochPEER0002');
+  });
+
+  it('the local user\'s own echo is never keyed', async () => {
+    useVoiceStore.getState().addUserToChannel('ch-sec', vu('me', { deviceId: 'device-me000001', epoch: 'epochME000001' }), 'srv-1');
+    await flushAsync();
+
+    expect(svk.onParticipantJoined).not.toHaveBeenCalled();
   });
 });
