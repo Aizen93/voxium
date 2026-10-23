@@ -785,6 +785,57 @@ describe('socketServer — presence registration vs. disconnect race', () => {
     httpServer.close();
   });
 
+  it('a registration landing between the re-check and the offline write is put right: column back online, rooms told', async () => {
+    const { socket, handlers, toFn, emitFn } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    await getConnectionHandler()(socket);
+
+    mockSetUserOffline.mockResolvedValueOnce({ userId: 'user-1', fullyOffline: true });
+    // Offline at the first look, online again at the second (the look after the write)
+    mockIsUserOnline.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    mockPrisma.user.updateMany.mockClear();
+    emitFn.mockClear();
+    toFn.mockClear();
+
+    await handlers.get('disconnecting')!();
+
+    expect(mockPrisma.user.updateMany).toHaveBeenNthCalledWith(1, {
+      where: { id: 'user-1', NOT: { status: 'offline' } },
+      data: { status: 'offline' },
+    });
+    expect(mockPrisma.user.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: 'user-1', NOT: { status: 'online' } },
+      data: { status: 'online' },
+    });
+    const statuses = emitFn.mock.calls.filter((c) => c[0] === 'presence:update').map((c) => c[1].status);
+    // offline to the server room and the DM room, then online to both: the last word is online
+    expect(statuses).toEqual(['offline', 'offline', 'online', 'online']);
+    httpServer.close();
+  });
+
+  it('joins NO room and replays nothing for a socket that dropped during the setup', async () => {
+    // socket.io's join() does not check the connection, and the adapter's
+    // cleanup for this socket has already run: a room joined now would hold
+    // its dead id for good
+    const { socket } = createMockSocket('user-1');
+    socket.disconnected = false;
+    mockPrisma.channel.findMany.mockImplementationOnce(async () => { socket.disconnected = true; return [{ id: 'tc', serverId: 'srv-1', type: 'text', secure: false }]; });
+    mockPrisma.server.findMany.mockResolvedValue([{ id: 'srv-1', ownerId: 'user-1' }]);
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    // The server room was joined before the drop; nothing after it
+    expect(socket.join).toHaveBeenCalledWith('server:srv-1');
+    expect(socket.join).not.toHaveBeenCalledWith('channel:tc');
+    expect(socket.join).not.toHaveBeenCalledWith('dm:conv-1');
+    expect(mockReplayVoiceState).not.toHaveBeenCalled();
+    expect(mockPrisma.announcement.findMany).not.toHaveBeenCalled();
+    httpServer.close();
+  });
+
   it('control: a disconnect whose user stayed offline writes and announces offline', async () => {
     const { socket, handlers, toFn, emitFn } = createMockSocket('user-1');
     const httpServer = http.createServer();
