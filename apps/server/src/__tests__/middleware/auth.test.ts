@@ -164,6 +164,21 @@ describe('authenticate middleware', () => {
     expect(err.message).toMatch(/invalid or expired/i);
   });
 
+  it('passes a FAILING user lookup through as the error it is — never a 401 (a database blip signed everyone out)', async () => {
+    const token = generateToken({ userId: 'user-123', username: 'testuser', role: 'user', tokenVersion: 0 });
+    const dbDown = Object.assign(new Error("Can't reach database server"), { name: 'PrismaClientInitializationError' });
+    mockPrismaUser.findUnique.mockRejectedValueOnce(dbDown);
+
+    const { req, res, next } = createMockReqResNext();
+    req.headers = { authorization: `Bearer ${token}` };
+    await authenticate(req as Request, res as Response, next as NextFunction);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next.mock.calls[0][0]).toBe(dbDown);
+    expect(next.mock.calls[0][0].statusCode).toBeUndefined();
+    expect(req.user).toBeUndefined();
+  });
+
   it('rejects JWT signed with wrong algorithm (algorithm confusion prevention)', async () => {
     // Sign with HS384 instead of the required HS256
     const payload = {

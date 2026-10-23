@@ -58,6 +58,15 @@ export function App({ onReady }: { onReady?: () => void }) {
     checkAuth();
   }, [checkAuth]);
 
+  // A launch that could not reach the server keeps its tokens (checkAuth):
+  // the network coming back is when to try the restore again, instead of
+  // leaving a signed-in user on the login page until the next launch
+  useEffect(() => {
+    const retryRestore = () => { void useAuthStore.getState().retrySessionRestore(); };
+    window.addEventListener('online', retryRestore);
+    return () => window.removeEventListener('online', retryRestore);
+  }, []);
+
   // Remove splash screen once auth check completes
   useEffect(() => {
     if (!isLoading && onReady) {

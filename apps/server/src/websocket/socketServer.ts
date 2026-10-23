@@ -3,6 +3,7 @@ import { Server as SocketServer } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import jwt from 'jsonwebtoken';
 import { consentIsRequired, type AuthPayload } from '../middleware/auth';
+import { isJwtExpiredError, isJwtVerifyError } from '../utils/jwtErrors';
 import { setUserOnline, setUserOffline, isUserOnline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, replayVoiceState } from './voiceHandler';
@@ -114,11 +115,21 @@ export function initSocketServer(httpServer: HttpServer) {
       // own, with a refresh before the next attempt (services/socket.ts): a
       // window restored after a long minimize handshakes with the token it
       // had when it was hidden. Named so the client refreshes for this and
-      // for nothing else; every other failure stays the generic answer.
-      if ((err as { name?: unknown } | null)?.name === 'TokenExpiredError') {
+      // for nothing else; every other TOKEN failure stays the generic answer.
+      if (isJwtExpiredError(err)) {
         return next(new Error('Token expired'));
       }
-      next(new Error('Invalid token'));
+      if (isJwtVerifyError(err)) {
+        return next(new Error('Invalid token'));
+      }
+      // Not the token: the user or IP-ban lookup failed (database down, pool
+      // exhausted). Answered 'Invalid token' this made the client renew and,
+      // the renewal meeting the same outage, sign out — a database blip
+      // during a reconnect storm signed everyone out. Named so the client
+      // tries the handshake again later instead (a middleware refusal closes
+      // its manager: nothing else would retry).
+      console.error('[WS] Handshake could not be verified:', err instanceof Error ? err.message : err);
+      next(new Error('Authentication unavailable'));
     }
   });
 

@@ -27,17 +27,25 @@ vi.mock('../../services/tokenStorage', () => ({
 }));
 
 import {
-  accessTokenExpiresAt, isAccessTokenFresh, refreshAccessToken, getFreshAccessToken,
-  isDefinitiveRefreshFailure, SessionLostError, setSessionLostNavigation, _resetSessionForTests,
-  TOKEN_EXPIRY_SKEW_MS, API_BASE,
+  accessTokenExpiresAt, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, getFreshAccessToken,
+  endSessionRenewals, isDefinitiveRefreshFailure, SessionLostError, setSessionLostNavigation, _resetSessionForTests,
+  TOKEN_EXPIRY_SKEW_MS, REFRESH_TIMEOUT_MS, API_BASE,
 } from '../../services/session';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-/** A JWT-shaped string whose payload carries `exp` (seconds). Unsigned: only the claim is read. */
-function jwtWithExp(expSeconds: number): string {
-  const payload = btoa(JSON.stringify({ sub: 'u-1', exp: expSeconds })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+/** A JWT-shaped string whose payload carries `exp` (seconds) and optionally `iat`. Unsigned: only the claims are read. */
+function jwtWithExp(expSeconds: number, iatSeconds?: number): string {
+  const claims: Record<string, unknown> = { sub: 'u-1', exp: expSeconds };
+  if (iatSeconds !== undefined) claims.iat = iatSeconds;
+  const payload = btoa(JSON.stringify(claims)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
+}
+
+/** What the server answers a refresh with: a token issued "now" on ITS clock, living 15 minutes. */
+function serverIssued(serverNowMs: number): { accessToken: string; refreshToken: string } {
+  const iat = Math.floor(serverNowMs / 1000);
+  return { accessToken: jwtWithExp(iat + 15 * 60, iat), refreshToken: 'refresh-new' };
 }
 
 function axios401(): unknown {
@@ -85,7 +93,7 @@ describe('session — refreshAccessToken', () => {
 
     await expect(refreshAccessToken()).resolves.toBe('access-new');
 
-    expect(http.post).toHaveBeenCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-old' });
+    expect(http.post).toHaveBeenCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-old' }, { timeout: REFRESH_TIMEOUT_MS });
     expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
     expect(navigate).not.toHaveBeenCalled();
   });
@@ -156,6 +164,46 @@ describe('session — refreshAccessToken', () => {
     http.post.mockReset();
   });
 
+  it('a renewal that lands AFTER a logout stores nothing, reconnects nothing, and does not navigate', async () => {
+    // The answer belongs to the logged-out user; storing it (and the REST
+    // client's 401 path then opening a socket for it) resurrected the session
+    let finish!: (v: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    const pending = refreshAccessToken();
+
+    endSessionRenewals();
+    storage.clearTokens();
+    finish({ data: { data: { accessToken: 'access-new', refreshToken: 'refresh-new' } } });
+
+    await expect(pending).rejects.toBeInstanceOf(SessionLostError);
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(storage.access).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('a refusal that lands after a logout does not navigate either (the login page is already up)', async () => {
+    let fail!: (e: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((_r, j) => { fail = j; }));
+    const pending = refreshAccessToken();
+
+    endSessionRenewals();
+    fail(axios401());
+
+    await expect(pending).rejects.toBeInstanceOf(SessionLostError);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('after a logout a new session renews again (the in-flight slot is free)', async () => {
+    http.post.mockReturnValueOnce(new Promise(() => {})); // never settles
+    void refreshAccessToken().catch(() => {});
+    endSessionRenewals();
+    storage.refresh = 'refresh-next-session';
+    http.post.mockResolvedValueOnce({ data: { data: { accessToken: 'access-2', refreshToken: 'refresh-2' } } });
+
+    await expect(refreshAccessToken()).resolves.toBe('access-2');
+    expect(http.post).toHaveBeenLastCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-next-session' }, { timeout: REFRESH_TIMEOUT_MS });
+  });
+
   it('isDefinitiveRefreshFailure: 401 and 403 answers only', () => {
     expect(isDefinitiveRefreshFailure(axios401())).toBe(true);
     expect(isDefinitiveRefreshFailure(Object.assign(new Error('x'), { isAxiosError: true, response: { status: 403 } }))).toBe(true);
@@ -185,5 +233,57 @@ describe('session — getFreshAccessToken', () => {
 
     await expect(getFreshAccessToken()).resolves.toBeNull();
     expect(http.post).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — a device clock out of step with the server', () => {
+  // A device clock 20 minutes ahead read every fresh 15-minute token as
+  // expired and renewed on EVERY request: the per-IP refresh limiter, shared
+  // by everyone behind the same NAT, was spent in silence
+  const AHEAD_MS = 20 * 60_000;
+
+  it('learns the server clock from a renewed token\'s iat, and judges freshness on it from then on', async () => {
+    const serverNow = Date.now() - AHEAD_MS; // this device is 20 min ahead
+    storage.access = jwtWithExp((Date.now() - 60_000) / 1000); // reads expired either way
+    http.post.mockResolvedValueOnce({ data: { data: serverIssued(serverNow) } });
+
+    const renewed = await getFreshAccessToken();
+    expect(renewed).toBe(storage.access);
+
+    // The renewed token expires 15 min after SERVER now, which is 5 min before
+    // DEVICE now: read naively it is expired; read on the learnt offset it is fresh
+    expect(isAccessTokenFresh(renewed!, Date.now())).toBe(false);
+    expect(shouldRenewBeforeSending(renewed!)).toBe(false);
+    await expect(getFreshAccessToken()).resolves.toBe(renewed);
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('a renewal answering a token that still reads expired (no iat to learn from) suspends proactive renewal: 401s only from here', async () => {
+    storage.access = jwtWithExp((Date.now() - 60_000) / 1000);
+    http.post.mockResolvedValueOnce({ data: { data: { accessToken: jwtWithExp((Date.now() - 1000) / 1000), refreshToken: 'r' } } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const renewed = await getFreshAccessToken();
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('renewing on 401 only'));
+    // Still "expired" by the clock, but no longer renewed before sending
+    expect(isAccessTokenFresh(renewed!)).toBe(false);
+    expect(shouldRenewBeforeSending(renewed!)).toBe(false);
+    await expect(getFreshAccessToken()).resolves.toBe(renewed);
+    expect(http.post).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('a device clock BEHIND the server never renews early either', async () => {
+    const serverNow = Date.now() + AHEAD_MS; // this device is 20 min behind
+    storage.access = jwtWithExp((Date.now() - 60_000) / 1000);
+    http.post.mockResolvedValueOnce({ data: { data: serverIssued(serverNow) } });
+
+    const renewed = await getFreshAccessToken();
+
+    // Naively it has 35 min left; on the server's clock, 15: fresh both ways,
+    // and the offset would call it expired at the right moment, not 20 min late
+    expect(shouldRenewBeforeSending(renewed!)).toBe(false);
+    expect(isAccessTokenFresh(renewed!, Date.now() + AHEAD_MS + 15 * 60_000)).toBe(false);
   });
 });

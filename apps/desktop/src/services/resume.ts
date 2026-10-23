@@ -16,34 +16,36 @@ import { getSocket, ensureSocketConnected } from './socket';
  *   servers, the People slice, the DM list, the friends, the open channel or
  *   conversation and re-join voice — so the only job here is to make the
  *   reconnect happen now, with a live token (services/socket.ts).
- * - The socket stayed connected: nothing was missed, but a presence slice or
- *   a DM list may still have gone stale (a browser can freeze a hidden page
- *   without dropping its socket), so the cheap ones are refetched.
+ * - The socket stayed connected (or there is none to reconnect: an account
+ *   that cannot hold a live session has no socket object at all): nothing
+ *   was missed, but a presence slice or a DM list may still have gone stale
+ *   (a browser can freeze a hidden page without dropping its socket), so the
+ *   cheap ones are refetched.
  *
- * Nothing is fetched while the browser says it is offline: the `online` event
- * calls this again, and a burst of failed requests on a laptop that has not
- * found its network yet would only toast "failed to load" at the user.
+ * Nothing goes out while the browser says it is offline — the mark-read
+ * write included: the `online` event calls this again, and a burst of failed
+ * requests on a laptop that has not found its network yet would only toast
+ * "failed to load" at the user.
  *
- * The unread bookkeeping of the view on screen runs in every case: the socket
- * may have reconnected in the background and `unread:init` restored counts
- * for a channel the user was reading all along.
+ * The unread counter of the view on screen is cleared locally in every case:
+ * the socket may have reconnected in the background and `unread:init`
+ * restored a count for a channel the user was reading all along.
  */
 export async function handleAppResume(): Promise<void> {
   const serverState = useServerStore.getState();
+  const dmState = useDMStore.getState();
   // Only when actually in server view — activeChannelId survives switching to DMs
-  if (serverState.activeChannelId && serverState.activeServerId) {
-    serverState.clearUnread(serverState.activeChannelId);
-    serverState.markChannelRead(serverState.activeChannelId);
-  }
-  if (!serverState.activeServerId) {
-    const dmState = useDMStore.getState();
-    if (dmState.activeConversationId) {
-      dmState.clearDMUnread(dmState.activeConversationId);
-      dmState.markConversationRead(dmState.activeConversationId);
-    }
-  }
+  const viewedChannelId = serverState.activeServerId ? serverState.activeChannelId : null;
+  const viewedConversationId = serverState.activeServerId ? null : dmState.activeConversationId;
+
+  if (viewedChannelId) serverState.clearUnread(viewedChannelId);
+  if (viewedConversationId) dmState.clearDMUnread(viewedConversationId);
 
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+
+  // The server's copy of "read up to now" (a POST; retried once by the store)
+  if (viewedChannelId) serverState.markChannelRead(viewedChannelId);
+  if (viewedConversationId) dmState.markConversationRead(viewedConversationId);
 
   const socket = getSocket();
   if (socket && !socket.connected) {
@@ -52,7 +54,7 @@ export async function handleAppResume(): Promise<void> {
   }
 
   // Re-fetch data that may have become stale while the tab was hidden
-  void useDMStore.getState().fetchConversations();
+  void dmState.fetchConversations();
   if (serverState.activeServerId) {
     void serverState.fetchPeople(serverState.activeServerId);
   }

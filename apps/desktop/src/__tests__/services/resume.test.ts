@@ -125,7 +125,7 @@ describe('resume — the unread bookkeeping of the view on screen', () => {
     expect(serverState.clearUnread).not.toHaveBeenCalled();
   });
 
-  it('runs even while offline (it is local state and a retried write)', async () => {
+  it('offline: the local counter is cleared, the mark-read POST waits for the network like every other request', async () => {
     onLine.mockReturnValue(false);
     serverState.activeServerId = 'srv-1';
     serverState.activeChannelId = 'ch-1';
@@ -133,5 +133,27 @@ describe('resume — the unread bookkeeping of the view on screen', () => {
     await handleAppResume();
 
     expect(serverState.clearUnread).toHaveBeenCalledWith('ch-1');
+    expect(serverState.markChannelRead).not.toHaveBeenCalled();
+  });
+
+  it('offline, DM view: same — cleared locally, not written', async () => {
+    onLine.mockReturnValue(false);
+    dmState.activeConversationId = 'conv-1';
+
+    await handleAppResume();
+
+    expect(dmState.clearDMUnread).toHaveBeenCalledWith('conv-1');
+    expect(dmState.markConversationRead).not.toHaveBeenCalled();
+  });
+
+  it('the mark-read write goes out even when the socket is down (it is a REST call, renewed on its own)', async () => {
+    sock.current = { connected: false };
+    serverState.activeServerId = 'srv-1';
+    serverState.activeChannelId = 'ch-1';
+
+    await handleAppResume();
+
+    expect(serverState.markChannelRead).toHaveBeenCalledWith('ch-1');
+    expect(sock.ensureSocketConnected).toHaveBeenCalledTimes(1);
   });
 });
