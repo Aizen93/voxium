@@ -139,6 +139,7 @@ vi.mock('jsonwebtoken', () => ({
 }));
 
 import { initSocketServer, getSocketIp } from '../../websocket/socketServer';
+import jwt from 'jsonwebtoken';
 import http from 'http';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -309,6 +310,40 @@ describe('socketServer — DM presence broadcast on connect', () => {
     await expect(connectionHandler(socket)).resolves.not.toThrow();
 
     httpServer.close();
+  });
+});
+
+describe('socketServer — auth middleware names an EXPIRED access token', () => {
+  const savedJwtSecret = process.env.JWT_SECRET;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-secret';
+  });
+  afterEach(() => {
+    if (savedJwtSecret !== undefined) process.env.JWT_SECRET = savedJwtSecret; else delete process.env.JWT_SECRET;
+  });
+
+  async function handshakeWithVerifyThrowing(err: Error) {
+    vi.mocked(jwt.verify).mockImplementationOnce(() => { throw err; });
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const { socket } = createMockSocket('user-1');
+    const next = vi.fn();
+    await getAuthMiddleware()(socket, next);
+    httpServer.close();
+    return next;
+  }
+
+  it("answers 'Token expired' for jsonwebtoken's TokenExpiredError — the one refusal the client repairs with a refresh", async () => {
+    // A window restored after a long minimize handshakes with the token it
+    // had when it was hidden; the client renews on this answer and nothing else
+    const next = await handshakeWithVerifyThrowing(Object.assign(new Error('jwt expired'), { name: 'TokenExpiredError' }));
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Token expired' }));
+  });
+
+  it("keeps the generic 'Invalid token' for every other verification failure (nothing to learn from it)", async () => {
+    const next = await handshakeWithVerifyThrowing(Object.assign(new Error('invalid signature'), { name: 'JsonWebTokenError' }));
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Invalid token' }));
   });
 });
 

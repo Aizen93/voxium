@@ -43,6 +43,7 @@ import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { SharePreflightModal } from '../voice/SharePreflightModal';
 import { discoverySocketHandlers } from '../../services/discoverySocketHandlers';
 import { handleMessageBulkDeleted } from '../../services/webhookSocketHandlers';
+import { handleAppResume } from '../../services/resume';
 import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
@@ -118,34 +119,22 @@ export function MainLayout() {
     fetchServers();
   }, [fetchServers]);
 
-  // Re-mark current channel/conversation as read when tab/window regains visibility.
-  // This covers cases where the socket reconnected in the background and unread:init
-  // restored stale counts because a previous markChannelRead API call failed.
+  // The window coming back (restored, un-hidden, the network back): the
+  // resume handler reconnects the socket with a live token when it dropped
+  // — the connect handlers below then refetch everything — or refreshes the
+  // cheap slices when it did not (services/resume.ts).
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.hidden) return;
-      const serverState = useServerStore.getState();
-      // Only when actually in server view — activeChannelId survives switching to DMs
-      if (serverState.activeChannelId && serverState.activeServerId) {
-        serverState.clearUnread(serverState.activeChannelId);
-        serverState.markChannelRead(serverState.activeChannelId);
-      }
-      if (!serverState.activeServerId) {
-        const dmState = useDMStore.getState();
-        if (dmState.activeConversationId) {
-          dmState.clearDMUnread(dmState.activeConversationId);
-          dmState.markConversationRead(dmState.activeConversationId);
-        }
-      }
-      // Re-fetch data that may have become stale while the tab was hidden
-      // (socket events are lost during background disconnects)
-      useDMStore.getState().fetchConversations();
-      if (serverState.activeServerId) {
-        serverState.fetchPeople(serverState.activeServerId);
-      }
+      void handleAppResume();
     };
+    const handleOnline = () => { void handleAppResume(); };
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
+    };
   }, []);
 
   // Set up WebSocket event listeners with proper function references
