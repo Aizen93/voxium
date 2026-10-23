@@ -1,9 +1,11 @@
-import axios from 'axios';
+import axios, { type InternalAxiosRequestConfig } from 'axios';
 import { connectSocket } from './socket';
-import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStorage';
+import { getAccessToken } from './tokenStorage';
+import { API_BASE, isAccessTokenFresh, refreshAccessToken, SessionLostError } from './session';
 
-/** The REST base every request is relative to; also the root the incoming-webhook URL is composed on (services/webhooks.ts). */
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
+// The REST base; defined with the session module (which cannot import this
+// file) and re-exported for the callers that always took it from here
+export { API_BASE };
 
 export const api = axios.create({
   baseURL: API_BASE,
@@ -14,76 +16,51 @@ export const api = axios.create({
   // correctly by the server.
 });
 
-// Attach auth token to every request
-api.interceptors.request.use((config) => {
-  const token = getAccessToken();
+// Attach the auth token to every request. A token known to be expired (the
+// window was minimized longer than the access token lives) is renewed FIRST:
+// the request then succeeds on its first trip instead of a 401 and a retry,
+// and the renewal failing leaves the request to the 401 path below.
+api.interceptors.request.use(async (config) => {
+  let token = getAccessToken();
+  if (token && !isAccessTokenFresh(token)) {
+    try {
+      token = await refreshAccessToken();
+    } catch (err) {
+      if (err instanceof SessionLostError) throw err;
+      // Transient: send with what we have, the server decides
+    }
+  }
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
 });
 
-// Handle token refresh on 401
-let isRefreshing = false;
-let refreshSubscribers: Array<{ resolve: (token: string) => void; reject: (err: unknown) => void }> = [];
-
-function onTokenRefreshed(token: string) {
-  refreshSubscribers.forEach((sub) => sub.resolve(token));
-  refreshSubscribers = [];
-}
-
-function onRefreshFailed(err: unknown) {
-  refreshSubscribers.forEach((sub) => sub.reject(err));
-  refreshSubscribers = [];
-}
-
+/**
+ * A 401 answers an access token the server no longer takes: renew it once
+ * (one shared refresh, however many requests hit the 401 together) and retry
+ * the request with the new one. A refused renewal has already ended the
+ * session (services/session.ts); a transient renewal failure fails this
+ * request only, the tokens stay for the next one.
+ */
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    const originalRequest = error.config;
+    const originalRequest = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined;
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
       originalRequest._retry = true;
-
-      // If already refreshing, queue this request until the new token arrives
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          refreshSubscribers.push({
-            resolve: (newToken: string) => {
-              originalRequest.headers.Authorization = `Bearer ${newToken}`;
-              resolve(api(originalRequest));
-            },
-            reject,
-          });
-        });
+      let accessToken: string;
+      try {
+        accessToken = await refreshAccessToken();
+      } catch (refreshErr) {
+        return Promise.reject(refreshErr);
       }
-
-      const refreshToken = getRefreshToken();
-      if (refreshToken) {
-        isRefreshing = true;
-        try {
-          const { data } = await axios.post(`${API_BASE}/auth/refresh`, { refreshToken });
-          const { accessToken, refreshToken: newRefreshToken } = data.data;
-
-          setTokens(accessToken, newRefreshToken);
-
-          // Reconnect socket with fresh token
-          connectSocket(accessToken);
-
-          // Resolve all queued requests with the new token
-          onTokenRefreshed(accessToken);
-
-          originalRequest.headers.Authorization = `Bearer ${accessToken}`;
-          return api(originalRequest);
-        } catch (refreshErr) {
-          onRefreshFailed(refreshErr);
-          clearTokens();
-          window.location.href = '/login';
-          return Promise.reject(refreshErr);
-        } finally {
-          isRefreshing = false;
-        }
-      }
+      // The socket re-handshakes with the renewed token (or is revived if its
+      // manager had given up while the token was expired)
+      connectSocket(accessToken);
+      originalRequest.headers.Authorization = `Bearer ${accessToken}`;
+      return api(originalRequest);
     }
 
     return Promise.reject(error);

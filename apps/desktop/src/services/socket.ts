@@ -1,6 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getAccessToken } from './tokenStorage';
+import { getFreshAccessToken, refreshAccessToken, SessionLostError } from './session';
 
 const SOCKET_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3001';
 
@@ -10,8 +11,24 @@ let socket: VoxSocket | null = null;
 let connecting = false;
 let hasConnectedOnce = false;
 let explicitlyDisconnected = true; // true until first connectSocket() call
+// The manager spent its reconnection attempts (reconnect_failed): nothing
+// reconnects it on its own any more, only a call here does
+let managerGaveUp = false;
 const readyCallbacks: Array<() => void> = [];
 const reconnectCallbacks: Array<() => void> = [];
+
+/**
+ * The handshake answers the server gives for an ACCESS token it will not
+ * take but which a refresh can replace. 'Token expired' is what the server
+ * says since the resume fix; 'Invalid token' is what an older server says for
+ * the same expiry (and for a malformed token, where a refresh costs one
+ * request and changes nothing).
+ */
+const REFRESHABLE_HANDSHAKE_ERRORS = new Set(['Token expired', 'Invalid token']);
+/** At most one refresh from the handshake path per this window: a server
+ *  refusing even a fresh token must not spend the refresh limiter. */
+export const HANDSHAKE_REFRESH_MIN_INTERVAL_MS = 30_000;
+let lastHandshakeRefreshAt = 0;
 
 /**
  * Monotonically increasing ID to track socket instance changes.
@@ -45,6 +62,22 @@ export function onConnectionStatusChange(listener: StatusListener): () => void {
 }
 
 /**
+ * Open the socket again with `token` after its manager gave up, or right now
+ * instead of after the current back-off wait. `disconnect()` on a socket that
+ * is not connected emits nothing: it only drops the manager's pending timer
+ * and resets its back-off, so the `connect()` that follows opens at once and,
+ * if that fails, starts a fresh reconnection cycle.
+ */
+function reopen(s: VoxSocket, token: string): void {
+  s.auth = { token };
+  managerGaveUp = false;
+  connecting = true;
+  setStatus('connecting');
+  s.disconnect();
+  s.connect();
+}
+
+/**
  * Connect to the WebSocket server.
  * Safe to call multiple times — deduplicates concurrent calls.
  */
@@ -61,8 +94,12 @@ export function connectSocket(token: string): VoxSocket {
   // If Socket.IO is auto-reconnecting (socket exists but wasn't explicitly
   // disconnected), just update the auth token and let it continue.
   // Tearing it down would destroy all event listeners attached by consumers.
+  // A manager that has GIVEN UP is not auto-reconnecting any more: it used to
+  // get the new token and sit there for good — the restored window stayed on
+  // "connection lost" until a page reload.
   if (socket && !explicitlyDisconnected) {
-    socket.auth = { token };
+    if (managerGaveUp) reopen(socket, token);
+    else socket.auth = { token };
     return socket;
   }
 
@@ -75,6 +112,7 @@ export function connectSocket(token: string): VoxSocket {
 
   explicitlyDisconnected = false;
   connecting = true;
+  managerGaveUp = false;
   socketGeneration++;
   setStatus('connecting');
 
@@ -109,6 +147,7 @@ export function connectSocket(token: string): VoxSocket {
 
   socket.on('connect', () => {
     connecting = false;
+    managerGaveUp = false;
     setStatus('connected');
     if (import.meta.env.DEV) console.log('[WS] Connected, socket id:', socket!.id);
 
@@ -173,6 +212,8 @@ export function connectSocket(token: string): VoxSocket {
 
   socket.io.on('reconnect_failed', () => {
     console.error('[WS] Reconnection failed after all attempts');
+    managerGaveUp = true;
+    connecting = false;
     setStatus('disconnected');
   });
 
@@ -180,9 +221,64 @@ export function connectSocket(token: string): VoxSocket {
     console.error('[WS] Connection error:', err.message);
     connecting = false;
     setStatus('disconnected');
+    // The server refused the ACCESS token: renew it so the manager's next
+    // attempt handshakes with a live one. Without this the manager retried
+    // the expired token until some REST request happened to refresh it — or
+    // until it gave up.
+    if (REFRESHABLE_HANDSHAKE_ERRORS.has(err.message)) {
+      void refreshForHandshake();
+    }
   });
 
   return socket;
+}
+
+/** Renew the access token for the handshake, at most once per window. */
+async function refreshForHandshake(): Promise<void> {
+  const now = Date.now();
+  if (now - lastHandshakeRefreshAt < HANDSHAKE_REFRESH_MIN_INTERVAL_MS) return;
+  lastHandshakeRefreshAt = now;
+  try {
+    const token = await refreshAccessToken();
+    if (socket && !explicitlyDisconnected) {
+      // Set for the next attempt; a manager that has given up is reopened
+      if (managerGaveUp && !socket.connected) reopen(socket, token);
+      else socket.auth = { token };
+    }
+  } catch (err) {
+    // A refused refresh has ended the session already (services/session.ts);
+    // a transient failure leaves the next attempt to the stored token
+    if (!(err instanceof SessionLostError)) {
+      console.warn('[WS] Could not renew the token for the handshake:', err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+/**
+ * Make sure the socket is connected or connecting, NOW — called when the
+ * window is restored or the network comes back. A socket already connected
+ * is left alone. Otherwise the access token is renewed if it has expired (a
+ * long minimize outlives it), and the socket reopens at once: a manager that
+ * gave up is revived, and one sitting in a back-off wait does not wait it
+ * out. A missing session (no token) is a no-op; a refused renewal has ended
+ * the session already.
+ */
+export async function ensureSocketConnected(): Promise<void> {
+  const s = socket;
+  if (!s || explicitlyDisconnected || s.connected) return;
+  let token: string | null;
+  try {
+    token = await getFreshAccessToken();
+  } catch (err) {
+    if (!(err instanceof SessionLostError)) {
+      console.warn('[WS] Could not renew the token on resume:', err instanceof Error ? err.message : err);
+    }
+    return;
+  }
+  if (!token) return;
+  // The socket may have connected on its own while the token was renewed
+  if (socket !== s || s.connected || explicitlyDisconnected) return;
+  reopen(s, token);
 }
 
 export function getSocket(): VoxSocket | null {
@@ -232,6 +328,7 @@ export function disconnectSocket() {
   connecting = false;
   hasConnectedOnce = false;
   explicitlyDisconnected = true;
+  managerGaveUp = false;
   readyCallbacks.length = 0;
   // Reconnect callbacks are NOT cleared: they are registered once at module
   // import (e.g. voiceStore's re-join handler) and must survive logout→login.
@@ -240,4 +337,9 @@ export function disconnectSocket() {
   // "Connected" with dead audio. Scoped consumers unsubscribe via the
   // function returned by onSocketReconnect().
   setStatus('disconnected');
+}
+
+/** @internal tests: the handshake refresh rate guard */
+export function _resetSocketModuleForTests(): void {
+  lastHandshakeRefreshAt = 0;
 }

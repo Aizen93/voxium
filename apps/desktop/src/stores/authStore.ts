@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { connectSocket, disconnectSocket } from '../services/socket';
 import { getAccessToken, setTokens, clearTokens, isRemembered } from '../services/tokenStorage';
+import { SessionLostError } from '../services/session';
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useVoiceStore } from './voiceStore';
@@ -97,6 +98,14 @@ async function solveWithRetry(onProgress: (fraction: number) => void, signal: Ab
  *  documents; connecting anyway only produces a reconnect loop. */
 function canConnect(user: { emailVerified: boolean; consentRequired?: boolean }): boolean {
   return user.emailVerified && !user.consentRequired;
+}
+
+/** The server REFUSED the session (401/403), or the renewal was refused for
+ *  good (SessionLostError): as opposed to a request that never reached it. */
+function isAuthRefusal(err: unknown): boolean {
+  if (err instanceof SessionLostError) return true;
+  const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
+  return status === 401 || status === 403;
 }
 
 /** The in-flight registration's abort handle. Module scope, not store state:
@@ -254,11 +263,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const { data } = await api.get('/auth/me');
       if (canConnect(data.data)) {
-        connectSocket(token);
+        // The stored token may have been renewed by the request above (an
+        // app launched after its access token expired): the socket must
+        // handshake with the CURRENT one, not the one read before the call,
+        // or its first attempt is refused and the connect waits a back-off
+        connectSocket(getAccessToken() ?? token);
       }
       set({ user: data.data, isAuthenticated: true, isLoading: false });
-    } catch {
-      clearTokens();
+    } catch (err) {
+      // Only a refusal ends the session (a refused renewal has cleared the
+      // tokens already). A launch with no network, or a server mid-restart,
+      // keeps them: the next launch signs back in without a password
+      if (isAuthRefusal(err)) clearTokens();
       set({ isLoading: false });
     }
   },

@@ -1,0 +1,151 @@
+import axios from 'axios';
+import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStorage';
+
+/**
+ * The signed-in session's access token, and the ONE way it is renewed.
+ *
+ * Two consumers used to race each other for it. The REST client refreshed on a
+ * 401 and the socket re-handshook with whatever token was in storage — so a
+ * window restored after a long minimize (the access token lives 15 minutes)
+ * had the socket retrying an expired token until some REST request happened
+ * to refresh it, and once the socket.io manager had spent its attempts nobody
+ * ever reconnected it. And ANY refresh failure, a network blip included, was
+ * treated as a dead session: tokens cleared, user sent to the login page.
+ *
+ * Here: one single-flight refresh shared by every caller; a token is
+ * "fresh" by its own `exp` claim (decoded, never trusted for anything but
+ * scheduling); only a definitive refusal of the refresh token (401/403) ends
+ * the session, a transient failure is reported to the caller and the tokens
+ * stay.
+ */
+
+/** The REST base every request is relative to; also the root the incoming-webhook URL is composed on (services/webhooks.ts). */
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
+
+/** A token expiring within this is treated as expired: a request sent with
+ *  it would reach the server after the clock ran out. */
+export const TOKEN_EXPIRY_SKEW_MS = 30_000;
+
+/** The refresh token was refused for good (revoked, expired, banned): the session is over. */
+export class SessionLostError extends Error {
+  constructor(message = 'Session lost') {
+    super(message);
+    this.name = 'SessionLostError';
+  }
+}
+
+/**
+ * The `exp` claim of a JWT as a millisecond timestamp, or null when the token
+ * cannot be decoded. The signature is NOT checked: this reads our own stored
+ * token to decide whether to refresh BEFORE sending it, nothing more.
+ */
+export function accessTokenExpiresAt(token: string): number | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const json = atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'));
+    const payload = JSON.parse(json) as { exp?: unknown };
+    return typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True while the token has more than the skew left. An undecodable token is
+ *  left to the server (fresh): refusing it here would stop every request. */
+export function isAccessTokenFresh(token: string, now: number = Date.now()): boolean {
+  const expiresAt = accessTokenExpiresAt(token);
+  if (expiresAt === null) return true;
+  return expiresAt - now > TOKEN_EXPIRY_SKEW_MS;
+}
+
+/** A refresh the server REFUSED (as opposed to one that did not reach it, or
+ *  that it could not serve right now): a 401 or 403 answer to the refresh call. */
+export function isDefinitiveRefreshFailure(err: unknown): boolean {
+  if (!axios.isAxiosError(err)) return false;
+  const status = err.response?.status;
+  return status === 401 || status === 403;
+}
+
+// What ends the session, replaceable for tests (jsdom cannot navigate)
+let navigateToLogin: () => void = () => {
+  window.location.href = '/login';
+};
+let sessionLost = false;
+
+/** @internal tests */
+export function setSessionLostNavigation(fn: () => void): void {
+  navigateToLogin = fn;
+  sessionLost = false;
+}
+
+/**
+ * The session is over: forget the tokens and go to the login page. Idempotent
+ * — every queued request fails at once when a refresh is refused, and the
+ * socket's handshake may refuse in the same breath; one navigation is enough.
+ */
+export function handleSessionLost(): void {
+  clearTokens();
+  if (sessionLost) return;
+  sessionLost = true;
+  navigateToLogin();
+}
+
+let refreshInFlight: Promise<string> | null = null;
+
+/**
+ * Renew the access token with the stored refresh token. Single-flight: every
+ * caller during the round trip shares one request and one answer (the REST
+ * 401 retry queue and the socket's expired handshake typically arrive
+ * together on resume). Resolves the new access token, already stored.
+ *
+ * Throws `SessionLostError` after a definitive refusal — and has already
+ * ended the session (tokens cleared, login page). Throws the transport or
+ * server error otherwise, with the tokens untouched: the caller's request
+ * fails, the next one tries again.
+ */
+export function refreshAccessToken(): Promise<string> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const refreshToken = getRefreshToken();
+    if (!refreshToken) {
+      handleSessionLost();
+      throw new SessionLostError('No refresh token');
+    }
+    try {
+      // Plain axios on purpose: the api instance's interceptors would try to
+      // refresh a refused refresh
+      const { data } = await axios.post(`${API_BASE}/auth/refresh`, { refreshToken });
+      const { accessToken, refreshToken: newRefreshToken } = data.data as { accessToken: string; refreshToken: string };
+      setTokens(accessToken, newRefreshToken);
+      return accessToken;
+    } catch (err) {
+      if (isDefinitiveRefreshFailure(err)) {
+        handleSessionLost();
+        throw new SessionLostError(err instanceof Error ? err.message : 'Refresh refused');
+      }
+      throw err;
+    }
+  })().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+/**
+ * An access token good enough to send now: the stored one while it is fresh,
+ * a renewed one otherwise. `null` when there is no session to speak of (no
+ * stored token). Throws like `refreshAccessToken` when the renewal fails.
+ */
+export async function getFreshAccessToken(): Promise<string | null> {
+  const token = getAccessToken();
+  if (!token) return null;
+  if (isAccessTokenFresh(token)) return token;
+  return refreshAccessToken();
+}
+
+/** @internal tests */
+export function _resetSessionForTests(): void {
+  refreshInFlight = null;
+  sessionLost = false;
+}

@@ -963,6 +963,8 @@ sequenceDiagram
     end
 ```
 
+The client renews in one place (`services/session.ts`): a single-flight refresh shared by the REST client and the socket, a token renewed before it is sent when its own `exp` says it has expired (a window restored after a long minimize), and a session that ends only on a 401 or 403 answer to the refresh — a network error, a server error or a rate limit fails that one request and keeps the tokens. The socket handshake answers an expired access token with `Token expired`; the client renews on it and re-handshakes, and a socket whose manager has given up is reopened by the next renewal or by the resume handler (`services/resume.ts`, on the window becoming visible or the network coming back).
+
 ### Password Reset Flow
 
 ```mermaid

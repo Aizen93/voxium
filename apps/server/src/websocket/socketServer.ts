@@ -110,6 +110,14 @@ export function initSocketServer(httpServer: HttpServer) {
       if (err instanceof Error && err.message === 'Account banned') {
         return next(err);
       }
+      // An EXPIRED access token is the one refusal the client repairs on its
+      // own, with a refresh before the next attempt (services/socket.ts): a
+      // window restored after a long minimize handshakes with the token it
+      // had when it was hidden. Named so the client refreshes for this and
+      // for nothing else; every other failure stays the generic answer.
+      if ((err as { name?: unknown } | null)?.name === 'TokenExpiredError') {
+        return next(new Error('Token expired'));
+      }
       next(new Error('Invalid token'));
     }
   });
