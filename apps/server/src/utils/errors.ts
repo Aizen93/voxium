@@ -40,10 +40,29 @@ export class ConflictError extends AppError {
   }
 }
 
+export class UnsupportedMediaTypeError extends AppError {
+  constructor(message: string) {
+    super(message, 415);
+  }
+}
+
 export class TooManyRequestsError extends AppError {
   constructor(message = 'Too many requests. Please try again later.') {
     super(message, 429);
   }
+}
+
+/** The server cannot serve this request as configured (e.g. a missing encryption key). */
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string) {
+    super(message, 503);
+  }
+}
+
+/** Prisma's error code (`P2025`, `P2003`, ...) when the error carries one. */
+export function prismaErrorCode(err: unknown): string | undefined {
+  const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+  return typeof code === 'string' ? code : undefined;
 }
 
 /** Parse a date string query parameter, throwing BadRequestError if invalid. */

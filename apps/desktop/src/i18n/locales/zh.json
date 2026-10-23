@@ -274,7 +274,8 @@
       "members": "成员",
       "roles": "角色",
       "limits": "限制",
-      "discovery": "发现"
+      "discovery": "发现",
+      "integrations": "集成"
     },
     "general": {
       "serverName": "服务器名称",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "此服务器中频道分类的最大数量",
       "maxMembers": "最大成员数",
       "maxMembersDesc": "可加入此服务器的最大成员数",
+      "maxWebhooks": "最大 Webhook 数",
+      "maxWebhooksDesc": "此服务器中传入 Webhook 的最大数量（为 0 时禁止创建）",
       "unlimited": "无限制",
       "failedToLoad": "服务器限制加载失败"
     }
@@ -365,6 +368,10 @@
     "CREATE_SECURE_CHANNELS": {
       "name": "创建安全频道",
       "description": "允许成员创建仅限邀请的端到端加密频道"
+    },
+    "MANAGE_WEBHOOKS": {
+      "name": "管理 Webhook",
+      "description": "允许成员创建、编辑和删除传入 Webhook"
     },
     "CREATE_INVITES": {
       "name": "创建邀请",
@@ -540,7 +547,9 @@
     "report": "举报",
     "editHint": "按 Esc 取消 · 按 Enter 保存",
     "originalDeleted": "原始消息已被删除",
-    "failedToToggleReaction": "表情更改失败"
+    "failedToToggleReaction": "表情更改失败",
+    "appTag": "应用",
+    "deletedWebhook": "已删除的 Webhook"
   },
   "messageInput": {
     "emojiPicker": "表情符号选择器",
@@ -1175,7 +1184,24 @@
     "joinMessageUnsupportedChars": "消息包含不支持的字符",
     "joinMessageTooLong": "消息最多 {{max}} 个字符",
     "refineSearch": "结果过多，请缩小搜索范围",
-    "serverNotFound": "未找到该空间"
+    "serverNotFound": "未找到该空间",
+    "webhooksDisabled": "Webhook 目前已禁用",
+    "webhookDisabled": "此 Webhook 已停用",
+    "webhookAdminDisabled": "此 Webhook 已被管理员停用",
+    "webhookNotFound": "未找到 Webhook",
+    "webhookNoPermission": "你没有管理 Webhook 的权限",
+    "webhookTextOnly": "Webhook 只能发布到文字频道",
+    "webhookInvalidType": "无效的 Webhook 类型",
+    "webhookGithubNotConfigured": "GitHub Webhook 不可用：此 Voxium 部署的运营者尚未配置其所需的加密密钥。",
+    "webhookChannelRequired": "请为 Webhook 选择一个频道",
+    "webhookNoFields": "没有要更新的内容",
+    "webhookEnabledBoolean": "启用状态的值无效",
+    "webhookNameEmpty": "Webhook 名称不能为空",
+    "webhookNameTooLong": "Webhook 名称最多 {{max}} 个字符",
+    "webhookNameInvalid": "Webhook 名称包含不支持的字符",
+    "webhookCap": "此服务器已达到 Webhook 数量上限（最多 {{max}} 个）",
+    "channelNotFound": "未找到频道",
+    "tooManyRequests": "请求过多，请稍后再试。"
   },
   "e2e": {
     "badgeTitle": "已端到端加密 — 查看安全码",
@@ -1488,6 +1514,128 @@
       "declined": "你加入 {{name}} 的申请被拒绝了",
       "newRequest": "{{user}} 申请加入 {{server}}",
       "unknownSpace": "某个空间"
+    }
+  },
+  "webhooks": {
+    "title": "集成",
+    "hint": "传入 Webhook 可让脚本、CI 任务和其他应用向文字频道发布消息。",
+    "usage": "{{used}} / {{max}}",
+    "newWebhook": "新建 Webhook",
+    "atCap": "已达到 Webhook 数量上限（最多 {{max}} 个）",
+    "frozen": "此服务器已冻结 Webhook 创建",
+    "empty": "还没有 Webhook。",
+    "emptyHint": "创建一个，让脚本、CI 任务或其他应用向频道发布消息。",
+    "failedToLoad": "无法加载 Webhook",
+    "retry": "重试",
+    "toggleFailed": "无法更新 Webhook",
+    "typeGeneric": "通用",
+    "typeGithub": "GitHub",
+    "disabledChip": "已停用",
+    "channelMissing": "未知频道",
+    "createdBy": "创建者：{{name}}",
+    "createdByUnknown": "创建者未知",
+    "lastUsed": "上次使用：{{when}}",
+    "neverUsed": "从未使用",
+    "rotatedBy": "上次重新生成 URL：{{when}}（{{name}}）",
+    "rotated": "上次重新生成 URL：{{when}}",
+    "adminDisabledChip": "已被管理员停用",
+    "adminDisabledHint": "只有管理员才能重新启用此 Webhook",
+    "creatorRemoved": "已于 {{date}} 停用：持有此 URL 的成员已被移出服务器。仍持有该 URL 的人都可以用它发帖；启用前请先更换 URL。",
+    "creatorRemovedUndated": "已停用：持有此 URL 的成员已被移出服务器。仍持有该 URL 的人都可以用它发帖；启用前请先更换 URL。",
+    "actions": {
+      "edit": "编辑",
+      "rotate": "重新生成 URL",
+      "enable": "启用",
+      "disable": "停用",
+      "delete": "删除"
+    },
+    "create": {
+      "title": "新建 Webhook",
+      "description": "它发布的消息会以此名称显示，并标记为应用。",
+      "name": "名称",
+      "namePlaceholder": "例如：夜间构建",
+      "channel": "频道",
+      "noChannels": "没有可供你绑定 Webhook 的文字频道。",
+      "loadingChannels": "正在加载频道…",
+      "type": "类型",
+      "typeGenericHint": "Discord 格式的 JSON：content、username、embeds",
+      "typeGithubHint": "验证并格式化 GitHub 自身的负载（push、pull request、issue、release）。附带一个仅显示一次的签名密钥。",
+      "submit": "创建 Webhook",
+      "creating": "创建中…",
+      "failed": "无法创建 Webhook"
+    },
+    "edit": {
+      "title": "编辑 Webhook",
+      "description": "它的 URL 保持不变，使用它的工具无需任何更改。",
+      "name": "名称",
+      "channel": "频道",
+      "current": "{{channel}}（当前）",
+      "loadingChannels": "正在加载频道…",
+      "pickGone": "你选择的频道已不可用。请另选一个频道，否则 Webhook 将留在原处。",
+      "moveNote": "移动只会改变它之后消息的发布位置，已发布的消息仍留在原处。",
+      "saving": "正在保存…",
+      "saved": "已更新 {{name}}",
+      "failed": "无法保存 Webhook"
+    },
+    "reveal": {
+      "title": "{{name}} 已就绪",
+      "rotatedTitle": "{{name}} 的新 URL",
+      "copyNow": "请立即复制。URL 仅显示一次；如需新的 URL，请重新生成。",
+      "url": "Webhook URL",
+      "copyUrl": "复制 URL",
+      "worksWith": "适用于任何要求填写 Discord Webhook URL 的工具。",
+      "curlHint": "在终端中试用",
+      "copyCurl": "复制命令",
+      "secret": "签名密钥",
+      "copySecret": "复制密钥",
+      "copied": "已复制到剪贴板",
+      "copyFailed": "无法复制到剪贴板",
+      "invalidUrl": "服务器返回的 Webhook URL 格式无效，因此未显示。请重新生成以获取新的 URL。",
+      "done": "完成",
+      "github": {
+        "title": "在 GitHub 中设置",
+        "rotatedTitle": "{{name}} 的新 URL 和密钥",
+        "updateTitle": "在 GitHub 中同时更新两者",
+        "copyNow": "请立即复制两者。URL 和密钥仅显示一次；如需新的，请重新生成。",
+        "urlHint": "将它粘贴到 GitHub 的 Payload URL 中；完整设置见下方。",
+        "intro": "在 GitHub 的仓库（或组织）中打开 Settings → Webhooks → Add webhook，并填写：",
+        "rotatedIntro": "旧的 URL 和密钥已失效。在 GitHub 中打开 Settings → Webhooks，编辑此 Webhook 并替换两者：",
+        "payloadUrl": "Payload URL",
+        "contentType": "Content type",
+        "secret": "Secret",
+        "ssl": "SSL verification",
+        "sslValue": "Enable SSL verification",
+        "events": "Which events would you like to trigger this webhook?",
+        "eventsValue": "Let me select individual events",
+        "eventsTick": "然后勾选：",
+        "eventPushes": "Pushes",
+        "eventPullRequests": "Pull requests",
+        "eventIssues": "Issues",
+        "eventReleases": "Releases",
+        "ping": "点击 Add webhook 后，GitHub 会发送一个 ping：频道中会出现一行“Connected to owner/repo”，你可以立即确认设置是否正确。",
+        "rotatedCheck": "编辑 Webhook 不会发送新的 ping：两者都更新后，下一个事件（push、pull request、issue 或 release）就会出现在频道中。",
+        "secretRequired": "密钥为必填项：未使用它签名的投递会被拒绝。"
+      }
+    },
+    "rotate": {
+      "title": "重新生成 Webhook URL",
+      "body": "{{name}} 将获得新的 URL。当前 URL 会立即失效，请更新所有使用它的工具。",
+      "bodyGithub": "{{name}} 将获得新的 URL 和新的密钥。当前的会立即失效，请在 GitHub 中用两者更新该 Webhook。",
+      "confirm": "重新生成",
+      "rotating": "正在重新生成…",
+      "failed": "无法重新生成 Webhook URL"
+    },
+    "delete": {
+      "title": "删除 Webhook",
+      "body": "要删除 {{name}} 吗？所有仍在使用其 URL 的工具都将停止工作。",
+      "alsoDeleteMessages": "同时删除它发布的所有消息",
+      "deleted": "已删除 {{name}}",
+      "deletedMessages_other": "已删除 {{name}} 及其 {{count}} 条消息",
+      "failed": "无法删除 Webhook"
+    },
+    "off": {
+      "title": "Webhook 目前已关闭。",
+      "hint": "管理员已禁用传入 Webhook。在重新启用之前，无法通过它们发布任何内容。"
     }
   }
 }

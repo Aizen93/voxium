@@ -1,0 +1,196 @@
+{
+  "ref": "refs/heads/feat/`whoami`",
+  "before": "26eb267f8b1075b250535a6c534a22ce35439778",
+  "after": "38a8db3af3c91417f8a7fb9aa347a133bf21a04f",
+  "repository": {
+    "id": 712345678,
+    "node_id": "R_kgDOKnF1Tg",
+    "name": "rocket",
+    "full_name": "acme/rocket",
+    "private": false,
+    "owner": {
+      "name": "acme",
+      "email": null,
+      "login": "acme",
+      "id": 98765432,
+      "node_id": "O_kgDOBeIq2A",
+      "avatar_url": "https://avatars.githubusercontent.com/u/98765432?v=4",
+      "url": "https://api.github.com/users/acme",
+      "html_url": "https://github.com/acme",
+      "type": "Organization",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/acme/rocket",
+    "description": "Launch toolkit for very fast birds",
+    "fork": false,
+    "url": "https://github.com/acme/rocket",
+    "created_at": 1741944413,
+    "updated_at": "2026-10-17T18:02:11Z",
+    "pushed_at": 1792395669,
+    "homepage": null,
+    "size": 1840,
+    "stargazers_count": 128,
+    "watchers_count": 128,
+    "language": "TypeScript",
+    "forks_count": 9,
+    "open_issues_count": 4,
+    "visibility": "public",
+    "default_branch": "main",
+    "stargazers": 128,
+    "master_branch": "main",
+    "organization": "acme"
+  },
+  "pusher": {
+    "name": "mallory",
+    "email": "mallory@acme.example"
+  },
+  "organization": {
+    "login": "acme",
+    "id": 98765432,
+    "node_id": "O_kgDOBeIq2A",
+    "url": "https://api.github.com/orgs/acme",
+    "repos_url": "https://api.github.com/orgs/acme/repos",
+    "events_url": "https://api.github.com/orgs/acme/events",
+    "hooks_url": "https://api.github.com/orgs/acme/hooks",
+    "issues_url": "https://api.github.com/orgs/acme/issues",
+    "members_url": "https://api.github.com/orgs/acme/members{/member}",
+    "public_members_url": "https://api.github.com/orgs/acme/public_members{/member}",
+    "avatar_url": "https://avatars.githubusercontent.com/u/98765432?v=4",
+    "description": "Fictional makers of very fast rockets"
+  },
+  "sender": {
+    "login": "mallory",
+    "id": 5556666,
+    "node_id": "U_kgDOAFTCWg",
+    "avatar_url": "https://avatars.githubusercontent.com/u/5556666?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/mallory",
+    "html_url": "https://github.com/mallory",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "created": false,
+  "deleted": false,
+  "forced": true,
+  "base_ref": null,
+  "compare": "https://evil.example/acme/rocket/compare/26eb267f8b10...38a8db3af3c9",
+  "commits": [
+    {
+      "id": "not-a-sha-but-a-trap",
+      "tree_id": "6f3eb107528fc9654bcd9008e6dbcb097a74755e",
+      "distinct": true,
+      "message": "Totally safe](https://evil.example) [login](https://evil.example/phish)\n\nnothing to see here",
+      "timestamp": "2026-10-18T11:00:00+02:00",
+      "url": "https://github.com/acme/rocket/commit/not-a-sha-but-a-trap",
+      "author": {
+        "name": "Mallory <script>alert(1)</script>",
+        "email": "mallory@evil.example",
+        "username": "mallory"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "username": "web-flow"
+      },
+      "added": [],
+      "removed": [],
+      "modified": [
+        "src/launch.ts"
+      ]
+    },
+    {
+      "id": "500c61ca16e0d9f421ffc66e283f2551112c892b",
+      "tree_id": "f33c95329ec47c875b0f4834e54f138f26868046",
+      "distinct": true,
+      "message": "Point the label elsewhere",
+      "timestamp": "2026-10-18T11:01:00+02:00",
+      "url": "https://github.com.evil.example/acme/rocket/commit/500c61ca16e0d9f421ffc66e283f2551112c892b",
+      "author": {
+        "name": "Eve",
+        "email": "eve@evil.example",
+        "username": "eve"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "username": "web-flow"
+      },
+      "added": [],
+      "removed": [],
+      "modified": [
+        "src/launch.ts"
+      ]
+    },
+    {
+      "id": "92176daa280a9654682de3d3378758850fa0de98",
+      "tree_id": "4a35f9f0701ed8182c988f6302f176ce03a92757",
+      "distinct": true,
+      "message": "Run a script",
+      "timestamp": "2026-10-18T11:02:00+02:00",
+      "url": "javascript:alert(document.cookie)",
+      "author": {
+        "name": "Eve",
+        "email": "eve@evil.example",
+        "username": "eve"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "username": "web-flow"
+      },
+      "added": [],
+      "removed": [],
+      "modified": [
+        "src/launch.ts"
+      ]
+    },
+    {
+      "id": "38a8db3af3c91417f8a7fb9aa347a133bf21a04f",
+      "tree_id": "95782df3548ee1abd26af367178b0bccf518efa7",
+      "distinct": true,
+      "message": "**not bold** and _not italic_ <img src=x onerror=alert(1)>",
+      "timestamp": "2026-10-18T11:03:00+02:00",
+      "url": "https://github.com@evil.example/acme/rocket/commit/38a8db3af3c91417f8a7fb9aa347a133bf21a04f",
+      "author": {
+        "name": "Eve",
+        "email": "eve@evil.example",
+        "username": "eve"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "username": "web-flow"
+      },
+      "added": [],
+      "removed": [],
+      "modified": [
+        "src/launch.ts"
+      ]
+    }
+  ],
+  "head_commit": {
+    "id": "38a8db3af3c91417f8a7fb9aa347a133bf21a04f",
+    "tree_id": "95782df3548ee1abd26af367178b0bccf518efa7",
+    "distinct": true,
+    "message": "**not bold** and _not italic_ <img src=x onerror=alert(1)>",
+    "timestamp": "2026-10-18T11:03:00+02:00",
+    "url": "https://github.com@evil.example/acme/rocket/commit/38a8db3af3c91417f8a7fb9aa347a133bf21a04f",
+    "author": {
+      "name": "Eve",
+      "email": "eve@evil.example",
+      "username": "eve"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "username": "web-flow"
+    },
+    "added": [],
+    "removed": [],
+    "modified": [
+      "src/launch.ts"
+    ]
+  }
+}

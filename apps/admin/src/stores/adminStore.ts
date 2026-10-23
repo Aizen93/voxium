@@ -2,7 +2,8 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { getSocket, onSocketReconnect } from '../services/socket';
 import { toast } from '../stores/toastStore';
-import type { ServerJoinMode, AdminUser, AdminIpRecord, AdminServer, AdminServerExport, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
+import { apiErrorMessage, logMessage } from '../utils/apiError';
+import type { AdminWebhook, ServerJoinMode, AdminUser, AdminIpRecord, AdminServer, AdminServerExport, BanRecord, IpBanRecord, AdminDashboardStats, AdminMetricsSnapshot, StorageStats, StorageFile, StorageTopUploader, AuditLogEntry, Announcement, Report, SupportTicket, SupportMessageData, GeoStat, SfuStats, SfuMediaCounts, ResourceLimits, ServerResourceLimits, InfraServer } from '@voxium/shared';
 
 // Untyped socket interface for admin-specific events not in the shared event maps
 interface AdminSocket {
@@ -21,6 +22,10 @@ let metricsRetryTimer: ReturnType<typeof setInterval> | null = null;
 // The server list has two fetch triggers (Search and "Listed only") plus the
 // refetch after a curation: only the latest request may paint the table.
 let serversFetchSeq = 0;
+
+// The webhooks modal refetches after every action and can be reopened on
+// another server: only the latest list request may paint it.
+let serverWebhooksFetchSeq = 0;
 
 // Module-level refs for reports subscription cleanup
 let reportsHandler: ((data: { total: number }) => void) | null = null;
@@ -154,7 +159,7 @@ interface AdminState {
   rateLimits: Array<{
     name: string;
     label: string;
-    keyType: 'ip' | 'userId';
+    keyType: 'ip' | 'userId' | 'webhook';
     keyPrefix: string;
     points: number;
     duration: number;
@@ -172,6 +177,14 @@ interface AdminState {
   globalLimits: ResourceLimits | null;
   serverLimits: ServerResourceLimits | null;
   serverLimitsServerId: string | null;
+
+  // Webhooks of one server (moderation modal). Never a token: the API has none to send.
+  serverWebhooks: AdminWebhook[];
+  /** Whose webhooks `serverWebhooks` holds or is loading (null before the first request). */
+  serverWebhooksServerId: string | null;
+  serverWebhooksLoading: boolean;
+  /** The last list request failed (the modal shows it instead of an empty list). */
+  serverWebhooksError: boolean;
 
   // Loading
   loading: boolean;
@@ -256,6 +269,13 @@ interface AdminState {
   updateServerLimits: (serverId: string, limits: Partial<ServerResourceLimits>) => Promise<void>;
   resetServerLimits: (serverId: string) => Promise<void>;
 
+  /** Every webhook of the server (no channel filter: platform admins see all). */
+  fetchServerWebhooks: (serverId: string) => Promise<void>;
+  /** Disable / enable (audited server-side); toasts, then refetches the open list. */
+  setServerWebhookEnabled: (webhookId: string, enabled: boolean) => Promise<void>;
+  /** Delete, with `purge` also every message it posted (audited); toasts, then refetches. */
+  deleteServerWebhook: (webhookId: string, purge: boolean) => Promise<void>;
+
   fetchStorageStats: () => Promise<void>;
   fetchTopUploaders: () => Promise<void>;
   fetchStorageFiles: (page?: number) => Promise<void>;
@@ -332,6 +352,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   globalLimits: null,
   serverLimits: null,
   serverLimitsServerId: null,
+  serverWebhooks: [],
+  serverWebhooksServerId: null,
+  serverWebhooksLoading: false,
+  serverWebhooksError: false,
   featureFlags: [],
   rateLimits: [],
   loading: false,
@@ -468,7 +492,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       set({ users: data.data, usersTotal: data.total, usersPage: p });
     } catch (err) {
       // Fetchers must not reject unhandled — surface and log instead
-      console.error('Failed to fetch users:', err);
+      console.error('Failed to fetch users:', logMessage(err));
       toast.error('Failed to load users');
     } finally {
       set({ loading: false });
@@ -546,7 +570,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     } catch (err) {
       if (seq !== serversFetchSeq) return;
       // Fetchers must not reject unhandled — surface and log instead
-      console.error('Failed to fetch servers:', err);
+      console.error('Failed to fetch servers:', logMessage(err));
       toast.error('Failed to load servers');
     } finally {
       if (seq === serversFetchSeq) set({ loading: false });
@@ -939,8 +963,58 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
   resetServerLimits: async (serverId) => {
     await api.delete(`/admin/limits/servers/${serverId}`);
-    set({ serverLimits: { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null } });
+    set({ serverLimits: { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null } });
     toast.success('Server limits reset to global defaults');
+  },
+
+  fetchServerWebhooks: async (serverId) => {
+    const seq = ++serverWebhooksFetchSeq;
+    set((s) => ({
+      // Another server's rows never show under this one's title; a refetch of
+      // the same server keeps its rows on screen until the answer lands
+      serverWebhooks: s.serverWebhooksServerId === serverId ? s.serverWebhooks : [],
+      serverWebhooksServerId: serverId,
+      serverWebhooksLoading: true,
+      serverWebhooksError: false,
+    }));
+    try {
+      const { data } = await api.get(`/admin/servers/${serverId}/webhooks`);
+      if (seq !== serverWebhooksFetchSeq) return;
+      set({ serverWebhooks: data.data as AdminWebhook[] });
+    } catch (err) {
+      if (seq !== serverWebhooksFetchSeq) return;
+      console.error('Failed to fetch server webhooks:', logMessage(err));
+      set({ serverWebhooksError: true });
+      toast.error(apiErrorMessage(err, 'Failed to load webhooks'));
+    } finally {
+      if (seq === serverWebhooksFetchSeq) set({ serverWebhooksLoading: false });
+    }
+  },
+
+  setServerWebhookEnabled: async (webhookId, enabled) => {
+    try {
+      await api.patch(`/admin/webhooks/${webhookId}`, { enabled });
+      toast.success(enabled ? 'Webhook enabled' : 'Webhook disabled');
+    } catch (err) {
+      console.error('Failed to update webhook:', logMessage(err));
+      // e.g. "Webhook not found" when its owner deleted it meanwhile
+      toast.error(apiErrorMessage(err, 'Failed to update the webhook'));
+    }
+    const serverId = get().serverWebhooksServerId;
+    if (serverId) await get().fetchServerWebhooks(serverId);
+  },
+
+  deleteServerWebhook: async (webhookId, purge) => {
+    try {
+      const { data } = await api.delete(`/admin/webhooks/${webhookId}${purge ? '?purge=1' : ''}`);
+      const deleted = Number(data?.data?.deletedMessages ?? 0);
+      toast.success(purge ? `Webhook deleted with ${deleted} message${deleted === 1 ? '' : 's'}` : 'Webhook deleted');
+    } catch (err) {
+      console.error('Failed to delete webhook:', logMessage(err));
+      toast.error(apiErrorMessage(err, 'Failed to delete the webhook'));
+    }
+    const serverId = get().serverWebhooksServerId;
+    if (serverId) await get().fetchServerWebhooks(serverId);
   },
 
   fetchStorageStats: async () => {
@@ -993,7 +1067,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       const { data } = await api.get('/admin/infra-servers');
       set({ infraServers: data.data });
     } catch (err) {
-      console.error('[Admin] Failed to fetch infrastructure servers:', err);
+      console.error('[Admin] Failed to fetch infrastructure servers:', logMessage(err));
     }
   },
 

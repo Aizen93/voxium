@@ -11,17 +11,47 @@
  */
 export async function copyToClipboard(text: string): Promise<void> {
   if (navigator.clipboard && window.isSecureContext) {
-    await navigator.clipboard.writeText(text);
-    return;
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (err) {
+      // A refusal of the async API (a webview permission policy, a document
+      // without focus) is not the end: the textarea route below may still work
+      console.warn('[Clipboard] writeText was refused, trying the fallback:', err instanceof Error ? err.message : err);
+    }
   }
+  copyThroughTextarea(text);
+}
+
+/** The execCommand route. Throws `copy rejected` when it does not copy. */
+function copyThroughTextarea(text: string): void {
+  // The copy-once panel (and every other caller) is a dialog with a focus
+  // trap: focus goes back where it was, or the trap loses it to <body>
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const field = document.createElement('textarea');
   field.value = text;
   field.style.position = 'fixed';
   field.style.left = '-9999px';
   document.body.appendChild(field);
-  field.focus();
-  field.select();
-  const ok = document.execCommand('copy');
-  document.body.removeChild(field);
+  let ok = false;
+  try {
+    field.focus();
+    field.select();
+    // execCommand can throw (a webview that blocks it) as well as answer false;
+    // both are the same failure to the caller
+    ok = document.execCommand('copy');
+  } catch (err) {
+    console.warn('[Clipboard] execCommand copy threw:', err instanceof Error ? err.message : err);
+  } finally {
+    // Never leave the text (a webhook token, a recovery key) in the DOM
+    field.remove();
+    if (previousFocus && previousFocus.isConnected) {
+      try {
+        previousFocus.focus({ preventScroll: true });
+      } catch (err) {
+        console.warn('[Clipboard] Could not restore focus:', err instanceof Error ? err.message : err);
+      }
+    }
+  }
   if (!ok) throw new Error('copy rejected');
 }

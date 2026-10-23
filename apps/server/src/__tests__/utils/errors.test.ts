@@ -6,6 +6,8 @@ import {
   ForbiddenError,
   NotFoundError,
   ConflictError,
+  UnsupportedMediaTypeError,
+  ServiceUnavailableError,
   parseDateParam,
 } from '../../utils/errors';
 
@@ -123,6 +125,34 @@ describe('ConflictError', () => {
 
   it('is an instance of AppError', () => {
     expect(new ConflictError('x')).toBeInstanceOf(AppError);
+  });
+});
+
+describe('UnsupportedMediaTypeError', () => {
+  it('has statusCode 415 and the provided message', () => {
+    const err = new UnsupportedMediaTypeError('Send application/json');
+    expect(err.statusCode).toBe(415);
+    expect(err.message).toBe('Send application/json');
+  });
+
+  it('is an operational AppError', () => {
+    const err = new UnsupportedMediaTypeError('x');
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.isOperational).toBe(true);
+  });
+});
+
+describe('ServiceUnavailableError', () => {
+  it('has statusCode 503 and the provided message', () => {
+    const err = new ServiceUnavailableError('Webhook secret is unavailable');
+    expect(err.statusCode).toBe(503);
+    expect(err.message).toBe('Webhook secret is unavailable');
+  });
+
+  it('is an operational AppError', () => {
+    const err = new ServiceUnavailableError('x');
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.isOperational).toBe(true);
   });
 });
 

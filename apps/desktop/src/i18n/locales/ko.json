@@ -274,7 +274,8 @@
       "members": "멤버",
       "roles": "역할",
       "limits": "제한",
-      "discovery": "탐색"
+      "discovery": "탐색",
+      "integrations": "연동"
     },
     "general": {
       "serverName": "서버 이름",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "이 서버의 최대 채널 카테고리 수",
       "maxMembers": "최대 멤버 수",
       "maxMembersDesc": "이 서버에 참여할 수 있는 최대 멤버 수",
+      "maxWebhooks": "최대 웹후크 수",
+      "maxWebhooksDesc": "이 서버의 최대 수신 웹후크 수 (0이면 생성 불가)",
       "unlimited": "무제한",
       "failedToLoad": "서버 제한을 불러오지 못했습니다"
     }
@@ -365,6 +368,10 @@
     "CREATE_SECURE_CHANNELS": {
       "name": "보안 채널 만들기",
       "description": "멤버가 초대 전용 종단간 암호화 채널을 만들 수 있도록 허용합니다"
+    },
+    "MANAGE_WEBHOOKS": {
+      "name": "웹후크 관리",
+      "description": "멤버가 수신 웹후크를 생성, 편집 및 삭제할 수 있도록 허용합니다"
     },
     "CREATE_INVITES": {
       "name": "초대 만들기",
@@ -540,7 +547,9 @@
     "report": "신고",
     "editHint": "Esc로 취소 · Enter로 저장",
     "originalDeleted": "원본 메시지가 삭제되었습니다",
-    "failedToToggleReaction": "반응 변경에 실패했습니다"
+    "failedToToggleReaction": "반응 변경에 실패했습니다",
+    "appTag": "앱",
+    "deletedWebhook": "삭제된 웹후크"
   },
   "messageInput": {
     "emojiPicker": "이모지 선택",
@@ -1175,7 +1184,24 @@
     "joinMessageUnsupportedChars": "메시지에 지원되지 않는 문자가 포함되어 있습니다",
     "joinMessageTooLong": "메시지는 최대 {{max}}자까지 입력할 수 있습니다",
     "refineSearch": "결과가 너무 많습니다. 검색어를 더 구체적으로 입력하세요",
-    "serverNotFound": "스페이스를 찾을 수 없습니다"
+    "serverNotFound": "스페이스를 찾을 수 없습니다",
+    "webhooksDisabled": "웹후크가 현재 비활성화되어 있습니다",
+    "webhookDisabled": "이 웹후크는 비활성화되어 있습니다",
+    "webhookAdminDisabled": "이 웹후크는 관리자가 비활성화했습니다",
+    "webhookNotFound": "웹후크를 찾을 수 없습니다",
+    "webhookNoPermission": "웹후크를 관리할 권한이 없습니다",
+    "webhookTextOnly": "웹후크는 텍스트 채널에만 게시할 수 있습니다",
+    "webhookInvalidType": "잘못된 웹후크 유형입니다",
+    "webhookGithubNotConfigured": "GitHub 웹후크를 사용할 수 없습니다. 이 Voxium 설치의 운영자가 필요한 암호화 키를 구성하지 않았습니다.",
+    "webhookChannelRequired": "웹후크가 게시할 채널을 선택하세요",
+    "webhookNoFields": "업데이트할 항목이 없습니다",
+    "webhookEnabledBoolean": "활성화 값이 올바르지 않습니다",
+    "webhookNameEmpty": "웹후크 이름은 비워 둘 수 없습니다",
+    "webhookNameTooLong": "웹후크 이름은 최대 {{max}}자까지 입력할 수 있습니다",
+    "webhookNameInvalid": "웹후크 이름에 사용할 수 없는 문자가 포함되어 있습니다",
+    "webhookCap": "이 서버의 웹후크 한도에 도달했습니다 (최대 {{max}}개)",
+    "channelNotFound": "채널을 찾을 수 없습니다",
+    "tooManyRequests": "요청이 너무 많습니다. 나중에 다시 시도해 주세요."
   },
   "e2e": {
     "badgeTitle": "종단간 암호화됨 — 안전 번호 보기",
@@ -1488,6 +1514,128 @@
       "declined": "{{name}} 참여 요청이 거절되었습니다",
       "newRequest": "{{user}}님이 {{server}} 참여를 요청했습니다",
       "unknownSpace": "스페이스"
+    }
+  },
+  "webhooks": {
+    "title": "연동",
+    "hint": "수신 웹후크를 사용하면 스크립트, CI 작업, 기타 앱이 텍스트 채널에 게시할 수 있습니다.",
+    "usage": "{{used}} / {{max}}",
+    "newWebhook": "새 웹후크",
+    "atCap": "웹후크 한도에 도달했습니다 (최대 {{max}}개)",
+    "frozen": "이 서버에서는 웹후크 생성이 중지되었습니다",
+    "empty": "아직 웹후크가 없습니다.",
+    "emptyHint": "웹후크를 만들면 스크립트, CI 작업 또는 다른 앱이 채널에 게시할 수 있습니다.",
+    "failedToLoad": "웹후크를 불러오지 못했습니다",
+    "retry": "다시 시도",
+    "toggleFailed": "웹후크를 업데이트하지 못했습니다",
+    "typeGeneric": "일반",
+    "typeGithub": "GitHub",
+    "disabledChip": "비활성화됨",
+    "channelMissing": "알 수 없는 채널",
+    "createdBy": "만든 사람: {{name}}",
+    "createdByUnknown": "만든 사람 알 수 없음",
+    "lastUsed": "마지막 사용: {{when}}",
+    "neverUsed": "사용한 적 없음",
+    "rotatedBy": "URL 재발급: {{when}} ({{name}})",
+    "rotated": "URL 재발급: {{when}}",
+    "adminDisabledChip": "관리자가 비활성화함",
+    "adminDisabledHint": "이 웹후크는 관리자만 다시 활성화할 수 있습니다",
+    "creatorRemoved": "{{date}}에 비활성화됨: 이 URL을 보유했던 멤버가 서버에서 제거되었습니다. URL을 가진 사람은 누구나 게시할 수 있으니, 활성화하기 전에 URL을 재발급하세요.",
+    "creatorRemovedUndated": "비활성화됨: 이 URL을 보유했던 멤버가 서버에서 제거되었습니다. URL을 가진 사람은 누구나 게시할 수 있으니, 활성화하기 전에 URL을 재발급하세요.",
+    "actions": {
+      "edit": "편집",
+      "rotate": "URL 재발급",
+      "enable": "활성화",
+      "disable": "비활성화",
+      "delete": "삭제"
+    },
+    "create": {
+      "title": "새 웹후크",
+      "description": "이 웹후크의 메시지는 이 이름으로, 앱 표시와 함께 나타납니다.",
+      "name": "이름",
+      "namePlaceholder": "예: 야간 빌드",
+      "channel": "채널",
+      "noChannels": "웹후크를 연결할 수 있는 텍스트 채널이 없습니다.",
+      "loadingChannels": "채널을 불러오는 중…",
+      "type": "유형",
+      "typeGenericHint": "Discord 형식 JSON: content, username, embeds",
+      "typeGithubHint": "GitHub 자체 페이로드(push, pull request, issue, release)를 검증하고 서식을 적용합니다. 서명 시크릿이 발급되며 한 번만 표시됩니다.",
+      "submit": "웹후크 만들기",
+      "creating": "만드는 중…",
+      "failed": "웹후크를 만들지 못했습니다"
+    },
+    "edit": {
+      "title": "웹후크 편집",
+      "description": "URL은 바뀌지 않으므로 이를 사용하는 도구를 업데이트할 필요가 없습니다.",
+      "name": "이름",
+      "channel": "채널",
+      "current": "{{channel}} (현재)",
+      "loadingChannels": "채널을 불러오는 중…",
+      "pickGone": "선택한 채널을 더 이상 사용할 수 없습니다. 다른 채널을 선택하지 않으면 웹후크는 현재 위치에 그대로 있습니다.",
+      "moveNote": "이동하면 앞으로 보낼 메시지가 게시되는 위치만 바뀌며, 이미 게시된 메시지는 그대로 남습니다.",
+      "saving": "저장 중…",
+      "saved": "{{name}}을(를) 업데이트했습니다",
+      "failed": "웹후크를 저장하지 못했습니다"
+    },
+    "reveal": {
+      "title": "{{name}} 준비 완료",
+      "rotatedTitle": "{{name}}의 새 URL",
+      "copyNow": "지금 복사하세요. URL은 한 번만 표시되며, 새 URL이 필요하면 재발급하세요.",
+      "url": "웹후크 URL",
+      "copyUrl": "URL 복사",
+      "worksWith": "Discord 웹후크 URL을 요구하는 도구라면 어디서든 사용할 수 있습니다.",
+      "curlHint": "터미널에서 테스트하기",
+      "copyCurl": "명령어 복사",
+      "secret": "서명 시크릿",
+      "copySecret": "시크릿 복사",
+      "copied": "클립보드에 복사했습니다",
+      "copyFailed": "클립보드에 복사하지 못했습니다",
+      "invalidUrl": "서버가 잘못된 형식의 웹후크 URL을 보내 표시하지 않습니다. 재발급하여 새 URL을 받으세요.",
+      "done": "완료",
+      "github": {
+        "title": "GitHub에서 설정하기",
+        "rotatedTitle": "{{name}}의 새 URL과 시크릿",
+        "updateTitle": "GitHub에서 둘 다 업데이트하기",
+        "copyNow": "지금 둘 다 복사하세요. URL과 시크릿은 한 번만 표시되며, 새로 필요하면 재발급하세요.",
+        "urlHint": "GitHub의 Payload URL에 붙여 넣으세요. 전체 설정은 아래에 있습니다.",
+        "intro": "GitHub 저장소(또는 조직)에서 Settings → Webhooks → Add webhook을 열고 다음을 입력하세요:",
+        "rotatedIntro": "이전 URL과 시크릿은 더 이상 작동하지 않습니다. GitHub에서 Settings → Webhooks를 열고 이 웹후크를 편집해 둘 다 바꾸세요:",
+        "payloadUrl": "Payload URL",
+        "contentType": "Content type",
+        "secret": "Secret",
+        "ssl": "SSL verification",
+        "sslValue": "Enable SSL verification",
+        "events": "Which events would you like to trigger this webhook?",
+        "eventsValue": "Let me select individual events",
+        "eventsTick": "그런 다음 체크하세요:",
+        "eventPushes": "Pushes",
+        "eventPullRequests": "Pull requests",
+        "eventIssues": "Issues",
+        "eventReleases": "Releases",
+        "ping": "Add webhook을 클릭하면 GitHub가 ping을 보내고 채널에 “Connected to owner/repo” 줄이 표시되므로 설정을 바로 확인할 수 있습니다.",
+        "rotatedCheck": "웹후크를 편집하면 새 ping이 전송되지 않습니다. 둘 다 업데이트하면 다음 이벤트(push, pull request, issue, release)가 채널에 표시됩니다.",
+        "secretRequired": "시크릿은 필수입니다. 이 시크릿으로 서명되지 않은 전송은 거부됩니다."
+      }
+    },
+    "rotate": {
+      "title": "웹후크 URL 재발급",
+      "body": "{{name}}에 새 URL이 발급됩니다. 현재 URL은 즉시 작동을 멈추므로 이를 사용하는 모든 도구를 업데이트하세요.",
+      "bodyGithub": "{{name}}에 새 URL과 새 시크릿이 발급됩니다. 현재 값은 즉시 작동을 멈추므로 GitHub의 웹후크에서 둘 다 업데이트하세요.",
+      "confirm": "재발급",
+      "rotating": "재발급 중…",
+      "failed": "웹후크 URL을 재발급하지 못했습니다"
+    },
+    "delete": {
+      "title": "웹후크 삭제",
+      "body": "{{name}}을(를) 삭제할까요? 이 URL을 아직 사용하는 모든 항목이 작동을 멈춥니다.",
+      "alsoDeleteMessages": "이 웹후크가 게시한 모든 메시지도 삭제",
+      "deleted": "{{name}}을(를) 삭제했습니다",
+      "deletedMessages_other": "{{name}}과(와) 메시지 {{count}}개를 삭제했습니다",
+      "failed": "웹후크를 삭제하지 못했습니다"
+    },
+    "off": {
+      "title": "웹후크가 현재 꺼져 있습니다.",
+      "hint": "관리자가 수신 웹후크를 비활성화했습니다. 다시 켜질 때까지 웹후크를 통해 게시할 수 없습니다."
     }
   }
 }

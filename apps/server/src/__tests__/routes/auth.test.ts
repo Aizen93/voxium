@@ -179,6 +179,10 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitE2EStatus: passthroughMiddleware,
   rateLimitE2EShares: passthroughMiddleware,
   rateLimitE2EApprove: passthroughMiddleware,
+  rateLimitWebhookExecuteIp: passthroughMiddleware,
+  rateLimitWebhookExecute: passthroughMiddleware,
+  rateLimitWebhookManage: passthroughMiddleware,
+  rateLimitWebhookRead: passthroughMiddleware,
   socketRateLimit: vi.fn().mockReturnValue(true),
 }));
 

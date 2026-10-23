@@ -29,6 +29,10 @@ const RULE_DESCRIPTIONS: Record<string, string> = {
   admin: 'Limits admin panel API requests.',
   report: 'Limits how often a user can submit reports.',
   support: 'Limits support ticket message sending.',
+  webhookExecute: 'Deliveries accepted per webhook per minute, charged only after the token matched.',
+  webhookExecuteIp: "Webhook deliveries per client address per minute; generous because GitHub's deliveries share a few egress addresses.",
+  webhookManage: 'Webhook create, edit, rotate and delete per user per hour.',
+  webhookRead: 'Webhook list reads per user per minute.',
   general: 'Catch-all limiter applied to all other API routes.',
 };
 
@@ -183,7 +187,7 @@ export function AdminRateLimits() {
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
                       rule.keyType === 'ip' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
                     }`}>
-                      {rule.keyType === 'ip' ? 'IP' : 'User'}
+                      {rule.keyType === 'ip' ? 'IP' : rule.keyType === 'webhook' ? 'Webhook' : 'User'}
                     </span>
                   </td>
                   <td className="px-4 py-3">

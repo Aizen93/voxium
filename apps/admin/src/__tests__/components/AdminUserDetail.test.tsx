@@ -120,7 +120,8 @@ describe('AdminUserDetail — owned servers', () => {
     store.fetchUserOwnedServers.mockRejectedValue(new Error('boom'));
     await render();
     expect(toast.error).toHaveBeenCalledWith('Failed to load owned servers');
-    expect(spy).toHaveBeenCalled();
+    // the message only, never the error object (an axios one carries the request headers)
+    expect(spy).toHaveBeenCalledWith('Failed to load owned servers:', 'boom');
     expect(q('[data-testid="owned-servers-panel"]')).toBeNull();
     spy.mockRestore();
   });

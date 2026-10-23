@@ -499,12 +499,13 @@ roleRouter.put(
       }
 
       // Validate that allow and deny don't overlap, and strip the flags that
-      // cannot be granted via channel overrides: ADMINISTRATOR, and
-      // CREATE_SECURE_CHANNELS (server-level only — a channel-scoped grant of
-      // "may create secure channels" is meaningless and would just confuse
-      // effective-permission displays)
+      // cannot be granted via channel overrides: ADMINISTRATOR, and the two
+      // server-level-only flags CREATE_SECURE_CHANNELS and MANAGE_WEBHOOKS (a
+      // channel-scoped grant of either is meaningless and would just confuse
+      // effective-permission displays — webhook management is checked against
+      // the SERVER permissions, so a channel grant must never look like one)
       const CHANNEL_OVERRIDE_MASK =
-        ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR & ~Permissions.CREATE_SECURE_CHANNELS;
+        ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR & ~Permissions.CREATE_SECURE_CHANNELS & ~Permissions.MANAGE_WEBHOOKS;
       const allowBits = permissionsFromString(allow) & CHANNEL_OVERRIDE_MASK;
       const denyBits = permissionsFromString(deny) & CHANNEL_OVERRIDE_MASK;
       if ((allowBits & denyBits) !== 0n) {

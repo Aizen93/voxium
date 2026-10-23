@@ -16,11 +16,14 @@ vi.mock('react-i18next', async (importOriginal) => {
   return { ...actual, useTranslation: () => ({ t: (k: string) => k }) };
 });
 
+/** What the mocked chat store answers for replyingTo (a test sets it, then re-renders). */
+const chatState = vi.hoisted(() => ({ replyingTo: null as unknown }));
+
 vi.mock('../../stores/chatStore', () => {
   const state = () => ({
     sendMessage: vi.fn(),
     sendDMMessage: vi.fn(),
-    replyingTo: null,
+    replyingTo: chatState.replyingTo,
     clearReplyingTo: vi.fn(),
   });
   const useChatStore = <T,>(sel?: (s: ReturnType<typeof state>) => T) =>
@@ -90,5 +93,37 @@ describe('MessageInput single-row composer', () => {
       'messageInput.emojiPicker',
       'messageInput.sendMessage',
     ]);
+  });
+});
+
+describe('MessageInput reply banner', () => {
+  afterEach(() => { chatState.replyingTo = null; });
+
+  const reply = (author: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    id: 'm1', content: 'the quoted text', channelId: 'c1', createdAt: '2026-10-18T00:00:00.000Z', editedAt: null, reactions: [],
+    author: { id: 'u2', username: 'alice', displayName: 'alice', avatarUrl: null, ...author },
+    ...extra,
+  });
+  const rerender = () => act(() => { root.render(<MessageInput channelId="c1" channelName="general" />); });
+  const appTag = () => container.querySelector('[data-testid="app-tag"]');
+
+  it('tags a webhook author with APP: a webhook names itself on every post, and the composer is where a reply quotes it', () => {
+    chatState.replyingTo = reply({ id: 'webhook:wh-1', isWebhook: true });
+    rerender();
+    expect(container.textContent).toContain('messageInput.replyingTo');
+    expect(container.textContent).toContain('alice');
+    expect(appTag()).toBeTruthy();
+  });
+
+  it('shows no tag for a member, nor for a webhook claim on an encrypted or a DM row (there it is the server relabelling)', () => {
+    chatState.replyingTo = reply({});
+    rerender();
+    expect(appTag()).toBeNull();
+    chatState.replyingTo = reply({ id: 'webhook:wh-1', isWebhook: true }, { encrypted: true });
+    rerender();
+    expect(appTag()).toBeNull();
+    chatState.replyingTo = reply({ id: 'webhook:wh-1', isWebhook: true }, { conversationId: 'dm-1', channelId: null });
+    rerender();
+    expect(appTag()).toBeNull();
   });
 });

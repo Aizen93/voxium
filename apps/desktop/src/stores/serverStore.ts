@@ -5,7 +5,7 @@ import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { pinSecure, isPinnedSecure, claimDowngradeWarning } from '../utils/securePins';
-import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST } from '@voxium/shared';
+import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST, OPAQUE_ID_RE } from '@voxium/shared';
 import type { DiscoveryTier } from '@voxium/shared';
 import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
 
@@ -741,7 +741,10 @@ export const useServerStore = create<ServerState>((set, get) => ({
     const known = new Set(get().members.map((m) => m.userId));
     let queued = false;
     for (const id of userIds) {
-      if (!id || known.has(id) || lookupMisses.has(id) || lookupPending.has(id) || lookupInFlight.has(id)) continue;
+      // Not an id the server could answer for (a webhook author): dropped
+      // here, the one choke point every lookup goes through (OPAQUE_ID_RE)
+      if (typeof id !== 'string' || !OPAQUE_ID_RE.test(id)) continue;
+      if (known.has(id) || lookupMisses.has(id) || lookupPending.has(id) || lookupInFlight.has(id)) continue;
       lookupPending.add(id);
       queued = true;
     }

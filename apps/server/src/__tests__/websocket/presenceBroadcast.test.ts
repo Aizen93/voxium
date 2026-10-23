@@ -632,6 +632,79 @@ describe('socketServer — voice:channel_users replay on connect', () => {
   });
 });
 
+// ─── Connect-time unread counts (webhook rows have no author) ───────────────
+
+describe('socketServer — unread:init / dm:unread:init count authorless rows', () => {
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-secret';
+    mockPrisma.user.findUnique.mockResolvedValue({
+      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+    });
+    mockPrisma.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-1' }]);
+    mockPrisma.channel.findMany.mockResolvedValue([
+      { id: 'tc', serverId: 'srv-1', type: 'text', secure: false },
+    ]);
+    // Owner fast path: the plaintext text channel is visible
+    mockPrisma.server.findMany.mockResolvedValue([{ id: 'srv-1', ownerId: 'user-1' }]);
+    mockPrisma.conversation.findMany.mockResolvedValue([{ id: 'conv-1' }]);
+    mockPrisma.ipBan.findUnique.mockResolvedValue(null);
+    mockPrisma.ipRecord.upsert.mockResolvedValue({});
+    mockPrisma.supportTicket.findUnique.mockResolvedValue(null);
+    mockPrisma.announcement.findMany.mockResolvedValue([]);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.$queryRawUnsafe.mockImplementation(async (sql: string) =>
+      sql.includes('m.channel_id = c.id')
+        ? [{ channel_id: 'tc', server_id: 'srv-1', cnt: 3 }]
+        : [{ conversation_id: 'conv-1', cnt: 2 }]);
+  });
+
+  afterEach(() => {
+    if (savedJwtSecret !== undefined) process.env.JWT_SECRET = savedJwtSecret;
+    else delete process.env.JWT_SECRET;
+    mockPrisma.$queryRawUnsafe.mockReset();
+    mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
+  });
+
+  it('excludes only the viewer as author with IS DISTINCT FROM, so a NULL-author webhook row still counts', async () => {
+    // `m.author_id != $1` is NULL for author_id NULL, which drops every
+    // webhook-posted row from the reconnect count while the live message:new
+    // handler counts it: the badge would shrink on every reconnect.
+    const { socket, emitFn } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const connectionHandler = getConnectionHandler();
+
+    await connectionHandler(socket);
+
+    const calls = mockPrisma.$queryRawUnsafe.mock.calls as unknown[][];
+    const channelSql = calls.map((c) => c[0] as string).find((q) => q.includes('m.channel_id = c.id'));
+    const dmSql = calls.map((c) => c[0] as string).find((q) => q.includes('m.conversation_id = conv.id'));
+    expect(channelSql).toBeDefined();
+    expect(dmSql).toBeDefined();
+    for (const sql of [channelSql!, dmSql!]) {
+      expect(sql).toMatch(/AND m\.author_id IS DISTINCT FROM \$1/);
+      expect(sql).not.toMatch(/author_id\s*!=/);
+      expect(sql).not.toMatch(/author_id\s*<>/);
+    }
+    // the viewer is still the excluded author
+    const channelCall = calls.find((c) => c[0] === channelSql)!;
+    expect(channelCall[1]).toBe('user-1');
+    expect(channelCall[2]).toEqual(['tc']);
+
+    expect(emitFn).toHaveBeenCalledWith('unread:init', {
+      unreads: [{ channelId: 'tc', serverId: 'srv-1', count: 3 }],
+    });
+    expect(emitFn).toHaveBeenCalledWith('dm:unread:init', {
+      unreads: [{ conversationId: 'conv-1', count: 2 }],
+    });
+
+    httpServer.close();
+  });
+});
+
 // ─── Which address the socket surface believes it is talking to ─────────────
 
 describe('getSocketIp', () => {

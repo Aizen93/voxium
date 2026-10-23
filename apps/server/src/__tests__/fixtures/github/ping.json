@@ -1,0 +1,93 @@
+{
+  "zen": "Design for failure.",
+  "hook_id": 501234567,
+  "hook": {
+    "type": "Repository",
+    "id": 501234567,
+    "name": "web",
+    "active": true,
+    "events": [
+      "issues",
+      "pull_request",
+      "push",
+      "release"
+    ],
+    "config": {
+      "content_type": "json",
+      "insecure_ssl": "0",
+      "secret": "********",
+      "url": "https://voxium.example/api/v1/webhooks/wh_example/REDACTED"
+    },
+    "updated_at": "2026-10-18T07:30:12Z",
+    "created_at": "2026-10-18T07:30:12Z",
+    "url": "https://api.github.com/repos/acme/rocket/hooks/501234567",
+    "ping_url": "https://api.github.com/repos/acme/rocket/hooks/501234567/pings",
+    "deliveries_url": "https://api.github.com/repos/acme/rocket/hooks/501234567/deliveries",
+    "last_response": {
+      "code": null,
+      "status": "unused",
+      "message": null
+    },
+    "test_url": "https://api.github.com/repos/acme/rocket/hooks/501234567/test"
+  },
+  "repository": {
+    "id": 712345678,
+    "node_id": "R_kgDOKnF1Tg",
+    "name": "rocket",
+    "full_name": "acme/rocket",
+    "private": false,
+    "owner": {
+      "login": "acme",
+      "id": 98765432,
+      "node_id": "O_kgDOBeIq2A",
+      "avatar_url": "https://avatars.githubusercontent.com/u/98765432?v=4",
+      "url": "https://api.github.com/users/acme",
+      "html_url": "https://github.com/acme",
+      "type": "Organization",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/acme/rocket",
+    "description": "Launch toolkit for very fast birds",
+    "fork": false,
+    "url": "https://api.github.com/repos/acme/rocket",
+    "created_at": "2025-03-14T09:26:53Z",
+    "updated_at": "2026-10-17T18:02:11Z",
+    "pushed_at": "2026-10-18T07:41:09Z",
+    "homepage": null,
+    "size": 1840,
+    "stargazers_count": 128,
+    "watchers_count": 128,
+    "language": "TypeScript",
+    "forks_count": 9,
+    "open_issues_count": 4,
+    "visibility": "public",
+    "default_branch": "main"
+  },
+  "organization": {
+    "login": "acme",
+    "id": 98765432,
+    "node_id": "O_kgDOBeIq2A",
+    "url": "https://api.github.com/orgs/acme",
+    "repos_url": "https://api.github.com/orgs/acme/repos",
+    "events_url": "https://api.github.com/orgs/acme/events",
+    "hooks_url": "https://api.github.com/orgs/acme/hooks",
+    "issues_url": "https://api.github.com/orgs/acme/issues",
+    "members_url": "https://api.github.com/orgs/acme/members{/member}",
+    "public_members_url": "https://api.github.com/orgs/acme/public_members{/member}",
+    "avatar_url": "https://avatars.githubusercontent.com/u/98765432?v=4",
+    "description": "Fictional makers of very fast rockets"
+  },
+  "sender": {
+    "login": "marvin",
+    "id": 5550042,
+    "node_id": "U_kgDOAFSqmg",
+    "avatar_url": "https://avatars.githubusercontent.com/u/5550042?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/marvin",
+    "html_url": "https://github.com/marvin",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  }
+}

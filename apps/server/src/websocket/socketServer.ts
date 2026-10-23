@@ -376,6 +376,9 @@ export function initSocketServer(httpServer: HttpServer) {
       // Uses LATERAL JOIN with LIMIT 100 to cap per-channel scanning — the frontend
       // shows "99+" anyway, so exact counts beyond 100 are unnecessary. This prevents
       // full table scans on channels with thousands of unread messages.
+      // `IS DISTINCT FROM`, never `!=`: a webhook-posted row has author_id
+      // NULL, `NULL != $1` is NULL (row dropped), and the live message:new
+      // handler on the client DOES count it, so a reconnect would lose it.
       if (textChannels.length > 0) {
         const textChannelIds = textChannels.map((ch) => ch.id);
         const unreads = await prisma.$queryRawUnsafe<
@@ -389,7 +392,7 @@ export function initSocketServer(httpServer: HttpServer) {
                SELECT 1 FROM messages m
                WHERE m.channel_id = c.id
                  AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
-                 AND m.author_id != $1
+                 AND m.author_id IS DISTINCT FROM $1
                LIMIT 100
              ) sub
            ) cnt
@@ -433,7 +436,7 @@ export function initSocketServer(httpServer: HttpServer) {
                SELECT 1 FROM messages m
                WHERE m.conversation_id = conv.id
                  AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
-                 AND m.author_id != $1
+                 AND m.author_id IS DISTINCT FROM $1
                LIMIT 100
              ) sub
            ) cnt

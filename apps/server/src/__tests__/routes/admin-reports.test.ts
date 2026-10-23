@@ -18,6 +18,8 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
 const prismaMock: Record<string, any> = {
+  // the platform-ban disarm (utils/webhookLifecycle.ts): holds none unless a test says so
+  webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
   serverJoinRequest: { findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
   user: {
     findUnique: vi.fn(),

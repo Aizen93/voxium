@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // removeMemberFromServer — the kick route's teardown lifted out, plus the ban
-// upsert, the join-request delete and the memberCount decrement in its
-// transaction. Kick calls it with a ban; leave calls it without one.
+// upsert, the join-request delete, the memberCount decrement and (kick only)
+// the creator's webhooks disabled in its transaction. Kick calls it with a
+// ban; leave calls it without one.
 
 const prismaMock = vi.hoisted(() => ({
   channel: { findMany: vi.fn() },
@@ -11,6 +12,7 @@ const prismaMock = vi.hoisted(() => ({
   serverJoinRequest: { deleteMany: vi.fn() },
   serverMember: { delete: vi.fn() },
   server: { updateMany: vi.fn() },
+  webhook: { updateMany: vi.fn() },
   $transaction: vi.fn(),
 }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
@@ -30,6 +32,9 @@ vi.mock('../../utils/secureChannelLifecycle', () => ({ purgeSecureChannelState: 
 const memberLeft = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/memberBroadcast', () => ({ broadcastMemberLeft: (...a: unknown[]) => memberLeft(...a) }));
 
+const webhookChanged = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/webhookLifecycle', () => ({ emitWebhookChanged: (...a: unknown[]) => webhookChanged(...a) }));
+
 import { removeMemberFromServer } from '../../utils/removeMember';
 
 const order: string[] = [];
@@ -37,6 +42,16 @@ const BAN = { op: 'ban.upsert' };
 const REQ = { op: 'request.deleteMany' };
 const DEL = { op: 'member.delete' };
 const DEC = { op: 'server.updateMany' };
+const HOOKS = { op: 'webhook.updateMany' };
+
+/** The array transaction's results, as Prisma resolves them: one per statement,
+ *  in order (the webhook disable, last, answers a BatchPayload). */
+function txResults(webhooksDisabled: number) {
+  prismaMock.$transaction.mockImplementation(async (ops: unknown[]) => {
+    order.push('txn');
+    return ops.map((op) => (op === HOOKS ? { count: webhooksDisabled } : op === DEC ? { count: 1 } : { id: 'row' }));
+  });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -50,8 +65,10 @@ beforeEach(() => {
   prismaMock.serverJoinRequest.deleteMany.mockReturnValue(REQ);
   prismaMock.serverMember.delete.mockReturnValue(DEL);
   prismaMock.server.updateMany.mockReturnValue(DEC);
+  prismaMock.webhook.updateMany.mockReturnValue(HOOKS);
   prismaMock.$transaction.mockImplementation(async () => { order.push('txn'); return []; });
   memberLeft.mockImplementation(async () => { order.push('left'); });
+  webhookChanged.mockImplementation(() => { order.push('webhooks'); });
 });
 
 describe('removeMemberFromServer', () => {
@@ -87,7 +104,7 @@ describe('removeMemberFromServer', () => {
   it('with a ban: the ServerBan upsert rides FIRST in the same transaction, carrying who and why', async () => {
     await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: 'spam' } });
 
-    expect(prismaMock.$transaction).toHaveBeenCalledWith([BAN, REQ, DEL, DEC]);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([HOOKS, BAN, REQ, DEL, DEC]);
     expect(prismaMock.serverBan.upsert).toHaveBeenCalledWith({
       where: { serverId_userId: { serverId: 's-1', userId: 'u-1' } },
       create: { serverId: 's-1', userId: 'u-1', bannedById: 'mod-1', reason: 'spam' },
@@ -155,5 +172,71 @@ describe('removeMemberFromServer', () => {
 
     await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null } })).rejects.toThrow('db gone');
     expect(memberLeft).not.toHaveBeenCalled();
+  });
+});
+
+describe('removeMemberFromServer: a kick disables the removed creator\'s webhooks', () => {
+  const KICK = { ban: { by: 'mod-1', reason: 'spam' } };
+
+  it('disables the webhooks whose LIVE URL the member holds on THIS server (created and never rotated by another, or last rotated by them), enabled or not, and marks them creatorRemovedAt', async () => {
+    const before = Date.now();
+    txResults(2);
+    await removeMemberFromServer('u-1', 's-1', KICK);
+
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+    const args = prismaMock.webhook.updateMany.mock.calls[0][0];
+    expect(args).toEqual({
+      where: { serverId: 's-1', OR: [{ lastRotatedById: 'u-1' }, { lastRotatedAt: null, createdById: 'u-1' }] },
+      data: { enabled: false, creatorRemovedAt: expect.any(Date) },
+    });
+    // no `enabled: true` filter: an already-disabled row must carry the mark too
+    expect(JSON.stringify(args.where)).not.toContain('enabled');
+    expect(args.data.creatorRemovedAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it('rides FIRST in the SAME transaction as the membership delete (a removal never commits without it; the row lock of a purge is waited for before the server row is taken)', async () => {
+    txResults(1);
+    await removeMemberFromServer('u-1', 's-1', KICK);
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([HOOKS, BAN, REQ, DEL, DEC]);
+  });
+
+  it('when it disabled any: one webhook:changed with the server id alone, AFTER member:left (the removed member is out of the room)', async () => {
+    txResults(3);
+    await removeMemberFromServer('u-1', 's-1', KICK);
+
+    expect(webhookChanged).toHaveBeenCalledTimes(1);
+    expect(webhookChanged).toHaveBeenCalledWith('s-1');
+    expect(order).toEqual(['secure', 'channels', 'reads', 'txn', 'left', 'webhooks']);
+  });
+
+  it('when the member created none (count 0): the statement runs, but no event is sent', async () => {
+    txResults(0);
+    await removeMemberFromServer('u-1', 's-1', KICK);
+
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+    // The decrement resolves { count: 1 } in txResults: the count must be the
+    // webhook statement's, never another BatchPayload's
+    expect(webhookChanged).not.toHaveBeenCalled();
+    expect(order).toEqual(['secure', 'channels', 'reads', 'txn', 'left']);
+  });
+
+  it('a voluntary leave (no ban) keeps the member\'s webhooks: no statement, no event', async () => {
+    txResults(5);
+    await removeMemberFromServer('u-1', 's-1');
+
+    expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([REQ, DEL, DEC]);
+    expect(webhookChanged).not.toHaveBeenCalled();
+  });
+
+  it('a failed or raced transaction disables nothing it reports, and sends no event', async () => {
+    prismaMock.$transaction.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+    await expect(removeMemberFromServer('u-1', 's-1', KICK)).rejects.toMatchObject({ statusCode: 404 });
+    expect(webhookChanged).not.toHaveBeenCalled();
+
+    prismaMock.$transaction.mockRejectedValue(new Error('db gone'));
+    await expect(removeMemberFromServer('u-1', 's-1', KICK)).rejects.toThrow('db gone');
+    expect(webhookChanged).not.toHaveBeenCalled();
   });
 });

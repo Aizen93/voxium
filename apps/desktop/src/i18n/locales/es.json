@@ -274,7 +274,8 @@
       "members": "Miembros",
       "roles": "Roles",
       "limits": "Límites",
-      "discovery": "Descubrir"
+      "discovery": "Descubrir",
+      "integrations": "Integraciones"
     },
     "general": {
       "serverName": "Nombre del servidor",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "Máximo de categorías de canales en este servidor",
       "maxMembers": "Máx. de miembros",
       "maxMembersDesc": "Máximo de miembros que pueden unirse a este servidor",
+      "maxWebhooks": "Máx. de webhooks",
+      "maxWebhooksDesc": "Máximo de webhooks entrantes en este servidor (0 bloquea la creación)",
       "unlimited": "Ilimitado",
       "failedToLoad": "No se pudieron cargar los límites del servidor"
     }
@@ -365,6 +368,10 @@
     "CREATE_SECURE_CHANNELS": {
       "name": "Crear canales seguros",
       "description": "Permite a los miembros crear canales cifrados de extremo a extremo solo por invitación"
+    },
+    "MANAGE_WEBHOOKS": {
+      "name": "Gestionar webhooks",
+      "description": "Permite a los miembros crear, editar y eliminar webhooks entrantes"
     },
     "CREATE_INVITES": {
       "name": "Crear invitaciones",
@@ -540,7 +547,9 @@
     "report": "Reportar",
     "editHint": "escape para cancelar · enter para guardar",
     "originalDeleted": "El mensaje original fue eliminado",
-    "failedToToggleReaction": "No se pudo cambiar la reacción"
+    "failedToToggleReaction": "No se pudo cambiar la reacción",
+    "appTag": "APP",
+    "deletedWebhook": "Webhook eliminado"
   },
   "messageInput": {
     "emojiPicker": "Selector de emojis",
@@ -1176,7 +1185,24 @@
     "joinMessageUnsupportedChars": "El mensaje contiene caracteres no admitidos",
     "joinMessageTooLong": "El mensaje no puede superar los {{max}} caracteres",
     "refineSearch": "Demasiados resultados: afina tu búsqueda",
-    "serverNotFound": "Espacio no encontrado"
+    "serverNotFound": "Espacio no encontrado",
+    "webhooksDisabled": "Los webhooks están desactivados en este momento",
+    "webhookDisabled": "Este webhook está desactivado",
+    "webhookAdminDisabled": "Este webhook fue desactivado por un administrador",
+    "webhookNotFound": "Webhook no encontrado",
+    "webhookNoPermission": "No tienes permiso para gestionar webhooks",
+    "webhookTextOnly": "Los webhooks solo pueden publicar en canales de texto",
+    "webhookInvalidType": "Tipo de webhook no válido",
+    "webhookGithubNotConfigured": "Los webhooks de GitHub no están disponibles: el operador de esta instalación de Voxium no ha configurado la clave de cifrado que necesitan.",
+    "webhookChannelRequired": "Elige un canal para el webhook",
+    "webhookNoFields": "No hay nada que actualizar",
+    "webhookEnabledBoolean": "Valor no válido para la activación",
+    "webhookNameEmpty": "El nombre del webhook no puede estar vacío",
+    "webhookNameTooLong": "El nombre del webhook no puede superar los {{max}} caracteres",
+    "webhookNameInvalid": "El nombre del webhook contiene caracteres no admitidos",
+    "webhookCap": "Este servidor alcanzó su límite de webhooks (máximo {{max}})",
+    "channelNotFound": "Canal no encontrado",
+    "tooManyRequests": "Demasiadas solicitudes. Inténtalo de nuevo más tarde."
   },
   "e2e": {
     "badgeTitle": "Cifrado de extremo a extremo — ver número de seguridad",
@@ -1495,6 +1521,129 @@
       "declined": "Tu solicitud para unirte a {{name}} fue rechazada",
       "newRequest": "{{user}} pidió unirse a {{server}}",
       "unknownSpace": "un espacio"
+    }
+  },
+  "webhooks": {
+    "title": "Integraciones",
+    "hint": "Los webhooks entrantes permiten que scripts, tareas de CI y otras aplicaciones publiquen en un canal de texto.",
+    "usage": "{{used}} de {{max}}",
+    "newWebhook": "Nuevo webhook",
+    "atCap": "Límite de webhooks alcanzado (máximo {{max}})",
+    "frozen": "La creación de webhooks está bloqueada en este servidor",
+    "empty": "Todavía no hay webhooks.",
+    "emptyHint": "Crea uno para que un script, una tarea de CI u otra aplicación publique en un canal.",
+    "failedToLoad": "No se pudieron cargar los webhooks",
+    "retry": "Reintentar",
+    "toggleFailed": "No se pudo actualizar el webhook",
+    "typeGeneric": "Genérico",
+    "typeGithub": "GitHub",
+    "disabledChip": "Desactivado",
+    "channelMissing": "canal desconocido",
+    "createdBy": "creado por {{name}}",
+    "createdByUnknown": "creador desconocido",
+    "lastUsed": "último uso {{when}}",
+    "neverUsed": "nunca usado",
+    "rotatedBy": "URL renovada {{when}} por {{name}}",
+    "rotated": "URL renovada {{when}}",
+    "adminDisabledChip": "Desactivado por un administrador",
+    "adminDisabledHint": "Solo un administrador puede volver a activar este webhook",
+    "creatorRemoved": "Desactivado el {{date}}: el miembro que tenía su URL fue expulsado del servidor. Quien aún tenga la URL podría publicar con ella; renueva la URL antes de activarlo.",
+    "creatorRemovedUndated": "Desactivado: el miembro que tenía su URL fue expulsado del servidor. Quien aún tenga la URL podría publicar con ella; renueva la URL antes de activarlo.",
+    "actions": {
+      "edit": "Editar",
+      "rotate": "Renovar URL",
+      "enable": "Activar",
+      "disable": "Desactivar",
+      "delete": "Eliminar"
+    },
+    "create": {
+      "title": "Nuevo webhook",
+      "description": "Sus mensajes aparecen con este nombre, marcados como una aplicación.",
+      "name": "Nombre",
+      "namePlaceholder": "p. ej., Compilación nocturna",
+      "channel": "Canal",
+      "noChannels": "No hay ningún canal de texto al que puedas vincular un webhook.",
+      "loadingChannels": "Cargando canales…",
+      "type": "Tipo",
+      "typeGenericHint": "JSON al estilo de Discord: content, username, embeds",
+      "typeGithubHint": "Verifica y formatea los payloads propios de GitHub (pushes, pull requests, issues, releases). Incluye un secreto de firma que se muestra una sola vez.",
+      "submit": "Crear webhook",
+      "creating": "Creando…",
+      "failed": "No se pudo crear el webhook"
+    },
+    "edit": {
+      "title": "Editar webhook",
+      "description": "Su URL no cambia, así que las herramientas que la usan no necesitan ningún cambio.",
+      "name": "Nombre",
+      "channel": "Canal",
+      "current": "{{channel}} (actual)",
+      "loadingChannels": "Cargando canales…",
+      "pickGone": "El canal que elegiste ya no está disponible. Elige otro o el webhook se quedará donde está.",
+      "moveNote": "Moverlo solo cambia adónde van sus próximos mensajes: los que ya publicó se quedan donde están.",
+      "saving": "Guardando…",
+      "saved": "{{name}} actualizado",
+      "failed": "No se pudo guardar el webhook"
+    },
+    "reveal": {
+      "title": "{{name}} está listo",
+      "rotatedTitle": "Nueva URL para {{name}}",
+      "copyNow": "Cópiala ahora. La URL solo se muestra una vez; renuévala para obtener una nueva.",
+      "url": "URL del webhook",
+      "copyUrl": "Copiar URL",
+      "worksWith": "Funciona en cualquier herramienta que pida una URL de webhook de Discord.",
+      "curlHint": "Pruébala desde una terminal",
+      "copyCurl": "Copiar comando",
+      "secret": "Secreto de firma",
+      "copySecret": "Copiar secreto",
+      "copied": "Copiado al portapapeles",
+      "copyFailed": "No se pudo copiar al portapapeles",
+      "invalidUrl": "El servidor envió una URL de webhook mal formada, así que no se muestra. Renuévala para obtener una nueva.",
+      "done": "Listo",
+      "github": {
+        "title": "Configúralo en GitHub",
+        "rotatedTitle": "Nueva URL y nuevo secreto para {{name}}",
+        "updateTitle": "Actualiza ambos en GitHub",
+        "copyNow": "Cópialos ahora. La URL y el secreto solo se muestran una vez; renuévalos para obtener otros nuevos.",
+        "urlHint": "Pégala en GitHub como Payload URL; la configuración completa está abajo.",
+        "intro": "En el repositorio (o la organización) de GitHub, abre Settings → Webhooks → Add webhook e introduce:",
+        "rotatedIntro": "La URL y el secreto anteriores ya no funcionan. En GitHub, abre Settings → Webhooks, edita este webhook y reemplaza ambos:",
+        "payloadUrl": "Payload URL",
+        "contentType": "Content type",
+        "secret": "Secret",
+        "ssl": "SSL verification",
+        "sslValue": "Enable SSL verification",
+        "events": "Which events would you like to trigger this webhook?",
+        "eventsValue": "Let me select individual events",
+        "eventsTick": "Después marca:",
+        "eventPushes": "Pushes",
+        "eventPullRequests": "Pull requests",
+        "eventIssues": "Issues",
+        "eventReleases": "Releases",
+        "ping": "Al hacer clic en Add webhook, GitHub envía un ping: aparece una línea «Connected to owner/repo» en el canal, así puedes comprobar la configuración de inmediato.",
+        "rotatedCheck": "Editar un webhook no envía un nuevo ping: el próximo evento (push, pull request, issue o release) aparecerá en el canal cuando ambos estén actualizados.",
+        "secretRequired": "El secreto es obligatorio: se rechaza cualquier entrega que no esté firmada con él."
+      }
+    },
+    "rotate": {
+      "title": "Renovar la URL del webhook",
+      "body": "{{name}} recibe una nueva URL. La actual deja de funcionar de inmediato, así que actualiza todas las herramientas que la usan.",
+      "bodyGithub": "{{name}} recibe una nueva URL y un nuevo secreto. Los actuales dejan de funcionar de inmediato, así que actualiza el webhook en GitHub con ambos.",
+      "confirm": "Renovar",
+      "rotating": "Renovando…",
+      "failed": "No se pudo renovar la URL del webhook"
+    },
+    "delete": {
+      "title": "Eliminar webhook",
+      "body": "¿Eliminar {{name}}? Todo lo que aún use su URL dejará de funcionar.",
+      "alsoDeleteMessages": "Eliminar también todos los mensajes que publicó",
+      "deleted": "{{name}} eliminado",
+      "deletedMessages_one": "{{name}} eliminado, junto con {{count}} mensaje",
+      "deletedMessages_other": "{{name}} eliminado, junto con {{count}} mensajes",
+      "failed": "No se pudo eliminar el webhook"
+    },
+    "off": {
+      "title": "Los webhooks están desactivados por ahora.",
+      "hint": "Un administrador ha desactivado los webhooks entrantes. No se puede publicar nada a través de ellos hasta que vuelvan."
     }
   }
 }

@@ -9,6 +9,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission, hasChannelPermission, filterVisibleChannels, computeServerPermissions } from '../utils/permissionCalculator';
 import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
+import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 
 export const channelRouter = Router({ mergeParams: true });
@@ -391,11 +392,18 @@ channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; chan
       throw new NotFoundError('Channel');
     }
 
+    // The channel's webhooks go with it (FK cascade) and leave the server's
+    // webhook count, but channel:deleted reaches only the channel's own room: a
+    // webhook manager who could not see the channel would keep a stale "N of M"
+    // in the Integrations tab. webhook:changed carries the server id alone.
+    const webhooks = await prisma.webhook.count({ where: { channelId } });
+
     await prisma.channel.delete({ where: { id: channelId } });
 
     // Same audience as every other lifecycle event for this channel: the people
     // who could see it. Nobody else has it in their sidebar to remove.
     getIO().to(`channel:${channelId}`).emit('channel:deleted', { channelId, serverId });
+    if (webhooks > 0) emitWebhookChanged(serverId);
 
     // Live voice must die with the channel on every node — participants used
     // to keep their transports (and the Redis mirror entry) until they left

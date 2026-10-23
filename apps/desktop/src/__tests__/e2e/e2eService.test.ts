@@ -21,13 +21,14 @@ import {
   e2eDeviceCrossCanonical,
   e2eKeyCanonical,
   e2eMasterCanonical,
+  type E2EDeviceRegistration,
 } from '@voxium/shared';
 
 // The real api module drags in axios/socket.io — the service takes an
 // injected client, so stub the module out entirely.
 vi.mock('../../services/api', () => ({ api: {} }));
 
-import { E2EService, E2EIdentityChangedError } from '../../services/e2e/e2eService';
+import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey } from '../../services/e2e/engine';
 import type { PickleKeyProvider } from '../../services/e2e/vault';
@@ -96,6 +97,55 @@ interface StoredShare {
   body: string;
   createdAt: string;
 }
+
+// Request bodies, as the client sends them to each route. The fake trusts the
+// shape (the real routes validate it); its own runtime checks stay as written.
+interface MasterKeyBody {
+  masterKey: string;
+  masterSignature: string;
+  deviceSignatures?: Array<{ deviceId: string; signature: string }>;
+}
+interface BackupBody {
+  blob: string;
+}
+type FakePutBody = E2EDeviceRegistration | BackupBody | MasterKeyBody;
+
+interface DeviceKeysBody {
+  deviceId: string;
+  oneTimeKeys?: PreKey[];
+  fallbackKey?: PreKey;
+}
+interface KeyShareUploadBody {
+  deviceId: string;
+  shares: Array<{
+    recipientUserId: string;
+    recipientDeviceId: string;
+    conversationId: string;
+    sessionId: string;
+    body: string;
+  }>;
+}
+interface MessageKeysBody {
+  keys: Array<{ conversationId: string; sessionId: string; blob: string; firstKnownIndex: number }>;
+}
+interface MasterTransfersBody {
+  deviceId: string;
+  transfers: Array<{ recipientDeviceId: string; body: string }>;
+}
+interface MasterTransferAckBody {
+  deviceId: string;
+  ids: string[];
+}
+interface DeviceSignatureBody {
+  signature: string;
+}
+type FakePostBody =
+  | DeviceKeysBody
+  | KeyShareUploadBody
+  | MessageKeysBody
+  | MasterTransfersBody
+  | MasterTransferAckBody
+  | DeviceSignatureBody;
 
 interface StoredUser {
   devices: Map<string, StoredDevice>;
@@ -275,8 +325,9 @@ function createFakeServer() {
         throw new Error(`unmocked GET ${url}`);
       },
 
-      async put(url: string, body: any) {
+      async put(url: string, payload: FakePutBody) {
         if (url === '/e2e/devices') {
+          const body = payload as E2EDeviceRegistration;
           const user = userOf(userId);
           const existing = user.devices.get(body.deviceId);
           if (!existing && user.devices.size >= E2E_LIMITS.MAX_DEVICES) {
@@ -311,6 +362,7 @@ function createFakeServer() {
         }
 
         if (url === '/e2e/backup') {
+          const body = payload as BackupBody;
           if (typeof body?.blob !== 'string' || body.blob.length === 0) throw new Error('400: bad blob');
           if (body.blob.length > E2E_LIMITS.KEY_BACKUP_MAX) throw new Error('400: blob too large');
           const updatedAt = new Date().toISOString();
@@ -319,6 +371,7 @@ function createFakeServer() {
         }
 
         if (url === '/e2e/master-key') {
+          const body = payload as MasterKeyBody;
           if (failMasterKeyPublish) throw new Error('503: master key publish unavailable');
           const user = userOf(userId);
           if (!verifyEd25519(body.masterKey, e2eMasterCanonical(userId, body.masterKey), body.masterSignature)) {
@@ -356,10 +409,11 @@ function createFakeServer() {
         throw new Error(`unmocked PUT ${url}`);
       },
 
-      async post(url: string, body?: any) {
+      async post(url: string, payload?: FakePostBody) {
         const [path, query] = split(url);
 
         if (path === '/e2e/devices/me/keys') {
+          const body = payload as DeviceKeysBody;
           const device = userOf(userId).devices.get(body.deviceId);
           if (!device) throw new Error('403: no device');
           if (body.oneTimeKeys) device.oneTimeKeys.push(...body.oneTimeKeys);
@@ -368,6 +422,7 @@ function createFakeServer() {
         }
 
         if (path === '/e2e/keyshares') {
+          const body = payload as KeyShareUploadBody;
           if (failKeyshareUploads) throw new Error('503: key-share upload unavailable');
           if (!userOf(userId).devices.has(body.deviceId)) throw new Error('403: unknown sender device');
           if (!Array.isArray(body.shares) || body.shares.length > E2E_LIMITS.KEYSHARE_BATCH_MAX) {
@@ -404,6 +459,7 @@ function createFakeServer() {
         }
 
         if (path === '/e2e/message-keys') {
+          const body = payload as MessageKeysBody;
           if (!Array.isArray(body?.keys) || body.keys.length === 0) throw new Error('400: bad batch');
           if (body.keys.length > E2E_LIMITS.MESSAGE_KEY_BATCH_MAX) throw new Error('400: batch too large');
           for (const k of body.keys) {
@@ -424,6 +480,7 @@ function createFakeServer() {
         }
 
         if (path === '/e2e/master-transfers') {
+          const body = payload as MasterTransfersBody;
           const user = userOf(userId);
           if (!user.devices.has(body.deviceId)) throw new Error('403: unknown sender device');
           if (!Array.isArray(body.transfers) || body.transfers.length === 0 ||
@@ -460,6 +517,7 @@ function createFakeServer() {
         }
 
         if (path === '/e2e/master-transfers/ack') {
+          const body = payload as MasterTransferAckBody;
           const user = userOf(userId);
           if (!user.devices.has(body.deviceId)) throw new Error('403: unknown device');
           if (!Array.isArray(body.ids) || body.ids.length === 0) throw new Error('400: bad ids');
@@ -476,6 +534,7 @@ function createFakeServer() {
 
         const signatureMatch = path.match(/^\/e2e\/devices\/([^/]+)\/signature$/);
         if (signatureMatch) {
+          const body = payload as DeviceSignatureBody;
           if (failSignaturePublish) throw new Error('503: signature publish unavailable');
           const user = userOf(userId);
           const device = user.devices.get(signatureMatch[1]);
@@ -616,7 +675,10 @@ function makeDevice(
   const keyProvider = opts.keyProvider ?? memoryKeyProvider();
   const vaultNamespace = opts.vaultNamespace ?? `v${++vaultSeq}`;
   const service = new E2EService(userId, {
-    api: server.apiFor(userId) as any,
+    // The fake implements the four verbs the service calls (get/put/post/
+    // delete) with the `{ data: { success, data } }` envelope; axios's generic
+    // method signatures cannot be met structurally, hence the cast.
+    api: server.apiFor(userId) as unknown as E2EServiceOptions['api'],
     keyProvider,
     wasmInput: wasmBytes,
     vaultNamespace,

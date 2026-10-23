@@ -64,6 +64,9 @@ const prismaMock: Record<string, any> = {
     delete: vi.fn(),
     count: vi.fn(),
   },
+  webhook: {
+    count: vi.fn(),
+  },
   category: {
     findFirst: vi.fn(),
     findMany: vi.fn(),
@@ -783,6 +786,28 @@ describe('Channel Routes', () => {
       // sidebar to remove.
       expect(mockTo).toHaveBeenCalledWith('channel:ch-1');
       expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
+      expect(mockEmit).toHaveBeenCalledWith('channel:deleted', { channelId: 'ch-1', serverId: 'srv-1' });
+    });
+
+    it('tells the server room webhook:changed when the channel carried webhooks (they cascade with it), and nothing when it did not', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'owner' });
+      prismaMock.channel.findFirst.mockResolvedValue({ id: 'ch-1', name: 'general', type: 'text', serverId: 'srv-1' });
+      prismaMock.channel.delete.mockResolvedValue({});
+      prismaMock.webhook.count.mockResolvedValueOnce(2);
+
+      await request(app).delete('/api/v1/servers/srv-1/channels/ch-1').set('Authorization', `Bearer ${token}`);
+
+      expect(prismaMock.webhook.count).toHaveBeenCalledWith({ where: { channelId: 'ch-1' } });
+      // the server id alone: a channel id never reaches the server room
+      expect(mockTo).toHaveBeenCalledWith('server:srv-1');
+      expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 'srv-1' });
+
+      mockTo.mockClear();
+      mockEmit.mockClear();
+      prismaMock.webhook.count.mockResolvedValueOnce(0);
+      await request(app).delete('/api/v1/servers/srv-1/channels/ch-1').set('Authorization', `Bearer ${token}`);
+      expect(mockEmit).not.toHaveBeenCalledWith('webhook:changed', expect.anything());
       expect(mockEmit).toHaveBeenCalledWith('channel:deleted', { channelId: 'ch-1', serverId: 'srv-1' });
     });
   });

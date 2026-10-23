@@ -10,10 +10,8 @@ import { sanitizeText } from '../utils/sanitize';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, attachMentions } from '../utils/mentions';
 import { hasChannelPermission } from '../utils/permissionCalculator';
-
-const attachmentSelect = {
-  select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
-} as const;
+import { shapeMessageRow, isWebhookRow } from '../utils/messageAuthor';
+import { authorSelect, attachmentSelect, replyToSelect } from '../utils/messageSelect';
 
 export const messageRouter = Router({ mergeParams: true });
 
@@ -49,16 +47,8 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
     if (!canView) throw secureDenied() ?? new ForbiddenError('You do not have permission to view this channel');
 
     const messageInclude = {
-      author: {
-        select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
-      },
-      replyTo: {
-        select: {
-          id: true,
-          content: true,
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
-        },
-      },
+      author: authorSelect,
+      replyTo: replyToSelect,
       reactions: reactionInclude,
       attachments: attachmentSelect,
     };
@@ -105,7 +95,7 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
 
       const mentionMap = await batchResolveMentions(unique, channel.serverId);
       const data = unique.map((m) => ({
-        ...m,
+        ...shapeMessageRow(m),
         reactions: aggregateReactions(m.reactions),
         mentions: attachMentions(m, mentionMap),
       }));
@@ -133,7 +123,7 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
     const reversed = messages.reverse();
     const mentionMap = await batchResolveMentions(reversed, channel.serverId);
     const data = reversed.map((m) => ({
-      ...m,
+      ...shapeMessageRow(m),
       reactions: aggregateReactions(m.reactions),
       mentions: attachMentions(m, mentionMap),
     }));
@@ -276,7 +266,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       if (!parent || parent.channelId !== channelId) throw new BadRequestError('Invalid replyToId');
     }
 
-    const message = await prisma.$transaction(async (tx) => {
+    const created = await prisma.$transaction(async (tx) => {
       const msg = await tx.message.create({
         data: {
           content,
@@ -302,21 +292,18 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       return tx.message.findUniqueOrThrow({
         where: { id: msg.id },
         include: {
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
-          replyTo: {
-            select: {
-              id: true, content: true,
-              author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
-            },
-          },
+          author: authorSelect,
+          replyTo: replyToSelect,
           attachments: attachmentSelect,
         },
       });
     });
+    const message = shapeMessageRow(created);
 
     // Resolve mentions from content — never for ciphertext (nothing to parse,
     // and the server must not pretend to know what an encrypted message says)
-    const mentionIds = channel.secure ? [] : extractMentionIds(content);
+    // and never for a webhook row (an unauthenticated URL must not ping anyone)
+    const mentionIds = channel.secure || isWebhookRow(created) ? [] : extractMentionIds(content);
     const mentions = await resolveMentionsForServer(mentionIds, channel.serverId);
 
     // Broadcast to all users subscribed to this channel
@@ -393,24 +380,16 @@ messageRouter.patch('/:messageId', rateLimitInteract, async (req: Request<{ chan
       if (contentErr) throw new BadRequestError(contentErr);
     }
 
-    const updated = await prisma.message.update({
+    const updated = shapeMessageRow(await prisma.message.update({
       where: { id: messageId },
       data: { content, editedAt: new Date() },
       include: {
-        author: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
-        },
-        replyTo: {
-          select: {
-            id: true,
-            content: true,
-            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
-          },
-        },
+        author: authorSelect,
+        replyTo: replyToSelect,
         reactions: reactionInclude,
         attachments: attachmentSelect,
       },
-    });
+    }));
 
     const editMentionIds = message.channel!.secure ? [] : extractMentionIds(content);
     const editMentions = await resolveMentionsForServer(editMentionIds, message.channel!.serverId);

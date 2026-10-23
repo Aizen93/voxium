@@ -1,5 +1,6 @@
 import { MENTION_RE, LIMITS } from '@voxium/shared';
 import { prisma } from './prisma';
+import { isWebhookRow, type WebhookRowMarkers } from './messageAuthor';
 
 /** Extract unique user IDs from @[userId] tokens in message content. Capped to MAX_MENTIONS_PER_MESSAGE. */
 export function extractMentionIds(content: string): string[] {
@@ -35,16 +36,32 @@ export async function resolveMentionsForServer(
 }
 
 /**
+ * The row fields mention resolution looks at. A row is never mention-parsed
+ * when it is ciphertext (`encrypted`) or webhook-posted (isWebhookRow: a
+ * webhookId, a frozen webhookName — which outlives the webhook — or a NULL
+ * authorId): an unauthenticated webhook URL must never ping anyone, and a
+ * refetch must agree with the live event, which carries no mentions for it.
+ */
+export interface MentionSourceRow extends WebhookRowMarkers {
+  content: string;
+  encrypted?: boolean;
+}
+
+function skipsMentions(row: MentionSourceRow): boolean {
+  return Boolean(row.encrypted) || isWebhookRow(row);
+}
+
+/**
  * Batch-resolve mentions across multiple messages.
  * Returns a Map of userId -> user profile for efficient per-message lookup.
  */
 export async function batchResolveMentions(
-  messages: Array<{ content: string; encrypted?: boolean }>,
+  messages: MentionSourceRow[],
   serverId: string,
 ): Promise<Map<string, { id: string; username: string; displayName: string; avatarUrl: string | null }>> {
   const allIds = new Set<string>();
   for (const m of messages) {
-    if (m.encrypted) continue; // ciphertext is never mention-parsed
+    if (skipsMentions(m)) continue; // ciphertext and webhook rows are never mention-parsed
     for (const id of extractMentionIds(m.content)) {
       allIds.add(id);
     }
@@ -65,10 +82,10 @@ export async function batchResolveMentions(
 
 /** Attach resolved mentions to a single message based on its content. */
 export function attachMentions(
-  message: { content: string; encrypted?: boolean },
+  message: MentionSourceRow,
   mentionMap: Map<string, { id: string; username: string; displayName: string; avatarUrl: string | null }>,
 ) {
-  if (message.encrypted) return [];
+  if (skipsMentions(message)) return [];
   const ids = extractMentionIds(message.content);
   return ids.map((id) => mentionMap.get(id)).filter(Boolean);
 }

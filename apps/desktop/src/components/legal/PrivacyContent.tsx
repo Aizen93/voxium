@@ -15,7 +15,7 @@ export function PrivacyContent() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Privacy Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 11, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 18, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -136,6 +136,11 @@ export function PrivacyContent() {
             </li>
             <li><strong className="text-vox-text-primary">Removals from a server</strong> are recorded as a ban on that server until one of its moderators lifts it</li>
             <li><strong className="text-vox-text-primary">Undelivered encryption key material</strong> is deleted after 30 days</li>
+            <li>
+              <strong className="text-vox-text-primary">Incoming webhooks</strong> store their name, the channel they
+              post to, who created them and when they were last used; the body of a request a webhook receives is
+              not kept beyond the message it produced
+            </li>
             <li><strong className="text-vox-text-primary">Everything else</strong> is kept for as long as your account exists. Deleting your account (Settings → Security) deletes your profile, your messages, your devices' keys and your consent records with it</li>
           </ul>
         </section>

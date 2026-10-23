@@ -1,11 +1,12 @@
-import { useEffect, useState, useCallback } from 'react';
-import { Search, Trash2, Settings2, RotateCcw, Save, X, Star, StarOff, Ban, ShieldOff } from 'lucide-react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { Search, Trash2, Settings2, RotateCcw, Save, X, Star, StarOff, Ban, ShieldOff, Webhook } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { DirectoryChips } from './DirectoryChips';
+import { AdminServerWebhooksModal } from './AdminServerWebhooksModal';
 import { toast } from '../stores/toastStore';
-import { apiErrorMessage } from '../utils/apiError';
+import { apiErrorMessage, logMessage } from '../utils/apiError';
 import type { AdminServer, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
 
 const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; description: string; min: number; max: number }> = [
@@ -13,7 +14,55 @@ const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; descriptio
   { key: 'maxVoiceUsersPerChannel', label: 'Max Voice Users / Channel', description: 'Maximum users in a single voice channel', min: 1, max: 500 },
   { key: 'maxCategoriesPerServer', label: 'Max Categories / Server', description: 'Maximum channel categories per server', min: 1, max: 200 },
   { key: 'maxMembersPerServer', label: 'Max Members / Server', description: 'Maximum members per server (0 = unlimited)', min: 0, max: 100000 },
+  { key: 'maxWebhooksPerServer', label: 'Max Webhooks / Server', description: 'Maximum incoming webhooks per server (0 freezes creation)', min: 0, max: 100 },
 ];
+
+type LimitKey = keyof ResourceLimits;
+
+const WHOLE_NUMBER_RE = /^[0-9]+$/;
+const NOT_A_WHOLE_NUMBER = 'Every limit needs a whole number';
+
+/** The typed text as a limit, or null when it is not a whole number (empty included). */
+function parseLimit(text: string): number | null {
+  const trimmed = text.trim();
+  if (!WHOLE_NUMBER_RE.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * The draft of one limits form. Each field keeps the TEXT the admin typed: a
+ * cleared field is '' (never coerced to 0, which freezes webhook creation and
+ * makes members unlimited out of a slip of the backspace key).
+ *
+ * Text a number input cannot parse (Firefox lets letters in) reads as '', and
+ * typing it into an already empty field fires no change at all, so the draft
+ * alone cannot tell "cleared" from "unreadable". The element's own
+ * `validity.badInput` can, and Save asks it.
+ */
+function useLimitsDraft(initial: () => Record<LimitKey, string>) {
+  const [draft, setDraft] = useState<Record<LimitKey, string>>(initial);
+  const inputs = useRef<Partial<Record<LimitKey, HTMLInputElement | null>>>({});
+
+  const bindInput = (key: LimitKey) => ({
+    ref: (el: HTMLInputElement | null) => { inputs.current[key] = el; },
+    value: draft[key],
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+      const { value } = e.target;
+      setDraft((d) => ({ ...d, [key]: value }));
+    },
+  });
+
+  const isUnreadable = (key: LimitKey) => inputs.current[key]?.validity?.badInput === true;
+
+  return { draft, setDraft, bindInput, isUnreadable };
+}
+
+function limitsToText(limits: ResourceLimits): Record<LimitKey, string> {
+  const text = {} as Record<LimitKey, string>;
+  for (const f of LIMIT_FIELDS) text[f.key] = String(limits[f.key]);
+  return text;
+}
 
 // Directory curation (server discovery). Featured is a hand-picked row on the
 // first page of Explore and never changes the ranked list; Block hides the
@@ -61,6 +110,7 @@ export function AdminServerList() {
   const [editingServer, setEditingServer] = useState<{ id: string; name: string } | null>(null);
   const [showGlobalLimits, setShowGlobalLimits] = useState(false);
   const [curation, setCuration] = useState<{ server: AdminServer; action: CurationAction } | null>(null);
+  const [webhooksServer, setWebhooksServer] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     fetchServers(1);
@@ -85,7 +135,7 @@ export function AdminServerList() {
     { key: 'channels', label: 'Channels', width: '80px' },
     { key: 'messages', label: 'Messages', width: '100px' },
     { key: 'created', label: 'Created', width: '120px' },
-    { key: 'actions', label: '', width: '150px' },
+    { key: 'actions', label: '', width: '180px' },
   ];
 
   const rows = servers.map((server) => ({
@@ -143,6 +193,14 @@ export function AdminServerList() {
           title="Configure limits"
         >
           <Settings2 size={14} />
+        </button>
+        <button
+          onClick={() => setWebhooksServer({ id: server.id, name: server.name })}
+          className="p-1 rounded text-vox-text-muted hover:text-vox-accent-info"
+          title="Webhooks"
+          data-testid="server-webhooks"
+        >
+          <Webhook size={14} />
         </button>
         <button
           onClick={() => setDeleteTarget({ id: server.id, name: server.name })}
@@ -232,6 +290,14 @@ export function AdminServerList() {
         />
       )}
 
+      {webhooksServer && (
+        <AdminServerWebhooksModal
+          serverId={webhooksServer.id}
+          serverName={webhooksServer.name}
+          onClose={() => setWebhooksServer(null)}
+        />
+      )}
+
       {curation && (
         <AdminConfirmModal
           title={CURATION[curation.action].title}
@@ -277,16 +343,33 @@ export function AdminServerList() {
 // ─── Global Limits Editor ──────────────────────────────────────────────────
 
 function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave: (l: Partial<ResourceLimits>) => Promise<void> }) {
-  const [draft, setDraft] = useState<ResourceLimits>({ ...limits });
+  const { draft, setDraft, bindInput, isUnreadable } = useLimitsDraft(() => limitsToText(limits));
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => { setDraft({ ...limits }); }, [limits]);
+  useEffect(() => { setDraft(limitsToText(limits)); }, [limits, setDraft]);
 
-  const hasChanges = LIMIT_FIELDS.some((f) => draft[f.key] !== limits[f.key]);
+  // A cleared field parses to null, so it counts as a change: Save shows up
+  // and says why it refuses instead of the form silently looking untouched
+  const hasChanges = LIMIT_FIELDS.some((f) => parseLimit(draft[f.key]) !== limits[f.key]);
 
   const handleSave = async () => {
+    const values = {} as ResourceLimits;
+    for (const f of LIMIT_FIELDS) {
+      const value = isUnreadable(f.key) ? null : parseLimit(draft[f.key]);
+      // Every global limit is required: there is no lower layer to fall back to
+      if (value === null) {
+        toast.error(NOT_A_WHOLE_NUMBER);
+        return;
+      }
+      values[f.key] = value;
+    }
     setSaving(true);
-    try { await onSave(draft); } catch { toast.error('Failed to save limits'); }
+    try {
+      await onSave(values);
+    } catch (err) {
+      console.error('Failed to save global limits:', logMessage(err));
+      toast.error(apiErrorMessage(err, 'Failed to save limits'));
+    }
     setSaving(false);
   };
 
@@ -300,8 +383,8 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
               type="number"
               min={field.min}
               max={field.max}
-              value={draft[field.key]}
-              onChange={(e) => setDraft({ ...draft, [field.key]: Number(e.target.value) })}
+              step={1}
+              {...bindInput(field.key)}
               className="w-full rounded-md bg-vox-bg-hover border border-vox-border text-sm text-vox-text-primary px-3 py-1.5 focus:outline-none focus:border-vox-accent-primary"
             />
             <p className="text-[10px] text-vox-text-muted mt-0.5">{field.description}</p>
@@ -310,7 +393,7 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
       </div>
       {hasChanges && (
         <div className="flex justify-end gap-2 pt-1">
-          <button onClick={() => setDraft({ ...limits })} className="px-3 py-1.5 text-xs rounded-md text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors">
+          <button onClick={() => setDraft(limitsToText(limits))} className="px-3 py-1.5 text-xs rounded-md text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors">
             Cancel
           </button>
           <button
@@ -329,6 +412,12 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
 
 // ─── Server Limits Modal ───────────────────────────────────────────────────
 
+function emptyOverrides(): Record<LimitKey, string> {
+  const text = {} as Record<LimitKey, string>;
+  for (const f of LIMIT_FIELDS) text[f.key] = '';
+  return text;
+}
+
 function ServerLimitsModal({
   serverName,
   serverId: _serverId,
@@ -346,30 +435,43 @@ function ServerLimitsModal({
   onReset: () => Promise<void>;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  const { draft, setDraft, bindInput, isUnreadable } = useLimitsDraft(emptyOverrides);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (serverLimits) {
-      const d: Record<string, string> = {};
+      const d = emptyOverrides();
       for (const f of LIMIT_FIELDS) {
-        const v = serverLimits[f.key as keyof ServerResourceLimits];
+        const v = serverLimits[f.key];
         d[f.key] = v !== null && v !== undefined ? String(v) : '';
       }
       setDraft(d);
     }
-  }, [serverLimits]);
+  }, [serverLimits, setDraft]);
 
   const handleSave = async () => {
+    const updates = {} as ServerResourceLimits;
+    for (const f of LIMIT_FIELDS) {
+      const text = draft[f.key].trim();
+      // '' is "use the global default" here, unless the input holds text it could not parse
+      if (text === '' && !isUnreadable(f.key)) {
+        updates[f.key] = null;
+        continue;
+      }
+      const value = parseLimit(text);
+      if (value === null) {
+        toast.error(NOT_A_WHOLE_NUMBER);
+        return;
+      }
+      updates[f.key] = value;
+    }
     setSaving(true);
     try {
-      const updates: Record<string, number | null> = {};
-      for (const f of LIMIT_FIELDS) {
-        const val = draft[f.key];
-        updates[f.key] = val === '' ? null : Number(val);
-      }
       await onSave(updates);
-    } catch { toast.error('Failed to save server limits'); }
+    } catch (err) {
+      console.error('Failed to save server limits:', logMessage(err));
+      toast.error(apiErrorMessage(err, 'Failed to save server limits'));
+    }
     setSaving(false);
   };
 
@@ -377,10 +479,11 @@ function ServerLimitsModal({
     setSaving(true);
     try {
       await onReset();
-      const d: Record<string, string> = {};
-      for (const f of LIMIT_FIELDS) d[f.key] = '';
-      setDraft(d);
-    } catch { toast.error('Failed to reset limits'); }
+      setDraft(emptyOverrides());
+    } catch (err) {
+      console.error('Failed to reset server limits:', logMessage(err));
+      toast.error(apiErrorMessage(err, 'Failed to reset limits'));
+    }
     setSaving(false);
   };
 
@@ -417,8 +520,8 @@ function ServerLimitsModal({
                     type="number"
                     min={field.min}
                     max={field.max}
-                    value={draft[field.key] ?? ''}
-                    onChange={(e) => setDraft({ ...draft, [field.key]: e.target.value })}
+                    step={1}
+                    {...bindInput(field.key)}
                     placeholder={String(globalVal)}
                     className="w-full rounded-md bg-vox-bg-hover border border-vox-border text-sm text-vox-text-primary px-3 py-1.5 placeholder:text-vox-text-muted/50 focus:outline-none focus:border-vox-accent-primary"
                   />

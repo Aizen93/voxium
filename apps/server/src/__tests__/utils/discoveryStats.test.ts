@@ -106,6 +106,19 @@ describe('recomputeServerStats — three statements, every one bounded by the id
     expect(values).toEqual([DISCOVERY_SCORE_WEIGHTS.online, DISCOVERY_SCORE_WEIGHTS.messages, DISCOVERY_SCORE_WEIGHTS.members, ['a', 'b', 'c'], [0, 7, 0], [2, 1, 0]]);
   });
 
+  it('counts only member-authored messages: webhook rows (author_id NULL) never feed the activity score', async () => {
+    // Badges are a RANK by discovery_activity_score; ten webhooks at their
+    // rate cap would otherwise add ~300 messages a minute with no members.
+    await recomputeServerStats(['a']);
+    const weeklySql = sqlOf(prismaMock.$queryRaw.mock.calls[0]);
+    expect(weeklySql).toContain(
+      "WHERE c.server_id = ANY(?::text[]) AND m.created_at >= now() - interval '7 days' AND m.author_id IS NOT NULL GROUP BY c.server_id",
+    );
+    // an extra predicate on the same range: still one channel join, one bound value
+    expect(weeklySql).toContain('FROM channels c JOIN messages m ON m.channel_id = c.id WHERE');
+    expect(prismaMock.$queryRaw.mock.calls[0]).toHaveLength(2);
+  });
+
   it('is a no-op for an empty batch', async () => {
     await recomputeServerStats([]);
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled();

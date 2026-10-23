@@ -262,6 +262,43 @@ describe('Report Routes — E2E message reports', () => {
   });
 });
 
+// ─── Webhook-posted messages (no user author) ───────────────────────────────
+
+describe('Report Routes — webhook-posted messages', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.report.count).mockResolvedValue(0);
+  });
+
+  it('a webhook message (authorId null) cannot be pinned on a user: 400, no report written', async () => {
+    // The row as the route selects it, plus the webhook columns a webhook row
+    // carries: authorId is NULL, so no reportedUserId can ever match it.
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-2' } as any);
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.message.findUnique).mockResolvedValue({
+      id: 'msg-wh',
+      content: 'Build #42 passed',
+      encrypted: false,
+      channelId: 'ch-1',
+      conversationId: null,
+      authorId: null,
+      webhookId: 'wh1',
+      webhookName: 'CI',
+      channel: { serverId: 'srv-1', secure: false },
+    } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'user-1' } as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/reports')
+      .send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-wh', reason: 'Spam from this integration' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Reported user does not match message author' });
+    expect(prisma.message.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'msg-wh' } }));
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+});
+
 // ─── Server reports (directory listings) ────────────────────────────────────
 
 describe('Report Routes — type: server', () => {

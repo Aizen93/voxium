@@ -247,18 +247,28 @@ export async function getEffectivePermissions(
 }
 
 /**
- * Filter a list of channels to only those the user can view.
- * Optimized: fetches permissions data once and computes per-channel in memory.
+ * Filter a list of channels to those in which the user holds EVERY bit of
+ * `required` (one flag or a mask, `VIEW_CHANNEL | SEND_MESSAGES`), with the
+ * permission data fetched once and each channel decided in memory: one
+ * batched pass whatever the channel count, never a computation per channel
+ * (at the admin's channel cap that would be thousands of queries per call).
+ * `filterVisibleChannels` is this with `VIEW_CHANNEL`.
  */
-export async function filterVisibleChannels<T extends { id: string; secure?: boolean }>(
+export async function filterChannelsWithPermissions<T extends { id: string; secure?: boolean; type?: string }>(
   userId: string,
   serverId: string,
   channels: T[],
+  required: bigint,
 ): Promise<T[]> {
-  // Secure channels are visible iff the user is a ChannelMember — decided
-  // BEFORE the owner/ADMINISTRATOR fast paths below, which only ever apply to
-  // the plaintext partition. Callers that select channels without the `secure`
-  // field fail open here, so every caller must include it.
+  // Secure channels: membership-derived, decided BEFORE the owner/ADMINISTRATOR
+  // fast paths below, which only ever apply to the plaintext partition. A
+  // member holds exactly SECURE_MEMBER_PERMISSIONS in a secure text channel
+  // and SECURE_VOICE_MEMBER_PERMISSIONS in a secure voice channel (callers
+  // that select `type` get the right set; without it, the text set), so the
+  // mask must fit in it; the creator's extra MANAGE_MESSAGES is not modelled
+  // here (no caller asks for it: a mask with it excludes secure channels).
+  // Callers that select channels without the `secure` field fail open here,
+  // so every caller must include it.
   const secureIds = channels.filter((c) => c.secure).map((c) => c.id);
   let secureMemberships: Set<string> | null = null;
   if (secureIds.length > 0) {
@@ -268,17 +278,19 @@ export async function filterVisibleChannels<T extends { id: string; secure?: boo
     });
     secureMemberships = new Set(rows.map((r) => r.channelId));
   }
-  const visibleSecure = (c: T) => (secureMemberships ? secureMemberships.has(c.id) : false);
+  const secureAllowed = (c: T) =>
+    (secureMemberships ? secureMemberships.has(c.id) : false)
+    && hasFlag(c.type === 'voice' ? SECURE_VOICE_MEMBER_PERMISSIONS : SECURE_MEMBER_PERMISSIONS, required);
   const plainChannels = channels.filter((c) => !c.secure);
 
-  // Owner sees every plaintext channel
+  // Owner holds every permission in every plaintext channel
   const server = await prisma.server.findUnique({
     where: { id: serverId },
     select: { ownerId: true },
   });
   if (!server) return [];
   if (server.ownerId === userId) {
-    return channels.filter((c) => (c.secure ? visibleSecure(c) : true));
+    return channels.filter((c) => (c.secure ? secureAllowed(c) : true));
   }
 
   // Fetch base permission data
@@ -299,9 +311,9 @@ export async function filterVisibleChannels<T extends { id: string; secure?: boo
   const rolePerms = memberRoles.map((mr) => permissionsFromString(mr.role.permissions));
   const base = computeBasePermissions(everyonePerms, rolePerms);
 
-  // ADMINISTRATOR sees every plaintext channel — secure still needs membership
+  // ADMINISTRATOR holds everything in every plaintext channel — secure still needs membership
   if (base === ALL_PERMISSIONS) {
-    return channels.filter((c) => (c.secure ? visibleSecure(c) : true));
+    return channels.filter((c) => (c.secure ? secureAllowed(c) : true));
   }
 
   // Fetch all channel overrides for the plaintext channels in one query
@@ -321,7 +333,7 @@ export async function filterVisibleChannels<T extends { id: string; secure?: boo
   const userRoleIds = new Set(memberRoles.map((mr) => mr.roleId));
 
   return channels.filter((channel) => {
-    if (channel.secure) return visibleSecure(channel);
+    if (channel.secure) return secureAllowed(channel);
 
     const overrides = overridesByChannel.get(channel.id) || [];
 
@@ -339,8 +351,20 @@ export async function filterVisibleChannels<T extends { id: string; secure?: boo
     }
 
     const perms = computeChannelPermissions(base, everyoneOverride, roleOverrides);
-    return hasFlag(perms, Permissions.VIEW_CHANNEL);
+    return hasFlag(perms, required);
   });
+}
+
+/**
+ * Filter a list of channels to only those the user can view: the batched
+ * filter above with VIEW_CHANNEL as the required mask.
+ */
+export async function filterVisibleChannels<T extends { id: string; secure?: boolean }>(
+  userId: string,
+  serverId: string,
+  channels: T[],
+): Promise<T[]> {
+  return filterChannelsWithPermissions(userId, serverId, channels, Permissions.VIEW_CHANNEL);
 }
 
 /**

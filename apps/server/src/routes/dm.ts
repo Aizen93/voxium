@@ -7,6 +7,7 @@ import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTAC
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
+import { shapeMessageRow } from '../utils/messageAuthor';
 
 const attachmentSelect = {
   select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
@@ -20,11 +21,16 @@ const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, status: true, role: true, isSupporter: true, supporterTier: true },
 };
 
+// webhookId/webhookName: a DM row always has a user author, but every message
+// reader goes through shapeMessageRow() (utils/messageAuthor.ts), which needs
+// both to keep the author non-null if it ever does not
 const replyToSelect = {
   select: {
     id: true,
     content: true,
     encrypted: true,
+    webhookId: true,
+    webhookName: true,
     author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
   },
 };
@@ -233,7 +239,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
       });
 
       const data = unique.map((m) => ({
-        ...m,
+        ...shapeMessageRow(m),
         reactions: aggregateReactions(m.reactions),
       }));
 
@@ -258,7 +264,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
     if (hasMore) messages.pop();
 
     const data = messages.reverse().map((m) => ({
-      ...m,
+      ...shapeMessageRow(m),
       reactions: aggregateReactions(m.reactions),
     }));
 
@@ -365,7 +371,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
       data: { updatedAt: new Date() },
     });
 
-    const payload = { ...message, reactions: [] };
+    const payload = { ...shapeMessageRow(message), reactions: [] };
     getIO().to(`dm:${conversationId}`).emit('dm:message:new', payload as unknown as Message);
 
     res.status(201).json({ success: true, data: payload });
@@ -422,7 +428,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
       },
     });
 
-    const payload = { ...updated, reactions: aggregateReactions(updated.reactions) };
+    const payload = { ...shapeMessageRow(updated), reactions: aggregateReactions(updated.reactions) };
     getIO().to(`dm:${conversationId}`).emit('dm:message:update', payload as unknown as Message);
 
     res.json({ success: true, data: payload });

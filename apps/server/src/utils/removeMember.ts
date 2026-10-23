@@ -5,6 +5,7 @@ import { getIO } from '../websocket/socketServer';
 import { broadcastVoiceEvictUser } from '../websocket/voiceCluster';
 import { purgeSecureChannelState } from './secureChannelLifecycle';
 import { broadcastMemberLeft } from './memberBroadcast';
+import { emitWebhookChanged } from './webhookLifecycle';
 
 export interface RemoveMemberOptions {
   /**
@@ -33,9 +34,21 @@ export interface RemoveMemberOptions {
  *    remaining members rotate keys. MUST run before the ServerMember delete.
  * 3. ChannelRead rows for this server's text channels.
  * 4. One transaction: ban upsert (optional), pending/declined join request
- *    gone, membership gone, memberCount − 1 (never below zero).
+ *    gone, membership gone, memberCount − 1 (never below zero), and with a
+ *    ban (a kick) the webhooks whose LIVE URL the member holds (created by
+ *    them and never rotated by another, or last rotated by them: a rotate
+ *    hands its caller the only working URL), enabled or not, disabled and
+ *    marked `creatorRemovedAt`. The URL is a bearer credential that may have
+ *    left with the kicked member, so it stops posting the moment they are
+ *    out, and a row already disabled carries the mark too, so whoever enables
+ *    it later is warned; any enable or a rotate clears the mark. In the
+ *    transaction so a removal never commits without it. A voluntary leave
+ *    keeps them.
  * 5. The room invariant's other half: sockets leave `server:{id}` and every
  *    `channel:{id}` room, remaining members get member:left.
+ * 6. When step 4 disabled any webhook: the `webhook:changed` refetch hint to
+ *    `server:{id}` (the server id alone), after step 5 so the removed
+ *    member's sockets are no longer in the room.
  *
  * The caller emits anything route-specific afterwards (kick → member:kicked
  * to the removed user's room).
@@ -70,8 +83,26 @@ export async function removeMemberFromServer(
     });
   }
 
+  // A kick only. FIRST in the transaction: a 60 s purge-delete may hold one
+  // of these webhook rows, and waiting for it must happen before this
+  // transaction takes the server row (every create and join touches it)
+  const disableWebhooks = opts.ban
+    ? prisma.webhook.updateMany({
+        where: {
+          serverId,
+          // The webhooks whose LIVE URL the member holds: created by them and
+          // never rotated since, or rotated last by them. Disabled or not: a
+          // disabled row gets the mark too, so a later enable is warned.
+          OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }],
+        },
+        data: { enabled: false, creatorRemovedAt: new Date() },
+      })
+    : null;
+
+  let disabledWebhooks = 0;
   try {
-    await prisma.$transaction([
+    const results = await prisma.$transaction([
+      ...(disableWebhooks ? [disableWebhooks] : []),
       ...(opts.ban
         ? [
             prisma.serverBan.upsert({
@@ -94,6 +125,8 @@ export async function removeMemberFromServer(
         data: { memberCount: { decrement: 1 } },
       }),
     ]);
+    const first = disableWebhooks ? results[0] : undefined;
+    if (first && 'count' in first) disabledWebhooks = first.count;
   } catch (err) {
     // The member left (or was removed) between the caller's membership check
     // and this transaction: serverMember.delete is the only statement here
@@ -104,4 +137,6 @@ export async function removeMemberFromServer(
   }
 
   await broadcastMemberLeft(userId, serverId);
+
+  if (disabledWebhooks > 0) emitWebhookChanged(serverId);
 }

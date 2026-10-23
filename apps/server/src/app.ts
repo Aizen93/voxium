@@ -25,9 +25,12 @@ import { secureChannelRouter } from './routes/secureChannels';
 import { themeRouter } from './routes/themes';
 import { e2eRouter } from './routes/e2e';
 import { discoveryRouter } from './routes/discovery';
+import { webhookExecuteRouter } from './routes/webhookExecute';
+import { webhookRouter } from './routes/webhooks';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 import { trustsProxy, trustedProxyHops } from './utils/trustProxy';
+import { redactUrl } from './utils/redactUrl';
 
 export const app = express();
 
@@ -120,13 +123,15 @@ let _morganHandler: express.RequestHandler | null = null;
 function getMorganHandler(): express.RequestHandler {
   if (!_morganHandler) {
     const fmt = process.env.LOG_FORMAT || (process.env.NODE_ENV === 'production' ? 'json' : 'dev');
+    // Every format prints the redacted URL (the 'dev' format too: LOG_FORMAT
+    // can select it in production, and a token on a terminal is still a token)
+    morgan.token<express.Request, express.Response>('url', (rq) => redactUrl(rq.originalUrl || rq.url));
     if (fmt === 'json') {
       morgan.token('body-size', (_rq, rs) => rs.getHeader('content-length') as string || '0');
-      // Invite codes are single-use bearer credentials — keep them out of
-      // durable access logs (tokens/reset codes travel in POST bodies, which
-      // morgan never captures; invite codes are the one credential in a URL)
-      const redactUrl = (url: string | undefined): string | undefined =>
-        url?.replace(/(\/invites\/)[^/?]+/, '$1[redacted]');
+      // Credentials in a URL stay out of durable access logs (utils/redactUrl.ts):
+      // invite codes (single-use bearer credentials) and incoming-webhook tokens
+      // (/api/v1/webhooks/:id/[redacted] — a bearer credential in a URL, like an
+      // invite code). Tokens/reset codes in POST bodies never reach morgan.
       _morganHandler = morgan((tokens, rq, rs) => JSON.stringify({
         ts: new Date().toISOString(),
         rid: rq.id,
@@ -148,6 +153,13 @@ app.use((req, res, next) => {
 });
 
 app.use(compression());
+// Incoming-webhook execute route (public, token in the URL). Mounted HERE, on
+// purpose: after morgan (logged, token redacted) and compression; BEFORE the
+// global 100 KB parser below, because it has its own 1 MB parser (GitHub push
+// payloads routinely exceed 100 KB); and OUTSIDE the api router, so not under
+// its per-IP rateLimitGeneral (GitHub's deliveries to every server share a
+// few egress addresses) — it brings its own per-IP and per-webhook limiters.
+app.use('/api/v1/webhooks', webhookExecuteRouter);
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
@@ -236,6 +248,9 @@ api.use('/support', supportRouter);
 api.use('/themes', themeRouter);
 api.use('/e2e', e2eRouter);
 api.use('/discovery', discoveryRouter);
+// Incoming-webhook MANAGEMENT (authenticated, MANAGE_WEBHOOKS); the public
+// execute endpoint is mounted above, outside this router.
+api.use('/servers/:serverId/webhooks', webhookRouter);
 
 app.use('/api/v1', api);
 

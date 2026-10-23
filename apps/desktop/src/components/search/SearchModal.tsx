@@ -6,6 +6,7 @@ import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { Avatar } from '../common/Avatar';
+import { AppTag } from '../common/AppTag';
 import { Search, X, Hash, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import type { SearchResult, Channel } from '@voxium/shared';
@@ -37,6 +38,11 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   // search over this device's decrypted history — there is no encrypted/
   // plaintext conversation distinction left to test for.
   const isEncryptedDM = !!conversationId;
+  // A webhook-posted hit. Never one from a local (decrypted) search — a DM or
+  // a secure channel, where no webhook posts — whatever the row claims.
+  const isWebhookHit = (result: SearchResult) =>
+    result.author.isWebhook === true && !isEncryptedDM
+    && !channels?.some((c) => c.id === result.channelId && c.secure === true);
 
   // Auto-focus input + cleanup in-flight requests on unmount
   useEffect(() => {
@@ -306,6 +312,9 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
                   <span className="text-sm font-semibold text-vox-text-primary">
                     {result.author.displayName}
                   </span>
+                  {/* A webhook names itself: the tag keeps "alice" from passing for
+                      the member */}
+                  {isWebhookHit(result) && <AppTag />}
                   {result.channelName && (
                     <span className="flex items-center gap-0.5 text-xs text-vox-text-muted">
                       <Hash size={10} />

@@ -23,6 +23,16 @@ vi.mock('../routes/stats', () => ({ statsRouter: Router() }));
 vi.mock('../routes/admin', () => ({ adminRouter: Router() }));
 vi.mock('../routes/support', () => ({ supportRouter: Router() }));
 vi.mock('../routes/roles', () => ({ roleRouter: Router() }));
+// The public webhook execute router. Its one route reports whether a body
+// parser ran BEFORE it — which proves where app.ts mounts it
+vi.mock('../routes/webhookExecute', async () => {
+  const { Router: makeRouter } = await import('express');
+  const router = makeRouter();
+  router.post('/:webhookId/:token', (req, res) => {
+    res.status(200).json({ parsedBeforeRouter: req.body !== undefined });
+  });
+  return { webhookExecuteRouter: router };
+});
 
 // Mock error handler
 vi.mock('../middleware/errorHandler', () => ({
@@ -31,7 +41,10 @@ vi.mock('../middleware/errorHandler', () => ({
   },
 }));
 
-// Mock rate limiter (app.ts imports rateLimitGeneral + route-specific limiters)
+// Mock rate limiter (app.ts imports rateLimitGeneral + route-specific limiters).
+// rateLimitGeneral is a recording passthrough: the api router's per-IP bucket
+// must never see a webhook execute request
+const generalLimiter = vi.hoisted(() => vi.fn((_req: unknown, _res: unknown, next: () => void) => next()));
 vi.mock('../middleware/rateLimiter', async (importOriginal) => {
   const original = await importOriginal<Record<string, unknown>>();
   const passthrough = (_req: unknown, _res: unknown, next: () => void) => next();
@@ -39,6 +52,7 @@ vi.mock('../middleware/rateLimiter', async (importOriginal) => {
   for (const key of Object.keys(original)) {
     mocked[key] = key === 'socketRateLimit' ? vi.fn().mockReturnValue(true) : passthrough;
   }
+  mocked.rateLimitGeneral = (req: unknown, res: unknown, next: () => void) => generalLimiter(req, res, next);
   return mocked;
 });
 
@@ -57,6 +71,7 @@ vi.mock('../utils/redis', () => ({
 
 // Mock themes router separately (needs Router export)
 vi.mock('../routes/themes', () => ({ themeRouter: Router() }));
+vi.mock('../routes/webhooks', () => ({ webhookRouter: Router() }));
 
 // Mock feature flags used by the public feature flags endpoint
 vi.mock('../utils/featureFlags', () => ({
@@ -70,6 +85,7 @@ function request(
   method: string,
   path: string,
   headers: Record<string, string> = {},
+  body?: string,
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
     const server = app.listen(0, () => {
@@ -98,9 +114,55 @@ function request(
         server.close();
         reject(err);
       });
-      req.end();
+      req.end(body);
     });
   });
+}
+
+// ─── Helper to capture the access log (morgan writes to stdout) ──────────────
+
+const LOG_WAIT_MS = 2000;
+const LOG_POLL_MS = 5;
+
+/**
+ * Captures every stdout write until `restore()`. Morgan writes its line when
+ * the response FINISHES, which can land after the client already holds the
+ * answer, so `waitFor` polls the capture instead of sleeping a fixed time: a
+ * slow runner waits as long as it needs (up to 2 s), a fast one not at all.
+ */
+function captureStdout() {
+  const chunks: string[] = [];
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write);
+  const output = () => chunks.join('');
+  return {
+    /**
+     * Everything captured, once every needle has appeared in it (or once 2 s
+     * have passed: the caller's assertions then fail on what WAS logged). A
+     * needle names the request's line, redacted or not, so a redaction bug
+     * fails at once instead of after the timeout.
+     */
+    async waitFor(...needles: string[]): Promise<string> {
+      const deadline = Date.now() + LOG_WAIT_MS;
+      while (!needles.every((needle) => output().includes(needle)) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, LOG_POLL_MS));
+      }
+      return output();
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
+
+/** Runs `body` with stdout captured, and always gives stdout back. */
+async function withStdout(body: (stdout: ReturnType<typeof captureStdout>) => Promise<void>): Promise<void> {
+  const stdout = captureStdout();
+  try {
+    await body(stdout);
+  } finally {
+    stdout.restore();
+  }
 }
 
 describe('app.ts — CORS lazy configuration', () => {
@@ -263,41 +325,113 @@ describe('app.ts — lazy morgan middleware', () => {
     process.env.LOG_FORMAT = 'json';
     const { app } = await import('../app');
 
-    const lines: string[] = [];
-    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
-      lines.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write);
-    try {
+    await withStdout(async (stdout) => {
       await request(app, 'GET', '/api/v1/invites/SUPERSECRETCODE123');
-      // morgan logs on response finish — give the event loop a tick
-      await new Promise((r) => setTimeout(r, 50));
+      const logged = await stdout.waitFor('/api/v1/invites/');
 
-      const logged = lines.join('');
       expect(logged).toContain('/api/v1/invites/[redacted]');
       expect(logged).not.toContain('SUPERSECRETCODE123');
-    } finally {
-      writeSpy.mockRestore();
-    }
+    });
+  });
+
+  it('json access log redacts the webhook token from execute URLs, keeping the id', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    await withStdout(async (stdout) => {
+      await request(app, 'POST', '/api/v1/webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      const logged = await stdout.waitFor('/api/v1/webhooks/wh_abc/');
+
+      expect(logged).toContain('/api/v1/webhooks/wh_abc/[redacted]');
+      expect(logged).not.toContain('SECRETTOKEN');
+    });
+  });
+
+  it('json access log redacts a case-variant execute URL (Express routes case-insensitively)', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    await withStdout(async (stdout) => {
+      const res = await request(app, 'POST', '/API/V1/Webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      const logged = await stdout.waitFor('/API/V1/Webhooks/wh_abc/');
+
+      // the execute router really answered it: the mixed-case path is live
+      expect(res.status).toBe(200);
+      expect(logged).toContain('/API/V1/Webhooks/wh_abc/[redacted]');
+      expect(logged).not.toContain('SECRETTOKEN');
+    });
+  });
+
+  it('json access log redacts an absolute-form execute target (Express routes it; originalUrl is the whole URL)', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    await withStdout(async (stdout) => {
+      // The proxy form of the request line: POST http://host/path HTTP/1.1
+      const res = await request(app, 'POST', 'http://voxium.test/api/v1/webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      const logged = await stdout.waitFor('http://voxium.test/api/v1/webhooks/wh_abc/');
+
+      // the execute router really answered it: the absolute form is live
+      expect(res.status).toBe(200);
+      expect(logged).toContain('http://voxium.test/api/v1/webhooks/wh_abc/[redacted]');
+      expect(logged).not.toContain('SECRETTOKEN');
+    });
+  });
+
+  it('json access log redacts double-slash execute URLs (not executed, but still logged)', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    await withStdout(async (stdout) => {
+      await request(app, 'POST', '/api/v1//webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      await request(app, 'POST', '//api/v1/webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      const logged = await stdout.waitFor('/api/v1//webhooks/wh_abc/', '//api/v1/webhooks/wh_abc/');
+
+      expect(logged).toContain('/api/v1//webhooks/wh_abc/[redacted]');
+      expect(logged).toContain('//api/v1/webhooks/wh_abc/[redacted]');
+      expect(logged).not.toContain('SECRETTOKEN');
+    });
+  });
+
+  it('the dev access log redacts the webhook token too', async () => {
+    delete process.env.LOG_FORMAT;
+    delete process.env.NODE_ENV;
+    const { app } = await import('../app');
+
+    await withStdout(async (stdout) => {
+      await request(app, 'POST', '/api/v1/webhooks/wh_abc/SECRETTOKEN', { 'Content-Type': 'application/json' }, '{}');
+      await request(app, 'GET', '/api/v1/invites/SUPERSECRETCODE123');
+      const logged = await stdout.waitFor('/api/v1/webhooks/wh_abc/', '/api/v1/invites/');
+
+      expect(logged).toContain('/api/v1/webhooks/wh_abc/[redacted]');
+      expect(logged).toContain('/api/v1/invites/[redacted]');
+      expect(logged).not.toContain('SECRETTOKEN');
+      expect(logged).not.toContain('SUPERSECRETCODE123');
+    });
+  });
+
+  it('json access log leaves the webhook management URLs untouched', async () => {
+    process.env.LOG_FORMAT = 'json';
+    const { app } = await import('../app');
+
+    await withStdout(async (stdout) => {
+      await request(app, 'GET', '/api/v1/servers/s1/webhooks/wh_abc/rotate');
+      const logged = await stdout.waitFor('/api/v1/servers/s1/webhooks/');
+
+      expect(logged).toContain('"/api/v1/servers/s1/webhooks/wh_abc/rotate"');
+    });
   });
 
   it('json access log leaves non-invite URLs untouched', async () => {
     process.env.LOG_FORMAT = 'json';
     const { app } = await import('../app');
 
-    const lines: string[] = [];
-    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
-      lines.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write);
-    try {
+    await withStdout(async (stdout) => {
       await request(app, 'GET', '/health');
-      await new Promise((r) => setTimeout(r, 50));
+      const logged = await stdout.waitFor('/health');
 
-      expect(lines.join('')).toContain('"/health"');
-    } finally {
-      writeSpy.mockRestore();
-    }
+      expect(logged).toContain('"/health"');
+    });
   });
 
   it('morgan handler is reused across multiple requests (lazy singleton)', async () => {
@@ -309,6 +443,49 @@ describe('app.ts — lazy morgan middleware', () => {
     // Second request should reuse the same morgan handler
     const res2 = await request(app, 'GET', '/health');
     expect(res2.status).toBe(200);
+  });
+});
+
+describe('app.ts — incoming webhook execute mount', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    generalLimiter.mockClear();
+  });
+
+  it('is mounted BEFORE the global 100 KB parser: a 200 KB body reaches the router unparsed', async () => {
+    const { app } = await import('../app');
+    const big = JSON.stringify({ content: 'x', pad: 'p'.repeat(200 * 1024) });
+
+    const res = await request(app, 'POST', '/api/v1/webhooks/wh_abc/TOKEN', {
+      'Content-Type': 'application/json',
+      'Content-Length': String(Buffer.byteLength(big)),
+    }, big);
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ parsedBeforeRouter: false });
+  });
+
+  it('the same 200 KB body elsewhere is rejected by the global parser (the control)', async () => {
+    const { app } = await import('../app');
+    const big = JSON.stringify({ content: 'x', pad: 'p'.repeat(200 * 1024) });
+
+    const res = await request(app, 'POST', '/api/v1/auth/login', {
+      'Content-Type': 'application/json',
+      'Content-Length': String(Buffer.byteLength(big)),
+    }, big);
+
+    // the global parser's 413 reaches this file's mocked errorHandler (500)
+    expect(res.status).toBe(500);
+  });
+
+  it('is mounted OUTSIDE the api router: rateLimitGeneral never sees an execute request', async () => {
+    const { app } = await import('../app');
+
+    await request(app, 'POST', '/api/v1/webhooks/wh_abc/TOKEN', { 'Content-Type': 'application/json' }, '{}');
+    expect(generalLimiter).not.toHaveBeenCalled();
+
+    await request(app, 'GET', '/api/v1/servers/s1/webhooks');
+    expect(generalLimiter).toHaveBeenCalledTimes(1);
   });
 });
 

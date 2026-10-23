@@ -35,12 +35,14 @@ import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
+import { notificationAuthorName } from '../../utils/notificationAuthor';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { SharePreflightModal } from '../voice/SharePreflightModal';
 import { discoverySocketHandlers } from '../../services/discoverySocketHandlers';
+import { handleMessageBulkDeleted } from '../../services/webhookSocketHandlers';
 import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
@@ -232,7 +234,8 @@ export function MainLayout() {
           }
         }
         if (settings.enableDesktopNotifications) {
-          const authorName = message.author?.displayName || message.author?.username || 'Someone';
+          // A webhook's name carries the APP marker: it picks its own name per post
+          const authorName = notificationAuthorName(message.author, i18n.t);
           const serverName = message.serverName || 'Unknown Server';
           const channelName = message.channelName || 'unknown';
           const readable = formatNotificationBody(message.content, message.mentions);
@@ -724,6 +727,9 @@ export function MainLayout() {
       ['message:new', handlers.messageNew],
       ['message:update', handlers.messageUpdate],
       ['message:delete', handlers.messageDelete],
+      // A webhook deleted with purge (services/webhookSocketHandlers.ts):
+      // acts only on the channel on screen, validates its payload
+      ['message:bulk_deleted', (data: unknown) => handleMessageBulkDeleted(data, isViewingChannel)],
       ['typing:start', handlers.typingStart],
       ['typing:stop', handlers.typingStop],
       ['presence:update', handlers.presenceUpdate],

@@ -133,10 +133,11 @@ describe('Server discovery — KICK_MEMBERS is now "Manage members", no new bit'
     expect(entry.description).toMatch(/join requests/);
   });
 
-  it('adds no permission flag — the directory reuses KICK_MEMBERS for all membership moderation', () => {
-    expect(Object.keys(Permissions)).toHaveLength(21);
-    expect(ALL_PERMISSIONS).toBe((1n << 21n) - 1n);
-    expect(PERMISSION_LIST).toHaveLength(21);
+  it('adds no permission flag — the directory reuses KICK_MEMBERS for all membership moderation (the 22nd bit is MANAGE_WEBHOOKS, from incoming webhooks)', () => {
+    expect(Object.keys(Permissions)).toHaveLength(22);
+    expect(ALL_PERMISSIONS).toBe((1n << 22n) - 1n);
+    expect(PERMISSION_LIST).toHaveLength(22);
+    expect(Permissions.MANAGE_WEBHOOKS).toBe(1n << 21n);
   });
 });
 

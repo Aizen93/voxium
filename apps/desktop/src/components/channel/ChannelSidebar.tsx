@@ -41,6 +41,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { Permissions, hasPermission, permissionsFromString } from '@voxium/shared';
 import { canOpenServerSettings } from '../../utils/serverSettingsAccess';
+import { permissionsFingerprint } from '../../hooks/useServerPermissions';
 import type { Channel, Category } from '@voxium/shared';
 import { isSecureVoiceSupported } from '../../services/e2e/voiceFrameTransform';
 
@@ -461,15 +462,7 @@ export function ChannelSidebar() {
   // — without it, a freshly granted CREATE_SECURE_CHANNELS would not show the
   // create control until the next server switch.
   const roles = useServerStore((s) => s.roles);
-  const myPermsKey = useMemo(() => {
-    const assigned = new Set((currentMember?.roles ?? []).map((r) => r.id));
-    const bits = roles
-      .filter((r) => r.isDefault || assigned.has(r.id))
-      .map((r) => `${r.id}:${r.permissions}`)
-      .sort()
-      .join('|');
-    return `${currentMember?.role ?? ''}|${bits}`;
-  }, [currentMember, roles]);
+  const myPermsKey = useMemo(() => permissionsFingerprint(currentMember, roles), [currentMember, roles]);
 
   // Secure-channel creation is gated on the PERMISSION BIT, not the legacy
   // member.role field — a custom role can carry CREATE_SECURE_CHANNELS.

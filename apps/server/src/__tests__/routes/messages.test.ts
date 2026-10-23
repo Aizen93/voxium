@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME } from '@voxium/shared';
-import { extractMentionIds } from '../../utils/mentions';
+import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, Permissions } from '@voxium/shared';
+import { extractMentionIds, batchResolveMentions, attachMentions, resolveMentionsForServer } from '../../utils/mentions';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -1087,6 +1087,280 @@ describe('Message Routes', () => {
           data: expect.objectContaining({ content: ENVELOPE }),
         }),
       );
+    });
+  });
+
+  // ── Incoming webhooks: authorless rows ─────────────────────────────────
+  // A webhook-posted row has author === null plus webhookId/webhookName. The
+  // wire keeps a non-null author (synthesised, isWebhook: true) and the row
+  // never resolves mentions: an unauthenticated URL must never ping anyone.
+
+  describe('webhook-authored rows', () => {
+    const webhookAuthor = { id: 'webhook:wh-1', username: 'CI', displayName: 'CI', avatarUrl: null, isWebhook: true };
+    const user2 = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null };
+
+    function makeWebhookMessage(overrides: Record<string, unknown> = {}) {
+      return makeMockMessage({
+        authorId: null,
+        author: null,
+        webhookId: 'wh-1',
+        webhookName: 'CI',
+        content: 'Build failed, ping @[user-2]',
+        ...overrides,
+      });
+    }
+
+    beforeEach(async () => {
+      // Run the REAL batch resolver/attacher for these tests (the module is
+      // mocked file-wide); prisma.serverMember.findMany is the mocked query
+      const actual = await vi.importActual<typeof import('../../utils/mentions')>('../../utils/mentions');
+      vi.mocked(batchResolveMentions).mockImplementation(actual.batchResolveMentions);
+      vi.mocked(attachMentions).mockImplementation(actual.attachMentions);
+      prismaMock.channel.findUnique.mockResolvedValue({ id: 'ch-1', serverId: 'srv-1', type: 'text', secure: false });
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.findMany.mockResolvedValue([{ user: user2 }]);
+    });
+
+    afterEach(() => {
+      // back to the file-wide defaults so later tests see the plain mocks
+      vi.mocked(batchResolveMentions).mockResolvedValue(new Map());
+      vi.mocked(attachMentions).mockReturnValue([]);
+      vi.mocked(extractMentionIds).mockReturnValue([]);
+    });
+
+    it('DELETE: a plain member is not the author of a webhook row (authorId null) and gets the 403; nothing deleted, nothing emitted', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeWebhookMessage());
+      mockHasChannelPermission.mockImplementation(async (...args: unknown[]) => args[3] !== Permissions.MANAGE_MESSAGES);
+
+      const res = await request(app)
+        .delete('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('You can only delete your own messages');
+      expect(prismaMock.message.delete).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
+    });
+
+    it('DELETE: MANAGE_MESSAGES deletes a webhook row (the only way to remove one post) and emits message:delete', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeWebhookMessage());
+      prismaMock.message.delete.mockResolvedValue({});
+
+      const res = await request(app)
+        .delete('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.message.delete).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+      expect(mockEmit).toHaveBeenCalledWith('message:delete', expect.anything());
+    });
+
+    it('GET (standard page): synthesises the author and resolves no mentions for a webhook row, while a human row on the same page still does', async () => {
+      const token = makeToken();
+      // findMany is newest-first; the route reverses it
+      prismaMock.message.findMany.mockResolvedValue([
+        makeMockMessage({ id: 'msg-human', content: 'hey @[user-2]', webhookId: null, webhookName: null }),
+        makeWebhookMessage({ id: 'msg-hook' }),
+      ]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      const hook = res.body.data.find((m: { id: string }) => m.id === 'msg-hook');
+      const human = res.body.data.find((m: { id: string }) => m.id === 'msg-human');
+      expect(hook.author).toEqual(webhookAuthor);
+      expect(hook.webhookId).toBe('wh-1');
+      expect(hook.mentions).toEqual([]);
+      expect(human.author).toEqual(mockAuthor);
+      expect(human.mentions).toEqual([user2]);
+      // the quoted-author select carries what the shape needs
+      expect(prismaMock.message.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        include: expect.objectContaining({
+          replyTo: { select: expect.objectContaining({ webhookId: true, webhookName: true, author: expect.any(Object) }) },
+        }),
+      }));
+    });
+
+    it('GET (standard page): a page of webhook rows only never queries members at all', async () => {
+      const token = makeToken();
+      prismaMock.message.findMany.mockResolvedValue([makeWebhookMessage({ id: 'a' }), makeWebhookMessage({ id: 'b' })]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.map((m: { mentions: unknown[] }) => m.mentions)).toEqual([[], []]);
+      expect(prismaMock.serverMember.findMany).not.toHaveBeenCalled();
+    });
+
+    it('GET (around mode): synthesises the author and resolves no mentions for a webhook row', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-hook', channelId: 'ch-1', createdAt: new Date('2024-01-01') });
+      prismaMock.message.findMany
+        .mockResolvedValueOnce([makeWebhookMessage({ id: 'msg-hook' })]) // older, incl. the target
+        .mockResolvedValueOnce([makeMockMessage({ id: 'msg-after', content: '@[user-2] look', webhookId: null, webhookName: null })]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages?around=msg-hook')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.targetMessageId).toBe('msg-hook');
+      const hook = res.body.data.find((m: { id: string }) => m.id === 'msg-hook');
+      const after = res.body.data.find((m: { id: string }) => m.id === 'msg-after');
+      expect(hook.author).toEqual(webhookAuthor);
+      expect(hook.mentions).toEqual([]);
+      expect(after.mentions).toEqual([user2]);
+    });
+
+    it('GET: a deleted webhook (webhookId SET NULL) still renders under its frozen name as webhook:deleted', async () => {
+      const token = makeToken();
+      prismaMock.message.findMany.mockResolvedValue([makeWebhookMessage({ id: 'old', webhookId: null, webhookName: 'Old bot' })]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data[0].author).toEqual({
+        id: 'webhook:deleted', username: 'Old bot', displayName: 'Old bot', avatarUrl: null, isWebhook: true,
+      });
+      expect(res.body.data[0].mentions).toEqual([]);
+    });
+
+    it('GET: a human reply quoting a webhook message carries a synthesised replyTo.author', async () => {
+      const token = makeToken();
+      prismaMock.message.findMany.mockResolvedValue([
+        makeMockMessage({
+          id: 'msg-reply',
+          webhookId: null,
+          webhookName: null,
+          replyToId: 'msg-hook',
+          replyTo: { id: 'msg-hook', content: 'Deploy failed', author: null, webhookId: 'wh-1', webhookName: 'CI' },
+        }),
+      ]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data[0].author).toEqual(mockAuthor);
+      expect(res.body.data[0].replyTo.author).toEqual(webhookAuthor);
+    });
+
+    function mockSendChannel() {
+      prismaMock.channel.findUnique.mockResolvedValue({
+        id: 'ch-1', serverId: 'srv-1', type: 'text', name: 'general', secure: false, server: { name: 'Test Server' },
+      });
+    }
+
+    function mockCreatedRow(row: Record<string, unknown>) {
+      prismaMock.$transaction.mockImplementation(async (cb: Function) => cb({
+        message: {
+          create: vi.fn().mockResolvedValue({ id: row.id }),
+          findUniqueOrThrow: vi.fn().mockResolvedValue(row),
+        },
+        messageAttachment: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      }));
+    }
+
+    it('POST: a reply quoting a webhook message comes back (response AND message:new) with a synthesised replyTo.author', async () => {
+      const token = makeToken();
+      mockSendChannel();
+      prismaMock.message.findUnique.mockResolvedValue({ channelId: 'ch-1' }); // the replyToId check
+      mockCreatedRow(makeMockMessage({
+        id: 'msg-reply',
+        content: 'on it',
+        webhookId: null,
+        webhookName: null,
+        replyToId: 'msg-hook',
+        replyTo: { id: 'msg-hook', content: 'Deploy failed', author: null, webhookId: 'wh-1', webhookName: 'CI' },
+      }));
+
+      const res = await request(app)
+        .post('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'on it', replyToId: 'msg-hook' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.author).toEqual(mockAuthor);
+      expect(res.body.data.replyTo.author).toEqual(webhookAuthor);
+      const emitted = mockEmit.mock.calls.find((c) => c[0] === 'message:new')![1];
+      expect(emitted.replyTo.author).toEqual(webhookAuthor);
+    });
+
+    it('POST: never resolves mentions for a row carrying a webhookId (defence in depth)', async () => {
+      const token = makeToken();
+      mockSendChannel();
+      vi.mocked(extractMentionIds).mockReturnValue(['user-2']);
+      mockCreatedRow(makeWebhookMessage({ id: 'msg-hook' }));
+
+      const res = await request(app)
+        .post('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'Build failed, ping @[user-2]' });
+
+      expect(res.status).toBe(201);
+      expect(resolveMentionsForServer).toHaveBeenCalledWith([], 'srv-1');
+      expect(res.body.data.author).toEqual(webhookAuthor);
+      const emitted = mockEmit.mock.calls.find((c) => c[0] === 'message:new')![1];
+      expect(emitted.author).toEqual(webhookAuthor);
+    });
+
+    it('POST: a human row still resolves its mentions (the skip is keyed on isWebhookRow: webhookId, webhookName or a null authorId)', async () => {
+      const token = makeToken();
+      mockSendChannel();
+      vi.mocked(extractMentionIds).mockReturnValue(['user-2']);
+      mockCreatedRow(makeMockMessage({ id: 'msg-human', content: 'hey @[user-2]', webhookId: null, webhookName: null }));
+
+      const res = await request(app)
+        .post('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'hey @[user-2]' });
+
+      expect(res.status).toBe(201);
+      expect(resolveMentionsForServer).toHaveBeenCalledWith(['user-2'], 'srv-1');
+    });
+
+    it('PATCH: a webhook row is nobody\'s to edit (authorId null never matches the caller)', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeWebhookMessage({ channel: { serverId: 'srv-1', secure: false } }));
+
+      const res = await request(app)
+        .patch('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'rewritten' });
+
+      expect(res.status).toBe(403);
+      expect(prismaMock.message.update).not.toHaveBeenCalled();
+    });
+
+    it('PATCH: an edited human reply quoting a webhook message carries a synthesised replyTo.author', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeMockMessage({ channel: { serverId: 'srv-1', secure: false } }));
+      prismaMock.message.update.mockResolvedValue(makeMockMessage({
+        content: 'edited',
+        editedAt: new Date(),
+        webhookId: null,
+        webhookName: null,
+        replyTo: { id: 'msg-hook', content: 'Deploy failed', author: null, webhookId: 'wh-1', webhookName: 'CI' },
+      }));
+
+      const res = await request(app)
+        .patch('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'edited' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.replyTo.author).toEqual(webhookAuthor);
+      const emitted = mockEmit.mock.calls.find((c) => c[0] === 'message:update')![1];
+      expect(emitted.replyTo.author).toEqual(webhookAuthor);
     });
   });
 });

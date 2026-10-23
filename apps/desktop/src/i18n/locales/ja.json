@@ -274,7 +274,8 @@
       "members": "メンバー",
       "roles": "ロール",
       "limits": "制限",
-      "discovery": "探索"
+      "discovery": "探索",
+      "integrations": "連携"
     },
     "general": {
       "serverName": "サーバー名",
@@ -337,6 +338,8 @@
       "maxCategoriesDesc": "このサーバーのチャンネルカテゴリの最大数",
       "maxMembers": "最大メンバー数",
       "maxMembersDesc": "このサーバーに参加できる最大メンバー数",
+      "maxWebhooks": "最大ウェブフック数",
+      "maxWebhooksDesc": "このサーバーの受信ウェブフックの最大数（0の場合は作成できません）",
       "unlimited": "無制限",
       "failedToLoad": "サーバー制限の読み込みに失敗しました"
     }
@@ -365,6 +368,10 @@
     "CREATE_SECURE_CHANNELS": {
       "name": "セキュアチャンネルの作成",
       "description": "メンバーが招待制のエンドツーエンド暗号化チャンネルを作成できるようにします"
+    },
+    "MANAGE_WEBHOOKS": {
+      "name": "ウェブフックの管理",
+      "description": "メンバーが受信ウェブフックを作成、編集、削除できるようにします"
     },
     "CREATE_INVITES": {
       "name": "招待を作成",
@@ -540,7 +547,9 @@
     "report": "報告",
     "editHint": "Escでキャンセル · Enterで保存",
     "originalDeleted": "元のメッセージは削除されました",
-    "failedToToggleReaction": "リアクションの変更に失敗しました"
+    "failedToToggleReaction": "リアクションの変更に失敗しました",
+    "appTag": "アプリ",
+    "deletedWebhook": "削除されたウェブフック"
   },
   "messageInput": {
     "emojiPicker": "絵文字ピッカー",
@@ -1175,7 +1184,24 @@
     "joinMessageUnsupportedChars": "メッセージにサポートされていない文字が含まれています",
     "joinMessageTooLong": "メッセージは{{max}}文字以内にしてください",
     "refineSearch": "結果が多すぎます。検索条件を絞ってください",
-    "serverNotFound": "スペースが見つかりません"
+    "serverNotFound": "スペースが見つかりません",
+    "webhooksDisabled": "ウェブフックは現在無効になっています",
+    "webhookDisabled": "このウェブフックは無効になっています",
+    "webhookAdminDisabled": "このウェブフックは管理者によって無効化されました",
+    "webhookNotFound": "ウェブフックが見つかりません",
+    "webhookNoPermission": "ウェブフックを管理する権限がありません",
+    "webhookTextOnly": "ウェブフックはテキストチャンネルにのみ投稿できます",
+    "webhookInvalidType": "ウェブフックの種類が無効です",
+    "webhookGithubNotConfigured": "GitHubウェブフックは利用できません。このVoxiumの運営者が、必要な暗号化キーを設定していません。",
+    "webhookChannelRequired": "ウェブフックの投稿先チャンネルを選択してください",
+    "webhookNoFields": "更新する項目がありません",
+    "webhookEnabledBoolean": "有効化の値が無効です",
+    "webhookNameEmpty": "ウェブフック名を入力してください",
+    "webhookNameTooLong": "ウェブフック名は{{max}}文字以内にしてください",
+    "webhookNameInvalid": "ウェブフック名に使用できない文字が含まれています",
+    "webhookCap": "このサーバーはウェブフックの上限に達しました（最大{{max}}）",
+    "channelNotFound": "チャンネルが見つかりません",
+    "tooManyRequests": "リクエストが多すぎます。しばらくしてからもう一度お試しください。"
   },
   "e2e": {
     "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",
@@ -1488,6 +1514,128 @@
       "declined": "{{name}}への参加リクエストは却下されました",
       "newRequest": "{{user}}が{{server}}への参加をリクエストしました",
       "unknownSpace": "スペース"
+    }
+  },
+  "webhooks": {
+    "title": "連携",
+    "hint": "受信ウェブフックを使うと、スクリプトやCIジョブ、その他のアプリからテキストチャンネルに投稿できます。",
+    "usage": "{{used}} / {{max}}",
+    "newWebhook": "新しいウェブフック",
+    "atCap": "ウェブフックの上限に達しました（最大{{max}}）",
+    "frozen": "このサーバーではウェブフックの作成が停止されています",
+    "empty": "ウェブフックはまだありません。",
+    "emptyHint": "作成すると、スクリプトやCIジョブ、その他のアプリからチャンネルに投稿できるようになります。",
+    "failedToLoad": "ウェブフックを読み込めませんでした",
+    "retry": "再試行",
+    "toggleFailed": "ウェブフックを更新できませんでした",
+    "typeGeneric": "汎用",
+    "typeGithub": "GitHub",
+    "disabledChip": "無効",
+    "channelMissing": "不明なチャンネル",
+    "createdBy": "作成者: {{name}}",
+    "createdByUnknown": "作成者不明",
+    "lastUsed": "最終使用: {{when}}",
+    "neverUsed": "未使用",
+    "rotatedBy": "URL再発行: {{when}}（{{name}}）",
+    "rotated": "URL再発行: {{when}}",
+    "adminDisabledChip": "管理者により無効化",
+    "adminDisabledHint": "このウェブフックを再び有効にできるのは管理者だけです",
+    "creatorRemoved": "{{date}} に無効化: この URL を保持していたメンバーがサーバーから削除されました。URL を持っている人は誰でも投稿できます。有効化する前に URL を更新してください。",
+    "creatorRemovedUndated": "無効化: この URL を保持していたメンバーがサーバーから削除されました。URL を持っている人は誰でも投稿できます。有効化する前に URL を更新してください。",
+    "actions": {
+      "edit": "編集",
+      "rotate": "URLを再発行",
+      "enable": "有効にする",
+      "disable": "無効にする",
+      "delete": "削除"
+    },
+    "create": {
+      "title": "新しいウェブフック",
+      "description": "このウェブフックのメッセージは、この名前とアプリの印付きで表示されます。",
+      "name": "名前",
+      "namePlaceholder": "例: 夜間ビルド",
+      "channel": "チャンネル",
+      "noChannels": "ウェブフックを紐付けられるテキストチャンネルがありません。",
+      "loadingChannels": "チャンネルを読み込み中…",
+      "type": "種類",
+      "typeGenericHint": "Discord形式のJSON: content、username、embeds",
+      "typeGithubHint": "GitHub自体のペイロード（push、pull request、issue、release）を検証して整形します。署名シークレットは一度だけ表示されます。",
+      "submit": "ウェブフックを作成",
+      "creating": "作成中…",
+      "failed": "ウェブフックを作成できませんでした"
+    },
+    "edit": {
+      "title": "ウェブフックを編集",
+      "description": "URLは変わらないため、利用しているツールを更新する必要はありません。",
+      "name": "名前",
+      "channel": "チャンネル",
+      "current": "{{channel}}（現在）",
+      "loadingChannels": "チャンネルを読み込み中…",
+      "pickGone": "選択したチャンネルは利用できなくなりました。別のチャンネルを選択しない場合、ウェブフックは現在の場所に残ります。",
+      "moveNote": "移動しても変わるのは今後のメッセージの投稿先だけです。投稿済みのメッセージは元の場所に残ります。",
+      "saving": "保存中…",
+      "saved": "{{name}}を更新しました",
+      "failed": "ウェブフックを保存できませんでした"
+    },
+    "reveal": {
+      "title": "{{name}}の準備ができました",
+      "rotatedTitle": "{{name}}の新しいURL",
+      "copyNow": "今すぐコピーしてください。URLは一度しか表示されません。新しいURLが必要な場合は再発行してください。",
+      "url": "ウェブフックURL",
+      "copyUrl": "URLをコピー",
+      "worksWith": "DiscordのウェブフックURLを求めるツールなら、どこでも使えます。",
+      "curlHint": "ターミナルで試す",
+      "copyCurl": "コマンドをコピー",
+      "secret": "署名シークレット",
+      "copySecret": "シークレットをコピー",
+      "copied": "クリップボードにコピーしました",
+      "copyFailed": "クリップボードにコピーできませんでした",
+      "invalidUrl": "サーバーから不正な形式のウェブフックURLが返されたため、表示されません。再発行して新しいURLを取得してください。",
+      "done": "完了",
+      "github": {
+        "title": "GitHubで設定する",
+        "rotatedTitle": "{{name}}の新しいURLとシークレット",
+        "updateTitle": "GitHubで両方を更新する",
+        "copyNow": "今すぐ両方をコピーしてください。URLとシークレットは一度しか表示されません。新しいものが必要な場合は再発行してください。",
+        "urlHint": "GitHubのPayload URLに貼り付けてください。設定手順の全体は下にあります。",
+        "intro": "GitHubのリポジトリ（または組織）で Settings → Webhooks → Add webhook を開き、次のように入力します：",
+        "rotatedIntro": "古いURLとシークレットはもう使えません。GitHubで Settings → Webhooks を開き、このウェブフックを編集して両方を置き換えてください：",
+        "payloadUrl": "Payload URL",
+        "contentType": "Content type",
+        "secret": "Secret",
+        "ssl": "SSL verification",
+        "sslValue": "Enable SSL verification",
+        "events": "Which events would you like to trigger this webhook?",
+        "eventsValue": "Let me select individual events",
+        "eventsTick": "次の項目にチェックを入れます：",
+        "eventPushes": "Pushes",
+        "eventPullRequests": "Pull requests",
+        "eventIssues": "Issues",
+        "eventReleases": "Releases",
+        "ping": "Add webhook をクリックすると GitHub が ping を送信し、チャンネルに「Connected to owner/repo」という行が表示されるので、設定をすぐに確認できます。",
+        "rotatedCheck": "ウェブフックを編集しても新しい ping は送信されません。両方を更新すると、次のイベント（push、pull request、issue、release）がチャンネルに表示されます。",
+        "secretRequired": "シークレットは必須です。これで署名されていない配信は拒否されます。"
+      }
+    },
+    "rotate": {
+      "title": "ウェブフックURLを再発行",
+      "body": "{{name}}に新しいURLが発行されます。現在のURLはすぐに使えなくなるため、利用しているすべてのツールを更新してください。",
+      "bodyGithub": "{{name}}に新しいURLとシークレットが発行されます。現在のものはすぐに使えなくなるため、GitHubのウェブフックを両方とも更新してください。",
+      "confirm": "再発行",
+      "rotating": "再発行中…",
+      "failed": "ウェブフックURLを再発行できませんでした"
+    },
+    "delete": {
+      "title": "ウェブフックを削除",
+      "body": "{{name}}を削除しますか？このURLを使っているものはすべて動作しなくなります。",
+      "alsoDeleteMessages": "このウェブフックが投稿したメッセージもすべて削除する",
+      "deleted": "{{name}}を削除しました",
+      "deletedMessages_other": "{{name}}とメッセージ{{count}}件を削除しました",
+      "failed": "ウェブフックを削除できませんでした"
+    },
+    "off": {
+      "title": "ウェブフックは現在オフになっています。",
+      "hint": "管理者が受信ウェブフックを無効にしました。再び有効になるまで、ウェブフック経由では投稿できません。"
     }
   }
 }

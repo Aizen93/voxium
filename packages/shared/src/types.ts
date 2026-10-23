@@ -1,5 +1,5 @@
 import type { AnnotationOp, AnnotationScene, AnnotationLiveEvent } from './annotations.js';
-import type { ServerJoinMode, DiscoveryTier } from './constants.js';
+import type { ServerJoinMode, DiscoveryTier, WebhookType } from './constants.js';
 
 // ─── User ────────────────────────────────────────────────────────────────────
 
@@ -268,7 +268,15 @@ export interface Message {
     encrypted?: boolean;
     author: MessageAuthor;
   } | null;
+  /** Always present: for a webhook-authored row the server synthesises it
+   *  (`isWebhook: true`, id `webhook:{webhookId}` — never a user id). */
   author: MessageAuthor;
+  /** Set when an incoming webhook posted the message (null once the webhook
+   *  is deleted: the message stays, labelled with the name it posted under). */
+  webhookId?: string | null;
+  /** The name the webhook posted under, frozen at post time: what labels the
+   *  row once the webhook is deleted. Only on webhook-authored rows. */
+  webhookName?: string | null;
   mentions?: MessageAuthor[];
   attachments?: Attachment[];
   createdAt: string;
@@ -284,6 +292,58 @@ export interface MessageAuthor {
   role?: UserRole;
   isSupporter?: boolean;
   supporterTier?: SupporterTier;
+  /** A synthesised author for a webhook-posted message: there is no user
+   *  behind it (no profile, no DM, no mention). */
+  isWebhook?: boolean;
+}
+
+// ─── Incoming Webhooks ───────────────────────────────────────────────────────
+
+/** A webhook as the management API lists it. Never carries the token, its
+ *  hash or the GitHub secret. */
+export interface Webhook {
+  id: string;
+  serverId: string;
+  channelId: string;
+  name: string;
+  type: WebhookType;
+  enabled: boolean;
+  /** Set while a platform admin's disable is in force: `enabled` is false and
+   *  the owner's PATCH { enabled: true } answers 403 until an admin re-enables. */
+  adminDisabledAt: string | null;
+  /** Set when a kick or ban of the member who held the live URL (the creator,
+   *  or whoever rotated it last) disabled the webhook: the URL may have left
+   *  with them. Cleared by any enable (owner or admin) or a rotate. */
+  creatorRemovedAt: string | null;
+  createdBy: { id: string; username: string; displayName: string } | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+  /** The last rotation of the credential, and who did it (null before the first). */
+  lastRotatedAt: string | null;
+  lastRotatedBy: { id: string; username: string; displayName: string } | null;
+}
+
+/** A channel a webhook may be bound to by THIS caller (GET
+ *  /servers/:serverId/webhooks/targets): a non-secure text channel of the
+ *  server the caller can VIEW and SEND_MESSAGES in, as the create and move
+ *  checks decide it. */
+export interface WebhookTarget {
+  id: string;
+  name: string;
+  categoryId: string | null;
+  position: number;
+}
+
+/** The create/rotate answer: the plaintext token (and, for "github", the
+ *  signing secret) are shown exactly once. */
+export type WebhookCreated = Webhook & { token: string; secret?: string };
+
+/** A row of the platform-admin webhook list (GET /admin/servers/:id/webhooks):
+ *  every webhook of the server, plus its channel's name. `null` for a secure
+ *  channel, which a webhook never targets (the create and move checks refuse
+ *  one): should a row ever point at one, its name stays off the dashboard. */
+export interface AdminWebhook extends Webhook {
+  channelName: string | null;
 }
 
 export interface SendMessageRequest {
@@ -403,6 +463,8 @@ export interface ServerToClientEvents {
   'message:new': (message: Message) => void;
   'message:update': (message: Message) => void;
   'message:delete': (data: { messageId: string; channelId: string }) => void;
+  'message:bulk_deleted': (data: { channelId: string; webhookId: string; count: number }) => void;
+  'webhook:changed': (data: { serverId: string }) => void;
   'channel:created': (channel: Channel) => void;
   'channel:updated': (channel: Channel) => void;
   'channel:deleted': (data: { channelId: string; serverId: string }) => void;
@@ -838,6 +900,7 @@ export interface ResourceLimits {
   maxVoiceUsersPerChannel: number;
   maxCategoriesPerServer: number;
   maxMembersPerServer: number; // 0 = unlimited
+  maxWebhooksPerServer: number;
 }
 
 export interface ServerResourceLimits {
@@ -845,6 +908,7 @@ export interface ServerResourceLimits {
   maxVoiceUsersPerChannel: number | null;
   maxCategoriesPerServer: number | null;
   maxMembersPerServer: number | null;
+  maxWebhooksPerServer: number | null;
 }
 
 // ─── Storage ─────────────────────────────────────────────────────────────────
@@ -1001,7 +1065,9 @@ export type AuditAction =
   | 'report.resolve' | 'report.dismiss'
   | 'support.claim' | 'support.close'
   | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
-  | 'feature_flag.update' | 'feature_flag.reset';
+  | 'feature_flag.update' | 'feature_flag.reset'
+  | 'webhook.disable' | 'webhook.enable' | 'webhook.delete'
+  | 'limits.update_global' | 'limits.update_server' | 'limits.reset_server';
 
 // ─── Announcements ─────────────────────────────────────────────────────────
 

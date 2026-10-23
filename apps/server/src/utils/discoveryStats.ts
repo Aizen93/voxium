@@ -149,11 +149,16 @@ export async function recomputeServerStats(ids: string[]): Promise<void> {
   const W = DISCOVERY_SCORE_WEIGHTS;
 
   const [weeklyRows, onlineRows] = await Promise.all([
-    // nested loop over the server's channels, then an index range per channel
+    // nested loop over the server's channels, then an index range per channel.
+    // `author_id IS NOT NULL` drops webhook-posted rows (the only authorless
+    // ones, live or from a deleted webhook): badges are a RANK by this score,
+    // and a few webhooks at their rate cap must not buy one. It filters rows
+    // the (channel_id, created_at) range already selected; no new scan.
     prisma.$queryRaw<Array<{ serverId: string; n: number }>>`
       SELECT c.server_id AS "serverId", COUNT(*)::int AS n
       FROM channels c JOIN messages m ON m.channel_id = c.id
       WHERE c.server_id = ANY(${ids}::text[]) AND m.created_at >= now() - interval '7 days'
+        AND m.author_id IS NOT NULL
       GROUP BY c.server_id`,
     prisma.$queryRaw<Array<{ serverId: string; n: number }>>`
       SELECT sm.server_id AS "serverId", COUNT(*)::int AS n

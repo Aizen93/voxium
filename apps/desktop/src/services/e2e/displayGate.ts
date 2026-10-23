@@ -7,7 +7,7 @@
 // a file, a mention) is dropped or locked; what remains is either the
 // decrypted message or the "unable to decrypt" marker.
 import { parseE2EPlaintext } from '@voxium/shared';
-import type { Message, E2EAttachmentMeta } from '@voxium/shared';
+import type { Message, MessageAuthor, E2EAttachmentMeta } from '@voxium/shared';
 
 /** Content of a row that could not be shown; with `encrypted: true` the UI renders its "unable to decrypt" marker. */
 export const DECRYPT_FAILED_CONTENT = '';
@@ -20,7 +20,9 @@ export const DECRYPT_FAILED_CONTENT = '';
  */
 export function decryptedRow(message: Message, raw: string): Message {
   const { text, attachments } = parseE2EPlaintext(raw);
-  return { ...message, type: 'user', content: text, ...(attachments.length > 0 && { e2eAttachments: attachments }) };
+  // The callers strip first already; stripping here too keeps the shape safe
+  // for any caller that hands in the server's row as it came off the wire
+  return { ...withoutServerAssertions(message), type: 'user', content: text, ...(attachments.length > 0 && { e2eAttachments: attachments }) };
 }
 
 /** A quote whose text nothing vouched for: the lock placeholder. */
@@ -36,12 +38,29 @@ export function lockedQuote(quote: NonNullable<Message['replyTo']>): NonNullable
  *    and IV) to render inside a contact's authenticated message;
  *  - `mentions` names the people an `@[id]` in the text resolves to — the
  *    server never resolves mentions for encrypted rows, so a list on one is the
- *    server renaming an authentic mention (and setting off a "mentioned you").
+ *    server renaming an authentic mention (and setting off a "mentioned you");
+ *  - `author.isWebhook`, `webhookId` and `webhookName` say an incoming webhook
+ *    posted the row — but a webhook never posts an encrypted row, nor into a
+ *    DM, so on one of these rows it is the server relabelling an authentic
+ *    message as an app: an APP tag, no profile, no Report on a DM (which must
+ *    stay reportable), no Edit on the user's own message.
  */
 export function withoutServerAssertions(message: Message): Message {
-  if (message.e2eAttachments === undefined && !message.mentions?.length) return message;
+  const author = message.author as MessageAuthor | undefined;
+  const authorClaimsWebhook = author !== undefined && author !== null && 'isWebhook' in author;
+  const rowClaimsWebhook = 'webhookId' in message || 'webhookName' in message;
+  if (message.e2eAttachments === undefined && !message.mentions?.length && !authorClaimsWebhook && !rowClaimsWebhook) {
+    return message;
+  }
   const rest: Message = { ...message, mentions: [] };
   delete rest.e2eAttachments;
+  delete rest.webhookId;
+  delete rest.webhookName;
+  if (authorClaimsWebhook) {
+    const human: MessageAuthor = { ...author };
+    delete human.isWebhook;
+    rest.author = human;
+  }
   return rest;
 }
 

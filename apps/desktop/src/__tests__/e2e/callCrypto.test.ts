@@ -42,11 +42,21 @@ import {
   decryptCallSignal,
   CallSecurityError,
   E2EIdentityChangedError,
+  type CallSecurityErrorKind,
 } from '../../services/e2e/callCrypto';
 
 const PEER = { userId: 'peer', deviceId: 'device-peer0001' };
 const CONV = 'conv-1';
 const OFFER: E2ECallSignal = { type: 'offer', sdp: 'v=0 fake-sdp a=fingerprint:sha-256 AA:BB' };
+
+/**
+ * voiceStore aborts the call on `instanceof CallSecurityError`, so the class
+ * is part of the contract, not just the `kind` field.
+ */
+async function expectCallSecurityError(attempt: Promise<unknown>, kind: CallSecurityErrorKind): Promise<void> {
+  await expect(attempt).rejects.toBeInstanceOf(CallSecurityError);
+  await expect(attempt).rejects.toMatchObject({ kind });
+}
 
 function peerPlaintext(over: Partial<Parameters<typeof buildCallSignalPlaintext>[0]> = {}): string {
   return buildCallSignalPlaintext({
@@ -120,7 +130,7 @@ describe('encryptCallSignal', () => {
     fetchDeviceList.mockResolvedValue({ devices: [], servedDeviceCount: 0, listVersion: 0, masterKey: null });
     beginCallSignaling(CONV, PEER);
 
-    await expect(encryptCallSignal(CONV, PEER, OFFER)).rejects.toMatchObject({ kind: 'peer-not-e2e' });
+    await expectCallSecurityError(encryptCallSignal(CONV, PEER, OFFER), 'peer-not-e2e');
     expect(encryptToDevice).not.toHaveBeenCalled();
   });
 
@@ -131,7 +141,7 @@ describe('encryptCallSignal', () => {
     });
     beginCallSignaling(CONV, PEER);
 
-    await expect(encryptCallSignal(CONV, PEER, OFFER)).rejects.toMatchObject({ kind: 'binding-mismatch' });
+    await expectCallSecurityError(encryptCallSignal(CONV, PEER, OFFER), 'binding-mismatch');
     expect(encryptToDevice).not.toHaveBeenCalled();
   });
 
@@ -155,7 +165,7 @@ describe('decryptCallSignal', () => {
       '{"type":"offer","sdp":"x"}',                      // plaintext JSON string
       'random string', 42, null, undefined,
     ]) {
-      await expect(decryptCallSignal(CONV, PEER, legacy)).rejects.toMatchObject({ kind: 'legacy-signal' });
+      await expectCallSecurityError(decryptCallSignal(CONV, PEER, legacy), 'legacy-signal');
     }
     expect(decryptFromDevice).not.toHaveBeenCalled();
   });
