@@ -1,4 +1,5 @@
 import { getIO } from '../websocket/socketServer';
+import { replayVoiceState } from '../websocket/voiceHandler';
 import { prisma } from './prisma';
 import { filterVisibleChannels } from './permissionCalculator';
 import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
@@ -8,8 +9,15 @@ import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
  * rooms of every channel (text AND voice) they can VIEW. Channel rooms are the
  * visibility boundary for real-time events — joining unfiltered would leak
  * private-channel messages and voice presence to members without VIEW_CHANNEL.
+ *
+ * Adapter-wide room operations by the `user:{id}` room, never a
+ * `fetchSockets()` round trip: the latter waits for every node's reply and
+ * throws after 5 s when one peer is unresponsive, which skipped the
+ * member:joined broadcast below (or the member:left one) for everyone.
+ *
+ * Returns the ids of the channels the user can view.
  */
-async function joinVisibleChannelRooms(userId: string, serverId: string): Promise<void> {
+async function joinVisibleChannelRooms(userId: string, serverId: string): Promise<string[]> {
   const io = getIO();
   const channels = await prisma.channel.findMany({
     where: { serverId },
@@ -18,25 +26,33 @@ async function joinVisibleChannelRooms(userId: string, serverId: string): Promis
     select: { id: true, secure: true },
   });
   const visible = await filterVisibleChannels(userId, serverId, channels);
-  const sockets = await io.in(`user:${userId}`).fetchSockets();
-  for (const s of sockets) {
-    s.join(`server:${serverId}`);
-    for (const ch of visible) {
-      s.join(`channel:${ch.id}`);
-    }
-  }
+  const visibleIds = visible.map((ch) => ch.id);
+  io.in(`user:${userId}`).socketsJoin([`server:${serverId}`, ...visibleIds.map((id) => `channel:${id}`)]);
+  return visibleIds;
 }
 
 /**
  * After a user joins a server:
- * 1. Makes their active socket(s) join the `server:<id>` room.
- * 2. Broadcasts `member:joined` with safe user fields (no email) to all
+ * 1. Makes their active socket(s) join the `server:<id>` room and the
+ *    visible `channel:<id>` rooms.
+ * 2. Replays the server's live voice occupancy to them: every join and leave
+ *    happened before their sockets were in the rooms, so without it the new
+ *    member's sidebar shows the voice channels empty until someone moves.
+ * 3. Broadcasts `member:joined` with safe user fields (no email) to all
  *    members in the server room.
  */
 export async function broadcastMemberJoined(userId: string, serverId: string): Promise<void> {
   const io = getIO();
 
-  await joinVisibleChannelRooms(userId, serverId);
+  const visibleIds = await joinVisibleChannelRooms(userId, serverId);
+
+  try {
+    await replayVoiceState(io.to(`user:${userId}`), [serverId], new Set(visibleIds));
+  } catch (err) {
+    // The rooms are joined and the broadcast below still goes out: the voice
+    // lists catch up on the member's next connect
+    console.warn(`[Members] Voice occupancy replay to new member ${userId} failed:`, err instanceof Error ? err.message : err);
+  }
 
   // Fetch only the fields needed for the broadcast (no email)
   const joinedUser = await prisma.user.findUnique({
@@ -82,13 +98,10 @@ export async function broadcastMemberLeft(userId: string, serverId: string): Pro
     where: { serverId },
     select: { id: true },
   });
-  const sockets = await io.in(`user:${userId}`).fetchSockets();
-  for (const s of sockets) {
-    s.leave(`server:${serverId}`);
-    for (const ch of channels) {
-      s.leave(`channel:${ch.id}`);
-    }
-  }
+  // Adapter-wide and fire-and-forget (see joinVisibleChannelRooms): the
+  // departed member's sockets on every node leave the server room and every
+  // channel room, and the broadcast below never waits on a peer
+  io.in(`user:${userId}`).socketsLeave([`server:${serverId}`, ...channels.map((ch) => `channel:${ch.id}`)]);
 
   io.to(`server:${serverId}`).emit('member:left', { serverId, userId });
 }

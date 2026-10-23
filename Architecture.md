@@ -1350,14 +1350,17 @@ graph TD
 - Rust: null byte rejection, control char rejection, 128-char key limit, image magic byte validation (PNG/JPEG/WebP/GIF), symlink detection on cached files
 - Server: `?inline` proxy forces `Content-Type: image/webp`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`
 
-### Presence Cleanup
+### Presence
 
-`clearPresenceState()` in `utils/redis.ts` prevents ghost online statuses:
-- Collects all user IDs from Redis `online_users` set
-- Deletes per-user socket sets (`user:sockets:{userId}`)
-- Clears global keys (`online_users`, `socket:users`)
-- Resets all DB users with `status: 'online'` to `'offline'`
-- Called on server startup (before accepting connections) and graceful shutdown
+A user is online while at least one of their sockets, on any node, is registered: `user:sockets:{userId}` (the socket ids), `socket:users` (socket id → user id) and `online_users` in Redis, plus the `User.status` column the People panel reads. Both transitions are atomic — registration is one MULTI, unregistration one Lua script that removes the socket and decides in the same step whether it was the user's last — so two sockets of one user can never interleave into a partial state.
+
+The connection handler registers the socket and writes the column `online` before anything else, and the `disconnecting` handler waits for that registration before it unregisters; a socket that drops during the setup is therefore always unwound, and never announced online. A disconnect that finds the user already registered again (a page reload whose new socket connected while the old one was being torn down) writes and broadcasts nothing.
+
+Two sweeps keep the keys honest without a disconnect:
+- `clearPresenceState()` (`utils/redis.ts`) at startup (before accepting connections) and at graceful shutdown: as the sole node a full wipe, with live peers a scoped reap of the sockets missing from the cluster's adapter snapshot.
+- `utils/presenceReaper.ts` every 60 seconds while serving, under a short cluster lock: the same scoped reap, followed by a `presence:update` offline to every server and DM room of each user it took offline.
+
+Voice occupancy (`voice:channel_users`) is replayed to a socket on connect and to a member on joining a server (`replayVoiceState()`), for the channels they can view; the client clears its lists on reconnect because the replay only names channels that have occupants.
 
 ### Email System
 

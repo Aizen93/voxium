@@ -1149,6 +1149,7 @@
     "invalidTargetVoiceChannel": "القناة الصوتية المستهدفة غير صالحة",
     "targetNoPermissionJoinVoice": "المستخدم المستهدف ليس لديه صلاحية الانضمام إلى تلك القناة",
     "targetVoiceChannelFull": "القناة الصوتية المستهدفة ممتلئة",
+    "voiceSessionTakenOver": "تم نقل جلستك الصوتية إلى جهاز آخر",
     "cannotFriendSelf": "لا يمكنك إرسال طلب صداقة لنفسك",
     "alreadyFriends": "أنتما أصدقاء بالفعل",
     "friendRequestAlreadySent": "تم إرسال طلب الصداقة بالفعل",

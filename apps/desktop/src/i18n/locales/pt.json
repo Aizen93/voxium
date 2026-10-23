@@ -1145,6 +1145,7 @@
     "invalidTargetVoiceChannel": "Canal de voz de destino inválido",
     "targetNoPermissionJoinVoice": "O usuário de destino não tem permissão para entrar nesse canal",
     "targetVoiceChannelFull": "O canal de voz de destino está cheio",
+    "voiceSessionTakenOver": "A sua sessão de voz foi movida para outro dispositivo",
     "cannotFriendSelf": "Não é possível enviar um pedido de amizade para si mesmo",
     "alreadyFriends": "Vocês já são amigos",
     "friendRequestAlreadySent": "O pedido de amizade já foi enviado",

@@ -1674,7 +1674,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // runs, so every key they seal from now on fails the epoch binding and the
     // pair goes permanently silent. (Ghost list entries survive a missed
     // voice:user_left and an owner-node takeover, so this is reachable.)
-    if (listed && listed.deviceId === user.deviceId && listed.epoch === user.epoch) return;
+    // The same-session case still REFRESHES the row below: an announcement
+    // carries the participant's current mute/deaf flags, and a stale ghost
+    // entry (a missed voice:user_left before this re-join) would otherwise
+    // keep showing the flags of the session that ended. It just never re-keys.
+    const sameSession = !!listed && listed.deviceId === user.deviceId && listed.epoch === user.epoch;
 
     set((state) => {
       const newMap = new Map(state.channelUsers);
@@ -1695,8 +1699,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // No peer creation needed — SFU creates consumers server-side
 
     // Secure voice: a genuine ARRIVAL ratchets our key forward so the joiner
-    // never decrypts past audio (spec §21). Self echo is skipped.
-    if (user.id !== get().localUserId && activeSecureVoiceSession(channelId)) {
+    // never decrypts past audio (spec §21). Self echo is skipped, and so is a
+    // re-announcement of a session already keyed.
+    if (!sameSession && user.id !== get().localUserId && activeSecureVoiceSession(channelId)) {
       void import('../services/e2e/secureVoiceKeys')
         .then((m) => m.onParticipantJoined(channelId, user, { initialReplay: false }))
         .catch((err) => console.error('[SecureVoice] Arrival keying failed:', err));
@@ -2907,6 +2912,17 @@ useSettingsStore.subscribe((state, prevState) => {
 // On socket reconnect while in a voice channel: re-join and re-establish
 onSocketReconnect(async () => {
   const { activeChannelId, dmCallConversationId } = useVoiceStore.getState();
+
+  // Every voice occupancy list is stale the moment the socket was gone: the
+  // leaves that happened meanwhile never reached this client, and the server's
+  // connect-time replay only names channels that still HAVE occupants — a
+  // channel that emptied while we were away was never replayed, so its last
+  // known occupants stayed on screen for good. Cleared synchronously, BEFORE
+  // any await: the replay (voice:channel_users per occupied channel, then
+  // our own re-join's events) arrives after this handler ran and rebuilds the
+  // lists from the server's truth. The channel→server map stays: it is a fact
+  // about channels, not about who is in them.
+  useVoiceStore.setState({ channelUsers: new Map() });
 
   const socket = getSocket();
   if (!socket) return;

@@ -103,6 +103,9 @@ const ERROR_MAP: Record<string, string> = {
   'Invalid target voice channel.': 'invalidTargetVoiceChannel',
   'Target user does not have permission to join that channel.': 'targetNoPermissionJoinVoice',
   'Target voice channel is full.': 'targetVoiceChannelFull',
+  // A newer connection of the SAME account took over the voice session (a
+  // second device joined voice or a DM call): this device leaves on it
+  'Your voice session moved to another device.': 'voiceSessionTakenOver',
 
   // ─── Friends ───────────────────────────────────────────────────────────
   'Cannot send friend request to yourself': 'cannotFriendSelf',

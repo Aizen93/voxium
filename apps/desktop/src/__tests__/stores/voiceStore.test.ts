@@ -153,7 +153,12 @@ vi.mock('../../stores/settingsStore', async () => {
 });
 
 import { useVoiceStore, isMicProducer, registerShareMaskHooks } from '../../stores/voiceStore';
-import { getSocket } from '../../services/socket';
+import { getSocket, onSocketReconnect } from '../../services/socket';
+import type { VoiceUser } from '@voxium/shared';
+
+// Captured at import, before any beforeEach clears the mock: voiceStore
+// registers its one reconnect handler at module load
+const reconnectHandler = vi.mocked(onSocketReconnect).mock.calls[0]?.[0] as () => Promise<void>;
 import type { Producer, Consumer } from 'mediasoup-client/types';
 
 // ─── Fakes ───────────────────────────────────────────────────────────────────
@@ -1252,5 +1257,124 @@ describe('voiceStore', () => {
       expect(socketEmit()).toHaveBeenCalledWith('dm:voice:join', 'conv-1',
         expect.objectContaining({ deviceId: 'device-me000001' }));
     });
+  });
+});
+
+// ─── Voice occupancy lists vs. a socket reconnect ────────────────────────────
+
+function vu(id: string, overrides: Partial<VoiceUser> = {}): VoiceUser {
+  return {
+    id, username: id, displayName: id, avatarUrl: null,
+    selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false,
+    ...overrides,
+  };
+}
+
+describe('voiceStore — socket reconnect clears stale voice occupancy', () => {
+  // This describe's own socket: the shared mock may carry one-shot return
+  // values an earlier test queued, and the handler must emit on the very
+  // object these assertions watch
+  const socket = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
+
+  beforeEach(() => {
+    // A full leave first: an earlier test's secure join leaves the module-level
+    // secure-session marker behind, and the reconnect handler routes a channel
+    // it matches through the secure re-join instead of the plain re-emit
+    useVoiceStore.getState().leaveChannel();
+    vi.mocked(getSocket).mockReset();
+    vi.mocked(getSocket).mockReturnValue(socket as never);
+    socket.emit.mockClear();
+    useVoiceStore.setState({
+      localUserId: 'me',
+      activeChannelId: null,
+      activeVoiceServerId: null,
+      dmCallConversationId: null,
+      // The flags travel with the re-join; an earlier toggleMute test leaves them set
+      selfMute: false,
+      selfDeaf: false,
+      channelUsers: new Map(),
+      channelServers: new Map(),
+    });
+  });
+
+  afterEach(() => {
+    useVoiceStore.getState().stopLatencyMeasurement();
+  });
+
+  it('registers exactly one reconnect handler at module load', () => {
+    expect(typeof reconnectHandler).toBe('function');
+  });
+
+  it('empties every voice list on reconnect, even when not in voice — the server only replays occupied channels', () => {
+    // A channel that emptied while the socket was gone is never replayed, so
+    // its last known occupants stayed on screen for good
+    useVoiceStore.setState({
+      channelUsers: new Map([['ch-emptied', [vu('ghost')]], ['ch-busy', [vu('peer')]]]),
+      channelServers: new Map([['ch-emptied', 'srv-1'], ['ch-busy', 'srv-1']]),
+    });
+
+    void reconnectHandler();
+
+    expect(useVoiceStore.getState().channelUsers.size).toBe(0);
+    // The channel → server map is a fact about channels, not occupants: kept
+    expect(useVoiceStore.getState().channelServers.get('ch-emptied')).toBe('srv-1');
+  });
+
+  it('clears SYNCHRONOUSLY, before the re-join of the active channel goes out', async () => {
+    useVoiceStore.setState({
+      activeChannelId: 'ch-reconnect',
+      activeVoiceServerId: 'srv-1',
+      channelUsers: new Map([['ch-reconnect', [vu('me'), vu('ghost')]]]),
+    });
+    const socketEmit = socket.emit;
+
+    const done = reconnectHandler();
+    // Nothing has been awaited yet: the replay that follows the server's
+    // CONNECT packet cannot be processed before this ran
+    expect(useVoiceStore.getState().channelUsers.size).toBe(0);
+    expect(socketEmit).not.toHaveBeenCalledWith('voice:join', expect.anything(), expect.anything());
+
+    await done;
+
+    expect(socketEmit).toHaveBeenCalledWith('voice:join', 'ch-reconnect', expect.objectContaining({ selfMute: false, selfDeaf: false }));
+    expect(useVoiceStore.getState().activeChannelId).toBe('ch-reconnect');
+  });
+
+  it('a replay after the clear rebuilds the list from the server\'s truth', () => {
+    useVoiceStore.setState({ channelUsers: new Map([['ch-emptied', [vu('ghost')]]]) });
+
+    void reconnectHandler();
+    useVoiceStore.getState().setChannelUsers('ch-busy', [vu('peer')], 'srv-1');
+
+    const lists = useVoiceStore.getState().channelUsers;
+    expect([...lists.keys()]).toEqual(['ch-busy']);
+    expect(lists.get('ch-busy')).toEqual([vu('peer')]);
+  });
+});
+
+describe('voiceStore — addUserToChannel re-announcement of a listed participant', () => {
+  beforeEach(() => {
+    useVoiceStore.setState({ localUserId: 'me', activeChannelId: null, channelUsers: new Map() });
+  });
+
+  it('refreshes the flags of a plaintext participant already listed instead of keeping the stale row', () => {
+    // A ghost row (a missed voice:user_left before this re-join) kept the
+    // flags of the session that ended
+    useVoiceStore.setState({ channelUsers: new Map([['ch-ok', [vu('peer', { selfMute: false, selfDeaf: false })]]]) });
+
+    useVoiceStore.getState().addUserToChannel('ch-ok', vu('peer', { selfMute: true, selfDeaf: true }), 'srv-1');
+
+    const list = useVoiceStore.getState().channelUsers.get('ch-ok')!;
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id: 'peer', selfMute: true, selfDeaf: true });
+  });
+
+  it('still appends a participant that was not listed', () => {
+    useVoiceStore.setState({ channelUsers: new Map([['ch-ok', [vu('peer')]]]) });
+
+    useVoiceStore.getState().addUserToChannel('ch-ok', vu('other'), 'srv-1');
+
+    expect(useVoiceStore.getState().channelUsers.get('ch-ok')!.map((u) => u.id)).toEqual(['peer', 'other']);
+    expect(useVoiceStore.getState().channelServers.get('ch-ok')).toBe('srv-1');
   });
 });

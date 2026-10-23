@@ -21,6 +21,13 @@ import { Permissions, E2E_DEVICE_ID_RE, E2E_CALL_EPOCH_RE, VOICE_KEY_ENVELOPE_MA
 // Re-exported for existing consumers (voiceCluster, tests)
 export { reapVoiceChannelMirror };
 
+/**
+ * What a socket hears when a newer connection of the SAME user took over its
+ * voice session (a second device joining voice or a DM call). The desktop
+ * maps the exact sentence to a translation (utils/serverErrors.ts).
+ */
+export const VOICE_SESSION_TAKEN_OVER = 'Your voice session moved to another device.';
+
 /** Runtime type guard — returns false if value is not a non-empty string */
 function isString(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0;
@@ -1788,6 +1795,15 @@ export function leaveCurrentVoiceChannel(
     // owner-side shim state so reconnect cycles don't accumulate stale shims.
     dropShim(ownerMedia.socketId);
     shimHandlerTables.delete(ownerMedia.socketId);
+    // Tell the evicted connection. After a reconnect the old socket is dead
+    // and nobody hears this; when it is the SAME user on another device, that
+    // device's client still believes it is in the call: its transports have
+    // just been closed under it, it shows a connected voice panel with nobody
+    // in it, and ~30 s later its DTLS failure handler re-joins and evicts the
+    // newer device in turn — the two trade the session forever. The client
+    // treats voice:error as "leave now", which ends that cleanly. io.to()
+    // reaches a relayed participant's socket on its home node too.
+    io.to(ownerMedia.socketId).emit('voice:error', { message: VOICE_SESSION_TAKEN_OVER });
   }
 
   console.log(`[Voice] Removing user ${userId} from channel ${channelId}`);
@@ -2110,3 +2126,74 @@ export async function getVoiceStateForServers(serverIds: string[]): Promise<{ ch
 // wiring it up anywhere would have leaked secure voice channel occupancy. The
 // batched getVoiceStateForServers above is the live path, and its callers
 // intersect with filterVisibleChannelsMulti results.)
+
+/** Where a voice occupancy replay goes: one socket, or a `user:{id}` room
+ *  (a Socket and a BroadcastOperator both satisfy these two overloads). */
+export interface VoiceReplayTarget {
+  emit(event: 'voice:channel_users', data: Parameters<ServerToClientEvents['voice:channel_users']>[0]): unknown;
+  emit(event: 'voice:screen_share:state', data: Parameters<ServerToClientEvents['voice:screen_share:state']>[0]): unknown;
+}
+
+/**
+ * Replay the live voice occupancy of `serverIds` to one user: a
+ * `voice:channel_users` per channel that has occupants (and the sharer, if
+ * any), the same shape the join replay uses. Only channels in
+ * `visibleChannelIds` are sent — `channel:{id}` is the VIEW_CHANNEL boundary,
+ * and a replay must never show a private channel's occupants to someone who
+ * cannot see it.
+ *
+ * Sent on socket connect for every server the user is in, and on joining a
+ * server (the new member's sockets are in the rooms now, but every join/leave
+ * event happened before they were, so their sidebar would show the server's
+ * voice channels empty until someone moved). The client treats a connect as
+ * "every voice list is stale" and this as the truth; a channel that emptied
+ * while they were away is simply absent.
+ */
+export async function replayVoiceState(
+  target: VoiceReplayTarget,
+  serverIds: string[],
+  visibleChannelIds: ReadonlySet<string>,
+): Promise<void> {
+  const voiceStates = (await getVoiceStateForServers(serverIds))
+    .filter(({ channelId }) => visibleChannelIds.has(channelId));
+  if (voiceStates.length === 0) return;
+
+  // Single user-info query across all visible voice channels
+  const allVoiceUserIds = [...new Set(voiceStates.flatMap((v) => v.userIds))];
+  const userInfos = await prisma.user.findMany({
+    where: { id: { in: allVoiceUserIds } },
+    select: { id: true, username: true, displayName: true, avatarUrl: true },
+  });
+  const userInfoById = new Map(userInfos.map((u) => [u.id, u]));
+
+  for (const { channelId, serverId, userIds, userStates } of voiceStates) {
+    const voiceUsers = userIds
+      .map((uid) => userInfoById.get(uid))
+      .filter((u): u is NonNullable<typeof u> => !!u)
+      .map((u) => {
+        const state = userStates.get(u.id);
+        return {
+          ...u,
+          selfMute: state?.selfMute ?? false,
+          selfDeaf: state?.selfDeaf ?? false,
+          serverMuted: state?.serverMuted ?? false,
+          serverDeafened: state?.serverDeafened ?? false,
+          speaking: false,
+          // Same conditional-spread shape the voice:join replay uses —
+          // this list has to be indistinguishable from that one, because
+          // a secure-voice client feeds BOTH to onParticipantJoined and
+          // an entry missing these is excluded from keying for the rest
+          // of the call (spec §21).
+          ...(state?.e2eDeviceId && { deviceId: state.e2eDeviceId }),
+          ...(state?.e2eEpoch && { epoch: state.e2eEpoch }),
+        };
+      });
+    target.emit('voice:channel_users', { channelId, serverId, users: voiceUsers });
+
+    // Send screen share state if someone is sharing in this channel
+    const sharingUserId = await getScreenShareState(channelId);
+    if (sharingUserId) {
+      target.emit('voice:screen_share:state', { channelId, sharingUserId });
+    }
+  }
+}

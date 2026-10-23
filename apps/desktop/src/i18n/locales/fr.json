@@ -1145,6 +1145,7 @@
     "invalidTargetVoiceChannel": "Salon vocal cible invalide",
     "targetNoPermissionJoinVoice": "L'utilisateur cible n'a pas l'autorisation de rejoindre ce salon",
     "targetVoiceChannelFull": "Le salon vocal cible est plein",
+    "voiceSessionTakenOver": "Votre session vocale a été déplacée vers un autre appareil",
     "cannotFriendSelf": "Impossible de s'envoyer une demande d'ami à soi-même",
     "alreadyFriends": "Déjà amis",
     "friendRequestAlreadySent": "Demande d'ami déjà envoyée",

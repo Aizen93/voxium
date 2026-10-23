@@ -1144,6 +1144,7 @@
     "invalidTargetVoiceChannel": "移動先のボイスチャンネルが無効です",
     "targetNoPermissionJoinVoice": "対象ユーザーにはそのチャンネルに参加する権限がありません",
     "targetVoiceChannelFull": "移動先のボイスチャンネルが満員です",
+    "voiceSessionTakenOver": "ボイスセッションが別のデバイスに移動しました",
     "cannotFriendSelf": "自分自身にフレンドリクエストは送れません",
     "alreadyFriends": "既にフレンドです",
     "friendRequestAlreadySent": "フレンドリクエストは既に送信済みです",

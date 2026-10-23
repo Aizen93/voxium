@@ -2,18 +2,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { mockEmit, mockTo, mockIn, mockFetchSockets, mockPrisma, mockFilterVisibleChannels } = vi.hoisted(() => {
+const { mockEmit, mockTo, mockIn, mockSocketsJoin, mockSocketsLeave, mockPrisma, mockFilterVisibleChannels, mockReplayVoiceState } = vi.hoisted(() => {
   const mockEmit = vi.fn();
   const mockTo = vi.fn();
-  const mockFetchSockets = vi.fn();
   const mockIn = vi.fn();
+  const mockSocketsJoin = vi.fn();
+  const mockSocketsLeave = vi.fn();
 
   return {
     mockEmit,
     mockTo,
     mockIn,
-    mockFetchSockets,
+    mockSocketsJoin,
+    mockSocketsLeave,
     mockFilterVisibleChannels: vi.fn(),
+    mockReplayVoiceState: vi.fn(),
     mockPrisma: {
       channel: {
         findMany: vi.fn(),
@@ -32,6 +35,12 @@ vi.mock('../../websocket/socketServer', () => ({
     to: mockTo,
     in: mockIn,
   })),
+}));
+
+// The replay itself is voiceHandler's (covered there); here only that the join
+// path asks for it, for the right rooms, and that its failure stays contained
+vi.mock('../../websocket/voiceHandler', () => ({
+  replayVoiceState: mockReplayVoiceState,
 }));
 
 vi.mock('../../utils/prisma', () => ({
@@ -58,23 +67,28 @@ import {
 /** Re-establish the mock return-value chains after vi.clearAllMocks() */
 function resetMockChains() {
   mockTo.mockReturnValue({ emit: mockEmit });
-  mockIn.mockReturnValue({ fetchSockets: mockFetchSockets });
-  mockFetchSockets.mockResolvedValue([]);
+  mockIn.mockReturnValue({ socketsJoin: mockSocketsJoin, socketsLeave: mockSocketsLeave });
   mockPrisma.channel.findMany.mockResolvedValue([]);
   mockPrisma.user.findUnique.mockResolvedValue(null);
+  mockReplayVoiceState.mockResolvedValue(undefined);
   // Default: every channel is visible (pass-through)
   mockFilterVisibleChannels.mockImplementation(
     async (_userId: string, _serverId: string, channels: { id: string }[]) => channels,
   );
 }
 
-function createMockSocket(id = 'socket-1') {
-  return {
-    id,
-    join: vi.fn(),
-    leave: vi.fn(),
-  };
-}
+const aliceRow = () => ({
+  id: 'user-1',
+  username: 'alice',
+  displayName: 'Alice',
+  avatarUrl: null,
+  bio: 'Hello',
+  status: 'online',
+  role: 'user',
+  isSupporter: false,
+  supporterTier: null,
+  createdAt: new Date('2024-01-15T00:00:00.000Z'),
+});
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -84,20 +98,16 @@ describe('memberBroadcast — joinServerRoom', () => {
     resetMockChains();
   });
 
-  it('joins the user socket to the server room', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
+  it('joins the user room (every socket of the user, on every node) to the server room', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await joinServerRoom('user-1', 'server-1');
 
     expect(mockIn).toHaveBeenCalledWith('user:user-1');
-    expect(socket.join).toHaveBeenCalledWith('server:server-1');
+    expect(mockSocketsJoin).toHaveBeenCalledWith(['server:server-1']);
   });
 
-  it('joins user socket to all visible channel rooms', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
+  it('joins the visible channel rooms in the SAME adapter operation as the server room', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([
       { id: 'ch-1' },
       { id: 'ch-2' },
@@ -110,16 +120,11 @@ describe('memberBroadcast — joinServerRoom', () => {
       where: { serverId: 'server-1' },
       select: { id: true, secure: true },
     });
-    expect(socket.join).toHaveBeenCalledWith('server:server-1');
-    expect(socket.join).toHaveBeenCalledWith('channel:ch-1');
-    expect(socket.join).toHaveBeenCalledWith('channel:ch-2');
-    expect(socket.join).toHaveBeenCalledWith('channel:ch-3');
-    expect(socket.join).toHaveBeenCalledTimes(4); // server + 3 channels
+    expect(mockSocketsJoin).toHaveBeenCalledTimes(1);
+    expect(mockSocketsJoin).toHaveBeenCalledWith(['server:server-1', 'channel:ch-1', 'channel:ch-2', 'channel:ch-3']);
   });
 
   it('does NOT join rooms of channels the user cannot view', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([
       { id: 'ch-public' },
       { id: 'ch-private' },
@@ -134,35 +139,25 @@ describe('memberBroadcast — joinServerRoom', () => {
       'server-1',
       [{ id: 'ch-public' }, { id: 'ch-private' }],
     );
-    expect(socket.join).toHaveBeenCalledWith('channel:ch-public');
-    expect(socket.join).not.toHaveBeenCalledWith('channel:ch-private');
+    const rooms = mockSocketsJoin.mock.calls[0][0] as string[];
+    expect(rooms).toContain('channel:ch-public');
+    expect(rooms).not.toContain('channel:ch-private');
   });
 
-  it('joins ALL connected sockets of that user (multi-device)', async () => {
-    const socket1 = createMockSocket('socket-1');
-    const socket2 = createMockSocket('socket-2');
-    const socket3 = createMockSocket('socket-3');
-    mockFetchSockets.mockResolvedValueOnce([socket1, socket2, socket3]);
+  it('never fetches the sockets — a room operation cannot wait on an unresponsive peer node', async () => {
+    // io.in(room).fetchSockets() waits for every node's reply and throws after
+    // 5 s when one peer is down, which used to skip the broadcast entirely
+    const fetchSockets = vi.fn();
+    mockIn.mockReturnValue({ socketsJoin: mockSocketsJoin, socketsLeave: mockSocketsLeave, fetchSockets });
     mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }]);
 
     await joinServerRoom('user-1', 'server-1');
 
-    for (const s of [socket1, socket2, socket3]) {
-      expect(s.join).toHaveBeenCalledWith('server:server-1');
-      expect(s.join).toHaveBeenCalledWith('channel:ch-1');
-    }
-  });
-
-  it('does not throw when user has no active sockets', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
-    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }]);
-
-    await expect(joinServerRoom('user-1', 'server-1')).resolves.not.toThrow();
+    expect(fetchSockets).not.toHaveBeenCalled();
+    expect(mockSocketsJoin).toHaveBeenCalledTimes(1);
   });
 
   it('does not emit any events (silent join)', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await joinServerRoom('user-1', 'server-1');
@@ -170,10 +165,10 @@ describe('memberBroadcast — joinServerRoom', () => {
     // joinServerRoom should NOT broadcast — it's for the server creator
     expect(mockTo).not.toHaveBeenCalled();
     expect(mockEmit).not.toHaveBeenCalled();
+    expect(mockReplayVoiceState).not.toHaveBeenCalled();
   });
 
   it('queries ALL channels (text and voice — voice presence rooms need joining too)', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await joinServerRoom('user-1', 'server-1');
@@ -185,15 +180,12 @@ describe('memberBroadcast — joinServerRoom', () => {
   });
 
   it('handles server with no channels', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await joinServerRoom('user-1', 'server-1');
 
-    // Should only join the server room, no channel rooms
-    expect(socket.join).toHaveBeenCalledTimes(1);
-    expect(socket.join).toHaveBeenCalledWith('server:server-1');
+    // Only the server room
+    expect(mockSocketsJoin).toHaveBeenCalledWith(['server:server-1']);
   });
 });
 
@@ -203,32 +195,52 @@ describe('memberBroadcast — broadcastMemberJoined', () => {
     resetMockChains();
   });
 
-  it('joins the user socket to server room and visible channel rooms', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
+  it('joins the user room to the server room and the visible channel rooms', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }]);
-    mockPrisma.user.findUnique.mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'alice',
-      displayName: 'Alice',
-      avatarUrl: null,
-      bio: 'Hello',
-      status: 'online',
-      role: 'user',
-      isSupporter: false,
-      supporterTier: null,
-      createdAt: new Date('2024-01-15T00:00:00.000Z'),
-    });
+    mockPrisma.user.findUnique.mockResolvedValueOnce(aliceRow());
 
     await broadcastMemberJoined('user-1', 'server-1');
 
-    expect(socket.join).toHaveBeenCalledWith('server:server-1');
-    expect(socket.join).toHaveBeenCalledWith('channel:ch-1');
+    expect(mockIn).toHaveBeenCalledWith('user:user-1');
+    expect(mockSocketsJoin).toHaveBeenCalledWith(['server:server-1', 'channel:ch-1']);
+  });
+
+  it('replays the server\'s live voice occupancy to the new member, for the channels they can view', async () => {
+    // Every voice join/leave happened before the member's sockets were in the
+    // rooms: without the replay the new member's sidebar shows the voice
+    // channels empty until someone moves
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'vc-public' }, { id: 'vc-staff' }]);
+    mockFilterVisibleChannels.mockResolvedValueOnce([{ id: 'vc-public' }]);
+    const userRoom = { emit: vi.fn() };
+    mockTo.mockImplementation((room: string) => (room === 'user:user-1' ? userRoom : { emit: mockEmit }));
+    mockPrisma.user.findUnique.mockResolvedValueOnce(aliceRow());
+
+    await broadcastMemberJoined('user-1', 'server-1');
+
+    expect(mockReplayVoiceState).toHaveBeenCalledTimes(1);
+    const [target, serverIds, visible] = mockReplayVoiceState.mock.calls[0] as [unknown, string[], Set<string>];
+    expect(target).toBe(userRoom);
+    expect(serverIds).toEqual(['server-1']);
+    expect([...visible]).toEqual(['vc-public']);
+  });
+
+  it('replays AFTER the rooms are joined, and still broadcasts member:joined when the replay fails', async () => {
+    const order: string[] = [];
+    mockSocketsJoin.mockImplementation(() => { order.push('rooms'); });
+    mockReplayVoiceState.mockImplementation(async () => { order.push('replay'); throw new Error('redis down'); });
+    mockPrisma.user.findUnique.mockResolvedValueOnce(aliceRow());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(broadcastMemberJoined('user-1', 'server-1')).resolves.toBeUndefined();
+
+    expect(order).toEqual(['rooms', 'replay']);
+    expect(mockEmit).toHaveBeenCalledWith('member:joined', expect.objectContaining({ serverId: 'server-1' }));
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('broadcasts member:joined with correct user fields to the server room', async () => {
     const createdAt = new Date('2024-01-15T12:00:00.000Z');
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
     mockPrisma.user.findUnique.mockResolvedValueOnce({
       id: 'user-1',
@@ -264,20 +276,8 @@ describe('memberBroadcast — broadcastMemberJoined', () => {
   });
 
   it('converts null bio to null in the broadcast payload', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
-    mockPrisma.user.findUnique.mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'alice',
-      displayName: 'Alice',
-      avatarUrl: null,
-      bio: null,
-      status: 'online',
-      role: 'user',
-      isSupporter: false,
-      supporterTier: null,
-      createdAt: new Date('2024-01-15T00:00:00.000Z'),
-    });
+    mockPrisma.user.findUnique.mockResolvedValueOnce({ ...aliceRow(), bio: null });
 
     await broadcastMemberJoined('user-1', 'server-1');
 
@@ -290,18 +290,15 @@ describe('memberBroadcast — broadcastMemberJoined', () => {
   });
 
   it('does not broadcast if user is not found in DB', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
     mockPrisma.user.findUnique.mockResolvedValueOnce(null);
 
     await broadcastMemberJoined('nonexistent-user', 'server-1');
 
-    expect(mockTo).not.toHaveBeenCalled();
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
   it('fetches user with safe fields only (no email, no password)', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
     mockPrisma.user.findUnique.mockResolvedValueOnce(null);
 
@@ -324,52 +321,10 @@ describe('memberBroadcast — broadcastMemberJoined', () => {
     });
   });
 
-  it('joins ALL connected sockets for multi-device before broadcasting', async () => {
-    const socket1 = createMockSocket('socket-1');
-    const socket2 = createMockSocket('socket-2');
-    mockFetchSockets.mockResolvedValueOnce([socket1, socket2]);
-    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }, { id: 'ch-2' }]);
-    mockPrisma.user.findUnique.mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'alice',
-      displayName: 'Alice',
-      avatarUrl: null,
-      bio: null,
-      status: 'online',
-      role: 'user',
-      isSupporter: false,
-      supporterTier: null,
-      createdAt: new Date('2024-01-15T00:00:00.000Z'),
-    });
-
-    await broadcastMemberJoined('user-1', 'server-1');
-
-    for (const s of [socket1, socket2]) {
-      expect(s.join).toHaveBeenCalledWith('server:server-1');
-      expect(s.join).toHaveBeenCalledWith('channel:ch-1');
-      expect(s.join).toHaveBeenCalledWith('channel:ch-2');
-    }
-
-    // Also verify broadcast happened
-    expect(mockEmit).toHaveBeenCalledWith('member:joined', expect.any(Object));
-  });
-
   it('serializes createdAt as ISO string', async () => {
     const date = new Date('2025-06-15T08:30:00.000Z');
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
-    mockPrisma.user.findUnique.mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'alice',
-      displayName: 'Alice',
-      avatarUrl: null,
-      bio: null,
-      status: 'online',
-      role: 'user',
-      isSupporter: false,
-      supporterTier: null,
-      createdAt: date,
-    });
+    mockPrisma.user.findUnique.mockResolvedValueOnce({ ...aliceRow(), createdAt: date });
 
     await broadcastMemberJoined('user-1', 'server-1');
 
@@ -383,60 +338,21 @@ describe('memberBroadcast — broadcastMemberJoined', () => {
     );
   });
 
-  it('still joins socket rooms even when user lookup returns null', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
+  it('still joins the rooms even when user lookup returns null', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }]);
     mockPrisma.user.findUnique.mockResolvedValueOnce(null);
 
     await broadcastMemberJoined('user-1', 'server-1');
 
-    // Socket room joins happen before the user lookup
-    expect(socket.join).toHaveBeenCalledWith('server:server-1');
-    expect(socket.join).toHaveBeenCalledWith('channel:ch-1');
-
+    // Room joins happen before the user lookup
+    expect(mockSocketsJoin).toHaveBeenCalledWith(['server:server-1', 'channel:ch-1']);
     // But no broadcast
-    expect(mockTo).not.toHaveBeenCalled();
-  });
-
-  it('handles user with no active sockets but still broadcasts', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
-    mockPrisma.channel.findMany.mockResolvedValueOnce([]);
-    mockPrisma.user.findUnique.mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'alice',
-      displayName: 'Alice',
-      avatarUrl: null,
-      bio: null,
-      status: 'online',
-      role: 'user',
-      isSupporter: false,
-      supporterTier: null,
-      createdAt: new Date('2024-01-15T00:00:00.000Z'),
-    });
-
-    await broadcastMemberJoined('user-1', 'server-1');
-
-    // Still broadcasts even though user has no sockets (e.g. API-only join)
-    expect(mockTo).toHaveBeenCalledWith('server:server-1');
-    expect(mockEmit).toHaveBeenCalledWith('member:joined', expect.any(Object));
+    expect(mockEmit).not.toHaveBeenCalled();
   });
 
   it('includes serverId in the broadcast payload', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
-    mockPrisma.user.findUnique.mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'alice',
-      displayName: null,
-      avatarUrl: null,
-      bio: null,
-      status: 'offline',
-      role: 'admin',
-      isSupporter: false,
-      supporterTier: null,
-      createdAt: new Date('2024-01-01T00:00:00.000Z'),
-    });
+    mockPrisma.user.findUnique.mockResolvedValueOnce({ ...aliceRow(), displayName: null, status: 'offline', role: 'admin' });
 
     await broadcastMemberJoined('user-1', 'server-42');
 
@@ -453,20 +369,16 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
     resetMockChains();
   });
 
-  it('removes the user socket from the server room', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
+  it('removes the user room from the server room', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await broadcastMemberLeft('user-1', 'server-1');
 
     expect(mockIn).toHaveBeenCalledWith('user:user-1');
-    expect(socket.leave).toHaveBeenCalledWith('server:server-1');
+    expect(mockSocketsLeave).toHaveBeenCalledWith(['server:server-1']);
   });
 
-  it('removes the user socket from all channel rooms', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
+  it('removes the user room from ALL channel rooms in the same operation', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([
       { id: 'ch-1' },
       { id: 'ch-2' },
@@ -474,46 +386,25 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
 
     await broadcastMemberLeft('user-1', 'server-1');
 
-    expect(socket.leave).toHaveBeenCalledWith('server:server-1');
-    expect(socket.leave).toHaveBeenCalledWith('channel:ch-1');
-    expect(socket.leave).toHaveBeenCalledWith('channel:ch-2');
-    expect(socket.leave).toHaveBeenCalledTimes(3); // server + 2 channels
+    expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
+    expect(mockSocketsLeave).toHaveBeenCalledWith(['server:server-1', 'channel:ch-1', 'channel:ch-2']);
   });
 
-  it('removes ALL connected sockets of the user (multi-device)', async () => {
-    const socket1 = createMockSocket('socket-1');
-    const socket2 = createMockSocket('socket-2');
-    mockFetchSockets.mockResolvedValueOnce([socket1, socket2]);
+  it('never fetches the sockets (see the join path)', async () => {
+    const fetchSockets = vi.fn();
+    mockIn.mockReturnValue({ socketsJoin: mockSocketsJoin, socketsLeave: mockSocketsLeave, fetchSockets });
     mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }]);
 
     await broadcastMemberLeft('user-1', 'server-1');
 
-    for (const s of [socket1, socket2]) {
-      expect(s.leave).toHaveBeenCalledWith('server:server-1');
-      expect(s.leave).toHaveBeenCalledWith('channel:ch-1');
-    }
+    expect(fetchSockets).not.toHaveBeenCalled();
   });
 
   it('broadcasts member:left to the server room with userId and serverId', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await broadcastMemberLeft('user-1', 'server-1');
 
-    expect(mockTo).toHaveBeenCalledWith('server:server-1');
-    expect(mockEmit).toHaveBeenCalledWith('member:left', {
-      serverId: 'server-1',
-      userId: 'user-1',
-    });
-  });
-
-  it('broadcasts member:left even when user has no active sockets', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
-    mockPrisma.channel.findMany.mockResolvedValueOnce([]);
-
-    await broadcastMemberLeft('user-1', 'server-1');
-
-    // Broadcast should still happen even if user has no sockets
     expect(mockTo).toHaveBeenCalledWith('server:server-1');
     expect(mockEmit).toHaveBeenCalledWith('member:left', {
       serverId: 'server-1',
@@ -522,7 +413,6 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
   });
 
   it('queries ALL channels for room removal (no visibility filter — a departed member must receive nothing)', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await broadcastMemberLeft('user-1', 'server-1');
@@ -534,19 +424,18 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
     expect(mockFilterVisibleChannels).not.toHaveBeenCalled();
   });
 
-  it('handles server with no channels — only leaves server room', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
+  it('leaves the rooms BEFORE announcing the departure', async () => {
+    const order: string[] = [];
+    mockSocketsLeave.mockImplementation(() => { order.push('leave'); });
+    mockEmit.mockImplementation(() => { order.push('emit'); });
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await broadcastMemberLeft('user-1', 'server-1');
 
-    expect(socket.leave).toHaveBeenCalledTimes(1);
-    expect(socket.leave).toHaveBeenCalledWith('server:server-1');
+    expect(order).toEqual(['leave', 'emit']);
   });
 
   it('broadcasts to the correct server room with different server IDs', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await broadcastMemberLeft('user-99', 'server-42');
@@ -565,8 +454,7 @@ describe('memberBroadcast — room naming conventions', () => {
     resetMockChains();
   });
 
-  it('uses "user:{userId}" for fetching sockets', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
+  it('uses "user:{userId}" to address the user\'s sockets', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await joinServerRoom('abc-123', 'server-1');
@@ -574,24 +462,12 @@ describe('memberBroadcast — room naming conventions', () => {
     expect(mockIn).toHaveBeenCalledWith('user:abc-123');
   });
 
-  it('uses "server:{serverId}" for server room', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
-    mockPrisma.channel.findMany.mockResolvedValueOnce([]);
+  it('uses "server:{serverId}" for the server room and "channel:{channelId}" for channel rooms', async () => {
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'channel-abc' }]);
 
     await joinServerRoom('user-1', 'srv-xyz');
 
-    expect(socket.join).toHaveBeenCalledWith('server:srv-xyz');
-  });
-
-  it('uses "channel:{channelId}" for channel rooms', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
-    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'channel-abc' }]);
-
-    await joinServerRoom('user-1', 'server-1');
-
-    expect(socket.join).toHaveBeenCalledWith('channel:channel-abc');
+    expect(mockSocketsJoin).toHaveBeenCalledWith(['server:srv-xyz', 'channel:channel-abc']);
   });
 });
 
@@ -602,51 +478,31 @@ describe('memberBroadcast — edge cases', () => {
   });
 
   it('broadcastMemberJoined handles many channels', async () => {
-    const socket = createMockSocket();
-    mockFetchSockets.mockResolvedValueOnce([socket]);
-
     const channels = Array.from({ length: 20 }, (_, i) => ({ id: `ch-${i}` }));
     mockPrisma.channel.findMany.mockResolvedValueOnce(channels);
-    mockPrisma.user.findUnique.mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'alice',
-      displayName: null,
-      avatarUrl: null,
-      bio: null,
-      status: 'online',
-      role: 'user',
-      isSupporter: false,
-      supporterTier: null,
-      createdAt: new Date(),
-    });
+    mockPrisma.user.findUnique.mockResolvedValueOnce(aliceRow());
 
     await broadcastMemberJoined('user-1', 'server-1');
 
-    // 1 server room + 20 channel rooms
-    expect(socket.join).toHaveBeenCalledTimes(21);
+    // 1 server room + 20 channel rooms, one operation
+    expect(mockSocketsJoin).toHaveBeenCalledTimes(1);
+    expect(mockSocketsJoin.mock.calls[0][0]).toHaveLength(21);
   });
 
-  it('broadcastMemberLeft handles many sockets and many channels', async () => {
-    const sockets = Array.from({ length: 5 }, (_, i) => createMockSocket(`socket-${i}`));
-    mockFetchSockets.mockResolvedValueOnce(sockets);
-
+  it('broadcastMemberLeft handles many channels', async () => {
     const channels = Array.from({ length: 10 }, (_, i) => ({ id: `ch-${i}` }));
     mockPrisma.channel.findMany.mockResolvedValueOnce(channels);
 
     await broadcastMemberLeft('user-1', 'server-1');
 
-    // Each socket leaves server room + 10 channels = 11 leave calls per socket
-    for (const s of sockets) {
-      expect(s.leave).toHaveBeenCalledTimes(11);
-    }
+    expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
+    expect(mockSocketsLeave.mock.calls[0][0]).toHaveLength(11);
   });
 
   it('broadcastMemberJoined with supporter tier casts types correctly', async () => {
-    mockFetchSockets.mockResolvedValueOnce([]);
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
     mockPrisma.user.findUnique.mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'alice',
+      ...aliceRow(),
       displayName: 'Alice Pro',
       avatarUrl: 'avatars/user-1.png',
       bio: null,

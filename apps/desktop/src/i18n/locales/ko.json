@@ -1144,6 +1144,7 @@
     "invalidTargetVoiceChannel": "유효하지 않은 대상 음성 채널입니다",
     "targetNoPermissionJoinVoice": "대상 사용자에게 해당 채널에 참여할 권한이 없습니다",
     "targetVoiceChannelFull": "대상 음성 채널이 가득 찼습니다",
+    "voiceSessionTakenOver": "음성 세션이 다른 기기로 이동했습니다",
     "cannotFriendSelf": "자신에게 친구 요청을 보낼 수 없습니다",
     "alreadyFriends": "이미 친구입니다",
     "friendRequestAlreadySent": "친구 요청이 이미 전송되었습니다",

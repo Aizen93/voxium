@@ -1145,6 +1145,7 @@
     "invalidTargetVoiceChannel": "Invalid target voice channel",
     "targetNoPermissionJoinVoice": "Target user does not have permission to join that channel",
     "targetVoiceChannelFull": "Target voice channel is full",
+    "voiceSessionTakenOver": "Your voice session moved to another device",
     "cannotFriendSelf": "Cannot send friend request to yourself",
     "alreadyFriends": "Already friends",
     "friendRequestAlreadySent": "Friend request already sent",

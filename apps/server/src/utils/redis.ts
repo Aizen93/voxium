@@ -133,30 +133,50 @@ export async function anyOtherNodeAlive(): Promise<boolean> {
 }
 
 // ─── Presence helpers (multi-node safe: 1 user → many sockets) ──────────────
+//
+// Three keys describe who is connected: `user:sockets:{userId}` (the user's
+// live socket ids, on every node), `socket:users` (socket id → user id) and
+// `online_users`. They are written and unwound ATOMICALLY: the old
+// command-by-command versions could be interleaved by the same user's other
+// socket, and a partial write left a socket the unregister could never find —
+// a user who then read as online until the next boot sweep.
 
+/** Register a socket for a user. One transaction: all three keys or none. */
 export async function setUserOnline(userId: string, socketId: string): Promise<void> {
   const redis = getRedis();
-  await redis.sAdd(`user:sockets:${userId}`, socketId);
-  await redis.hSet('socket:users', socketId, userId);
-  await redis.sAdd('online_users', userId);
+  await redis.multi()
+    .sAdd(`user:sockets:${userId}`, socketId)
+    .hSet('socket:users', socketId, userId)
+    .sAdd('online_users', userId)
+    .exec();
 }
+
+// Unregister a socket and decide, in the SAME atomic step, whether its user
+// has any socket left. Read-then-write in separate commands let a concurrent
+// registration slip between the SCARD and the DEL: the newly registered socket
+// was wiped with the set and its user read as offline while connected.
+const SET_USER_OFFLINE_LUA = `
+local userId = redis.call('hget', KEYS[1], ARGV[1])
+if not userId then return nil end
+redis.call('hdel', KEYS[1], ARGV[1])
+local socketsKey = ARGV[2] .. userId
+redis.call('srem', socketsKey, ARGV[1])
+if redis.call('scard', socketsKey) == 0 then
+  redis.call('srem', KEYS[2], userId)
+  redis.call('del', socketsKey)
+  return { userId, 1 }
+end
+return { userId, 0 }
+`;
 
 export async function setUserOffline(socketId: string): Promise<{ userId: string; fullyOffline: boolean } | undefined> {
   const redis = getRedis();
-  const userId = await redis.hGet('socket:users', socketId);
-  if (userId) {
-    await redis.hDel('socket:users', socketId);
-    await redis.sRem(`user:sockets:${userId}`, socketId);
-    // Only mark user offline if they have no remaining sockets on any node
-    const remaining = await redis.sCard(`user:sockets:${userId}`);
-    if (remaining === 0) {
-      await redis.sRem('online_users', userId);
-      await redis.del(`user:sockets:${userId}`);
-      return { userId, fullyOffline: true };
-    }
-    return { userId, fullyOffline: false };
-  }
-  return undefined;
+  const result = await redis.eval(SET_USER_OFFLINE_LUA, {
+    keys: ['socket:users', 'online_users'],
+    arguments: [socketId, 'user:sockets:'],
+  }) as [string, number] | null;
+  if (!result || !Array.isArray(result) || typeof result[0] !== 'string') return undefined;
+  return { userId: result[0], fullyOffline: Number(result[1]) === 1 };
 }
 
 export async function isUserOnline(userId: string): Promise<boolean> {
@@ -271,8 +291,21 @@ export interface SweepOptions {
 }
 
 /**
+ * What a presence sweep did. `offlineUserIds` names the users the scoped reap
+ * took fully offline (their last stale socket went), so a caller that runs
+ * while serving — the periodic reaper — can tell their contacts with
+ * `presence:update`; the full wipe runs only when nobody is connected to hear
+ * it and reports none.
+ */
+export interface PresenceSweepResult {
+  skipped: boolean;
+  offlineUserIds: string[];
+}
+
+/**
  * Clear stale presence state from Redis and reset affected DB user statuses.
- * Called on server startup (crash/redeploy leftovers) and shutdown.
+ * Called on server startup (crash/redeploy leftovers), on shutdown, and every
+ * minute while serving (utils/presenceReaper.ts).
  *
  * Multi-node aware: production runs multiple instances, so wiping ALL presence
  * would mark every user on the peer nodes offline. When another node is alive
@@ -284,7 +317,7 @@ export async function clearPresenceState(
   db: { user: { updateMany: (args: { where: { status: string; id?: { in: string[] } }; data: { status: string } }) => Promise<unknown> } },
   io?: ClusterSocketLookup,
   { allowFullWipe = true }: SweepOptions = {},
-): Promise<{ skipped: boolean }> {
+): Promise<PresenceSweepResult> {
   const redis = getRedis();
 
   const { peers } = io ? await liveNodeCounts() : { peers: 0 };
@@ -312,7 +345,7 @@ export async function clearPresenceState(
       // a peer offline, which is worse than leaving stale rows for the next
       // boot to clear.
       console.warn('[Presence] Cluster socket snapshot unusable — skipping the scoped reap:', err instanceof Error ? err.message : err);
-      return { skipped: true };
+      return { skipped: true, offlineUserIds: [] };
     }
 
     const fullyOffline: string[] = [];
@@ -335,7 +368,7 @@ export async function clearPresenceState(
       await db.user.updateMany({ where: { status: 'online', id: { in: fullyOffline } }, data: { status: 'offline' } });
       console.log(`[Presence] Reaped ${fullyOffline.length} stale user(s) (scoped, ${peers} peer(s) alive)`);
     }
-    return { skipped: false };
+    return { skipped: false, offlineUserIds: fullyOffline };
   }
 
   // Sole node, before listen() or after shutdown: legacy full wipe.
@@ -345,5 +378,5 @@ export async function clearPresenceState(
   }
   await redis.del(['online_users', 'socket:users']);
   await db.user.updateMany({ where: { status: 'online' }, data: { status: 'offline' } });
-  return { skipped: false };
+  return { skipped: false, offlineUserIds: [] };
 }

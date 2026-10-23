@@ -1145,6 +1145,7 @@
     "invalidTargetVoiceChannel": "Ungültiger Ziel-Sprachkanal",
     "targetNoPermissionJoinVoice": "Der Zielbenutzer hat keine Berechtigung, diesem Kanal beizutreten",
     "targetVoiceChannelFull": "Der Ziel-Sprachkanal ist voll",
+    "voiceSessionTakenOver": "Deine Sprachsitzung wurde auf ein anderes Gerät verschoben",
     "cannotFriendSelf": "Du kannst dir selbst keine Freundschaftsanfrage senden",
     "alreadyFriends": "Ihr seid bereits befreundet",
     "friendRequestAlreadySent": "Freundschaftsanfrage wurde bereits gesendet",

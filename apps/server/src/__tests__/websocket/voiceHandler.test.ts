@@ -190,7 +190,7 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath, getVoiceDiagnostics, cleanupChannelVoice, cleanupServerVoice, evictUserFromChannelVoice, getVoiceStateForServers } from '../../websocket/voiceHandler';
+import { handleVoiceEvents, leaveCurrentVoiceChannel, clearVoiceState, reapOrphanedRemoteParticipants, dispatchVoiceEvent, handleWorkerDeath, getVoiceDiagnostics, cleanupChannelVoice, cleanupServerVoice, evictUserFromChannelVoice, getVoiceStateForServers, replayVoiceState, VOICE_SESSION_TAKEN_OVER } from '../../websocket/voiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -2461,5 +2461,177 @@ describe('voiceHandler — getVoiceStateForServers', () => {
 
     expect(state.userIds).toEqual(['u-good']);
     expect(state.userStates.get('u-good')?.selfMute).toBe(true);
+  });
+});
+
+// ─── Occupancy replay (connect, and joining a server) ───────────────────────
+
+describe('voiceHandler — replayVoiceState', () => {
+  /** Drive the two pipelined exec() calls: channel→server, then the user hashes. */
+  function mockMirror(entries: Array<{ channelId: string; serverId: string; users: Record<string, string> }>) {
+    mockVoiceRedis.sMembers.mockResolvedValueOnce(entries.map((e) => e.channelId));
+    const chain = mockVoiceRedis.multi();
+    chain.exec
+      .mockResolvedValueOnce(entries.map((e) => e.serverId))
+      .mockResolvedValueOnce(entries.map((e) => e.users));
+  }
+
+  function target() {
+    return { emit: vi.fn() };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockVoiceRedis.get.mockResolvedValue(null);
+    vi.mocked(prisma.user.findMany).mockResolvedValue([
+      { id: 'u-1', username: 'one', displayName: 'One', avatarUrl: null },
+      { id: 'u-2', username: 'two', displayName: 'Two', avatarUrl: null },
+    ] as any);
+  });
+
+  it('emits one voice:channel_users per occupied channel, in the join replay shape', async () => {
+    mockMirror([{
+      channelId: 'vc', serverId: 'srv-1',
+      users: {
+        'u-1': JSON.stringify({ selfMute: true, selfDeaf: false, serverMuted: false, serverDeafened: true }),
+        'u-2': JSON.stringify({ selfMute: false, selfDeaf: false }),
+      },
+    }]);
+    const t = target();
+
+    await replayVoiceState(t, ['srv-1'], new Set(['vc']));
+
+    expect(t.emit).toHaveBeenCalledTimes(1);
+    expect(t.emit).toHaveBeenCalledWith('voice:channel_users', {
+      channelId: 'vc',
+      serverId: 'srv-1',
+      users: [
+        { id: 'u-1', username: 'one', displayName: 'One', avatarUrl: null, selfMute: true, selfDeaf: false, serverMuted: false, serverDeafened: true, speaking: false },
+        { id: 'u-2', username: 'two', displayName: 'Two', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false },
+      ],
+    });
+  });
+
+  it('forwards e2eDeviceId/e2eEpoch as deviceId/epoch, matching the voice:join replay shape', async () => {
+    // A replay without them makes every occupant trip the client's "joined
+    // without an E2E device/epoch" branch, which drops their buffered keys and
+    // never re-vets them (spec §21)
+    mockMirror([{
+      channelId: 'sec-vc', serverId: 'srv-1',
+      users: { 'u-1': JSON.stringify({ selfMute: false, selfDeaf: false, e2eDeviceId: 'device-aaaa1111', e2eEpoch: 'epochAAAA0001' }) },
+    }]);
+    const t = target();
+
+    await replayVoiceState(t, ['srv-1'], new Set(['sec-vc']));
+
+    const users = (t.emit.mock.calls[0][1] as { users: Array<Record<string, unknown>> }).users;
+    expect(users[0]).toMatchObject({ id: 'u-1', deviceId: 'device-aaaa1111', epoch: 'epochAAAA0001' });
+  });
+
+  it('omits the E2E keys entirely for a plaintext channel, rather than sending undefined', async () => {
+    mockMirror([{ channelId: 'vc', serverId: 'srv-1', users: { 'u-1': JSON.stringify({ selfMute: false, selfDeaf: false }) } }]);
+    const t = target();
+
+    await replayVoiceState(t, ['srv-1'], new Set(['vc']));
+
+    const users = (t.emit.mock.calls[0][1] as { users: Array<Record<string, unknown>> }).users;
+    expect(users[0]).not.toHaveProperty('deviceId');
+    expect(users[0]).not.toHaveProperty('epoch');
+  });
+
+  it('never replays a channel outside the visible set (channel:{id} is the VIEW boundary)', async () => {
+    mockMirror([
+      { channelId: 'vc-public', serverId: 'srv-1', users: { 'u-1': JSON.stringify({ selfMute: false, selfDeaf: false }) } },
+      { channelId: 'vc-staff', serverId: 'srv-1', users: { 'u-2': JSON.stringify({ selfMute: false, selfDeaf: false }) } },
+    ]);
+    const t = target();
+
+    await replayVoiceState(t, ['srv-1'], new Set(['vc-public']));
+
+    expect(t.emit).toHaveBeenCalledTimes(1);
+    expect(t.emit.mock.calls[0][1]).toMatchObject({ channelId: 'vc-public' });
+  });
+
+  it('adds the screen-share state of a channel with a sharer', async () => {
+    mockMirror([{ channelId: 'vc', serverId: 'srv-1', users: { 'u-1': JSON.stringify({ selfMute: false, selfDeaf: false }) } }]);
+    mockVoiceRedis.get.mockImplementation(async (key: string) => (key === 'voice:screen:vc' ? 'u-1' : null));
+    const t = target();
+
+    await replayVoiceState(t, ['srv-1'], new Set(['vc']));
+
+    expect(t.emit).toHaveBeenCalledWith('voice:screen_share:state', { channelId: 'vc', sharingUserId: 'u-1' });
+  });
+
+  it('emits nothing when no visible channel has occupants', async () => {
+    mockVoiceRedis.sMembers.mockResolvedValueOnce([]);
+    const t = target();
+
+    await replayVoiceState(t, ['srv-1'], new Set(['vc']));
+
+    expect(t.emit).not.toHaveBeenCalled();
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── A newer connection of the same user takes the session ──────────────────
+
+describe('voiceHandler — session takeover notice', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.channel.findUnique).mockResolvedValue({ serverId: 's1', type: 'voice' } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'x', serverId: 's1' } as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'x', username: 'u', displayName: 'U', avatarUrl: null } as any);
+    vi.mocked(prisma.user.findMany).mockResolvedValue([] as any);
+  });
+
+  it('tells the evicted socket its session moved when ANOTHER socket of the user joins', async () => {
+    // The same account on a second device: the first device's client still
+    // shows a connected panel over closed transports, and ~30 s later its DTLS
+    // failure handler re-joins and evicts the newer device in turn
+    const io = createMockIO();
+    const c1 = createMockSocket('user-T', 'socket-T1');
+    const c2 = createMockSocket('user-T', 'socket-T2');
+    io.sockets.sockets.set('socket-T1', c1.socket);
+    io.sockets.sockets.set('socket-T2', c2.socket);
+    handleVoiceEvents(io as any, c1.socket as any);
+    handleVoiceEvents(io as any, c2.socket as any);
+    await c1.handlers.get('voice:join')!('ch-T');
+    io.to.mockClear();
+    io._emit.mockClear();
+
+    await c2.handlers.get('voice:join')!('ch-T');
+
+    expect(io.to).toHaveBeenCalledWith('socket-T1');
+    expect(io._emit).toHaveBeenCalledWith('voice:error', { message: VOICE_SESSION_TAKEN_OVER });
+    // The newer socket owns the session
+    expect(c2.socket.data.voiceChannelId).toBe('ch-T');
+    expect(c1.socket.data.voiceChannelId).toBeUndefined();
+  });
+
+  it('is silent when the SAME socket re-joins (a transport restart on one connection)', async () => {
+    const io = createMockIO();
+    const c1 = createMockSocket('user-S', 'socket-S1');
+    io.sockets.sockets.set('socket-S1', c1.socket);
+    handleVoiceEvents(io as any, c1.socket as any);
+    await c1.handlers.get('voice:join')!('ch-S');
+    io._emit.mockClear();
+
+    await c1.handlers.get('voice:join')!('ch-S');
+
+    expect(io._emit).not.toHaveBeenCalledWith('voice:error', { message: VOICE_SESSION_TAKEN_OVER });
+    expect(c1.socket.data.voiceChannelId).toBe('ch-S');
+  });
+
+  it('is silent on a plain leave or disconnect of the owning socket', async () => {
+    const io = createMockIO();
+    const c1 = createMockSocket('user-L', 'socket-L1');
+    handleVoiceEvents(io as any, c1.socket as any);
+    await c1.handlers.get('voice:join')!('ch-L');
+    io._emit.mockClear();
+
+    c1.handlers.get('voice:leave')!();
+
+    expect(io._emit).not.toHaveBeenCalledWith('voice:error', expect.anything());
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-L', userId: 'user-L' });
   });
 });

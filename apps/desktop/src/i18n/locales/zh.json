@@ -1144,6 +1144,7 @@
     "invalidTargetVoiceChannel": "无效的目标语音频道",
     "targetNoPermissionJoinVoice": "目标用户没有加入该频道的权限",
     "targetVoiceChannelFull": "目标语音频道已满",
+    "voiceSessionTakenOver": "您的语音会话已转移到另一台设备",
     "cannotFriendSelf": "无法向自己发送好友请求",
     "alreadyFriends": "已经是好友",
     "friendRequestAlreadySent": "好友请求已发送",

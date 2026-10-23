@@ -1147,6 +1147,7 @@
     "invalidTargetVoiceChannel": "Недійсний цільовий голосовий канал",
     "targetNoPermissionJoinVoice": "Цільовий користувач не має дозволу на приєднання до цього каналу",
     "targetVoiceChannelFull": "Цільовий голосовий канал заповнений",
+    "voiceSessionTakenOver": "Ваш голосовий сеанс перенесено на інший пристрій",
     "cannotFriendSelf": "Не можна надіслати запит на дружбу самому собі",
     "alreadyFriends": "Ви вже друзі",
     "friendRequestAlreadySent": "Запит на дружбу вже надіслано",
