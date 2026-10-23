@@ -277,8 +277,8 @@ export function MainLayout() {
         useDMStore.getState().updateParticipantStatus(userId, status);
         useFriendStore.getState().updateFriendStatus(userId, status);
       },
-      voiceChannelUsers: ({ channelId, serverId, users: voiceUsers }: { channelId: string; serverId?: string; users: VoiceUser[] }) => {
-        useVoiceStore.getState().setChannelUsers(channelId, voiceUsers, serverId);
+      voiceChannelUsers: ({ channelId, serverId, users: voiceUsers, source }: { channelId: string; serverId?: string; users: VoiceUser[]; source?: 'connect' }) => {
+        useVoiceStore.getState().setChannelUsers(channelId, voiceUsers, serverId, source);
       },
       voiceUserJoined: ({ channelId, serverId, user: voiceUser }: { channelId: string; serverId?: string; user: VoiceUser }) => {
         useVoiceStore.getState().addUserToChannel(channelId, voiceUser, serverId);
@@ -714,11 +714,12 @@ export function MainLayout() {
       supportStatusChange: (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => {
         useSupportStore.getState().updateStatus(data.status, data.claimedById, data.claimedByUsername);
       },
-      voiceError: (data: { message: string }) => {
-        const vs = useVoiceStore.getState();
-        if (vs.activeChannelId) vs.leaveChannel();
-        if (vs.dmCallConversationId) vs.leaveDMCall();
-        toast.error(translateServerError(data.message, i18n.t, 'common.somethingWentWrong'));
+      voiceError: (data: { message: string; channelId?: string }) => {
+        // The store decides (a channel-scoped notice about a channel we left
+        // is ignored); the toast follows only when it acted
+        if (useVoiceStore.getState().handleVoiceError(data)) {
+          toast.error(translateServerError(data.message, i18n.t, 'common.somethingWentWrong'));
+        }
       },
     };
 

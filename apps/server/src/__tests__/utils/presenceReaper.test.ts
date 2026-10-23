@@ -2,16 +2,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
-const { mockClearPresenceState, mockRedisSet, mockRedisEval } = vi.hoisted(() => ({
+const { mockClearPresenceState, mockRedisSet, mockRedisEval, mockIsUserOnline } = vi.hoisted(() => ({
   mockClearPresenceState: vi.fn(),
   mockRedisSet: vi.fn(),
   mockRedisEval: vi.fn(),
+  mockIsUserOnline: vi.fn(),
 }));
 
 // withClusterLock (utils/dailySchedule.ts) stays REAL: the lock's token, hold
 // and release semantics are the rule this job must follow
 vi.mock('../../utils/redis', () => ({
   clearPresenceState: mockClearPresenceState,
+  isUserOnline: mockIsUserOnline,
   getRedis: () => ({ set: mockRedisSet, eval: mockRedisEval }),
   NODE_ID: () => 'node-1',
 }));
@@ -31,7 +33,7 @@ function makeIO() {
 
 function makeDb() {
   return {
-    user: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    user: { updateMany: vi.fn().mockResolvedValue({ count: 0 }), findMany: vi.fn().mockResolvedValue([]) },
     serverMember: { findMany: vi.fn().mockResolvedValue([]) },
     conversation: { findMany: vi.fn().mockResolvedValue([]) },
   };
@@ -44,16 +46,37 @@ describe('presenceReaper — reapStalePresence', () => {
     vi.clearAllMocks();
     mockRedisSet.mockResolvedValue('OK');
     mockRedisEval.mockResolvedValue(1);
+    mockIsUserOnline.mockResolvedValue(false);
     mockClearPresenceState.mockResolvedValue({ skipped: false, offlineUserIds: [] });
   });
 
-  it('runs the SCOPED sweep (never the full wipe) and demands ONE adapter snapshot: this node is serving every minute', async () => {
+  it('runs the SCOPED sweep (never the full wipe), demands ONE adapter snapshot and reconciles the column: this node is serving every minute', async () => {
     const io = makeIO();
     const db = makeDb();
 
     await reapStalePresence(io as never, db);
 
-    expect(mockClearPresenceState).toHaveBeenCalledWith(db, io, { allowFullWipe: false, requireSnapshot: true });
+    expect(mockClearPresenceState).toHaveBeenCalledWith(db, io, { allowFullWipe: false, requireSnapshot: true, reconcileColumn: true });
+  });
+
+  it('a reaped user who registered a new socket by the time their turn to be announced comes is NOT announced offline', async () => {
+    // A large batch takes a while to announce (two DB reads per user); an
+    // offline landing after the user's own online would be the last word on
+    // every client
+    mockClearPresenceState.mockResolvedValueOnce({ skipped: false, offlineUserIds: ['u-back', 'u-gone'] });
+    mockIsUserOnline.mockImplementation(async (id: string) => id === 'u-back');
+    const io = makeIO();
+    const db = makeDb();
+    db.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-1' }]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await reapStalePresence(io as never, db);
+
+    expect(io._emit).toHaveBeenCalledTimes(1);
+    expect(io._emit).toHaveBeenCalledWith('presence:update', { userId: 'u-gone', status: 'offline' });
+    // Checked AFTER the room reads, as late as it can be
+    expect(db.serverMember.findMany.mock.invocationCallOrder[0]).toBeLessThan(mockIsUserOnline.mock.invocationCallOrder[0]);
+    warn.mockRestore();
   });
 
   it('takes the shared cluster lock with a per-acquisition token, and sweeps nothing when another node holds it', async () => {
@@ -165,6 +188,7 @@ describe('presenceReaper — interval', () => {
     vi.clearAllMocks();
     mockRedisSet.mockResolvedValue('OK');
     mockRedisEval.mockResolvedValue(1);
+    mockIsUserOnline.mockResolvedValue(false);
     mockClearPresenceState.mockResolvedValue({ skipped: false, offlineUserIds: [] });
   });
 

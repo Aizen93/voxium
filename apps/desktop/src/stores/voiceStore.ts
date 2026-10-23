@@ -265,8 +265,15 @@ interface VoiceState {
   // ─── Server Voice Actions (SFU) ────────────────────────────────────
   joinChannel: (channelId: string, serverId?: string, opts?: { secure?: boolean; keepRetryCount?: boolean }) => Promise<void>;
   leaveChannel: () => void;
-  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => void;
+  /** `source: 'connect'` is a snapshot replay (socket connect, server join): ignored for the channel this client is in. */
+  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string, source?: 'connect') => void;
   addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => void;
+  /**
+   * `voice:error` from the server. Scoped by `channelId` when the server sent
+   * one: acted on only while that channel is the active one. Returns whether
+   * it acted (the caller toasts the message only then).
+   */
+  handleVoiceError: (data: { message: string; channelId?: string }) => boolean;
   removeUserFromChannel: (channelId: string, userId: string) => void;
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => void;
   handleForceMove: (targetChannelId: string) => void;
@@ -1632,8 +1639,17 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   // ── Channel user state (unchanged) ─────────────────────────────────────
 
-  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => {
-    debugLog('[Voice] setChannelUsers:', channelId, users.length, 'users');
+  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string, source?: 'connect') => {
+    debugLog('[Voice] setChannelUsers:', channelId, users.length, 'users', source ?? 'join');
+    // A snapshot replay for the channel we are (re)joining ourselves: our own
+    // voice:join answers with the fresh list (and voice:user_joined for us),
+    // and the snapshot — read, then one DB round trip, then sent — can land
+    // AFTER it, with our previous session and peers who left back in the
+    // list, and would re-key every one of them in a secure channel.
+    if (source === 'connect' && channelId === get().activeChannelId) {
+      debugLog('[Voice] setChannelUsers: snapshot for the active channel ignored (the re-join replays it)');
+      return;
+    }
     set((state) => {
       const newMap = new Map(state.channelUsers);
       newMap.set(channelId, users);
@@ -1780,6 +1796,17 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         set({ selfDeaf: false });
       }
     }
+  },
+
+  handleVoiceError: (data) => {
+    const { activeChannelId, dmCallConversationId } = get();
+    // A channel-scoped notice (the session takeover) about a channel this
+    // client is no longer in — it moved on, perhaps evicting the other device
+    // in turn — must not end the call it is in now
+    if (data.channelId && data.channelId !== activeChannelId) return false;
+    if (activeChannelId) get().leaveChannel();
+    if (dmCallConversationId) get().leaveDMCall();
+    return true;
   },
 
   handleForceMove: (targetChannelId: string) => {

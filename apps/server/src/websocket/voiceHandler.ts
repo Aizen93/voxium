@@ -1802,8 +1802,10 @@ export function leaveCurrentVoiceChannel(
     // in it, and ~30 s later its DTLS failure handler re-joins and evicts the
     // newer device in turn — the two trade the session forever. The client
     // treats voice:error as "leave now", which ends that cleanly. io.to()
-    // reaches a relayed participant's socket on its home node too.
-    io.to(ownerMedia.socketId).emit('voice:error', { message: VOICE_SESSION_TAKEN_OVER });
+    // reaches a relayed participant's socket on its home node too. Scoped to
+    // the channel: a notice that arrives after that device moved on to
+    // another channel (and evicted this one in turn) must not end its new call.
+    io.to(ownerMedia.socketId).emit('voice:error', { message: VOICE_SESSION_TAKEN_OVER, channelId });
   }
 
   console.log(`[Voice] Removing user ${userId} from channel ${channelId}`);
@@ -2148,11 +2150,18 @@ export interface VoiceReplayTarget {
  * voice channels empty until someone moved). The client treats a connect as
  * "every voice list is stale" and this as the truth; a channel that emptied
  * while they were away is simply absent.
+ *
+ * `source: 'connect'` stamps every list as a SNAPSHOT (read from Redis, then
+ * one DB round trip, then emitted): a client re-joining its own channel on
+ * reconnect ignores the snapshot for that channel, because its join's own
+ * replay is fresher and this one can land after it — with the client's old
+ * session, and peers who left, back in the list.
  */
 export async function replayVoiceState(
   target: VoiceReplayTarget,
   serverIds: string[],
   visibleChannelIds: ReadonlySet<string>,
+  opts: { source?: 'connect' } = {},
 ): Promise<void> {
   const voiceStates = (await getVoiceStateForServers(serverIds))
     .filter(({ channelId }) => visibleChannelIds.has(channelId));
@@ -2194,7 +2203,7 @@ export async function replayVoiceState(
           ...(state?.e2eEpoch && { epoch: state.e2eEpoch }),
         };
       });
-    target.emit('voice:channel_users', { channelId, serverId, users: voiceUsers });
+    target.emit('voice:channel_users', { channelId, serverId, users: voiceUsers, ...(opts.source && { source: opts.source }) });
 
     // Send screen share state if someone is sharing in this channel (the
     // pipeline's reply type is opaque; a sharer is a non-empty user id)
