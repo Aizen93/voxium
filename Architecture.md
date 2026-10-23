@@ -1358,9 +1358,9 @@ The connection handler registers the socket and writes the column `online` befor
 
 Two sweeps keep the keys honest without a disconnect:
 - `clearPresenceState()` (`utils/redis.ts`) at startup (before accepting connections) and at graceful shutdown: as the sole node a full wipe, with live peers a scoped reap of the sockets missing from the cluster's adapter snapshot.
-- `utils/presenceReaper.ts` every 60 seconds while serving, under a short cluster lock: the same scoped reap, followed by a `presence:update` offline to every server and DM room of each user it took offline.
+- `utils/presenceReaper.ts` every 60 seconds while serving, under the shared cluster lock: the same scoped reap, plus a reconciliation of the users themselves (one the DB column or `online_users` calls online with no live socket registered is taken offline too), followed by a `presence:update` offline to every server and DM room of each user it took offline, unless they registered a new socket by then.
 
-Voice occupancy (`voice:channel_users`) is replayed to a socket on connect and to a member on joining a server (`replayVoiceState()`), for the channels they can view; the client clears its lists on reconnect because the replay only names channels that have occupants.
+Voice occupancy (`voice:channel_users`) is replayed to a socket on connect and to a member on joining a server (`replayVoiceState()`, stamped `source: 'connect'`), for the channels they can view; the client clears its lists on reconnect because the replay only names channels that have occupants, and ignores the snapshot for the channel it is re-joining itself, whose join answers with a fresher list.
 
 ### Email System
 

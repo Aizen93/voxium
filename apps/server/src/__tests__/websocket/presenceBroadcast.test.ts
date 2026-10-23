@@ -702,14 +702,70 @@ describe('socketServer — presence registration vs. disconnect race', () => {
     const { socket, handlers } = createMockSocket('user-1');
     const httpServer = http.createServer();
     initSocketServer(httpServer);
-    mockSetUserOnline.mockRejectedValueOnce(new Error('redis down'));
+    mockSetUserOnline.mockRejectedValue(new Error('redis down'));
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await getConnectionHandler()(socket);
     await expect(handlers.get('disconnecting')!()).resolves.toBeUndefined();
 
     expect(mockSetUserOffline).toHaveBeenCalledWith('socket-user-1');
+    mockSetUserOnline.mockResolvedValue(undefined);
     error.mockRestore();
+    httpServer.close();
+  });
+
+  it('a registration Redis refused twice is NEVER announced online (nobody could unwind it), and the column is not written', async () => {
+    // A failover's READONLY, LOADING, a closed client: the disconnect handler
+    // and the reaper find no socket:users entry, so an online broadcast would
+    // show the user online to every contact until they refetch
+    const { socket, toFn, emitFn } = createMockSocket('user-1');
+    socket.disconnected = false;
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    mockSetUserOnline.mockRejectedValue(new Error('READONLY'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await getConnectionHandler()(socket);
+
+    expect(mockSetUserOnline).toHaveBeenCalledTimes(2);
+    expect(mockPrisma.user.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'online' } }));
+    expect(emitFn).not.toHaveBeenCalledWith('presence:update', expect.anything());
+    expect(toFn).not.toHaveBeenCalledWith('server:srv-1');
+    // The socket still serves: its rooms are joined
+    expect(socket.join).toHaveBeenCalledWith('server:srv-1');
+    mockSetUserOnline.mockResolvedValue(undefined);
+    error.mockRestore();
+    httpServer.close();
+  });
+
+  it('a registration refused once is retried and, once it lands, the socket is announced online', async () => {
+    const { socket, toFn } = createMockSocket('user-1');
+    socket.disconnected = false;
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    mockSetUserOnline.mockRejectedValueOnce(new Error('LOADING'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await getConnectionHandler()(socket);
+
+    expect(mockSetUserOnline).toHaveBeenCalledTimes(2);
+    expect(mockPrisma.user.updateMany).toHaveBeenCalledWith({
+      where: { id: 'user-1', NOT: { status: 'online' } },
+      data: { status: 'online' },
+    });
+    expect(toFn).toHaveBeenCalledWith('server:srv-1');
+    error.mockRestore();
+    httpServer.close();
+  });
+
+  it('asks the replay for a SNAPSHOT (source connect): the client ignores it for the channel it is re-joining', async () => {
+    const { socket } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    expect(mockReplayVoiceState).toHaveBeenCalledWith(socket, ['srv-1'], expect.any(Set), { source: 'connect' });
     httpServer.close();
   });
 

@@ -258,8 +258,13 @@ describe('utils/redis — clearPresenceState (multi-node aware)', () => {
     delete process.env.NODE_ID;
   });
 
-  function makeDb() {
-    return { user: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) } };
+  function makeDb(columnOnline: string[] = []) {
+    return {
+      user: {
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        findMany: vi.fn().mockResolvedValue(columnOnline.map((id) => ({ id }))),
+      },
+    };
   }
 
   type Client = ReturnType<typeof import('../../utils/redis').getRedis>;
@@ -602,6 +607,149 @@ describe('utils/redis — clearPresenceState (multi-node aware)', () => {
     vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
     vi.mocked(client.eval).mockReset();
     vi.mocked(client.eval).mockResolvedValue(null);
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  // ── reconcileColumn: ghosts the socket walk cannot see ────────────────────
+
+  it('reconcileColumn: a user the DB column calls online with no live socket is taken offline and reported', async () => {
+    // A disconnect handler that threw after its Lua step, or a boot sweep
+    // whose broadcast never went out: Redis is clean, the column is not, and
+    // socket:users has nothing for the walk to find
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-live': 'u-live' });
+    offlineByLua(client, {});
+    vi.mocked(client.sMembers).mockImplementation(async (key: string) => (key === 'online_users' ? ['u-live'] : []));
+
+    const io = ioWithAdapter(['s-live'], 2);
+    const db = makeDb(['u-live', 'u-column-ghost']);
+    const result = await mod.clearPresenceState(db, io, { allowFullWipe: false, reconcileColumn: true });
+
+    expect(db.user.findMany).toHaveBeenCalledWith({ where: { status: 'online' }, select: { id: true } });
+    const chain = vi.mocked(client.multi).mock.results.at(-1)?.value as Record<string, ReturnType<typeof vi.fn>>;
+    expect(chain.del).toHaveBeenCalledWith('user:sockets:u-column-ghost');
+    expect(chain.sRem).toHaveBeenCalledWith('online_users', 'u-column-ghost');
+    expect(db.user.updateMany).toHaveBeenCalledWith({
+      where: { status: 'online', id: { in: ['u-column-ghost'] } },
+      data: { status: 'offline' },
+    });
+    expect(result).toEqual({ skipped: false, offlineUserIds: ['u-column-ghost'] });
+    // The live user, found through their socket, is untouched
+    expect(chain.del).not.toHaveBeenCalledWith('user:sockets:u-live');
+
+    vi.mocked(client.sMembers).mockReset();
+    vi.mocked(client.sMembers).mockResolvedValue([]);
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.eval).mockReset();
+    vi.mocked(client.eval).mockResolvedValue(null);
+    vi.mocked(client.sIsMember).mockReset();
+    vi.mocked(client.sIsMember).mockResolvedValue(1);
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  it('reconcileColumn: a user in online_users whose socket set holds ids socket:users never learnt of is a ghost too', async () => {
+    // What the pre-atomic registration could leave: a socket in
+    // user:sockets with no socket:users entry, so the user can never read as
+    // fully offline through the walk
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, {});
+    offlineByLua(client, {});
+    vi.mocked(client.sMembers).mockImplementation(async (key: string) => (key === 'online_users' ? ['u-orphan'] : []));
+
+    const result = await mod.clearPresenceState(makeDb(), ioWithAdapter([], 2), { allowFullWipe: false, reconcileColumn: true });
+
+    expect(result).toEqual({ skipped: false, offlineUserIds: ['u-orphan'] });
+    const chain = vi.mocked(client.multi).mock.results.at(-1)?.value as Record<string, ReturnType<typeof vi.fn>>;
+    expect(chain.del).toHaveBeenCalledWith('user:sockets:u-orphan');
+    expect(chain.sRem).toHaveBeenCalledWith('online_users', 'u-orphan');
+
+    vi.mocked(client.sMembers).mockReset();
+    vi.mocked(client.sMembers).mockResolvedValue([]);
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.eval).mockReset();
+    vi.mocked(client.eval).mockResolvedValue(null);
+    vi.mocked(client.sIsMember).mockReset();
+    vi.mocked(client.sIsMember).mockResolvedValue(1);
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  it('reconcileColumn: reads the user candidates BEFORE socket:users, so a user registering in between is never a ghost', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, {});
+    const order: string[] = [];
+    const db = makeDb();
+    db.user.findMany.mockImplementation(async () => { order.push('column'); return []; });
+    vi.mocked(client.sMembers).mockImplementation(async (key: string) => { if (key === 'online_users') order.push('online_users'); return []; });
+    vi.mocked(client.hGetAll).mockImplementation(async () => { order.push('hash'); return {}; });
+
+    await mod.clearPresenceState(db, ioWithAdapter([], 2), { allowFullWipe: false, reconcileColumn: true });
+
+    expect(order.indexOf('column')).toBeLessThan(order.indexOf('hash'));
+    expect(order.indexOf('online_users')).toBeLessThan(order.indexOf('hash'));
+
+    vi.mocked(client.sMembers).mockReset();
+    vi.mocked(client.sMembers).mockResolvedValue([]);
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGetAll).mockReset();
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  it('without reconcileColumn the column is never read (the boot and shutdown sweeps)', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, {});
+    const db = makeDb(['u-column-ghost']);
+
+    const result = await mod.clearPresenceState(db, ioWithAdapter([], 2));
+
+    expect(db.user.findMany).not.toHaveBeenCalled();
+    expect(result).toEqual({ skipped: false, offlineUserIds: [] });
+
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.hGetAll).mockResolvedValue({});
+  });
+
+  it('a dead socket whose Lua step throws does not cost the others their column write and report', async () => {
+    const mod = await import('../../utils/redis');
+    await mod.initRedis();
+    const client = mod.getRedis();
+    await peersAliveWith(client, { 's-bad': 'u-bad', 's-dead': 'u-dead' });
+    vi.mocked(client.eval).mockReset();
+    vi.mocked(client.eval).mockImplementation((async (_script: unknown, opts: { arguments: string[] }) => {
+      if (opts.arguments[0] === 's-bad') throw new Error('LOADING');
+      return ['u-dead', 1];
+    }) as never);
+    vi.mocked(client.sIsMember).mockResolvedValue(0);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const db = makeDb();
+    const result = await mod.clearPresenceState(db, ioWithAdapter([], 2));
+
+    expect(result).toEqual({ skipped: false, offlineUserIds: ['u-dead'] });
+    expect(db.user.updateMany).toHaveBeenCalledWith({
+      where: { status: 'online', id: { in: ['u-dead'] } },
+      data: { status: 'offline' },
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('unregister'), 's-bad', expect.anything(), 'LOADING');
+
+    warn.mockRestore();
+    // eslint-disable-next-line require-yield
+    vi.mocked(client.scanIterator).mockImplementation(async function* () { /* none */ });
+    vi.mocked(client.eval).mockReset();
+    vi.mocked(client.eval).mockResolvedValue(null);
+    vi.mocked(client.sIsMember).mockReset();
+    vi.mocked(client.sIsMember).mockResolvedValue(1);
     vi.mocked(client.hGetAll).mockResolvedValue({});
   });
 

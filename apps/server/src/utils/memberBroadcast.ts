@@ -15,6 +15,13 @@ import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
  * throws after 5 s when one peer is unresponsive, which skipped the
  * member:joined broadcast below (or the member:left one) for everyone.
  *
+ * Twice on purpose: `io.local` applies the change to THIS node's sockets now,
+ * and the cluster-wide call reaches every other node (the Redis adapter only
+ * publishes it, and applies it here when its own message comes back one
+ * round trip later — so without the local call the broadcast that follows
+ * would still find the sockets in the rooms they are leaving, or miss the
+ * ones they are joining). The echo re-applies the same join: idempotent.
+ *
  * Returns the ids of the channels the user can view.
  */
 async function joinVisibleChannelRooms(userId: string, serverId: string): Promise<string[]> {
@@ -27,7 +34,9 @@ async function joinVisibleChannelRooms(userId: string, serverId: string): Promis
   });
   const visible = await filterVisibleChannels(userId, serverId, channels);
   const visibleIds = visible.map((ch) => ch.id);
-  io.in(`user:${userId}`).socketsJoin([`server:${serverId}`, ...visibleIds.map((id) => `channel:${id}`)]);
+  const rooms = [`server:${serverId}`, ...visibleIds.map((id) => `channel:${id}`)];
+  io.local.in(`user:${userId}`).socketsJoin(rooms);
+  io.in(`user:${userId}`).socketsJoin(rooms);
   return visibleIds;
 }
 
@@ -47,7 +56,7 @@ export async function broadcastMemberJoined(userId: string, serverId: string): P
   const visibleIds = await joinVisibleChannelRooms(userId, serverId);
 
   try {
-    await replayVoiceState(io.to(`user:${userId}`), [serverId], new Set(visibleIds));
+    await replayVoiceState(io.to(`user:${userId}`), [serverId], new Set(visibleIds), { source: 'connect' });
   } catch (err) {
     // The rooms are joined and the broadcast below still goes out: the voice
     // lists catch up on the member's next connect
@@ -100,8 +109,11 @@ export async function broadcastMemberLeft(userId: string, serverId: string): Pro
   });
   // Adapter-wide and fire-and-forget (see joinVisibleChannelRooms): the
   // departed member's sockets on every node leave the server room and every
-  // channel room, and the broadcast below never waits on a peer
-  io.in(`user:${userId}`).socketsLeave([`server:${serverId}`, ...channels.map((ch) => `channel:${ch.id}`)]);
+  // channel room — this node's at once, so the broadcast below never reaches
+  // them — and the broadcast never waits on a peer
+  const rooms = [`server:${serverId}`, ...channels.map((ch) => `channel:${ch.id}`)];
+  io.local.in(`user:${userId}`).socketsLeave(rooms);
+  io.in(`user:${userId}`).socketsLeave(rooms);
 
   io.to(`server:${serverId}`).emit('member:left', { serverId, userId });
 }

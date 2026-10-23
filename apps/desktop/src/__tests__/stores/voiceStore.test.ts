@@ -1458,3 +1458,87 @@ describe('voiceStore — secure voice re-announcement keying (spec 21)', () => {
     expect(svk.onParticipantJoined).not.toHaveBeenCalled();
   });
 });
+
+describe('voiceStore — snapshot replays vs. the channel being re-joined', () => {
+  beforeEach(() => {
+    useVoiceStore.getState().leaveChannel();
+    useVoiceStore.setState({ localUserId: 'me', activeChannelId: null, channelUsers: new Map(), channelServers: new Map() });
+  });
+
+  it('ignores a connect-time snapshot for the ACTIVE channel (the re-join replays it, and the snapshot can land after)', () => {
+    useVoiceStore.setState({ activeChannelId: 'ch-live', channelUsers: new Map([['ch-live', [vu('me'), vu('peer')]]]) });
+
+    useVoiceStore.getState().setChannelUsers('ch-live', [vu('me-old'), vu('left-peer')], 'srv-1', 'connect');
+
+    expect(useVoiceStore.getState().channelUsers.get('ch-live')!.map((u) => u.id)).toEqual(['me', 'peer']);
+  });
+
+  it('applies a connect-time snapshot for every OTHER channel', () => {
+    useVoiceStore.setState({ activeChannelId: 'ch-live' });
+
+    useVoiceStore.getState().setChannelUsers('ch-other', [vu('a'), vu('b')], 'srv-1', 'connect');
+
+    expect(useVoiceStore.getState().channelUsers.get('ch-other')!.map((u) => u.id)).toEqual(['a', 'b']);
+    expect(useVoiceStore.getState().channelServers.get('ch-other')).toBe('srv-1');
+  });
+
+  it('applies the JOIN replay (no source) for the active channel, as before', () => {
+    useVoiceStore.setState({ activeChannelId: 'ch-live', channelUsers: new Map([['ch-live', [vu('stale')]]]) });
+
+    useVoiceStore.getState().setChannelUsers('ch-live', [vu('peer')], 'srv-1');
+
+    expect(useVoiceStore.getState().channelUsers.get('ch-live')!.map((u) => u.id)).toEqual(['peer']);
+  });
+
+  it('applies a connect-time snapshot when not in voice at all', () => {
+    useVoiceStore.getState().setChannelUsers('ch-any', [vu('a')], 'srv-1', 'connect');
+
+    expect(useVoiceStore.getState().channelUsers.get('ch-any')).toHaveLength(1);
+  });
+});
+
+describe('voiceStore — handleVoiceError (channel-scoped notices)', () => {
+  const socket = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
+
+  beforeEach(() => {
+    useVoiceStore.getState().leaveChannel();
+    vi.mocked(getSocket).mockReset();
+    vi.mocked(getSocket).mockReturnValue(socket as never);
+    socket.emit.mockClear();
+    useVoiceStore.setState({ localUserId: 'me', activeChannelId: null, activeVoiceServerId: null, dmCallConversationId: null, channelUsers: new Map() });
+  });
+
+  it('a notice scoped to the channel we are in ends the call and is acted on', () => {
+    useVoiceStore.setState({ activeChannelId: 'ch-a', activeVoiceServerId: 'srv-1' });
+
+    const acted = useVoiceStore.getState().handleVoiceError({ message: 'Your voice session moved to another device.', channelId: 'ch-a' });
+
+    expect(acted).toBe(true);
+    expect(useVoiceStore.getState().activeChannelId).toBeNull();
+    expect(socket.emit).toHaveBeenCalledWith('voice:leave');
+  });
+
+  it('a notice scoped to a channel we have since LEFT is ignored: it must not end the call we are in now', () => {
+    // Device A was in C, device B joined C (notice to A in flight), A moved to
+    // E and evicted B in turn; A's late notice about C must leave E alone
+    useVoiceStore.setState({ activeChannelId: 'ch-e', activeVoiceServerId: 'srv-1' });
+
+    const acted = useVoiceStore.getState().handleVoiceError({ message: 'Your voice session moved to another device.', channelId: 'ch-c' });
+
+    expect(acted).toBe(false);
+    expect(useVoiceStore.getState().activeChannelId).toBe('ch-e');
+    expect(socket.emit).not.toHaveBeenCalledWith('voice:leave');
+  });
+
+  it('an unscoped error ends whatever is active (a server voice channel), as before', () => {
+    useVoiceStore.setState({ activeChannelId: 'ch-a', activeVoiceServerId: 'srv-1' });
+
+    expect(useVoiceStore.getState().handleVoiceError({ message: 'Voice server unavailable. Please try again later.' })).toBe(true);
+    expect(useVoiceStore.getState().activeChannelId).toBeNull();
+  });
+
+  it('an unscoped error with nothing active still reports acted (the message is shown)', () => {
+    expect(useVoiceStore.getState().handleVoiceError({ message: 'Voice channels are currently disabled' })).toBe(true);
+    expect(socket.emit).not.toHaveBeenCalledWith('voice:leave');
+  });
+});

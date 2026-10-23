@@ -1,13 +1,12 @@
 import type { Server as SocketServer } from 'socket.io';
 import type { ClientToServerEvents, ServerToClientEvents } from '@voxium/shared';
-import { clearPresenceState } from './redis';
+import { clearPresenceState, isUserOnline, type PresenceSweepDb } from './redis';
 import { withClusterLock, wasSkipped } from './dailySchedule';
 
 type IO = SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
 /** The subset of the Prisma client the sweep reads and writes. */
-export interface PresenceReaperDb {
-  user: { updateMany: (args: { where: { status?: string; id?: { in: string[] } }; data: { status: string } }) => Promise<unknown> };
+export interface PresenceReaperDb extends PresenceSweepDb {
   serverMember: { findMany: (args: { where: { userId: string }; select: { serverId: true } }) => Promise<Array<{ serverId: string }>> };
   conversation: {
     findMany: (args: { where: { OR: Array<{ user1Id: string } | { user2Id: string }> }; select: { id: true } }) => Promise<Array<{ id: string }>>;
@@ -38,12 +37,16 @@ let reaperTimer: ReturnType<typeof setInterval> | null = null;
  * It is the boot sweep's scoped path (`allowFullWipe: false`: this node is
  * serving, so only sockets missing from the cluster snapshot are reaped;
  * `requireSnapshot`: a tick without an adapter snapshot is skipped rather
- * than walked socket by socket), under the shared cluster lock
- * (`withClusterLock`, per-acquisition token, fail closed on a Redis error,
- * held until the TTL after a success) so one node sweeps per tick. A reaped
- * user's contacts are told the way the disconnect handler tells them:
- * `presence:update` to every server they are in and every DM room they are
- * part of.
+ * than walked socket by socket; `reconcileColumn`: a user the DB column or
+ * `online_users` calls online with no live socket registered is a ghost too),
+ * under the shared cluster lock (`withClusterLock`, per-acquisition token,
+ * fail closed on a Redis error, held until the TTL after a success) so one
+ * node sweeps per tick. A reaped user's contacts are told the way the
+ * disconnect handler tells them: `presence:update` to every server they are
+ * in and every DM room they are part of — unless they registered a new
+ * socket meanwhile, checked right before each broadcast (a large batch takes
+ * a while to announce, and an offline landing after the user's own online
+ * would stick on every client).
  *
  * Returns how many users were taken offline (0 when the lock was held, the
  * snapshot refused, or nothing was stale).
@@ -57,7 +60,7 @@ export async function reapStalePresence(io: IO, db: PresenceReaperDb): Promise<n
 }
 
 async function sweepAndAnnounce(io: IO, db: PresenceReaperDb): Promise<number> {
-  const { skipped, offlineUserIds } = await clearPresenceState(db, io, { allowFullWipe: false, requireSnapshot: true });
+  const { skipped, offlineUserIds } = await clearPresenceState(db, io, { allowFullWipe: false, requireSnapshot: true, reconcileColumn: true });
   if (skipped || offlineUserIds.length === 0) return 0;
 
   for (const userId of offlineUserIds) {
@@ -66,6 +69,9 @@ async function sweepAndAnnounce(io: IO, db: PresenceReaperDb): Promise<number> {
         db.serverMember.findMany({ where: { userId }, select: { serverId: true } }),
         db.conversation.findMany({ where: { OR: [{ user1Id: userId }, { user2Id: userId }] }, select: { id: true } }),
       ]);
+      // Back online since the sweep decided (their own connect announced it):
+      // an offline after that would be the last word on every client
+      if (await isUserOnline(userId)) continue;
       for (const m of memberships) {
         io.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'offline' });
       }

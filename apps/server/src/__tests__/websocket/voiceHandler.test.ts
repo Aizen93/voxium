@@ -2580,6 +2580,18 @@ describe('voiceHandler — replayVoiceState', () => {
     expect(t.emit).not.toHaveBeenCalled();
     expect(prisma.user.findMany).not.toHaveBeenCalled();
   });
+
+  it('stamps every list with source "connect" when asked (a snapshot the client may ignore for its own channel), and omits the key otherwise', async () => {
+    mockMirror([{ channelId: 'vc', serverId: 'srv-1', users: { 'u-1': JSON.stringify({ selfMute: false, selfDeaf: false }) } }]);
+    const snapshot = target();
+    await replayVoiceState(snapshot, ['srv-1'], new Set(['vc']), { source: 'connect' });
+    expect(snapshot.emit.mock.calls[0][1]).toMatchObject({ channelId: 'vc', source: 'connect' });
+
+    mockMirror([{ channelId: 'vc', serverId: 'srv-1', users: { 'u-1': JSON.stringify({ selfMute: false, selfDeaf: false }) } }]);
+    const plain = target();
+    await replayVoiceState(plain, ['srv-1'], new Set(['vc']));
+    expect(plain.emit.mock.calls[0][1]).not.toHaveProperty('source');
+  });
 });
 
 // ─── A newer connection of the same user takes the session ──────────────────
@@ -2611,7 +2623,9 @@ describe('voiceHandler — session takeover notice', () => {
     await c2.handlers.get('voice:join')!('ch-T');
 
     expect(io.to).toHaveBeenCalledWith('socket-T1');
-    expect(io._emit).toHaveBeenCalledWith('voice:error', { message: VOICE_SESSION_TAKEN_OVER });
+    // Scoped to the channel: a notice arriving after that device moved on to
+    // another channel must not end its new call
+    expect(io._emit).toHaveBeenCalledWith('voice:error', { message: VOICE_SESSION_TAKEN_OVER, channelId: 'ch-T' });
     // The newer socket owns the session
     expect(c2.socket.data.voiceChannelId).toBe('ch-T');
     expect(c1.socket.data.voiceChannelId).toBeUndefined();
@@ -2627,7 +2641,7 @@ describe('voiceHandler — session takeover notice', () => {
 
     await c1.handlers.get('voice:join')!('ch-S');
 
-    expect(io._emit).not.toHaveBeenCalledWith('voice:error', { message: VOICE_SESSION_TAKEN_OVER });
+    expect(io._emit).not.toHaveBeenCalledWith('voice:error', expect.objectContaining({ message: VOICE_SESSION_TAKEN_OVER }));
     expect(c1.socket.data.voiceChannelId).toBe('ch-S');
   });
 

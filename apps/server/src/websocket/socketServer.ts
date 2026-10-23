@@ -16,6 +16,9 @@ import { hasChannelPermission } from '../utils/permissionCalculator';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
+/** Before the one retry of a presence registration Redis refused. */
+export const PRESENCE_RETRY_DELAY_MS = 500;
+
 /**
  * Get the real client IP. Reads X-Forwarded-For only when a trusted reverse
  * proxy is expected — the SAME condition app.ts uses for Express's
@@ -368,22 +371,41 @@ export function initSocketServer(httpServer: HttpServer) {
     // the setup, after a dozen queries — a socket that dropped meanwhile had
     // already been marked offline when the belated write flipped it back to
     // online, with no socket behind it.
-    try {
-      await setUserOnline(userId, socket.id);
-      // updateMany with a status filter: reconnect churn / multi-device connects
-      // otherwise rewrite the same 'online' row on every socket (write amplification)
-      await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'online' } }, data: { status: 'online' } });
-    } catch (err) {
-      console.error(`[WS] Presence registration failed for ${userId}:`, err);
-    } finally {
-      presenceRegistered();
+    //
+    // `registered` gates the online broadcast below: a registration Redis
+    // refused (a failover's READONLY, LOADING, a closed client) leaves nothing
+    // for the disconnect handler or the reaper to find, so announcing the
+    // socket online would show the user online to every contact until they
+    // refetch. One retry covers a blip; after that the socket serves without
+    // presence and says so in the log.
+    let registered = false;
+    for (let attempt = 0; attempt < 2 && !registered; attempt++) {
+      try {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, PRESENCE_RETRY_DELAY_MS));
+        await setUserOnline(userId, socket.id);
+        registered = true;
+      } catch (err) {
+        console.error(`[WS] Presence registration failed for ${userId} (attempt ${attempt + 1}):`, err);
+      }
     }
+    if (registered) {
+      try {
+        // updateMany with a status filter: reconnect churn / multi-device connects
+        // otherwise rewrite the same 'online' row on every socket (write amplification)
+        await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'online' } }, data: { status: 'online' } });
+      } catch (err) {
+        // Redis holds the truth; the reaper's column reconciliation and the
+        // next presence transition put the column right
+        console.error(`[WS] Presence column write failed for ${userId}:`, err);
+      }
+    }
+    presenceRegistered();
 
     // A socket that dropped during the registration has already been unwound
-    // by its disconnect handler: there is nothing left to set up for it, and a
-    // room joined now would hold its dead id (socket.io's join() does not
-    // check, and the adapter's cleanup for this socket already ran). Checked
-    // again before every later step, the same way.
+    // by its disconnect handler: there is nothing left to set up for it
+    // (socket.io turns its join() into a no-op once it is cleaned up, so the
+    // queries and the replay below would only be wasted work). Checked again
+    // before every later step, the same way.
     if (socket.disconnected) return;
 
     // Upsert IP record
@@ -449,7 +471,7 @@ export function initSocketServer(httpServer: HttpServer) {
     // that emptied while it was away is absent here and stays empty there.
     try {
       const visibleChannelIds = new Set(visibleChannels.map((ch) => ch.id));
-      await replayVoiceState(socket, memberships.map((m) => m.serverId), visibleChannelIds);
+      await replayVoiceState(socket, memberships.map((m) => m.serverId), visibleChannelIds, { source: 'connect' });
     } catch (err) {
       console.error(`[WS] Error replaying voice state for ${userId}:`, err);
     }
@@ -474,13 +496,16 @@ export function initSocketServer(httpServer: HttpServer) {
     // conversation list fetched above — this was a duplicate query). Guarded:
     // a socket that disconnected during the setup has already been unwound by
     // its disconnect handler, and announcing it online now would leave every
-    // contact showing a user who is gone.
+    // contact showing a user who is gone; a socket Redis never registered
+    // (above) has nobody to unwind it at all.
     if (socket.disconnected) return;
-    for (const m of memberships) {
-      socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
-    }
-    for (const c of conversations) {
-      socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
+    if (registered) {
+      for (const m of memberships) {
+        socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
+      }
+      for (const c of conversations) {
+        socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
+      }
     }
 
     // Compute unread counts across all text channels in a single query.

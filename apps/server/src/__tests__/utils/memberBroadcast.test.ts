@@ -2,31 +2,29 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { mockEmit, mockTo, mockIn, mockSocketsJoin, mockSocketsLeave, mockPrisma, mockFilterVisibleChannels, mockReplayVoiceState } = vi.hoisted(() => {
-  const mockEmit = vi.fn();
-  const mockTo = vi.fn();
-  const mockIn = vi.fn();
-  const mockSocketsJoin = vi.fn();
-  const mockSocketsLeave = vi.fn();
-
-  return {
-    mockEmit,
-    mockTo,
-    mockIn,
-    mockSocketsJoin,
-    mockSocketsLeave,
-    mockFilterVisibleChannels: vi.fn(),
-    mockReplayVoiceState: vi.fn(),
-    mockPrisma: {
-      channel: {
-        findMany: vi.fn(),
-      },
-      user: {
-        findUnique: vi.fn(),
-      },
+const {
+  mockEmit, mockTo, mockIn, mockLocalIn, mockSocketsJoin, mockSocketsLeave, mockLocalSocketsJoin, mockLocalSocketsLeave,
+  mockPrisma, mockFilterVisibleChannels, mockReplayVoiceState,
+} = vi.hoisted(() => ({
+  mockEmit: vi.fn(),
+  mockTo: vi.fn(),
+  mockIn: vi.fn(),
+  mockLocalIn: vi.fn(),
+  mockSocketsJoin: vi.fn(),
+  mockSocketsLeave: vi.fn(),
+  mockLocalSocketsJoin: vi.fn(),
+  mockLocalSocketsLeave: vi.fn(),
+  mockFilterVisibleChannels: vi.fn(),
+  mockReplayVoiceState: vi.fn(),
+  mockPrisma: {
+    channel: {
+      findMany: vi.fn(),
     },
-  };
-});
+    user: {
+      findUnique: vi.fn(),
+    },
+  },
+}));
 
 // ─── Module mocks ────────────────────────────────────────────────────────────
 
@@ -34,6 +32,7 @@ vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
     in: mockIn,
+    local: { in: mockLocalIn },
   })),
 }));
 
@@ -68,6 +67,7 @@ import {
 function resetMockChains() {
   mockTo.mockReturnValue({ emit: mockEmit });
   mockIn.mockReturnValue({ socketsJoin: mockSocketsJoin, socketsLeave: mockSocketsLeave });
+  mockLocalIn.mockReturnValue({ socketsJoin: mockLocalSocketsJoin, socketsLeave: mockLocalSocketsLeave });
   mockPrisma.channel.findMany.mockResolvedValue([]);
   mockPrisma.user.findUnique.mockResolvedValue(null);
   mockReplayVoiceState.mockResolvedValue(undefined);
@@ -98,12 +98,14 @@ describe('memberBroadcast — joinServerRoom', () => {
     resetMockChains();
   });
 
-  it('joins the user room (every socket of the user, on every node) to the server room', async () => {
+  it('joins the user room (every socket of the user) to the server room: this node at once, then cluster-wide', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await joinServerRoom('user-1', 'server-1');
 
+    expect(mockLocalIn).toHaveBeenCalledWith('user:user-1');
     expect(mockIn).toHaveBeenCalledWith('user:user-1');
+    expect(mockLocalSocketsJoin).toHaveBeenCalledWith(['server:server-1']);
     expect(mockSocketsJoin).toHaveBeenCalledWith(['server:server-1']);
   });
 
@@ -120,8 +122,21 @@ describe('memberBroadcast — joinServerRoom', () => {
       where: { serverId: 'server-1' },
       select: { id: true, secure: true },
     });
+    const rooms = ['server:server-1', 'channel:ch-1', 'channel:ch-2', 'channel:ch-3'];
+    expect(mockLocalSocketsJoin).toHaveBeenCalledTimes(1);
+    expect(mockLocalSocketsJoin).toHaveBeenCalledWith(rooms);
     expect(mockSocketsJoin).toHaveBeenCalledTimes(1);
-    expect(mockSocketsJoin).toHaveBeenCalledWith(['server:server-1', 'channel:ch-1', 'channel:ch-2', 'channel:ch-3']);
+    expect(mockSocketsJoin).toHaveBeenCalledWith(rooms);
+  });
+
+  it('applies the join to this node BEFORE publishing it (the Redis adapter only applies its own publish on the echo)', async () => {
+    const order: string[] = [];
+    mockLocalSocketsJoin.mockImplementation(() => { order.push('local'); });
+    mockSocketsJoin.mockImplementation(() => { order.push('cluster'); });
+
+    await joinServerRoom('user-1', 'server-1');
+
+    expect(order).toEqual(['local', 'cluster']);
   });
 
   it('does NOT join rooms of channels the user cannot view', async () => {
@@ -139,9 +154,10 @@ describe('memberBroadcast — joinServerRoom', () => {
       'server-1',
       [{ id: 'ch-public' }, { id: 'ch-private' }],
     );
-    const rooms = mockSocketsJoin.mock.calls[0][0] as string[];
-    expect(rooms).toContain('channel:ch-public');
-    expect(rooms).not.toContain('channel:ch-private');
+    for (const call of [mockSocketsJoin.mock.calls[0][0], mockLocalSocketsJoin.mock.calls[0][0]] as string[][]) {
+      expect(call).toContain('channel:ch-public');
+      expect(call).not.toContain('channel:ch-private');
+    }
   });
 
   it('never fetches the sockets — a room operation cannot wait on an unresponsive peer node', async () => {
@@ -203,9 +219,10 @@ describe('memberBroadcast — broadcastMemberJoined', () => {
 
     expect(mockIn).toHaveBeenCalledWith('user:user-1');
     expect(mockSocketsJoin).toHaveBeenCalledWith(['server:server-1', 'channel:ch-1']);
+    expect(mockLocalSocketsJoin).toHaveBeenCalledWith(['server:server-1', 'channel:ch-1']);
   });
 
-  it('replays the server\'s live voice occupancy to the new member, for the channels they can view', async () => {
+  it('replays the server\'s live voice occupancy to the new member, as a snapshot, for the channels they can view', async () => {
     // Every voice join/leave happened before the member's sockets were in the
     // rooms: without the replay the new member's sidebar shows the voice
     // channels empty until someone moves
@@ -218,10 +235,11 @@ describe('memberBroadcast — broadcastMemberJoined', () => {
     await broadcastMemberJoined('user-1', 'server-1');
 
     expect(mockReplayVoiceState).toHaveBeenCalledTimes(1);
-    const [target, serverIds, visible] = mockReplayVoiceState.mock.calls[0] as [unknown, string[], Set<string>];
+    const [target, serverIds, visible, opts] = mockReplayVoiceState.mock.calls[0] as [unknown, string[], Set<string>, unknown];
     expect(target).toBe(userRoom);
     expect(serverIds).toEqual(['server-1']);
     expect([...visible]).toEqual(['vc-public']);
+    expect(opts).toEqual({ source: 'connect' });
   });
 
   it('replays AFTER the rooms are joined, and still broadcasts member:joined when the replay fails', async () => {
@@ -369,12 +387,14 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
     resetMockChains();
   });
 
-  it('removes the user room from the server room', async () => {
+  it('removes the user room from the server room: this node at once, then cluster-wide', async () => {
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await broadcastMemberLeft('user-1', 'server-1');
 
+    expect(mockLocalIn).toHaveBeenCalledWith('user:user-1');
     expect(mockIn).toHaveBeenCalledWith('user:user-1');
+    expect(mockLocalSocketsLeave).toHaveBeenCalledWith(['server:server-1']);
     expect(mockSocketsLeave).toHaveBeenCalledWith(['server:server-1']);
   });
 
@@ -386,8 +406,11 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
 
     await broadcastMemberLeft('user-1', 'server-1');
 
+    const rooms = ['server:server-1', 'channel:ch-1', 'channel:ch-2'];
     expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
-    expect(mockSocketsLeave).toHaveBeenCalledWith(['server:server-1', 'channel:ch-1', 'channel:ch-2']);
+    expect(mockSocketsLeave).toHaveBeenCalledWith(rooms);
+    expect(mockLocalSocketsLeave).toHaveBeenCalledTimes(1);
+    expect(mockLocalSocketsLeave).toHaveBeenCalledWith(rooms);
   });
 
   it('never fetches the sockets (see the join path)', async () => {
@@ -424,15 +447,16 @@ describe('memberBroadcast — broadcastMemberLeft', () => {
     expect(mockFilterVisibleChannels).not.toHaveBeenCalled();
   });
 
-  it('leaves the rooms BEFORE announcing the departure', async () => {
+  it('leaves the rooms on THIS node BEFORE announcing the departure, so the departed member never hears it', async () => {
     const order: string[] = [];
-    mockSocketsLeave.mockImplementation(() => { order.push('leave'); });
+    mockLocalSocketsLeave.mockImplementation(() => { order.push('local-leave'); });
+    mockSocketsLeave.mockImplementation(() => { order.push('cluster-leave'); });
     mockEmit.mockImplementation(() => { order.push('emit'); });
     mockPrisma.channel.findMany.mockResolvedValueOnce([]);
 
     await broadcastMemberLeft('user-1', 'server-1');
 
-    expect(order).toEqual(['leave', 'emit']);
+    expect(order).toEqual(['local-leave', 'cluster-leave', 'emit']);
   });
 
   it('broadcasts to the correct server room with different server IDs', async () => {
@@ -460,6 +484,7 @@ describe('memberBroadcast — room naming conventions', () => {
     await joinServerRoom('abc-123', 'server-1');
 
     expect(mockIn).toHaveBeenCalledWith('user:abc-123');
+    expect(mockLocalIn).toHaveBeenCalledWith('user:abc-123');
   });
 
   it('uses "server:{serverId}" for the server room and "channel:{channelId}" for channel rooms', async () => {
@@ -484,7 +509,7 @@ describe('memberBroadcast — edge cases', () => {
 
     await broadcastMemberJoined('user-1', 'server-1');
 
-    // 1 server room + 20 channel rooms, one operation
+    // 1 server room + 20 channel rooms, one operation (per scope)
     expect(mockSocketsJoin).toHaveBeenCalledTimes(1);
     expect(mockSocketsJoin.mock.calls[0][0]).toHaveLength(21);
   });
