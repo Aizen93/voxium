@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { connectSocket, disconnectSocket } from '../services/socket';
 import { getAccessToken, setTokens, clearTokens, isRemembered } from '../services/tokenStorage';
-import { SessionLostError } from '../services/session';
+import { SessionLostError, endSessionRenewals } from '../services/session';
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useVoiceStore } from './voiceStore';
@@ -50,6 +50,10 @@ interface AuthState {
   cancelRegistration: () => void;
   logout: () => void;
   checkAuth: () => Promise<void>;
+  /** `checkAuth` again when a launch could not reach the server and kept
+   *  its tokens (the network came back): a no-op while signed in, while
+   *  the first restore is still running, or with nothing stored. */
+  retrySessionRestore: () => Promise<void>;
   clearError: () => void;
   uploadAvatar: (file: File) => Promise<void>;
   updateProfile: (fields: { displayName?: string; bio?: string }) => Promise<void>;
@@ -79,6 +83,18 @@ interface AuthState {
  * Exactly one retry — an unbounded loop on a device too slow for the issued
  * difficulty would grind forever instead of surfacing the failure.
  */
+/**
+ * Before a sign-in or a registration: the tokens of a session this launch
+ * could not verify (kept for a retry, see checkAuth) and the socket of a
+ * session being replaced must not ride along. The stale token would be sent
+ * — and renewed, or refused — on the sign-in request itself, and a socket
+ * still open for the old account would be handed to the new one.
+ */
+function discardStaleSession(): void {
+  clearTokens();
+  disconnectSocket();
+}
+
 async function solveWithRetry(onProgress: (fraction: number) => void, signal: AbortSignal) {
   for (let attempt = 0; ; attempt++) {
     if (signal.aborted) throw new PowAbortedError();
@@ -127,6 +143,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   login: async (email, password, rememberMe = true) => {
     set({ isSubmitting: true, error: null });
+    discardStaleSession();
     try {
       const trustedDeviceToken = localStorage.getItem('voxium_trusted_device') || undefined;
       const { data } = await api.post('/auth/login', { email, password, rememberMe, trustedDeviceToken });
@@ -185,6 +202,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const controller = new AbortController();
     registrationAbort = controller;
     set({ isRegistering: true, error: null, powProgress: 0 });
+    discardStaleSession();
     try {
       // Anti-bot proof-of-work: fetch a challenge and burn CPU solving it. No
       // captcha, no third-party service, nothing leaves our infrastructure.
@@ -245,12 +263,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (vs.activeChannelId) vs.leaveChannel();
     if (vs.dmCallConversationId) vs.leaveDMCall();
 
+    // A token renewal still in flight must not store its answer after this:
+    // it would be the logged-out user's session, with a socket opened for it
+    endSessionRenewals();
     clearTokens();
     disconnectSocket();
     // Wipe every account-scoped store — on a shared machine the next login must
     // never see the previous account's servers, DMs, or support transcript
     resetAccountStores();
     set({ user: null, isAuthenticated: false });
+  },
+
+  retrySessionRestore: async () => {
+    const { isAuthenticated, isLoading, checkAuth } = get();
+    if (isAuthenticated || isLoading || !getAccessToken()) return;
+    await checkAuth();
   },
 
   checkAuth: async () => {
@@ -274,7 +301,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Only a refusal ends the session (a refused renewal has cleared the
       // tokens already). A launch with no network, or a server mid-restart,
       // keeps them: the next launch signs back in without a password
-      if (isAuthRefusal(err)) clearTokens();
+      if (isAuthRefusal(err)) {
+        clearTokens();
+      } else {
+        console.warn('[Auth] Session restore could not reach the server (tokens kept):', err instanceof Error ? err.message : err);
+      }
       set({ isLoading: false });
     }
   },

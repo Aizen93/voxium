@@ -6,7 +6,11 @@ export class AppError extends Error {
     super(message);
     this.statusCode = statusCode;
     this.isOperational = true;
-    Object.setPrototypeOf(this, AppError.prototype);
+    // The prototype of the class being constructed, not AppError's: pinned
+    // to AppError.prototype, every subclass instance WAS an AppError only,
+    // and `err instanceof ForbiddenError` never matched anywhere (the two
+    // catch blocks that asked fell through to their generic answer)
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 

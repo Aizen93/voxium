@@ -23,6 +23,7 @@ vi.mock('axios', () => ({
 const session = vi.hoisted(() => ({
   API_BASE: 'http://api.test/api/v1',
   isAccessTokenFresh: vi.fn(() => true),
+  shouldRenewBeforeSending: vi.fn(() => false),
   refreshAccessToken: vi.fn(),
   SessionLostError: class SessionLostError extends Error {},
 }));
@@ -31,7 +32,10 @@ vi.mock('../../services/session', () => session);
 const socket = vi.hoisted(() => ({ connectSocket: vi.fn() }));
 vi.mock('../../services/socket', () => socket);
 
-const storage = vi.hoisted(() => ({ getAccessToken: vi.fn(() => 'access-old') }));
+const storage = vi.hoisted(() => ({
+  getAccessToken: vi.fn(() => 'access-old' as string | null),
+  getRefreshToken: vi.fn(() => 'refresh-old' as string | null),
+}));
 vi.mock('../../services/tokenStorage', () => storage);
 
 import { api } from '../../services/api';
@@ -46,7 +50,9 @@ function config(): Record<string, unknown> & { headers: Record<string, string> }
 beforeEach(() => {
   vi.clearAllMocks();
   session.isAccessTokenFresh.mockReturnValue(true);
+  session.shouldRenewBeforeSending.mockReturnValue(false);
   storage.getAccessToken.mockReturnValue('access-old');
+  storage.getRefreshToken.mockReturnValue('refresh-old');
   fake.instance.mockResolvedValue({ data: { success: true } });
 });
 
@@ -67,7 +73,7 @@ describe('api — the request interceptor', () => {
   });
 
   it('renews a token known to be expired BEFORE sending (a window restored after a long minimize): no 401 round trip', async () => {
-    session.isAccessTokenFresh.mockReturnValue(false);
+    session.shouldRenewBeforeSending.mockReturnValue(true);
     session.refreshAccessToken.mockResolvedValueOnce('access-new');
 
     const out = await requestInterceptor()(config()) as { headers: Record<string, string> };
@@ -75,17 +81,21 @@ describe('api — the request interceptor', () => {
     expect(out.headers.Authorization).toBe('Bearer access-new');
   });
 
-  it('sends with the stale token when the renewal fails transiently (the server decides)', async () => {
-    session.isAccessTokenFresh.mockReturnValue(false);
+  it('sends with the stale token when the renewal fails transiently (the server decides), logged and marked on the request', async () => {
+    session.shouldRenewBeforeSending.mockReturnValue(true);
     session.refreshAccessToken.mockRejectedValueOnce(new Error('Network Error'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const out = await requestInterceptor()(config()) as { headers: Record<string, string> };
+    const out = await requestInterceptor()(config()) as { headers: Record<string, string>; _renewalFailed?: boolean };
 
     expect(out.headers.Authorization).toBe('Bearer access-old');
+    expect(out._renewalFailed).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('renew'), 'Network Error');
+    warn.mockRestore();
   });
 
   it('refuses the request outright once the session is lost', async () => {
-    session.isAccessTokenFresh.mockReturnValue(false);
+    session.shouldRenewBeforeSending.mockReturnValue(true);
     session.refreshAccessToken.mockRejectedValueOnce(new session.SessionLostError('lost'));
 
     await expect(requestInterceptor()(config())).rejects.toBeInstanceOf(session.SessionLostError);
@@ -103,7 +113,7 @@ describe('api — the request interceptor', () => {
 describe('api — the 401 retry', () => {
   it('renews the token once, re-handshakes the socket with it and retries the request', async () => {
     session.refreshAccessToken.mockResolvedValueOnce('access-new');
-    const original = config();
+    const original = { ...config(), headers: { Authorization: 'Bearer access-old' } };
     const error = { response: { status: 401 }, config: original };
 
     await responseRejected()(error);
@@ -114,6 +124,59 @@ describe('api — the 401 retry', () => {
     const retried = fake.instance.mock.calls[0][0] as { headers: Record<string, string>; _retry: boolean };
     expect(retried.headers.Authorization).toBe('Bearer access-new');
     expect(retried._retry).toBe(true);
+  });
+
+  it('retries with the token stored meanwhile — no second renewal — when another request\'s renewal landed after this one left', async () => {
+    storage.getAccessToken.mockReturnValue('access-renewed-by-another');
+    const original = { ...config(), headers: { Authorization: 'Bearer access-old' } };
+    const error = { response: { status: 401 }, config: original };
+
+    await responseRejected()(error);
+
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(socket.connectSocket).not.toHaveBeenCalled();
+    const retried = fake.instance.mock.calls[0][0] as { headers: Record<string, string> };
+    expect(retried.headers.Authorization).toBe('Bearer access-renewed-by-another');
+  });
+
+  it('does not spend a second renewal on a request whose own pre-send renewal just failed transiently', async () => {
+    const original = { ...config(), headers: { Authorization: 'Bearer access-old' }, _renewalFailed: true };
+    const error = { response: { status: 401 }, config: original };
+
+    await expect(responseRejected()(error)).rejects.toBe(error);
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(fake.instance).not.toHaveBeenCalled();
+  });
+
+  it('a 401 to a request that carried NO token (a sign-in with a wrong password) is the answer: no renewal, nothing ended', async () => {
+    // Renewing here found no refresh token and ended a session that did not
+    // exist — a navigation to the login page that lost the typed e-mail and
+    // the "invalid credentials" banner
+    storage.getAccessToken.mockReturnValue(null);
+    storage.getRefreshToken.mockReturnValue(null);
+    const error = { response: { status: 401 }, config: { ...config(), url: '/auth/login', method: 'post' } };
+
+    await expect(responseRejected()(error)).rejects.toBe(error);
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(fake.instance).not.toHaveBeenCalled();
+  });
+
+  it('a 401 with a token sent but no refresh token stored passes through as well (nothing to renew with)', async () => {
+    storage.getRefreshToken.mockReturnValue(null);
+    const error = { response: { status: 401 }, config: { ...config(), headers: { Authorization: 'Bearer access-old' } } };
+
+    await expect(responseRejected()(error)).rejects.toBe(error);
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('reads the sent token through AxiosHeaders#get, which is what a sent request carries', async () => {
+    session.refreshAccessToken.mockResolvedValueOnce('access-new');
+    const headers = { get: (name: string) => (name === 'Authorization' ? 'Bearer access-old' : undefined) };
+    const error = { response: { status: 401 }, config: { ...config(), headers } };
+
+    await responseRejected()(error);
+
+    expect(session.refreshAccessToken).toHaveBeenCalledTimes(1);
   });
 
   it('never retries twice: a 401 on the retried request is the answer', async () => {
@@ -127,7 +190,7 @@ describe('api — the 401 retry', () => {
   it('a failed renewal fails this request with the renewal error (tokens are the session module\'s business)', async () => {
     const failure = new Error('Network Error');
     session.refreshAccessToken.mockRejectedValueOnce(failure);
-    const error = { response: { status: 401 }, config: config() };
+    const error = { response: { status: 401 }, config: { ...config(), headers: { Authorization: 'Bearer access-old' } } };
 
     await expect(responseRejected()(error)).rejects.toBe(failure);
     expect(fake.instance).not.toHaveBeenCalled();

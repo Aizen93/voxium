@@ -5,10 +5,11 @@ import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
 import type { UserRole, RegistrationConsent } from '@voxium/shared';
-import { BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, UnauthorizedError } from '../utils/errors';
+import { AppError, BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
+import { isJwtVerifyError } from '../utils/jwtErrors';
 import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
 import { consentIsRequired } from '../middleware/auth';
 import { verifyTOTP } from './totpService';
@@ -401,8 +402,14 @@ export async function refreshTokens(token: string) {
     const rememberMe = payload.rememberMe ?? true;
     return generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
   } catch (err) {
-    if (err instanceof UnauthorizedError) throw err;
-    throw new UnauthorizedError('Invalid refresh token');
+    // Every refusal of this function's own (account gone, revoked, banned)
+    // and every token jsonwebtoken refused answer the one 401, as they always
+    // did. A failing user lookup (database down, pool exhausted) is neither:
+    // it used to answer 401 too, and the client ends the session on a 401 to
+    // the refresh — a database blip signed everyone out. It surfaces as the
+    // 500 it is; the client keeps the tokens and tries again later.
+    if (err instanceof AppError || isJwtVerifyError(err)) throw new UnauthorizedError('Invalid refresh token');
+    throw err;
   }
 }
 

@@ -341,9 +341,46 @@ describe('socketServer — auth middleware names an EXPIRED access token', () =>
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Token expired' }));
   });
 
-  it("keeps the generic 'Invalid token' for every other verification failure (nothing to learn from it)", async () => {
-    const next = await handshakeWithVerifyThrowing(Object.assign(new Error('invalid signature'), { name: 'JsonWebTokenError' }));
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Invalid token' }));
+  it("keeps the generic 'Invalid token' for every other TOKEN failure (nothing to learn from it)", async () => {
+    for (const name of ['JsonWebTokenError', 'NotBeforeError']) {
+      const next = await handshakeWithVerifyThrowing(Object.assign(new Error('invalid signature'), { name }));
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Invalid token' }));
+    }
+  });
+
+  it("answers 'Authentication unavailable' when the user lookup fails — a database blip is not a bad token", async () => {
+    // 'Invalid token' here made the client renew and, the renewal meeting the
+    // same outage, end the session: a database blip during a reconnect storm
+    // signed everyone out. The client retries this answer later instead.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPrisma.user.findUnique.mockRejectedValueOnce(Object.assign(new Error("Can't reach database server"), { name: 'PrismaClientInitializationError' }));
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const { socket } = createMockSocket('user-1');
+    const next = vi.fn();
+
+    await getAuthMiddleware()(socket, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Authentication unavailable' }));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Handshake'), "Can't reach database server");
+    httpServer.close();
+    error.mockRestore();
+  });
+
+  it("the IP-ban lookup failing answers the same (the token was fine)", async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPrisma.user.findUnique.mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(), privacyAcceptedAt: new Date() });
+    mockPrisma.ipBan.findUnique.mockRejectedValueOnce(new Error('pool timeout'));
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const { socket } = createMockSocket('user-1');
+    const next = vi.fn();
+
+    await getAuthMiddleware()(socket, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Authentication unavailable' }));
+    httpServer.close();
+    error.mockRestore();
   });
 });
 
