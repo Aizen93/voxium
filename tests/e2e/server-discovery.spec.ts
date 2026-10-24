@@ -141,7 +141,8 @@ test.describe('Server discovery — Explore and the request flow', () => {
 
     // ── Owner removes B (every removal is a ban) ──
     await kickMember(request, dataOwner.accessToken, server.id, b.data.user.id, 'raid-night no-show');
-    await expect(toasts(b.page)).toContainText('kicked', { timeout: 15_000 });
+    // The toast says what happened: a removal IS a ban (`server.youWereRemovedAndBanned`)
+    await expect(toasts(b.page)).toContainText('removed and banned', { timeout: 15_000 });
     await expect(b.page.getByRole('button', { name: serverName, exact: true })).toHaveCount(0, { timeout: 15_000 });
 
     // Join is refused, and so is a fresh invite
