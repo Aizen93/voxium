@@ -128,7 +128,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       if (axios.isCancel(err)) return;
       console.error('Failed to fetch messages:', err);
-      toast.error('Failed to load messages');
+      toast.error(i18n.t('chat.failedToLoadMessages'));
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -167,7 +167,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       if (axios.isCancel(err)) return;
       console.error('Failed to fetch messages around:', err);
-      toast.error('Failed to load messages');
+      toast.error(i18n.t('chat.failedToLoadMessages'));
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -320,7 +320,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       if (axios.isCancel(err)) return;
       console.error('Failed to fetch DM messages:', err);
-      toast.error('Failed to load messages');
+      toast.error(i18n.t('chat.failedToLoadMessages'));
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -357,7 +357,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       if (axios.isCancel(err)) return;
       console.error('Failed to fetch DM messages around:', err);
-      toast.error('Failed to load messages');
+      toast.error(i18n.t('chat.failedToLoadMessages'));
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {

@@ -8,7 +8,8 @@ import { notificationAuthorName } from '../../utils/notificationAuthor';
  * read exactly like the member. The marker travels inside the text.
  */
 
-const t = vi.fn((key: string) => (key === 'messageItem.appTag' ? 'APP' : key)) as unknown as TFunction;
+// The fallback name is a translation too (notifications.someone), never a literal
+const t = vi.fn((key: string) => (key === 'messageItem.appTag' ? 'APP' : key === 'notifications.someone' ? 'Someone' : key)) as unknown as TFunction;
 const DOT = String.fromCharCode(0xb7);
 
 describe('notificationAuthorName', () => {

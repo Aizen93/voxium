@@ -1,10 +1,12 @@
 import { clsx } from 'clsx';
+import { useTranslation } from 'react-i18next';
 
 interface ConnectionQualityProps {
   latency: number | null;
 }
 
 export function ConnectionQuality({ latency }: ConnectionQualityProps) {
+  const { t } = useTranslation();
   let bars: number;
   let color: string;
 
@@ -23,7 +25,7 @@ export function ConnectionQuality({ latency }: ConnectionQualityProps) {
   }
 
   return (
-    <div className="flex items-end gap-[2px] h-3.5" title={latency !== null ? `${latency}ms` : 'Measuring...'}>
+    <div className="flex items-end gap-[2px] h-3.5" title={latency !== null ? `${latency}ms` : t('voice.measuring')}>
       {[1, 2, 3].map((i) => (
         <div
           key={i}

@@ -52,6 +52,7 @@ import { clearVoiceState, dispatchVoiceEvent, handleWorkerDeath } from './websoc
 import { clearDMVoiceState } from './websocket/dmVoiceHandler';
 import { initVoiceCluster, stopVoiceCluster } from './websocket/voiceCluster';
 import { initVoiceRelay } from './websocket/voiceRelay';
+import { startPresenceReaper, stopPresenceReaper } from './utils/presenceReaper';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -171,6 +172,12 @@ async function main() {
   await initVoiceCluster(io);
   console.log('[VoiceCluster] Initialized');
 
+  // Presence reconciliation: every minute, users whose last socket is gone
+  // cluster-wide without a disconnect having unregistered it (a node killed
+  // hard, a failed Redis command) are taken offline and their contacts told.
+  // The voice side has had its reaper since multi-node; presence had none.
+  startPresenceReaper(io, prisma);
+
   // Channel-affinity voice signaling relay (HIGH-15): a channel's mediasoup
   // Router lives on ONE node; peers relay their participants' voice events here
   // and this node dispatches them against shims.
@@ -222,6 +229,7 @@ async function main() {
     stopOrphanCleanup();
     stopDiscoveryStats();
     stopVoiceCluster();
+    stopPresenceReaper();
     // Drop our liveness key FIRST so peer reapers promptly clean up any voice
     // state this node owned, instead of waiting out the heartbeat TTL.
     await stopNodeHeartbeat().catch((err) => console.warn('[Shutdown] Heartbeat cleanup failed:', err));

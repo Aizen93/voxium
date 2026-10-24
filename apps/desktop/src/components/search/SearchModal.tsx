@@ -208,8 +208,8 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
 
   const formatTime = (dateStr: string) => {
     const date = new Date(dateStr);
-    if (isToday(date)) return `${t('chat.search.today')} at ${format(date, 'h:mm a')}`;
-    if (isYesterday(date)) return `${t('chat.search.yesterday')} at ${format(date, 'h:mm a')}`;
+    if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
+    if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
     return format(date, 'MM/dd/yyyy h:mm a');
   };
 

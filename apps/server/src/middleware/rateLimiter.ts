@@ -1,4 +1,6 @@
 import net from 'node:net';
+import { createHash, createHmac } from 'node:crypto';
+import jwt from 'jsonwebtoken';
 import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis, getRedisPubSub, getRedisConfigSub } from '../utils/redis';
@@ -13,15 +15,57 @@ export interface RateLimitConfig {
 
 interface RateLimitDef extends RateLimitConfig {
   keyPrefix: string;
-  /** What the bucket is keyed on: a client address, a user, or (incoming
-   *  webhooks) a webhook id that has already passed token validation. */
-  keyType: 'ip' | 'userId' | 'webhook';
+  /** What the bucket is keyed on: a client address, the /24 or /48 it sits
+   *  in, a user, the account a sign-in is FOR (before anyone is
+   *  authenticated), a mailbox (the canonical address mail is sent to), an
+   *  e-mail domain, or (incoming webhooks) a webhook id that has already
+   *  passed token validation. Shown as a badge in the admin table. */
+  keyType: 'ip' | 'subnet' | 'userId' | 'account' | 'inbox' | 'domain' | 'webhook';
   label: string;
 }
 
+// Every `keyType: 'ip'` bucket is SHARED by everyone behind one address: an
+// office or school NAT, a carrier-grade NAT, a campus VPN — and, behind a
+// reverse proxy the process does not trust, the whole platform (app.ts warns
+// when that happens). A per-IP budget is therefore sized for a GROUP of real
+// users doing the thing, not for one; the per-user buckets below bound what
+// one account can do, and the expensive unauthenticated paths (sign-in,
+// registration, mail) carry their own tight buckets that count FAILURES.
 const DEFAULTS: Record<string, RateLimitDef> = {
-  login:          { keyPrefix: 'rl:login',    points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Login' },
-  register:       { keyPrefix: 'rl:register', points: 3,   duration: 60,  blockDuration: 600, keyType: 'ip',     label: 'Register' },
+  // Sign-in: three buckets, all counting FAILED attempts only (a 2xx refunds
+  // the point, `refundOnSuccess`; so does a 429 from a later bucket, which
+  // never reached the password check). Per address: 20 failures a minute,
+  // then a 5-minute block — a credential-stuffing source, not a NAT where
+  // several people sign in within the same minute (5 of ANY attempt used to
+  // lock a whole office out for five minutes, and the TOTP step shared the
+  // bucket). Per network (`loginSubnet`): the same, per /24 or /48, so a
+  // stuffing source rotating inside its range — every routed IPv6 /64 is
+  // free — is bounded too. Per account (`loginAccount`): below.
+  login:          { keyPrefix: 'rl:login',    points: 20,  duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Login (failures per IP)' },
+  loginSubnet:    { keyPrefix: 'rl:loginnet', points: 60,  duration: 60,  blockDuration: 0,   keyType: 'subnet',     label: 'Login (failures per subnet)' },
+  // The per-account bound on guessing. Two key shapes behind one row:
+  //  - the PASSWORD step is keyed on the account AND the caller's network
+  //    (`e:<hmac of the lowercased, trimmed e-mail>|<subnet>`): ten wrong
+  //    passwords at one account from one /24 or /48 in a quarter hour, then
+  //    that network waits. Not per account alone, on purpose: a bucket any
+  //    address can fill is a lock anyone can hold on anyone's account for
+  //    five requests a quarter hour, with nothing but the e-mail — a griefing
+  //    tool against moderators. Guessing from MANY networks stays bounded by
+  //    the per-address and per-subnet failure buckets and by bcrypt itself,
+  //    as it was before this row existed.
+  //  - the TOTP step is keyed on the account alone (`t:<userId>`), read from
+  //    a challenge token whose SIGNATURE verifies (an unsigned read let a
+  //    forged payload pick any victim's bucket): reaching it takes the
+  //    password, and a 6-digit code must not be walkable from many addresses
+  //    by whoever has it — ten guesses a quarter hour per account, whatever
+  //    the address.
+  // No block: the window is the wait, and it ends on its own.
+  loginAccount:   { keyPrefix: 'rl:loginacct', points: 10, duration: 900, blockDuration: 0,   keyType: 'account', label: 'Login (failures per account)' },
+  // Short-window registration burst per address. The 10-minute block it used
+  // to carry locked a household or a small team signing up together out of
+  // registration for the rest of their session; the daily budgets and the
+  // proof of work are the real bound, this only flattens a burst.
+  register:       { keyPrefix: 'rl:register', points: 5,   duration: 60,  blockDuration: 120, keyType: 'ip',     label: 'Register' },
   // Long-window registration counters: the short window above misses slow
   // drips entirely (one signup every 45 minutes is 32/day and never trips
   // 3/min). Per-IP catches a patient single address; per-/24 catches rotation
@@ -37,7 +81,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // The cheap attempt buckets below are what bound garbage instead — one per
   // address, one per range, neither ever refunded.
   registerDaily:  { keyPrefix: 'rl:regday',   points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per IP)' },
-  registerSubnet: { keyPrefix: 'rl:regnet',   points: 20,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per subnet)' },
+  registerSubnet: { keyPrefix: 'rl:regnet',   points: 20,  duration: 86400, blockDuration: 0, keyType: 'subnet',     label: 'Register (daily per subnet)' },
   // Attempts — successful or not — per IP per day. This is the bucket that
   // bounds username/email enumeration now that the two above only count
   // successes. Deliberately cheap and generous: a fumbling real user has
@@ -57,7 +101,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // so the admin rate-limit API can raise it for a genuinely large shared range
   // without a deploy.
   registerAttemptSubnet:
-                  { keyPrefix: 'rl:regattnet', points: 300, duration: 86400, blockDuration: 0, keyType: 'ip',    label: 'Register (daily attempts per subnet)' },
+                  { keyPrefix: 'rl:regattnet', points: 300, duration: 86400, blockDuration: 0, keyType: 'subnet',    label: 'Register (daily attempts per subnet)' },
   // Challenge minting is stateless (HMAC) so it is cheap to serve, but a
   // limit keeps a hostile client from turning the endpoint into a hash-mint
   // treadmill. Generous: a legit flow needs exactly one per registration.
@@ -66,7 +110,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // exempt in the service). NOT used as route middleware — consumed only
   // after a successful create (authService), so garbage attempts cannot burn
   // a legitimate small-org domain's budget and lock its employees out.
-  registerDomain: { keyPrefix: 'rl:regdom',   points: 10,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per email domain)' },
+  registerDomain: { keyPrefix: 'rl:regdom',   points: 10,  duration: 86400, blockDuration: 0, keyType: 'domain',     label: 'Register (daily per email domain)' },
   // Per-INBOX daily mail caps, keyed on the CANONICAL address. The per-IP and
   // per-user limiters bound the burst rate; these bound how much mail one real
   // mailbox can be made to receive in a day no matter which account, address
@@ -74,18 +118,44 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // whoever really owns an address. blockDuration MUST stay 0: a block would
   // push the window past 24h. Consumed via `consumeMailCap`, not middleware —
   // the key is an email, not a request property.
-  verifyMail:     { keyPrefix: 'rl:vfymail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Verification mail (daily per inbox)' },
-  resetMail:      { keyPrefix: 'rl:rstmail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Password-reset mail (daily per inbox)' },
+  verifyMail:     { keyPrefix: 'rl:vfymail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'inbox',     label: 'Verification mail (daily per inbox)' },
+  resetMail:      { keyPrefix: 'rl:rstmail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'inbox',     label: 'Password-reset mail (daily per inbox)' },
   forgotPassword: { keyPrefix: 'rl:forgot',   points: 3,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Forgot Password' },
   resetPassword:  { keyPrefix: 'rl:reset',    points: 5,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Reset Password' },
-  refresh:        { keyPrefix: 'rl:refresh',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
+  // One refresh per client per access-token life (15 min), plus one at every
+  // launch and every reconnect — and every client behind the NAT launches at
+  // nine o'clock. 10 a minute per address answered the eleventh launch with a
+  // 429 and, before the restore kept its tokens, signed that user out. The
+  // handler is a signature check and one indexed query; a refresh JWT cannot
+  // be guessed at any rate the limiter would matter for.
+  refresh:        { keyPrefix: 'rl:refresh',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
   changePassword: { keyPrefix: 'rl:chgpwd',   points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Change Password' },
   consent:        { keyPrefix: 'rl:consent',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId',   label: 'Accept legal documents' },
   deleteAccount:  { keyPrefix: 'rl:delacct',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Delete own account' },
   totp:           { keyPrefix: 'rl:totp',     points: 10,  duration: 60,  blockDuration: 300, keyType: 'userId', label: 'TOTP Management' },
   messageSend:    { keyPrefix: 'rl:msg',       points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Send' },
   upload:         { keyPrefix: 'rl:upload',    points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Upload' },
+  // Friend requests, accepts and removals share this bucket.
   friendRequest:  { keyPrefix: 'rl:friend',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Friend Request' },
+  // The routes below had only the per-address general budget between them and
+  // a hostile client; when that budget was sized for a room of users (below),
+  // each got a bucket of its own, keyed on the user it serves.
+  // A profile edit fans `user:updated` out to every server room the user is in.
+  profileUpdate:  { keyPrefix: 'rl:profile',   points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Profile Update' },
+  // Invite preview, join and creation: a code is a 48-bit bearer credential.
+  inviteUse:      { keyPrefix: 'rl:invite',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Invite Use' },
+  // Opening (or re-opening) a DM conversation.
+  dmOpen:         { keyPrefix: 'rl:dmopen',    points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'DM Open' },
+  // The public avatar / icon proxy (`GET /uploads/*`, no sign-in: an `<img>`
+  // tag, a notification toast). Its ONLY budget: `rateLimitGeneral` lets it
+  // through (every avatar on screen would otherwise spend the address's
+  // anonymous budget — a few dozen users launching behind one egress, fifty
+  // images each, 429'd that address's sign-ins). Per address, sized for a
+  // room of people opening media-heavy channels: the handler is a 302 to a
+  // signed link (cached for 50 minutes by the browser) or, with `?inline`,
+  // a proxied image. It used to ride the general budget TWICE (api level and
+  // route), an effective 50 a minute — a channel with sixty images 429'd.
+  attachmentRead: { keyPrefix: 'rl:attread',   points: 2000, duration: 60, blockDuration: 0,   keyType: 'ip',     label: 'Attachment Read' },
   memberManage:   { keyPrefix: 'rl:member',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Member Manage' },
   // Reads of the moderation lists (join requests, bans): the client follows
   // pages and refetches on open, so they must not share the write budget.
@@ -102,14 +172,40 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   admin:          { keyPrefix: 'rl:admin',     points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Admin' },
   report:         { keyPrefix: 'rl:report',    points: 5,   duration: 300, blockDuration: 0,   keyType: 'userId', label: 'Report' },
   support:        { keyPrefix: 'rl:support',   points: 10,  duration: 30,  blockDuration: 0,   keyType: 'userId', label: 'Support' },
-  verifyEmail:        { keyPrefix: 'rl:vfyeml', points: 5, duration: 900, blockDuration: 300, keyType: 'ip',     label: 'Verify Email' },
+  // A verification link is a 256-bit token: nobody guesses one at any rate,
+  // so this only bounds lookups — 5 per quarter hour and a 5-minute block
+  // refused the sixth colleague verifying from one office.
+  verifyEmail:        { keyPrefix: 'rl:vfyeml', points: 20, duration: 900, blockDuration: 0,  keyType: 'ip',     label: 'Verify Email' },
   resendVerification: { keyPrefix: 'rl:verify', points: 3, duration: 300, blockDuration: 300, keyType: 'userId', label: 'Resend Verification' },
   markRead:       { keyPrefix: 'rl:markread',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Mark Read' },
   roleManage:     { keyPrefix: 'rl:role',      points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Role Manage' },
   // Secure-channel create/rename/delete. Deliberately tight: every create can
   // fan out key shares from all members' clients, so churn is expensive.
   secureChannelManage: { keyPrefix: 'rl:secchan', points: 10, duration: 300, blockDuration: 0, keyType: 'userId', label: 'Secure Channel Manage' },
-  general:        { keyPrefix: 'rl:general',   points: 100, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'General' },
+  // Charged once per request on every /api/v1 route. Two buckets behind one
+  // middleware (`rateLimitGeneral`): a request whose bearer VERIFIES is
+  // charged on that USER (`generalUser`); every other request on its ADDRESS
+  // (`general`). Measured (2026-10-24, one browser, dev build): a sign-in
+  // plus the first screen is about 11 requests, a page reload about 13, and a
+  // person moving through two servers and six channels about 35 within a
+  // minute — on top of the socket's own traffic, which this never sees. At
+  // 100 a minute per address, three people behind one NAT navigating at the
+  // same time were refused ordinary reads (the e2e harness had already
+  // measured one multi-context test at 104), and no per-address budget fits a
+  // company of five hundred behind one egress: hence per user once signed in.
+  // The address bucket then carries only the anonymous traffic (the sign-in,
+  // registration and refresh calls, the public flags and stats) — a handful
+  // per person — and bounds how fast one address can hit cheap endpoints.
+  // The writes and the expensive reads carry per-user buckets of their own
+  // (the handful that did not got theirs with this change: `profileUpdate`,
+  // `inviteUse`, `dmOpen`; the public asset proxy `attachmentRead`).
+  general:        { keyPrefix: 'rl:general',   points: 1000, duration: 60, blockDuration: 0,   keyType: 'ip',     label: 'General (anonymous, per IP)' },
+  // Ten a second sustained for one account: a power user in fifty servers
+  // whose network flaps five times a minute refetches about 275 (the connect
+  // handler asks for every server's People slice), well inside; a hostile
+  // client with a stolen session is held to cheap reads at that pace, every
+  // write and expensive read having a tighter bucket of its own.
+  generalUser:    { keyPrefix: 'rl:generaluser', points: 600, duration: 60, blockDuration: 0,  keyType: 'userId', label: 'General (signed in, per user)' },
   interact:       { keyPrefix: 'rl:interact',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Interact' },
   themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
   themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
@@ -267,29 +363,63 @@ export async function resetRateLimit(name: string): Promise<void> {
   await pub.publish(RL_CONFIG_CHANNEL, JSON.stringify({ name, action: 'reset' }));
 }
 
-/** Delete all rate limit keys for a specific user or IP */
+/**
+ * Delete all rate limit keys for a specific user id, address or e-mail (the
+ * admin "clear rate limits" tool). A user id also clears the user's TOTP
+ * account bucket (`t:<id>`); an e-mail clears the password account buckets
+ * of that address on every network (`e:<digest>|*`, found by scan).
+ */
 export async function clearUserRateLimits(key: string): Promise<number> {
   const redis = getRedis();
   const prefixes = Object.values(DEFAULTS).map((d) => d.keyPrefix);
+  const exact = prefixes.map((prefix) => `${prefix}:${key}`);
+  exact.push(`${DEFAULTS.loginAccount.keyPrefix}:t:${key}`);
+  if (net.isIP(key)) {
+    // An address also owns its network's buckets and its "names no account" sender bucket
+    const ip = normalizeIp(key);
+    const subnet = subnetOf(key);
+    for (const row of Object.values(DEFAULTS)) {
+      if (row.keyType === 'subnet') exact.push(`${row.keyPrefix}:${subnet}`);
+    }
+    exact.push(`${DEFAULTS.loginAccount.keyPrefix}:x:${ip}`);
+    if (ip !== key) exact.push(...prefixes.map((prefix) => `${prefix}:${ip}`));
+  }
+  const digest = key.includes('@') ? loginEmailDigest(key) : null;
+  if (digest !== null) {
+    for await (const batch of redis.scanIterator({ MATCH: `${DEFAULTS.loginAccount.keyPrefix}:e:${digest}|*`, COUNT: 100 })) {
+      for (const found of batch as unknown as string[]) exact.push(found);
+    }
+  }
   let cleared = 0;
-  for (const prefix of prefixes) {
-    const redisKey = `${prefix}:${key}`;
-    const result = await redis.del(redisKey);
-    cleared += result;
+  for (const redisKey of exact) {
+    cleared += await redis.del(redisKey);
   }
   return cleared;
 }
 
 // ─── Middleware factories ────────────────────────────────────────────────────
 
+interface MiddlewareOptions {
+  /** Count FAILURES only: the point is given back when the response is a
+   *  2xx — or a 429, which a LATER bucket answered before the request
+   *  reached the check it would have been a guess at. The house way
+   *  (consume atomically, reward on the non-counting path — never a
+   *  read-then-consume), for the buckets that exist to bound guessing: a
+   *  right password is not a guess, and a team signing in from one address
+   *  must not spend the budget meant for the wrong ones. */
+  refundOnSuccess?: boolean;
+}
+
 function createMiddleware(
   name: string,
   keyFn: (req: Request) => string,
+  options: MiddlewareOptions = {},
 ) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    let key = 'unknown';
     try {
-      await getLimiter(name).consume(keyFn(req));
-      next();
+      key = keyFn(req);
+      await getLimiter(name).consume(key);
     } catch (err) {
       if (err instanceof RateLimiterRes) {
         const retryAfter = Math.ceil(err.msBeforeNext / 1000);
@@ -300,7 +430,17 @@ function createMiddleware(
       // Redis error or unexpected — fail open but log for visibility
       console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
       next();
+      return;
     }
+    if (options.refundOnSuccess) {
+      // 'finish' fires for every terminal outcome; an aborted request keeps
+      // its charge, the safe direction for a guessing counter
+      res.on('finish', () => {
+        const status = res.statusCode;
+        if ((status >= 200 && status < 300) || status === 429) void refundRateLimit(name, key);
+      });
+    }
+    next();
   };
 }
 
@@ -355,6 +495,96 @@ function canonicalIPv6(h: number[]): string {
 
 const byIp = (req: Request) => normalizeIp(req.ip || req.socket.remoteAddress || 'unknown');
 const byUserId = (req: Request) => req.user?.userId || req.ip || 'unknown';
+
+/** The e-mail part of a login-account key: the address the way the service
+ *  looks it up (lowercase, trimmed), under an HMAC keyed off `JWT_SECRET`
+ *  (the proof-of-work's pattern) — a bucket key sits in Redis, where an
+ *  address, or a hash anyone could test addresses against, does not belong.
+ *  Null for a body without a usable e-mail (the route answers it 400). */
+export function loginEmailDigest(email: unknown): string | null {
+  if (typeof email !== 'string' || email.trim() === '') return null;
+  // A domain-separated key derived from the secret, never the signing key
+  // itself (the proof-of-work and the signed cursors derive theirs the same way)
+  const key = createHash('sha256').update(`voxium-login-account:${process.env.JWT_SECRET ?? ''}`).digest();
+  return createHmac('sha256', key).update(email.toLowerCase().trim()).digest('hex').slice(0, 32);
+}
+
+/** The password step's account bucket: the account AND the caller's network
+ *  (see the `loginAccount` registry note for why not the account alone). */
+export function loginAccountKey(email: unknown, subnet: string): string | null {
+  const digest = loginEmailDigest(email);
+  return digest === null ? null : `e:${digest}|${subnet}`;
+}
+
+/** Clock skew tolerated when a limiter key is read from a token's expiry. */
+const TOKEN_KEY_CLOCK_TOLERANCE_S = 120;
+
+/** The TOTP step's account bucket: the userId of a challenge token whose
+ *  signature VERIFIES (`purpose: 'totp-verify'`, HS256, our own secret) and
+ *  that is still valid. Null for anything else: a forged payload used to be
+ *  able to pick any victim's bucket (a userId is public knowledge), and an
+ *  EXPIRED token must not name one either — a challenge obtained once (it
+ *  takes the password) would otherwise fill the victim's bucket forever, a
+ *  password change notwithstanding. An expired challenge is refused by the
+ *  route before any code is checked, so sending it to the address bucket
+ *  opens no guessing. */
+export function totpAccountKey(totpToken: unknown): string | null {
+  if (typeof totpToken !== 'string' || totpToken.length === 0 || totpToken.length > 4096) return null;
+  try {
+    const payload = jwt.verify(totpToken, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown; purpose?: unknown };
+    const userId = payload?.userId;
+    return payload?.purpose === 'totp-verify' && typeof userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(userId) ? `t:${userId}` : null;
+  } catch {
+    // Not our token (forged, garbage, wrong purpose): the route refuses it;
+    // the sender is charged on their own address, never on anyone's account
+    return null;
+  }
+}
+
+/** Garbage that names no account is charged on the sender's own address. */
+const bySenderAddress = (req: Request) => `x:${byIp(req)}`;
+
+// The verified bearer, once per request: `rateLimitGeneral` runs BEFORE the
+// routes' `authenticate`, so it checks the signature itself (an HMAC, a few
+// microseconds; `authenticate` checks again and asks the database — this never
+// does). A token that verifies AND is still valid names its user; an expired
+// one names nobody (it is charged on the address, like a forged one): the
+// 15-minute lifetime is what caps what a leaked token can do, and keying a
+// bucket on an expired token let any old token of a user — a HAR file, a log,
+// a shared machine — drain that user's budget forever from anywhere. The
+// desktop renews before sending, so an expired bearer is a handful of
+// requests per launch at most.
+const verifiedBearers = new WeakMap<Request, string | null>();
+
+/** The userId a request's bearer carries, if the signature verifies, the
+ *  token is not expired and it is an ACCESS token (one with a `purpose` —
+ *  TOTP challenge, trusted device — is not a session); null otherwise. The
+ *  bearer is the Authorization header or, for the tags that cannot set one
+ *  (an attachment `<img>`), the `token` query parameter. Memoised per request. */
+export function verifiedBearerUserId(req: Request): string | null {
+  if (verifiedBearers.has(req)) return verifiedBearers.get(req) ?? null;
+  let userId: string | null = null;
+  const header = req.headers.authorization;
+  const queryToken = (req.query as { token?: unknown } | undefined)?.token;
+  const token = typeof header === 'string' && header.startsWith('Bearer ')
+    ? header.slice('Bearer '.length)
+    : typeof queryToken === 'string' ? queryToken : null;
+  if (token !== null && token.length > 0 && token.length <= 4096) {
+    try {
+      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown; purpose?: unknown };
+      if (payload?.purpose === undefined && typeof payload?.userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(payload.userId)) {
+        userId = payload.userId;
+      }
+    } catch {
+      // Not our token, or no longer valid: anonymous for the limiter,
+      // refused by authenticate later
+    }
+  }
+  verifiedBearers.set(req, userId);
+  return userId;
+}
+const byLoginAccount = (req: Request) => loginAccountKey((req.body as { email?: unknown } | undefined)?.email, bySubnet(req)) ?? bySenderAddress(req);
+const byTotpAccount = (req: Request) => totpAccountKey((req.body as { totpToken?: unknown } | undefined)?.totpToken) ?? bySenderAddress(req);
 // Only meaningful AFTER the execute route has validated the token for this id
 const byWebhookId = (req: Request) => {
   const id = req.params.webhookId;
@@ -584,8 +814,20 @@ export function domainRegistrationCap(): number {
 
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
-export const rateLimitLogin = createMiddleware('login', byIp);
+// Sign-in counts FAILURES: a right password (or a right TOTP code) is refunded.
+// Four middlewares, three buckets: the per-address and per-subnet ones are
+// shared by the password step and the TOTP step; the per-account one is keyed
+// on the e-mail and network for the password step and on the verified
+// challenge token's userId for the TOTP step (`loginAccount`, registry note).
+export const rateLimitLogin = createMiddleware('login', byIp, { refundOnSuccess: true });
+export const rateLimitLoginSubnet = createMiddleware('loginSubnet', bySubnet, { refundOnSuccess: true });
+export const rateLimitLoginAccount = createMiddleware('loginAccount', byLoginAccount, { refundOnSuccess: true });
+export const rateLimitTotpAccount = createMiddleware('loginAccount', byTotpAccount, { refundOnSuccess: true });
 export const rateLimitRegister = createMiddleware('register', byIp);
+export const rateLimitProfileUpdate = createMiddleware('profileUpdate', byUserId);
+export const rateLimitInviteUse = createMiddleware('inviteUse', byUserId);
+export const rateLimitDmOpen = createMiddleware('dmOpen', byUserId);
+export const rateLimitAttachmentRead = createMiddleware('attachmentRead', byIp);
 export const rateLimitRegisterAttempt = createMiddleware('registerAttempt', byIp);
 export const rateLimitRegisterAttemptSubnet = createMiddleware('registerAttemptSubnet', bySubnet);
 export const rateLimitPowChallenge = createMiddleware('powChallenge', byIp);
@@ -615,7 +857,25 @@ export const rateLimitResendVerification = createMiddleware('resendVerification'
 export const rateLimitMarkRead = createMiddleware('markRead', byUserId);
 export const rateLimitRoleManage = createMiddleware('roleManage', byUserId);
 export const rateLimitSecureChannelManage = createMiddleware('secureChannelManage', byUserId);
-export const rateLimitGeneral = createMiddleware('general', byIp);
+// The api-level budget: per USER for a request whose bearer verifies, per
+// ADDRESS for the rest (see the `general` registry note). One middleware so
+// app.ts mounts it once and a route never charges it a second time.
+const generalByAddress = createMiddleware('general', byIp);
+const generalByUser = createMiddleware('generalUser', (req) => verifiedBearerUserId(req) ?? byIp(req));
+
+/** The public avatar / icon proxy: no sign-in (an `<img>` carries no bearer),
+ *  one request per picture on screen. It has a per-address budget of its own
+ *  (`attachmentRead`) and must not spend the address's anonymous budget, or a
+ *  busy NAT's sign-ins pay for everyone's avatars. Attachments carry a token
+ *  and are charged on their user like any other request. */
+function isPublicAssetRead(req: Request): boolean {
+  return req.method === 'GET' && req.path.startsWith('/uploads/') && !req.path.startsWith('/uploads/attachments/');
+}
+
+export const rateLimitGeneral = (req: Request, res: Response, next: NextFunction): Promise<void> | void => {
+  if (isPublicAssetRead(req)) return next();
+  return (verifiedBearerUserId(req) !== null ? generalByUser : generalByAddress)(req, res, next);
+};
 // Authenticated message interactions (edit/delete/react). Keyed by userId — the
 // old per-route rateLimitGeneral shared ONE IP bucket with the global api-level
 // limiter, so users behind a NAT split a halved 429 budget between them.

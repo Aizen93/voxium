@@ -622,3 +622,31 @@ describe('POST /admin/ip-bans — stores the canonical address form', () => {
     expect(prismaMock.ipBan.upsert).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /admin/users/:userId/unban — the ban hierarchy applies to the lift too', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.user.update.mockResolvedValue({});
+    prismaMock.ipBan.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.ipRecord.findMany.mockResolvedValue([]);
+    prismaMock.$transaction.mockImplementation((ops: Promise<unknown>[]) => Promise.all(ops));
+    app = createApp();
+  });
+
+  it('an admin cannot unban another admin (the ban was a superadmin\'s to place, so it is theirs to lift)', async () => {
+    mockUsers({
+      'admin-1': { role: 'admin' },
+      'target-1': { role: 'admin', bannedAt: new Date('2026-01-01T00:00:00Z') },
+    });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('super admins');
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+  });
+});

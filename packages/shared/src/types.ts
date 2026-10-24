@@ -278,6 +278,10 @@ export interface Message {
    *  row once the webhook is deleted. Only on webhook-authored rows. */
   webhookName?: string | null;
   mentions?: MessageAuthor[];
+  /** The server's word that this message pings the whole channel: the author
+   *  wrote `@everyone` AND held MENTION_EVERYONE there when it was sent (or
+   *  last edited). Absent or false: the token, if present, is plain text. */
+  mentionsEveryone?: boolean;
   attachments?: Attachment[];
   createdAt: string;
   editedAt: string | null;
@@ -478,7 +482,11 @@ export interface ServerToClientEvents {
   // serverId lets clients keep a channel→server map for cross-server voice
   // presence (the spaces strip's "live" indicators). Removal events don't
   // carry it — removing by channelId alone is always sufficient.
-  'voice:channel_users': (data: { channelId: string; serverId?: string; users: VoiceUser[] }) => void;
+  // `source: 'connect'` marks a SNAPSHOT replay (socket connect, joining a
+  // server) as opposed to the list a voice:join answers with: a client that is
+  // re-joining its own channel ignores the snapshot for THAT channel, since its
+  // join replay is fresher and the snapshot can land after it.
+  'voice:channel_users': (data: { channelId: string; serverId?: string; users: VoiceUser[]; source?: 'connect' }) => void;
   'voice:user_joined': (data: { channelId: string; serverId?: string; user: VoiceUser }) => void;
   'voice:user_left': (data: { channelId: string; userId: string }) => void;
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => void;
@@ -491,7 +499,10 @@ export interface ServerToClientEvents {
   'voice:e2e:key': (data: { channelId: string; from: string; fromDeviceId: string; envelope: string }) => void;
   'voice:e2e:key_request': (data: { channelId: string; from: string }) => void;
   'voice:force_moved': (data: { channelId: string; userId: string; targetChannelId: string }) => void;
-  'voice:error': (data: { message: string }) => void;
+  // `channelId`, when present, scopes the error to ONE server voice channel:
+  // the client acts on it only while that channel is its active one (a late
+  // notice about a channel it has since left must not end its new call).
+  'voice:error': (data: { message: string; channelId?: string }) => void;
   'voice:transport_created': (data: {
     routerRtpCapabilities: unknown;
     sendTransport: TransportOptions;

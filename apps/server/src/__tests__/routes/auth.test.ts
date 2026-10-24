@@ -145,6 +145,9 @@ vi.mock('../../middleware/rateLimiter', () => ({
   countDomainRegistration: vi.fn().mockResolvedValue(undefined),
   domainRegistrationCap: vi.fn().mockReturnValue(10),
   rateLimitLogin: passthroughMiddleware,
+  rateLimitLoginAccount: passthroughMiddleware,
+  rateLimitLoginSubnet: passthroughMiddleware,
+  rateLimitTotpAccount: passthroughMiddleware,
   rateLimitForgotPassword: passthroughMiddleware,
   rateLimitResetPassword: passthroughMiddleware,
   rateLimitRefresh: passthroughMiddleware,
@@ -769,6 +772,24 @@ describe('POST /api/v1/auth/refresh', () => {
 
     expect(res.status).toBe(401);
     expect(res.body.success).toBe(false);
+  });
+
+  it('answers 500, NOT 401, when the user lookup fails: the client keeps its session through a database blip', async () => {
+    const refreshToken = generateRefreshToken({
+      userId: MOCK_USER.id,
+      username: MOCK_USER.username,
+      tokenVersion: 0,
+    });
+    mockPrismaUser.findUnique.mockRejectedValueOnce(Object.assign(new Error("Can't reach database server"), { name: 'PrismaClientInitializationError' }));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/api/v1/auth/refresh')
+      .send({ refreshToken });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ success: false, error: 'Internal server error' });
+    error.mockRestore();
   });
 
   it('returns 401 when tokenVersion does not match (revoked)', async () => {

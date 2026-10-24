@@ -278,6 +278,17 @@ export const JOIN_REQUEST_DECLINE_COOLDOWN_DAYS = 7;
 /** Pending requests older than this are deleted; the user can ask again. */
 export const JOIN_REQUEST_PENDING_TTL_DAYS = 30;
 
+// ─── Retention and trust periods the UI and the legal copy quote ─────────────
+// One copy each: the server jobs run on them, and the admin dashboard and the
+// locale fact test read them from here instead of restating the number.
+
+/** IpRecord rows unseen for this long are deleted by the registration hygiene sweep. */
+export const IP_RECORD_RETENTION_DAYS = 180;
+/** The orphan sweep never deletes an unreferenced S3 object younger than this. */
+export const ORPHAN_GRACE_DAYS = 7;
+/** Lifetime of the trusted-device token a successful TOTP sign-in issues (skips TOTP on that device). */
+export const TRUSTED_DEVICE_TTL_DAYS = 30;
+
 /** Characters that text shown to STRANGERS (a server description, a join
  *  request message, a ban reason) may never carry: control characters and the
  *  bidi-override / zero-width / invisible format characters that let text
@@ -314,6 +325,50 @@ export const INVITE_CODE_LENGTH = 8;
 
 /** Regex to match @[userId] mention tokens in message content */
 export const MENTION_RE = /@\[([^\]]{1,30})\]/g;
+
+/** The `@everyone` token, exactly this spelling. */
+export const EVERYONE_MENTION = '@everyone';
+
+/**
+ * Where `@everyone` tokens start in `content`: the token is not preceded by
+ * a word character or another `@` (`me@everyone`, `@@everyone` are not it),
+ * not a prefix of a longer word (`@everyone-else`, `@everyone2` are not it),
+ * and never inside a user mention (`@[…]`). One function for the server (does
+ * the message ping?) and the renderer (where to draw the badge), so the two
+ * can never disagree — and a plain scan rather than a lookbehind regex, which
+ * the oldest WebKit the desktop app runs on rejects at parse time (a syntax
+ * error there takes the whole bundle down). Whether the token PINGS anyone is
+ * the server's decision at send time (`Message.mentionsEveryone`: the author
+ * held MENTION_EVERYONE in the channel); a renderer must never treat the bare
+ * text as a mention.
+ */
+export function findEveryoneMentions(content: string): number[] {
+  const mentionSpans: Array<[number, number]> = [];
+  const re = new RegExp(MENTION_RE.source, MENTION_RE.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) mentionSpans.push([m.index, m.index + m[0].length]);
+  const insideMention = (i: number) => mentionSpans.some(([s, e]) => i >= s && i < e);
+
+  const found: number[] = [];
+  let from = 0;
+  for (;;) {
+    const i = content.indexOf(EVERYONE_MENTION, from);
+    if (i < 0) break;
+    from = i + EVERYONE_MENTION.length;
+    const before = i === 0 ? '' : content[i - 1];
+    const after = content[i + EVERYONE_MENTION.length] ?? '';
+    if (before !== '' && /[\w@]/.test(before)) continue;
+    if (after !== '' && /[\w-]/.test(after)) continue;
+    if (insideMention(i)) continue;
+    found.push(i);
+  }
+  return found;
+}
+
+/** Whether `content` contains an @everyone token. */
+export function mentionsEveryone(content: string): boolean {
+  return findEveryoneMentions(content).length > 0;
+}
 
 export const WS_EVENTS = {
   MESSAGE_NEW: 'message:new',

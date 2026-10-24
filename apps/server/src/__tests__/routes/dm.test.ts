@@ -27,6 +27,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   return {
     rateLimitMessageSend: passthrough,
     rateLimitGeneral: passthrough,
+    rateLimitDmOpen: passthrough,
     rateLimitInteract: passthrough,
     rateLimitMarkRead: passthrough,
     socketRateLimit: vi.fn().mockReturnValue(true),

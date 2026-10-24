@@ -54,7 +54,7 @@ test.describe('Secure channels — invite-only E2E-encrypted', () => {
     await openServer(pageC, 'Covert Ops HQ');
 
     // Three contexts share one IP: registration + E2E init already burned most
-    // of the 100/min global bucket (a harness property, not a product one —
+    // of the anonymous per-IP bucket (a harness property, not a product one —
     // see helpers/rateLimits.ts)
     await clearRateLimits();
 

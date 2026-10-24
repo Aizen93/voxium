@@ -672,3 +672,71 @@ describe('app.ts — security headers', () => {
     expect(body.ready).toBe(true);
   });
 });
+
+describe('app.ts — a reverse proxy the process does not trust is reported (issue 4: every client as ONE address)', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...originalEnv, NODE_ENV: 'test' };
+    delete process.env.TRUST_PROXY;
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it('warns ONCE when requests arrive with X-Forwarded-For while the proxy is not trusted', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { app } = await import('../app');
+
+    await request(app, 'GET', '/health', { 'X-Forwarded-For': '203.0.113.7' });
+    await request(app, 'GET', '/health', { 'X-Forwarded-For': '203.0.113.8' });
+
+    const said = warn.mock.calls.filter((c) => String(c[0]).startsWith('[TrustProxy]'));
+    expect(said).toHaveLength(1);
+    expect(String(said[0][0])).toContain('TRUST_PROXY=true');
+  });
+
+  it('says nothing without the header', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { app } = await import('../app');
+
+    await request(app, 'GET', '/health');
+
+    expect(warn.mock.calls.filter((c) => String(c[0]).startsWith('[TrustProxy]'))).toHaveLength(0);
+  });
+
+  it('says nothing when the proxy IS trusted (TRUST_PROXY=true)', async () => {
+    process.env.TRUST_PROXY = 'true';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { app } = await import('../app');
+
+    await request(app, 'GET', '/health', { 'X-Forwarded-For': '203.0.113.7' });
+
+    expect(warn.mock.calls.filter((c) => String(c[0]).startsWith('[TrustProxy]'))).toHaveLength(0);
+  });
+});
+
+describe('app.ts — a 429\'s Retry-After is readable across origins (issue 4)', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...originalEnv, NODE_ENV: 'test', CORS_ORIGIN: 'http://localhost:8080' };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('exposes Retry-After to a cross-origin client (not CORS-safelisted: the desktop app and the dev server never saw it)', async () => {
+    const { app } = await import('../app');
+
+    const res = await request(app, 'GET', '/health', { Origin: 'http://localhost:8080' });
+
+    expect(res.status).toBe(200);
+    expect(String(res.headers['access-control-expose-headers'] ?? '').toLowerCase()).toContain('retry-after');
+  });
+});

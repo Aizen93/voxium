@@ -21,6 +21,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   return {
     rateLimitUpload: passthrough,
     rateLimitGeneral: passthrough,
+    rateLimitAttachmentRead: passthrough,
   };
 });
 
@@ -93,6 +94,9 @@ describe('uploads — GET /avatars/* (public redirect)', () => {
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe(mockPresignedGetUrl);
     expect(generatePresignedGetUrl).toHaveBeenCalledWith('avatars/user-123.webp');
+    // Keys are immutable and the signed link lives an hour: the browser keeps
+    // the redirect for most of it instead of asking again per avatar on screen
+    expect(res.headers['cache-control']).toBe('private, max-age=3000');
   });
 
   it('rejects key with path traversal (..)', async () => {

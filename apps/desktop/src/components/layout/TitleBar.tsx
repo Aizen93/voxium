@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Minus, Square, X, Maximize2 } from 'lucide-react';
 
 const TAURI_AVAILABLE = '__TAURI_INTERNALS__' in window;
@@ -9,6 +10,7 @@ async function getTauriWindow() {
 }
 
 export function TitleBar() {
+  const { t } = useTranslation();
   const [maximized, setMaximized] = useState(false);
 
   // Sync maximized state when window is resized externally (e.g. Win+Up, Snap Assist)
@@ -96,7 +98,7 @@ export function TitleBar() {
           onClick={handleMinimize}
           className="flex h-full w-11 items-center justify-center text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
           tabIndex={-1}
-          aria-label="Minimize"
+          aria-label={t('common.minimize')}
         >
           <Minus size={14} />
         </button>
@@ -104,7 +106,7 @@ export function TitleBar() {
           onClick={handleMaximize}
           className="flex h-full w-11 items-center justify-center text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
           tabIndex={-1}
-          aria-label={maximized ? 'Restore' : 'Maximize'}
+          aria-label={maximized ? t('common.restore') : t('common.maximize')}
         >
           {maximized ? <Square size={12} /> : <Maximize2 size={13} />}
         </button>
@@ -112,7 +114,7 @@ export function TitleBar() {
           onClick={handleClose}
           className="flex h-full w-11 items-center justify-center text-vox-text-muted hover:bg-red-600 hover:text-white transition-colors"
           tabIndex={-1}
-          aria-label="Close"
+          aria-label={t('common.close')}
         >
           <X size={14} />
         </button>

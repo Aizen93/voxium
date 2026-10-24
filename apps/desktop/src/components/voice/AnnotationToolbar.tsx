@@ -150,7 +150,8 @@ export function AnnotationToolbar() {
       onClick={onClick}
       disabled={!enabled}
       className="rounded p-1.5 text-vox-text-muted transition-colors hover:bg-vox-bg-hover hover:text-vox-text-primary disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
-      title={`${t(labelKey)} (${keyLabel})`}
+      // The shown shortcut names Ctrl the way the keyboard is labelled in the UI language (Strg in German)
+      title={`${t(labelKey)} (${keyLabel.replace('Ctrl', t('common.ctrlKey'))})`}
       aria-label={t(labelKey)}
       aria-keyshortcuts={keyLabel}
     >

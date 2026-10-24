@@ -71,7 +71,7 @@ test.describe('message search jump', () => {
 
     // Back to NOW: the button must reload the live tail, where the newest
     // message exists — not just scroll to the window's edge.
-    await page.getByRole('button', { name: 'Scroll to bottom' }).click();
+    await page.getByRole('button', { name: 'Jump to bottom' }).click();
     await expect(page.getByText('haystack message 59', { exact: false }).first()).toBeVisible({ timeout: 10_000 });
   });
 

@@ -159,7 +159,7 @@ interface AdminState {
   rateLimits: Array<{
     name: string;
     label: string;
-    keyType: 'ip' | 'userId' | 'webhook';
+    keyType: 'ip' | 'subnet' | 'userId' | 'account' | 'inbox' | 'domain' | 'webhook';
     keyPrefix: string;
     points: number;
     duration: number;

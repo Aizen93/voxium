@@ -120,9 +120,13 @@ adminRouter.get('/registration-stats', async (_req: Request, res: Response, next
       prisma.user.count({ where: { createdAt: { gte: hourAgo } } }),
       prisma.user.count({ where: { createdAt: { gte: dayAgo } } }),
       prisma.user.count({ where: { emailVerified: false } }),
+      // Addresses that REGISTERED accounts this week: the record's kind is
+      // fixed at first sight, and the account's creation date says when.
+      // (`lastSeenAt` is refreshed by every login, so filtering on it counted
+      // returning accounts instead — useless for anti-bot triage.)
       prisma.ipRecord.groupBy({
         by: ['ip'],
-        where: { kind: 'register', lastSeenAt: { gte: weekAgo } },
+        where: { kind: 'register', user: { createdAt: { gte: weekAgo } } },
         _count: { ip: true },
         orderBy: { _count: { ip: 'desc' } },
         take: 10,
@@ -501,9 +505,11 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
 
 adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
   try {
-    const user = await prisma.user.findUnique({ where: { id: req.params.userId }, select: { id: true, bannedAt: true } });
+    const user = await prisma.user.findUnique({ where: { id: req.params.userId }, select: { id: true, bannedAt: true, role: true } });
     if (!user) throw new NotFoundError('User');
     if (!user.bannedAt) throw new BadRequestError('User is not banned');
+    // The same hierarchy the ban applies: an admin's ban is a superadmin's to lift
+    if (user.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can unban other admins');
 
     // Remove IP bans for this user's IPs — but only if no other banned user
     // shares that IP. Resolved in ONE query instead of a findFirst per IP

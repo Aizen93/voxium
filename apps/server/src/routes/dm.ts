@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
-import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead } from '../middleware/rateLimiter';
+import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead, rateLimitDmOpen } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
@@ -104,7 +104,7 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
 
 // ─── Create or get conversation ──────────────────────────────────────────────
 
-dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
+dmRouter.post('/', rateLimitDmOpen, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const currentUserId = req.user!.userId;
     const { userId: targetUserId } = req.body;

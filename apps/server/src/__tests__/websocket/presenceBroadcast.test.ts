@@ -5,6 +5,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const {
   mockSetUserOnline,
   mockSetUserOffline,
+  mockIsUserOnline,
+  mockReplayVoiceState,
   mockGetRedisPubSub,
   mockIOInstance,
 } = vi.hoisted(() => {
@@ -24,6 +26,8 @@ const {
   return {
     mockSetUserOnline: vi.fn().mockResolvedValue(undefined),
     mockSetUserOffline: vi.fn().mockResolvedValue(null),
+    mockIsUserOnline: vi.fn().mockResolvedValue(false),
+    mockReplayVoiceState: vi.fn().mockResolvedValue(undefined),
     mockGetRedisPubSub: vi.fn().mockReturnValue({
       pub: {},
       sub: {},
@@ -93,6 +97,7 @@ vi.mock('@socket.io/redis-adapter', () => ({
 vi.mock('../../utils/redis', () => ({
   setUserOnline: mockSetUserOnline,
   setUserOffline: mockSetUserOffline,
+  isUserOnline: mockIsUserOnline,
   getRedisPubSub: mockGetRedisPubSub,
   getRedis: vi.fn().mockReturnValue({ ping: vi.fn() }),
   getOnlineUsers: vi.fn().mockResolvedValue([]),
@@ -110,9 +115,9 @@ vi.mock('../../middleware/rateLimiter', async (importOriginal) => ({
 
 vi.mock('../../websocket/voiceHandler', () => ({
   handleVoiceEvents: vi.fn(),
-  getVoiceStateForServer: vi.fn().mockResolvedValue([]),
-  getVoiceStateForServers: vi.fn().mockResolvedValue([]),
-  getScreenShareState: vi.fn().mockResolvedValue(null),
+  // The replay's shape is voiceHandler's (covered there); here only that the
+  // connect handler asks for it, for the right servers and visible channels
+  replayVoiceState: mockReplayVoiceState,
 }));
 
 vi.mock('../../websocket/dmVoiceHandler', () => ({
@@ -134,6 +139,7 @@ vi.mock('jsonwebtoken', () => ({
 }));
 
 import { initSocketServer, getSocketIp } from '../../websocket/socketServer';
+import jwt from 'jsonwebtoken';
 import http from 'http';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -304,6 +310,77 @@ describe('socketServer — DM presence broadcast on connect', () => {
     await expect(connectionHandler(socket)).resolves.not.toThrow();
 
     httpServer.close();
+  });
+});
+
+describe('socketServer — auth middleware names an EXPIRED access token', () => {
+  const savedJwtSecret = process.env.JWT_SECRET;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-secret';
+  });
+  afterEach(() => {
+    if (savedJwtSecret !== undefined) process.env.JWT_SECRET = savedJwtSecret; else delete process.env.JWT_SECRET;
+  });
+
+  async function handshakeWithVerifyThrowing(err: Error) {
+    vi.mocked(jwt.verify).mockImplementationOnce(() => { throw err; });
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const { socket } = createMockSocket('user-1');
+    const next = vi.fn();
+    await getAuthMiddleware()(socket, next);
+    httpServer.close();
+    return next;
+  }
+
+  it("answers 'Token expired' for jsonwebtoken's TokenExpiredError — the one refusal the client repairs with a refresh", async () => {
+    // A window restored after a long minimize handshakes with the token it
+    // had when it was hidden; the client renews on this answer and nothing else
+    const next = await handshakeWithVerifyThrowing(Object.assign(new Error('jwt expired'), { name: 'TokenExpiredError' }));
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Token expired' }));
+  });
+
+  it("keeps the generic 'Invalid token' for every other TOKEN failure (nothing to learn from it)", async () => {
+    for (const name of ['JsonWebTokenError', 'NotBeforeError']) {
+      const next = await handshakeWithVerifyThrowing(Object.assign(new Error('invalid signature'), { name }));
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Invalid token' }));
+    }
+  });
+
+  it("answers 'Authentication unavailable' when the user lookup fails — a database blip is not a bad token", async () => {
+    // 'Invalid token' here made the client renew and, the renewal meeting the
+    // same outage, end the session: a database blip during a reconnect storm
+    // signed everyone out. The client retries this answer later instead.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPrisma.user.findUnique.mockRejectedValueOnce(Object.assign(new Error("Can't reach database server"), { name: 'PrismaClientInitializationError' }));
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const { socket } = createMockSocket('user-1');
+    const next = vi.fn();
+
+    await getAuthMiddleware()(socket, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Authentication unavailable' }));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Handshake'), "Can't reach database server");
+    httpServer.close();
+    error.mockRestore();
+  });
+
+  it("the IP-ban lookup failing answers the same (the token was fine)", async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPrisma.user.findUnique.mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(), privacyAcceptedAt: new Date() });
+    mockPrisma.ipBan.findUnique.mockRejectedValueOnce(new Error('pool timeout'));
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const { socket } = createMockSocket('user-1');
+    const next = vi.fn();
+
+    await getAuthMiddleware()(socket, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Authentication unavailable' }));
+    httpServer.close();
+    error.mockRestore();
   });
 });
 
@@ -532,9 +609,7 @@ describe('socketServer — DM presence broadcast on disconnect', () => {
 
 // ─── Connect-time voice replay (F3) ─────────────────────────────────────────
 
-import { getVoiceStateForServers } from '../../websocket/voiceHandler';
-
-describe('socketServer — voice:channel_users replay on connect', () => {
+describe('socketServer — voice occupancy replay on connect', () => {
   const savedJwtSecret = process.env.JWT_SECRET;
 
   beforeEach(() => {
@@ -561,73 +636,373 @@ describe('socketServer — voice:channel_users replay on connect', () => {
     else delete process.env.JWT_SECRET;
   });
 
-  it('forwards e2eDeviceId/e2eEpoch as deviceId/epoch, matching the voice:join replay shape', async () => {
-    // F3: this replay dropped both fields, so a client that reconnected during
-    // a secure voice call excluded every occupant from keying for the rest of
-    // the call — silent, and only reachable on reconnect.
-    const { socket, emitFn } = createMockSocket('user-1');
+  it('replays to the socket itself, for every server the user is in, with ONLY the channels they can view', async () => {
+    // A secure channel's visibility is membership-derived: without the row it
+    // is (correctly) outside the replay set, so its occupants never leak
+    const { socket } = createMockSocket('user-1');
     const httpServer = http.createServer();
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
-
-    // Secure channel visibility is membership-derived — without this row the
-    // replay is (correctly) filtered out before it is ever emitted
-    mockPrisma.channelMember.findMany.mockResolvedValue([{ channelId: 'sec-vc' }]);
-    mockPrisma.user.findMany.mockResolvedValueOnce([
-      { id: 'peer-1', username: 'peer', displayName: 'Peer', avatarUrl: null },
-    ]);
-    vi.mocked(getVoiceStateForServers).mockResolvedValueOnce([{
-      channelId: 'sec-vc',
-      serverId: 'srv-1',
-      userIds: ['peer-1'],
-      userStates: new Map([['peer-1', {
-        selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false,
-        e2eDeviceId: 'device-aaaa1111', e2eEpoch: 'epochAAAA0001',
-      }]]),
-    }] as never);
+    mockPrisma.channelMember.findMany.mockResolvedValue([]);
 
     await connectionHandler(socket);
 
-    const replay = emitFn.mock.calls.find((c) => c[0] === 'voice:channel_users');
-    expect(replay?.[1].users[0]).toMatchObject({
-      id: 'peer-1',
-      deviceId: 'device-aaaa1111',
-      epoch: 'epochAAAA0001',
-    });
+    expect(mockReplayVoiceState).toHaveBeenCalledTimes(1);
+    const [target, serverIds, visible] = mockReplayVoiceState.mock.calls[0] as [unknown, string[], Set<string>];
+    expect(target).toBe(socket);
+    expect(serverIds).toEqual(['srv-1']);
+    expect([...visible]).toEqual([]);
 
     httpServer.close();
   });
 
-  it('omits the keys entirely for a plaintext channel, rather than sending undefined', async () => {
-    // Conditional spread, exactly like voiceHandler's replay — a present-but-
-    // undefined key would read as "announced no device" on the client
-    const { socket, emitFn } = createMockSocket('user-1');
+  it('a secure voice channel the user is a member of IS in the replay set', async () => {
+    const { socket } = createMockSocket('user-1');
     const httpServer = http.createServer();
     initSocketServer(httpServer);
     const connectionHandler = getConnectionHandler();
-
-    mockPrisma.channel.findMany.mockResolvedValue([
-      { id: 'vc', serverId: 'srv-1', type: 'voice', secure: false },
-    ]);
-    mockPrisma.server.findMany.mockResolvedValue([{ id: 'srv-1', ownerId: 'user-1' }]);
-    mockPrisma.user.findMany.mockResolvedValueOnce([
-      { id: 'peer-1', username: 'peer', displayName: 'Peer', avatarUrl: null },
-    ]);
-    vi.mocked(getVoiceStateForServers).mockResolvedValueOnce([{
-      channelId: 'vc',
-      serverId: 'srv-1',
-      userIds: ['peer-1'],
-      userStates: new Map([['peer-1', {
-        selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false,
-      }]]),
-    }] as never);
+    mockPrisma.channelMember.findMany.mockResolvedValue([{ channelId: 'sec-vc' }]);
 
     await connectionHandler(socket);
 
-    const replay = emitFn.mock.calls.find((c) => c[0] === 'voice:channel_users');
-    expect(replay?.[1].users[0]).not.toHaveProperty('deviceId');
-    expect(replay?.[1].users[0]).not.toHaveProperty('epoch');
+    const visible = mockReplayVoiceState.mock.calls[0][2] as Set<string>;
+    expect([...visible]).toEqual(['sec-vc']);
 
+    httpServer.close();
+  });
+
+  it('replays right after the channel rooms are joined, before the unread counts', async () => {
+    // The later the replay, the wider the window for a leave to land before
+    // it; everything after the room joins reaches the socket live anyway
+    const order: string[] = [];
+    const { socket } = createMockSocket('user-1');
+    socket.join.mockImplementation((room: string) => { order.push(`join:${room}`); });
+    mockReplayVoiceState.mockImplementationOnce(async () => { order.push('replay'); });
+    mockPrisma.$queryRawUnsafe.mockImplementation(async () => { order.push('unread'); return []; });
+    mockPrisma.channel.findMany.mockResolvedValue([{ id: 'tc', serverId: 'srv-1', type: 'text', secure: false }]);
+    mockPrisma.server.findMany.mockResolvedValue([{ id: 'srv-1', ownerId: 'user-1' }]);
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    expect(order.indexOf('join:channel:tc')).toBeLessThan(order.indexOf('replay'));
+    expect(order.indexOf('replay')).toBeLessThan(order.indexOf('unread'));
+
+    mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
+    httpServer.close();
+  });
+
+  it('a replay failure does not take the DM rooms or the presence broadcast with it', async () => {
+    const { socket, toFn } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    mockReplayVoiceState.mockRejectedValueOnce(new Error('redis down'));
+    mockPrisma.conversation.findMany.mockResolvedValue([{ id: 'conv-1' }]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await getConnectionHandler()(socket);
+
+    expect(socket.join).toHaveBeenCalledWith('dm:conv-1');
+    expect(toFn).toHaveBeenCalledWith('server:srv-1');
+    expect(toFn).toHaveBeenCalledWith('dm:conv-1');
+    error.mockRestore();
+    httpServer.close();
+  });
+});
+
+// ─── Presence registration vs. a disconnect during the setup ────────────────
+//
+// A socket that drops while its connection setup is still running used to
+// leave its user online for good: the unregistration ran before the
+// registration had landed (nothing to remove), and the DB column was written
+// 'online' at the very END of the setup, after the disconnect had already
+// written 'offline'.
+
+describe('socketServer — presence registration vs. disconnect race', () => {
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-secret';
+    mockPrisma.user.findUnique.mockResolvedValue({
+      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+    });
+    mockPrisma.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-1' }]);
+    mockPrisma.channel.findMany.mockResolvedValue([]);
+    mockPrisma.conversation.findMany.mockResolvedValue([{ id: 'conv-1' }]);
+    mockPrisma.ipBan.findUnique.mockResolvedValue(null);
+    mockPrisma.ipRecord.upsert.mockResolvedValue({});
+    mockPrisma.supportTicket.findUnique.mockResolvedValue(null);
+    mockPrisma.announcement.findMany.mockResolvedValue([]);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
+    mockSetUserOnline.mockResolvedValue(undefined);
+    mockSetUserOffline.mockResolvedValue(null);
+    mockIsUserOnline.mockResolvedValue(false);
+    mockReplayVoiceState.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    if (savedJwtSecret !== undefined) process.env.JWT_SECRET = savedJwtSecret;
+    else delete process.env.JWT_SECRET;
+  });
+
+  it('a disconnect during the setup WAITS for the registration before unregistering', async () => {
+    const { socket, handlers } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    let finishOnline!: () => void;
+    mockSetUserOnline.mockReturnValueOnce(new Promise<void>((r) => { finishOnline = r; }));
+
+    const setup = getConnectionHandler()(socket);
+    // The socket drops before Redis answered the registration
+    const teardown = handlers.get('disconnecting')!();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockSetUserOffline).not.toHaveBeenCalled();
+
+    finishOnline();
+    await Promise.all([setup, teardown]);
+
+    // Unregistered AFTER the registration landed: the socket is found and removed
+    expect(mockSetUserOffline).toHaveBeenCalledWith('socket-user-1');
+    expect(mockSetUserOnline.mock.invocationCallOrder[0]).toBeLessThan(mockSetUserOffline.mock.invocationCallOrder[0]);
+    httpServer.close();
+  });
+
+  it('a failed registration still lets the disconnect handler run (never a hang)', async () => {
+    const { socket, handlers } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    mockSetUserOnline.mockRejectedValue(new Error('redis down'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await getConnectionHandler()(socket);
+    await expect(handlers.get('disconnecting')!()).resolves.toBeUndefined();
+
+    expect(mockSetUserOffline).toHaveBeenCalledWith('socket-user-1');
+    mockSetUserOnline.mockResolvedValue(undefined);
+    error.mockRestore();
+    httpServer.close();
+  });
+
+  it('a registration Redis refused twice is NEVER announced online (nobody could unwind it), and the column is not written', async () => {
+    // A failover's READONLY, LOADING, a closed client: the disconnect handler
+    // and the reaper find no socket:users entry, so an online broadcast would
+    // show the user online to every contact until they refetch
+    const { socket, toFn, emitFn } = createMockSocket('user-1');
+    socket.disconnected = false;
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    mockSetUserOnline.mockRejectedValue(new Error('READONLY'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await getConnectionHandler()(socket);
+
+    expect(mockSetUserOnline).toHaveBeenCalledTimes(2);
+    expect(mockPrisma.user.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'online' } }));
+    expect(emitFn).not.toHaveBeenCalledWith('presence:update', expect.anything());
+    expect(toFn).not.toHaveBeenCalledWith('server:srv-1');
+    // The socket still serves: its rooms are joined
+    expect(socket.join).toHaveBeenCalledWith('server:srv-1');
+    mockSetUserOnline.mockResolvedValue(undefined);
+    error.mockRestore();
+    httpServer.close();
+  });
+
+  it('a registration refused once is retried and, once it lands, the socket is announced online', async () => {
+    const { socket, toFn } = createMockSocket('user-1');
+    socket.disconnected = false;
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    mockSetUserOnline.mockRejectedValueOnce(new Error('LOADING'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await getConnectionHandler()(socket);
+
+    expect(mockSetUserOnline).toHaveBeenCalledTimes(2);
+    expect(mockPrisma.user.updateMany).toHaveBeenCalledWith({
+      where: { id: 'user-1', NOT: { status: 'online' } },
+      data: { status: 'online' },
+    });
+    expect(toFn).toHaveBeenCalledWith('server:srv-1');
+    error.mockRestore();
+    httpServer.close();
+  });
+
+  it('asks the replay for a SNAPSHOT (source connect): the client ignores it for the channel it is re-joining', async () => {
+    const { socket } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    expect(mockReplayVoiceState).toHaveBeenCalledWith(socket, ['srv-1'], expect.any(Set), { source: 'connect' });
+    httpServer.close();
+  });
+
+  it('writes the DB column online right after the Redis registration, before any other query', async () => {
+    const order: string[] = [];
+    mockSetUserOnline.mockImplementationOnce(async () => { order.push('redis-online'); });
+    mockPrisma.user.updateMany.mockImplementation(async (args: { data: { status: string } }) => { order.push(`db-${args.data.status}`); return { count: 1 }; });
+    mockPrisma.serverMember.findMany.mockImplementationOnce(async () => { order.push('memberships'); return [{ serverId: 'srv-1' }]; });
+    const { socket } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    expect(order.slice(0, 3)).toEqual(['redis-online', 'db-online', 'memberships']);
+    httpServer.close();
+  });
+
+  it('does NOT announce a socket online that disconnected during the setup', async () => {
+    const { socket, toFn } = createMockSocket('user-1');
+    socket.disconnected = false;
+    // The socket drops while the channel rooms are being computed
+    mockPrisma.channel.findMany.mockImplementationOnce(async () => { socket.disconnected = true; return []; });
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    // Registered (its own disconnect handler unwinds it) but never announced
+    expect(mockSetUserOnline).toHaveBeenCalled();
+    expect(toFn).not.toHaveBeenCalledWith('server:srv-1');
+    expect(toFn).not.toHaveBeenCalledWith('dm:conv-1');
+    httpServer.close();
+  });
+
+  it('control: a socket that stays connected IS announced online to its servers and DMs', async () => {
+    const { socket, toFn, emitFn } = createMockSocket('user-1');
+    socket.disconnected = false;
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    expect(toFn).toHaveBeenCalledWith('server:srv-1');
+    expect(toFn).toHaveBeenCalledWith('dm:conv-1');
+    expect(emitFn).toHaveBeenCalledWith('presence:update', { userId: 'user-1', status: 'online' });
+    httpServer.close();
+  });
+
+  it('a disconnect whose user reconnected meanwhile writes and announces NOTHING offline', async () => {
+    // A page reload under load: the old socket's teardown and the new socket's
+    // setup run in parallel. The teardown re-checks Redis as late as it can
+    // (after its own queries); if the user is online again, the new
+    // connection's online write and broadcast are the truth and an offline
+    // one landing after them would show a connected user as offline.
+    const { socket, handlers, toFn } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    await getConnectionHandler()(socket);
+
+    mockSetUserOffline.mockResolvedValueOnce({ userId: 'user-1', fullyOffline: true });
+    mockIsUserOnline.mockResolvedValueOnce(true);
+    mockPrisma.user.updateMany.mockClear();
+    toFn.mockClear();
+
+    await handlers.get('disconnecting')!();
+
+    expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    expect(toFn).not.toHaveBeenCalled();
+    // Checked AFTER the room queries, so the window after it is as small as it can be
+    expect(mockPrisma.serverMember.findMany.mock.invocationCallOrder.at(-1)!)
+      .toBeLessThan(mockIsUserOnline.mock.invocationCallOrder[0]);
+    httpServer.close();
+  });
+
+  it('a registration landing between the re-check and the offline write is put right: column back online, rooms told', async () => {
+    const { socket, handlers, toFn, emitFn } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    await getConnectionHandler()(socket);
+
+    mockSetUserOffline.mockResolvedValueOnce({ userId: 'user-1', fullyOffline: true });
+    // Offline at the first look, online again at the second (the look after the write)
+    mockIsUserOnline.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    mockPrisma.user.updateMany.mockClear();
+    emitFn.mockClear();
+    toFn.mockClear();
+
+    await handlers.get('disconnecting')!();
+
+    expect(mockPrisma.user.updateMany).toHaveBeenNthCalledWith(1, {
+      where: { id: 'user-1', NOT: { status: 'offline' } },
+      data: { status: 'offline' },
+    });
+    expect(mockPrisma.user.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: 'user-1', NOT: { status: 'online' } },
+      data: { status: 'online' },
+    });
+    const statuses = emitFn.mock.calls.filter((c) => c[0] === 'presence:update').map((c) => c[1].status);
+    // offline to the server room and the DM room, then online to both: the last word is online
+    expect(statuses).toEqual(['offline', 'offline', 'online', 'online']);
+    httpServer.close();
+  });
+
+  it('joins NO room and replays nothing for a socket that dropped during the setup', async () => {
+    // socket.io's join() does not check the connection, and the adapter's
+    // cleanup for this socket has already run: a room joined now would hold
+    // its dead id for good
+    const { socket } = createMockSocket('user-1');
+    socket.disconnected = false;
+    mockPrisma.channel.findMany.mockImplementationOnce(async () => { socket.disconnected = true; return [{ id: 'tc', serverId: 'srv-1', type: 'text', secure: false }]; });
+    mockPrisma.server.findMany.mockResolvedValue([{ id: 'srv-1', ownerId: 'user-1' }]);
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    // The server room was joined before the drop; nothing after it
+    expect(socket.join).toHaveBeenCalledWith('server:srv-1');
+    expect(socket.join).not.toHaveBeenCalledWith('channel:tc');
+    expect(socket.join).not.toHaveBeenCalledWith('dm:conv-1');
+    expect(mockReplayVoiceState).not.toHaveBeenCalled();
+    expect(mockPrisma.announcement.findMany).not.toHaveBeenCalled();
+    httpServer.close();
+  });
+
+  it('control: a disconnect whose user stayed offline writes and announces offline', async () => {
+    const { socket, handlers, toFn, emitFn } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    await getConnectionHandler()(socket);
+
+    mockSetUserOffline.mockResolvedValueOnce({ userId: 'user-1', fullyOffline: true });
+    mockIsUserOnline.mockResolvedValueOnce(false);
+    mockPrisma.user.updateMany.mockClear();
+    toFn.mockClear();
+
+    await handlers.get('disconnecting')!();
+
+    expect(mockPrisma.user.updateMany).toHaveBeenCalledWith({
+      where: { id: 'user-1', NOT: { status: 'offline' } },
+      data: { status: 'offline' },
+    });
+    expect(toFn).toHaveBeenCalledWith('server:srv-1');
+    expect(emitFn).toHaveBeenCalledWith('presence:update', { userId: 'user-1', status: 'offline' });
+    httpServer.close();
+  });
+
+  it('one failing setup step does not abandon the rest: a dead channel query still leaves the DM rooms joined and presence announced', async () => {
+    const { socket, toFn } = createMockSocket('user-1');
+    socket.disconnected = false;
+    mockPrisma.channel.findMany.mockRejectedValueOnce(new Error('db hiccup'));
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await getConnectionHandler()(socket);
+
+    expect(socket.join).toHaveBeenCalledWith('server:srv-1');
+    expect(socket.join).toHaveBeenCalledWith('dm:conv-1');
+    expect(mockReplayVoiceState).toHaveBeenCalled();
+    expect(toFn).toHaveBeenCalledWith('server:srv-1');
+    expect(toFn).toHaveBeenCalledWith('dm:conv-1');
+    expect(mockPrisma.announcement.findMany).toHaveBeenCalled();
+    error.mockRestore();
     httpServer.close();
   });
 });

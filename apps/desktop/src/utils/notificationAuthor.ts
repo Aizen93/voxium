@@ -13,6 +13,6 @@ export function notificationAuthorName(
   author: Pick<MessageAuthor, 'displayName' | 'username' | 'isWebhook'> | null | undefined,
   t: TFunction,
 ): string {
-  const name = author?.displayName || author?.username || 'Someone';
+  const name = author?.displayName || author?.username || t('notifications.someone');
   return author?.isWebhook === true ? `${name} · ${t('messageItem.appTag')}` : name;
 }

@@ -183,7 +183,8 @@ channelRouter.get('/', async (req: Request<{ serverId: string }>, res: Response,
 });
 
 // Create a channel
-channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+// The structure bucket the PATCH and the reorder already use
+channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const { type = 'text', categoryId } = req.body;
@@ -341,7 +342,7 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
 });
 
 // Delete a channel
-channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
+channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, channelId } = req.params;
     const userId = req.user!.userId;

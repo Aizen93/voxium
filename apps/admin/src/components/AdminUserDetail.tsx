@@ -18,6 +18,11 @@ export function AdminUserDetail({ userId, onBack }: Props) {
   const { selectedUser, fetchUserDetail, fetchUserOwnedServers, banUser, unbanUser, deleteUser, updateUserRole, toggleSupporter } = useAdminStore();
   const currentUser = useAuthStore((s) => s.user);
   const isSuperAdmin = currentUser?.role === 'superadmin';
+  // What the server allows (routes/admin.ts): an admin may ban or delete
+  // members only; a superadmin anyone who is not a superadmin
+  const canModerateTarget = selectedUser
+    ? (isSuperAdmin ? selectedUser.role !== 'superadmin' : selectedUser.role === 'user')
+    : false;
   const [confirmAction, setConfirmAction] = useState<'ban' | 'unban' | 'delete' | 'deleteWithTransfer' | 'promote' | 'demote' | null>(null);
   const [banReason, setBanReason] = useState('');
   const [banIps, setBanIps] = useState(false);
@@ -147,7 +152,10 @@ export function AdminUserDetail({ userId, onBack }: Props) {
         {/* Actions */}
         {selectedUser.role !== 'superadmin' && (
           <div className="mt-6 flex flex-wrap gap-3">
-            {selectedUser.bannedAt ? (
+            {/* The server lets an admin ban or delete members only, and a
+                superadmin anyone but another superadmin: the buttons used to
+                show regardless and fail with a generic error */}
+            {canModerateTarget && (selectedUser.bannedAt ? (
               <button
                 onClick={() => setConfirmAction('unban')}
                 className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-vox-accent-success/20 text-vox-accent-success hover:bg-vox-accent-success/30"
@@ -161,15 +169,25 @@ export function AdminUserDetail({ userId, onBack }: Props) {
               >
                 <Ban size={14} /> Ban User
               </button>
+            ))}
+            {canModerateTarget && (
+              <button
+                onClick={() => setConfirmAction(
+                  (selectedUser._count?.ownedServers ?? 0) > 0 ? 'deleteWithTransfer' : 'delete'
+                )}
+                className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30"
+              >
+                <Trash2 size={14} /> Delete User
+              </button>
             )}
-            <button
-              onClick={() => setConfirmAction(
-                (selectedUser._count?.ownedServers ?? 0) > 0 ? 'deleteWithTransfer' : 'delete'
-              )}
-              className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30"
-            >
-              <Trash2 size={14} /> Delete User
-            </button>
+            {!canModerateTarget && (
+              // Inside this block the target is never a superadmin (the whole
+              // action row is hidden for them above): the only refusal left
+              // is an admin looking at another admin
+              <span className="text-xs text-vox-text-muted self-center">
+                Only a superadmin can ban or delete an admin.
+              </span>
+            )}
 
             {isSuperAdmin && (
               selectedUser.role === 'admin' ? (
@@ -392,7 +410,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
       {confirmAction === 'promote' && (
         <AdminConfirmModal
           title="Promote to Admin"
-          message={`Promote "${selectedUser.username}" to admin? They will have full access to the admin dashboard.`}
+          message={`Promote "${selectedUser.username}" to admin? They will get access to the admin dashboard; changing roles, managing infrastructure servers and banning or deleting other admins stay superadmin-only.`}
           confirmLabel="Promote"
           danger={false}
           onConfirm={async () => {

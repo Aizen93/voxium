@@ -265,8 +265,15 @@ interface VoiceState {
   // ─── Server Voice Actions (SFU) ────────────────────────────────────
   joinChannel: (channelId: string, serverId?: string, opts?: { secure?: boolean; keepRetryCount?: boolean }) => Promise<void>;
   leaveChannel: () => void;
-  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => void;
+  /** `source: 'connect'` is a snapshot replay (socket connect, server join): ignored for the channel this client is in. */
+  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string, source?: 'connect') => void;
   addUserToChannel: (channelId: string, user: VoiceUser, serverId?: string) => void;
+  /**
+   * `voice:error` from the server. Scoped by `channelId` when the server sent
+   * one: acted on only while that channel is the active one. Returns whether
+   * it acted (the caller toasts the message only then).
+   */
+  handleVoiceError: (data: { message: string; channelId?: string }) => boolean;
   removeUserFromChannel: (channelId: string, userId: string) => void;
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => void;
   handleForceMove: (targetChannelId: string) => void;
@@ -563,7 +570,7 @@ async function acquireAudioStream(): Promise<MediaStream | null> {
     return await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   } catch (err) {
     console.warn('[Voice] Microphone access denied, joining in listen-only mode:', err);
-    toast.warning('Microphone access denied — joining in listen-only mode');
+    toast.warning(i18n.t('voice.toasts.micDenied'));
     return null;
   }
 }
@@ -998,13 +1005,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         const record = useServerStore.getState().channels.find((c) => c.id === channelId);
         if (!record) {
           console.error(`[Voice] Channel ${channelId} not in the store — refusing to join`);
-          toast.error('Could not join the voice channel — try again');
+          toast.error(i18n.t('voice.toasts.joinFailed'));
           return;
         }
         secure = record.secure === true;
       } catch (err) {
         console.error('[Voice] Channel resolution failed — refusing to join:', err);
-        toast.error('Could not join the voice channel — try again');
+        toast.error(i18n.t('voice.toasts.joinFailed'));
         return;
       }
       if (generation !== voiceSessionGeneration) return;
@@ -1231,7 +1238,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             if (!settled) {
               settled = true;
               console.error('[Voice SFU] Send transport connect ACK timed out');
-              toast.error('Voice connection timed out — try rejoining');
+              toast.error(i18n.t('voice.toasts.connectionTimedOut'));
               errback(new Error('Transport connect timeout'));
             }
           }, 10000);
@@ -1241,7 +1248,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             clearTimeout(timeout);
             if (response.error) {
               console.error('[Voice SFU] Send transport DTLS connect failed:', response.error);
-              toast.error('Voice connection failed — try rejoining');
+              toast.error(i18n.t('voice.toasts.connectionFailed'));
               errback(new Error(response.error));
             } else {
               callback();
@@ -1334,7 +1341,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             const currentServerId = get().activeVoiceServerId;
             if (currentChannelId && transportRejoinAttempts < MAX_TRANSPORT_REJOIN_ATTEMPTS) {
               transportRejoinAttempts++;
-              toast.error(`Voice connection lost — reconnecting (attempt ${transportRejoinAttempts}/${MAX_TRANSPORT_REJOIN_ATTEMPTS})...`);
+              toast.error(i18n.t('voice.toasts.connectionLost', { attempt: transportRejoinAttempts, max: MAX_TRANSPORT_REJOIN_ATTEMPTS }));
               // Screen share cannot survive the rejoin — release the capture stream
               // and clear state so the share button doesn't stay stuck "on"
               const { screenStream: staleScreenStream } = get();
@@ -1358,7 +1365,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
                 set({ activeChannelId: currentChannelId, activeVoiceServerId: currentServerId });
               }
             } else if (currentChannelId) {
-              toast.error('Voice connection failed — please rejoin manually');
+              toast.error(i18n.t('voice.toasts.connectionFailedManual'));
               get().leaveChannel();
             }
           } else if (state === 'connected') {
@@ -1438,7 +1445,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
     } catch (err) {
       console.error('[Voice SFU] Failed to set up mediasoup:', err);
-      toast.error('Failed to establish voice connection');
+      toast.error(i18n.t('voice.toasts.establishFailed'));
     }
   },
 
@@ -1632,8 +1639,17 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   // ── Channel user state (unchanged) ─────────────────────────────────────
 
-  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string) => {
-    debugLog('[Voice] setChannelUsers:', channelId, users.length, 'users');
+  setChannelUsers: (channelId: string, users: VoiceUser[], serverId?: string, source?: 'connect') => {
+    debugLog('[Voice] setChannelUsers:', channelId, users.length, 'users', source ?? 'join');
+    // A snapshot replay for the channel we are (re)joining ourselves: our own
+    // voice:join answers with the fresh list (and voice:user_joined for us),
+    // and the snapshot — read, then one DB round trip, then sent — can land
+    // AFTER it, with our previous session and peers who left back in the
+    // list, and would re-key every one of them in a secure channel.
+    if (source === 'connect' && channelId === get().activeChannelId) {
+      debugLog('[Voice] setChannelUsers: snapshot for the active channel ignored (the re-join replays it)');
+      return;
+    }
     set((state) => {
       const newMap = new Map(state.channelUsers);
       newMap.set(channelId, users);
@@ -1674,7 +1690,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // runs, so every key they seal from now on fails the epoch binding and the
     // pair goes permanently silent. (Ghost list entries survive a missed
     // voice:user_left and an owner-node takeover, so this is reachable.)
-    if (listed && listed.deviceId === user.deviceId && listed.epoch === user.epoch) return;
+    // The same-session case still REFRESHES the row below: an announcement
+    // carries the participant's current mute/deaf flags, and a stale ghost
+    // entry (a missed voice:user_left before this re-join) would otherwise
+    // keep showing the flags of the session that ended. It just never re-keys.
+    const sameSession = !!listed && listed.deviceId === user.deviceId && listed.epoch === user.epoch;
 
     set((state) => {
       const newMap = new Map(state.channelUsers);
@@ -1695,8 +1715,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // No peer creation needed — SFU creates consumers server-side
 
     // Secure voice: a genuine ARRIVAL ratchets our key forward so the joiner
-    // never decrypts past audio (spec §21). Self echo is skipped.
-    if (user.id !== get().localUserId && activeSecureVoiceSession(channelId)) {
+    // never decrypts past audio (spec §21). Self echo is skipped, and so is a
+    // re-announcement of a session already keyed.
+    if (!sameSession && user.id !== get().localUserId && activeSecureVoiceSession(channelId)) {
       void import('../services/e2e/secureVoiceKeys')
         .then((m) => m.onParticipantJoined(channelId, user, { initialReplay: false }))
         .catch((err) => console.error('[SecureVoice] Arrival keying failed:', err));
@@ -1777,6 +1798,17 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
   },
 
+  handleVoiceError: (data) => {
+    const { activeChannelId, dmCallConversationId } = get();
+    // A channel-scoped notice (the session takeover) about a channel this
+    // client is no longer in — it moved on, perhaps evicting the other device
+    // in turn — must not end the call it is in now
+    if (data.channelId && data.channelId !== activeChannelId) return false;
+    if (activeChannelId) get().leaveChannel();
+    if (dmCallConversationId) get().leaveDMCall();
+    return true;
+  },
+
   handleForceMove: (targetChannelId: string) => {
     const { activeChannelId, activeVoiceServerId } = get();
     if (!activeChannelId || !activeVoiceServerId) return;
@@ -1831,7 +1863,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const users = channelUsers.get(activeChannelId) || [];
       const me = users.find((u) => u.id === localUserId);
       if (me?.serverMuted) {
-        toast.warning('You have been muted by a moderator');
+        toast.warning(i18n.t('voice.toasts.mutedByModerator'));
         return;
       }
     }
@@ -1884,7 +1916,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const users = channelUsers.get(activeChannelId) || [];
       const me = users.find((u) => u.id === localUserId);
       if (me?.serverDeafened) {
-        toast.warning('You have been deafened by a moderator');
+        toast.warning(i18n.t('voice.toasts.deafenedByModerator'));
         return;
       }
     }
@@ -2063,7 +2095,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
       if (!isUserCancel) {
         console.warn('[Voice] Screen capture failed:', err);
-        toast.error('Screen share failed — please try again');
+        toast.error(i18n.t('voice.toasts.screenShareFailed'));
       }
       return;
     }
@@ -2071,7 +2103,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const videoTrack = stream.getVideoTracks()[0];
     if (!videoTrack) {
       stream.getTracks().forEach((t) => t.stop());
-      toast.error('Screen share failed — please try again');
+      toast.error(i18n.t('voice.toasts.screenShareFailed'));
       return;
     }
     const settings = videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number };
@@ -2110,7 +2142,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     if (secureVoiceActive) return;
     const board = createWhiteboardStream();
     if (!board) {
-      toast.error('Screen share failed — please try again');
+      toast.error(i18n.t('voice.toasts.screenShareFailed'));
       return;
     }
     // A fixed source key that can never collide with a remembered SCREEN
@@ -2313,7 +2345,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // A getDisplayMedia permission cancel is a deliberate user action — no toast
       const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
       if (!isUserCancel) {
-        toast.error('Screen share failed — please try again');
+        toast.error(i18n.t('voice.toasts.screenShareFailed'));
       }
     } finally {
       shareActivationInFlight = false;
@@ -2746,7 +2778,7 @@ useSettingsStore.subscribe((state, prevState) => {
               debugLog('[Voice SFU] Replaced audio track on producer after input device change');
             } catch (err) {
               console.error('[Voice SFU] Failed to replace track on producer:', err);
-              toast.error('Microphone issue detected — try rejoining voice');
+              toast.error(i18n.t('voice.toasts.micIssue'));
             }
           }
         }
@@ -2907,6 +2939,17 @@ useSettingsStore.subscribe((state, prevState) => {
 // On socket reconnect while in a voice channel: re-join and re-establish
 onSocketReconnect(async () => {
   const { activeChannelId, dmCallConversationId } = useVoiceStore.getState();
+
+  // Every voice occupancy list is stale the moment the socket was gone: the
+  // leaves that happened meanwhile never reached this client, and the server's
+  // connect-time replay only names channels that still HAVE occupants — a
+  // channel that emptied while we were away was never replayed, so its last
+  // known occupants stayed on screen for good. Cleared synchronously, BEFORE
+  // any await: the replay (voice:channel_users per occupied channel, then
+  // our own re-join's events) arrives after this handler ran and rebuilds the
+  // lists from the server's truth. The channel→server map stays: it is a fact
+  // about channels, not about who is in them.
+  useVoiceStore.setState({ channelUsers: new Map() });
 
   const socket = getSocket();
   if (!socket) return;

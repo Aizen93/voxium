@@ -114,7 +114,7 @@ export function CreateServerModal({ onClose, onExplore }: Props) {
             {/* Icon Picker */}
             <div className="flex justify-center">
               <ImageUploadButton
-                displayName={name || 'Server'}
+                displayName={name || t('channel.server')}
                 onFileChange={setIconFile}
                 variant="create"
               />

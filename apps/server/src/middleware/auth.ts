@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { ForbiddenError, UnauthorizedError } from '../utils/errors';
+import { isJwtVerifyError } from '../utils/jwtErrors';
 import { prisma } from '../utils/prisma';
 import type { UserRole } from '@voxium/shared';
 
@@ -68,7 +69,15 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     if (err instanceof ForbiddenError || err instanceof UnauthorizedError) {
       return next(err);
     }
-    next(new UnauthorizedError('Invalid or expired token'));
+    // Only a token jsonwebtoken refused is a 401. The user lookup failing
+    // (pool exhausted, database down) used to answer 401 as well, and the
+    // client reads a 401 as "renew, then sign out when that fails too": a
+    // database blip signed everyone out. It surfaces as the 500 it is, and
+    // the client keeps the session for a later attempt.
+    if (isJwtVerifyError(err)) {
+      return next(new UnauthorizedError('Invalid or expired token'));
+    }
+    next(err);
   }
 }
 

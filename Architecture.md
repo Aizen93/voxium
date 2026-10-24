@@ -276,7 +276,7 @@ apps/desktop/
 │   │   ├── socket.ts            # Socket.IO client manager
 │   │   ├── audioAnalyser.ts     # Speaking detection (server + DM mode)
 │   │   ├── notificationSounds.ts # Sound effects (message, mention, join, leave, looping call ringtone)
-│   │   ├── tokenStorage.ts      # Dual-storage token abstraction (localStorage/sessionStorage)
+│   │   ├── tokenStorage.ts      # Session store: memory + write-through (OS credential store in the Tauri app, localStorage/sessionStorage on the web)
 │   │   └── notifications.ts     # 3-tier notifications: WinRT toast (avatar) → Tauri plugin → Web API (blob URL avatar)
 │   ├── utils/
 │   │   ├── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
@@ -934,6 +934,8 @@ Authoritative spec: `docs/e2e-dm-spec.md`. Summary of what ships and how it fits
 
 ### JWT Token Flow
 
+**Where the client keeps the tokens.** `services/tokenStorage.ts` holds the session in memory (synchronous reads for the REST interceptor and the socket) and writes it through to a store. In the Tauri desktop app that store is the OS credential store — Windows Credential Manager / macOS Keychain / Linux Secret Service, through the `session_secret_*` Tauri commands and the `keyring` crate, service `app.voxium.session`, the same keyring the E2E pickle key uses — where the access + refresh token pair is one entry and the TOTP trusted-device token another; nothing is written to the webview's localStorage, and an install that kept its tokens there is migrated into the keychain on its first launch. In a browser the store is localStorage ("Remember me") or sessionStorage. "Remember me" off keeps a desktop session in memory only. The store is loaded once at launch (`hydrateTokens()`) before the session restore (`authStore.checkAuth`: single-flight, a 15 s deadline over the whole attempt, retried on a 2 s → 30 s back-off after a transport failure; only a refusal ends the session, and a sign-in or logout voids an attempt still in flight). In the web client, a sign-out or sign-in in another tab is followed through `storage` events.
+
 ```mermaid
 sequenceDiagram
     participant Client
@@ -945,7 +947,7 @@ sequenceDiagram
     Server->>Server: Generate Refresh Token (7d, JWT_REFRESH_SECRET)
     Note over Server: Both embed tokenVersion from User model
     Server-->>Client: { accessToken, refreshToken }
-    Client->>Client: Store in localStorage
+    Client->>Client: Store (OS credential store in the desktop app, browser storage on the web)
 
     Client->>Server: API request (Authorization: Bearer access_token)
     Server-->>Client: 200 OK / Response
@@ -962,6 +964,8 @@ sequenceDiagram
         Server-->>Client: 401 — Redirect to login
     end
 ```
+
+The client renews in one place (`services/session.ts`): a single-flight refresh shared by the REST client and the socket, a token renewed before it is sent when its own `exp` (read on the server's clock, learnt from each renewed token's `iat`) says it has expired (a window restored after a long minimize), and a session that ends only on a 401 or 403 answer to the refresh or with no refresh token to send — a network error, a server error or a rate limit fails that one request and keeps the tokens, and a renewal that lands after a logout stores nothing. The socket handshake answers an expired access token with `Token expired` (any other token failure stays `Invalid token`; a failing database lookup answers `Authentication unavailable` instead, and on REST surfaces as a 500, never a 401, so a database blip cannot sign anyone out). A refusal by the server closes the socket.io manager for good, so the client reopens the socket itself: with the stored token when a REST request renewed it meanwhile, after one renewal otherwise, and after a growing wait for `Authentication unavailable`; transport failures are left to the manager, which retries without limit. The resume handler (`services/resume.ts`, on the window becoming visible or the network coming back) reopens a dropped socket at once with a live token, unless a handshake is already on the wire.
 
 ### Password Reset Flow
 
@@ -1071,7 +1075,7 @@ nothing about a visitor leaves the infrastructure):
 
 ```mermaid
 flowchart TD
-    A[POST /auth/register] --> B{Rate limits<br/>3/min + 5/day per IP<br/>20/day per /24 subnet}
+    A[POST /auth/register] --> B{Rate limits<br/>5/min + 5/day per IP<br/>20/day per /24 subnet}
     B -->|over budget| R1[429]
     B --> C{Proof-of-work valid?<br/>HMAC challenge, single-use,<br/>difficulty scales with subnet pressure}
     C -->|missing/invalid/replayed| R2[400 generic]
@@ -1186,6 +1190,10 @@ Redis Hash: rl:config
 - Overrides loaded from Redis on startup, cached in memory
 - Limiter instances nulled on config change → recreated on next request
 - Admin API: `GET /rate-limits`, `PUT /rate-limits/:name`, `POST /rate-limits/:name/reset`, `POST /rate-limits/clear-user`
+- The api-level general budget is per USER once signed in (`generalUser`, 600 requests/min; the limiter verifies the bearer's signature itself, before `authenticate`) and per ADDRESS for anonymous traffic (`general`, 1000/min), so a company behind one egress address is never bounded as a whole; one active client measures 35–60 requests/min
+- Key types: `ip` (shared by everyone behind one address, so sized for a group), `userId` (every write and expensive read, and the signed-in general budget), `account` (the account a sign-in is FOR, before anyone is authenticated: on `/login` an HMAC of the lowercased, trimmed e-mail together with the caller's network, so a stranger elsewhere cannot lock an account; on `/totp/verify` the user of a challenge token whose signature verifies), `webhook`
+- The sign-in buckets count failures only (`refundOnSuccess`: the point is consumed atomically and refunded on a 2xx, or on a 429 a later bucket answered): 20 failures/min per address with a 5-minute block, 60/min per /24 or /48, 10 failures per 15 minutes per account and network (TOTP: per account) with no block
+- Behind a reverse proxy the process does not trust (`NODE_ENV` not production and `TRUST_PROXY` not true), every client is one address; the server warns once when it sees `X-Forwarded-For` in that state. CORS exposes `Retry-After` so cross-origin clients can honour it
 
 ### Server Invite Lock
 
@@ -1350,14 +1358,17 @@ graph TD
 - Rust: null byte rejection, control char rejection, 128-char key limit, image magic byte validation (PNG/JPEG/WebP/GIF), symlink detection on cached files
 - Server: `?inline` proxy forces `Content-Type: image/webp`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`
 
-### Presence Cleanup
+### Presence
 
-`clearPresenceState()` in `utils/redis.ts` prevents ghost online statuses:
-- Collects all user IDs from Redis `online_users` set
-- Deletes per-user socket sets (`user:sockets:{userId}`)
-- Clears global keys (`online_users`, `socket:users`)
-- Resets all DB users with `status: 'online'` to `'offline'`
-- Called on server startup (before accepting connections) and graceful shutdown
+A user is online while at least one of their sockets, on any node, is registered: `user:sockets:{userId}` (the socket ids), `socket:users` (socket id → user id) and `online_users` in Redis, plus the `User.status` column the People panel reads. Both transitions are atomic — registration is one MULTI, unregistration one Lua script that removes the socket and decides in the same step whether it was the user's last — so two sockets of one user can never interleave into a partial state.
+
+The connection handler registers the socket and writes the column `online` before anything else, and the `disconnecting` handler waits for that registration before it unregisters; a socket that drops during the setup is therefore always unwound, and never announced online. A disconnect that finds the user already registered again (a page reload whose new socket connected while the old one was being torn down) writes and broadcasts nothing.
+
+Two sweeps keep the keys honest without a disconnect:
+- `clearPresenceState()` (`utils/redis.ts`) at startup (before accepting connections) and at graceful shutdown: as the sole node a full wipe, with live peers a scoped reap of the sockets missing from the cluster's adapter snapshot.
+- `utils/presenceReaper.ts` every 60 seconds while serving, under the shared cluster lock: the same scoped reap, plus a reconciliation of the users themselves (one the DB column or `online_users` calls online with no live socket registered is taken offline too), followed by a `presence:update` offline to every server and DM room of each user it took offline, unless they registered a new socket by then.
+
+Voice occupancy (`voice:channel_users`) is replayed to a socket on connect and to a member on joining a server (`replayVoiceState()`, stamped `source: 'connect'`), for the channels they can view; the client clears its lists on reconnect because the replay only names channels that have occupants, and ignores the snapshot for the channel it is re-joining itself, whose join answers with a fresher list.
 
 ### Email System
 
