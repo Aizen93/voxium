@@ -25,14 +25,17 @@ import { prisma } from './prisma';
 import { listAllS3Objects, deleteMultipleFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from './s3';
 import { getRedis } from './redis';
 import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
+import { ORPHAN_GRACE_DAYS } from '@voxium/shared';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;
 
 const SWEEP_HOUR = 5;
 const SWEEP_MINUTE = 0;
-/** Objects younger than this are never touched — see the ordering note above. */
-export const ORPHAN_GRACE_DAYS = 7;
+/** Objects younger than this are never touched — see the ordering note above.
+ *  Lives in @voxium/shared (the admin dashboard quotes it); re-exported here
+ *  so this module's existing importers keep working. */
+export { ORPHAN_GRACE_DAYS };
 const PAGE_SIZE = 1000;
 /** Only one node runs the sweep: production is multi-node and two concurrent
  *  full-bucket destructive scans, from two different snapshots, is not a thing

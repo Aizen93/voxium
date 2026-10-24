@@ -123,4 +123,50 @@ describe('AdminRateLimits — rule descriptions', () => {
     await render();
     expect(await hoverDescription('someFutureRule')).toBeNull();
   });
+
+  // What each bucket really charges (middleware/rateLimiter.ts and the routes
+  // that mount it): the old texts said "login attempts" for a failures-only
+  // bucket, "avatars, server icons" for a limiter attachments share, a
+  // stats/health limiter that /health never had, and a "catch-all" for what
+  // is the anonymous half of a per-IP / per-user pair.
+  const CORRECTED: Array<[name: string, keyType: Rule['keyType'], mustSay: RegExp, mustNotSay?: RegExp]> = [
+    ['login', 'ip', /failed sign-in attempts per ip.*successful sign-in is not counted/i],
+    ['upload', 'userId', /message attachments/i],
+    ['friendRequest', 'userId', /sending, accepting, declining and cancelling friend requests and removing friends/i],
+    ['stats', 'ip', /public stats endpoint/i, /health/i],
+    ['support', 'userId', /opening support tickets and sending ticket messages/i],
+    // Webhook deliveries are mounted outside /api/v1 (app.ts), so neither general bucket charges them
+    ['general', 'ip', /per-ip budget for requests without a valid sign-in.*every route under \/api\/v1 except webhook deliveries/i, /catch-all|every api route/i],
+    ['generalUser', 'userId', /per-user budget for signed-in requests.*every route under \/api\/v1 except webhook deliveries/i, /every api route/i],
+  ];
+
+  it.each(CORRECTED)('%s describes what the bucket really charges', async (name, keyType, mustSay, mustNotSay) => {
+    store.rateLimits = [rule(name, keyType, name)];
+    await render();
+    const text = await hoverDescription(name);
+    expect(text).toMatch(mustSay);
+    if (mustNotSay) expect(text).not.toMatch(mustNotSay);
+  });
+});
+
+describe('AdminRateLimits — table and reset help', () => {
+  it('the time-window help describes a fixed window from the first counted request, not a rolling one', async () => {
+    await render();
+    const tip = Array.from(document.body.querySelectorAll('thead th'))
+      .find((th) => th.textContent?.includes('Time Window'))!
+      .querySelector('.cursor-help') as HTMLElement;
+    await act(async () => {
+      tip.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body }));
+    });
+    const text = Array.from(document.body.children).filter((el) => el !== container).map((el) => el.textContent ?? '').join('');
+    expect(text).toMatch(/starts at the first counted request/i);
+    expect(text).not.toMatch(/rolling/i);
+  });
+
+  it('the reset field says it takes an e-mail too (clearUserRateLimits clears its sign-in buckets)', async () => {
+    await render();
+    const input = document.body.querySelector('form input[type="text"]') as HTMLInputElement;
+    expect(input.placeholder).toBe('User ID, IP address or e-mail');
+    expect(document.body.textContent).toContain('user ID, IP address or e-mail address');
+  });
 });

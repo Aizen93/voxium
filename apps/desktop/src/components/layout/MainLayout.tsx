@@ -629,8 +629,13 @@ export function MainLayout() {
         if (voiceState.activeChannelId && activeVoiceServerIs(serverId)) {
           voiceState.leaveChannel();
         }
+        // Read before handleMemberKicked drops the server from the strip
+        const spaceName = serverState.servers.find((s) => s.id === serverId)?.name;
         serverState.handleMemberKicked(serverId);
-        toast.warning('You were kicked from the server');
+        // Every kick is a remove-and-ban (removeMemberFromServer with `ban`)
+        toast.warning(spaceName
+          ? i18n.t('server.youWereRemovedAndBanned', { name: spaceName })
+          : i18n.t('server.youWereRemovedAndBannedUnknown'));
       },
       serverDeleted: ({ serverId }: { serverId: string }) => {
         const voiceState = useVoiceStore.getState();

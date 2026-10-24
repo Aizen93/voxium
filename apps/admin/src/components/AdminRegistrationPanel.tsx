@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { toast } from '../stores/toastStore';
 import { logMessage } from '../utils/apiError';
+import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
 
 interface RegistrationStats {
   lastHour: number;
@@ -42,8 +43,8 @@ function timeAgo(iso: string): string {
 
 /**
  * Registration-abuse triage panel (anti-bot Phase 4): volume over two
- * windows, the unverified backlog, and the IPs registering the most accounts
- * this week. REST + refresh button, per the admin conventions.
+ * windows, the unverified backlog, and the registration IPs behind the most
+ * accounts seen this week. REST + refresh button, per the admin conventions.
  */
 export function AdminRegistrationPanel() {
   const [stats, setStats] = useState<RegistrationStats | null>(null);
@@ -129,7 +130,10 @@ export function AdminRegistrationPanel() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {stats && stats.topRegisterIps.length > 0 && (
           <div>
-            <p className="text-xs text-vox-text-muted mb-1.5">Top registering IPs (7 days)</p>
+            {/* The server groups `register` IP records by lastSeenAt, which a later
+                sign-in from the same address refreshes: these are accounts
+                SEEN from their registration address this week, not new ones */}
+            <p className="text-xs text-vox-text-muted mb-1.5">Top registration IPs (accounts seen in the last 7 days)</p>
             <div className="space-y-1">
               {stats.topRegisterIps.map((row) => (
                 <div key={row.ip} className="flex items-center justify-between text-xs">
@@ -208,7 +212,7 @@ export function AdminRegistrationPanel() {
       {confirmSweep && hygiene && (
         <AdminConfirmModal
           title="Run unverified-account cleanup"
-          message={`This permanently deletes ${hygiene.pendingDeletions} account${hygiene.pendingDeletions === 1 ? '' : 's'} that never verified their email address and are older than ${hygiene.ttlDays} days, along with their avatars. Accounts holding a role other than 'user', and any that own a server, are never touched. This is the same sweep that runs nightly at 04:30 — running it now only makes it happen sooner. This action is irreversible.`}
+          message={`This permanently deletes ${hygiene.pendingDeletions} account${hygiene.pendingDeletions === 1 ? '' : 's'} that never verified their email address and are older than ${hygiene.ttlDays} days, along with their avatars. Accounts holding a role other than 'user', and any that own a server, are never touched. It also deletes IP records not seen for ${IP_RECORD_RETENTION_DAYS} days. This is the same sweep that runs nightly at 04:30 — running it now only makes it happen sooner. This action is irreversible.`}
           confirmLabel="Run cleanup"
           danger
           onConfirm={() => runSweep(false)}

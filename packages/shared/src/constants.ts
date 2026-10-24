@@ -278,6 +278,17 @@ export const JOIN_REQUEST_DECLINE_COOLDOWN_DAYS = 7;
 /** Pending requests older than this are deleted; the user can ask again. */
 export const JOIN_REQUEST_PENDING_TTL_DAYS = 30;
 
+// ─── Retention and trust periods the UI and the legal copy quote ─────────────
+// One copy each: the server jobs run on them, and the admin dashboard and the
+// locale fact test read them from here instead of restating the number.
+
+/** IpRecord rows unseen for this long are deleted by the registration hygiene sweep. */
+export const IP_RECORD_RETENTION_DAYS = 180;
+/** The orphan sweep never deletes an unreferenced S3 object younger than this. */
+export const ORPHAN_GRACE_DAYS = 7;
+/** Lifetime of the trusted-device token a successful TOTP sign-in issues (skips TOTP on that device). */
+export const TRUSTED_DEVICE_TTL_DAYS = 30;
+
 /** Characters that text shown to STRANGERS (a server description, a join
  *  request message, a ban reason) may never carry: control characters and the
  *  bidi-override / zero-width / invisible format characters that let text

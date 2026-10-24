@@ -18,6 +18,7 @@ import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
 import { logAuditEvent } from './auditLog';
 import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
+import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let spikeIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -26,7 +27,8 @@ let stopped = true;
 const SWEEP_HOUR = 4;
 const SWEEP_MINUTE = 30;
 export const UNVERIFIED_ACCOUNT_TTL_DAYS = 7;
-export const IP_RETENTION_DAYS = 180;
+/** The shared constant (the admin dashboard quotes it), under this module's existing name. */
+export const IP_RETENTION_DAYS = IP_RECORD_RETENTION_DAYS;
 
 /** Only one node sweeps. Both would otherwise run the identical `deleteMany`
  *  at 04:30: harmless (the loser matches zero rows) but it makes the loser's

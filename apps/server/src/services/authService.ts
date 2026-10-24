@@ -6,7 +6,7 @@ import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
 import type { UserRole, RegistrationConsent } from '@voxium/shared';
 import { AppError, BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, UnauthorizedError } from '../utils/errors';
-import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider } from '@voxium/shared';
+import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
 import { sanitizeText } from '../utils/sanitize';
 import { isJwtVerifyError } from '../utils/jwtErrors';
@@ -351,11 +351,12 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
   const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, payload.rememberMe);
   const { tokenVersion: _tv, ...safeUser } = user;
 
-  // Issue a trusted device token (30 days) — includes tokenVersion so password changes invalidate it
+  // Issue a trusted device token (TRUSTED_DEVICE_TTL_DAYS, the figure the
+  // Security tab quotes) — includes tokenVersion so password changes invalidate it
   const trustedDeviceToken = jwt.sign(
     { userId: user.id, purpose: 'trusted-device', tokenVersion: user.tokenVersion },
     process.env.JWT_SECRET!,
-    { expiresIn: '30d' } as jwt.SignOptions,
+    { expiresIn: `${TRUSTED_DEVICE_TTL_DAYS}d` } as jwt.SignOptions,
   );
 
   return { user: withConsentFlag(safeUser), ...tokens, trustedDeviceToken };
