@@ -7,13 +7,14 @@ import { INVITE_CODE_LENGTH, Permissions } from '@voxium/shared';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { hasServerPermission } from '../utils/permissionCalculator';
 import { joinServerMember } from '../utils/serverJoin';
+import { rateLimitInviteUse } from '../middleware/rateLimiter';
 
 export const inviteRouter = Router();
 
 inviteRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // Create an invite for a server
-inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+inviteRouter.post('/servers/:serverId', rateLimitInviteUse, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('invites')) throw new ForbiddenError('Server invites are currently disabled');
     const { serverId } = req.params;
@@ -39,7 +40,8 @@ inviteRouter.post('/servers/:serverId', async (req: Request<{ serverId: string }
 });
 
 // Use an invite to join a server
-inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Response, next: NextFunction) => {
+// Per user (a code is a 48-bit bearer credential: preview and join are the guessing surface)
+inviteRouter.post('/:code/join', rateLimitInviteUse, async (req: Request<{ code: string }>, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('invites')) throw new ForbiddenError('Server invites are currently disabled');
     const { code } = req.params;
@@ -81,7 +83,7 @@ inviteRouter.post('/:code/join', async (req: Request<{ code: string }>, res: Res
 });
 
 // Get invite info (preview)
-inviteRouter.get('/:code', async (req: Request<{ code: string }>, res: Response, next: NextFunction) => {
+inviteRouter.get('/:code', rateLimitInviteUse, async (req: Request<{ code: string }>, res: Response, next: NextFunction) => {
   try {
     const { code } = req.params;
 

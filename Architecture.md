@@ -1075,7 +1075,7 @@ nothing about a visitor leaves the infrastructure):
 
 ```mermaid
 flowchart TD
-    A[POST /auth/register] --> B{Rate limits<br/>3/min + 5/day per IP<br/>20/day per /24 subnet}
+    A[POST /auth/register] --> B{Rate limits<br/>5/min + 5/day per IP<br/>20/day per /24 subnet}
     B -->|over budget| R1[429]
     B --> C{Proof-of-work valid?<br/>HMAC challenge, single-use,<br/>difficulty scales with subnet pressure}
     C -->|missing/invalid/replayed| R2[400 generic]
@@ -1190,6 +1190,9 @@ Redis Hash: rl:config
 - Overrides loaded from Redis on startup, cached in memory
 - Limiter instances nulled on config change → recreated on next request
 - Admin API: `GET /rate-limits`, `PUT /rate-limits/:name`, `POST /rate-limits/:name/reset`, `POST /rate-limits/clear-user`
+- Key types: `ip` (shared by everyone behind one address, so sized for a group — the general budget is 1000 requests/min per address; one active client measures 35–60), `userId` (every write and expensive read), `account` (the account a sign-in is FOR, before anyone is authenticated: on `/login` an HMAC of the lowercased, trimmed e-mail together with the caller's network, so a stranger elsewhere cannot lock an account; on `/totp/verify` the user of a challenge token whose signature verifies), `webhook`
+- The sign-in buckets count failures only (`refundOnSuccess`: the point is consumed atomically and refunded on a 2xx, or on a 429 a later bucket answered): 20 failures/min per address with a 5-minute block, 60/min per /24 or /48, 10 failures per 15 minutes per account and network (TOTP: per account) with no block
+- Behind a reverse proxy the process does not trust (`NODE_ENV` not production and `TRUST_PROXY` not true), every client is one address; the server warns once when it sees `X-Forwarded-For` in that state. CORS exposes `Retry-After` so cross-origin clients can honour it
 
 ### Server Invite Lock
 

@@ -89,7 +89,7 @@ test.describe('Secure voice channels — E2E audio through the SFU', () => {
     const dave = testUser('svd');
     const dataA = await registerUser(request, alice);
     const dataB = await registerUser(request, bob);
-    // Four registrations from one IP exceed the 3/min auth bucket — refill
+    // Four registrations from one IP exceed the per-IP registration burst bucket (3/min when written, 5/min now) — refill
     // (harness property; production users don't register in quadruplets)
     await clearRateLimits();
     const dataC = await registerUser(request, charlie);
@@ -117,7 +117,7 @@ test.describe('Secure voice channels — E2E audio through the SFU', () => {
       (window as unknown as { __VOX_SECURE_VOICE_TEST__?: object }).__VOX_SECURE_VOICE_TEST__ = { dropInboundKeys: true };
     });
     await disableNoiseSuppression(pageD);
-    // Three app boots from one IP have nearly drained the 100/min global
+    // Three app boots from one IP have nearly drained the global per-IP budget (100/min when written, 1000/min now)
     // bucket — refill BEFORE the fourth boots. On CI this failed for real:
     // dave's server-detail and member fetches came back 429, the client does
     // not retry them, and his channel list stayed empty for the whole test

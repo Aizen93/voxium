@@ -21,6 +21,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   return {
     rateLimitUpload: passthrough,
     rateLimitGeneral: passthrough,
+    rateLimitAttachmentRead: passthrough,
   };
 });
 
