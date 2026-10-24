@@ -175,19 +175,30 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // Secure-channel create/rename/delete. Deliberately tight: every create can
   // fan out key shares from all members' clients, so churn is expensive.
   secureChannelManage: { keyPrefix: 'rl:secchan', points: 10, duration: 300, blockDuration: 0, keyType: 'userId', label: 'Secure Channel Manage' },
-  // Charged once per request on every /api/v1 route, per ADDRESS. Measured
-  // (2026-10-24, one browser, dev build): a sign-in plus the first screen is
-  // about 11 requests, a page reload about 13, and a person moving through
-  // two servers and six channels about 35 within a minute — on top of the
-  // socket's own traffic, which this never sees. At 100 a minute, three
-  // people behind one NAT navigating at the same time were refused ordinary
-  // reads (the e2e harness had already measured one multi-context test at
-  // 104). Sized for a room of them: the writes and the expensive reads carry
-  // per-user buckets (the handful that did not got theirs with this change,
-  // `profileUpdate`, `inviteUse`, `dmOpen`; the public asset proxy
-  // `attachmentRead`), so this bounds only how fast one address can hit
-  // cheap endpoints — 1000 a minute is 16 a second of 304s.
-  general:        { keyPrefix: 'rl:general',   points: 1000, duration: 60, blockDuration: 0,   keyType: 'ip',     label: 'General' },
+  // Charged once per request on every /api/v1 route. Two buckets behind one
+  // middleware (`rateLimitGeneral`): a request whose bearer VERIFIES is
+  // charged on that USER (`generalUser`); every other request on its ADDRESS
+  // (`general`). Measured (2026-10-24, one browser, dev build): a sign-in
+  // plus the first screen is about 11 requests, a page reload about 13, and a
+  // person moving through two servers and six channels about 35 within a
+  // minute — on top of the socket's own traffic, which this never sees. At
+  // 100 a minute per address, three people behind one NAT navigating at the
+  // same time were refused ordinary reads (the e2e harness had already
+  // measured one multi-context test at 104), and no per-address budget fits a
+  // company of five hundred behind one egress: hence per user once signed in.
+  // The address bucket then carries only the anonymous traffic (the sign-in,
+  // registration and refresh calls, the public flags and stats) — a handful
+  // per person — and bounds how fast one address can hit cheap endpoints.
+  // The writes and the expensive reads carry per-user buckets of their own
+  // (the handful that did not got theirs with this change: `profileUpdate`,
+  // `inviteUse`, `dmOpen`; the public asset proxy `attachmentRead`).
+  general:        { keyPrefix: 'rl:general',   points: 1000, duration: 60, blockDuration: 0,   keyType: 'ip',     label: 'General (anonymous, per IP)' },
+  // Ten a second sustained for one account: a power user in fifty servers
+  // whose network flaps five times a minute refetches about 275 (the connect
+  // handler asks for every server's People slice), well inside; a hostile
+  // client with a stolen session is held to cheap reads at that pace, every
+  // write and expensive read having a tighter bucket of its own.
+  generalUser:    { keyPrefix: 'rl:generaluser', points: 600, duration: 60, blockDuration: 0,  keyType: 'userId', label: 'General (signed in, per user)' },
   interact:       { keyPrefix: 'rl:interact',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Message Interact' },
   themeManage:    { keyPrefix: 'rl:theme',     points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Manage' },
   themeBrowse:    { keyPrefix: 'rl:themebr',   points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Theme Browse' },
@@ -505,6 +516,35 @@ export function totpAccountKey(totpToken: unknown): string | null {
 
 /** Garbage that names no account is charged on the sender's own address. */
 const bySenderAddress = (req: Request) => `x:${byIp(req)}`;
+
+// The verified bearer, once per request: `rateLimitGeneral` runs BEFORE the
+// routes' `authenticate`, so it checks the signature itself (an HMAC, a few
+// microseconds; `authenticate` checks again and asks the database — this never
+// does). The user, not the token's validity, is what the bucket is keyed on:
+// an expired token still names its own user (the route answers it 401), a
+// forged one names nobody and is charged on the address.
+const verifiedBearers = new WeakMap<Request, string | null>();
+
+/** The userId a request's bearer carries, if the signature verifies and it is
+ *  an ACCESS token (one with a `purpose` — TOTP challenge, trusted device —
+ *  is not a session); null otherwise. Memoised per request. */
+export function verifiedBearerUserId(req: Request): string | null {
+  if (verifiedBearers.has(req)) return verifiedBearers.get(req) ?? null;
+  let userId: string | null = null;
+  const header = req.headers.authorization;
+  if (typeof header === 'string' && header.startsWith('Bearer ') && header.length <= 4096) {
+    try {
+      const payload = jwt.verify(header.slice('Bearer '.length), process.env.JWT_SECRET!, { algorithms: ['HS256'], ignoreExpiration: true }) as { userId?: unknown; purpose?: unknown };
+      if (payload?.purpose === undefined && typeof payload?.userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(payload.userId)) {
+        userId = payload.userId;
+      }
+    } catch {
+      // Not our token: anonymous for the limiter, refused by authenticate later
+    }
+  }
+  verifiedBearers.set(req, userId);
+  return userId;
+}
 const byLoginAccount = (req: Request) => loginAccountKey((req.body as { email?: unknown } | undefined)?.email, bySubnet(req)) ?? bySenderAddress(req);
 const byTotpAccount = (req: Request) => totpAccountKey((req.body as { totpToken?: unknown } | undefined)?.totpToken) ?? bySenderAddress(req);
 // Only meaningful AFTER the execute route has validated the token for this id
@@ -779,7 +819,13 @@ export const rateLimitResendVerification = createMiddleware('resendVerification'
 export const rateLimitMarkRead = createMiddleware('markRead', byUserId);
 export const rateLimitRoleManage = createMiddleware('roleManage', byUserId);
 export const rateLimitSecureChannelManage = createMiddleware('secureChannelManage', byUserId);
-export const rateLimitGeneral = createMiddleware('general', byIp);
+// The api-level budget: per USER for a request whose bearer verifies, per
+// ADDRESS for the rest (see the `general` registry note). One middleware so
+// app.ts mounts it once and a route never charges it a second time.
+const generalByAddress = createMiddleware('general', byIp);
+const generalByUser = createMiddleware('generalUser', (req) => verifiedBearerUserId(req) ?? byIp(req));
+export const rateLimitGeneral = (req: Request, res: Response, next: NextFunction): Promise<void> =>
+  (verifiedBearerUserId(req) !== null ? generalByUser : generalByAddress)(req, res, next);
 // Authenticated message interactions (edit/delete/react). Keyed by userId — the
 // old per-route rateLimitGeneral shared ONE IP bucket with the global api-level
 // limiter, so users behind a NAT split a halved 429 budget between them.

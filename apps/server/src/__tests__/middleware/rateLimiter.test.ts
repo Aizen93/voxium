@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { RateLimiterRedis } from 'rate-limiter-flexible';
 import { getRedis } from '../../utils/redis';
@@ -26,7 +26,7 @@ vi.mock('../../utils/redis', () => ({
 
 import jwt from 'jsonwebtoken';
 import {
-  socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, loginAccountKey, loginEmailDigest, totpAccountKey,
+  socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, loginAccountKey, loginEmailDigest, totpAccountKey, verifiedBearerUserId,
   rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookManage, rateLimitWebhookRead, rateLimitByKey,
 } from '../../middleware/rateLimiter';
 
@@ -824,5 +824,128 @@ describe('the routes carry their buckets', () => {
     const uploads = read('uploads.ts');
     expect(uploads).toContain('rateLimitAttachmentRead');
     expect(uploads).not.toMatch(/\brateLimitGeneral\b/);
+  });
+});
+
+// ─── The general budget is per USER once signed in ──────────────────────────
+//
+// No per-address budget fits a company of several hundred people behind one
+// egress address. A request whose bearer verifies is charged on its user
+// (`generalUser`); everything else on its address (`general`).
+
+/** An access token as authService mints one. */
+function accessToken(userId: string, extra: Record<string, unknown> = {}, secret = TEST_SECRET): string {
+  return jwt.sign({ userId, username: 'u', role: 'user', tokenVersion: 0, ...extra }, secret, { expiresIn: '15m' });
+}
+
+function authedReq(ip: string, token: string) {
+  return { ...fakeReq(ip), headers: { authorization: `Bearer ${token}` } };
+}
+
+describe('verifiedBearerUserId — who a request is from, before authenticate runs', () => {
+  const secretBefore = process.env.JWT_SECRET;
+  beforeEach(() => { process.env.JWT_SECRET = TEST_SECRET; });
+  afterEach(() => { process.env.JWT_SECRET = secretBefore; });
+
+  it('names the user of a bearer whose signature verifies — an expired one included (the route answers it 401, the budget is still that user\'s)', () => {
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', accessToken('clxalice')) as never)).toBe('clxalice');
+    const expired = jwt.sign({ userId: 'clxalice', exp: Math.floor(Date.now() / 1000) - 60 }, TEST_SECRET);
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', expired) as never)).toBe('clxalice');
+  });
+
+  it('names nobody for a forged, malformed or missing bearer, or a token with a purpose (TOTP challenge, trusted device)', () => {
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', accessToken('clxalice', {}, 'not-our-secret')) as never)).toBeNull();
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', 'garbage') as never)).toBeNull();
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', 'x'.repeat(5000)) as never)).toBeNull();
+    expect(verifiedBearerUserId({ ...fakeReq('203.0.113.1'), headers: { authorization: 'Basic abc' } } as never)).toBeNull();
+    expect(verifiedBearerUserId(fakeReq('203.0.113.1') as never)).toBeNull();
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', accessToken('clxalice', { purpose: 'totp-verify' })) as never)).toBeNull();
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', jwt.sign({ userId: 'has spaces' }, TEST_SECRET)) as never)).toBeNull();
+  });
+
+  it('is memoised per request (the key function and the chooser both ask)', () => {
+    const req = authedReq('203.0.113.1', accessToken('clxalice'));
+    const verify = vi.spyOn(jwt, 'verify');
+    expect(verifiedBearerUserId(req as never)).toBe('clxalice');
+    expect(verifiedBearerUserId(req as never)).toBe('clxalice');
+    expect(verify).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('rateLimitGeneral — per user once signed in, per address otherwise', () => {
+  let mod: RateLimiterModule;
+  const secretBefore = process.env.JWT_SECRET;
+  beforeEach(async () => {
+    process.env.JWT_SECRET = TEST_SECRET;
+    vi.mocked(getRedis).mockReturnValue(brokenRedis as never);
+    mod = await freshRateLimiter();
+  });
+  afterEach(() => { process.env.JWT_SECRET = secretBefore; });
+
+  it('registers the per-user row next to the per-address one', () => {
+    const rows = Object.fromEntries(mod.getAllRateLimits().map((l) => [l.name, l]));
+    expect(rows.general).toMatchObject({ keyType: 'ip', points: 1000, duration: 60 });
+    expect(rows.generalUser).toMatchObject({ keyType: 'userId', points: 600, duration: 60, blockDuration: 0, keyPrefix: 'rl:generaluser' });
+  });
+
+  it('a company of 500 behind ONE address, every one of them doing a full measured session within the same minute, is never refused', async () => {
+    const egress = '203.0.113.100';
+    for (let person = 0; person < 500; person++) {
+      const token = accessToken(`clxemployee${person}`);
+      for (let r = 0; r < 56; r++) {
+        const { passed } = await hit(mod.rateLimitGeneral as Middleware, authedReq(egress, token));
+        expect(passed, `employee ${person} request ${r}`).toBe(true);
+      }
+    }
+    // ...and their anonymous requests (one sign-in each) fit the address bucket too
+    for (let person = 0; person < 500; person++) {
+      expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq(egress))).passed).toBe(true);
+    }
+  });
+
+  it('one signed-in user spraying is held to the per-user budget; a colleague on the same address is untouched', async () => {
+    const egress = '203.0.113.101';
+    const spammer = accessToken('clxspammer');
+    for (let r = 0; r < 600; r++) {
+      expect((await hit(mod.rateLimitGeneral as Middleware, authedReq(egress, spammer))).passed).toBe(true);
+    }
+    const refused = await hit(mod.rateLimitGeneral as Middleware, authedReq(egress, spammer));
+    expect(refused.passed).toBe(false);
+    expect(refused.res.statusCode).toBe(429);
+    expect(refused.res.body).toEqual({ success: false, error: 'Too many requests. Please try again later.' });
+
+    expect((await hit(mod.rateLimitGeneral as Middleware, authedReq(egress, accessToken('clxcolleague')))).passed).toBe(true);
+    expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq(egress))).passed).toBe(true);
+  });
+
+  it('a forged bearer buys no budget of its own: it is charged on the address like any anonymous request', async () => {
+    const ip = '203.0.113.102';
+    const forged = accessToken('clxvictim', {}, 'not-our-secret');
+    for (let r = 0; r < 1000; r++) {
+      expect((await hit(mod.rateLimitGeneral as Middleware, authedReq(ip, forged))).passed).toBe(true);
+    }
+    expect((await hit(mod.rateLimitGeneral as Middleware, authedReq(ip, forged))).passed).toBe(false);
+    expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq(ip))).passed).toBe(false); // the same address bucket
+    // the real user whose id was forged is untouched
+    expect((await hit(mod.rateLimitGeneral as Middleware, authedReq(ip, accessToken('clxvictim')))).passed).toBe(true);
+  });
+
+  it('the same user from two addresses spends ONE budget (it is the account, not the device, that is bounded)', async () => {
+    const token = accessToken('clxroaming');
+    for (let r = 0; r < 300; r++) expect((await hit(mod.rateLimitGeneral as Middleware, authedReq('203.0.113.103', token))).passed).toBe(true);
+    for (let r = 0; r < 300; r++) expect((await hit(mod.rateLimitGeneral as Middleware, authedReq('198.51.100.7', token))).passed).toBe(true);
+    expect((await hit(mod.rateLimitGeneral as Middleware, authedReq('192.0.2.9', token))).passed).toBe(false);
+  });
+
+  it('no route mounts rateLimitGeneral a second time (the api level charges it once; support used to charge its users twice)', () => {
+    const routesDir = resolve(__dirname, '../../routes');
+    // A route file that IMPORTS it mounts it (the webhook routers only mention it in comments)
+    const importsGeneral = /import\s*\{[^}]*\brateLimitGeneral\b[^}]*\}\s*from\s*'\.\.\/middleware\/rateLimiter'/;
+    const offenders = readdirSync(routesDir)
+      .filter((f) => f.endsWith('.ts'))
+      .filter((f) => importsGeneral.test(readFileSync(resolve(routesDir, f), 'utf8')));
+    expect(offenders).toEqual([]);
+    const support = readFileSync(resolve(routesDir, 'support.ts'), 'utf8');
+    expect(support.split(/\r?\n/).find((l) => l.startsWith("supportRouter.post('/open'"))).toContain('rateLimitSupport');
   });
 });
