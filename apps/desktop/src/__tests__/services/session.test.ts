@@ -18,12 +18,16 @@ const storage = vi.hoisted(() => ({
   getRefreshToken: vi.fn(() => storage.refresh),
   setTokens: vi.fn((a: string, r: string) => { storage.access = a; storage.refresh = r; }),
   clearTokens: vi.fn(() => { storage.access = null; storage.refresh = null; }),
+  // The persisted clear a session-ending navigation waits for; resolved at
+  // once unless a test holds it
+  flushTokenStorage: vi.fn(async () => {}),
 }));
 vi.mock('../../services/tokenStorage', () => ({
   getAccessToken: storage.getAccessToken,
   getRefreshToken: storage.getRefreshToken,
   setTokens: storage.setTokens,
   clearTokens: storage.clearTokens,
+  flushTokenStorage: storage.flushTokenStorage,
 }));
 
 import {
@@ -123,6 +127,24 @@ describe('session — refreshAccessToken', () => {
 
     expect(storage.clearTokens).toHaveBeenCalled();
     expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it('the navigation to the login page waits for the persisted clear (a reload must not outrun the keychain write)', async () => {
+    // In the desktop app clearTokens() returns before the OS credential
+    // store has the delete: reloading first would load the refused tokens
+    // again at the next launch, be refused again, and loop
+    let release!: () => void;
+    storage.flushTokenStorage.mockReturnValueOnce(new Promise<void>((r) => { release = r; }));
+    http.post.mockRejectedValueOnce(axios401());
+
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+
+    expect(storage.clearTokens).toHaveBeenCalled();
+    expect(storage.flushTokenStorage).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
   });
 
   it('a TRANSIENT failure (no answer) fails this renewal only: tokens untouched, no login page', async () => {

@@ -131,7 +131,7 @@ The code is multi-node capable: shared state lives in Redis, voice channels foll
 | | Reports & Moderation | User/message reports, admin moderation queue with resolve/dismiss/ban workflows |
 | | Support Tickets | One-per-user real-time chat with staff, admin claim/close workflow, audit logging |
 | **Security** | Two-Factor Auth | TOTP 2FA with authenticator app support, QR code setup, 8 backup codes, 30-day trusted device tokens |
-| | Authentication | JWT with refresh tokens, remember me, forgot/reset password via email, token version-based session invalidation |
+| | Authentication | JWT with refresh tokens, remember me (desktop sessions kept in the OS credential store), forgot/reset password via email, token version-based session invalidation |
 | | Rate Limiting | Per-endpoint and per-socket rate limiting, admin-editable via Redis-backed registry |
 | | Anti-Bot Registration | Self-hosted proof-of-work (no captcha service — nothing leaves the platform), canonical-email dedupe (gmail dot/+tag aliases collapse to one account), daily per-IP/subnet/domain budgets, IP bans enforced at signup, per-inbox mail caps, 7-day unverified-account expiry, live abuse dashboard with spike alerts |
 | | Input Sanitization | HTML stripping, validation, CORS protection |

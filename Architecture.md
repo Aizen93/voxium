@@ -276,7 +276,7 @@ apps/desktop/
 │   │   ├── socket.ts            # Socket.IO client manager
 │   │   ├── audioAnalyser.ts     # Speaking detection (server + DM mode)
 │   │   ├── notificationSounds.ts # Sound effects (message, mention, join, leave, looping call ringtone)
-│   │   ├── tokenStorage.ts      # Dual-storage token abstraction (localStorage/sessionStorage)
+│   │   ├── tokenStorage.ts      # Session store: memory + write-through (OS credential store in the Tauri app, localStorage/sessionStorage on the web)
 │   │   └── notifications.ts     # 3-tier notifications: WinRT toast (avatar) → Tauri plugin → Web API (blob URL avatar)
 │   ├── utils/
 │   │   ├── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
@@ -934,6 +934,8 @@ Authoritative spec: `docs/e2e-dm-spec.md`. Summary of what ships and how it fits
 
 ### JWT Token Flow
 
+**Where the client keeps the tokens.** `services/tokenStorage.ts` holds the session in memory (synchronous reads for the REST interceptor and the socket) and writes it through to a store. In the Tauri desktop app that store is the OS credential store — Windows Credential Manager / macOS Keychain / Linux Secret Service, through the `session_secret_*` Tauri commands and the `keyring` crate, service `app.voxium.session`, the same keyring the E2E pickle key uses — where the access + refresh token pair is one entry and the TOTP trusted-device token another; nothing is written to the webview's localStorage, and an install that kept its tokens there is migrated into the keychain on its first launch. In a browser the store is localStorage ("Remember me") or sessionStorage. "Remember me" off keeps a desktop session in memory only. The store is loaded once at launch (`hydrateTokens()`) before the session restore (`authStore.checkAuth`: single-flight, a 15 s deadline over the whole attempt, retried on a 2 s → 30 s back-off after a transport failure; only a refusal ends the session, and a sign-in or logout voids an attempt still in flight). In the web client, a sign-out or sign-in in another tab is followed through `storage` events.
+
 ```mermaid
 sequenceDiagram
     participant Client
@@ -945,7 +947,7 @@ sequenceDiagram
     Server->>Server: Generate Refresh Token (7d, JWT_REFRESH_SECRET)
     Note over Server: Both embed tokenVersion from User model
     Server-->>Client: { accessToken, refreshToken }
-    Client->>Client: Store in localStorage
+    Client->>Client: Store (OS credential store in the desktop app, browser storage on the web)
 
     Client->>Server: API request (Authorization: Bearer access_token)
     Server-->>Client: 200 OK / Response
