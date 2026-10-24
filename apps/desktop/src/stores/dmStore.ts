@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { useChatStore } from './chatStore';
 import { toast } from './toastStore';
+import i18n from '../i18n';
 import type { Conversation, DMUnreadCount, UserStatus } from '@voxium/shared';
 
 interface DMState {
@@ -63,7 +64,7 @@ export const useDMStore = create<DMState>((set, get) => ({
       conversations = (data.data as Conversation[]).map(withLockedPreview);
     } catch (err) {
       console.error('Failed to fetch conversations:', err);
-      toast.error('Failed to load conversations');
+      toast.error(i18n.t('dm.failedToLoadConversations'));
       set({ isLoading: false });
       return;
     }

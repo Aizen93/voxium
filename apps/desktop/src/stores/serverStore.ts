@@ -458,7 +458,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set({ servers: data.data });
     } catch (err) {
       console.error('Failed to fetch servers:', err);
-      toast.error('Failed to load servers');
+      toast.error(i18n.t('server.failedToLoadServers'));
     }
   },
 
@@ -511,7 +511,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       console.error('Failed to fetch server:', err);
       // Only surface the failure if this server is still the one being viewed
       if (get().activeServerId === serverId) {
-        toast.error('Failed to load server');
+        toast.error(i18n.t('server.failedToLoadServer'));
         set({ isLoading: false });
       }
     }
@@ -731,7 +731,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     } catch (err) {
       console.error('Failed to fetch members:', err);
       if (get().activeServerId === serverId) {
-        toast.error('Failed to load members');
+        toast.error(i18n.t('server.failedToLoadMembers'));
       }
     }
   },

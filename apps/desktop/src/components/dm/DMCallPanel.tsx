@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
@@ -6,6 +7,7 @@ import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function DMCallPanel() {
+  const { t } = useTranslation();
   const { dmCallUsers, selfMute, selfDeaf, pttActive, toggleMute, toggleDeaf, leaveDMCall } = useVoiceStore();
   const { user } = useAuthStore();
   const localAudioLevel = useLocalAudioLevel();
@@ -49,7 +51,7 @@ export function DMCallPanel() {
 
       {/* Status Text */}
       {waiting && (
-        <p className="text-sm text-vox-text-muted mb-4 animate-pulse">Calling...</p>
+        <p className="text-sm text-vox-text-muted mb-4 animate-pulse">{t('dm.calling')}</p>
       )}
 
       {/* Controls */}
@@ -62,8 +64,8 @@ export function DMCallPanel() {
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
-          title={selfMute ? 'Unmute' : 'Mute'}
-          aria-label={selfMute ? 'Unmute' : 'Mute'}
+          title={selfMute ? t('voice.unmute') : t('voice.mute')}
+          aria-label={selfMute ? t('voice.unmute') : t('voice.mute')}
         >
           {selfMute ? <MicOff size={20} /> : <Mic size={20} />}
         </button>
@@ -76,8 +78,8 @@ export function DMCallPanel() {
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
-          title={selfDeaf ? 'Undeafen' : 'Deafen'}
-          aria-label={selfDeaf ? 'Undeafen' : 'Deafen'}
+          title={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
+          aria-label={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
         >
           {selfDeaf ? <HeadphoneOff size={20} /> : <Headphones size={20} />}
         </button>
@@ -85,8 +87,8 @@ export function DMCallPanel() {
         <button
           onClick={leaveDMCall}
           className="rounded-full bg-vox-accent-danger p-3 text-white hover:bg-vox-accent-danger/80 transition-colors"
-          title="Leave Call"
-          aria-label="Leave call"
+          title={t('dm.endCall')}
+          aria-label={t('dm.endCall')}
         >
           <PhoneOff size={20} />
         </button>

@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import type { SupportTicketStatus, SupportMessageData } from '@voxium/shared';
 import axios from 'axios';
+import i18n from '../i18n';
+import { translateServerError } from '../utils/serverErrors';
 
 interface SupportTicketLocal {
   id: string;
@@ -45,7 +47,10 @@ export const useSupportStore = create<SupportState>((set, get) => ({
       });
     } catch (err) {
       set({ isLoading: false });
-      const msg = axios.isAxiosError(err) ? err.response?.data?.error || 'Failed to open support ticket' : 'Failed to open support ticket';
+      // The server's answer in the user's language (mapped), else the generic failure
+      const msg = axios.isAxiosError(err)
+        ? translateServerError(err.response?.data?.error, i18n.t, 'dm.failedToOpenTicket')
+        : i18n.t('dm.failedToOpenTicket');
       throw new Error(msg, { cause: err });
     }
   },

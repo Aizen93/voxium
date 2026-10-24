@@ -295,7 +295,7 @@ export function DMMessageList({ conversationId }: Props) {
       {showScrollButton && (
         <button
           onClick={scrollToBottom}
-          aria-label="Scroll to bottom"
+          aria-label={t('chat.jumpToBottom')}
           className="absolute bottom-4 left-1/2 -translate-x-1/2 flex h-8 w-8 items-center justify-center rounded-full bg-vox-bg-tertiary text-vox-text-secondary shadow-lg hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
         >
           <ArrowDown size={16} />

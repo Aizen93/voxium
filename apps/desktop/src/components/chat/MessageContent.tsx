@@ -1,13 +1,17 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import { useTranslation } from 'react-i18next';
 import type { Components } from 'react-markdown';
-import { MENTION_RE } from '@voxium/shared';
+import { MENTION_RE, EVERYONE_MENTION_RE } from '@voxium/shared';
 import type { MessageAuthor } from '@voxium/shared';
 
 interface Props {
   content: string;
   mentions?: MessageAuthor[];
+  /** The server's word that `@everyone` in this message pings the channel
+   *  (the author held MENTION_EVERYONE). Without it the token is plain text. */
+  mentionsEveryone?: boolean;
 }
 
 const allowedElements = [
@@ -76,9 +80,44 @@ function buildMentionMap(mentions?: MessageAuthor[]): Map<string, MessageAuthor>
   return map;
 }
 
-export function MessageContent({ content, mentions }: Props) {
+type Segment =
+  | { type: 'text'; value: string }
+  | { type: 'mention'; userId: string }
+  | { type: 'everyone' };
+
+/**
+ * Split `content` into text, `@[userId]` mentions and — only when the server
+ * said this message pings the channel — `@everyone` tokens. The bare text
+ * `@everyone` in a message the server did NOT flag stays text: whoever wrote
+ * it lacked the permission, and rendering it as a ping would lie.
+ */
+function segment(content: string, mentionsEveryone: boolean): Segment[] {
+  const sources: Array<{ re: RegExp; kind: 'mention' | 'everyone' }> = [{ re: MENTION_RE, kind: 'mention' }];
+  if (mentionsEveryone) sources.push({ re: EVERYONE_MENTION_RE, kind: 'everyone' });
+  const combined = new RegExp(sources.map((s) => `(${s.re.source})`).join('|'), 'g');
+  const segments: Segment[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = combined.exec(content)) !== null) {
+    // Group layout: [1] whole user mention, [2] its userId, [3] whole everyone
+    // token, [4] the character before it (which the token regex consumes)
+    const prefix = match[3] !== undefined ? (match[4] ?? '') : '';
+    const start = match.index + prefix.length;
+    if (start > lastIndex) segments.push({ type: 'text', value: content.slice(lastIndex, start) });
+    if (match[3] !== undefined) segments.push({ type: 'everyone' });
+    else segments.push({ type: 'mention', userId: match[2] });
+    lastIndex = combined.lastIndex;
+  }
+  if (lastIndex < content.length) segments.push({ type: 'text', value: content.slice(lastIndex) });
+  return segments;
+}
+
+export function MessageContent({ content, mentions, mentionsEveryone = false }: Props) {
+  const { t } = useTranslation();
   const mentionMap = buildMentionMap(mentions);
-  const hasMentions = mentionMap.size > 0 && new RegExp(MENTION_RE.source, MENTION_RE.flags).test(content);
+  const hasUserMentions = mentionMap.size > 0 && new RegExp(MENTION_RE.source, MENTION_RE.flags).test(content);
+  const hasEveryone = mentionsEveryone && new RegExp(EVERYONE_MENTION_RE.source).test(content);
+  const hasMentions = hasUserMentions || hasEveryone;
 
   if (!hasMentions) {
     return (
@@ -96,25 +135,22 @@ export function MessageContent({ content, mentions }: Props) {
   // When mentions are present, first do mention replacement then render markdown
   // for the text segments. We split content by mentions and render text parts
   // through markdown individually.
-  const re = new RegExp(MENTION_RE.source, MENTION_RE.flags);
-  const segments: Array<{ type: 'text'; value: string } | { type: 'mention'; userId: string }> = [];
-  let lastIndex = 0;
-  let match;
-
-  while ((match = re.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ type: 'text', value: content.slice(lastIndex, match.index) });
-    }
-    segments.push({ type: 'mention', userId: match[1] });
-    lastIndex = re.lastIndex;
-  }
-  if (lastIndex < content.length) {
-    segments.push({ type: 'text', value: content.slice(lastIndex) });
-  }
+  const segments = segment(content, hasEveryone);
 
   return (
     <span>
       {segments.map((seg, i) => {
+        if (seg.type === 'everyone') {
+          return (
+            <span
+              key={i}
+              className="inline-flex items-baseline rounded bg-vox-accent-primary/20 px-1 text-vox-accent-primary font-medium"
+              data-testid="mention-everyone"
+            >
+              @everyone
+            </span>
+          );
+        }
         if (seg.type === 'mention') {
           const user = mentionMap.get(seg.userId);
           return user ? (
@@ -129,7 +165,7 @@ export function MessageContent({ content, mentions }: Props) {
             </span>
           ) : (
             <span key={i} className="inline-flex items-baseline rounded bg-vox-bg-floating px-1 text-vox-text-muted">
-              @unknown
+              {t('chat.mentionUnknown')}
             </span>
           );
         }

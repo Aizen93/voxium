@@ -278,6 +278,10 @@ export interface Message {
    *  row once the webhook is deleted. Only on webhook-authored rows. */
   webhookName?: string | null;
   mentions?: MessageAuthor[];
+  /** The server's word that this message pings the whole channel: the author
+   *  wrote `@everyone` AND held MENTION_EVERYONE there when it was sent (or
+   *  last edited). Absent or false: the token, if present, is plain text. */
+  mentionsEveryone?: boolean;
   attachments?: Attachment[];
   createdAt: string;
   editedAt: string | null;

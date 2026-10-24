@@ -570,7 +570,7 @@ async function acquireAudioStream(): Promise<MediaStream | null> {
     return await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   } catch (err) {
     console.warn('[Voice] Microphone access denied, joining in listen-only mode:', err);
-    toast.warning('Microphone access denied — joining in listen-only mode');
+    toast.warning(i18n.t('voice.toasts.micDenied'));
     return null;
   }
 }
@@ -1005,13 +1005,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         const record = useServerStore.getState().channels.find((c) => c.id === channelId);
         if (!record) {
           console.error(`[Voice] Channel ${channelId} not in the store — refusing to join`);
-          toast.error('Could not join the voice channel — try again');
+          toast.error(i18n.t('voice.toasts.joinFailed'));
           return;
         }
         secure = record.secure === true;
       } catch (err) {
         console.error('[Voice] Channel resolution failed — refusing to join:', err);
-        toast.error('Could not join the voice channel — try again');
+        toast.error(i18n.t('voice.toasts.joinFailed'));
         return;
       }
       if (generation !== voiceSessionGeneration) return;
@@ -1238,7 +1238,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             if (!settled) {
               settled = true;
               console.error('[Voice SFU] Send transport connect ACK timed out');
-              toast.error('Voice connection timed out — try rejoining');
+              toast.error(i18n.t('voice.toasts.connectionTimedOut'));
               errback(new Error('Transport connect timeout'));
             }
           }, 10000);
@@ -1248,7 +1248,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             clearTimeout(timeout);
             if (response.error) {
               console.error('[Voice SFU] Send transport DTLS connect failed:', response.error);
-              toast.error('Voice connection failed — try rejoining');
+              toast.error(i18n.t('voice.toasts.connectionFailed'));
               errback(new Error(response.error));
             } else {
               callback();
@@ -1341,7 +1341,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             const currentServerId = get().activeVoiceServerId;
             if (currentChannelId && transportRejoinAttempts < MAX_TRANSPORT_REJOIN_ATTEMPTS) {
               transportRejoinAttempts++;
-              toast.error(`Voice connection lost — reconnecting (attempt ${transportRejoinAttempts}/${MAX_TRANSPORT_REJOIN_ATTEMPTS})...`);
+              toast.error(i18n.t('voice.toasts.connectionLost', { attempt: transportRejoinAttempts, max: MAX_TRANSPORT_REJOIN_ATTEMPTS }));
               // Screen share cannot survive the rejoin — release the capture stream
               // and clear state so the share button doesn't stay stuck "on"
               const { screenStream: staleScreenStream } = get();
@@ -1365,7 +1365,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
                 set({ activeChannelId: currentChannelId, activeVoiceServerId: currentServerId });
               }
             } else if (currentChannelId) {
-              toast.error('Voice connection failed — please rejoin manually');
+              toast.error(i18n.t('voice.toasts.connectionFailedManual'));
               get().leaveChannel();
             }
           } else if (state === 'connected') {
@@ -1445,7 +1445,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       }
     } catch (err) {
       console.error('[Voice SFU] Failed to set up mediasoup:', err);
-      toast.error('Failed to establish voice connection');
+      toast.error(i18n.t('voice.toasts.establishFailed'));
     }
   },
 
@@ -1863,7 +1863,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const users = channelUsers.get(activeChannelId) || [];
       const me = users.find((u) => u.id === localUserId);
       if (me?.serverMuted) {
-        toast.warning('You have been muted by a moderator');
+        toast.warning(i18n.t('voice.toasts.mutedByModerator'));
         return;
       }
     }
@@ -1916,7 +1916,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const users = channelUsers.get(activeChannelId) || [];
       const me = users.find((u) => u.id === localUserId);
       if (me?.serverDeafened) {
-        toast.warning('You have been deafened by a moderator');
+        toast.warning(i18n.t('voice.toasts.deafenedByModerator'));
         return;
       }
     }
@@ -2095,7 +2095,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
       if (!isUserCancel) {
         console.warn('[Voice] Screen capture failed:', err);
-        toast.error('Screen share failed — please try again');
+        toast.error(i18n.t('voice.toasts.screenShareFailed'));
       }
       return;
     }
@@ -2103,7 +2103,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const videoTrack = stream.getVideoTracks()[0];
     if (!videoTrack) {
       stream.getTracks().forEach((t) => t.stop());
-      toast.error('Screen share failed — please try again');
+      toast.error(i18n.t('voice.toasts.screenShareFailed'));
       return;
     }
     const settings = videoTrack.getSettings() as { displaySurface?: string; width?: number; height?: number };
@@ -2142,7 +2142,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     if (secureVoiceActive) return;
     const board = createWhiteboardStream();
     if (!board) {
-      toast.error('Screen share failed — please try again');
+      toast.error(i18n.t('voice.toasts.screenShareFailed'));
       return;
     }
     // A fixed source key that can never collide with a remembered SCREEN
@@ -2345,7 +2345,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       // A getDisplayMedia permission cancel is a deliberate user action — no toast
       const isUserCancel = err instanceof DOMException && err.name === 'NotAllowedError';
       if (!isUserCancel) {
-        toast.error('Screen share failed — please try again');
+        toast.error(i18n.t('voice.toasts.screenShareFailed'));
       }
     } finally {
       shareActivationInFlight = false;
@@ -2778,7 +2778,7 @@ useSettingsStore.subscribe((state, prevState) => {
               debugLog('[Voice SFU] Replaced audio track on producer after input device change');
             } catch (err) {
               console.error('[Voice SFU] Failed to replace track on producer:', err);
-              toast.error('Microphone issue detected — try rejoining voice');
+              toast.error(i18n.t('voice.toasts.micIssue'));
             }
           }
         }

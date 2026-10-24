@@ -11,6 +11,17 @@ interface EditState {
   blockDuration: number;
 }
 
+/** The badge for what a bucket is keyed on (middleware/rateLimiter.ts `keyType`). */
+const KEY_TYPE_LABEL: Record<string, string> = {
+  ip: 'IP',
+  subnet: 'Subnet',
+  userId: 'User',
+  account: 'Account',
+  inbox: 'Inbox',
+  domain: 'Domain',
+  webhook: 'Webhook',
+};
+
 const RULE_DESCRIPTIONS: Record<string, string> = {
   login: 'Failed sign-in attempts per IP address, against brute-force password guessing. A successful sign-in is not counted.',
   register: 'Limits account creation to prevent spam registrations.',
@@ -188,7 +199,7 @@ export function AdminRateLimits() {
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
                       rule.keyType === 'ip' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
                     }`}>
-                      {rule.keyType === 'ip' ? 'IP' : rule.keyType === 'webhook' ? 'Webhook' : rule.keyType === 'account' ? 'Account' : 'User'}
+                      {KEY_TYPE_LABEL[rule.keyType] ?? rule.keyType}
                     </span>
                   </td>
                   <td className="px-4 py-3">

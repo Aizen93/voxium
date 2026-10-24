@@ -264,12 +264,12 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
               {user.displayName}
             </h3>
             {role === 'owner' && (
-              <span className="shrink-0" aria-label="Owner">
+              <span className="shrink-0" aria-label={t('members.owner')}>
                 <Crown size={14} className="text-vox-accent-warning" />
               </span>
             )}
             {role === 'admin' && (
-              <span className="shrink-0" aria-label="Admin">
+              <span className="shrink-0" aria-label={t('serverSettings.members.admin')}>
                 <Shield size={14} className="text-vox-accent-primary" />
               </span>
             )}

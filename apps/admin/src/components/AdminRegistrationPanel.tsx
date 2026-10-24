@@ -133,7 +133,7 @@ export function AdminRegistrationPanel() {
             {/* The server groups `register` IP records by lastSeenAt, which a later
                 sign-in from the same address refreshes: these are accounts
                 SEEN from their registration address this week, not new ones */}
-            <p className="text-xs text-vox-text-muted mb-1.5">Top registration IPs (accounts seen in the last 7 days)</p>
+            <p className="text-xs text-vox-text-muted mb-1.5">Top registration IPs (accounts created in the last 7 days)</p>
             <div className="space-y-1">
               {stats.topRegisterIps.map((row) => (
                 <div key={row.ip} className="flex items-center justify-between text-xs">

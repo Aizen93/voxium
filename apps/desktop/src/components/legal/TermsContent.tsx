@@ -3,12 +3,16 @@
  * rendered as the public /terms page and inside the registration
  * form's consent modal (which must not navigate away from a half-filled form —
  * and in the Tauri webview there is no "new tab" to open it in).
+ *
+ * Statements about what the app lets you do (change your profile, delete your
+ * account) must match the code, like the Privacy Policy's; the numbers are
+ * pinned by __tests__/legal/legalFacts.test.ts.
  */
 export function TermsContent() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Terms of Service</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: March 3, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 24, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -25,8 +29,9 @@ export function TermsContent() {
           <p>
             You are responsible for maintaining the confidentiality of your account credentials and for all
             activities that occur under your account. You must provide accurate information when creating an
-            account and promptly update it if anything changes. You must be at least 13 years old to use the
-            Service.
+            account. You can change your display name, bio and avatar in the app at any time; your username and
+            email address cannot be changed from the app, so contact us if either needs correcting. You must be at
+            least 13 years old to use the Service, and by creating an account you confirm that you are.
           </p>
         </section>
 
@@ -58,7 +63,9 @@ export function TermsContent() {
           <p>
             We may suspend or terminate your account at any time if you violate these terms or engage in
             conduct that we determine is harmful to the Service or other users. You may delete your account
-            at any time. Upon termination, your right to use the Service ceases immediately.
+            yourself from Settings → Security: you confirm with your password, and with your two-factor code if it
+            is turned on, and if you still own servers, transfer or delete them first. Upon termination, your right
+            to use the Service ceases immediately.
           </p>
         </section>
 

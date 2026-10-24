@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Search, Plus, Volume2, Mic, MicOff, Headphones, AudioLines, Minus, Square, X } from 'lucide-react';
 import type { ThemeColors, ThemePattern, ThemePatterns } from '@voxium/shared';
 import { getPatternStyle, getThemeScopeStyle } from '../../services/themeEngine';
@@ -96,6 +97,7 @@ export function AppShellMock({
   variant = 'hero',
   bodyHeight = 300,
 }: AppShellMockProps) {
+  const { t } = useTranslation();
   const scoped = !!colors;
   const full = variant === 'full';
 
@@ -184,7 +186,7 @@ export function AppShellMock({
         <div className="min-w-0 flex-1" />
         <div className="flex h-6 items-center gap-1 whitespace-nowrap rounded-full border border-vox-border px-2 text-[9px] text-vox-text-muted">
           <Search className="h-2.5 w-2.5" />
-          Find a space
+          {t('server.findSpace')}
         </div>
         <div className="flex h-6 w-6 items-center justify-center rounded-full border border-vox-border text-vox-text-muted">
           <Plus className="h-3 w-3" />
@@ -198,9 +200,9 @@ export function AppShellMock({
           {full && (
             <div className="mb-1 flex h-[22px] items-center gap-1.5 rounded-md border border-vox-border bg-vox-bg-tertiary px-1.5">
               <Search className="h-2.5 w-2.5 shrink-0 text-vox-text-muted" />
-              <span className="truncate text-[9px] text-vox-text-muted">Search</span>
+              <span className="truncate text-[9px] text-vox-text-muted">{t('appMock.search')}</span>
               <span className="ml-auto shrink-0 rounded-[3px] bg-vox-bg-hover px-1 font-mono text-[7px] text-vox-text-muted">
-                Ctrl K
+                {`${t('common.ctrlKey')} K`}
               </span>
             </div>
           )}
@@ -212,9 +214,9 @@ export function AppShellMock({
           >
             <div className="flex items-baseline px-1.5 pb-1">
               <span className="truncate text-[10px] font-semibold text-vox-text-primary">Voxium HQ</span>
-              <span className="ml-auto shrink-0 text-[8px] text-vox-text-muted">4 online</span>
+              <span className="ml-auto shrink-0 text-[8px] text-vox-text-muted">{t('appMock.onlineCount', { n: 4 })}</span>
             </div>
-            <div className="px-1.5 pb-0.5 text-[8px] font-semibold uppercase tracking-wider text-vox-text-muted">Text</div>
+            <div className="px-1.5 pb-0.5 text-[8px] font-semibold uppercase tracking-wider text-vox-text-muted">{t('channel.text')}</div>
             <div className="space-y-0.5 px-0.5">
               <div className="flex items-center gap-1.5 rounded-md bg-vox-accent-tint px-1.5 py-[3px] text-[10px] font-semibold text-vox-text-primary">
                 <span className="font-mono text-vox-accent-primary">#</span>general
@@ -226,12 +228,12 @@ export function AppShellMock({
                 <span className="font-mono text-vox-text-muted/70">#</span>dev
               </div>
             </div>
-            <div className="px-1.5 pb-0.5 pt-2 text-[8px] font-semibold uppercase tracking-wider text-vox-text-muted">Voice</div>
+            <div className="px-1.5 pb-0.5 pt-2 text-[8px] font-semibold uppercase tracking-wider text-vox-text-muted">{t('channel.voiceType')}</div>
             {/* Occupied voice channel — the elevated card with a Join affordance */}
             <div data-testid="app-mock-voice-card" className="mx-0.5 overflow-hidden rounded-lg border border-vox-border bg-vox-bg-floating">
               <div className="flex items-center gap-1 px-1.5 pb-0.5 pt-1">
                 <Volume2 className="h-2.5 w-2.5 shrink-0 text-vox-text-primary" />
-                <span className="truncate text-[9.5px] font-semibold text-vox-text-primary">Lounge</span>
+                <span className="truncate text-[9.5px] font-semibold text-vox-text-primary">{t('appMock.lounge')}</span>
                 <span className="ml-auto text-[8px] tabular-nums text-vox-text-muted">2</span>
               </div>
               <div className="space-y-px px-1">
@@ -248,7 +250,7 @@ export function AppShellMock({
               </div>
               <div className="px-1 pb-1 pt-0.5">
                 <div className="flex h-[18px] items-center justify-center rounded-md bg-vox-accent-tint text-[8.5px] font-semibold text-vox-accent-primary">
-                  Join voice
+                  {t('channel.joinVoice')}
                 </div>
               </div>
             </div>
@@ -262,7 +264,7 @@ export function AppShellMock({
             </div>
             <div className="min-w-0 flex-1">
               <p className="truncate text-[9px] font-semibold leading-tight text-vox-text-primary">Charlie</p>
-              <p className="truncate text-[7.5px] leading-tight text-vox-text-muted">Online</p>
+              <p className="truncate text-[7.5px] leading-tight text-vox-text-muted">{t('channel.online')}</p>
             </div>
             <Mic className="h-2.5 w-2.5 shrink-0 text-vox-text-muted" />
             <Headphones className="h-2.5 w-2.5 shrink-0 text-vox-text-muted" />
@@ -290,7 +292,7 @@ export function AppShellMock({
                 <div>
                   <span className="text-[10px] font-semibold text-vox-accent-success">Alice</span>
                   <span className="text-[9px] text-vox-text-muted ml-1.5">12:01</span>
-                  <p className="text-xs text-vox-text-primary leading-snug">Hey, welcome to Voxium!</p>
+                  <p className="text-xs text-vox-text-primary leading-snug">{t('appMock.chatWelcome')}</p>
                   {/* Reaction */}
                   <div className="mock-reaction mt-1 inline-flex items-center gap-0.5 rounded-full bg-vox-bg-tertiary/60 border border-vox-border px-1.5 py-0.5">
                     <span className="text-[10px]">👋</span>
@@ -309,7 +311,7 @@ export function AppShellMock({
                 <div>
                   <span className="text-[10px] font-semibold text-vox-accent-primary">Bob</span>
                   <span className="text-[9px] text-vox-text-muted ml-1.5">12:02</span>
-                  <p className="text-xs text-vox-text-primary leading-snug">Voice quality is insane 🔥</p>
+                  <p className="text-xs text-vox-text-primary leading-snug">{t('appMock.chatVoiceQuality')}</p>
                 </div>
               </div>
             </div>
@@ -325,7 +327,7 @@ export function AppShellMock({
                   <span className="text-[10px] font-semibold text-vox-accent-warning">Charlie</span>
                   <span className="text-[9px] text-vox-text-muted ml-1.5">12:03</span>
                   <p className="text-xs text-vox-text-primary leading-snug">
-                    Noise suppression is magic 🚀
+                    {t('appMock.chatNoiseSuppression')}
                     {full && <span className="ml-1 text-vox-text-link underline">voxium.app</span>}
                   </p>
                 </div>
@@ -338,13 +340,13 @@ export function AppShellMock({
                 <div className="h-1.5 w-1.5 rounded-full bg-vox-text-muted mock-typing-dot" style={{ animationDelay: '0.15s' }} />
                 <div className="h-1.5 w-1.5 rounded-full bg-vox-text-muted mock-typing-dot" style={{ animationDelay: '0.3s' }} />
               </div>
-              <span className="text-[9px] text-vox-text-muted">Alice is typing...</span>
+              <span className="text-[9px] text-vox-text-muted">{t('chat.typing', { user: 'Alice' })}</span>
             </div>
           </div>
           {/* Message input */}
           <div className="px-3 pb-2.5">
             <div className="flex items-center rounded-md bg-vox-bg-floating border border-vox-border px-2.5 py-1.5">
-              <span className="text-[10px] text-vox-text-muted">Message #general</span>
+              <span className="text-[10px] text-vox-text-muted">{t('chat.messagePlaceholder', { channel: 'general' })}</span>
               <div className="ml-0.5 w-[1px] h-3 bg-vox-text-muted mock-cursor" />
             </div>
           </div>
@@ -357,19 +359,19 @@ export function AppShellMock({
             className="flex w-[132px] flex-none flex-col overflow-hidden rounded-xl border border-vox-border bg-vox-bg-secondary"
           >
             <div className="flex items-center gap-1.5 border-b border-vox-border px-2 py-1.5">
-              <span className="text-[10px] font-semibold text-vox-text-primary">People</span>
+              <span className="text-[10px] font-semibold text-vox-text-primary">{t('people.title')}</span>
               <span className="font-mono text-[8px] text-vox-text-muted">4</span>
             </div>
             <div className="flex-1 space-y-2 px-1.5 py-2">
-              <MockPeopleSection label="In voice · Lounge">
-                <MockPerson name="Alice" avatar="bg-vox-voice-speaking" note="Speaking" accent />
-                <MockPerson name="Bob" avatar="bg-vox-accent-primary" note="Muted" />
+              <MockPeopleSection label={`${t('people.inVoice')} · ${t('appMock.lounge')}`}>
+                <MockPerson name="Alice" avatar="bg-vox-voice-speaking" note={t('people.speaking')} accent />
+                <MockPerson name="Bob" avatar="bg-vox-accent-primary" note={t('people.mutedStatus')} />
               </MockPeopleSection>
-              <MockPeopleSection label="Active · 1">
-                <MockPerson name="Charlie" avatar="bg-vox-accent-warning" note="Online" />
+              <MockPeopleSection label={`${t('people.active')} · 1`}>
+                <MockPerson name="Charlie" avatar="bg-vox-accent-warning" note={t('channel.online')} />
               </MockPeopleSection>
-              <MockPeopleSection label="Offline · 1">
-                <MockPerson name="Dana" avatar="bg-vox-bg-tertiary" note="Offline" dimmed />
+              <MockPeopleSection label={`${t('people.offline')} · 1`}>
+                <MockPerson name="Dana" avatar="bg-vox-bg-tertiary" note={t('people.offlineStatus')} dimmed />
               </MockPeopleSection>
             </div>
           </div>

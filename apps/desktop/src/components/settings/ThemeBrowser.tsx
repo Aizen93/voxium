@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { X, Search, Download, Trash2, Eye, ChevronDown, Loader2 } from 'lucide-react';
 import type { CommunityTheme } from '@voxium/shared';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -15,6 +16,7 @@ interface ThemeBrowserProps {
 type SortOption = 'newest' | 'popular' | 'name';
 
 export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
+  const { t } = useTranslation();
   const { customThemes, installCustomTheme, uninstallCustomTheme, setTheme } = useSettingsStore();
   const {
     previewKey: previewingId,
@@ -59,11 +61,11 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
         setPage(p);
       }
     } catch {
-      toast.error('Failed to load themes');
+      toast.error(t('themes.browser.failedToLoad'));
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, sort, tag]);
+  }, [debouncedSearch, sort, tag, t]);
 
   useEffect(() => {
     fetchThemes(1);
@@ -91,11 +93,11 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
     // (a restore here would repaint the app in the theme we just replaced).
     adoptPreview();
     setTheme(`custom:${localId}`);
-    toast.success(`Installed "${theme.name}"`);
-  }, [installCustomTheme, setTheme, adoptPreview]);
+    toast.success(t('themes.browser.installedToast', { name: theme.name }));
+  }, [installCustomTheme, setTheme, adoptPreview, t]);
 
   const handleUninstall = useCallback(async (theme: CommunityTheme) => {
-    const installed = customThemes.find((t) => t.remoteId === theme.id);
+    const installed = customThemes.find((ct) => ct.remoteId === theme.id);
     if (!installed) return;
     uninstallCustomTheme(installed.localId);
     try {
@@ -103,11 +105,11 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
     } catch (err) {
       console.warn('[Themes] Failed to notify uninstall count:', err);
     }
-    toast.success(`Uninstalled "${theme.name}"`);
-  }, [customThemes, uninstallCustomTheme]);
+    toast.success(t('themes.browser.uninstalledToast', { name: theme.name }));
+  }, [customThemes, uninstallCustomTheme, t]);
 
   const isInstalled = useCallback((themeId: string) => {
-    return customThemes.some((t) => t.remoteId === themeId);
+    return customThemes.some((ct) => ct.remoteId === themeId);
   }, [customThemes]);
 
   const handleClose = useCallback(() => {
@@ -142,16 +144,17 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
         >
           <div>
             <h2 className="text-sm font-bold" style={{ color: 'var(--vox-text-primary)' }}>
-              Theme Marketplace
+              {t('themes.browser.title')}
             </h2>
             <p className="text-[11px] mt-0.5" style={{ color: 'var(--vox-text-muted)' }}>
-              {total} community theme{total !== 1 ? 's' : ''} available
+              {t('themes.browser.available', { count: total })}
             </p>
           </div>
           <button
             onClick={handleClose}
             className="p-1 rounded-md transition-colors hover:opacity-80"
             style={{ color: 'var(--vox-text-muted)' }}
+            aria-label={t('common.close')}
           >
             <X size={18} />
           </button>
@@ -173,7 +176,7 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search themes..."
+              placeholder={t('themes.browser.searchPlaceholder')}
               className="w-full rounded-lg pl-8 pr-3 py-1.5 text-xs outline-none"
               style={{
                 backgroundColor: 'var(--vox-bg-floating)',
@@ -195,9 +198,9 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
                 color: 'var(--vox-text-secondary)',
               }}
             >
-              <option value="newest">Newest</option>
-              <option value="popular">Popular</option>
-              <option value="name">A-Z</option>
+              <option value="newest">{t('themes.browser.sortNewest')}</option>
+              <option value="popular">{t('themes.browser.sortPopular')}</option>
+              <option value="name">{t('themes.browser.sortName')}</option>
             </select>
             <ChevronDown
               size={12}
@@ -211,7 +214,7 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
             type="text"
             value={tag}
             onChange={(e) => setTag(e.target.value)}
-            placeholder="Filter by tag..."
+            placeholder={t('themes.browser.tagPlaceholder')}
             className="rounded-lg px-3 py-1.5 text-xs outline-none w-[140px]"
             style={{
               backgroundColor: 'var(--vox-bg-floating)',
@@ -229,9 +232,9 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
             </div>
           ) : themes.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-40 gap-2">
-              <p className="text-sm" style={{ color: 'var(--vox-text-muted)' }}>No themes found</p>
+              <p className="text-sm" style={{ color: 'var(--vox-text-muted)' }}>{t('themes.browser.noThemes')}</p>
               <p className="text-xs" style={{ color: 'var(--vox-text-muted)' }}>
-                Try a different search or be the first to publish one!
+                {t('themes.browser.noThemesHint')}
               </p>
             </div>
           ) : (
@@ -263,7 +266,7 @@ export function ThemeBrowser({ onClose }: ThemeBrowserProps) {
                       color: 'var(--vox-text-secondary)',
                     }}
                   >
-                    {loading ? 'Loading...' : 'Load More'}
+                    {loading ? t('common.loading') : t('themes.browser.loadMore')}
                   </button>
                 </div>
               )}
@@ -295,6 +298,7 @@ function ThemeCard({
   onInstall: (theme: CommunityTheme) => void;
   onUninstall: (theme: CommunityTheme) => void;
 }) {
+  const { t } = useTranslation();
   const c = theme.colors;
 
   const togglePreview = useCallback(() => {
@@ -344,24 +348,24 @@ function ThemeCard({
               {theme.name}
             </h3>
             <p className="text-[10px] mt-0.5" style={{ color: 'var(--vox-text-muted)' }}>
-              by {theme.authorDisplayName}
+              {t('themes.browser.byAuthor', { name: theme.authorDisplayName })}
             </p>
           </div>
           <span className="text-[10px] shrink-0 tabular-nums" style={{ color: 'var(--vox-text-muted)' }}>
-            {theme.installCount} {theme.installCount === 1 ? 'install' : 'installs'}
+            {t('themes.browser.installs', { count: theme.installCount })}
           </span>
         </div>
 
         {/* Tags */}
         {theme.tags.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-1.5">
-            {theme.tags.map((t) => (
+            {theme.tags.map((tag) => (
               <span
-                key={t}
+                key={tag}
                 className="px-1.5 py-0.5 rounded text-[9px]"
                 style={{ backgroundColor: 'var(--vox-bg-secondary)', color: 'var(--vox-text-muted)' }}
               >
-                {t}
+                {tag}
               </span>
             ))}
           </div>
@@ -378,7 +382,7 @@ function ThemeCard({
               backgroundColor: previewing ? 'var(--vox-accent-primary)/10' : 'transparent',
             }}
           >
-            <Eye size={11} /> {previewing ? 'Stop' : 'Preview'}
+            <Eye size={11} /> {previewing ? t('themes.browser.stop') : t('common.preview')}
           </button>
           {installed ? (
             <button
@@ -389,7 +393,7 @@ function ThemeCard({
                 color: 'var(--vox-accent-danger)',
               }}
             >
-              <Trash2 size={11} /> Uninstall
+              <Trash2 size={11} /> {t('themes.browser.uninstall')}
             </button>
           ) : (
             <button
@@ -397,7 +401,7 @@ function ThemeCard({
               className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold text-white transition-colors"
               style={{ backgroundColor: 'var(--vox-accent-primary)' }}
             >
-              <Download size={11} /> Install
+              <Download size={11} /> {t('themes.browser.install')}
             </button>
           )}
         </div>

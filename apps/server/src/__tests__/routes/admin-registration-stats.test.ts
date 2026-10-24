@@ -158,9 +158,14 @@ describe('GET /api/v1/admin/registration-stats', () => {
       ],
     });
 
-    // Only register-kind sightings feed the IP list, bounded at 10
+    // Only register-kind sightings feed the IP list, bounded at 10 — and only
+    // those whose ACCOUNT was created this week. `lastSeenAt` is refreshed by
+    // every login, so filtering on it counted returning accounts instead of
+    // registrations, which is useless for anti-bot triage
     const groupByArgs = prismaMock.ipRecord.groupBy.mock.calls[0][0];
     expect(groupByArgs.where.kind).toBe('register');
+    expect(groupByArgs.where.user.createdAt.gte).toBeInstanceOf(Date);
+    expect(groupByArgs.where.lastSeenAt).toBeUndefined();
     expect(groupByArgs.take).toBe(10);
   });
 

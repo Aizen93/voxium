@@ -196,7 +196,10 @@ export function MainLayout() {
         if (message.author?.id === currentUser?.id) return;
 
         // Check if the current user is mentioned
-        const isMentioned = !!(currentUser && message.mentions?.some((m) => m.id === currentUser.id));
+        // A direct mention, or an @everyone the server accepted (the author
+        // held MENTION_EVERYONE in that channel — `mentionsEveryone` is the
+        // server's word, never the content's)
+        const isMentioned = !!(currentUser && (message.mentions?.some((m) => m.id === currentUser.id) || message.mentionsEveryone));
 
         const isActiveChannel = isViewingChannel(message.channelId);
 
@@ -225,13 +228,18 @@ export function MainLayout() {
         if (settings.enableDesktopNotifications) {
           // A webhook's name carries the APP marker: it picks its own name per post
           const authorName = notificationAuthorName(message.author, i18n.t);
-          const serverName = message.serverName || 'Unknown Server';
-          const channelName = message.channelName || 'unknown';
+          const serverName = message.serverName || i18n.t('notifications.unknownServer');
+          const channelName = message.channelName || i18n.t('notifications.unknownChannel');
           const readable = formatNotificationBody(message.content, message.mentions);
           const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
-          const title = isMentioned
-            ? `${authorName} mentioned you in ${serverName}, #${channelName}`
-            : `${serverName}, #${channelName}`;
+          // A direct mention names you; an @everyone the server accepted
+          // (the author held MENTION_EVERYONE) says so instead
+          const mentionedDirectly = !!(currentUser && message.mentions?.some((m) => m.id === currentUser.id));
+          const title = mentionedDirectly
+            ? i18n.t('notifications.mentionedYou', { author: authorName, server: serverName, channel: channelName })
+            : isMentioned
+              ? i18n.t('chat.mentionEveryone.notificationTitle', { author: authorName, server: serverName, channel: channelName })
+              : i18n.t('notifications.channelMessage', { server: serverName, channel: channelName });
           void notify(title, `${authorName}: ${body}`, message.author?.avatarUrl);
         }
       },
@@ -289,7 +297,7 @@ export function MainLayout() {
       },
       voiceForceMove: ({ targetChannelId }: { channelId: string; userId: string; targetChannelId: string }) => {
         useVoiceStore.getState().handleForceMove(targetChannelId);
-        toast.info('You were moved to another voice channel');
+        toast.info(i18n.t('voice.toasts.movedToAnotherChannel'));
       },
       voiceSpeaking: ({ channelId, userId, speaking }: { channelId: string; userId: string; speaking: boolean }) => {
         useVoiceStore.getState().setUserSpeaking(channelId, userId, speaking);
@@ -421,10 +429,10 @@ export function MainLayout() {
             const settings = useSettingsStore.getState();
             if (settings.enableNotificationSounds) playMessageSound();
             if (settings.enableDesktopNotifications) {
-              const authorName = message.author?.displayName || message.author?.username || 'Someone';
+              const authorName = message.author?.displayName || message.author?.username || i18n.t('notifications.someone');
               const readable = formatNotificationBody(message.content, message.mentions);
               const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
-              void notify(`DM, ${authorName}`, body, message.author?.avatarUrl);
+              void notify(i18n.t('notifications.dmTitle', { name: authorName }), body, message.author?.avatarUrl);
             }
           }
         }
@@ -691,16 +699,16 @@ export function MainLayout() {
         }
 
         serverState.handleServerDeleted(serverId);
-        toast.info('Server was deleted');
+        toast.info(i18n.t('server.deletedToast'));
       },
       announcementInit: ({ announcements }: { announcements: Announcement[] }) => {
         useAnnouncementStore.getState().initAnnouncements(announcements);
       },
       announcementNew: (announcement: Announcement) => {
         useAnnouncementStore.getState().addAnnouncement(announcement);
-        const typeLabels: Record<string, string> = { info: 'Info', warning: 'Warning', maintenance: 'Maintenance' };
-        const label = typeLabels[announcement.type] || 'Announcement';
-        toast.info(`${label}: ${announcement.title}`);
+        const typeLabels: Record<string, string> = { info: i18n.t('notifications.announcementInfo'), warning: i18n.t('notifications.announcementWarning'), maintenance: i18n.t('notifications.announcementMaintenance') };
+        const label = typeLabels[announcement.type] || i18n.t('notifications.announcementGeneric');
+        toast.info(i18n.t('notifications.announcementToast', { label, title: announcement.title }));
       },
       supportMessageNew: (message: SupportMessageData) => {
         useSupportStore.getState().addMessage(message);
@@ -925,7 +933,7 @@ export function MainLayout() {
               <Search size={14} className="shrink-0" />
               <span className="truncate text-[13px]">{t('search.placeholder')}</span>
               <kbd className="ml-auto shrink-0 rounded-sm bg-vox-bg-hover px-1.5 py-0.5 font-mono text-[10px] text-vox-text-muted/80">
-                {navigator.platform.toUpperCase().includes('MAC') ? '⌘K' : 'Ctrl K'}
+                {navigator.platform.toUpperCase().includes('MAC') ? '⌘K' : `${t('common.ctrlKey')} K`}
               </kbd>
             </button>
           </div>

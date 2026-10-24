@@ -10,7 +10,7 @@ import { createRoot, type Root } from 'react-dom/client';
 type Rule = {
   name: string;
   label: string;
-  keyType: 'ip' | 'userId' | 'account' | 'webhook';
+  keyType: 'ip' | 'subnet' | 'userId' | 'account' | 'inbox' | 'domain' | 'webhook';
   keyPrefix: string;
   points: number;
   duration: number;
@@ -100,13 +100,22 @@ afterEach(() => {
 });
 
 describe('AdminRateLimits — key-type badge', () => {
-  it("renders 'Webhook' for keyType 'webhook', 'IP' for 'ip', 'Account' for 'account' and 'User' for 'userId'", async () => {
+  it("renders a badge per key type: Webhook, IP, Subnet, Account, Inbox, Domain, User (subnet/inbox/domain buckets used to show 'IP')", async () => {
+    store.rateLimits = [
+      ...store.rateLimits,
+      rule('loginSubnet', 'subnet', 'Login (failures per subnet)'),
+      rule('verifyMail', 'inbox', 'Verification mail (daily per inbox)'),
+      rule('registerDomain', 'domain', 'Register (daily per email domain)'),
+    ];
     await render();
     expect(store.fetchRateLimits).toHaveBeenCalledTimes(1);
     expect(badgeOf('webhookExecute')).toBe('Webhook');
     expect(badgeOf('webhookExecuteIp')).toBe('IP');
     expect(badgeOf('login')).toBe('IP');
+    expect(badgeOf('loginSubnet')).toBe('Subnet');
     expect(badgeOf('loginAccount')).toBe('Account');
+    expect(badgeOf('verifyMail')).toBe('Inbox');
+    expect(badgeOf('registerDomain')).toBe('Domain');
     expect(badgeOf('webhookManage')).toBe('User');
     expect(badgeOf('messageSend')).toBe('User');
   });

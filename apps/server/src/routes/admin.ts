@@ -120,9 +120,13 @@ adminRouter.get('/registration-stats', async (_req: Request, res: Response, next
       prisma.user.count({ where: { createdAt: { gte: hourAgo } } }),
       prisma.user.count({ where: { createdAt: { gte: dayAgo } } }),
       prisma.user.count({ where: { emailVerified: false } }),
+      // Addresses that REGISTERED accounts this week: the record's kind is
+      // fixed at first sight, and the account's creation date says when.
+      // (`lastSeenAt` is refreshed by every login, so filtering on it counted
+      // returning accounts instead — useless for anti-bot triage.)
       prisma.ipRecord.groupBy({
         by: ['ip'],
-        where: { kind: 'register', lastSeenAt: { gte: weekAgo } },
+        where: { kind: 'register', user: { createdAt: { gte: weekAgo } } },
         _count: { ip: true },
         orderBy: { _count: { ip: 'desc' } },
         take: 10,

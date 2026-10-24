@@ -527,7 +527,16 @@ describe('the budgets a NAT shares (issue 4)', () => {
 
   it('sign-in counts failures per address, per network AND per account; only the address bucket blocks', () => {
     expect(rows.login).toMatchObject({ keyType: 'ip', points: 20, duration: 60, blockDuration: 300 });
-    expect(rows.loginSubnet).toMatchObject({ keyType: 'ip', points: 60, duration: 60, blockDuration: 0, keyPrefix: 'rl:loginnet' });
+    expect(rows.loginSubnet).toMatchObject({ keyType: 'subnet', points: 60, duration: 60, blockDuration: 0, keyPrefix: 'rl:loginnet' });
+  });
+
+  it('names what each bucket is keyed on (the admin table used to show "IP" for subnet, inbox and domain buckets)', () => {
+    expect(rows.registerSubnet.keyType).toBe('subnet');
+    expect(rows.registerAttemptSubnet.keyType).toBe('subnet');
+    expect(rows.verifyMail.keyType).toBe('inbox');
+    expect(rows.resetMail.keyType).toBe('inbox');
+    expect(rows.registerDomain.keyType).toBe('domain');
+    expect(rows.login.keyType).toBe('ip');
     expect(rows.loginAccount).toMatchObject({ keyType: 'account', points: 10, duration: 900, blockDuration: 0, keyPrefix: 'rl:loginacct' });
   });
 

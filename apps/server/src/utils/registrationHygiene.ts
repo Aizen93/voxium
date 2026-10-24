@@ -318,7 +318,7 @@ export async function checkRegistrationSpike(): Promise<void> {
     await sendAdminAlert(alertTo, `Registration spike: ${lastHour} signups in the last hour`, [
       `${lastHour} accounts were registered in the last hour (threshold ${REGISTRATION_SPIKE_PER_HOUR}).`,
       'Review the admin dashboard registration panel: top registering IPs, unverified backlog.',
-      'If this is an attack: ban the source IPs/ranges, or flip the registration feature flag off.',
+      'If this is an attack: ban the source IPs (one address per ban), or flip the registration feature flag off.',
     ]);
   } catch (err) {
     console.error('[RegHygiene] Spike alert email failed:', describeEmailError(err));
