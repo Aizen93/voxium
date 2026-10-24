@@ -106,6 +106,9 @@ searchRouter.get('/servers/:serverId/messages', async (req: Request<{ serverId: 
       channelId: m.channelId,
       author: shapeMessageAuthor(m),
       webhookId: m.webhookId,
+      // The server's word that `@everyone` pings here: a result renders it as
+      // a mention exactly like the channel does
+      mentionsEveryone: m.mentionsEveryone,
       createdAt: m.createdAt,
       editedAt: m.editedAt,
       channelName: m.channel?.name,

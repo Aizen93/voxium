@@ -267,7 +267,10 @@ uploadRouter.get(
       }
 
       const url = await generatePresignedGetUrl(key);
-      res.set('Cache-Control', 'no-cache');
+      // Keys are immutable and the signed link lives an hour: the browser may
+      // reuse this redirect for most of it instead of asking again for every
+      // avatar on screen (one request per picture per launch, on the NAT's budget)
+      res.set('Cache-Control', 'private, max-age=3000');
       res.redirect(302, url);
     } catch (err) {
       next(err);

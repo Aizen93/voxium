@@ -67,6 +67,14 @@ vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({ to: mockTo, in: mockIn })),
 }));
 
+// The invitee's sockets enter the channel room after every voice event in it:
+// the route replays the occupants to them
+const mockReplayVoiceState = vi.fn();
+vi.mock('../../websocket/voiceHandler', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../websocket/voiceHandler')>()),
+  replayVoiceState: (...args: any[]) => mockReplayVoiceState(...args),
+}));
+
 // S3 (imported transitively by secureChannelLifecycle)
 vi.mock('../../utils/s3', () => ({
   deleteMultipleFromS3: vi.fn().mockResolvedValue(undefined),
@@ -382,6 +390,28 @@ describe('Secure Channel Routes', () => {
         WS_EVENTS.CHANNEL_MEMBERS_UPDATED,
         expect.objectContaining({ channelId: 'sec-1', serverId: 'srv-1' }),
       );
+      // The occupants of the channel they just gained are replayed to the
+      // invitee as a connect-style snapshot (a call in progress is not empty)
+      expect(mockReplayVoiceState).toHaveBeenCalledWith(
+        expect.objectContaining({ emit: mockEmit }),
+        ['srv-1'],
+        new Set(['sec-1']),
+        { source: 'connect' },
+      );
+      expect(mockTo).toHaveBeenCalledWith('user:user-9');
+    });
+
+    it('a failing occupancy replay is logged and the invitation still succeeds', async () => {
+      mockReplayVoiceState.mockRejectedValueOnce(new Error('redis away'));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(201);
+      expect(warn).toHaveBeenCalledWith('[SecureChannels] Could not replay voice occupancy to the invitee:', 'redis away');
+      warn.mockRestore();
     });
 
     it('403 when a plain member tries to invite', async () => {

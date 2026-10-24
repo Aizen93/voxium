@@ -89,6 +89,9 @@ model User {
   joinRequestsDecided   ServerJoinRequest[] @relation("JoinRequestDecider")
   createdWebhooks       Webhook[]           @relation("WebhookCreator")
   rotatedWebhooks       Webhook[]           @relation("WebhookRotator")
+  // The presence reaper reads every user the column calls online, each minute
+  @@index([status])
+
 
   @@map("users")
 }

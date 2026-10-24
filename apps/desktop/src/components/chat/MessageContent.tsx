@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { useTranslation } from 'react-i18next';
 import type { Components } from 'react-markdown';
-import { MENTION_RE, EVERYONE_MENTION_RE } from '@voxium/shared';
+import { MENTION_RE, EVERYONE_MENTION, findEveryoneMentions } from '@voxium/shared';
 import type { MessageAuthor } from '@voxium/shared';
 
 interface Props {
@@ -92,19 +92,26 @@ type Segment =
  * it lacked the permission, and rendering it as a ping would lie.
  */
 function segment(content: string, mentionsEveryone: boolean): Segment[] {
-  const sources: Array<{ re: RegExp; kind: 'mention' | 'everyone' }> = [{ re: MENTION_RE, kind: 'mention' }];
-  if (mentionsEveryone) sources.push({ re: EVERYONE_MENTION_RE, kind: 'everyone' });
-  const combined = new RegExp(sources.map((s) => `(${s.re.source})`).join('|'), 'g');
+  const hits: Array<{ start: number; end: number; seg: Segment }> = [];
+  const re = new RegExp(MENTION_RE.source, MENTION_RE.flags);
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content)) !== null) {
+    hits.push({ start: match.index, end: match.index + match[0].length, seg: { type: 'mention', userId: match[1] } });
+  }
+  if (mentionsEveryone) {
+    // The SAME scan the server flagged the row with (it skips tokens inside a
+    // user mention, so the two kinds never overlap)
+    for (const start of findEveryoneMentions(content)) {
+      hits.push({ start, end: start + EVERYONE_MENTION.length, seg: { type: 'everyone' } });
+    }
+  }
+  hits.sort((a, b) => a.start - b.start);
   const segments: Segment[] = [];
   let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = combined.exec(content)) !== null) {
-    // Group layout: [1] whole user mention, [2] its userId, [3] the everyone
-    // token (a lookbehind: nothing before it is consumed)
-    if (match.index > lastIndex) segments.push({ type: 'text', value: content.slice(lastIndex, match.index) });
-    if (match[3] !== undefined) segments.push({ type: 'everyone' });
-    else segments.push({ type: 'mention', userId: match[2] });
-    lastIndex = combined.lastIndex;
+  for (const hit of hits) {
+    if (hit.start > lastIndex) segments.push({ type: 'text', value: content.slice(lastIndex, hit.start) });
+    segments.push(hit.seg);
+    lastIndex = hit.end;
   }
   if (lastIndex < content.length) segments.push({ type: 'text', value: content.slice(lastIndex) });
   return segments;
@@ -114,7 +121,7 @@ export function MessageContent({ content, mentions, mentionsEveryone = false }: 
   const { t } = useTranslation();
   const mentionMap = buildMentionMap(mentions);
   const hasUserMentions = mentionMap.size > 0 && new RegExp(MENTION_RE.source, MENTION_RE.flags).test(content);
-  const hasEveryone = mentionsEveryone && new RegExp(EVERYONE_MENTION_RE.source).test(content);
+  const hasEveryone = mentionsEveryone && findEveryoneMentions(content).length > 0;
   const hasMentions = hasUserMentions || hasEveryone;
 
   if (!hasMentions) {
