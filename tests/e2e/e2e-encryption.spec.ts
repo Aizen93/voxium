@@ -36,7 +36,7 @@ async function openDMWith(page: Page, username: string) {
 async function sendMessage(page: Page, text: string) {
   await page.locator('textarea').first().fill(text);
   await page.locator('textarea').first().press('Enter');
-  await expect(page.locator('.leading-relaxed', { hasText: text }).first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('p.leading-relaxed', { hasText: text }).first()).toBeVisible({ timeout: 15_000 });
 }
 
 /**
@@ -127,7 +127,7 @@ test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quara
     const secretA = `top secret from A ${Date.now()}`;
     await page.locator('textarea').fill(secretA);
     await page.keyboard.press('Enter');
-    await expect(page.locator('.leading-relaxed', { hasText: secretA }).first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('p.leading-relaxed', { hasText: secretA }).first()).toBeVisible({ timeout: 10_000 });
 
     // B opens the conversation, sees the DECRYPTED text + badge
     await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });

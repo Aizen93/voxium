@@ -115,7 +115,7 @@ test('a hostile server’s replayed, relabelled and rolled-back ciphertext never
   });
 
   const reopen = async () => {
-    // two browsers on one IP and a reload per step: the global per-IP bucket (100/min when written, 1000/min now)
+    // two browsers on one IP and a reload per step: the anonymous per-IP bucket
     // is a harness property, not the behaviour under test (helpers/rateLimits.ts)
     await clearRateLimits();
     await bobPage.reload();

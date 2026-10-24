@@ -948,7 +948,7 @@
     "measuring": "Midiendo...",
     "toasts": {
       "movedToAnotherChannel": "Te movieron a otro canal de voz",
-      "micDenied": "Acceso al micrófono denegado: te unes en modo solo escucha",
+      "micDenied": "Acceso al micrófono denegado: entrarás en modo solo escucha",
       "joinFailed": "No pudiste unirte al canal de voz: inténtalo de nuevo",
       "connectionTimedOut": "Se agotó el tiempo de la conexión de voz: intenta volver a unirte",
       "connectionFailed": "Falló la conexión de voz: intenta volver a unirte",
@@ -956,8 +956,8 @@
       "connectionFailedManual": "Falló la conexión de voz: vuelve a unirte manualmente",
       "establishFailed": "No se pudo establecer la conexión de voz",
       "mutedByModerator": "Un moderador te ha silenciado",
-      "deafenedByModerator": "Un moderador te ha ensordecido",
-      "screenShareFailed": "Falló la pantalla compartida: inténtalo de nuevo",
+      "deafenedByModerator": "Un moderador te ha silenciado el audio",
+      "screenShareFailed": "No se pudo compartir la pantalla: inténtalo de nuevo",
       "micIssue": "Se detectó un problema con el micrófono: intenta volver a unirte a la voz"
     }
   },
@@ -1249,7 +1249,7 @@
     "alreadyMemberInvite": "Ya eres miembro de este servidor",
     "fileTypeNotAllowed": "Tipo de archivo no permitido",
     "noPermissionChangeIcon": "No tienes permiso para cambiar el icono del servidor",
-    "cannotReportSelf": "No puedes reportarte a ti mismo",
+    "cannotReportSelf": "No puedes denunciarte a ti mismo",
     "reportAlreadyPending": "Ya tienes un reporte pendiente contra este objetivo",
     "supportDisabled": "Los tickets de soporte están desactivados actualmente",
     "ticketClosed": "El ticket está cerrado. Reabrelo para enviar mensajes.",

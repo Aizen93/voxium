@@ -8,14 +8,17 @@ import { registerUser, createServer, createChannel } from './helpers/api';
  * The per-address request budget (`general`, middleware/rateLimiter.ts) is
  * shared by everyone behind one NAT, so the client's chattiness is what
  * decides how many colleagues can use Voxium from one office before the
- * server refuses ordinary reads. Measured when this landed (2026-10-24, dev
- * build, StrictMode doubling every mount effect): a sign-in plus the first
- * screen ~9 requests, two servers and six channels ~26, a reload ~9 — 44 in
- * the busiest minute with every duplicate coalesced, 56 once a GET issued
- * after a socket event stopped joining one issued before it (correctness
- * over the saving). The ceiling below is a tripwire for a runaway poll or
+ * server refuses ordinary reads. A dev build (StrictMode doubles every mount
+ * effect) measures a sign-in plus the first screen at about 9 requests, two
+ * servers and six channels at about 26, a reload at about 9 — roughly 56 in
+ * the busiest minute. The ceiling below is a tripwire for a runaway poll or
  * a fetch-on-every-render regression, not a target: it sits at a fifth of
- * the budget, so five such sessions still fit behind one address.
+ * the anonymous per-address budget, so five such sessions still fit behind
+ * one address even unsigned.
+ *
+ * The fixed waits ARE the measurement: idle periods during which a well
+ * behaved client sends nothing, so they are not replaced by waits on an
+ * observable.
  */
 const BUSIEST_MINUTE_CEILING = 200;
 

@@ -2,6 +2,14 @@ import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getAccessToken, flushTokenStorage } from './tokenStorage';
 import { bumpRequestGeneration } from './requestGeneration';
+
+/** Events that arrive many times a second during a call and carry no state a REST read would show. */
+const NOISY_EVENTS = new Set([
+  'pong:latency', 'ping:latency',
+  'voice:speaking', 'dm:voice:speaking',
+  'voice:signal', 'dm:voice:signal',
+  'voice:annotation:ops', 'voice:annotation:live',
+]);
 import { getFreshAccessToken, refreshAccessToken, isAccessTokenFresh, SessionLostError } from './session';
 
 const SOCKET_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3001';
@@ -173,13 +181,6 @@ export function connectSocket(token: string): VoxSocket {
 
   // Debug logging — only in development
   if (import.meta.env.DEV) {
-    const NOISY_EVENTS = new Set([
-      'pong:latency', 'ping:latency',
-      'voice:speaking', 'dm:voice:speaking',
-      'voice:signal', 'dm:voice:signal',
-      'voice:annotation:ops', 'voice:annotation:live',
-    ]);
-
     s.onAny((event: string, ...args: unknown[]) => {
       if (NOISY_EVENTS.has(event)) return;
       console.log(`[WS] ← ${event}`, args.length > 0 ? JSON.stringify(args[0]).slice(0, 120) : '');
@@ -214,8 +215,12 @@ export function connectSocket(token: string): VoxSocket {
 
   // Every event the server delivers may mean its state changed: a GET the
   // stores issue because of it must not share a request issued before it
-  // (services/api.ts coalesces identical GETs in flight)
-  s.onAny(() => bumpRequestGeneration());
+  // (services/api.ts coalesces identical GETs in flight). The high-rate
+  // media events change no REST-readable state and would switch coalescing
+  // off for the length of a call
+  s.onAny((event: string) => {
+    if (!NOISY_EVENTS.has(event)) bumpRequestGeneration();
+  });
 
   s.on('force:logout', (data) => {
     if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);

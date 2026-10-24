@@ -43,6 +43,7 @@ const session = vi.hoisted(() => ({
   isAccessTokenFresh: vi.fn(() => true),
   shouldRenewBeforeSending: vi.fn(() => false),
   refreshAccessToken: vi.fn(),
+  currentSessionEpoch: vi.fn(() => 0),
   SessionLostError: class SessionLostError extends Error {},
 }));
 vi.mock('../../services/session', () => session);
@@ -427,5 +428,42 @@ describe('api — the coalescing adapter', () => {
     expect(coalescingKey(getConfig('/servers', { params: { big: BigInt(1) } }) as never)).toBeNull();
     expect(coalescingKey(getConfig('/e2e/keyshares') as never)).toBeNull();
     expect(coalescingKey(getConfig('/servers', { paramsSerializer: { indexes: null } }) as never)).toBeNull();
+  });
+});
+
+describe('api — a request belongs to the session it was sent under', () => {
+  beforeEach(() => {
+    session.currentSessionEpoch.mockReturnValue(0);
+  });
+
+  it('stamps the session epoch on every request at send time', async () => {
+    session.currentSessionEpoch.mockReturnValue(3);
+    const out = (await requestInterceptor()(config())) as { _sessionEpoch?: number };
+    expect(out._sessionEpoch).toBe(3);
+  });
+
+  it('a 401 that comes back after a logout or a new sign-in is final: no renewal, no retry with the NEW session\'s token', async () => {
+    // account A's request left under epoch 0; B signed in meanwhile (epoch 1) and a fresh token of B's is stored
+    const original = { ...config(), headers: { Authorization: 'Bearer access-A' }, _sessionEpoch: 0 };
+    session.currentSessionEpoch.mockReturnValue(1);
+    storage.getAccessToken.mockReturnValue('access-B');
+    session.isAccessTokenFresh.mockReturnValue(true);
+    const error = { response: { status: 401 }, config: original };
+
+    await expect(responseRejected()(error)).rejects.toBe(error);
+
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(fake.instance).not.toHaveBeenCalled();
+  });
+
+  it('the same session retries as before', async () => {
+    const original = { ...config(), headers: { Authorization: 'Bearer access-old' }, _sessionEpoch: 0 };
+    storage.getAccessToken.mockReturnValue('access-renewed-meanwhile');
+    session.isAccessTokenFresh.mockReturnValue(true);
+
+    await responseRejected()({ response: { status: 401 }, config: original });
+
+    expect(fake.instance).toHaveBeenCalledTimes(1);
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,7 @@
 import axios, { AxiosError, type AxiosAdapter, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
 import { connectSocket } from './socket';
 import { getAccessToken, getRefreshToken } from './tokenStorage';
-import { API_BASE, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, SessionLostError } from './session';
+import { API_BASE, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, currentSessionEpoch, SessionLostError } from './session';
 import { requestGeneration, bumpRequestGeneration } from './requestGeneration';
 
 // The REST base; defined with the session module (which cannot import this
@@ -14,6 +14,8 @@ export type SessionRequestConfig = InternalAxiosRequestConfig & {
   _retry?: boolean;
   /** The request went out with a stale token because its renewal had just failed transiently. */
   _renewalFailed?: boolean;
+  /** The session the request was sent under (`currentSessionEpoch()` at send time). */
+  _sessionEpoch?: number;
 };
 
 /** The token a request carried, from its Authorization header (an AxiosHeaders on a sent request, a plain object before). */
@@ -157,6 +159,10 @@ api.interceptors.request.use(async (config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+  // The session this request belongs to: a 401 that comes back after a logout
+  // or a new sign-in must not be retried with the NEW session's token (an
+  // old request of account A running as account B)
+  (config as SessionRequestConfig)._sessionEpoch = currentSessionEpoch();
   return config;
 });
 
@@ -185,6 +191,8 @@ api.interceptors.response.use(
       originalRequest._retry = true;
       const sent = bearerOf(originalRequest);
       if (!sent || !getRefreshToken()) return Promise.reject(error);
+      // Sent under a session since ended: its 401 is final, whatever is stored now
+      if (originalRequest._sessionEpoch !== undefined && originalRequest._sessionEpoch !== currentSessionEpoch()) return Promise.reject(error);
       let accessToken: string;
       const stored = getAccessToken();
       if (stored && stored !== sent && isAccessTokenFresh(stored)) {
