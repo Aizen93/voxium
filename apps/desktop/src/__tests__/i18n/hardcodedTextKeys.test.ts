@@ -24,6 +24,7 @@ const SOURCES = [
   'components/chat/MentionAutocomplete.tsx',
   'components/chat/MessageContent.tsx',
   'components/chat/MessageInput.tsx',
+  'components/chat/MessageItem.tsx',
   'components/chat/MessageList.tsx',
   'components/chat/ReactionDisplay.tsx',
   'components/common/AppShellMock.tsx',

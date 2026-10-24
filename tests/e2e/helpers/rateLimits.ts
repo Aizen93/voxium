@@ -9,16 +9,13 @@ function quitQuietly(redis: { quit(): Promise<unknown> }): Promise<unknown> {
  * Reset every rate-limit counter (never `rl:config`, which holds the admin
  * overrides the server loaded at boot).
  *
- * Why a test needs this MID-run, not just between tests: the global limiter
- * was IP-keyed at 100 requests/60s when this was written, and one Playwright
- * worker drives every browser context from the same address. A single-user
- * test stayed well inside that, but a multi-device scenario runs three
- * contexts — two devices of one account plus the peer — and their combined
- * traffic crossed 100 partway through, at which point ordinary reads started
- * coming back 429. (Since the false-429 fix of 2026-10-24 the budget is per
- * USER once signed in — 600/min — and 1000/min per address for anonymous
- * traffic; the measurement below was part of the evidence. The reset stays:
- * it is cheap, and it keeps the sign-in failure buckets from carrying over.)
+ * Why a test needs this MID-run, not just between tests: one Playwright
+ * worker drives every browser context from the same address, and every
+ * per-address bucket (the anonymous general budget, the sign-in failure
+ * buckets, registration) is shared by all of them. The signed-in general
+ * budget is per user, so ordinary reads no longer pile up on one bucket, but a
+ * multi-device scenario still registers and signs in several accounts from
+ * one address, and the reset keeps one spec's spend from reaching the next.
  *
  * That is a property of the harness, not of the product: a real user is one
  * browser, and the per-route E2E budgets sit at a few percent of their limits

@@ -217,7 +217,7 @@ describe('session — refreshAccessToken', () => {
 
   it('after a logout a new session renews again (the in-flight slot is free)', async () => {
     http.post.mockReturnValueOnce(new Promise(() => {})); // never settles
-    void refreshAccessToken().catch(() => {});
+    void refreshAccessToken();
     endSessionRenewals();
     storage.refresh = 'refresh-next-session';
     http.post.mockResolvedValueOnce({ data: { data: { accessToken: 'access-2', refreshToken: 'refresh-2' } } });

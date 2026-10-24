@@ -82,14 +82,6 @@ interface AuthState {
 }
 
 /**
- * Fetch a proof-of-work challenge and solve it, retrying ONCE with a fresh
- * challenge if the first one expires mid-solve. Solve time is geometric, so a
- * small tail of honest attempts overruns the window on a slow device even at
- * the difficulty ceiling; one retry turns that dead end into a slower success.
- * Exactly one retry — an unbounded loop on a device too slow for the issued
- * difficulty would grind forever instead of surfacing the failure.
- */
-/**
  * Before a sign-in or a registration: the tokens of a session this launch
  * could not verify (kept for a retry, see checkAuth) and the socket of a
  * session being replaced must not ride along. The stale token would be sent
@@ -211,6 +203,14 @@ export function _resetSessionRestoreForTests(): void {
   endSessionRestore();
 }
 
+/**
+ * Fetch a proof-of-work challenge and solve it, retrying ONCE with a fresh
+ * challenge if the first one expires mid-solve. Solve time is geometric, so a
+ * small tail of honest attempts overruns the window on a slow device even at
+ * the difficulty ceiling; one retry turns that dead end into a slower success.
+ * Exactly one retry — an unbounded loop on a device too slow for the issued
+ * difficulty would grind forever instead of surfacing the failure.
+ */
 async function solveWithRetry(onProgress: (fraction: number) => void, signal: AbortSignal) {
   for (let attempt = 0; ; attempt++) {
     if (signal.aborted) throw new PowAbortedError();

@@ -120,6 +120,13 @@ let sessionLost = false;
 let sessionEpoch = 0;
 let refreshInFlight: Promise<string> | null = null;
 
+/** The session a request is sent under: a request stamped with an older value
+ *  belongs to a session since ended (logout, a new sign-in) and must not be
+ *  retried with the new session's token. */
+export function currentSessionEpoch(): number {
+  return sessionEpoch;
+}
+
 /** @internal tests */
 export function setSessionLostNavigation(fn: () => void): void {
   navigateToLogin = fn;

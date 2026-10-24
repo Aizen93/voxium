@@ -958,7 +958,7 @@
       "mutedByModerator": "Un modérateur a coupé votre micro",
       "deafenedByModerator": "Un modérateur a coupé votre son",
       "screenShareFailed": "Échec du partage d'écran — veuillez réessayer",
-      "micIssue": "Problème de micro détecté — essayez de rejoindre le vocal à nouveau"
+      "micIssue": "Problème de micro détecté — essayez de rejoindre le salon vocal à nouveau"
     }
   },
   "attachment": {

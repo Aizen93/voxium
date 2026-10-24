@@ -462,7 +462,7 @@ export function translateServerError(
 ): string {
   if (!serverMessage) return t(fallbackKey);
 
-  const key = ERROR_MAP[serverMessage];
+  const key = Object.hasOwn(ERROR_MAP, serverMessage) ? ERROR_MAP[serverMessage] : undefined;
   if (key) return t(`serverErrors.${key}`, { defaultValue: serverMessage, ...ERROR_VARS[key] });
 
   for (const { re, key: patternKey, param = 'max' } of ERROR_PATTERNS) {
