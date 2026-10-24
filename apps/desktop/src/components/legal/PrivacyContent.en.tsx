@@ -1,3 +1,7 @@
+import { MINIMUM_AGE } from '@voxium/shared';
+import { LEGAL_OPERATOR, publisherOf } from './operator';
+import { MailLink } from './MailLink';
+
 /**
  * The Privacy Policy text itself, in English, without page chrome, so the same
  * document can be rendered as the public /privacy page and inside the
@@ -16,13 +20,17 @@
  *
  * Every number below is pinned to the constant it describes, and the text is
  * kept free of infrastructure names (say "our servers", never the product or
- * the provider behind them), by __tests__/legal/legalFacts.test.ts.
+ * the provider behind them), by __tests__/legal/legalFacts.test.ts. The
+ * controller's identity, the contact addresses and the change notice come from
+ * operator.ts, the minimum age from MINIMUM_AGE (@voxium/shared). The English
+ * is the reference version (section 11).
  */
 export function PrivacyContentEn() {
+  const publisher = publisherOf(LEGAL_OPERATOR);
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Privacy Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 24, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 25, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -75,6 +83,10 @@ export function PrivacyContentEn() {
               accepted the Terms of Service and this Privacy Policy
             </li>
           </ul>
+          <p className="mt-3">
+            The Service is not intended for anyone under {MINIMUM_AGE}, and we do not knowingly collect data from
+            them.
+          </p>
         </section>
 
         <section>
@@ -283,7 +295,13 @@ export function PrivacyContentEn() {
             <li>Correct inaccurate information: your display name, bio and avatar can be changed in the app, and so can your server nicknames where the server allows it; to correct your username or email address, contact us</li>
             <li>Delete your account and associated data yourself, from Settings → Security. You confirm with your password, and with your two-factor code if it is turned on; if you still own servers, transfer or delete them first</li>
             <li>Object to processing based on our legitimate interest, and withdraw consent — withdrawing consent to this policy means closing your account, since the Service cannot operate without the data described here</li>
-            <li>Lodge a complaint with your supervisory authority (in France, the CNIL)</li>
+            <li>
+              Lodge a complaint with your supervisory authority — in France, the CNIL (
+              <a href="https://www.cnil.fr/fr/plaintes" target="_blank" rel="noopener noreferrer" className="text-vox-accent-primary hover:underline">
+                cnil.fr/fr/plaintes
+              </a>
+              )
+            </li>
           </ul>
           <p className="mt-3">
             Since Voxium is source-available, you can also audit exactly how your data is handled by
@@ -293,24 +311,37 @@ export function PrivacyContentEn() {
 
         <section>
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">11. Changes to This Policy</h2>
+          <p className="mb-3">
+            We may revise this Privacy Policy. For a material change we give at least{' '}
+            {LEGAL_OPERATOR.changeNoticeDays} days&apos; notice in the app before it takes effect; a minor change, or
+            one with no adverse effect on you, may take effect when it is posted. The &ldquo;Last updated&rdquo; date at the top shows the current version. Your continued use of
+            the Service after a change takes effect is acceptance of it; if you do not agree, stop using the Service
+            and delete your account (see &ldquo;Your Rights&rdquo; above). Where a change concerns processing based
+            on your consent, we ask for your consent again rather than relying on your continued use.
+          </p>
           <p>
-            We may update this Privacy Policy from time to time. When we do, we will revise the "Last
-            updated" date at the top. We encourage you to review this policy periodically. Continued use of
-            the Service after changes are posted constitutes acceptance of the updated policy.
+            This policy is available in English and French. The English version is the reference version and
+            prevails in the event of a discrepancy, except where the mandatory law of your country of residence
+            requires otherwise.
           </p>
         </section>
 
         <section>
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">12. Contact</h2>
+          <p className="mb-3">
+            {publisher ? (
+              <>The data controller is the publisher of Voxium, {publisher.name}, {publisher.address}.</>
+            ) : (
+              <>
+                The data controller is the publisher of Voxium, operating from {LEGAL_OPERATOR.country}; its legal
+                notice is available on request at <MailLink address={LEGAL_OPERATOR.contactEmail} />.
+              </>
+            )}
+          </p>
           <p>
-            For questions about this Privacy Policy or to exercise your data rights, contact our Data
-            Protection Officer at{' '}
-            <a href="mailto:dpo@voxium.app" className="text-vox-accent-primary hover:underline">
-              dpo@voxium.app
-            </a>. For general inquiries, reach us at{' '}
-            <a href="mailto:contact@voxium.app" className="text-vox-accent-primary hover:underline">
-              contact@voxium.app
-            </a>.
+            For questions about this Privacy Policy or to exercise your data rights, write to our privacy contact
+            at <MailLink address={LEGAL_OPERATOR.privacyEmail} />. For general inquiries, reach us at{' '}
+            <MailLink address={LEGAL_OPERATOR.contactEmail} />.
           </p>
         </section>
       </div>

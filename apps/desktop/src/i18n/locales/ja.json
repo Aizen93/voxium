@@ -2025,5 +2025,8 @@
     "chatWelcome": "やあ、Voxium へようこそ！",
     "chatVoiceQuality": "音質がすごすぎる 🔥",
     "chatNoiseSuppression": "ノイズ抑制が魔法みたい 🚀"
+  },
+  "legal": {
+    "englishVersionNotice": "この文書は英語とフランス語で提供されています。以下に英語版を表示しています。"
   }
 }

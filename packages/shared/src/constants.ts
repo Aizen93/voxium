@@ -288,6 +288,8 @@ export const IP_RECORD_RETENTION_DAYS = 180;
 export const ORPHAN_GRACE_DAYS = 7;
 /** Lifetime of the trusted-device token a successful TOTP sign-in issues (skips TOTP on that device). */
 export const TRUSTED_DEVICE_TTL_DAYS = 30;
+/** Minimum age to use the Service: France's age of digital consent; the Terms and the Privacy Policy read it. */
+export const MINIMUM_AGE = 15;
 
 /** Characters that text shown to STRANGERS (a server description, a join
  *  request message, a ban reason) may never carry: control characters and the

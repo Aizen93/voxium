@@ -2025,5 +2025,8 @@
     "chatWelcome": "嘿，欢迎来到 Voxium！",
     "chatVoiceQuality": "语音质量太强了 🔥",
     "chatNoiseSuppression": "降噪简直是魔法 🚀"
+  },
+  "legal": {
+    "englishVersionNotice": "本文档提供英文和法文版本。下方显示的是英文版本。"
   }
 }

@@ -1,4 +1,6 @@
 import { StorageTable, type StorageRow, type StorageTableHeaders } from './StorageTable';
+import { LEGAL_OPERATOR } from './operator';
+import { MailLink } from './MailLink';
 
 /**
  * The Cookie Policy text itself, in English, without page chrome (the public
@@ -108,7 +110,7 @@ export function CookiePolicyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Cookie Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 24, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 25, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -188,13 +190,9 @@ export function CookiePolicyContentEn() {
         <section>
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">6. Contact</h2>
           <p>
-            For questions about this Cookie Policy, contact our Data Protection Officer at{' '}
-            <a href="mailto:dpo@voxium.app" className="text-vox-accent-primary hover:underline">
-              dpo@voxium.app
-            </a>. For general inquiries, reach us at{' '}
-            <a href="mailto:contact@voxium.app" className="text-vox-accent-primary hover:underline">
-              contact@voxium.app
-            </a>.
+            For questions about this Cookie Policy, write to our privacy contact at{' '}
+            <MailLink address={LEGAL_OPERATOR.privacyEmail} />. For general inquiries, reach us at{' '}
+            <MailLink address={LEGAL_OPERATOR.contactEmail} />.
           </p>
         </section>
       </div>

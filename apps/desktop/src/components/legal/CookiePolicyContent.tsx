@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react';
-import { useLegalLanguage, type LegalLanguage } from './legalLanguage';
+import type { LegalLanguage } from './legalLanguage';
+import { LegalDocument } from './LegalDocument';
 import { CookiePolicyContentEn } from './CookiePolicyContent.en';
 import { CookiePolicyContentFr } from './CookiePolicyContent.fr';
 
@@ -16,13 +17,5 @@ export const COOKIE_POLICY_CONTENT: Record<LegalLanguage, ComponentType> = {
 };
 
 export function CookiePolicyContent() {
-  const lang = useLegalLanguage();
-  const Document = COOKIE_POLICY_CONTENT[lang];
-  // lang: under <html lang="de"> (or any app language without a translation)
-  // the English text is still read with an English voice by screen readers
-  return (
-    <div lang={lang}>
-      <Document />
-    </div>
-  );
+  return <LegalDocument documents={COOKIE_POLICY_CONTENT} />;
 }

@@ -68,7 +68,7 @@
       "creatingAccount": "Création du compte…",
       "consentLegend": "Consentement",
       "acceptTermsPrefix": "J'ai lu et j'accepte les",
-      "termsOfService": "Conditions d'utilisation",
+      "termsOfService": "Conditions d’utilisation",
       "acceptPrivacyPrefix": "J'ai lu et j'accepte la",
       "privacyPolicy": "Politique de confidentialité",
       "showPassword": "Afficher le mot de passe",
@@ -1125,7 +1125,7 @@
       "status": "Statut",
       "legal": "Mentions légales",
       "privacyPolicy": "Politique de confidentialité",
-      "termsOfService": "Conditions d'utilisation",
+      "termsOfService": "Conditions d’utilisation",
       "cookiePolicy": "Politique de cookies",
       "community": "Communauté",
       "contributing": "Contribuer",
@@ -2035,5 +2035,8 @@
     "chatWelcome": "Salut, bienvenue sur Voxium !",
     "chatVoiceQuality": "La qualité audio est dingue 🔥",
     "chatNoiseSuppression": "La suppression du bruit, c'est magique 🚀"
+  },
+  "legal": {
+    "englishVersionNotice": "Ce document est disponible en anglais et en français. La version anglaise est affichée ci-dessous."
   }
 }

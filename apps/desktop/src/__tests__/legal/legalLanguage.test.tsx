@@ -22,11 +22,22 @@ import { TermsPage } from '../../pages/TermsPage';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+/** The documents' own <h1> (the French text elides with ’). */
 const TITLES = {
   privacy: { en: 'Privacy Policy', fr: 'Politique de confidentialité' },
-  terms: { en: 'Terms of Service', fr: "Conditions d'utilisation" },
+  terms: { en: 'Terms of Service', fr: 'Conditions d’utilisation' },
   cookies: { en: 'Cookie Policy', fr: 'Politique de cookies' },
 } as const;
+
+/** The page chrome's titles, from the locale files. */
+const CHROME_TITLE_KEYS = {
+  privacy: 'landing.footer.privacyPolicy',
+  terms: 'landing.footer.termsOfService',
+  cookies: 'landing.footer.cookiePolicy',
+} as const;
+
+const NOTICE_KEY = 'legal.englishVersionNotice';
+const notice = () => container.querySelector('[data-testid="legal-language-notice"]');
 
 const DOCUMENTS = {
   privacy: <PrivacyContent />,
@@ -128,8 +139,8 @@ describe('the legal documents follow the app language', () => {
     await setLanguage('fr');
     show(<MemoryRouter>{page}</MemoryRouter>);
     expect(h1()).toBe(TITLES[name].fr);
-    expect(container.querySelector('header')?.textContent).toContain(TITLES[name].fr);
-    expect(container.textContent).toContain("Retour à l'accueil");
+    expect(container.querySelector('header')?.textContent).toContain(i18n.t(CHROME_TITLE_KEYS[name]));
+    expect(container.textContent).toContain(i18n.t('landing.footer.backToHome'));
     expect(container.textContent).not.toContain('Back to home');
   });
 
@@ -139,5 +150,62 @@ describe('the legal documents follow the app language', () => {
     expect(h1()).toBe(TITLES.cookies.en);
     expect(container.querySelector('header')?.textContent).toContain('Cookie Policy');
     expect(container.textContent).toContain('Back to home');
+  });
+});
+
+describe('a language with no translation says the English is shown', () => {
+  it.each(['de', 'ja'])('shows the notice in %s, in that language, above the English document', async (code) => {
+    await setLanguage(code);
+    show(<PrivacyContent />);
+    const shown = notice();
+    expect(shown).toBeTruthy();
+    expect(shown!.textContent).toBe(i18n.getResource(code, 'translation', NOTICE_KEY));
+    expect(shown!.textContent).not.toBe(i18n.getResource('en', 'translation', NOTICE_KEY));
+    expect(shown!.getAttribute('lang')).toBe(code);
+    // above the document, inside the English wrapper
+    expect(shown!.parentElement?.getAttribute('lang')).toBe('en');
+    expect(shown!.nextElementSibling?.tagName).toBe('H1');
+  });
+
+  it('under Arabic, lays the English document out left to right and keeps the notice right to left', async () => {
+    await setLanguage('ar');
+    show(<TermsContent />);
+    const wrapper = container.firstElementChild;
+    expect(wrapper?.getAttribute('lang')).toBe('en');
+    expect(wrapper?.getAttribute('dir')).toBe('ltr');
+    expect(notice()?.getAttribute('dir')).toBe('rtl');
+    expect(notice()?.getAttribute('lang')).toBe('ar');
+  });
+
+  it.each(['de', 'en', 'fr'])('sets no direction in %s', async (code) => {
+    await setLanguage(code);
+    show(<TermsContent />);
+    expect(container.firstElementChild?.hasAttribute('dir')).toBe(false);
+    expect(notice()?.hasAttribute('dir') ?? false).toBe(false);
+  });
+
+  it.each(documentNames)('the %s carries it too', async (name) => {
+    await setLanguage('es');
+    show(DOCUMENTS[name]);
+    expect(notice()?.textContent).toBe(i18n.getResource('es', 'translation', NOTICE_KEY));
+  });
+
+  it.each(['en', 'fr', 'fr-CA'])('shows no notice in %s', async (code) => {
+    await setLanguage(code);
+    for (const name of documentNames) {
+      show(DOCUMENTS[name]);
+      expect(notice(), `${name} in ${code}`).toBeNull();
+    }
+  });
+
+  it('the notice exists in all 11 locales, translated', () => {
+    expect(SUPPORTED_LANGUAGES).toHaveLength(11);
+    const english = i18n.getResource('en', 'translation', NOTICE_KEY) as unknown;
+    expect(english).toBe('This document is available in English and French. The English version is shown below.');
+    for (const { code } of SUPPORTED_LANGUAGES) {
+      const text = i18n.getResource(code, 'translation', NOTICE_KEY) as unknown;
+      expect(typeof text === 'string' && text.length > 0, code).toBe(true);
+      if (code !== 'en') expect(text, code).not.toBe(english);
+    }
   });
 });

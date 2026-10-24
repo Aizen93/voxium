@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react';
-import { useLegalLanguage, type LegalLanguage } from './legalLanguage';
+import type { LegalLanguage } from './legalLanguage';
+import { LegalDocument } from './LegalDocument';
 import { TermsContentEn } from './TermsContent.en';
 import { TermsContentFr } from './TermsContent.fr';
 
@@ -15,13 +16,5 @@ export const TERMS_CONTENT: Record<LegalLanguage, ComponentType> = {
 };
 
 export function TermsContent() {
-  const lang = useLegalLanguage();
-  const Document = TERMS_CONTENT[lang];
-  // lang: under <html lang="de"> (or any app language without a translation)
-  // the English text is still read with an English voice by screen readers
-  return (
-    <div lang={lang}>
-      <Document />
-    </div>
-  );
+  return <LegalDocument documents={TERMS_CONTENT} />;
 }

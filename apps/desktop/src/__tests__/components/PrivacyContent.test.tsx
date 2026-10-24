@@ -17,7 +17,7 @@ import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/lega
 type PerLanguage = Record<LegalLanguage, string>;
 
 const PHRASES = {
-  lastUpdated: { en: 'Last updated: October 24, 2026', fr: 'Dernière mise à jour : 24 octobre 2026' },
+  lastUpdated: { en: 'Last updated: October 25, 2026', fr: 'Dernière mise à jour : 25 octobre 2026' },
   retentionHeading: { en: 'Retention', fr: 'Conservation' },
   webhooksItem: { en: 'Incoming webhooks', fr: 'Les webhooks entrants' },
   everythingElseItem: { en: 'Everything else', fr: 'Tout le reste' },
@@ -34,34 +34,34 @@ const PHRASES = {
   // The execute route stores only the rendered message, never the body
   webhookBody: {
     en: 'the body of a request a webhook receives is not kept beyond the message it produced',
-    fr: "le corps d'une requête reçue par un webhook n'est pas conservé au-delà du message qu'elle a produit",
+    fr: 'le corps d’une requête reçue par un webhook n’est pas conservé au-delà du message qu’elle a produit',
   },
   // ...but the JSON access log keeps the ip, method, redacted path, status
   // and size of every delivery: the policy must not claim the whole request
   webhookWholeRequest: {
     en: 'the request a webhook receives is not kept',
-    fr: "la requête reçue par un webhook n'est pas conservée",
+    fr: 'la requête reçue par un webhook n’est pas conservée',
   },
   // AuditLog.actor is onDelete: SetNull — the entries outlive the account
   auditLog: {
     en: 'records of moderation and administrative actions, no longer linked to your account',
-    fr: "les traces des actions de modération et d'administration, qui ne sont plus liées à votre compte",
+    fr: 'les traces des actions de modération et d’administration, qui ne sont plus liées à votre compte',
   },
   // IpBan rows carry no user link
   ipBans: {
     en: 'IP addresses on our block list, until the block is lifted',
-    fr: "les adresses IP figurant sur notre liste de blocage, jusqu'à la levée du blocage",
+    fr: 'les adresses IP figurant sur notre liste de blocage, jusqu’à la levée du blocage',
   },
   // Attachments of deleted messages are reclaimed by the orphan sweep, not inline
   orphans: {
     en: 'files you uploaded, until a daily clean-up removes them',
-    fr: "les fichiers que vous avez envoyés, jusqu'à ce qu'un nettoyage quotidien les supprime",
+    fr: 'les fichiers que vous avez envoyés, jusqu’à ce qu’un nettoyage quotidien les supprime',
   },
   logsAndBackups: { en: 'server logs and encrypted backups', fr: 'nos journaux serveur et nos sauvegardes chiffrées' },
   // MessageReaction.emoji is a plain column; dmVoiceHandler stores DM_SYSTEM_NOTICES as plaintext rows
   reactions: {
     en: 'Reactions (the emoji, who added it and to which message) are stored in readable form',
-    fr: "Les réactions (l'emoji, qui l'a ajouté et à quel message) sont stockées sous forme lisible",
+    fr: 'Les réactions (l’emoji, qui l’a ajouté et à quel message) sont stockées sous forme lisible',
   },
   callNotices: {
     en: '“call started” and “call ended” notices are stored in readable form',
@@ -112,7 +112,7 @@ describe.each(LEGAL_LANGUAGES)('PrivacyContent (%s)', (lang) => {
     return Array.from(list!.querySelectorAll('li')).map((li) => clean(li.textContent));
   }
 
-  it('shows the date of the last change (the audit against the code, 2026-10-24)', () => {
+  it('shows the date of the last change (2026-10-25: the operator, age, law and change-notice positions)', () => {
     expect(clean(container.textContent)).toContain(phrase('lastUpdated'));
   });
 

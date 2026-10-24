@@ -2025,5 +2025,8 @@
     "chatWelcome": "안녕, Voxium에 온 걸 환영해!",
     "chatVoiceQuality": "음질 미쳤다 🔥",
     "chatNoiseSuppression": "노이즈 억제가 마법 같아 🚀"
+  },
+  "legal": {
+    "englishVersionNotice": "이 문서는 영어와 프랑스어로 제공됩니다. 아래에는 영어 버전이 표시됩니다."
   }
 }

@@ -2075,5 +2075,8 @@
     "chatWelcome": "مرحبًا، أهلًا بك في Voxium!",
     "chatVoiceQuality": "جودة الصوت مذهلة 🔥",
     "chatNoiseSuppression": "كتم الضوضاء سحر حقيقي 🚀"
+  },
+  "legal": {
+    "englishVersionNotice": "هذه الوثيقة متاحة باللغتين الإنجليزية والفرنسية. تُعرض النسخة الإنجليزية أدناه."
   }
 }

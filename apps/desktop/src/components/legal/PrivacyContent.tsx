@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react';
-import { useLegalLanguage, type LegalLanguage } from './legalLanguage';
+import type { LegalLanguage } from './legalLanguage';
+import { LegalDocument } from './LegalDocument';
 import { PrivacyContentEn } from './PrivacyContent.en';
 import { PrivacyContentFr } from './PrivacyContent.fr';
 
@@ -16,13 +17,5 @@ export const PRIVACY_CONTENT: Record<LegalLanguage, ComponentType> = {
 };
 
 export function PrivacyContent() {
-  const lang = useLegalLanguage();
-  const Document = PRIVACY_CONTENT[lang];
-  // lang: under <html lang="de"> (or any app language without a translation)
-  // the English text is still read with an English voice by screen readers
-  return (
-    <div lang={lang}>
-      <Document />
-    </div>
-  );
+  return <LegalDocument documents={PRIVACY_CONTENT} />;
 }

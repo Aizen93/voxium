@@ -12,8 +12,10 @@ import {
   JOIN_REQUEST_PENDING_TTL_DAYS,
   JOIN_REQUEST_DECLINE_COOLDOWN_DAYS,
   E2E_LIMITS,
+  MINIMUM_AGE,
 } from '@voxium/shared';
 import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/legalLanguage';
+import { LEGAL_OPERATOR } from '../../components/legal/operator';
 import { PRIVACY_CONTENT } from '../../components/legal/PrivacyContent';
 import { TERMS_CONTENT } from '../../components/legal/TermsContent';
 import { COOKIE_POLICY_CONTENT } from '../../components/legal/CookiePolicyContent';
@@ -142,8 +144,19 @@ const pages = Object.fromEntries(pageNames.map((name) => [
 const cases = pageNames.flatMap((name) => LEGAL_LANGUAGES.map((lang) => [name, lang] as const));
 
 const LAST_UPDATED: PerLanguage = {
-  en: 'Last updated: October 24, 2026',
-  fr: 'Dernière mise à jour : 24 octobre 2026',
+  en: 'Last updated: October 25, 2026',
+  fr: 'Dernière mise à jour : 25 octobre 2026',
+};
+
+/**
+ * The change-notice promise (operator.ts), as the Terms and the Privacy Policy
+ * state it: in the app, the only channel the Service has for it (announcements;
+ * the only account e-mails are address verification and password reset).
+ */
+const CHANGE_NOTICE: { source: string } & PerLanguage = {
+  source: 'LEGAL_OPERATOR.changeNoticeDays (components/legal/operator.ts)',
+  en: `at least ${LEGAL_OPERATOR.changeNoticeDays} days' notice in the app before it takes effect`,
+  fr: `nous vous en informons dans l’application au moins ${LEGAL_OPERATOR.changeNoticeDays} jours avant son entrée en vigueur`,
 };
 
 /** Every number a page states, as the phrase that states it in each language, with where the value comes from. */
@@ -167,7 +180,7 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
     {
       source: 'UNVERIFIED_ACCOUNT_TTL_DAYS (server utils/registrationHygiene.ts)',
       en: `deleted ${UNVERIFIED_ACCOUNT_TTL_DAYS} days after registration`,
-      fr: `supprimés ${UNVERIFIED_ACCOUNT_TTL_DAYS} jours après l'inscription`,
+      fr: `supprimés ${UNVERIFIED_ACCOUNT_TTL_DAYS} jours après l’inscription`,
     },
     {
       source: 'JOIN_REQUEST_PENDING_TTL_DAYS',
@@ -187,12 +200,19 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
     {
       source: 'ORPHAN_GRACE_DAYS',
       en: `at least ${ORPHAN_GRACE_DAYS} days old`,
-      fr: `datent d'au moins ${ORPHAN_GRACE_DAYS} jours`,
+      fr: `datent d’au moins ${ORPHAN_GRACE_DAYS} jours`,
     },
+    {
+      source: 'MINIMUM_AGE',
+      en: `not intended for anyone under ${MINIMUM_AGE}, and we do not knowingly collect data from them.`,
+      fr: `ne s’adresse pas aux personnes de moins de ${MINIMUM_AGE} ans et nous ne collectons pas sciemment de données auprès d’elles.`,
+    },
+    CHANGE_NOTICE,
   ],
   terms: [
-    // A legal decision, not a code constant: nothing in the code checks age.
-    { source: 'the minimum age (no code constant)', en: 'at least 13 years old', fr: 'avoir au moins 13 ans' },
+    // A legal decision (nothing in the code checks age), kept in one constant both documents read
+    { source: 'MINIMUM_AGE', en: `at least ${MINIMUM_AGE} years old`, fr: `avoir au moins ${MINIMUM_AGE} ans` },
+    CHANGE_NOTICE,
   ],
   cookies: [
     {
@@ -203,7 +223,7 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
     {
       source: 'generateTokens() JWT_REFRESH_EXPIRES_IN default',
       en: `Up to ${REFRESH_REMEMBERED_DAYS} days with “Remember me”`,
-      fr: `Jusqu'à ${REFRESH_REMEMBERED_DAYS} jours avec « Se souvenir de moi »`,
+      fr: `Jusqu’à ${REFRESH_REMEMBERED_DAYS} jours avec « Se souvenir de moi »`,
     },
     {
       source: 'generateTokens() refresh lifetime without "Remember me"',
@@ -232,11 +252,14 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'promptly update it',
     'days after upload',
     'in shared servers',
+    // change notices: the only account e-mails are address verification and password reset
+    'by email to your account address',
+    'notices of changes to these documents',
   ],
   // The same statements, as a French translation would make them
   fr: [
-    "jusqu'à la déconnexion",
-    "stockage local pour l'authentification",
+    'jusqu’à la déconnexion',
+    'stockage local pour l’authentification',
     'ne quittent jamais votre appareil',
     'toutes les données stockées sont anonymes',
     'exporter vos données',
@@ -245,8 +268,10 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'supprimer votre compte à tout moment',
     'la mettre à jour sans délai',
     'jours après le téléversement',
-    "jours après l'envoi du fichier",
+    'jours après l’envoi du fichier',
     'dans les serveurs partagés',
+    'par e-mail à l’adresse de votre compte',
+    'avis de modification des présents documents',
   ],
 };
 
@@ -277,7 +302,7 @@ describe('legal pages: dates and structure', () => {
 
 describe('legal pages state the numbers the code implements', () => {
   it('reads every server-side value as a whole number', () => {
-    for (const value of [UNVERIFIED_ACCOUNT_TTL_DAYS, ANNOTATION_TTL_HOURS, ACCESS_TOKEN_MINUTES, REFRESH_REMEMBERED_DAYS, REFRESH_SESSION_HOURS, KEYSHARE_MAX_AGE_DAYS]) {
+    for (const value of [UNVERIFIED_ACCOUNT_TTL_DAYS, ANNOTATION_TTL_HOURS, ACCESS_TOKEN_MINUTES, REFRESH_REMEMBERED_DAYS, REFRESH_SESSION_HOURS, KEYSHARE_MAX_AGE_DAYS, MINIMUM_AGE, LEGAL_OPERATOR.changeNoticeDays]) {
       expect(Number.isInteger(value) && value > 0, String(value)).toBe(true);
     }
   });
@@ -321,11 +346,11 @@ describe('legal pages no longer make the statements the code contradicts', () =>
     { en: 'settings → security', fr: 'paramètres → sécurité' },
     {
       en: 'you confirm with your password, and with your two-factor code if it',
-      fr: "vous confirmez avec votre mot de passe, et avec votre code d'authentification à deux facteurs s'il",
+      fr: 'vous confirmez avec votre mot de passe, et avec votre code d’authentification à deux facteurs s’il',
     },
     {
       en: 'if you still own servers, transfer or delete them first',
-      fr: "si vous possédez encore des serveurs, transférez-les ou supprimez-les d'abord",
+      fr: 'si vous possédez encore des serveurs, transférez-les ou supprimez-les d’abord',
     },
   ];
 
@@ -342,11 +367,11 @@ describe('legal pages no longer make the statements the code contradicts', () =>
 
   const NO_EXPORT: PerLanguage = {
     en: 'the app has no download for it yet',
-    fr: "l'application ne propose pas encore de téléchargement",
+    fr: 'l’application ne propose pas encore de téléchargement',
   };
   const NO_ACCOUNT_CHANGE: PerLanguage = {
     en: 'your username and email address cannot be changed from the app',
-    fr: "votre nom d'utilisateur et votre adresse e-mail ne peuvent pas être modifiés depuis l'application",
+    fr: 'votre nom d’utilisateur et votre adresse e-mail ne peuvent pas être modifiés depuis l’application',
   };
 
   it.each(LEGAL_LANGUAGES)('there is still no self-service export, nor a username or email change, as the pages say (%s)', (lang) => {
@@ -361,11 +386,11 @@ describe('legal pages no longer make the statements the code contradicts', () =>
 });
 
 describe('the outside services the pages disclose are the ones the app contacts', () => {
-  const ASKS_GITHUB: PerLanguage = { en: 'the desktop app asks GitHub', fr: "l'application de bureau demande à GitHub" };
+  const ASKS_GITHUB: PerLanguage = { en: 'the desktop app asks GitHub', fr: 'l’application de bureau demande à GitHub' };
   const GITHUB_ONLY: PerLanguage = { en: 'GitHub, to check for updates', fr: 'GitHub, pour vérifier les mises à jour' };
   const EMAIL_PROVIDER: PerLanguage = {
     en: 'sent through an email delivery provider',
-    fr: "envoyés par l'intermédiaire d'un prestataire d'envoi d'e-mails",
+    fr: 'envoyés par l’intermédiaire d’un prestataire d’envoi d’e-mails',
   };
 
   it.each(LEGAL_LANGUAGES)('discloses GitHub as the update source, and the updater still points only there (%s)', (lang) => {
@@ -387,9 +412,9 @@ describe('the outside services the pages disclose are the ones the app contacts'
 describe('the Cookie Policy lists every storage key the app writes', () => {
   /** Keys the policy describes by name of the row rather than by key. */
   const DESCRIBED_BY_ROW: Record<string, PerLanguage> = {
-    voxium_access_token: { en: 'Access token', fr: "Jeton d'accès" },
+    voxium_access_token: { en: 'Access token', fr: 'Jeton d’accès' },
     voxium_refresh_token: { en: 'Refresh token', fr: 'Jeton de rafraîchissement' },
-    voxium_trusted_device: { en: 'Trusted-device token', fr: "Jeton d'appareil de confiance" },
+    voxium_trusted_device: { en: 'Trusted-device token', fr: 'Jeton d’appareil de confiance' },
     voxium_e2e_pk_: { en: 'Vault key', fr: 'Clé du coffre' },
   };
 
@@ -468,11 +493,13 @@ describe('the French documents follow French typography', () => {
       else if (':;?!»'.includes(char) && before === ' ') faults.push(`plain space before ${char}: ${at(i)}`);
       // English quotation marks
       if ('"“”'.includes(char)) faults.push(`quotation mark ${char}: ${at(i)}`);
+      // the straight apostrophe: French text uses the typographic ’
+      if (char === "'") faults.push(`straight apostrophe: ${at(i)}`);
     }
     return faults;
   }
 
-  it.each(pageNames)('%s puts a no-break space before : ; ? ! and inside « », and quotes with « »', (name) => {
+  it.each(pageNames)('%s puts a no-break space before : ; ? ! and inside « », quotes with « » and elides with ’', (name) => {
     expect(spacingFaults(pages[name].fr.html)).toEqual([]);
   });
 
@@ -481,8 +508,124 @@ describe('the French documents follow French typography', () => {
     expect(spacingFaults('<p>Contact : « Voxium »; "ok"</p>')).toHaveLength(6);
     // a plain space before a colon that is not followed by a space
     expect(spacingFaults('<p>voir :suite</p>')).toHaveLength(1);
-    // no-break spaces, storage keys, addresses and host names pass
+    // a straight apostrophe, rendered as React escapes it
+    expect(spacingFaults('<p>l&#x27;heure</p>')).toHaveLength(1);
+    // no-break spaces, storage keys, addresses, host names and ’ pass
     const nbsp = String.fromCharCode(0x00a0);
-    expect(spacingFaults(`<p>Contact${nbsp}: «${nbsp}Voxium${nbsp}» vox:securePins:… dpo@voxium.app com.voxium.app</p>`)).toEqual([]);
+    expect(spacingFaults(`<p>Contact${nbsp}: «${nbsp}Voxium${nbsp}» vox:securePins:… dpo@voxium.app com.voxium.app l’heure</p>`)).toEqual([]);
+  });
+});
+
+describe('the positions the documents take are stated in every language', () => {
+  /** Rendered text with no-break spaces and typographic apostrophes as plain characters, lowercased. */
+  const plain = (text: string) => text.replace(/’/g, "'").toLowerCase();
+  const mailtos = (html: string) => Array.from(html.matchAll(/href="mailto:([^"]+)"/g), (m) => m[1]);
+
+  const REFERENCE_VERSION: { what: string } & PerLanguage = {
+    what: 'the English version is the reference',
+    en: 'the english version is the reference version and prevails in the event of a discrepancy',
+    fr: 'la version anglaise est la version de référence et prévaut en cas de divergence',
+  };
+  const MINOR_CHANGE: { what: string } & PerLanguage = {
+    what: 'a minor change may take effect when posted',
+    en: 'a minor change, or one with no adverse effect on you, may take effect when it is posted',
+    fr: 'une modification mineure, ou sans effet défavorable pour vous, peut prendre effet dès sa publication',
+  };
+  const CONTINUED_USE: { what: string } & PerLanguage = {
+    what: 'continued use accepts a change, and the remedy is to stop',
+    en: 'after a change takes effect is acceptance of it; if you do not agree, stop using the Service',
+    fr: 'vaut acceptation de celle-ci ; si vous ne l’acceptez pas, cessez d’utiliser le Service',
+  };
+
+  /** Phrases each document must carry, per language: the decisions of 2026-10-25. */
+  const POSITIONS: Record<'privacy' | 'terms', Array<{ what: string } & PerLanguage>> = {
+    terms: [
+      {
+        what: 'who publishes the Service (legal notice on request while operator.ts has no name and address)',
+        en: `voxium is published and operated from ${LEGAL_OPERATOR.country}`,
+        fr: `voxium est édité et exploité depuis la ${LEGAL_OPERATOR.country}`,
+      },
+      REFERENCE_VERSION,
+      { what: 'the warranty disclaimer', en: '"as is" and "as available"', fr: '« en l’état » et « selon sa disponibilité »' },
+      {
+        what: 'the liability disclaimer (no fee cap: the Service takes no payments)',
+        en: 'to the fullest extent permitted by law, voxium disclaims liability for damages arising from your use of the service',
+        fr: 'dans toute la mesure permise par la loi, voxium décline toute responsabilité pour les dommages découlant de votre utilisation du service',
+      },
+      {
+        what: 'the consumer carve-out of the liability clause',
+        en: 'nothing in these terms affects the rights you have as a consumer under mandatory law',
+        fr: 'rien dans les présentes conditions n’affecte les droits dont vous disposez en tant que consommateur en vertu du droit impératif',
+      },
+      MINOR_CHANGE,
+      CONTINUED_USE,
+      { what: 'the governing law', en: 'these terms are governed by french law', fr: 'régies par le droit français' },
+      {
+        what: 'the courts, save mandatory consumer law',
+        en: 'subject to the jurisdiction of the french courts, unless the mandatory consumer-protection law',
+        fr: 'relève de la compétence des juridictions françaises, sauf si le droit impératif de protection des consommateurs',
+      },
+    ],
+    privacy: [
+      {
+        what: 'who the controller is (legal notice on request while operator.ts has no name and address)',
+        en: `the data controller is the publisher of voxium, operating from ${LEGAL_OPERATOR.country}`,
+        fr: `le responsable du traitement est l’éditeur de voxium, qui exerce son activité depuis la ${LEGAL_OPERATOR.country}`,
+      },
+      REFERENCE_VERSION,
+      MINOR_CHANGE,
+      CONTINUED_USE,
+      {
+        what: 'consent is asked again, never inferred from continued use (section 7 lists consent as a basis)',
+        en: 'where a change concerns processing based on your consent, we ask for your consent again rather than relying on your continued use.',
+        fr: 'lorsqu’une modification porte sur un traitement fondé sur votre consentement, nous vous demandons à nouveau votre consentement au lieu de nous fonder sur la poursuite de votre utilisation.',
+      },
+      { what: 'the privacy contact', en: 'write to our privacy contact at', fr: 'écrivez à notre contact pour les questions de confidentialité' },
+      {
+        what: 'the supervisory authority',
+        en: 'in france, the cnil (cnil.fr/fr/plaintes)',
+        fr: 'en france, la cnil (cnil.fr/fr/plaintes)',
+      },
+    ],
+  };
+
+  const positionCases = (['terms', 'privacy'] as const).flatMap((name) => LEGAL_LANGUAGES.map((lang) => [name, lang] as const));
+
+  it.each(positionCases)('%s (%s) states each decided position', (name, lang) => {
+    const text = plain(pages[name][lang].text);
+    for (const position of POSITIONS[name]) expect(text, `${name} (${lang}): ${position.what}`).toContain(plain(position[lang]));
+  });
+
+  it.each(cases)('%s (%s) gives the addresses of operator.ts', (name, lang) => {
+    const addresses = mailtos(pages[name][lang].html);
+    expect(addresses).toContain(LEGAL_OPERATOR.contactEmail);
+    if (name !== 'terms') expect(addresses).toContain(LEGAL_OPERATOR.privacyEmail);
+    for (const address of addresses) expect([LEGAL_OPERATOR.contactEmail, LEGAL_OPERATOR.privacyEmail]).toContain(address);
+    // opened like the app's other external links (the desktop shell hands them to the mail client)
+    for (const link of pages[name][lang].html.match(/<a [^>]*href="mailto:[^>]*>/g) ?? []) {
+      expect(link).toContain('target="_blank"');
+      expect(link).toContain('rel="noopener noreferrer"');
+    }
+  });
+
+  it('operator.ts names no publisher yet, so the documents offer the legal notice on request', () => {
+    // Filling these in switches both documents to "operated by {name}, {address}" (legalOperator.test.tsx)
+    expect(LEGAL_OPERATOR.publisherName).toBeNull();
+    expect(LEGAL_OPERATOR.publisherAddress).toBeNull();
+    expect(LEGAL_OPERATOR.country).toBe('France');
+  });
+
+  it.each(cases)('%s (%s) claims no Data Protection Officer', (name, lang) => {
+    const text = pages[name][lang].text;
+    expect(text).not.toMatch(/data protection officer|délégué à la protection des données/i);
+    // the acronyms (DPO, French DPD), case-sensitive: the privacy address dpo@… is not a designation
+    expect(text).not.toMatch(/\bDP[OD]\b/);
+  });
+
+  it.each(LEGAL_LANGUAGES)('the supervisory authority link goes to its complaints page, outside the app (%s)', (lang) => {
+    const link = /<a [^>]*href="https:\/\/www\.cnil\.fr\/fr\/plaintes"[^>]*>/.exec(pages.privacy[lang].html)?.[0];
+    expect(link).toBeDefined();
+    expect(link).toContain('target="_blank"');
+    expect(link).toContain('rel="noopener noreferrer"');
   });
 });

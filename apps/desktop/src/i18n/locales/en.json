@@ -2035,5 +2035,8 @@
     "chatWelcome": "Hey, welcome to Voxium!",
     "chatVoiceQuality": "Voice quality is insane 🔥",
     "chatNoiseSuppression": "Noise suppression is magic 🚀"
+  },
+  "legal": {
+    "englishVersionNotice": "This document is available in English and French. The English version is shown below."
   }
 }
