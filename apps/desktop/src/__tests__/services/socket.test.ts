@@ -683,3 +683,20 @@ describe('services/socket — ensureSocketConnected (the window comes back)', ()
     expect(socket.connect).not.toHaveBeenCalled();
   });
 });
+
+describe('services/socket — every inbound event bumps the request generation (issue 4)', () => {
+  // services/api.ts coalesces identical GETs in flight; a GET the stores issue
+  // BECAUSE of a socket event must not join one issued before it
+  it('registers an onAny handler that bumps requestGeneration', async () => {
+    const { requestGeneration } = await import('../../services/requestGeneration');
+    const mod = await freshSocketModule();
+    mod.connectSocket('token-1');
+    const s = createdSockets[createdSockets.length - 1];
+    const handlers = s.onAny.mock.calls.map((c) => c[0] as (event: string, ...args: unknown[]) => void);
+    expect(handlers.length).toBeGreaterThan(0);
+
+    const before = requestGeneration();
+    for (const handler of handlers) handler('message:new', { id: 'm1' });
+    expect(requestGeneration()).toBeGreaterThan(before);
+  });
+});

@@ -24,8 +24,9 @@ vi.mock('../../utils/redis', () => ({
   getRedisConfigSub: redisMock.getRedisConfigSub,
 }));
 
+import jwt from 'jsonwebtoken';
 import {
-  socketRateLimit, getAllRateLimits, subnetOf, normalizeIp,
+  socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, loginAccountKey, loginEmailDigest, totpAccountKey,
   rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookManage, rateLimitWebhookRead, rateLimitByKey,
 } from '../../middleware/rateLimiter';
 
@@ -439,7 +440,10 @@ describe('userId-keyed limiters sit AFTER authenticate on every auth route', () 
     expect(userKeyed).toEqual(expect.arrayContaining(['consent', 'deleteAccount', 'resendVerification']));
   });
 
-  it.each(userKeyed.map(middlewareFor).filter((mw) => source.includes(mw)))('%s comes after authenticate', (mw) => {
+  // Whole-word: `rateLimitTotpAccount` (the sign-in's per-account TOTP bucket,
+  // keyed on the challenge token, mounted before any authenticate on purpose)
+  // must not be read as the userId-keyed `rateLimitTotp`
+  it.each(userKeyed.map(middlewareFor).filter((mw) => new RegExp(`\\b${mw}\\b`).test(source)))('%s comes after authenticate', (mw) => {
     const routes = source
       .split(/\r?\n/)
       .filter((line) => /^authRouter\.[a-z]+\(/.test(line) && new RegExp(`\\b${mw}\\b`).test(line));
@@ -450,5 +454,375 @@ describe('userId-keyed limiters sit AFTER authenticate on every auth route', () 
       expect(auth, `${line.trim()} — no authenticate`).toBeGreaterThan(-1);
       expect(auth, `${line.trim()} — limiter before authenticate`).toBeLessThan(lim);
     }
+  });
+});
+
+
+// ─── Issue 4: false 429s for ordinary use ────────────────────────────────────
+//
+// Every `keyType: 'ip'` bucket is shared by everyone behind one address. The
+// general budget (100/min) was exceeded by three people navigating at once
+// (one measured at 35–60 requests a minute), and sign-in counted successes
+// too, at 5 a minute per address with a 5-minute block: a handful of testers
+// signing in from one office locked the office out of the login page.
+
+const TEST_SECRET = 'rate-limiter-test-secret';
+
+/** A Redis client that exists but fails every command: RateLimiterRedis then
+ *  falls back to its in-memory insurance limiter, which COUNTS — so these
+ *  tests exercise the real budgets, not the fail-open path. */
+const brokenRedis = { multi: () => { throw new Error('redis down'); } };
+
+function fakeReq(ip: string, body: Record<string, unknown> = {}) {
+  return { ip, socket: { remoteAddress: ip }, body, params: {}, headers: {} };
+}
+
+function fakeRes() {
+  const listeners: Record<string, Array<() => void>> = {};
+  const res = {
+    statusCode: 200,
+    headers: {} as Record<string, string>,
+    body: undefined as unknown,
+    set(name: string, value: string) { res.headers[name] = value; return res; },
+    status(code: number) { res.statusCode = code; return res; },
+    json(body: unknown) { res.body = body; return res; },
+    on(event: string, fn: () => void) { (listeners[event] ??= []).push(fn); return res; },
+    /** The route answered: fire 'finish' with this status. */
+    finish(code: number) { res.statusCode = code; for (const fn of listeners.finish ?? []) fn(); },
+  };
+  return res;
+}
+
+type Middleware = (req: never, res: never, next: () => void) => Promise<void>;
+
+/** Run a limiter middleware; `passed` is whether it called next(). */
+async function hit(mw: Middleware, req: ReturnType<typeof fakeReq>) {
+  const res = fakeRes();
+  let passed = false;
+  await mw(req as never, res as never, () => { passed = true; });
+  return { res, passed };
+}
+
+/** A request the route then answered with `status` (its refund, if any, has landed). */
+async function hitAndAnswer(mw: Middleware, req: ReturnType<typeof fakeReq>, status: number) {
+  const out = await hit(mw, req);
+  if (out.passed) out.res.finish(status);
+  await new Promise((r) => setImmediate(r)); // the refund is asynchronous
+  return out;
+}
+
+/** A challenge token as the server mints one (authService.loginUser). */
+function totpToken(userId: string, extra: Record<string, unknown> = {}, secret = TEST_SECRET): string {
+  return jwt.sign({ userId, purpose: 'totp-verify', rememberMe: true, ...extra }, secret, { expiresIn: '5m' });
+}
+
+describe('the budgets a NAT shares (issue 4)', () => {
+  const rows = Object.fromEntries(getAllRateLimits().map((l) => [l.name, l]));
+
+  it('the general per-address budget is sized for a room of users, not one', () => {
+    // ~35–60 requests a minute per active user (measured); at 100, three
+    // people behind one NAT were refused ordinary reads
+    expect(rows.general).toMatchObject({ keyType: 'ip', points: 1000, duration: 60, blockDuration: 0 });
+  });
+
+  it('sign-in counts failures per address, per network AND per account; only the address bucket blocks', () => {
+    expect(rows.login).toMatchObject({ keyType: 'ip', points: 20, duration: 60, blockDuration: 300 });
+    expect(rows.loginSubnet).toMatchObject({ keyType: 'ip', points: 60, duration: 60, blockDuration: 0, keyPrefix: 'rl:loginnet' });
+    expect(rows.loginAccount).toMatchObject({ keyType: 'account', points: 10, duration: 900, blockDuration: 0, keyPrefix: 'rl:loginacct' });
+  });
+
+  it('the refresh, verify-email and registration-burst buckets no longer refuse a group behind one address', () => {
+    expect(rows.refresh).toMatchObject({ keyType: 'ip', points: 60, duration: 60 });
+    expect(rows.verifyEmail).toMatchObject({ keyType: 'ip', points: 20, duration: 900, blockDuration: 0 });
+    expect(rows.register).toMatchObject({ keyType: 'ip', points: 5, duration: 60, blockDuration: 120 });
+  });
+
+  it('the registration DAILY budgets are untouched (the real bound on signup abuse)', () => {
+    expect(rows.registerDaily).toMatchObject({ points: 5, duration: 86400 });
+    expect(rows.registerAttempt).toMatchObject({ points: 30, duration: 86400 });
+    expect(rows.registerAttemptSubnet).toMatchObject({ points: 300, duration: 86400 });
+  });
+
+  it('the routes the general budget alone used to bound got buckets of their own', () => {
+    expect(rows.profileUpdate).toMatchObject({ keyType: 'userId', points: 10, duration: 60 });
+    expect(rows.inviteUse).toMatchObject({ keyType: 'userId', points: 20, duration: 60 });
+    expect(rows.dmOpen).toMatchObject({ keyType: 'userId', points: 30, duration: 60 });
+    expect(rows.attachmentRead).toMatchObject({ keyType: 'ip', points: 300, duration: 60 });
+  });
+
+  it('every key prefix is still distinct', () => {
+    const prefixes = getAllRateLimits().map((l) => l.keyPrefix);
+    expect(new Set(prefixes).size).toBe(prefixes.length);
+  });
+});
+
+describe('loginAccountKey / totpAccountKey — the account a sign-in is for', () => {
+  const secretBefore = process.env.JWT_SECRET;
+  beforeEach(() => { process.env.JWT_SECRET = TEST_SECRET; });
+  afterEach(() => { process.env.JWT_SECRET = secretBefore; });
+
+  it('keys the password step on the account AND the network: an HMAC of the lowercased, trimmed e-mail, then the subnet', () => {
+    const key = loginAccountKey('Alice@Example.com ', '203.0.113.0/24');
+    expect(key).toMatch(/^e:[0-9a-f]{32}\|203\.0\.113\.0\/24$/);
+    expect(key).not.toContain('alice');
+    expect(loginAccountKey('alice@example.com', '203.0.113.0/24')).toBe(key);
+    expect(loginAccountKey('alice@example.com', '198.51.100.0/24')).not.toBe(key); // another network: its own bucket
+    expect(loginAccountKey('bob@example.com', '203.0.113.0/24')).not.toBe(key);
+  });
+
+  it('the e-mail digest is keyed off JWT_SECRET (a plain hash in Redis could be tested against candidate addresses)', () => {
+    const a = loginEmailDigest('alice@example.com');
+    process.env.JWT_SECRET = 'another-secret';
+    expect(loginEmailDigest('alice@example.com')).not.toBe(a);
+  });
+
+  it('a body without a usable e-mail names no account (the caller is charged on its own address)', () => {
+    for (const bad of [undefined, null, 42, '', '   ']) expect(loginAccountKey(bad, '203.0.113.0/24')).toBeNull();
+  });
+
+  it('keys the TOTP step on the userId of a challenge token whose signature VERIFIES, an expired one included', () => {
+    expect(totpAccountKey(totpToken('clx1user'))).toBe('t:clx1user');
+    const expired = jwt.sign({ userId: 'clx1user', purpose: 'totp-verify', exp: Math.floor(Date.now() / 1000) - 60 }, TEST_SECRET);
+    expect(totpAccountKey(expired)).toBe('t:clx1user');
+  });
+
+  it('a FORGED token names no account: it used to pick any victim\'s bucket with nothing but their public userId', () => {
+    const forged = jwt.sign({ userId: 'clxvictim', purpose: 'totp-verify' }, 'not-our-secret');
+    expect(totpAccountKey(forged)).toBeNull();
+    const payload = Buffer.from(JSON.stringify({ userId: 'clxvictim', purpose: 'totp-verify' })).toString('base64url');
+    expect(totpAccountKey(`eyJhbGciOiJIUzI1NiJ9.${payload}.forged`)).toBeNull();
+    // alg:none and a token of another purpose are refused too
+    const none = `${Buffer.from('{"alg":"none"}').toString('base64url')}.${payload}.`;
+    expect(totpAccountKey(none)).toBeNull();
+    expect(totpAccountKey(jwt.sign({ userId: 'clx1user', purpose: 'trusted-device' }, TEST_SECRET))).toBeNull();
+  });
+
+  it('anything that is not a token with a well-formed userId names no account', () => {
+    for (const value of [undefined, 42, '', 'not.a-token', 'a.b', 'h.!!!.s', 'x'.repeat(5000)]) {
+      expect(totpAccountKey(value)).toBeNull();
+    }
+    expect(totpAccountKey(jwt.sign({ userId: 'has spaces and <tags>', purpose: 'totp-verify' }, TEST_SECRET))).toBeNull();
+  });
+});
+
+describe('sign-in limiters count FAILURES only (refund on a 2xx, and on a 429 from a later bucket)', () => {
+  let mod: RateLimiterModule;
+  const secretBefore = process.env.JWT_SECRET;
+  beforeEach(async () => {
+    process.env.JWT_SECRET = TEST_SECRET;
+    vi.mocked(getRedis).mockReturnValue(brokenRedis as never);
+    mod = await freshRateLimiter();
+  });
+  afterEach(() => { process.env.JWT_SECRET = secretBefore; });
+
+  it('a team signing in correctly from one address never spends the per-address budget', async () => {
+    const req = () => fakeReq('203.0.113.10', { email: 'anyone@example.com', password: 'right' });
+    for (let i = 0; i < 60; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitLogin as Middleware, req(), 200);
+      expect(passed, `sign-in #${i + 1}`).toBe(true);
+    }
+  });
+
+  it('a TOTP step that answers 200 (password right, code pending) is refunded too', async () => {
+    const req = () => fakeReq('203.0.113.11', { email: 'totp@example.com', password: 'right' });
+    for (let i = 0; i < 30; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitLogin as Middleware, req(), 200);
+      expect(passed).toBe(true);
+    }
+  });
+
+  it('20 failures from one address within a minute are refused on the 21st, with Retry-After and the common body, and the block holds', async () => {
+    const req = () => fakeReq('203.0.113.12', { email: 'victim@example.com', password: 'wrong' });
+    for (let i = 0; i < 20; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitLogin as Middleware, req(), 401);
+      expect(passed, `failure #${i + 1}`).toBe(true);
+    }
+    const refused = await hit(mod.rateLimitLogin as Middleware, req());
+    expect(refused.passed).toBe(false);
+    expect(refused.res.statusCode).toBe(429);
+    expect(Number(refused.res.headers['Retry-After'])).toBeGreaterThan(60); // the 300 s block, not the 60 s window
+    expect(refused.res.body).toEqual({ success: false, error: 'Too many requests. Please try again later.' });
+    // a right password during the block is still refused: the block is per address
+    const stillBlocked = await hit(mod.rateLimitLogin as Middleware, fakeReq('203.0.113.12', { email: 'other@example.com', password: 'right' }));
+    expect(stillBlocked.passed).toBe(false);
+  });
+
+  it('a 429 answered by a LATER bucket refunds this one: a refused request never reached the password check', async () => {
+    const req = () => fakeReq('203.0.113.15', { email: 'locked@example.com', password: 'wrong' });
+    for (let i = 0; i < 40; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitLogin as Middleware, req(), 429);
+      expect(passed, `refused-later request #${i + 1}`).toBe(true);
+    }
+  });
+
+  it('60 failures from one /24 within a minute refuse the 61st address of that network (IPv6 rotation inside a /48 is bounded the same way)', async () => {
+    for (let i = 0; i < 60; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitLoginSubnet as Middleware, fakeReq(`198.51.100.${i}`, { email: `u${i}@example.com`, password: 'wrong' }), 401);
+      expect(passed, `failure #${i + 1}`).toBe(true);
+    }
+    expect((await hit(mod.rateLimitLoginSubnet as Middleware, fakeReq('198.51.100.200', { email: 'x@example.com', password: 'wrong' }))).passed).toBe(false);
+    // a neighbouring /24 is untouched
+    expect((await hit(mod.rateLimitLoginSubnet as Middleware, fakeReq('198.51.101.1', { email: 'x@example.com', password: 'wrong' }))).passed).toBe(true);
+  });
+
+  it('10 failed guesses at ONE account from ONE network within 15 minutes refuse the 11th; another network and another account are untouched', async () => {
+    for (let i = 0; i < 10; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitLoginAccount as Middleware, fakeReq(`198.51.100.${i}`, { email: 'Victim@Example.com', password: 'wrong' }), 401);
+      expect(passed, `guess #${i + 1}`).toBe(true);
+    }
+    const eleventh = await hit(mod.rateLimitLoginAccount as Middleware, fakeReq('198.51.100.99', { email: 'victim@example.com ', password: 'wrong' }));
+    expect(eleventh.passed).toBe(false);
+    expect(eleventh.res.statusCode).toBe(429);
+    expect(Number(eleventh.res.headers['Retry-After'])).toBeLessThanOrEqual(900); // the window, no block on top
+
+    // the victim signing in from home (another network) is NOT locked out by a stranger's guesses
+    expect((await hit(mod.rateLimitLoginAccount as Middleware, fakeReq('203.0.113.50', { email: 'victim@example.com', password: 'right' }))).passed).toBe(true);
+    // and a bystander on the guessing network is untouched
+    expect((await hit(mod.rateLimitLoginAccount as Middleware, fakeReq('198.51.100.99', { email: 'bystander@example.com', password: 'wrong' }))).passed).toBe(true);
+  });
+
+  it('the TOTP step keys the account on the VERIFIED challenge token, so a code cannot be walked from many addresses', async () => {
+    const token = totpToken('clxvictim');
+    for (let i = 0; i < 10; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitTotpAccount as Middleware, fakeReq(`198.51.${i}.1`, { totpToken: token, code: '000000' }), 401);
+      expect(passed).toBe(true);
+    }
+    const eleventh = await hit(mod.rateLimitTotpAccount as Middleware, fakeReq('192.0.2.1', { totpToken: token, code: '000001' }));
+    expect(eleventh.passed).toBe(false);
+    expect(eleventh.res.statusCode).toBe(429);
+  });
+
+  it('forged challenge tokens are charged on the SENDER\'s address and never touch the victim\'s bucket', async () => {
+    const forged = jwt.sign({ userId: 'clxvictim', purpose: 'totp-verify' }, 'not-our-secret');
+    for (let i = 0; i < 10; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitTotpAccount as Middleware, fakeReq('192.0.2.66', { totpToken: forged, code: '000000' }), 401);
+      expect(passed).toBe(true);
+    }
+    // the sender's own address bucket is spent...
+    expect((await hit(mod.rateLimitTotpAccount as Middleware, fakeReq('192.0.2.66', { totpToken: forged, code: '000000' }))).passed).toBe(false);
+    // ...the victim's real token is untouched
+    expect((await hit(mod.rateLimitTotpAccount as Middleware, fakeReq('203.0.113.50', { totpToken: totpToken('clxvictim'), code: '123456' }))).passed).toBe(true);
+  });
+
+  it('a right answer on the account bucket is refunded as well', async () => {
+    for (let i = 0; i < 30; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitLoginAccount as Middleware, fakeReq('203.0.113.13', { email: 'regular@example.com', password: 'right' }), 200);
+      expect(passed).toBe(true);
+    }
+  });
+
+  it('an aborted request (no finish) keeps its charge — the safe direction for a guessing counter', async () => {
+    const req = () => fakeReq('203.0.113.14', { email: 'x@example.com', password: 'wrong' });
+    for (let i = 0; i < 20; i++) {
+      const { passed } = await hit(mod.rateLimitLogin as Middleware, req()); // never answered
+      expect(passed).toBe(true);
+    }
+    expect((await hit(mod.rateLimitLogin as Middleware, req())).passed).toBe(false);
+  });
+
+  it('a key function that throws fails OPEN like a store error, never a 500', async () => {
+    const mw = mod.rateLimitByKey('general', () => { throw new Error('bad key'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { passed } = await hit(mw as Middleware, fakeReq('203.0.113.1'));
+    expect(passed).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('general limiter error'), 'bad key');
+  });
+});
+
+describe('rateLimitGeneral — ordinary navigation behind one NAT is not a false positive', () => {
+  let mod: RateLimiterModule;
+  beforeEach(async () => {
+    vi.mocked(getRedis).mockReturnValue(brokenRedis as never);
+    mod = await freshRateLimiter();
+  });
+
+  it('a room of 20 people each doing a measured session (login + screen, two servers, six channels, a reload ≈ 45 requests) within one minute all get through', async () => {
+    const nat = '203.0.113.20';
+    for (let user = 0; user < 20; user++) {
+      for (let r = 0; r < 45; r++) {
+        const { passed } = await hit(mod.rateLimitGeneral as Middleware, fakeReq(nat));
+        expect(passed, `user ${user} request ${r}`).toBe(true);
+      }
+    }
+  });
+
+  it('one address spraying past the budget is still refused, with Retry-After and the common body', async () => {
+    const ip = '203.0.113.21';
+    for (let r = 0; r < 1000; r++) {
+      expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq(ip))).passed).toBe(true);
+    }
+    const refused = await hit(mod.rateLimitGeneral as Middleware, fakeReq(ip));
+    expect(refused.passed).toBe(false);
+    expect(refused.res.statusCode).toBe(429);
+    expect(Number(refused.res.headers['Retry-After'])).toBeGreaterThan(0);
+    expect(refused.res.body).toEqual({ success: false, error: 'Too many requests. Please try again later.' });
+    // and a different address is untouched
+    expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq('203.0.113.22'))).passed).toBe(true);
+  });
+});
+
+describe('clearUserRateLimits — the admin tool reaches the account buckets too', () => {
+  const secretBefore = process.env.JWT_SECRET;
+  beforeEach(() => { process.env.JWT_SECRET = TEST_SECRET; });
+  afterEach(() => { process.env.JWT_SECRET = secretBefore; });
+
+  it('a user id clears its TOTP account bucket; an e-mail clears its password buckets on every network (found by scan)', async () => {
+    const digest = loginEmailDigest('alice@example.com');
+    const scanned = [`rl:loginacct:e:${digest}|203.0.113.0/24`, `rl:loginacct:e:${digest}|2001:db8:1::/48`];
+    const del = vi.fn(async () => 1);
+    const scanIterator = vi.fn(async function* () { yield scanned; });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    await mod.clearUserRateLimits('clx1user');
+    expect(del).toHaveBeenCalledWith('rl:loginacct:t:clx1user');
+    expect(scanIterator).not.toHaveBeenCalled();
+
+    del.mockClear();
+    const cleared = await mod.clearUserRateLimits('Alice@Example.com');
+    expect(scanIterator).toHaveBeenCalledWith({ MATCH: `rl:loginacct:e:${digest}|*`, COUNT: 100 });
+    for (const key of scanned) expect(del).toHaveBeenCalledWith(key);
+    expect(cleared).toBeGreaterThan(0);
+  });
+});
+
+describe('the routes carry their buckets', () => {
+  const read = (file: string) => readFileSync(resolve(__dirname, `../../routes/${file}`), 'utf8');
+  const routeLine = (source: string, router: string, method: string, path: string) =>
+    source.split(/\r?\n/).find((l) => l.startsWith(`${router}.${method}('${path}'`)) ?? '';
+
+  it('/login: address, network, then the account-and-network bucket keyed on the e-mail', () => {
+    const line = routeLine(read('auth.ts'), 'authRouter', 'post', '/login');
+    expect(line).toMatch(/rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount,/);
+  });
+
+  it('/totp/verify: address, network, then the account bucket keyed on the verified challenge token', () => {
+    const line = routeLine(read('auth.ts'), 'authRouter', 'post', '/totp/verify');
+    expect(line).toMatch(/rateLimitLogin, rateLimitLoginSubnet, rateLimitTotpAccount,/);
+  });
+
+  it('the routes the general budget alone used to bound carry a per-user bucket now', () => {
+    expect(routeLine(read('users.ts'), 'userRouter', 'patch', '/me/profile')).toContain('rateLimitProfileUpdate');
+    const invites = read('invites.ts');
+    expect(routeLine(invites, 'inviteRouter', 'post', '/servers/:serverId')).toContain('rateLimitInviteUse');
+    expect(routeLine(invites, 'inviteRouter', 'post', '/:code/join')).toContain('rateLimitInviteUse');
+    expect(routeLine(invites, 'inviteRouter', 'get', '/:code')).toContain('rateLimitInviteUse');
+    expect(routeLine(read('dm.ts'), 'dmRouter', 'post', '/')).toContain('rateLimitDmOpen');
+    const friends = read('friends.ts');
+    expect(routeLine(friends, 'friendRouter', 'post', '/:friendshipId/accept')).toContain('rateLimitFriendRequest');
+    expect(routeLine(friends, 'friendRouter', 'delete', '/:friendshipId')).toContain('rateLimitFriendRequest');
+    const servers = read('servers.ts');
+    expect(routeLine(servers, 'serverRouter', 'post', '/')).toContain('rateLimitMemberManage');
+    expect(routeLine(servers, 'serverRouter', 'post', '/:serverId/leave')).toContain('rateLimitMemberManage');
+    expect(routeLine(servers, 'serverRouter', 'patch', '/:serverId')).toContain('rateLimitMemberManage');
+    const channels = read('channels.ts');
+    expect(routeLine(channels, 'channelRouter', 'post', '/')).toContain('rateLimitCategoryManage');
+    expect(routeLine(channels, 'channelRouter', 'delete', '/:channelId')).toContain('rateLimitCategoryManage');
+  });
+
+  it('the public asset proxy has its own per-address bucket and no longer charges the general one twice', () => {
+    const uploads = read('uploads.ts');
+    expect(uploads).toContain('rateLimitAttachmentRead');
+    expect(uploads).not.toMatch(/\brateLimitGeneral\b/);
   });
 });

@@ -120,12 +120,24 @@ export const SESSION_RESTORE_TIMEOUT_MS = 15_000;
  *  the user declined must not come back every half minute). */
 export const SESSION_RESTORE_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 30_000];
 
+/** The longest a 429's `Retry-After` is honoured for by the restore's retry. */
+export const SESSION_RESTORE_RETRY_AFTER_MAX_MS = 300_000;
+
 /** What one restore attempt found; applied only if the session it started for still exists. */
 type RestoreOutcome =
   | { kind: 'signed-in'; user: User }
   | { kind: 'no-session'; storeAnswered: boolean }
   | { kind: 'refused' }
-  | { kind: 'failed'; message: string };
+  | { kind: 'failed'; message: string; /** A 429's `Retry-After`, when the server named one. */ retryAfterMs?: number };
+
+/** The `Retry-After` of a 429 in milliseconds, bounded; undefined for anything else. */
+function retryAfterOf(err: unknown): number | undefined {
+  const failed = err as { response?: { status?: unknown; headers?: Record<string, unknown> } } | null;
+  if (failed?.response?.status !== 429) return undefined;
+  const seconds = Number.parseInt(String(failed.response.headers?.['retry-after'] ?? ''), 10);
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return Math.min(seconds * 1000, SESSION_RESTORE_RETRY_AFTER_MAX_MS);
+}
 
 // Module scope, like the registration abort: live handles, never rendered,
 // not part of the reset snapshot
@@ -151,14 +163,16 @@ function endSessionRestore(): void {
   cancelRestoreRetry();
 }
 
-/** One pending retry at a time; the delay grows with each failure in a row. */
-function scheduleRestoreRetry(reason: 'server' | 'store', run: () => void): void {
+/** One pending retry at a time; the delay grows with each failure in a row,
+ *  and never undercuts what a 429 asked for (`atLeastMs`): retrying into a
+ *  limiter's block only spends the shared budget again. */
+function scheduleRestoreRetry(reason: 'server' | 'store', run: () => void, atLeastMs = 0): void {
   if (restoreRetryTimer !== null) return;
   if (reason === 'store' && restoreRetryAttempt >= SESSION_RESTORE_RETRY_DELAYS_MS.length) {
     console.warn('[Auth] The credential store has not answered — the session restore waits for the network to change or the next launch');
     return;
   }
-  const delay = SESSION_RESTORE_RETRY_DELAYS_MS[Math.min(restoreRetryAttempt, SESSION_RESTORE_RETRY_DELAYS_MS.length - 1)];
+  const delay = Math.max(atLeastMs, SESSION_RESTORE_RETRY_DELAYS_MS[Math.min(restoreRetryAttempt, SESSION_RESTORE_RETRY_DELAYS_MS.length - 1)]);
   restoreRetryAttempt++;
   restoreRetryTimer = setTimeout(() => {
     restoreRetryTimer = null;
@@ -188,7 +202,7 @@ async function attemptRestore(): Promise<RestoreOutcome> {
     return { kind: 'signed-in', user: data.data as User };
   } catch (err) {
     if (isAuthRefusal(err)) return { kind: 'refused' };
-    return { kind: 'failed', message: err instanceof Error ? err.message : String(err) };
+    return { kind: 'failed', message: err instanceof Error ? err.message : String(err), retryAfterMs: retryAfterOf(err) };
   }
 }
 
@@ -443,7 +457,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           // tokens stay and the restore runs again on a back-off — the user
           // signs back in without a password the moment the server answers
           console.warn('[Auth] Session restore could not reach the server (tokens kept, retrying):', outcome.message);
-          if (!get().isAuthenticated) scheduleRestoreRetry('server', retry);
+          if (!get().isAuthenticated) scheduleRestoreRetry('server', retry, outcome.retryAfterMs ?? 0);
           set({ isLoading: false });
           break;
       }

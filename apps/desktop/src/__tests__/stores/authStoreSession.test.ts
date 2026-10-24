@@ -44,7 +44,8 @@ vi.mock('../../services/powSolver', () => ({ solveRegistrationPowOffThread: vi.f
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
 
 import {
-  useAuthStore, SESSION_RESTORE_RETRY_DELAYS_MS, SESSION_RESTORE_TIMEOUT_MS, _resetSessionRestoreForTests,
+  useAuthStore, SESSION_RESTORE_RETRY_DELAYS_MS, SESSION_RESTORE_TIMEOUT_MS, SESSION_RESTORE_RETRY_AFTER_MAX_MS,
+  _resetSessionRestoreForTests,
 } from '../../stores/authStore';
 
 const me = { id: 'u-1', username: 'alice', emailVerified: true, consentRequired: false };
@@ -623,5 +624,46 @@ describe('authStore.checkAuth — what counts as a refusal, and what the deadlin
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
     await vi.advanceTimersByTimeAsync(300_000);
     expect(api.get).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('authStore.checkAuth — a 429 is retried when the server says, not sooner', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+  });
+
+  const tooMany = (retryAfter: string) => Object.assign(new Error('429'), {
+    isAxiosError: true,
+    response: { status: 429, headers: { 'retry-after': retryAfter } },
+  });
+
+  it('honours Retry-After when it is longer than the back-off (retrying into a block only spends the shared budget again)', async () => {
+    api.get.mockRejectedValueOnce(tooMany('45'));
+
+    await useAuthStore.getState().checkAuth();
+    expect(storage.clearTokens).not.toHaveBeenCalled(); // a 429 is never a refusal
+
+    api.get.mockResolvedValueOnce({ data: { data: me } });
+    await vi.advanceTimersByTimeAsync(44_999);
+    expect(api.get).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(useAuthStore.getState()).toMatchObject({ user: me, isAuthenticated: true });
+  });
+
+  it('keeps the back-off when Retry-After is shorter, and bounds an absurd one', async () => {
+    api.get.mockRejectedValueOnce(tooMany('1'));
+    await useAuthStore.getState().checkAuth();
+    api.get.mockRejectedValueOnce(tooMany('999999'));
+    await vi.advanceTimersByTimeAsync(SESSION_RESTORE_RETRY_DELAYS_MS[0]); // the back-off, not 1 s
+    expect(api.get).toHaveBeenCalledTimes(2);
+
+    api.get.mockResolvedValueOnce({ data: { data: me } });
+    await vi.advanceTimersByTimeAsync(SESSION_RESTORE_RETRY_AFTER_MAX_MS - 1);
+    expect(api.get).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.get).toHaveBeenCalledTimes(3);
   });
 });

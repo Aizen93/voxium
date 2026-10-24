@@ -1,6 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getAccessToken, flushTokenStorage } from './tokenStorage';
+import { bumpRequestGeneration } from './requestGeneration';
 import { getFreshAccessToken, refreshAccessToken, isAccessTokenFresh, SessionLostError } from './session';
 
 const SOCKET_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3001';
@@ -210,6 +211,11 @@ export function connectSocket(token: string): VoxSocket {
       reconnectCallbacks.forEach((fn) => fn());
     }
   });
+
+  // Every event the server delivers may mean its state changed: a GET the
+  // stores issue because of it must not share a request issued before it
+  // (services/api.ts coalesces identical GETs in flight)
+  s.onAny(() => bumpRequestGeneration());
 
   s.on('force:logout', (data) => {
     if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);

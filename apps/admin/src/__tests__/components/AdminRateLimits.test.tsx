@@ -10,7 +10,7 @@ import { createRoot, type Root } from 'react-dom/client';
 type Rule = {
   name: string;
   label: string;
-  keyType: 'ip' | 'userId' | 'webhook';
+  keyType: 'ip' | 'userId' | 'account' | 'webhook';
   keyPrefix: string;
   points: number;
   duration: number;
@@ -89,7 +89,7 @@ async function render() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  store.rateLimits = [rule('login', 'ip', 'Login'), rule('messageSend', 'userId', 'Message Send'), ...WEBHOOK_RULES];
+  store.rateLimits = [rule('login', 'ip', 'Login'), rule('loginAccount', 'account', 'Login (failures per account)'), rule('messageSend', 'userId', 'Message Send'), ...WEBHOOK_RULES];
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -100,12 +100,13 @@ afterEach(() => {
 });
 
 describe('AdminRateLimits — key-type badge', () => {
-  it("renders 'Webhook' for keyType 'webhook', 'IP' for 'ip' and 'User' for 'userId'", async () => {
+  it("renders 'Webhook' for keyType 'webhook', 'IP' for 'ip', 'Account' for 'account' and 'User' for 'userId'", async () => {
     await render();
     expect(store.fetchRateLimits).toHaveBeenCalledTimes(1);
     expect(badgeOf('webhookExecute')).toBe('Webhook');
     expect(badgeOf('webhookExecuteIp')).toBe('IP');
     expect(badgeOf('login')).toBe('IP');
+    expect(badgeOf('loginAccount')).toBe('Account');
     expect(badgeOf('webhookManage')).toBe('User');
     expect(badgeOf('messageSend')).toBe('User');
   });

@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
-import { rateLimitUpload, rateLimitGeneral } from '../middleware/rateLimiter';
+import { rateLimitUpload, rateLimitAttachmentRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
@@ -242,7 +242,9 @@ uploadRouter.get(
 // Used by browser notifications where the S3 redirect fails due to CORS.
 uploadRouter.get(
   '/*path',
-  rateLimitGeneral,
+  // Its own per-address budget: this route rode the general one TWICE (api
+  // level and here), an effective 50 a minute that a media channel exceeded
+  rateLimitAttachmentRead,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const pathSegments = req.params.path;

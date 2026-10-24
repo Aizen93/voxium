@@ -36,12 +36,22 @@ export const app = express();
 
 // Enable trust proxy lazily (env vars not available at module scope due to import hoisting)
 let _trustProxySet = false;
+let _forwardedWithoutTrustWarned = false;
 app.use((req, _res, next) => {
   if (!_trustProxySet) {
     _trustProxySet = true;
     if (trustsProxy()) {
       req.app.set('trust proxy', trustedProxyHops());
     }
+  }
+  // A reverse proxy in front of a process that does not trust it: every
+  // caller IS the proxy's address — one rate-limit bucket, one IpBan key,
+  // one registration budget for the whole platform — and the symptom is
+  // "429 on the login page without doing anything". Said once, the first
+  // time a forwarded request shows it.
+  if (!_forwardedWithoutTrustWarned && !trustsProxy() && req.headers['x-forwarded-for'] !== undefined) {
+    _forwardedWithoutTrustWarned = true;
+    console.warn('[TrustProxy] Requests arrive with X-Forwarded-For but the proxy is not trusted (NODE_ENV is not production and TRUST_PROXY is not true): every client is rate-limited and ban-checked as ONE address, the proxy\'s. Behind a reverse proxy set TRUST_PROXY=true (and TRUST_PROXY_HOPS to the number of proxies).');
   }
   next();
 });
@@ -105,6 +115,9 @@ app.use(cors({
     }
   },
   credentials: true,
+  // Not CORS-safelisted: without this a cross-origin client (the desktop app,
+  // the dev server) never sees a 429's Retry-After and retries blind
+  exposedHeaders: ['Retry-After'],
   maxAge: 86400, // Cache preflight responses for 24 hours
 }));
 
