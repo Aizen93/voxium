@@ -1,6 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
-import { getAccessToken } from './tokenStorage';
+import { getAccessToken, flushTokenStorage } from './tokenStorage';
 import { getFreshAccessToken, refreshAccessToken, isAccessTokenFresh, SessionLostError } from './session';
 
 const SOCKET_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3001';
@@ -213,11 +213,25 @@ export function connectSocket(token: string): VoxSocket {
 
   s.on('force:logout', (data) => {
     if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);
-    import('../stores/authStore').then(({ useAuthStore }) => {
-      useAuthStore.getState().logout();
-      const reason = data?.reason;
+    const reason = data?.reason;
+    const toLogin = () => {
       window.location.href = reason ? `/login?reason=${encodeURIComponent(reason)}` : '/login';
-    });
+    };
+    import('../stores/authStore')
+      .then(async ({ useAuthStore }) => {
+        useAuthStore.getState().logout();
+        // The reload must not outrun the persisted clear of the tokens (the
+        // desktop app writes them to the OS credential store over IPC), or
+        // the next launch restores the session this logout just ended
+        await flushTokenStorage();
+        toLogin();
+      })
+      .catch((err: unknown) => {
+        // The server ended this session: the login page is where to be
+        // even when the local clean-up failed
+        console.error('[WS] Forced logout could not clean up locally:', err instanceof Error ? err.message : err);
+        toLogin();
+      });
   });
 
   s.on('disconnect', (reason) => {

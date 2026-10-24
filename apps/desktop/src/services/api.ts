@@ -7,8 +7,8 @@ import { API_BASE, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessTo
 // file) and re-exported for the callers that always took it from here
 export { API_BASE };
 
-/** What the interceptors note on a request's config. */
-type SessionRequestConfig = InternalAxiosRequestConfig & {
+/** What the interceptors note on a request's config (read back from an error's `config` by the session restore). */
+export type SessionRequestConfig = InternalAxiosRequestConfig & {
   /** The 401 path ran once for this request. */
   _retry?: boolean;
   /** The request went out with a stale token because its renewal had just failed transiently. */

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStorage';
+import { getAccessToken, getRefreshToken, setTokens, clearTokens, flushTokenStorage } from './tokenStorage';
 
 /**
  * The signed-in session's access token, and the ONE way it is renewed.
@@ -140,14 +140,18 @@ export function endSessionRenewals(): void {
  * The session is over: forget the tokens and go to the login page. Idempotent
  * — every queued request fails at once when a refresh is refused, and the
  * socket's handshake may refuse in the same breath; one navigation is enough
- * (and it reloads the page, so the latch never outlives the session).
+ * (and it reloads the page, so the latch never outlives the session). The
+ * navigation waits for the persisted clear: in the desktop app the tokens
+ * live in the OS credential store, written over IPC, and a reload that
+ * outran the clear would load the refused tokens again at the next launch
+ * and be refused again — a reload loop.
  */
 export function handleSessionLost(): void {
   endSessionRenewals();
   clearTokens();
   if (sessionLost) return;
   sessionLost = true;
-  navigateToLogin();
+  void flushTokenStorage().then(() => navigateToLogin());
 }
 
 /**

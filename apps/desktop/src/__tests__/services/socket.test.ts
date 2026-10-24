@@ -88,7 +88,10 @@ const session = vi.hoisted(() => {
   };
 });
 vi.mock('../../services/session', () => session);
-const storage = vi.hoisted(() => ({ getAccessToken: vi.fn(() => 'stored-token' as string | null) }));
+const storage = vi.hoisted(() => ({
+  getAccessToken: vi.fn(() => 'stored-token' as string | null),
+  flushTokenStorage: vi.fn(async () => {}),
+}));
 vi.mock('../../services/tokenStorage', () => storage);
 
 type SocketModule = typeof import('../../services/socket');
