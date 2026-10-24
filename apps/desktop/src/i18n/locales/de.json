@@ -1315,7 +1315,7 @@
     "powWorkerFailed": "Die Registrierungsprüfung ist fehlgeschlagen — bitte versuche es erneut",
     "usernameTooShort": "Der Benutzername muss mindestens {{min}} Zeichen lang sein",
     "usernameTooLong": "Der Benutzername darf höchstens {{max}} Zeichen lang sein",
-    "usernameInvalidChars": "Der Benutzername darf nur Buchstaben, Zahlen, Unterstriche, Punkte und Bindestriche enthalten",
+    "usernameInvalidChars": "Der Benutzername darf nur Buchstaben (A–Z), Zahlen, Unterstriche, Punkte und Bindestriche enthalten",
     "invalidEmail": "Ungültige E-Mail-Adresse",
     "passwordTooShort": "Das Passwort muss mindestens {{min}} Zeichen lang sein",
     "passwordTooLong": "Das Passwort darf höchstens {{max}} Bytes lang sein (Sonderzeichen und Emojis zählen als mehrere Bytes)",

@@ -1315,7 +1315,7 @@
     "powWorkerFailed": "La vérification d'inscription a échoué — veuillez réessayer",
     "usernameTooShort": "Le nom d'utilisateur doit contenir au moins {{min}} caractères",
     "usernameTooLong": "Le nom d'utilisateur doit contenir au plus {{max}} caractères",
-    "usernameInvalidChars": "Le nom d'utilisateur ne peut contenir que des lettres, des chiffres, des tirets bas, des points et des tirets",
+    "usernameInvalidChars": "Le nom d'utilisateur ne peut contenir que des lettres (A–Z), des chiffres, des tirets bas, des points et des tirets",
     "invalidEmail": "Adresse e-mail invalide",
     "passwordTooShort": "Le mot de passe doit contenir au moins {{min}} caractères",
     "passwordTooLong": "Le mot de passe doit faire au plus {{max}} octets (les caractères spéciaux et les emoji comptent pour plusieurs octets)",

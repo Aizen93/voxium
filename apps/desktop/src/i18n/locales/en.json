@@ -1315,7 +1315,7 @@
     "powWorkerFailed": "The registration check failed — please try again",
     "usernameTooShort": "Username must be at least {{min}} characters",
     "usernameTooLong": "Username must be at most {{max}} characters",
-    "usernameInvalidChars": "Username can only contain letters, numbers, underscores, dots, and hyphens",
+    "usernameInvalidChars": "Username can only contain letters (A–Z), numbers, underscores, dots and hyphens",
     "invalidEmail": "Invalid email address",
     "passwordTooShort": "Password must be at least {{min}} characters",
     "passwordTooLong": "Password must be at most {{max}} bytes (special characters and emoji count as multiple bytes)",

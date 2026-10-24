@@ -949,7 +949,7 @@
     "toasts": {
       "movedToAnotherChannel": "Te movieron a otro canal de voz",
       "micDenied": "Acceso al micrófono denegado: te unes en modo solo escucha",
-      "joinFailed": "No se pudo unir al canal de voz: inténtalo de nuevo",
+      "joinFailed": "No pudiste unirte al canal de voz: inténtalo de nuevo",
       "connectionTimedOut": "Se agotó el tiempo de la conexión de voz: intenta volver a unirte",
       "connectionFailed": "Falló la conexión de voz: intenta volver a unirte",
       "connectionLost": "Se perdió la conexión de voz: reconectando (intento {{attempt}}/{{max}})...",
@@ -1315,7 +1315,7 @@
     "powWorkerFailed": "La verificación de registro falló: inténtalo de nuevo",
     "usernameTooShort": "El nombre de usuario debe tener al menos {{min}} caracteres",
     "usernameTooLong": "El nombre de usuario debe tener como máximo {{max}} caracteres",
-    "usernameInvalidChars": "El nombre de usuario solo puede contener letras, números, guiones bajos, puntos y guiones",
+    "usernameInvalidChars": "El nombre de usuario solo puede contener letras (A–Z), números, guiones bajos, puntos y guiones",
     "invalidEmail": "Dirección de correo no válida",
     "passwordTooShort": "La contraseña debe tener al menos {{min}} caracteres",
     "passwordTooLong": "La contraseña debe tener como máximo {{max}} bytes (los caracteres especiales y los emojis cuentan como varios bytes)",

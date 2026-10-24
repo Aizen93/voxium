@@ -80,7 +80,8 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const activeServerId = useServerStore((s) => s.activeServerId);
   const currentUserId = useAuthStore((s) => s.user?.id);
   const serverPermissions = useServerPermissions(channelId ? activeServerId : null, currentUserId);
-  const canMentionEveryone = serverPermissions !== null && (serverPermissions & Permissions.MENTION_EVERYONE) !== 0n;
+  // Never in a secure channel: the server never flags an encrypted row
+  const canMentionEveryone = !isSecureChannel && serverPermissions !== null && (serverPermissions & Permissions.MENTION_EVERYONE) !== 0n;
 
   // Focus textarea when replying to a message
   useEffect(() => {

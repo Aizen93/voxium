@@ -4,9 +4,8 @@ import { createRoot, type Root } from 'react-dom/client';
 
 /**
  * The registration-abuse panel's wording against what the server computes:
- * - the IP list groups `register` IP records by lastSeenAt, which a later
- *   sign-in from the same address refreshes (IpRecord is unique per user and
- *   address), so it is accounts SEEN this week, not accounts created this week;
+ * - the IP list groups `register` IP records by the account's creation date,
+ *   so it is the addresses that registered accounts this week;
  * - the sweep the "Run now" confirmation describes also deletes IP records
  *   not seen for IP_RECORD_RETENTION_DAYS (@voxium/shared, used by utils/registrationHygiene.ts).
  */
@@ -51,7 +50,7 @@ afterEach(() => {
 });
 
 describe('AdminRegistrationPanel — wording', () => {
-  it('labels the IP list as accounts seen this week, not registrations this week', async () => {
+  it('labels the IP list as accounts created this week', async () => {
     await render();
     const text = document.body.textContent ?? '';
     expect(text).toContain('Top registration IPs (accounts created in the last 7 days)');
