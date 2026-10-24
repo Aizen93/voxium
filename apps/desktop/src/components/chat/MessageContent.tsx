@@ -99,11 +99,9 @@ function segment(content: string, mentionsEveryone: boolean): Segment[] {
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = combined.exec(content)) !== null) {
-    // Group layout: [1] whole user mention, [2] its userId, [3] whole everyone
-    // token, [4] the character before it (which the token regex consumes)
-    const prefix = match[3] !== undefined ? (match[4] ?? '') : '';
-    const start = match.index + prefix.length;
-    if (start > lastIndex) segments.push({ type: 'text', value: content.slice(lastIndex, start) });
+    // Group layout: [1] whole user mention, [2] its userId, [3] the everyone
+    // token (a lookbehind: nothing before it is consumed)
+    if (match.index > lastIndex) segments.push({ type: 'text', value: content.slice(lastIndex, match.index) });
     if (match[3] !== undefined) segments.push({ type: 'everyone' });
     else segments.push({ type: 'mention', userId: match[2] });
     lastIndex = combined.lastIndex;

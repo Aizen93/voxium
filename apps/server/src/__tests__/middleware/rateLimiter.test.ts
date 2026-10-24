@@ -537,6 +537,9 @@ describe('the budgets a NAT shares (issue 4)', () => {
     expect(rows.resetMail.keyType).toBe('inbox');
     expect(rows.registerDomain.keyType).toBe('domain');
     expect(rows.login.keyType).toBe('ip');
+    // Keyed byIp despite their neighbours: a range edit once re-typed them
+    expect(rows.registerAttempt.keyType).toBe('ip');
+    expect(rows.forgotPassword.keyType).toBe('ip');
     expect(rows.loginAccount).toMatchObject({ keyType: 'account', points: 10, duration: 900, blockDuration: 0, keyPrefix: 'rl:loginacct' });
   });
 

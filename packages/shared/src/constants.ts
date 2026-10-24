@@ -327,15 +327,15 @@ export const INVITE_CODE_LENGTH = 8;
 export const MENTION_RE = /@\[([^\]]{1,30})\]/g;
 
 /**
- * An `@everyone` token: at the start of the text or after a character that is
- * not part of a word or another mention, and not a prefix of a longer word
- * (`@everyone-else`, `@everyone2` are not it). Group 1 is the character before
- * the token (empty at the start), which a renderer must keep. Whether the token
- * PINGS anyone is the server's decision at send time (`Message.mentionsEveryone`:
- * the author held MENTION_EVERYONE in the channel); a renderer must never treat
- * the bare text as a mention.
+ * An `@everyone` token: not preceded by a word character or another `@`
+ * (`me@everyone`, `@@everyone` are not it), and not a prefix of a longer word
+ * (`@everyone-else`, `@everyone2` are not it). A lookbehind, so the match is
+ * the token alone — the server and the renderer agree on `@[id]@everyone` too.
+ * Whether the token PINGS anyone is the server's decision at send time
+ * (`Message.mentionsEveryone`: the author held MENTION_EVERYONE in the
+ * channel); a renderer must never treat the bare text as a mention.
  */
-export const EVERYONE_MENTION_RE = /(^|[^\w@])@everyone(?![\w-])/g;
+export const EVERYONE_MENTION_RE = /(?<![\w@])@everyone(?![\w-])/g;
 
 /** Whether `content` contains an @everyone token (a fresh regex: the shared one is global). */
 export function mentionsEveryone(content: string): boolean {

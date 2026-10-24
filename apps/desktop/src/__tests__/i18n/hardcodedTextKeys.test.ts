@@ -21,6 +21,8 @@ const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url)
 
 const SOURCES = [
   'components/chat/ImageLightbox.tsx',
+  'components/chat/MentionAutocomplete.tsx',
+  'components/chat/MessageContent.tsx',
   'components/chat/MessageInput.tsx',
   'components/chat/MessageList.tsx',
   'components/chat/ReactionDisplay.tsx',

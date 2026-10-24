@@ -1315,7 +1315,7 @@
     "powWorkerFailed": "A verificação de cadastro falhou — tente novamente",
     "usernameTooShort": "O nome de usuário deve ter pelo menos {{min}} caracteres",
     "usernameTooLong": "O nome de usuário deve ter no máximo {{max}} caracteres",
-    "usernameInvalidChars": "O nome de usuário só pode conter letras, números, sublinhados, pontos e hifens",
+    "usernameInvalidChars": "O nome de usuário só pode conter letras (A–Z), números, sublinhados, pontos e hifens",
     "invalidEmail": "Endereço de e-mail inválido",
     "passwordTooShort": "A senha deve ter pelo menos {{min}} caracteres",
     "passwordTooLong": "A senha deve ter no máximo {{max}} bytes (caracteres especiais e emojis contam como vários bytes)",

@@ -164,9 +164,10 @@ export function PrivacyContent() {
             Your data is stored on our servers. Passwords are hashed using bcrypt and are never stored in plain
             text. Sessions use signed tokens that we can revoke, and optional two-factor authentication whose
             secrets are stored encrypted and whose backup codes are stored hashed. Files you upload are kept in
-            storage that only our servers can reach: avatars and server icons are served to anyone who has their
-            link, and message attachments only to the people allowed to see the channel or conversation they were
-            sent in. End-to-end encrypted attachments are encrypted on your device before upload, so our storage
+            private storage: your device uploads and downloads them directly through short-lived links that our
+            servers sign, and nothing in it is reachable without such a link. Avatars and server icons are served
+            to anyone who has their link, and message attachments only to the people allowed to see the channel or
+            conversation they were sent in. End-to-end encrypted attachments are encrypted on your device before upload, so our storage
             only ever holds them as unreadable data. Backups of our database are encrypted.
           </p>
         </section>

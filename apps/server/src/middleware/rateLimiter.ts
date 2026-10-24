@@ -86,7 +86,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // bounds username/email enumeration now that the two above only count
   // successes. Deliberately cheap and generous: a fumbling real user has
   // plenty of headroom, while a prober gets 30 probes a day per address.
-  registerAttempt:{ keyPrefix: 'rl:regatt',   points: 30,  duration: 86400, blockDuration: 0, keyType: 'subnet',     label: 'Register (daily attempts per IP)' },
+  registerAttempt:{ keyPrefix: 'rl:regatt',   points: 30,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily attempts per IP)' },
   // The same bound, per RANGE — and the one that actually holds. Per-address is
   // no bound at all against an attacker who has a /24, or any routed IPv6 /64:
   // 254 x 30 is 7,620 confirmed probes a day, and v6 rotation is free. Since a
@@ -120,7 +120,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // the key is an email, not a request property.
   verifyMail:     { keyPrefix: 'rl:vfymail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'inbox',     label: 'Verification mail (daily per inbox)' },
   resetMail:      { keyPrefix: 'rl:rstmail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'inbox',     label: 'Password-reset mail (daily per inbox)' },
-  forgotPassword: { keyPrefix: 'rl:forgot',   points: 3,   duration: 900, blockDuration: 0,   keyType: 'inbox',     label: 'Forgot Password' },
+  forgotPassword: { keyPrefix: 'rl:forgot',   points: 3,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Forgot Password' },
   resetPassword:  { keyPrefix: 'rl:reset',    points: 5,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Reset Password' },
   // One refresh per client per access-token life (15 min), plus one at every
   // launch and every reconnect — and every client behind the NAT launches at

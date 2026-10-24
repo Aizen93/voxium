@@ -197,7 +197,7 @@ export function AdminRateLimits() {
                   </td>
                   <td className="px-4 py-3">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                      rule.keyType === 'ip' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
+                      rule.keyType === 'ip' || rule.keyType === 'subnet' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
                     }`}>
                       {KEY_TYPE_LABEL[rule.keyType] ?? rule.keyType}
                     </span>

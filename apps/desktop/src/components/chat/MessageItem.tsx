@@ -368,7 +368,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                   <>
                     {message.content ? (
                       <div className="text-[14.5px] leading-[1.65] text-vox-text-primary/85 break-words">
-                        <MessageContent content={message.content} mentions={message.mentions} mentionsEveryone={message.mentionsEveryone} />
+                        <MessageContent content={message.content} mentions={message.mentions} mentionsEveryone={!message.encrypted && !message.conversationId && !!message.mentionsEveryone} />
                       </div>
                     ) : message.encrypted && !message.e2eAttachments?.length ? (
                       <div className="flex items-center gap-1 text-sm italic text-vox-text-muted">
@@ -411,7 +411,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 <div className="min-w-0 flex-1">
                   {message.content ? (
                     <div className="text-[14.5px] leading-[1.65] text-vox-text-primary/85 break-words">
-                      <MessageContent content={message.content} mentions={message.mentions} mentionsEveryone={message.mentionsEveryone} />
+                      <MessageContent content={message.content} mentions={message.mentions} mentionsEveryone={!message.encrypted && !message.conversationId && !!message.mentionsEveryone} />
                       {message.editedAt && (
                         <span className="text-[10px] text-vox-text-muted">{t('messageItem.edited')}</span>
                       )}

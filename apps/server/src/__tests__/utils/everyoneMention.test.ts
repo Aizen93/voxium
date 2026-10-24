@@ -22,12 +22,14 @@ describe('mentionsEveryone — the @everyone token', () => {
     expect(mentionsEveryone('@EVERYONE')).toBe(false);
   });
 
-  it('the shared regex keeps the character before the token in group 1 so a renderer can re-emit it', () => {
+  it('the shared regex matches the token alone (a lookbehind), so the server and the renderer agree on where it starts', () => {
     const re = new RegExp(EVERYONE_MENTION_RE.source, EVERYONE_MENTION_RE.flags);
     const match = re.exec('hey @everyone');
-    expect(match?.[1]).toBe(' ');
-    expect(match?.index).toBe(3);
-    expect(new RegExp(EVERYONE_MENTION_RE.source).exec('@everyone')?.[1]).toBe('');
+    expect(match?.[0]).toBe('@everyone');
+    expect(match?.index).toBe(4);
+    // right after a user mention — the renderer's combined regex sees the same token
+    expect(mentionsEveryone('@[clx1]@everyone')).toBe(true);
+    expect(new RegExp(EVERYONE_MENTION_RE.source).exec('@[clx1]@everyone')?.index).toBe(7);
   });
 
   it('the permission the token is gated on is a channel-level text flag', () => {

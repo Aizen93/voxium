@@ -44,7 +44,7 @@ function timeAgo(iso: string): string {
 /**
  * Registration-abuse triage panel (anti-bot Phase 4): volume over two
  * windows, the unverified backlog, and the registration IPs behind the most
- * accounts seen this week. REST + refresh button, per the admin conventions.
+ * accounts created this week. REST + refresh button, per the admin conventions.
  */
 export function AdminRegistrationPanel() {
   const [stats, setStats] = useState<RegistrationStats | null>(null);
@@ -130,9 +130,9 @@ export function AdminRegistrationPanel() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {stats && stats.topRegisterIps.length > 0 && (
           <div>
-            {/* The server groups `register` IP records by lastSeenAt, which a later
-                sign-in from the same address refreshes: these are accounts
-                SEEN from their registration address this week, not new ones */}
+            {/* The server groups `register` IP records by the ACCOUNT's creation
+                date (the record's kind is fixed at first sight): the addresses
+                that registered accounts this week */}
             <p className="text-xs text-vox-text-muted mb-1.5">Top registration IPs (accounts created in the last 7 days)</p>
             <div className="space-y-1">
               {stats.topRegisterIps.map((row) => (
