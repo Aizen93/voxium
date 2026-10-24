@@ -369,7 +369,7 @@ function Navbar() {
         <button
           type="button"
           className="sm:hidden flex items-center justify-center h-9 w-9 rounded-full border border-white/10 text-vox-text-primary hover:bg-white/[0.06] transition-colors"
-          aria-label="Menu"
+          aria-label={t('landing.nav.menu')}
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((o) => !o)}
         >
@@ -743,10 +743,10 @@ function Features() {
 /* ─── Interactive Showcase ─── */
 
 const SHOWCASE_THEMES = [
-  { id: 'dark',     label: 'Dark',     bg: '#1a1b2e', sidebar: '#151627', chat: '#1e1f36', text: '#e2e2e8', muted: '#7a7a8e', accent: '#5b5bf7', border: '#2a2b42' },
-  { id: 'light',    label: 'Light',    bg: '#f5f5f7', sidebar: '#e8e8ed', chat: '#ffffff', text: '#1a1a1a', muted: '#6e6e7a', accent: '#4f46e5', border: '#d4d4d8' },
-  { id: 'midnight', label: 'Midnight', bg: '#0d1117', sidebar: '#0a0e14', chat: '#111820', text: '#c9d1d9', muted: '#6b7b8d', accent: '#58a6ff', border: '#1c2632' },
-  { id: 'tactical', label: 'Tactical', bg: '#1a1f16', sidebar: '#151a12', chat: '#1e2419', text: '#d4d4c8', muted: '#8a8a78', accent: '#84cc16', border: '#2a3024' },
+  { id: 'dark',     labelKey: 'themes.builtIn.dark',     bg: '#1a1b2e', sidebar: '#151627', chat: '#1e1f36', text: '#e2e2e8', muted: '#7a7a8e', accent: '#5b5bf7', border: '#2a2b42' },
+  { id: 'light',    labelKey: 'themes.builtIn.light',    bg: '#f5f5f7', sidebar: '#e8e8ed', chat: '#ffffff', text: '#1a1a1a', muted: '#6e6e7a', accent: '#4f46e5', border: '#d4d4d8' },
+  { id: 'midnight', labelKey: 'themes.builtIn.midnight', bg: '#0d1117', sidebar: '#0a0e14', chat: '#111820', text: '#c9d1d9', muted: '#6b7b8d', accent: '#58a6ff', border: '#1c2632' },
+  { id: 'tactical', labelKey: 'themes.builtIn.tactical', bg: '#1a1f16', sidebar: '#151a12', chat: '#1e2419', text: '#d4d4c8', muted: '#8a8a78', accent: '#84cc16', border: '#2a3024' },
 ] as const;
 
 const GREETINGS = [
@@ -764,11 +764,23 @@ const GREETINGS = [
 ];
 
 const PERM_ROLES = [
-  { name: 'Admin',     color: '#eab308', active: [0, 1, 2, 3, 4, 5] },
-  { name: 'Moderator', color: '#3b82f6', active: [0, 1, 2, 3] },
-  { name: 'Member',    color: '#22c55e', active: [0, 1] },
+  { nameKey: 'landing.demo.roleAdmin',     color: '#eab308', active: [0, 1, 2, 3, 4, 5] },
+  { nameKey: 'landing.demo.roleModerator', color: '#3b82f6', active: [0, 1, 2, 3] },
+  { nameKey: 'landing.demo.roleMember',    color: '#22c55e', active: [0, 1] },
 ];
-const PERM_LABELS = ['View', 'Send', 'React', 'Manage', 'Kick', 'Admin'];
+// The matrix's columns. A removal is a ban since server discovery, so the fifth
+// column says what the real member menu says (server.removeAndBan), not "Kick".
+const PERM_LABEL_KEYS = [
+  'landing.demo.permView', 'landing.demo.permSend', 'landing.demo.permReact',
+  'landing.demo.permManage', 'server.removeAndBan', 'landing.demo.permAdmin',
+];
+
+/** The demo conversation of the theme switcher: names are people, the lines are translated. */
+const SHOWCASE_CHAT = [
+  { id: 'alice', name: 'Alice', textKey: 'landing.demo.chatTryTheme' },
+  { id: 'bob', name: 'Bob', textKey: 'landing.demo.chatLookingClean' },
+  { id: 'you', nameKey: 'landing.demo.you', textKey: 'landing.demo.chatLoveIt' },
+] as const;
 
 function ThemeSwitcherCard() {
   const { t: tr } = useTranslation();
@@ -802,19 +814,19 @@ function ThemeSwitcherCard() {
         <div className="flex flex-1 min-h-0">
           {/* Chat */}
           <div className="flex-1 flex flex-col p-2.5 gap-2 justify-end" style={{ background: t.chat, transition: 'background 0.4s ease' }}>
-            {['Alice', 'Bob', 'You'].map((name, i) => (
-              <div key={name} className="flex items-start gap-1.5">
+            {SHOWCASE_CHAT.map((line, i) => (
+              <div key={line.id} className="flex items-start gap-1.5">
                 <div className="h-4 w-4 rounded-full shrink-0" style={{ background: i === 0 ? '#3eba68' : i === 1 ? t.accent : '#e67e22', transition: 'background 0.4s ease' }} />
                 <div>
-                  <span className="text-[8px] font-semibold" style={{ color: i === 0 ? '#3eba68' : i === 1 ? t.accent : '#e67e22', transition: 'color 0.4s ease' }}>{name}</span>
+                  <span className="text-[8px] font-semibold" style={{ color: i === 0 ? '#3eba68' : i === 1 ? t.accent : '#e67e22', transition: 'color 0.4s ease' }}>{'nameKey' in line ? tr(line.nameKey) : line.name}</span>
                   <p className="text-[9px] leading-tight" style={{ color: t.text, transition: 'color 0.4s ease' }}>
-                    {i === 0 ? 'Hey, try the new theme!' : i === 1 ? 'Looking clean' : 'Love it'}
+                    {tr(line.textKey)}
                   </p>
                 </div>
               </div>
             ))}
             <div className="rounded-md px-2 py-1 mt-0.5" style={{ background: t.sidebar, border: `1px solid ${t.border}`, transition: 'all 0.4s ease' }}>
-              <span className="text-[8px]" style={{ color: t.muted, transition: 'color 0.4s ease' }}>Message #general</span>
+              <span className="text-[8px]" style={{ color: t.muted, transition: 'color 0.4s ease' }}>{tr('chat.messagePlaceholder', { channel: 'general' })}</span>
             </div>
           </div>
         </div>
@@ -826,7 +838,7 @@ function ThemeSwitcherCard() {
           <button
             key={theme.id}
             onClick={() => setActive(i)}
-            aria-label={`${theme.label} theme`}
+            aria-label={tr('landing.demo.themeAria', { name: tr(theme.labelKey) })}
             className="group relative flex items-center gap-1 rounded-full px-2.5 py-1 border transition-all duration-300"
             style={{
               borderColor: active === i ? theme.accent : 'transparent',
@@ -838,7 +850,7 @@ function ThemeSwitcherCard() {
               style={{ background: `linear-gradient(135deg, ${theme.sidebar}, ${theme.accent})` }}
             />
             <span className="text-[10px] font-medium text-vox-text-secondary group-hover:text-vox-text-primary transition-colors">
-              {theme.label}
+              {tr(theme.labelKey)}
             </span>
           </button>
         ))}
@@ -975,9 +987,9 @@ function PermissionVisualizer() {
       {/* Column labels */}
       <div className="flex items-center px-3 pt-3 pb-1">
         <div className="w-24" />
-        {PERM_LABELS.map((label) => (
-          <div key={label} className="flex-1 text-center">
-            <span className="text-[9px] text-vox-text-muted font-medium">{label}</span>
+        {PERM_LABEL_KEYS.map((labelKey) => (
+          <div key={labelKey} className="flex-1 text-center">
+            <span className="text-[9px] text-vox-text-muted font-medium">{t(labelKey)}</span>
           </div>
         ))}
       </div>
@@ -988,7 +1000,7 @@ function PermissionVisualizer() {
           const isHovered = hoveredRole === ri;
           return (
             <div
-              key={role.name}
+              key={role.nameKey}
               className="flex items-center rounded-lg px-2 py-2.5 cursor-default transition-all duration-300"
               style={{
                 background: isHovered ? `${role.color}10` : 'transparent',
@@ -1010,13 +1022,13 @@ function PermissionVisualizer() {
                   className="text-[11px] font-semibold transition-colors duration-300"
                   style={{ color: isHovered ? role.color : '#9ca3af' }}
                 >
-                  {role.name}
+                  {t(role.nameKey)}
                 </span>
               </div>
 
               {/* Permission dots */}
               <div className="flex-1 flex">
-                {PERM_LABELS.map((_, pi) => {
+                {PERM_LABEL_KEYS.map((_, pi) => {
                   const isActive = role.active.includes(pi);
                   const isLit = isHovered && isActive;
                   return (
@@ -1339,8 +1351,8 @@ function CommunityFunding() {
 
   const cards = [
     { icon: Code2, value: '100%', label: t('landing.funding.sourceAvailable'), color: 'from-pink-500/20 to-purple-500/20' },
-    { icon: Users, value: 'You', label: t('landing.funding.youDecide'), color: 'from-purple-500/20 to-blue-500/20' },
-    { icon: Shield, value: 'Zero', label: t('landing.funding.zeroAds'), color: 'from-blue-500/20 to-pink-500/20' },
+    { icon: Users, value: t('landing.funding.youValue'), label: t('landing.funding.youDecide'), color: 'from-purple-500/20 to-blue-500/20' },
+    { icon: Shield, value: t('landing.funding.zeroValue'), label: t('landing.funding.zeroAds'), color: 'from-blue-500/20 to-pink-500/20' },
   ];
 
   return (

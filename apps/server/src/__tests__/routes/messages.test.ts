@@ -1364,3 +1364,101 @@ describe('Message Routes', () => {
     });
   });
 });
+
+// ─── @everyone: the MENTION_EVERYONE permission made real ────────────────────
+//
+// The real flag table (the permissionCalculator mock above carries a stub
+// `Permissions`; the route reads the shared one)
+import { Permissions as RealPermissions } from '@voxium/shared';
+//
+// The flag existed with nothing checking it. A message that contains the
+// token, sent or edited by a member holding the permission in that channel,
+// is flagged `mentionsEveryone` by the server — decided at write time and
+// stored on the row, never derived from the text on read.
+describe('@everyone (MENTION_EVERYONE)', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    app = createApp();
+    prismaMock.channel.findUnique.mockResolvedValue({ id: 'ch-1', serverId: 'srv-1', type: 'text', name: 'general', secure: false, server: { name: 'Test Server' } });
+    prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+    mockHasChannelPermission.mockResolvedValue(true);
+  });
+
+  /** A transaction whose create call is captured. */
+  function captureCreate(content: string) {
+    const create = vi.fn().mockResolvedValue({ id: 'msg-1', content });
+    prismaMock.$transaction.mockImplementation(async (cb: Function) => cb({
+      message: { create, findUniqueOrThrow: vi.fn().mockResolvedValue(makeMockMessage({ content })) },
+      messageAttachment: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    }));
+    return create;
+  }
+
+  it('flags a message that says @everyone when the author holds MENTION_EVERYONE in the channel', async () => {
+    const create = captureCreate('hey @everyone, standup');
+
+    const res = await request(app)
+      .post('/api/v1/channels/ch-1/messages')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: 'hey @everyone, standup' });
+
+    expect(res.status).toBe(201);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: true }) }));
+    expect(mockHasChannelPermission).toHaveBeenCalledWith('user-1', 'ch-1', 'srv-1', RealPermissions.MENTION_EVERYONE);
+  });
+
+  it('stores false — the token stays text — when the author lacks the permission', async () => {
+    mockHasChannelPermission.mockImplementation(async (_u: string, _c: string, _s: string, perm: bigint) => perm !== RealPermissions.MENTION_EVERYONE);
+    const create = captureCreate('hey @everyone');
+
+    const res = await request(app)
+      .post('/api/v1/channels/ch-1/messages')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: 'hey @everyone' });
+
+    expect(res.status).toBe(201);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: false }) }));
+  });
+
+  it('never asks the permission question for a message without the token (and @everyone2 is not the token)', async () => {
+    const create = captureCreate('see @everyone2 later');
+
+    await request(app)
+      .post('/api/v1/channels/ch-1/messages')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: 'see @everyone2 later' });
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: false }) }));
+    expect(mockHasChannelPermission.mock.calls.map((c) => c[3])).not.toContain(RealPermissions.MENTION_EVERYONE);
+  });
+
+  it('an edit re-decides with the editor\'s current permission: the token edited in pings, edited out stops', async () => {
+    prismaMock.message.findUnique.mockResolvedValue(makeMockMessage({ channel: { serverId: 'srv-1', secure: false } }));
+    prismaMock.message.update.mockResolvedValue({ ...makeMockMessage(), content: '@everyone now', editedAt: new Date(), reactions: [] });
+
+    let res = await request(app)
+      .patch('/api/v1/channels/ch-1/messages/msg-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: '@everyone now' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.message.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: true }) }));
+
+    mockHasChannelPermission.mockImplementation(async (_u: string, _c: string, _s: string, perm: bigint) => perm !== RealPermissions.MENTION_EVERYONE);
+    res = await request(app)
+      .patch('/api/v1/channels/ch-1/messages/msg-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: '@everyone now' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.message.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: false }) }));
+
+    mockHasChannelPermission.mockResolvedValue(true);
+    res = await request(app)
+      .patch('/api/v1/channels/ch-1/messages/msg-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: 'nobody in particular' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.message.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: false }) }));
+  });
+});

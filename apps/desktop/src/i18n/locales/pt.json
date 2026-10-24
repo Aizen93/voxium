@@ -28,7 +28,15 @@
     "reset": "Redefinir",
     "saving": "Salvando...",
     "creating": "Criando...",
-    "deleting": "Excluindo..."
+    "deleting": "Excluindo...",
+    "dismiss": "Dispensar",
+    "download": "Baixar",
+    "preview": "Pré-visualizar",
+    "icon": "Ícone",
+    "minimize": "Minimizar",
+    "maximize": "Maximizar",
+    "restore": "Restaurar",
+    "ctrlKey": "Ctrl"
   },
   "auth": {
     "login": {
@@ -205,7 +213,8 @@
       "backupCodesDescription": "Esses códigos podem ser usados para acessar sua conta caso você perca seu dispositivo de autenticação. Cada código só pode ser usado uma vez. Guarde-os em um lugar seguro.",
       "copyAllCodes": "Copiar todos os códigos",
       "savedBackupCodes": "Salvei meus códigos de backup",
-      "failedToCopyBackup": "Não foi possível copiar os códigos de backup para a área de transferência"
+      "failedToCopyBackup": "Não foi possível copiar os códigos de backup para a área de transferência",
+      "qrCodeAlt": "Código QR para seu aplicativo autenticador"
     },
     "appearance": {
       "builtInThemes": "Temas integrados",
@@ -226,7 +235,9 @@
       "themeUnpublished": "Tema retirado da loja",
       "failedToPublish": "Não foi possível publicar o tema",
       "failedToUnpublish": "Não foi possível retirar o tema",
-      "failedToImport": "Não foi possível importar o tema"
+      "failedToImport": "Não foi possível importar o tema",
+      "publishTitle": "Publicar na loja",
+      "unpublishTitle": "Remover da loja"
     },
     "audio": {
       "inputDevice": "Dispositivo de entrada",
@@ -258,7 +269,24 @@
       "micNotAvailable": "Acesso ao microfone não disponível (contexto inseguro?)",
       "couldNotAccessMic": "Não foi possível acessar o microfone",
       "deviceEnumNotAvailable": "Enumeração de dispositivos não disponível",
-      "couldNotListDevices": "Não foi possível listar os dispositivos de áudio"
+      "couldNotListDevices": "Não foi possível listar os dispositivos de áudio",
+      "microphoneFallback": "Microfone {{id}}",
+      "speakerFallback": "Alto-falante {{id}}",
+      "keys": {
+        "backquote": "` (crase)",
+        "space": "Espaço",
+        "tab": "Tab",
+        "capsLock": "Caps Lock",
+        "shiftLeft": "Shift esquerdo",
+        "shiftRight": "Shift direito",
+        "controlLeft": "Ctrl esquerdo",
+        "controlRight": "Ctrl direito",
+        "altLeft": "Alt esquerdo",
+        "altRight": "Alt direito",
+        "metaLeft": "Meta esquerdo",
+        "metaRight": "Meta direito",
+        "numpad": "Teclado numérico {{key}}"
+      }
     },
     "language": {
       "title": "Idioma",
@@ -463,7 +491,8 @@
     "deleteRoleConfirm": "Essa ação não pode ser desfeita.",
     "failedToCreate": "Ocorreu um erro",
     "failedToUpdate": "Ocorreu um erro",
-    "failedToDelete": "Ocorreu um erro"
+    "failedToDelete": "Ocorreu um erro",
+    "deleteRoleQuestion": "Excluir <1>{{name}}</1>?"
   },
   "channelPermissions": {
     "title": "Permissões do canal",
@@ -635,7 +664,11 @@
     "removeAndBanned": "{{name}} foi removido e banido",
     "removeAndBanFailed": "Falha ao remover o membro",
     "youWereRemovedAndBanned": "Você foi removido e banido de {{name}}",
-    "youWereRemovedAndBannedUnknown": "Você foi removido e banido de um espaço"
+    "youWereRemovedAndBannedUnknown": "Você foi removido e banido de um espaço",
+    "failedToLoadServers": "Não foi possível carregar os servidores",
+    "failedToLoadServer": "Não foi possível carregar o servidor",
+    "failedToLoadMembers": "Não foi possível carregar os membros",
+    "deletedToast": "O servidor foi excluído"
   },
   "channel": {
     "joinVoice": "Entrar na voz",
@@ -722,7 +755,21 @@
     "fileTooLarge": "{{name}} é muito grande (máx. {{max}} MB)",
     "searchMessages": "Pesquisar mensagens (Ctrl+K)",
     "today": "Hoje",
-    "yesterday": "Ontem"
+    "yesterday": "Ontem",
+    "failedToLoadMessages": "Não foi possível carregar as mensagens",
+    "welcomeTitle": "Boas-vindas ao canal!",
+    "welcomeSubtitle": "Este é o início da conversa.",
+    "searchEmoji": "Pesquisar emoji...",
+    "mentionEveryone": {
+      "label": "@everyone",
+      "description": "Notificar todos que podem ver este canal",
+      "notificationTitle": "{{author}} mencionou todos em {{server}}, #{{channel}}"
+    },
+    "mentionAutocomplete": {
+      "header": "Membros correspondentes a @{{query}}",
+      "searching": "Pesquisando..."
+    },
+    "mentionUnknown": "@desconhecido"
   },
   "dm": {
     "title": "Mensagens diretas",
@@ -739,7 +786,8 @@
     "inACall": "Em uma chamada",
     "beginningOfConversation": "Início da conversa",
     "conversationStart": "Este é o início do seu histórico de mensagens diretas.",
-    "welcomeMessage": "Selecione uma conversa na barra lateral ou clique em um membro de qualquer servidor para iniciar uma nova."
+    "welcomeMessage": "Selecione uma conversa na barra lateral ou clique em um membro de qualquer servidor para iniciar uma nova.",
+    "failedToLoadConversations": "Não foi possível carregar as conversas"
   },
   "friends": {
     "title": "Amigos",
@@ -771,7 +819,10 @@
     "decline": "Recusar",
     "failedToOpenConversation": "Não foi possível abrir a conversa",
     "failedToAccept": "Não foi possível aceitar a solicitação de amizade",
-    "failedToRemove": "Não foi possível remover a amizade"
+    "failedToRemove": "Não foi possível remover a amizade",
+    "failedToLoad": "Não foi possível carregar os amigos",
+    "requestReceived": "{{name}} enviou uma solicitação de amizade para você",
+    "requestAccepted": "{{name}} aceitou sua solicitação de amizade"
   },
   "members": {
     "owner": "Proprietário",
@@ -893,6 +944,21 @@
       "maskRestoreFailed": "Sua tela continua saindo pelo compositor de máscaras — os espectadores veem a imagem correta, só consome CPU extra. Reinicie o compartilhamento para resolver.",
       "sharePaused": "Os espectadores não conseguem ver sua tela agora — uma máscara de privacidade está sendo aplicada ou falhou ao ser aplicada",
       "syncError": "Não foi possível compartilhar uma anotação — sua visualização pode diferir da dos espectadores"
+    },
+    "measuring": "Medindo...",
+    "toasts": {
+      "movedToAnotherChannel": "Você foi movido para outro canal de voz",
+      "micDenied": "Acesso ao microfone negado — entrando no modo somente ouvir",
+      "joinFailed": "Não foi possível entrar no canal de voz — tente novamente",
+      "connectionTimedOut": "A conexão de voz expirou — tente entrar novamente",
+      "connectionFailed": "Falha na conexão de voz — tente entrar novamente",
+      "connectionLost": "Conexão de voz perdida — reconectando (tentativa {{attempt}}/{{max}})...",
+      "connectionFailedManual": "Falha na conexão de voz — entre novamente manualmente",
+      "establishFailed": "Não foi possível estabelecer a conexão de voz",
+      "mutedByModerator": "Você foi silenciado por um moderador",
+      "deafenedByModerator": "Você foi ensurdecido por um moderador",
+      "screenShareFailed": "Falha no compartilhamento de tela — tente novamente",
+      "micIssue": "Problema no microfone detectado — tente entrar na voz novamente"
     }
   },
   "attachment": {
@@ -902,7 +968,9 @@
     "failedToDownload": "Não foi possível baixar o arquivo",
     "loadingImage": "Carregando imagem...",
     "loadingVideo": "Carregando vídeo...",
-    "loadingAudio": "Carregando áudio..."
+    "loadingAudio": "Carregando áudio...",
+    "downloadedName": "\"{{name}}\" baixado",
+    "image": "imagem"
   },
   "support": {
     "sendMessage": "Enviar mensagem",
@@ -915,7 +983,8 @@
     "placeholder": "Descreva seu problema...",
     "messageTooLong": "Mensagem muito longa (máx. {{max}} caracteres)",
     "failedToSend": "Não foi possível enviar a mensagem",
-    "failedToReopen": "Não foi possível reabrir o ticket"
+    "failedToReopen": "Não foi possível reabrir o ticket",
+    "ticketClosed": "O ticket está fechado."
   },
   "invite": {
     "failedToJoin": "Não foi possível entrar no servidor. Verifique sua conexão e tente novamente.",
@@ -931,7 +1000,8 @@
   "landing": {
     "nav": {
       "signIn": "Entrar",
-      "getStarted": "Começar"
+      "getStarted": "Começar",
+      "menu": "Menu"
     },
     "hero": {
       "headlinePart1": "Fale. Conecte.",
@@ -1037,7 +1107,9 @@
       "zeroAds": "Anúncios ou rastreamento",
       "sponsorGithub": "Patrocinar no GitHub",
       "openCollective": "Open Collective",
-      "supporterBadge": "Apoiadores recebem um emblema especial no app para mostrar sua contribuição"
+      "supporterBadge": "Apoiadores recebem um emblema especial no app para mostrar sua contribuição",
+      "youValue": "Você",
+      "zeroValue": "Zero"
     },
     "cta": {
       "title": "Pronto para experimentar a comunicação reinventada?",
@@ -1057,7 +1129,23 @@
       "cookiePolicy": "Política de cookies",
       "community": "Comunidade",
       "contributing": "Contribuir",
-      "copyright": "© 2026 Voxium. Todos os direitos reservados."
+      "copyright": "© 2026 Voxium. Todos os direitos reservados.",
+      "backToHome": "Voltar ao início"
+    },
+    "demo": {
+      "themeAria": "Tema {{name}}",
+      "you": "Você",
+      "chatTryTheme": "Ei, experimente o novo tema!",
+      "chatLookingClean": "Ficou ótimo",
+      "chatLoveIt": "Amei",
+      "roleAdmin": "Admin",
+      "roleModerator": "Moderador",
+      "roleMember": "Membro",
+      "permView": "Ver",
+      "permSend": "Enviar",
+      "permReact": "Reagir",
+      "permManage": "Gerenciar",
+      "permAdmin": "Admin"
     }
   },
   "badges": {
@@ -1206,7 +1294,148 @@
     "webhookNameInvalid": "O nome do webhook contém caracteres não suportados",
     "webhookCap": "Este servidor atingiu o limite de webhooks (máximo {{max}})",
     "channelNotFound": "Canal não encontrado",
-    "tooManyRequests": "Muitas solicitações. Tente novamente mais tarde."
+    "tooManyRequests": "Muitas solicitações. Tente novamente mais tarde.",
+    "emailNotVerified": "Seu endereço de e-mail não foi verificado",
+    "invalidOrExpiredToken": "Sua sessão expirou. Entre novamente.",
+    "sessionInvalidated": "Sua sessão foi encerrada. Entre novamente.",
+    "userNotFound": "Usuário não encontrado",
+    "consentRequired": "Você precisa aceitar os Termos de Serviço e a Política de Privacidade para continuar",
+    "mustAcceptTerms": "Você precisa aceitar os Termos de Serviço",
+    "mustAcceptPrivacy": "Você precisa aceitar a Política de Privacidade",
+    "mustAcceptTermsAndPrivacy": "Você precisa aceitar os Termos de Serviço e a Política de Privacidade",
+    "passwordIncorrect": "A senha está incorreta",
+    "twoFactorCodeRequired": "O código de autenticação de dois fatores é obrigatório",
+    "invalidTwoFactorCode": "Código de autenticação de dois fatores inválido",
+    "emailAlreadyVerified": "Seu endereço de e-mail já foi verificado",
+    "tooManyVerificationEmails": "Muitos e-mails de verificação solicitados — tente novamente amanhã",
+    "tooManyDomainRegistrations": "Muitos cadastros deste domínio de e-mail hoje — tente novamente mais tarde",
+    "registrationChallengeInvalid": "A verificação de cadastro é inválida ou expirou — atualize e tente novamente",
+    "powExpired": "A verificação de cadastro demorou demais — tente novamente",
+    "powUnavailable": "Este navegador não consegue executar a verificação de cadastro (WebCrypto indisponível)",
+    "powWorkerFailed": "A verificação de cadastro falhou — tente novamente",
+    "usernameTooShort": "O nome de usuário deve ter pelo menos {{min}} caracteres",
+    "usernameTooLong": "O nome de usuário deve ter no máximo {{max}} caracteres",
+    "usernameInvalidChars": "O nome de usuário só pode conter letras, números, sublinhados, pontos e hifens",
+    "invalidEmail": "Endereço de e-mail inválido",
+    "passwordTooShort": "A senha deve ter pelo menos {{min}} caracteres",
+    "passwordTooLong": "A senha deve ter no máximo {{max}} bytes (caracteres especiais e emojis contam como vários bytes)",
+    "displayNameEmpty": "O nome de exibição não pode ficar vazio",
+    "displayNameTooLong": "O nome de exibição deve ter no máximo {{max}} caracteres",
+    "bioTooLong": "A bio deve ter no máximo {{max}} caracteres",
+    "serverNameTooShort": "O nome do servidor deve ter pelo menos {{min}} caracteres",
+    "serverNameTooLong": "O nome do servidor deve ter no máximo {{max}} caracteres",
+    "noPermissionManageServer": "Você não tem permissão para gerenciar as configurações do servidor",
+    "noPermissionViewServerSettings": "Você não tem permissão para ver as configurações do servidor",
+    "onlyOwnerCanDelete": "Somente o dono do servidor pode excluí-lo",
+    "onlyOwnerCanTransfer": "Somente o dono do servidor pode transferir a propriedade",
+    "onlyOwnerCanChangeRoles": "Somente o dono do servidor pode alterar cargos",
+    "ownerCannotLeave": "O dono do servidor não pode sair. Transfira a propriedade primeiro.",
+    "cannotKickSelf": "Você não pode remover a si mesmo",
+    "cannotTransferToSelf": "Você não pode transferir a propriedade para si mesmo",
+    "cannotChangeOwnRole": "Você não pode alterar seu próprio cargo",
+    "cannotChangeOwnerRole": "O cargo do dono não pode ser alterado",
+    "noPermissionChangeNickname": "Você não tem permissão para alterar seu apelido",
+    "noPermissionManageNicknames": "Você não tem permissão para gerenciar apelidos",
+    "cannotManageHigherNickname": "Não é possível alterar o apelido de um membro com cargo igual ou superior",
+    "nicknameEmpty": "O apelido não pode ficar vazio",
+    "nicknameTooLong": "O apelido deve ter no máximo {{max}} caracteres",
+    "searchTextTooLong": "O texto de pesquisa é muito longo",
+    "membershipNotFound": "Participação no servidor não encontrada",
+    "memberNotFound": "Membro não encontrado",
+    "userNotServerMember": "Este usuário não é membro deste servidor",
+    "notAuthorized": "Você não tem permissão para fazer isso",
+    "inviteNotFound": "Convite não encontrado",
+    "serverCap": "Você só pode criar até {{max}} servidores",
+    "memberCap": "Este servidor atingiu o limite de membros ({{max}})",
+    "noPermissionCreateChannels": "Você não tem permissão para criar canais",
+    "noPermissionDeleteChannels": "Você não tem permissão para excluir canais",
+    "noPermissionUpdateChannels": "Você não tem permissão para atualizar canais",
+    "channelNameTooShort": "O nome do canal é muito curto (mínimo {{min}})",
+    "channelNameTooLong": "O nome do canal deve ter no máximo {{max}} caracteres",
+    "channelNameInvalid": "O nome do canal contém caracteres inválidos",
+    "categoryNotFound": "Categoria não encontrada",
+    "categoryNameTooShort": "O nome da categoria é muito curto (mínimo {{min}})",
+    "categoryNameTooLong": "O nome da categoria deve ter no máximo {{max}} caracteres",
+    "reorderStale": "A lista mudou nesse meio-tempo — atualize e tente novamente",
+    "channelCap": "Este servidor pode ter no máximo {{max}} canais",
+    "categoryCap": "Este servidor pode ter no máximo {{max}} categorias",
+    "roleNameReserved": "O nome de cargo \"everyone\" é reservado",
+    "cannotAssignEveryone": "O cargo @everyone não pode ser atribuído",
+    "cannotRenameEveryone": "O cargo @everyone não pode ser renomeado",
+    "everyoneMustStayLast": "O cargo @everyone deve ficar no fim da lista",
+    "cannotAssignHigherRole": "Não é possível atribuir cargos de posição igual ou superior à sua",
+    "cannotModifyOwnerRoles": "Os cargos do dono do servidor não podem ser alterados",
+    "cannotModifyHigherMember": "Não é possível alterar os cargos de um membro com cargo igual ou superior",
+    "cannotReorderHigherRoles": "Não é possível reordenar cargos de posição igual ou superior à sua",
+    "cannotSetHigherPosition": "Não é possível mover um cargo para a sua posição ou acima",
+    "cannotModifyHigherOverrides": "Não é possível alterar as substituições de cargos de posição igual ou superior à sua",
+    "cannotSetHigherOverrides": "Não é possível definir substituições para cargos de posição igual ou superior à sua",
+    "cannotOverrideUnheldPermissions": "Não é possível definir substituições para permissões que você não tem",
+    "noPermissionManagePermissions": "Você não tem permissão para gerenciar permissões",
+    "roleNotFound": "Cargo não encontrado",
+    "roleNameTooShort": "O nome do cargo é muito curto (mínimo {{min}})",
+    "roleNameTooLong": "O nome do cargo deve ter no máximo {{max}} caracteres",
+    "invalidRoleColor": "A cor deve ser uma cor hexadecimal válida (ex.: #FF5733)",
+    "roleCap": "Este servidor pode ter no máximo {{max}} cargos",
+    "canOnlyDeleteOwnMessages": "Você só pode excluir suas próprias mensagens",
+    "systemMessageNoEdit": "Mensagens do sistema não podem ser editadas",
+    "messageEmpty": "A mensagem não pode ficar vazia",
+    "messageTooLong": "A mensagem deve ter no máximo {{max}} caracteres",
+    "messageNotFound": "Mensagem não encontrada",
+    "conversationNotFound": "Conversa não encontrada",
+    "replyTargetUnavailable": "A mensagem que você está respondendo não está mais disponível",
+    "maxAttachments": "Você pode anexar no máximo {{max}} arquivos a uma mensagem",
+    "maxReactions": "Uma mensagem pode ter no máximo {{max}} reações diferentes",
+    "invalidEmoji": "Emoji inválido",
+    "fileTooLarge": "O arquivo é muito grande (máx. {{max}} MB)",
+    "e2eUpdateToSendDm": "Esta conversa é criptografada de ponta a ponta; atualize o app para enviar mensagens",
+    "e2eUpdateToSendChannel": "Este canal é criptografado de ponta a ponta; atualize o app para enviar mensagens",
+    "e2eUpdateToEdit": "Esta mensagem é criptografada de ponta a ponta; atualize o app para editá-la",
+    "e2eUpdateToUpload": "Este canal é criptografado de ponta a ponta; atualize o app para enviar arquivos",
+    "noAccessToMessage": "Você não tem acesso a esta mensagem",
+    "reportReasonTooShort": "O motivo deve ter pelo menos {{min}} caracteres",
+    "reportReasonTooLong": "O motivo deve ter no máximo {{max}} caracteres",
+    "friendshipNotFound": "Esta amizade não existe mais",
+    "supportTicketNotFound": "Ticket de suporte não encontrado",
+    "secureInviteesMustBeMembers": "Todas as pessoas convidadas precisam ser membros deste servidor",
+    "secureCreatorCannotLeave": "O criador não pode sair — exclua o canal em vez disso",
+    "secureAlreadyMember": "Esta pessoa já é membro deste canal",
+    "secureNotMember": "Esta pessoa não é membro deste canal",
+    "secureOnlyCreatorInvites": "Somente o criador do canal pode convidar membros",
+    "secureOnlyCreatorRemoves": "Somente o criador do canal pode remover membros",
+    "secureOnlyCreatorRenames": "Somente o criador do canal pode renomeá-lo",
+    "noPermissionCreateSecure": "Você não tem permissão para criar canais seguros",
+    "notChannelMember": "Você não é membro deste canal",
+    "secureChannelMemberCap": "Um canal seguro pode ter no máximo {{max}} membros",
+    "deviceLimit": "Limite de dispositivos atingido ({{max}}) — revogue um dispositivo primeiro",
+    "keyBackupFull": "O backup de chaves está cheio",
+    "tooManyPendingKeyShares": "Muitos compartilhamentos de chaves não entregues — tente novamente quando os destinatários estiverem online",
+    "nameRequired": "O nome é obrigatório",
+    "themeNameTooShort": "O nome do tema deve ter pelo menos {{min}} caracteres",
+    "themeNameTooLong": "O nome do tema deve ter no máximo {{max}} caracteres",
+    "themeDescriptionTooLong": "A descrição deve ter no máximo {{max}} caracteres",
+    "tagEmpty": "A tag não pode ficar vazia",
+    "tagTooLong": "A tag deve ter no máximo {{max}} caracteres",
+    "tagInvalidChars": "As tags só podem conter letras (A–Z), números, espaços, sublinhados e hifens",
+    "themeTooManyTags": "Um tema pode ter no máximo {{max}} tags",
+    "themeCap": "Você pode criar no máximo {{max}} temas",
+    "svgTooLong": "Os dados SVG devem ter no máximo {{max}} caracteres",
+    "svgUnsafe": "Código SVG inválido ou inseguro",
+    "themeNameTaken": "Você já tem um tema com esse nome",
+    "themeAlreadyPublished": "Este tema já está publicado",
+    "themeNotPublished": "Este tema não está publicado",
+    "themeRemovedByAdmin": "Este tema foi removido por um administrador",
+    "themeNotOwned": "Você só pode gerenciar seus próprios temas",
+    "themeNotFound": "Tema não encontrado",
+    "voiceChannelGone": "Este canal de voz não existe mais",
+    "voiceServerRestarted": "O servidor de voz foi reiniciado — entre novamente no canal de voz",
+    "voiceDisconnected": "Você foi desconectado deste canal de voz",
+    "voiceRequiresE2E": "Este canal de voz requer suporte à criptografia de ponta a ponta",
+    "screenShareNotInSecure": "O compartilhamento de tela não está disponível em canais de voz seguros",
+    "screenShareTaken": "Outra pessoa já está compartilhando neste canal",
+    "noPermissionSpeak": "Você não tem permissão para falar neste canal",
+    "searchQueryTooShort": "A pesquisa deve ter pelo menos {{min}} caracteres",
+    "searchQueryTooLong": "A pesquisa deve ter no máximo {{max}} caracteres"
   },
   "e2e": {
     "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
@@ -1649,5 +1878,162 @@
       "title": "Os webhooks estão desativados no momento.",
       "hint": "Um administrador desativou os webhooks de entrada. Nada pode ser publicado por eles até que voltem."
     }
+  },
+  "notifications": {
+    "someone": "Alguém",
+    "unknownServer": "Servidor desconhecido",
+    "unknownChannel": "desconhecido",
+    "mentionedYou": "{{author}} mencionou você em {{server}}, #{{channel}}",
+    "channelMessage": "{{server}}, #{{channel}}",
+    "dmTitle": "DM de {{name}}",
+    "announcementInfo": "Info",
+    "announcementWarning": "Aviso",
+    "announcementMaintenance": "Manutenção",
+    "announcementGeneric": "Anúncio",
+    "announcementToast": "{{label}}: {{title}}",
+    "announcementMore": "+{{n}} mais",
+    "dismissAnnouncement": "Dispensar anúncio"
+  },
+  "updater": {
+    "titleAvailable": "Atualização necessária",
+    "titleDownloading": "Baixando atualização",
+    "titleReady": "Atualização pronta",
+    "titleFailed": "Falha na atualização",
+    "required": "É necessária uma nova versão do Voxium para continuar.",
+    "version": "Versão {{version}}",
+    "updateNow": "Atualizar agora",
+    "downloading": "Baixando atualização...",
+    "progress": "{{done}} / {{total}}, {{percent}}%",
+    "downloaded": "{{size}} baixados",
+    "installed": "Atualização instalada. Reinicie o Voxium para aplicá-la.",
+    "restartNow": "Reiniciar agora",
+    "failed": "Algo deu errado durante a atualização.",
+    "retry": "Tentar novamente"
+  },
+  "themes": {
+    "builtIn": {
+      "dark": "Escuro",
+      "light": "Claro",
+      "midnight": "Meia-noite",
+      "tactical": "Tático"
+    },
+    "editor": {
+      "untitled": "Tema sem título",
+      "nameRequired": "O nome do tema é obrigatório",
+      "updated": "Tema atualizado",
+      "created": "Tema criado",
+      "nameBeforeExport": "Dê um nome ao seu tema antes de exportá-lo",
+      "exported": "Tema exportado",
+      "livePreview": "Pré-visualização ao vivo",
+      "previewInApp": "Visualizar no app",
+      "previewInAppHint": "Aplicar estas cores ao app inteiro até você parar",
+      "editTitle": "Editar tema",
+      "name": "Nome",
+      "namePlaceholder": "Meu tema incrível",
+      "tags": "Tags",
+      "tagsHint": "(separadas por vírgulas, máx. {{max}})",
+      "tagsPlaceholder": "escuro, minimalista, azul",
+      "description": "Descrição",
+      "descriptionPlaceholder": "Uma breve descrição do seu tema...",
+      "startFrom": "Começar a partir de:",
+      "exportJson": "Exportar JSON",
+      "update": "Atualizar",
+      "patternsTitle": "Padrões e identidade visual",
+      "patternsHint": "(fundos decorativos)",
+      "patternType": "Tipo",
+      "patternColor": "Cor",
+      "opacity": "Opacidade ({{value}}%)",
+      "size": "Tamanho ({{value}}px)",
+      "angle": "Ângulo ({{value}}°)",
+      "svgMarkup": "Código SVG",
+      "svgHint": "(máx. {{max}} caracteres — cole aqui o SVG da sua marca ou jogo)",
+      "svgCount": "{{used}} / {{max}} caracteres",
+      "tileSize": "Tamanho do bloco"
+    },
+    "colors": {
+      "primary": "Principal",
+      "secondary": "Secundário",
+      "tertiary": "Terciário",
+      "hover": "Ao passar o cursor",
+      "active": "Ativo",
+      "floating": "Flutuante",
+      "sidebar": "Barra lateral",
+      "channelList": "Lista de canais",
+      "chatArea": "Área de chat",
+      "muted": "Atenuado",
+      "links": "Links",
+      "success": "Sucesso",
+      "warning": "Aviso",
+      "danger": "Perigo",
+      "info": "Info",
+      "border": "Borda",
+      "connected": "Conectado",
+      "speaking": "Falando",
+      "voiceMuted": "Silenciado",
+      "thumb": "Cursor",
+      "thumbHover": "Cursor (ao passar o cursor)",
+      "background": "Fundo",
+      "text": "Texto"
+    },
+    "groups": {
+      "backgrounds": "Fundos",
+      "layout": "Layout",
+      "text": "Texto",
+      "accents": "Destaques",
+      "borders": "Bordas",
+      "voice": "Voz",
+      "scrollbar": "Barra de rolagem",
+      "selection": "Seleção"
+    },
+    "patterns": {
+      "none": "Nenhum",
+      "stripes": "Listras",
+      "grid": "Grade",
+      "dots": "Pontos",
+      "crosshatch": "Hachura cruzada",
+      "customSvg": "SVG personalizado"
+    },
+    "browser": {
+      "title": "Loja de temas",
+      "available_one": "{{count}} tema da comunidade disponível",
+      "available_other": "{{count}} temas da comunidade disponíveis",
+      "searchPlaceholder": "Pesquisar temas...",
+      "sortNewest": "Mais recentes",
+      "sortPopular": "Populares",
+      "sortName": "A-Z",
+      "tagPlaceholder": "Filtrar por tag...",
+      "noThemes": "Nenhum tema encontrado",
+      "noThemesHint": "Tente outra pesquisa ou seja o primeiro a publicar um!",
+      "loadMore": "Carregar mais",
+      "byAuthor": "por {{name}}",
+      "installs_one": "{{count}} instalação",
+      "installs_other": "{{count}} instalações",
+      "stop": "Parar",
+      "install": "Instalar",
+      "uninstall": "Desinstalar",
+      "failedToLoad": "Não foi possível carregar os temas",
+      "installedToast": "\"{{name}}\" instalado",
+      "uninstalledToast": "\"{{name}}\" desinstalado"
+    },
+    "preview": {
+      "previewing": "Pré-visualizando:",
+      "stop": "Parar pré-visualização"
+    },
+    "import": {
+      "invalidJson": "Arquivo JSON inválido",
+      "notAnObject": "O arquivo de tema deve conter um objeto JSON",
+      "missingName": "O tema deve ter um nome",
+      "missingColors": "O tema deve ter um objeto \"colors\"",
+      "invalidColors": "Cores do tema inválidas ({{detail}})",
+      "invalidPatterns": "Padrões do tema inválidos ({{detail}})"
+    }
+  },
+  "appMock": {
+    "search": "Pesquisar",
+    "onlineCount": "{{n}} online",
+    "lounge": "Lounge",
+    "chatWelcome": "Oi, boas-vindas ao Voxium!",
+    "chatVoiceQuality": "A qualidade de voz é insana 🔥",
+    "chatNoiseSuppression": "A supressão de ruído é mágica 🚀"
   }
 }

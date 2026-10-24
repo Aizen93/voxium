@@ -87,7 +87,7 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
     // media frames, spec §21). Anything else is rejected.
     const type = req.body.type ?? 'text';
     if (type !== 'text' && type !== 'voice') {
-      throw new BadRequestError('Channel type must be text or voice');
+      throw new BadRequestError('Channel type must be "text" or "voice"');
     }
 
     // Invitees: optional, deduped, never the creator, capped, all server members

@@ -29,7 +29,7 @@ describe('translateServerError', () => {
   });
 
   it('returns an unmapped message raw, and the fallback key for none', () => {
-    expect(translateServerError('Server can have at most 20 channels', t)).toBe('Server can have at most 20 channels');
+    expect(translateServerError('A sentence no server version has ever sent', t)).toBe('A sentence no server version has ever sent');
     expect(translateServerError(undefined, t)).toBe('common.somethingWentWrong|{}');
   });
 
@@ -98,7 +98,7 @@ describe('translateServerError — incoming webhooks', () => {
       .toBe(`serverErrors.webhookCap|${JSON.stringify({ defaultValue: 'Server can have at most 3 webhooks', max: 3 })}`);
     expect(translateServerError('Server can have at most 0 webhooks', t)).toContain('"max":0');
     expect(WEBHOOK_ERROR_KEYS).toContain('webhookCap');
-    // anchored: a lookalike is not rewritten, and the channel cap stays raw
+    // anchored: a lookalike is not rewritten
     expect(translateServerError('Server can have at most 3 webhooks!', t)).toBe('Server can have at most 3 webhooks!');
     expect(translateServerError('Server can have at most many webhooks', t)).toBe('Server can have at most many webhooks');
   });

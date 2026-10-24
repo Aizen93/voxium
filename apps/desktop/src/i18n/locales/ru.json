@@ -28,7 +28,15 @@
     "reset": "Сбросить",
     "saving": "Сохранение...",
     "creating": "Создание...",
-    "deleting": "Удаление..."
+    "deleting": "Удаление...",
+    "dismiss": "Закрыть",
+    "download": "Скачать",
+    "preview": "Предпросмотр",
+    "icon": "Значок",
+    "minimize": "Свернуть",
+    "maximize": "Развернуть",
+    "restore": "Восстановить",
+    "ctrlKey": "Ctrl"
   },
   "auth": {
     "login": {
@@ -205,7 +213,8 @@
       "backupCodesDescription": "Эти коды можно использовать для доступа к аккаунту, если вы потеряете устройство-аутентификатор. Каждый код можно использовать только один раз. Храните их в надёжном месте.",
       "copyAllCodes": "Копировать все коды",
       "savedBackupCodes": "Я сохранил(а) свои резервные коды",
-      "failedToCopyBackup": "Не удалось скопировать резервные коды в буфер обмена"
+      "failedToCopyBackup": "Не удалось скопировать резервные коды в буфер обмена",
+      "qrCodeAlt": "QR-код для приложения-аутентификатора"
     },
     "appearance": {
       "builtInThemes": "Встроенные темы",
@@ -226,7 +235,9 @@
       "themeUnpublished": "Тема снята с публикации в маркетплейсе",
       "failedToPublish": "Не удалось опубликовать тему",
       "failedToUnpublish": "Не удалось снять с публикации",
-      "failedToImport": "Не удалось импортировать тему"
+      "failedToImport": "Не удалось импортировать тему",
+      "publishTitle": "Опубликовать в маркетплейсе",
+      "unpublishTitle": "Снять с публикации в маркетплейсе"
     },
     "audio": {
       "inputDevice": "Устройство ввода",
@@ -258,7 +269,24 @@
       "micNotAvailable": "Доступ к микрофону недоступен (небезопасный контекст?)",
       "couldNotAccessMic": "Не удалось получить доступ к микрофону",
       "deviceEnumNotAvailable": "Перечисление устройств недоступно",
-      "couldNotListDevices": "Не удалось получить список аудиоустройств"
+      "couldNotListDevices": "Не удалось получить список аудиоустройств",
+      "microphoneFallback": "Микрофон {{id}}",
+      "speakerFallback": "Динамик {{id}}",
+      "keys": {
+        "backquote": "` (обратный апостроф)",
+        "space": "Пробел",
+        "tab": "Tab",
+        "capsLock": "Caps Lock",
+        "shiftLeft": "Левый Shift",
+        "shiftRight": "Правый Shift",
+        "controlLeft": "Левый Ctrl",
+        "controlRight": "Правый Ctrl",
+        "altLeft": "Левый Alt",
+        "altRight": "Правый Alt",
+        "metaLeft": "Левый Meta",
+        "metaRight": "Правый Meta",
+        "numpad": "NumPad {{key}}"
+      }
     },
     "language": {
       "title": "Язык",
@@ -463,7 +491,8 @@
     "deleteRoleConfirm": "Это действие нельзя отменить.",
     "failedToCreate": "Произошла ошибка",
     "failedToUpdate": "Произошла ошибка",
-    "failedToDelete": "Произошла ошибка"
+    "failedToDelete": "Произошла ошибка",
+    "deleteRoleQuestion": "Удалить <1>{{name}}</1>?"
   },
   "channelPermissions": {
     "title": "Разрешения канала",
@@ -637,7 +666,11 @@
     "removeAndBanned": "{{name}} удалён и заблокирован",
     "removeAndBanFailed": "Не удалось удалить участника",
     "youWereRemovedAndBanned": "Вас удалили из пространства «{{name}}» и заблокировали",
-    "youWereRemovedAndBannedUnknown": "Вас удалили из пространства и заблокировали"
+    "youWereRemovedAndBannedUnknown": "Вас удалили из пространства и заблокировали",
+    "failedToLoadServers": "Не удалось загрузить серверы",
+    "failedToLoadServer": "Не удалось загрузить сервер",
+    "failedToLoadMembers": "Не удалось загрузить участников",
+    "deletedToast": "Сервер был удалён"
   },
   "channel": {
     "joinVoice": "Присоединиться к голосовому",
@@ -724,7 +757,21 @@
     "fileTooLarge": "{{name}} слишком большой (макс. {{max}} МБ)",
     "searchMessages": "Поиск сообщений (Ctrl+K)",
     "today": "Сегодня",
-    "yesterday": "Вчера"
+    "yesterday": "Вчера",
+    "failedToLoadMessages": "Не удалось загрузить сообщения",
+    "welcomeTitle": "Добро пожаловать в канал!",
+    "welcomeSubtitle": "Это начало беседы.",
+    "searchEmoji": "Поиск эмодзи...",
+    "mentionEveryone": {
+      "label": "@everyone",
+      "description": "Уведомить всех, кто видит этот канал",
+      "notificationTitle": "{{author}} упомянул(а) всех в {{server}}, #{{channel}}"
+    },
+    "mentionAutocomplete": {
+      "header": "Участники по запросу @{{query}}",
+      "searching": "Поиск..."
+    },
+    "mentionUnknown": "@неизвестно"
   },
   "dm": {
     "title": "Личные сообщения",
@@ -741,7 +788,8 @@
     "inACall": "В звонке",
     "beginningOfConversation": "Начало диалога",
     "conversationStart": "Это начало вашей истории личных сообщений.",
-    "welcomeMessage": "Выберите беседу на боковой панели или нажмите на участника любого сервера, чтобы начать новую."
+    "welcomeMessage": "Выберите беседу на боковой панели или нажмите на участника любого сервера, чтобы начать новую.",
+    "failedToLoadConversations": "Не удалось загрузить беседы"
   },
   "friends": {
     "title": "Друзья",
@@ -773,7 +821,10 @@
     "decline": "Отклонить",
     "failedToOpenConversation": "Не удалось открыть диалог",
     "failedToAccept": "Не удалось принять запрос на дружбу",
-    "failedToRemove": "Не удалось удалить дружбу"
+    "failedToRemove": "Не удалось удалить дружбу",
+    "failedToLoad": "Не удалось загрузить друзей",
+    "requestReceived": "Запрос на дружбу от {{name}}",
+    "requestAccepted": "{{name}} принял(а) ваш запрос на дружбу"
   },
   "members": {
     "owner": "Владелец",
@@ -895,6 +946,21 @@
       "maskRestoreFailed": "Демонстрация экрана всё ещё идёт через компоновщик масок — зрители видят правильную картинку, просто расходуется больше процессора. Перезапустите демонстрацию, чтобы это исправить.",
       "sharePaused": "Зрители сейчас не видят ваш экран — маска приватности применяется или не смогла примениться",
       "syncError": "Не удалось поделиться аннотацией — ваш вид может отличаться от того, что видят зрители"
+    },
+    "measuring": "Измерение...",
+    "toasts": {
+      "movedToAnotherChannel": "Вас переместили в другой голосовой канал",
+      "micDenied": "Доступ к микрофону запрещён — подключение в режиме прослушивания",
+      "joinFailed": "Не удалось подключиться к голосовому каналу — попробуйте ещё раз",
+      "connectionTimedOut": "Истекло время ожидания голосового соединения — попробуйте переподключиться",
+      "connectionFailed": "Не удалось установить голосовое соединение — попробуйте переподключиться",
+      "connectionLost": "Голосовое соединение потеряно — переподключение (попытка {{attempt}}/{{max}})...",
+      "connectionFailedManual": "Не удалось восстановить голосовое соединение — подключитесь заново вручную",
+      "establishFailed": "Не удалось установить голосовое соединение",
+      "mutedByModerator": "Модератор отключил вам микрофон",
+      "deafenedByModerator": "Модератор отключил вам звук",
+      "screenShareFailed": "Не удалось начать демонстрацию экрана — попробуйте ещё раз",
+      "micIssue": "Обнаружена проблема с микрофоном — попробуйте переподключиться к голосовому каналу"
     }
   },
   "attachment": {
@@ -904,7 +970,9 @@
     "failedToDownload": "Не удалось скачать файл",
     "loadingImage": "Загрузка изображения...",
     "loadingVideo": "Загрузка видео...",
-    "loadingAudio": "Загрузка аудио..."
+    "loadingAudio": "Загрузка аудио...",
+    "downloadedName": "Файл «{{name}}» скачан",
+    "image": "изображение"
   },
   "support": {
     "sendMessage": "Отправить сообщение",
@@ -917,7 +985,8 @@
     "placeholder": "Опишите вашу проблему...",
     "messageTooLong": "Сообщение слишком длинное (макс. {{max}} символов)",
     "failedToSend": "Не удалось отправить сообщение",
-    "failedToReopen": "Не удалось переоткрыть запрос"
+    "failedToReopen": "Не удалось переоткрыть запрос",
+    "ticketClosed": "Запрос закрыт."
   },
   "invite": {
     "failedToJoin": "Не удалось присоединиться к серверу. Проверьте подключение и попробуйте снова.",
@@ -933,7 +1002,8 @@
   "landing": {
     "nav": {
       "signIn": "Войти",
-      "getStarted": "Начать"
+      "getStarted": "Начать",
+      "menu": "Меню"
     },
     "hero": {
       "headlinePart1": "Говори. Общайся.",
@@ -1039,7 +1109,9 @@
       "zeroAds": "Реклама или отслеживание",
       "sponsorGithub": "Спонсировать на GitHub",
       "openCollective": "Open Collective",
-      "supporterBadge": "Спонсоры получают специальный значок в приложении в знак благодарности"
+      "supporterBadge": "Спонсоры получают специальный значок в приложении в знак благодарности",
+      "youValue": "Вы",
+      "zeroValue": "Ноль"
     },
     "cta": {
       "title": "Готовы к новому формату общения?",
@@ -1059,7 +1131,23 @@
       "cookiePolicy": "Политика cookies",
       "community": "Сообщество",
       "contributing": "Участие",
-      "copyright": "© 2026 Voxium. Все права защищены."
+      "copyright": "© 2026 Voxium. Все права защищены.",
+      "backToHome": "На главную"
+    },
+    "demo": {
+      "themeAria": "Тема «{{name}}»",
+      "you": "Вы",
+      "chatTryTheme": "Привет, попробуй новую тему!",
+      "chatLookingClean": "Смотрится отлично",
+      "chatLoveIt": "Обожаю",
+      "roleAdmin": "Админ",
+      "roleModerator": "Модератор",
+      "roleMember": "Участник",
+      "permView": "Просмотр",
+      "permSend": "Отправка",
+      "permReact": "Реакции",
+      "permManage": "Управление",
+      "permAdmin": "Админ"
     }
   },
   "badges": {
@@ -1208,7 +1296,148 @@
     "webhookNameInvalid": "Название вебхука содержит недопустимые символы",
     "webhookCap": "На этом сервере достигнут лимит вебхуков (максимум {{max}})",
     "channelNotFound": "Канал не найден",
-    "tooManyRequests": "Слишком много запросов. Пожалуйста, попробуйте позже."
+    "tooManyRequests": "Слишком много запросов. Пожалуйста, попробуйте позже.",
+    "emailNotVerified": "Ваш адрес электронной почты не подтверждён",
+    "invalidOrExpiredToken": "Срок действия сеанса истёк. Войдите снова.",
+    "sessionInvalidated": "Ваш сеанс завершён. Войдите снова.",
+    "userNotFound": "Пользователь не найден",
+    "consentRequired": "Чтобы продолжить, примите Условия использования и Политику конфиденциальности",
+    "mustAcceptTerms": "Необходимо принять Условия использования",
+    "mustAcceptPrivacy": "Необходимо принять Политику конфиденциальности",
+    "mustAcceptTermsAndPrivacy": "Необходимо принять Условия использования и Политику конфиденциальности",
+    "passwordIncorrect": "Неверный пароль",
+    "twoFactorCodeRequired": "Требуется код двухфакторной аутентификации",
+    "invalidTwoFactorCode": "Неверный код двухфакторной аутентификации",
+    "emailAlreadyVerified": "Ваш адрес электронной почты уже подтверждён",
+    "tooManyVerificationEmails": "Запрошено слишком много писем для подтверждения — попробуйте завтра",
+    "tooManyDomainRegistrations": "Сегодня слишком много регистраций с этого почтового домена — попробуйте позже",
+    "registrationChallengeInvalid": "Проверка при регистрации недействительна или устарела — обновите страницу и попробуйте снова",
+    "powExpired": "Проверка при регистрации заняла слишком много времени — попробуйте ещё раз",
+    "powUnavailable": "Этот браузер не может выполнить проверку при регистрации (WebCrypto недоступен)",
+    "powWorkerFailed": "Проверка при регистрации не удалась — попробуйте ещё раз",
+    "usernameTooShort": "Имя пользователя должно содержать не менее {{min}} символов",
+    "usernameTooLong": "Имя пользователя должно содержать не более {{max}} символов",
+    "usernameInvalidChars": "Имя пользователя может содержать только буквы, цифры, подчёркивания, точки и дефисы",
+    "invalidEmail": "Недопустимый адрес электронной почты",
+    "passwordTooShort": "Пароль должен содержать не менее {{min}} символов",
+    "passwordTooLong": "Пароль должен занимать не более {{max}} байт (спецсимволы и эмодзи занимают несколько байт)",
+    "displayNameEmpty": "Отображаемое имя не может быть пустым",
+    "displayNameTooLong": "Отображаемое имя должно содержать не более {{max}} символов",
+    "bioTooLong": "Раздел «О себе» должен содержать не более {{max}} символов",
+    "serverNameTooShort": "Название сервера должно содержать не менее {{min}} символов",
+    "serverNameTooLong": "Название сервера должно содержать не более {{max}} символов",
+    "noPermissionManageServer": "У вас нет разрешения на управление настройками сервера",
+    "noPermissionViewServerSettings": "У вас нет разрешения на просмотр настроек сервера",
+    "onlyOwnerCanDelete": "Удалить сервер может только его владелец",
+    "onlyOwnerCanTransfer": "Передать права владельца может только владелец сервера",
+    "onlyOwnerCanChangeRoles": "Изменять роли может только владелец сервера",
+    "ownerCannotLeave": "Владелец сервера не может покинуть его. Сначала передайте права владельца.",
+    "cannotKickSelf": "Нельзя удалить самого себя",
+    "cannotTransferToSelf": "Нельзя передать права владельца самому себе",
+    "cannotChangeOwnRole": "Нельзя изменить собственную роль",
+    "cannotChangeOwnerRole": "Роль владельца нельзя изменить",
+    "noPermissionChangeNickname": "У вас нет разрешения на изменение никнейма",
+    "noPermissionManageNicknames": "У вас нет разрешения на управление никнеймами",
+    "cannotManageHigherNickname": "Нельзя изменить никнейм участника с такой же или более высокой ролью",
+    "nicknameEmpty": "Никнейм не может быть пустым",
+    "nicknameTooLong": "Никнейм должен содержать не более {{max}} символов",
+    "searchTextTooLong": "Слишком длинный поисковый запрос",
+    "membershipNotFound": "Членство на сервере не найдено",
+    "memberNotFound": "Участник не найден",
+    "userNotServerMember": "Этот пользователь не является участником сервера",
+    "notAuthorized": "У вас нет прав на это действие",
+    "inviteNotFound": "Приглашение не найдено",
+    "serverCap": "Можно создать не более {{max}} серверов",
+    "memberCap": "На этом сервере достигнут лимит участников ({{max}})",
+    "noPermissionCreateChannels": "У вас нет разрешения на создание каналов",
+    "noPermissionDeleteChannels": "У вас нет разрешения на удаление каналов",
+    "noPermissionUpdateChannels": "У вас нет разрешения на изменение каналов",
+    "channelNameTooShort": "Название канала слишком короткое (минимум {{min}})",
+    "channelNameTooLong": "Название канала должно содержать не более {{max}} символов",
+    "channelNameInvalid": "Название канала содержит недопустимые символы",
+    "categoryNotFound": "Категория не найдена",
+    "categoryNameTooShort": "Название категории слишком короткое (минимум {{min}})",
+    "categoryNameTooLong": "Название категории должно содержать не более {{max}} символов",
+    "reorderStale": "Список изменился — обновите страницу и попробуйте снова",
+    "channelCap": "На этом сервере может быть не более {{max}} каналов",
+    "categoryCap": "На этом сервере может быть не более {{max}} категорий",
+    "roleNameReserved": "Название роли «everyone» зарезервировано",
+    "cannotAssignEveryone": "Роль @everyone нельзя назначить",
+    "cannotRenameEveryone": "Роль @everyone нельзя переименовать",
+    "everyoneMustStayLast": "Роль @everyone должна оставаться внизу списка",
+    "cannotAssignHigherRole": "Нельзя назначать роли с позицией равной или выше вашей",
+    "cannotModifyOwnerRoles": "Роли владельца сервера нельзя изменить",
+    "cannotModifyHigherMember": "Нельзя изменить роли участника с такой же или более высокой ролью",
+    "cannotReorderHigherRoles": "Нельзя менять порядок ролей с позицией равной или выше вашей",
+    "cannotSetHigherPosition": "Нельзя поставить роль на вашу позицию или выше",
+    "cannotModifyHigherOverrides": "Нельзя изменять переопределения для ролей с позицией равной или выше вашей",
+    "cannotSetHigherOverrides": "Нельзя задавать переопределения для ролей с позицией равной или выше вашей",
+    "cannotOverrideUnheldPermissions": "Нельзя задавать переопределения для разрешений, которых у вас нет",
+    "noPermissionManagePermissions": "У вас нет разрешения на управление разрешениями",
+    "roleNotFound": "Роль не найдена",
+    "roleNameTooShort": "Название роли слишком короткое (минимум {{min}})",
+    "roleNameTooLong": "Название роли должно содержать не более {{max}} символов",
+    "invalidRoleColor": "Цвет должен быть допустимым HEX-кодом (например, #FF5733)",
+    "roleCap": "На этом сервере может быть не более {{max}} ролей",
+    "canOnlyDeleteOwnMessages": "Вы можете удалять только свои сообщения",
+    "systemMessageNoEdit": "Системные сообщения нельзя редактировать",
+    "messageEmpty": "Сообщение не может быть пустым",
+    "messageTooLong": "Сообщение должно содержать не более {{max}} символов",
+    "messageNotFound": "Сообщение не найдено",
+    "conversationNotFound": "Беседа не найдена",
+    "replyTargetUnavailable": "Сообщение, на которое вы отвечаете, больше недоступно",
+    "maxAttachments": "К сообщению можно прикрепить не более {{max}} файлов",
+    "maxReactions": "У сообщения может быть не более {{max}} разных реакций",
+    "invalidEmoji": "Недопустимый эмодзи",
+    "fileTooLarge": "Файл слишком большой (максимум {{max}} МБ)",
+    "e2eUpdateToSendDm": "Эта беседа защищена сквозным шифрованием; обновите приложение, чтобы отправлять сообщения",
+    "e2eUpdateToSendChannel": "Этот канал защищён сквозным шифрованием; обновите приложение, чтобы отправлять сообщения",
+    "e2eUpdateToEdit": "Это сообщение защищено сквозным шифрованием; обновите приложение, чтобы его отредактировать",
+    "e2eUpdateToUpload": "Этот канал защищён сквозным шифрованием; обновите приложение, чтобы загружать файлы",
+    "noAccessToMessage": "У вас нет доступа к этому сообщению",
+    "reportReasonTooShort": "Причина должна содержать не менее {{min}} символов",
+    "reportReasonTooLong": "Причина должна содержать не более {{max}} символов",
+    "friendshipNotFound": "Этой дружбы больше нет",
+    "supportTicketNotFound": "Запрос в поддержку не найден",
+    "secureInviteesMustBeMembers": "Все приглашённые должны быть участниками этого сервера",
+    "secureCreatorCannotLeave": "Создатель не может покинуть канал — удалите его",
+    "secureAlreadyMember": "Этот человек уже участник канала",
+    "secureNotMember": "Этот человек не участник канала",
+    "secureOnlyCreatorInvites": "Приглашать участников может только создатель канала",
+    "secureOnlyCreatorRemoves": "Удалять участников может только создатель канала",
+    "secureOnlyCreatorRenames": "Переименовать канал может только его создатель",
+    "noPermissionCreateSecure": "У вас нет разрешения на создание защищённых каналов",
+    "notChannelMember": "Вы не участник этого канала",
+    "secureChannelMemberCap": "В защищённом канале может быть не более {{max}} участников",
+    "deviceLimit": "Достигнут лимит устройств ({{max}}) — сначала отзовите одно из устройств",
+    "keyBackupFull": "Резервная копия ключей заполнена",
+    "tooManyPendingKeyShares": "Слишком много недоставленных ключей — повторите, когда получатели будут в сети",
+    "nameRequired": "Укажите название",
+    "themeNameTooShort": "Название темы должно содержать не менее {{min}} символов",
+    "themeNameTooLong": "Название темы должно содержать не более {{max}} символов",
+    "themeDescriptionTooLong": "Описание должно содержать не более {{max}} символов",
+    "tagEmpty": "Тег не может быть пустым",
+    "tagTooLong": "Тег должен содержать не более {{max}} символов",
+    "tagInvalidChars": "Теги могут содержать только латинские буквы, цифры, пробелы, подчёркивания и дефисы",
+    "themeTooManyTags": "У темы может быть не более {{max}} тегов",
+    "themeCap": "Можно создать не более {{max}} тем",
+    "svgTooLong": "Данные SVG должны содержать не более {{max}} символов",
+    "svgUnsafe": "Недопустимая или небезопасная разметка SVG",
+    "themeNameTaken": "У вас уже есть тема с таким названием",
+    "themeAlreadyPublished": "Эта тема уже опубликована",
+    "themeNotPublished": "Эта тема не опубликована",
+    "themeRemovedByAdmin": "Эта тема удалена администратором",
+    "themeNotOwned": "Вы можете управлять только своими темами",
+    "themeNotFound": "Тема не найдена",
+    "voiceChannelGone": "Этот голосовой канал больше не существует",
+    "voiceServerRestarted": "Голосовой сервер перезапущен — подключитесь к голосовому каналу снова",
+    "voiceDisconnected": "Вы были отключены от этого голосового канала",
+    "voiceRequiresE2E": "Для этого голосового канала нужна поддержка сквозного шифрования",
+    "screenShareNotInSecure": "Демонстрация экрана недоступна в защищённых голосовых каналах",
+    "screenShareTaken": "В этом канале уже кто-то демонстрирует экран",
+    "noPermissionSpeak": "У вас нет разрешения говорить в этом канале",
+    "searchQueryTooShort": "Поисковый запрос должен содержать не менее {{min}} символов",
+    "searchQueryTooLong": "Поисковый запрос должен содержать не более {{max}} символов"
   },
   "e2e": {
     "badgeTitle": "Сквозное шифрование — показать код безопасности",
@@ -1665,5 +1894,166 @@
       "title": "Вебхуки сейчас отключены.",
       "hint": "Администратор отключил входящие вебхуки. Пока их не включат снова, через них ничего нельзя опубликовать."
     }
+  },
+  "notifications": {
+    "someone": "Кто-то",
+    "unknownServer": "Неизвестный сервер",
+    "unknownChannel": "неизвестный",
+    "mentionedYou": "{{author}} упомянул(а) вас в {{server}}, #{{channel}}",
+    "channelMessage": "{{server}}, #{{channel}}",
+    "dmTitle": "ЛС от {{name}}",
+    "announcementInfo": "Информация",
+    "announcementWarning": "Предупреждение",
+    "announcementMaintenance": "Техобслуживание",
+    "announcementGeneric": "Объявление",
+    "announcementToast": "{{label}}: {{title}}",
+    "announcementMore": "ещё +{{n}}",
+    "dismissAnnouncement": "Скрыть объявление"
+  },
+  "updater": {
+    "titleAvailable": "Требуется обновление",
+    "titleDownloading": "Загрузка обновления",
+    "titleReady": "Обновление готово",
+    "titleFailed": "Ошибка обновления",
+    "required": "Для продолжения требуется новая версия Voxium.",
+    "version": "Версия {{version}}",
+    "updateNow": "Обновить сейчас",
+    "downloading": "Загрузка обновления...",
+    "progress": "{{done}} / {{total}}, {{percent}}%",
+    "downloaded": "Загружено {{size}}",
+    "installed": "Обновление установлено. Перезапустите Voxium, чтобы применить его.",
+    "restartNow": "Перезапустить",
+    "failed": "Во время обновления что-то пошло не так.",
+    "retry": "Повторить"
+  },
+  "themes": {
+    "builtIn": {
+      "dark": "Тёмная",
+      "light": "Светлая",
+      "midnight": "Полночь",
+      "tactical": "Тактическая"
+    },
+    "editor": {
+      "untitled": "Тема без названия",
+      "nameRequired": "Укажите название темы",
+      "updated": "Тема обновлена",
+      "created": "Тема создана",
+      "nameBeforeExport": "Дайте теме название перед экспортом",
+      "exported": "Тема экспортирована",
+      "livePreview": "Предпросмотр в реальном времени",
+      "previewInApp": "Посмотреть в приложении",
+      "previewInAppHint": "Применить эти цвета ко всему приложению до остановки",
+      "editTitle": "Изменить тему",
+      "name": "Название",
+      "namePlaceholder": "Моя крутая тема",
+      "tags": "Теги",
+      "tagsHint": "(через запятую, не более {{max}})",
+      "tagsPlaceholder": "dark, minimal, blue",
+      "description": "Описание",
+      "descriptionPlaceholder": "Краткое описание вашей темы...",
+      "startFrom": "Начать с:",
+      "exportJson": "Экспорт в JSON",
+      "update": "Обновить",
+      "patternsTitle": "Узоры и брендинг",
+      "patternsHint": "(декоративные фоны)",
+      "patternType": "Тип",
+      "patternColor": "Цвет",
+      "opacity": "Непрозрачность ({{value}}%)",
+      "size": "Размер ({{value}} px)",
+      "angle": "Угол ({{value}}°)",
+      "svgMarkup": "Разметка SVG",
+      "svgHint": "(не более {{max}} символов — вставьте сюда SVG вашего бренда или игры)",
+      "svgCount": "{{used}} / {{max}} символов",
+      "tileSize": "Размер плитки"
+    },
+    "colors": {
+      "primary": "Основной",
+      "secondary": "Вторичный",
+      "tertiary": "Третичный",
+      "hover": "При наведении",
+      "active": "Активный",
+      "floating": "Плавающий",
+      "sidebar": "Боковая панель",
+      "channelList": "Список каналов",
+      "chatArea": "Область чата",
+      "muted": "Приглушённый",
+      "links": "Ссылки",
+      "success": "Успех",
+      "warning": "Предупреждение",
+      "danger": "Опасность",
+      "info": "Инфо",
+      "border": "Граница",
+      "connected": "Подключено",
+      "speaking": "Говорит",
+      "voiceMuted": "Микрофон выключен",
+      "thumb": "Ползунок",
+      "thumbHover": "Ползунок при наведении",
+      "background": "Фон",
+      "text": "Текст"
+    },
+    "groups": {
+      "backgrounds": "Фоны",
+      "layout": "Макет",
+      "text": "Текст",
+      "accents": "Акценты",
+      "borders": "Границы",
+      "voice": "Голос",
+      "scrollbar": "Полоса прокрутки",
+      "selection": "Выделение"
+    },
+    "patterns": {
+      "none": "Нет",
+      "stripes": "Полосы",
+      "grid": "Сетка",
+      "dots": "Точки",
+      "crosshatch": "Штриховка",
+      "customSvg": "Свой SVG"
+    },
+    "browser": {
+      "title": "Маркетплейс тем",
+      "available_one": "Доступна {{count}} тема сообщества",
+      "available_few": "Доступно {{count}} темы сообщества",
+      "available_many": "Доступно {{count}} тем сообщества",
+      "available_other": "Доступно {{count}} темы сообщества",
+      "searchPlaceholder": "Поиск тем...",
+      "sortNewest": "Новые",
+      "sortPopular": "Популярные",
+      "sortName": "А–Я",
+      "tagPlaceholder": "Фильтр по тегу...",
+      "noThemes": "Темы не найдены",
+      "noThemesHint": "Попробуйте другой запрос или опубликуйте тему первым!",
+      "loadMore": "Загрузить ещё",
+      "byAuthor": "автор: {{name}}",
+      "installs_one": "{{count}} установка",
+      "installs_few": "{{count}} установки",
+      "installs_many": "{{count}} установок",
+      "installs_other": "{{count}} установки",
+      "stop": "Стоп",
+      "install": "Установить",
+      "uninstall": "Удалить",
+      "failedToLoad": "Не удалось загрузить темы",
+      "installedToast": "Тема «{{name}}» установлена",
+      "uninstalledToast": "Тема «{{name}}» удалена"
+    },
+    "preview": {
+      "previewing": "Предпросмотр:",
+      "stop": "Остановить предпросмотр"
+    },
+    "import": {
+      "invalidJson": "Недопустимый файл JSON",
+      "notAnObject": "Файл темы должен содержать объект JSON",
+      "missingName": "У темы должно быть название",
+      "missingColors": "У темы должен быть объект «colors»",
+      "invalidColors": "Недопустимые цвета темы ({{detail}})",
+      "invalidPatterns": "Недопустимые узоры темы ({{detail}})"
+    }
+  },
+  "appMock": {
+    "search": "Поиск",
+    "onlineCount": "{{n}} в сети",
+    "lounge": "Лаунж",
+    "chatWelcome": "Привет, добро пожаловать в Voxium!",
+    "chatVoiceQuality": "Качество звука просто огонь 🔥",
+    "chatNoiseSuppression": "Шумоподавление — это магия 🚀"
   }
 }

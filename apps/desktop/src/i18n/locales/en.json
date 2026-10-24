@@ -28,7 +28,15 @@
     "saving": "Saving...",
     "creating": "Creating...",
     "deleting": "Deleting...",
-    "clear": "Clear"
+    "clear": "Clear",
+    "dismiss": "Dismiss",
+    "download": "Download",
+    "preview": "Preview",
+    "icon": "Icon",
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restore": "Restore",
+    "ctrlKey": "Ctrl"
   },
   "auth": {
     "login": {
@@ -205,7 +213,8 @@
       "backupCodesDescription": "These codes can be used to access your account if you lose your authenticator device. Each code can only be used once. Store them somewhere safe.",
       "copyAllCodes": "Copy all codes",
       "savedBackupCodes": "I've saved my backup codes",
-      "failedToCopyBackup": "Unable to copy backup codes to clipboard"
+      "failedToCopyBackup": "Unable to copy backup codes to clipboard",
+      "qrCodeAlt": "QR code for your authenticator app"
     },
     "appearance": {
       "builtInThemes": "Built-in Themes",
@@ -226,7 +235,9 @@
       "themeUnpublished": "Theme unpublished from marketplace",
       "failedToPublish": "Failed to publish theme",
       "failedToUnpublish": "Failed to unpublish",
-      "failedToImport": "Failed to import theme"
+      "failedToImport": "Failed to import theme",
+      "publishTitle": "Publish to marketplace",
+      "unpublishTitle": "Unpublish from marketplace"
     },
     "audio": {
       "inputDevice": "Input Device",
@@ -258,7 +269,24 @@
       "micNotAvailable": "Microphone access not available (insecure context?)",
       "couldNotAccessMic": "Could not access microphone",
       "deviceEnumNotAvailable": "Device enumeration not available",
-      "couldNotListDevices": "Could not list audio devices"
+      "couldNotListDevices": "Could not list audio devices",
+      "microphoneFallback": "Microphone {{id}}",
+      "speakerFallback": "Speaker {{id}}",
+      "keys": {
+        "backquote": "` (Backtick)",
+        "space": "Space",
+        "tab": "Tab",
+        "capsLock": "Caps Lock",
+        "shiftLeft": "Left Shift",
+        "shiftRight": "Right Shift",
+        "controlLeft": "Left Ctrl",
+        "controlRight": "Right Ctrl",
+        "altLeft": "Left Alt",
+        "altRight": "Right Alt",
+        "metaLeft": "Left Meta",
+        "metaRight": "Right Meta",
+        "numpad": "Numpad {{key}}"
+      }
     },
     "language": {
       "title": "Language",
@@ -463,7 +491,8 @@
     "deleteRoleConfirm": "This cannot be undone.",
     "failedToCreate": "An error occurred",
     "failedToUpdate": "An error occurred",
-    "failedToDelete": "An error occurred"
+    "failedToDelete": "An error occurred",
+    "deleteRoleQuestion": "Delete <1>{{name}}</1>?"
   },
   "channelPermissions": {
     "title": "Channel Permissions",
@@ -635,7 +664,11 @@
     "removeAndBanned": "{{name}} was removed and banned",
     "removeAndBanFailed": "Failed to remove the member",
     "youWereRemovedAndBanned": "You were removed and banned from {{name}}",
-    "youWereRemovedAndBannedUnknown": "You were removed and banned from a space"
+    "youWereRemovedAndBannedUnknown": "You were removed and banned from a space",
+    "failedToLoadServers": "Failed to load servers",
+    "failedToLoadServer": "Failed to load server",
+    "failedToLoadMembers": "Failed to load members",
+    "deletedToast": "Server was deleted"
   },
   "channel": {
     "joinVoice": "Join voice",
@@ -722,7 +755,21 @@
     "fileTooLarge": "{{name}} is too large (max {{max}}MB)",
     "searchMessages": "Search Messages (Ctrl+K)",
     "today": "Today",
-    "yesterday": "Yesterday"
+    "yesterday": "Yesterday",
+    "failedToLoadMessages": "Failed to load messages",
+    "welcomeTitle": "Welcome to the channel!",
+    "welcomeSubtitle": "This is the beginning of the conversation.",
+    "searchEmoji": "Search emoji...",
+    "mentionEveryone": {
+      "label": "@everyone",
+      "description": "Notify everyone who can see this channel",
+      "notificationTitle": "{{author}} mentioned everyone in {{server}}, #{{channel}}"
+    },
+    "mentionAutocomplete": {
+      "header": "Members matching @{{query}}",
+      "searching": "Searching..."
+    },
+    "mentionUnknown": "@unknown"
   },
   "dm": {
     "title": "Direct Messages",
@@ -739,7 +786,8 @@
     "inACall": "In a Call",
     "beginningOfConversation": "Beginning of conversation",
     "conversationStart": "This is the start of your direct message history.",
-    "welcomeMessage": "Select a conversation from the sidebar, or click on a member in any server to start a new one."
+    "welcomeMessage": "Select a conversation from the sidebar, or click on a member in any server to start a new one.",
+    "failedToLoadConversations": "Failed to load conversations"
   },
   "friends": {
     "title": "Friends",
@@ -771,7 +819,10 @@
     "decline": "Decline",
     "failedToOpenConversation": "Failed to open conversation",
     "failedToAccept": "Failed to accept friend request",
-    "failedToRemove": "Failed to remove friendship"
+    "failedToRemove": "Failed to remove friendship",
+    "failedToLoad": "Failed to load friends",
+    "requestReceived": "{{name}} sent you a friend request",
+    "requestAccepted": "{{name}} accepted your friend request"
   },
   "members": {
     "owner": "Owner",
@@ -893,6 +944,21 @@
       "maskRestoreFailed": "Your screen is still going out through the mask compositor — viewers see the right picture, it just costs extra CPU. Restart the share to clear it.",
       "sharePaused": "Viewers cannot see your screen right now — a privacy mask is being applied or failed to apply",
       "syncError": "An annotation could not be shared — your view may differ from what viewers see"
+    },
+    "measuring": "Measuring...",
+    "toasts": {
+      "movedToAnotherChannel": "You were moved to another voice channel",
+      "micDenied": "Microphone access denied — joining in listen-only mode",
+      "joinFailed": "Could not join the voice channel — try again",
+      "connectionTimedOut": "Voice connection timed out — try rejoining",
+      "connectionFailed": "Voice connection failed — try rejoining",
+      "connectionLost": "Voice connection lost — reconnecting (attempt {{attempt}}/{{max}})...",
+      "connectionFailedManual": "Voice connection failed — please rejoin manually",
+      "establishFailed": "Failed to establish voice connection",
+      "mutedByModerator": "You have been muted by a moderator",
+      "deafenedByModerator": "You have been deafened by a moderator",
+      "screenShareFailed": "Screen share failed — please try again",
+      "micIssue": "Microphone issue detected — try rejoining voice"
     }
   },
   "attachment": {
@@ -902,7 +968,9 @@
     "failedToDownload": "Failed to download file",
     "loadingImage": "Loading image...",
     "loadingVideo": "Loading video...",
-    "loadingAudio": "Loading audio..."
+    "loadingAudio": "Loading audio...",
+    "downloadedName": "Downloaded \"{{name}}\"",
+    "image": "image"
   },
   "support": {
     "title": "Support",
@@ -915,7 +983,8 @@
     "messageTooLong": "Message too long (max {{max}} characters)",
     "failedToSend": "Failed to send message",
     "failedToReopen": "Failed to reopen ticket",
-    "sendMessage": "Send message"
+    "sendMessage": "Send message",
+    "ticketClosed": "Ticket is closed."
   },
   "invite": {
     "failedToJoin": "Could not join the server. Check your connection and try again.",
@@ -931,7 +1000,8 @@
   "landing": {
     "nav": {
       "signIn": "Sign In",
-      "getStarted": "Get Started"
+      "getStarted": "Get Started",
+      "menu": "Menu"
     },
     "hero": {
       "headlinePart1": "Talk. Connect.",
@@ -1037,7 +1107,9 @@
       "zeroAds": "Ads or Tracking",
       "sponsorGithub": "Sponsor on GitHub",
       "openCollective": "Open Collective",
-      "supporterBadge": "Supporters get a special in-app badge to show their contribution"
+      "supporterBadge": "Supporters get a special in-app badge to show their contribution",
+      "youValue": "You",
+      "zeroValue": "Zero"
     },
     "cta": {
       "title": "Ready to experience communication, reimagined?",
@@ -1057,7 +1129,23 @@
       "cookiePolicy": "Cookie Policy",
       "community": "Community",
       "contributing": "Contributing",
-      "copyright": "© 2026 Voxium. All rights reserved."
+      "copyright": "© 2026 Voxium. All rights reserved.",
+      "backToHome": "Back to home"
+    },
+    "demo": {
+      "themeAria": "{{name}} theme",
+      "you": "You",
+      "chatTryTheme": "Hey, try the new theme!",
+      "chatLookingClean": "Looking clean",
+      "chatLoveIt": "Love it",
+      "roleAdmin": "Admin",
+      "roleModerator": "Moderator",
+      "roleMember": "Member",
+      "permView": "View",
+      "permSend": "Send",
+      "permReact": "React",
+      "permManage": "Manage",
+      "permAdmin": "Admin"
     }
   },
   "badges": {
@@ -1206,7 +1294,148 @@
     "webhookNameInvalid": "Webhook name contains unsupported characters",
     "webhookCap": "This server has reached its webhook limit (maximum {{max}})",
     "channelNotFound": "Channel not found",
-    "tooManyRequests": "Too many requests. Please try again later."
+    "tooManyRequests": "Too many requests. Please try again later.",
+    "emailNotVerified": "Your email address is not verified",
+    "invalidOrExpiredToken": "Your session has expired. Please sign in again.",
+    "sessionInvalidated": "Your session has ended. Please sign in again.",
+    "userNotFound": "User not found",
+    "consentRequired": "You must accept the Terms of Service and the Privacy Policy to continue",
+    "mustAcceptTerms": "You must accept the Terms of Service",
+    "mustAcceptPrivacy": "You must accept the Privacy Policy",
+    "mustAcceptTermsAndPrivacy": "You must accept the Terms of Service and the Privacy Policy",
+    "passwordIncorrect": "Password is incorrect",
+    "twoFactorCodeRequired": "Two-factor authentication code is required",
+    "invalidTwoFactorCode": "Invalid two-factor authentication code",
+    "emailAlreadyVerified": "Your email address is already verified",
+    "tooManyVerificationEmails": "Too many verification emails requested — try again tomorrow",
+    "tooManyDomainRegistrations": "Too many registrations from this email domain today — try again later",
+    "registrationChallengeInvalid": "Registration check is invalid or expired — refresh and try again",
+    "powExpired": "The registration check took too long — please try again",
+    "powUnavailable": "This browser cannot run the registration check (WebCrypto is unavailable)",
+    "powWorkerFailed": "The registration check failed — please try again",
+    "usernameTooShort": "Username must be at least {{min}} characters",
+    "usernameTooLong": "Username must be at most {{max}} characters",
+    "usernameInvalidChars": "Username can only contain letters, numbers, underscores, dots, and hyphens",
+    "invalidEmail": "Invalid email address",
+    "passwordTooShort": "Password must be at least {{min}} characters",
+    "passwordTooLong": "Password must be at most {{max}} bytes (special characters and emoji count as multiple bytes)",
+    "displayNameEmpty": "Display name cannot be empty",
+    "displayNameTooLong": "Display name must be at most {{max}} characters",
+    "bioTooLong": "Bio must be at most {{max}} characters",
+    "serverNameTooShort": "Server name must be at least {{min}} characters",
+    "serverNameTooLong": "Server name must be at most {{max}} characters",
+    "noPermissionManageServer": "You do not have permission to manage server settings",
+    "noPermissionViewServerSettings": "You do not have permission to view server settings",
+    "onlyOwnerCanDelete": "Only the server owner can delete this server",
+    "onlyOwnerCanTransfer": "Only the server owner can transfer ownership",
+    "onlyOwnerCanChangeRoles": "Only the server owner can change roles",
+    "ownerCannotLeave": "The server owner cannot leave. Transfer ownership first.",
+    "cannotKickSelf": "You cannot remove yourself",
+    "cannotTransferToSelf": "You cannot transfer ownership to yourself",
+    "cannotChangeOwnRole": "You cannot change your own role",
+    "cannotChangeOwnerRole": "The owner's role cannot be changed",
+    "noPermissionChangeNickname": "You do not have permission to change your nickname",
+    "noPermissionManageNicknames": "You do not have permission to manage nicknames",
+    "cannotManageHigherNickname": "Cannot change the nickname of a member with an equal or higher role",
+    "nicknameEmpty": "Nickname cannot be empty",
+    "nicknameTooLong": "Nickname must be at most {{max}} characters",
+    "searchTextTooLong": "Search text is too long",
+    "membershipNotFound": "Server membership not found",
+    "memberNotFound": "Member not found",
+    "userNotServerMember": "This user is not a member of this server",
+    "notAuthorized": "You are not allowed to do this",
+    "inviteNotFound": "Invite not found",
+    "serverCap": "You can only create up to {{max}} servers",
+    "memberCap": "This server has reached its member limit ({{max}})",
+    "noPermissionCreateChannels": "You do not have permission to create channels",
+    "noPermissionDeleteChannels": "You do not have permission to delete channels",
+    "noPermissionUpdateChannels": "You do not have permission to update channels",
+    "channelNameTooShort": "Channel name is too short (minimum {{min}})",
+    "channelNameTooLong": "Channel name must be at most {{max}} characters",
+    "channelNameInvalid": "Channel name contains invalid characters",
+    "categoryNotFound": "Category not found",
+    "categoryNameTooShort": "Category name is too short (minimum {{min}})",
+    "categoryNameTooLong": "Category name must be at most {{max}} characters",
+    "reorderStale": "The list changed in the meantime — refresh and try again",
+    "channelCap": "This server can have at most {{max}} channels",
+    "categoryCap": "This server can have at most {{max}} categories",
+    "roleNameReserved": "The role name \"everyone\" is reserved",
+    "cannotAssignEveryone": "The @everyone role cannot be assigned",
+    "cannotRenameEveryone": "The @everyone role cannot be renamed",
+    "everyoneMustStayLast": "The @everyone role must stay at the bottom of the list",
+    "cannotAssignHigherRole": "Cannot assign roles at or above your own position",
+    "cannotModifyOwnerRoles": "The server owner's roles cannot be changed",
+    "cannotModifyHigherMember": "Cannot change the roles of a member with an equal or higher role",
+    "cannotReorderHigherRoles": "Cannot reorder roles at or above your own position",
+    "cannotSetHigherPosition": "Cannot move a role to or above your own position",
+    "cannotModifyHigherOverrides": "Cannot change overrides for roles at or above your own position",
+    "cannotSetHigherOverrides": "Cannot set overrides for roles at or above your own position",
+    "cannotOverrideUnheldPermissions": "Cannot set overrides for permissions you do not have",
+    "noPermissionManagePermissions": "You do not have permission to manage permissions",
+    "roleNotFound": "Role not found",
+    "roleNameTooShort": "Role name is too short (minimum {{min}})",
+    "roleNameTooLong": "Role name must be at most {{max}} characters",
+    "invalidRoleColor": "The color must be a valid hex color (e.g. #FF5733)",
+    "roleCap": "This server can have at most {{max}} roles",
+    "canOnlyDeleteOwnMessages": "You can only delete your own messages",
+    "systemMessageNoEdit": "System messages cannot be edited",
+    "messageEmpty": "Message cannot be empty",
+    "messageTooLong": "Message must be at most {{max}} characters",
+    "messageNotFound": "Message not found",
+    "conversationNotFound": "Conversation not found",
+    "replyTargetUnavailable": "The message you are replying to is no longer available",
+    "maxAttachments": "You can attach at most {{max}} files to a message",
+    "maxReactions": "A message can have at most {{max}} different reactions",
+    "invalidEmoji": "Invalid emoji",
+    "fileTooLarge": "The file is too large (max {{max}} MB)",
+    "e2eUpdateToSendDm": "This conversation is end-to-end encrypted; update the app to send messages",
+    "e2eUpdateToSendChannel": "This channel is end-to-end encrypted; update the app to send messages",
+    "e2eUpdateToEdit": "This message is end-to-end encrypted; update the app to edit it",
+    "e2eUpdateToUpload": "This channel is end-to-end encrypted; update the app to upload files",
+    "noAccessToMessage": "You do not have access to this message",
+    "reportReasonTooShort": "Reason must be at least {{min}} characters",
+    "reportReasonTooLong": "Reason must be at most {{max}} characters",
+    "friendshipNotFound": "This friendship no longer exists",
+    "supportTicketNotFound": "Support ticket not found",
+    "secureInviteesMustBeMembers": "Everyone you invite must be a member of this server",
+    "secureCreatorCannotLeave": "The creator cannot leave — delete the channel instead",
+    "secureAlreadyMember": "This person is already a member of this channel",
+    "secureNotMember": "This person is not a member of this channel",
+    "secureOnlyCreatorInvites": "Only the channel creator can invite members",
+    "secureOnlyCreatorRemoves": "Only the channel creator can remove members",
+    "secureOnlyCreatorRenames": "Only the channel creator can rename this channel",
+    "noPermissionCreateSecure": "You do not have permission to create secure channels",
+    "notChannelMember": "You are not a member of this channel",
+    "secureChannelMemberCap": "A secure channel can have at most {{max}} members",
+    "deviceLimit": "Device limit reached ({{max}}) — revoke a device first",
+    "keyBackupFull": "The key backup is full",
+    "tooManyPendingKeyShares": "Too many undelivered key shares — retry once recipients come online",
+    "nameRequired": "Name is required",
+    "themeNameTooShort": "Theme name must be at least {{min}} characters",
+    "themeNameTooLong": "Theme name must be at most {{max}} characters",
+    "themeDescriptionTooLong": "Description must be at most {{max}} characters",
+    "tagEmpty": "Tag cannot be empty",
+    "tagTooLong": "Tag must be at most {{max}} characters",
+    "tagInvalidChars": "Tags can only contain letters (A–Z), numbers, spaces, underscores and hyphens",
+    "themeTooManyTags": "A theme can have at most {{max}} tags",
+    "themeCap": "You can create at most {{max}} themes",
+    "svgTooLong": "SVG data must be at most {{max}} characters",
+    "svgUnsafe": "Invalid or unsafe SVG markup",
+    "themeNameTaken": "You already have a theme with that name",
+    "themeAlreadyPublished": "This theme is already published",
+    "themeNotPublished": "This theme is not published",
+    "themeRemovedByAdmin": "This theme has been removed by an administrator",
+    "themeNotOwned": "You can only manage your own themes",
+    "themeNotFound": "Theme not found",
+    "voiceChannelGone": "This voice channel no longer exists",
+    "voiceServerRestarted": "The voice server restarted — please rejoin the voice channel",
+    "voiceDisconnected": "You have been disconnected from this voice channel",
+    "voiceRequiresE2E": "This voice channel requires end-to-end encryption support",
+    "screenShareNotInSecure": "Screen sharing is not available in secure voice channels",
+    "screenShareTaken": "Someone else is already sharing in this channel",
+    "noPermissionSpeak": "You do not have permission to speak in this channel",
+    "searchQueryTooShort": "Search query must be at least {{min}} characters",
+    "searchQueryTooLong": "Search query must be at most {{max}} characters"
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",
@@ -1649,5 +1878,162 @@
       "title": "Webhooks are turned off right now.",
       "hint": "An administrator has disabled incoming webhooks. Nothing can post through them until they are back."
     }
+  },
+  "notifications": {
+    "someone": "Someone",
+    "unknownServer": "Unknown Server",
+    "unknownChannel": "unknown",
+    "mentionedYou": "{{author}} mentioned you in {{server}}, #{{channel}}",
+    "channelMessage": "{{server}}, #{{channel}}",
+    "dmTitle": "DM, {{name}}",
+    "announcementInfo": "Info",
+    "announcementWarning": "Warning",
+    "announcementMaintenance": "Maintenance",
+    "announcementGeneric": "Announcement",
+    "announcementToast": "{{label}}: {{title}}",
+    "announcementMore": "+{{n}} more",
+    "dismissAnnouncement": "Dismiss announcement"
+  },
+  "updater": {
+    "titleAvailable": "Update Required",
+    "titleDownloading": "Downloading Update",
+    "titleReady": "Update Ready",
+    "titleFailed": "Update Failed",
+    "required": "A new version of Voxium is required to continue.",
+    "version": "Version {{version}}",
+    "updateNow": "Update Now",
+    "downloading": "Downloading update...",
+    "progress": "{{done}} / {{total}}, {{percent}}%",
+    "downloaded": "{{size}} downloaded",
+    "installed": "Update installed. Restart Voxium to apply.",
+    "restartNow": "Restart Now",
+    "failed": "Something went wrong during the update.",
+    "retry": "Retry"
+  },
+  "themes": {
+    "builtIn": {
+      "dark": "Dark",
+      "light": "Light",
+      "midnight": "Midnight",
+      "tactical": "Tactical"
+    },
+    "editor": {
+      "untitled": "Untitled theme",
+      "nameRequired": "Theme name is required",
+      "updated": "Theme updated",
+      "created": "Theme created",
+      "nameBeforeExport": "Give your theme a name before exporting",
+      "exported": "Theme exported",
+      "livePreview": "Live Preview",
+      "previewInApp": "Preview in app",
+      "previewInAppHint": "Apply these colors to the whole app until you stop",
+      "editTitle": "Edit Theme",
+      "name": "Name",
+      "namePlaceholder": "My Awesome Theme",
+      "tags": "Tags",
+      "tagsHint": "(comma-separated, max {{max}})",
+      "tagsPlaceholder": "dark, minimal, blue",
+      "description": "Description",
+      "descriptionPlaceholder": "A brief description of your theme...",
+      "startFrom": "Start from:",
+      "exportJson": "Export JSON",
+      "update": "Update",
+      "patternsTitle": "Patterns & Branding",
+      "patternsHint": "(decorative backgrounds)",
+      "patternType": "Type",
+      "patternColor": "Color",
+      "opacity": "Opacity ({{value}}%)",
+      "size": "Size ({{value}}px)",
+      "angle": "Angle ({{value}}°)",
+      "svgMarkup": "SVG Markup",
+      "svgHint": "(max {{max}} characters — paste your brand/game SVG here)",
+      "svgCount": "{{used}} / {{max}} characters",
+      "tileSize": "Tile size"
+    },
+    "colors": {
+      "primary": "Primary",
+      "secondary": "Secondary",
+      "tertiary": "Tertiary",
+      "hover": "Hover",
+      "active": "Active",
+      "floating": "Floating",
+      "sidebar": "Sidebar",
+      "channelList": "Channel List",
+      "chatArea": "Chat Area",
+      "muted": "Muted",
+      "links": "Links",
+      "success": "Success",
+      "warning": "Warning",
+      "danger": "Danger",
+      "info": "Info",
+      "border": "Border",
+      "connected": "Connected",
+      "speaking": "Speaking",
+      "voiceMuted": "Muted",
+      "thumb": "Thumb",
+      "thumbHover": "Thumb Hover",
+      "background": "Background",
+      "text": "Text"
+    },
+    "groups": {
+      "backgrounds": "Backgrounds",
+      "layout": "Layout",
+      "text": "Text",
+      "accents": "Accents",
+      "borders": "Borders",
+      "voice": "Voice",
+      "scrollbar": "Scrollbar",
+      "selection": "Selection"
+    },
+    "patterns": {
+      "none": "None",
+      "stripes": "Stripes",
+      "grid": "Grid",
+      "dots": "Dots",
+      "crosshatch": "Crosshatch",
+      "customSvg": "Custom SVG"
+    },
+    "browser": {
+      "title": "Theme Marketplace",
+      "available_one": "{{count}} community theme available",
+      "available_other": "{{count}} community themes available",
+      "searchPlaceholder": "Search themes...",
+      "sortNewest": "Newest",
+      "sortPopular": "Popular",
+      "sortName": "A-Z",
+      "tagPlaceholder": "Filter by tag...",
+      "noThemes": "No themes found",
+      "noThemesHint": "Try a different search or be the first to publish one!",
+      "loadMore": "Load More",
+      "byAuthor": "by {{name}}",
+      "installs_one": "{{count}} install",
+      "installs_other": "{{count}} installs",
+      "stop": "Stop",
+      "install": "Install",
+      "uninstall": "Uninstall",
+      "failedToLoad": "Failed to load themes",
+      "installedToast": "Installed \"{{name}}\"",
+      "uninstalledToast": "Uninstalled \"{{name}}\""
+    },
+    "preview": {
+      "previewing": "Previewing:",
+      "stop": "Stop Preview"
+    },
+    "import": {
+      "invalidJson": "Invalid JSON file",
+      "notAnObject": "Theme file must contain a JSON object",
+      "missingName": "Theme must have a name",
+      "missingColors": "Theme must have a colors object",
+      "invalidColors": "Invalid theme colors ({{detail}})",
+      "invalidPatterns": "Invalid theme patterns ({{detail}})"
+    }
+  },
+  "appMock": {
+    "search": "Search",
+    "onlineCount": "{{n}} online",
+    "lounge": "Lounge",
+    "chatWelcome": "Hey, welcome to Voxium!",
+    "chatVoiceQuality": "Voice quality is insane 🔥",
+    "chatNoiseSuppression": "Noise suppression is magic 🚀"
   }
 }

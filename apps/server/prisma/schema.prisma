@@ -401,6 +401,10 @@ model Message {
   // E2E DMs: when true, content is an opaque ciphertext envelope (see
   // docs/e2e-dm-spec.md §6) — never sanitized, searched, or mention-resolved.
   encrypted      Boolean   @default(false)
+  // The author wrote @everyone AND held MENTION_EVERYONE in the channel when
+  // the message was sent (or last edited): the server's word that this row
+  // pings the whole channel. Never derived from content on read.
+  mentionsEveryone Boolean @default(false) @map("mentions_everyone")
   type           String    @default("user")
   channelId      String?   @map("channel_id")
   conversationId String?   @map("conversation_id")

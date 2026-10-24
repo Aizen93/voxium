@@ -54,7 +54,7 @@ describe('AdminRegistrationPanel — wording', () => {
   it('labels the IP list as accounts seen this week, not registrations this week', async () => {
     await render();
     const text = document.body.textContent ?? '';
-    expect(text).toContain('Top registration IPs (accounts seen in the last 7 days)');
+    expect(text).toContain('Top registration IPs (accounts created in the last 7 days)');
     expect(text).not.toContain('Top registering IPs (7 days)');
     expect(text).toContain('203.0.113.7');
   });

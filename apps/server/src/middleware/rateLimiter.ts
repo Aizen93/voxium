@@ -15,10 +15,12 @@ export interface RateLimitConfig {
 
 interface RateLimitDef extends RateLimitConfig {
   keyPrefix: string;
-  /** What the bucket is keyed on: a client address, a user, the account a
-   *  sign-in is FOR (before anyone is authenticated), or (incoming webhooks)
-   *  a webhook id that has already passed token validation. */
-  keyType: 'ip' | 'userId' | 'account' | 'webhook';
+  /** What the bucket is keyed on: a client address, the /24 or /48 it sits
+   *  in, a user, the account a sign-in is FOR (before anyone is
+   *  authenticated), a mailbox (the canonical address mail is sent to), an
+   *  e-mail domain, or (incoming webhooks) a webhook id that has already
+   *  passed token validation. Shown as a badge in the admin table. */
+  keyType: 'ip' | 'subnet' | 'userId' | 'account' | 'inbox' | 'domain' | 'webhook';
   label: string;
 }
 
@@ -40,7 +42,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // stuffing source rotating inside its range — every routed IPv6 /64 is
   // free — is bounded too. Per account (`loginAccount`): below.
   login:          { keyPrefix: 'rl:login',    points: 20,  duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Login (failures per IP)' },
-  loginSubnet:    { keyPrefix: 'rl:loginnet', points: 60,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Login (failures per subnet)' },
+  loginSubnet:    { keyPrefix: 'rl:loginnet', points: 60,  duration: 60,  blockDuration: 0,   keyType: 'subnet',     label: 'Login (failures per subnet)' },
   // The per-account bound on guessing. Two key shapes behind one row:
   //  - the PASSWORD step is keyed on the account AND the caller's network
   //    (`e:<hmac of the lowercased, trimmed e-mail>|<subnet>`): ten wrong
@@ -79,12 +81,12 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // The cheap attempt buckets below are what bound garbage instead — one per
   // address, one per range, neither ever refunded.
   registerDaily:  { keyPrefix: 'rl:regday',   points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per IP)' },
-  registerSubnet: { keyPrefix: 'rl:regnet',   points: 20,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per subnet)' },
+  registerSubnet: { keyPrefix: 'rl:regnet',   points: 20,  duration: 86400, blockDuration: 0, keyType: 'subnet',     label: 'Register (daily per subnet)' },
   // Attempts — successful or not — per IP per day. This is the bucket that
   // bounds username/email enumeration now that the two above only count
   // successes. Deliberately cheap and generous: a fumbling real user has
   // plenty of headroom, while a prober gets 30 probes a day per address.
-  registerAttempt:{ keyPrefix: 'rl:regatt',   points: 30,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily attempts per IP)' },
+  registerAttempt:{ keyPrefix: 'rl:regatt',   points: 30,  duration: 86400, blockDuration: 0, keyType: 'subnet',     label: 'Register (daily attempts per IP)' },
   // The same bound, per RANGE — and the one that actually holds. Per-address is
   // no bound at all against an attacker who has a /24, or any routed IPv6 /64:
   // 254 x 30 is 7,620 confirmed probes a day, and v6 rotation is free. Since a
@@ -99,7 +101,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // so the admin rate-limit API can raise it for a genuinely large shared range
   // without a deploy.
   registerAttemptSubnet:
-                  { keyPrefix: 'rl:regattnet', points: 300, duration: 86400, blockDuration: 0, keyType: 'ip',    label: 'Register (daily attempts per subnet)' },
+                  { keyPrefix: 'rl:regattnet', points: 300, duration: 86400, blockDuration: 0, keyType: 'subnet',    label: 'Register (daily attempts per subnet)' },
   // Challenge minting is stateless (HMAC) so it is cheap to serve, but a
   // limit keeps a hostile client from turning the endpoint into a hash-mint
   // treadmill. Generous: a legit flow needs exactly one per registration.
@@ -108,7 +110,7 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // exempt in the service). NOT used as route middleware — consumed only
   // after a successful create (authService), so garbage attempts cannot burn
   // a legitimate small-org domain's budget and lock its employees out.
-  registerDomain: { keyPrefix: 'rl:regdom',   points: 10,  duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Register (daily per email domain)' },
+  registerDomain: { keyPrefix: 'rl:regdom',   points: 10,  duration: 86400, blockDuration: 0, keyType: 'domain',     label: 'Register (daily per email domain)' },
   // Per-INBOX daily mail caps, keyed on the CANONICAL address. The per-IP and
   // per-user limiters bound the burst rate; these bound how much mail one real
   // mailbox can be made to receive in a day no matter which account, address
@@ -116,9 +118,9 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // whoever really owns an address. blockDuration MUST stay 0: a block would
   // push the window past 24h. Consumed via `consumeMailCap`, not middleware —
   // the key is an email, not a request property.
-  verifyMail:     { keyPrefix: 'rl:vfymail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Verification mail (daily per inbox)' },
-  resetMail:      { keyPrefix: 'rl:rstmail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'ip',     label: 'Password-reset mail (daily per inbox)' },
-  forgotPassword: { keyPrefix: 'rl:forgot',   points: 3,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Forgot Password' },
+  verifyMail:     { keyPrefix: 'rl:vfymail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'inbox',     label: 'Verification mail (daily per inbox)' },
+  resetMail:      { keyPrefix: 'rl:rstmail',  points: 5,   duration: 86400, blockDuration: 0, keyType: 'inbox',     label: 'Password-reset mail (daily per inbox)' },
+  forgotPassword: { keyPrefix: 'rl:forgot',   points: 3,   duration: 900, blockDuration: 0,   keyType: 'inbox',     label: 'Forgot Password' },
   resetPassword:  { keyPrefix: 'rl:reset',    points: 5,   duration: 900, blockDuration: 0,   keyType: 'ip',     label: 'Reset Password' },
   // One refresh per client per access-token life (15 min), plus one at every
   // launch and every reconnect — and every client behind the NAT launches at

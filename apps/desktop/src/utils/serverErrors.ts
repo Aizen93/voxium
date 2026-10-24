@@ -188,6 +188,173 @@ const ERROR_MAP: Record<string, string> = {
   // e.g. webhookManage's 30 changes an hour
   'Too many requests. Please try again later.': 'tooManyRequests',
 
+  // ─── Session & account (middleware/auth.ts, services/authService.ts) ───
+  'Email not verified': 'emailNotVerified',
+  'Invalid or expired token': 'invalidOrExpiredToken',
+  'Session invalidated': 'sessionInvalidated',
+  'User not found': 'userNotFound',
+  // CONSENT_REQUIRED_MESSAGE: an account that predates consent-at-signup
+  'You must accept the Terms of Service and the Privacy Policy to continue': 'consentRequired',
+  'You must accept the Terms of Service': 'mustAcceptTerms',
+  'You must accept the Privacy Policy': 'mustAcceptPrivacy',
+  'You must accept the Terms of Service and the Privacy Policy': 'mustAcceptTermsAndPrivacy',
+  'Password is incorrect': 'passwordIncorrect',
+  'Two-factor authentication code is required': 'twoFactorCodeRequired',
+  'Invalid two-factor authentication code': 'invalidTwoFactorCode',
+  'Email already verified': 'emailAlreadyVerified',
+  'Too many verification emails requested — try again tomorrow': 'tooManyVerificationEmails',
+  'Too many registrations from this email domain today — try again later': 'tooManyDomainRegistrations',
+  'Registration challenge is invalid or expired — refresh and try again': 'registrationChallengeInvalid',
+  // The registration proof of work fails on the CLIENT too (shared/pow.ts,
+  // services/powSolver.ts) and reaches the form through the same helper
+  'Registration challenge expired before it was solved': 'powExpired',
+  'WebCrypto unavailable — cannot solve registration challenge': 'powUnavailable',
+  'Proof-of-work worker failed': 'powWorkerFailed',
+  // Shared validators (validateUsername / Email / Password / DisplayName / Bio)
+  [`Username must be at least ${LIMITS.USERNAME_MIN} characters`]: 'usernameTooShort',
+  [`Username must be at most ${LIMITS.USERNAME_MAX} characters`]: 'usernameTooLong',
+  'Username can only contain letters, numbers, underscores, dots, and hyphens': 'usernameInvalidChars',
+  'Invalid email address': 'invalidEmail',
+  [`Password must be at least ${LIMITS.PASSWORD_MIN} characters`]: 'passwordTooShort',
+  [`Password must be at most ${LIMITS.PASSWORD_MAX} bytes (special characters and emoji count as multiple bytes)`]: 'passwordTooLong',
+  'Display name cannot be empty': 'displayNameEmpty',
+  [`Display name must be at most ${LIMITS.DISPLAY_NAME_MAX} characters`]: 'displayNameTooLong',
+  [`Bio must be at most ${LIMITS.BIO_MAX} characters`]: 'bioTooLong',
+
+  // ─── Servers & membership (routes/servers.ts, utils/serverJoin.ts) ─────
+  [`Server name must be at least ${LIMITS.SERVER_NAME_MIN} characters`]: 'serverNameTooShort',
+  [`Server name must be at most ${LIMITS.SERVER_NAME_MAX} characters`]: 'serverNameTooLong',
+  'You do not have permission to manage server settings': 'noPermissionManageServer',
+  'You do not have permission to view server settings': 'noPermissionViewServerSettings',
+  'Only the server owner can delete it': 'onlyOwnerCanDelete',
+  'Only the server owner can transfer ownership': 'onlyOwnerCanTransfer',
+  'Only the server owner can change roles': 'onlyOwnerCanChangeRoles',
+  'Server owner cannot leave. Transfer ownership first.': 'ownerCannotLeave',
+  'Cannot kick yourself': 'cannotKickSelf',
+  'Cannot transfer ownership to yourself': 'cannotTransferToSelf',
+  'Cannot change your own role': 'cannotChangeOwnRole',
+  "Cannot change the owner's role": 'cannotChangeOwnerRole',
+  'You do not have permission to change your nickname': 'noPermissionChangeNickname',
+  'You do not have permission to manage nicknames': 'noPermissionManageNicknames',
+  'Cannot manage the nickname of a member with an equal or higher role': 'cannotManageHigherNickname',
+  'Nickname cannot be empty': 'nicknameEmpty',
+  [`Nickname must be at most ${LIMITS.NICKNAME_MAX} characters`]: 'nicknameTooLong',
+  'Search text is too long': 'searchTextTooLong',
+  'Server membership not found': 'membershipNotFound',
+  'Member not found': 'memberNotFound',
+  'Target member not found': 'memberNotFound',
+  'User is not a member of this server': 'userNotServerMember',
+  'Not a member': 'notAMember',
+  'Not a participant': 'notAParticipant',
+  'Not authorized': 'notAuthorized',
+  'Invite not found': 'inviteNotFound',
+
+  // ─── Channels & categories (routes/channels.ts, routes/categories.ts) ──
+  'You do not have permission to create channels': 'noPermissionCreateChannels',
+  'You do not have permission to delete channels': 'noPermissionDeleteChannels',
+  'You do not have permission to update channels': 'noPermissionUpdateChannels',
+  [`Channel name must be at least ${LIMITS.CHANNEL_NAME_MIN} character`]: 'channelNameTooShort',
+  [`Channel name must be at most ${LIMITS.CHANNEL_NAME_MAX} characters`]: 'channelNameTooLong',
+  'Channel name contains invalid characters': 'channelNameInvalid',
+  'Category not found': 'categoryNotFound',
+  'Category not found in this server': 'categoryNotFound',
+  [`Category name must be at least ${LIMITS.CATEGORY_NAME_MIN} character`]: 'categoryNameTooShort',
+  [`Category name must be at most ${LIMITS.CATEGORY_NAME_MAX} characters`]: 'categoryNameTooLong',
+  // A reorder that raced a deletion: the list the client sent is stale
+  'One or more channel IDs do not belong to this server': 'reorderStale',
+  'One or more category IDs do not belong to this server': 'reorderStale',
+
+  // ─── Roles & permissions (routes/roles.ts) ─────────────────────────────
+  'Cannot use reserved role name "everyone"': 'roleNameReserved',
+  'Cannot explicitly assign the @everyone role': 'cannotAssignEveryone',
+  'Cannot rename the @everyone role': 'cannotRenameEveryone',
+  'The @everyone role must stay at position 0': 'everyoneMustStayLast',
+  'Cannot assign roles at or above your own position': 'cannotAssignHigherRole',
+  "Cannot modify the server owner's roles": 'cannotModifyOwnerRoles',
+  'Cannot modify roles of a member with an equal or higher role': 'cannotModifyHigherMember',
+  'Cannot reorder roles at or above your own position': 'cannotReorderHigherRoles',
+  'Cannot set a role position at or above your own': 'cannotSetHigherPosition',
+  'Cannot modify overrides for roles at or above your own position': 'cannotModifyHigherOverrides',
+  'Cannot set overrides for roles at or above your own position': 'cannotSetHigherOverrides',
+  'Cannot set overrides for permissions you do not have': 'cannotOverrideUnheldPermissions',
+  'You do not have permission to manage permissions': 'noPermissionManagePermissions',
+  'Role not found': 'roleNotFound',
+  'One or more role IDs do not belong to this server': 'reorderStale',
+  'One or more role IDs are invalid': 'reorderStale',
+  'Role positions must be unique': 'reorderStale',
+  [`Role name must be at least ${LIMITS.ROLE_NAME_MIN} character`]: 'roleNameTooShort',
+  [`Role name must be at most ${LIMITS.ROLE_NAME_MAX} characters`]: 'roleNameTooLong',
+  'Color must be a valid hex color (e.g., #FF5733)': 'invalidRoleColor',
+
+  // ─── Messages, DMs, reactions, uploads, reports ─────────────────────────
+  'You can only delete your own messages': 'canOnlyDeleteOwnMessages',
+  'System messages cannot be edited': 'systemMessageNoEdit',
+  'Message cannot be empty': 'messageEmpty',
+  [`Message must be at most ${LIMITS.MESSAGE_MAX} characters`]: 'messageTooLong',
+  'Message not found': 'messageNotFound',
+  'Conversation not found': 'conversationNotFound',
+  'Invalid replyToId': 'replyTargetUnavailable',
+  [`Max ${LIMITS.MAX_ATTACHMENTS_PER_MESSAGE} attachments`]: 'maxAttachments',
+  [`Maximum of ${LIMITS.MAX_REACTIONS_PER_MESSAGE} different reactions per message`]: 'maxReactions',
+  'Invalid emoji': 'invalidEmoji',
+  'Emoji cannot be empty': 'invalidEmoji',
+  'Emoji is too long': 'invalidEmoji',
+  'Invalid file type': 'fileTypeNotAllowed',
+  // An older client meeting an end-to-end encrypted conversation or channel
+  'This conversation is end-to-end encrypted; update your client to send messages': 'e2eUpdateToSendDm',
+  'This channel is end-to-end encrypted; update your client to send messages': 'e2eUpdateToSendChannel',
+  'This message is end-to-end encrypted; update your client to edit it': 'e2eUpdateToEdit',
+  'This channel is end-to-end encrypted; update your client to upload files': 'e2eUpdateToUpload',
+  'You do not have access to this message': 'noAccessToMessage',
+  [`Reason must be at least ${LIMITS.REPORT_REASON_MIN} characters`]: 'reportReasonTooShort',
+  [`Reason must be at most ${LIMITS.REPORT_REASON_MAX} characters`]: 'reportReasonTooLong',
+  'Friendship not found': 'friendshipNotFound',
+  'Support ticket not found': 'supportTicketNotFound',
+
+  // ─── Secure channels (routes/secureChannels.ts, routes/e2e.ts) ─────────
+  'All invited users must be members of this server': 'secureInviteesMustBeMembers',
+  'The creator cannot leave — delete the channel instead': 'secureCreatorCannotLeave',
+  'User is already a member of this channel': 'secureAlreadyMember',
+  'User is not a member of this channel': 'secureNotMember',
+  'Only the channel creator can invite members': 'secureOnlyCreatorInvites',
+  'Only the channel creator can remove members': 'secureOnlyCreatorRemoves',
+  'Only the channel creator can rename this channel': 'secureOnlyCreatorRenames',
+  'You do not have permission to create secure channels': 'noPermissionCreateSecure',
+  'Not a member of this channel': 'notChannelMember',
+  'Key backup is full': 'keyBackupFull',
+  'Too many undelivered key shares — retry once recipients come online': 'tooManyPendingKeyShares',
+
+  // ─── Themes (routes/themes.ts + the shared theme validators) ───────────
+  'Name is required': 'nameRequired',
+  [`Theme name must be at least ${LIMITS.THEME_NAME_MIN} characters`]: 'themeNameTooShort',
+  [`Theme name must be at most ${LIMITS.THEME_NAME_MAX} characters`]: 'themeNameTooLong',
+  [`Description must be at most ${LIMITS.THEME_DESCRIPTION_MAX} characters`]: 'themeDescriptionTooLong',
+  'Tag cannot be empty': 'tagEmpty',
+  [`Tag must be at most ${LIMITS.THEME_TAG_MAX_LENGTH} characters`]: 'tagTooLong',
+  'Tag can only contain letters, numbers, spaces, underscores, and hyphens': 'tagInvalidChars',
+  [`Maximum ${LIMITS.THEME_MAX_TAGS} tags allowed`]: 'themeTooManyTags',
+  [`You can create a maximum of ${LIMITS.THEME_MAX_PER_USER} themes`]: 'themeCap',
+  [`SVG data must be at most ${LIMITS.THEME_SVG_MAX_SIZE} characters`]: 'svgTooLong',
+  'Invalid or unsafe SVG markup': 'svgUnsafe',
+  'You already have a theme with that name': 'themeNameTaken',
+  'Theme is already published': 'themeAlreadyPublished',
+  'Theme is not published': 'themeNotPublished',
+  'This theme has been removed by an admin': 'themeRemovedByAdmin',
+  'You can only edit your own themes': 'themeNotOwned',
+  'You can only delete your own themes': 'themeNotOwned',
+  'You can only publish your own themes': 'themeNotOwned',
+  'You can only unpublish your own themes': 'themeNotOwned',
+  'Theme not found': 'themeNotFound',
+
+  // ─── Voice (voice:error notices and acks, websocket/voiceHandler.ts) ───
+  'This voice channel no longer exists.': 'voiceChannelGone',
+  'Voice server restarted — please rejoin the voice channel.': 'voiceServerRestarted',
+  'You have been disconnected from this voice channel.': 'voiceDisconnected',
+  'This voice channel requires end-to-end encryption support.': 'voiceRequiresE2E',
+  'Screen sharing is not available in secure voice channels': 'screenShareNotInSecure',
+  'Someone else is already sharing in this channel': 'screenShareTaken',
+  'You do not have permission to speak in this channel': 'noPermissionSpeak',
+
   // ─── Admin ─────────────────────────────────────────────────────────────
   'Cannot ban yourself': 'cannotBanSelf',
   'Cannot ban a super admin': 'cannotBanSuperAdmin',
@@ -205,15 +372,64 @@ const ERROR_VARS: Record<string, Record<string, unknown>> = {
   tooManyTags: { max: LIMITS.DISCOVERY_MAX_TAGS },
   joinMessageTooLong: { max: LIMITS.JOIN_REQUEST_MESSAGE_MAX },
   webhookNameTooLong: { max: LIMITS.WEBHOOK_NAME_MAX },
+  usernameTooShort: { min: LIMITS.USERNAME_MIN },
+  usernameTooLong: { max: LIMITS.USERNAME_MAX },
+  passwordTooShort: { min: LIMITS.PASSWORD_MIN },
+  passwordTooLong: { max: LIMITS.PASSWORD_MAX },
+  displayNameTooLong: { max: LIMITS.DISPLAY_NAME_MAX },
+  bioTooLong: { max: LIMITS.BIO_MAX },
+  serverNameTooShort: { min: LIMITS.SERVER_NAME_MIN },
+  serverNameTooLong: { max: LIMITS.SERVER_NAME_MAX },
+  nicknameTooLong: { max: LIMITS.NICKNAME_MAX },
+  channelNameTooShort: { min: LIMITS.CHANNEL_NAME_MIN },
+  channelNameTooLong: { max: LIMITS.CHANNEL_NAME_MAX },
+  categoryNameTooShort: { min: LIMITS.CATEGORY_NAME_MIN },
+  categoryNameTooLong: { max: LIMITS.CATEGORY_NAME_MAX },
+  roleNameTooShort: { min: LIMITS.ROLE_NAME_MIN },
+  roleNameTooLong: { max: LIMITS.ROLE_NAME_MAX },
+  messageTooLong: { max: LIMITS.MESSAGE_MAX },
+  maxAttachments: { max: LIMITS.MAX_ATTACHMENTS_PER_MESSAGE },
+  maxReactions: { max: LIMITS.MAX_REACTIONS_PER_MESSAGE },
+  reportReasonTooShort: { min: LIMITS.REPORT_REASON_MIN },
+  reportReasonTooLong: { max: LIMITS.REPORT_REASON_MAX },
+  themeNameTooShort: { min: LIMITS.THEME_NAME_MIN },
+  themeNameTooLong: { max: LIMITS.THEME_NAME_MAX },
+  themeDescriptionTooLong: { max: LIMITS.THEME_DESCRIPTION_MAX },
+  tagTooLong: { max: LIMITS.THEME_TAG_MAX_LENGTH },
+  themeTooManyTags: { max: LIMITS.THEME_MAX_TAGS },
+  themeCap: { max: LIMITS.THEME_MAX_PER_USER },
+  svgTooLong: { max: LIMITS.THEME_SVG_MAX_SIZE },
 };
 
 /**
  * Messages that carry a value the SERVER picks at runtime (an admin-tunable
- * cap), so no exact string can be mapped: matched by pattern, the captured
- * number travels as `{{max}}`.
+ * cap, a per-kind upload size, another package's constant), so no exact string
+ * can be mapped: matched by pattern, anchored at both ends, and the captured
+ * number travels as `{{max}}` (or `{{min}}` where the entry says so).
  */
-const ERROR_PATTERNS: ReadonlyArray<{ re: RegExp; key: string }> = [
+const ERROR_PATTERNS: ReadonlyArray<{ re: RegExp; key: string; param?: 'max' | 'min' }> = [
   { re: /^Server can have at most (\d+) webhooks$/, key: 'webhookCap' },
+  { re: /^Server can have at most (\d+) channels$/, key: 'channelCap' },
+  { re: /^Server can have at most (\d+) categories$/, key: 'categoryCap' },
+  { re: /^Server can have at most (\d+) roles$/, key: 'roleCap' },
+  { re: /^You can only create up to (\d+) servers$/, key: 'serverCap' },
+  { re: /^This server has reached its member limit \((\d+)\)$/, key: 'memberCap' },
+  { re: /^A secure channel can have at most (\d+) members$/, key: 'secureChannelMemberCap' },
+  { re: /^Device limit reached \((\d+)\) — revoke a device first$/, key: 'deviceLimit' },
+  // routes/uploads.ts: the cap depends on the kind of file (video or not, avatar, icon)
+  { re: /^Invalid file size \(max (\d+(?:\.\d+)?)MB\)$/, key: 'fileTooLarge' },
+  // validateSearchQuery (message search) and the directory search share the sentence, not the numbers
+  { re: /^Search query must be at least (\d+) characters$/, key: 'searchQueryTooShort', param: 'min' },
+  { re: /^Search query must be at most (\d+) characters$/, key: 'searchQueryTooLong' },
+];
+
+/**
+ * Every `serverErrors.*` key this module can produce — exact strings AND
+ * patterns — for the locale parity test: the keys are reached through a
+ * template no static scan sees.
+ */
+export const ALL_ERROR_KEYS: readonly string[] = [
+  ...new Set([...Object.values(ERROR_MAP), ...ERROR_PATTERNS.map((p) => p.key)]),
 ];
 
 /** The server-discovery subset of the map, for the locale parity test. */
@@ -249,13 +465,13 @@ export function translateServerError(
   const key = ERROR_MAP[serverMessage];
   if (key) return t(`serverErrors.${key}`, { defaultValue: serverMessage, ...ERROR_VARS[key] });
 
-  for (const { re, key: patternKey } of ERROR_PATTERNS) {
+  for (const { re, key: patternKey, param = 'max' } of ERROR_PATTERNS) {
     const match = re.exec(serverMessage);
-    if (match) return t(`serverErrors.${patternKey}`, { defaultValue: serverMessage, max: Number(match[1]) });
+    if (match) return t(`serverErrors.${patternKey}`, { defaultValue: serverMessage, [param]: Number(match[1]) });
   }
 
-  // Other dynamic messages (e.g., "Server can have at most 20 channels"):
-  // return the raw message as fallback — at least it's informative
+  // A message no mapping knows (a newer server's): the raw text is still more
+  // useful than a generic failure
   return serverMessage;
 }
 

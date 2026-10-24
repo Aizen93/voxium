@@ -148,3 +148,40 @@ describe('AdminUserDetail — promote confirmation', () => {
     expect(qa('button').some((b) => b.textContent?.includes('Promote to Admin'))).toBe(false);
   });
 });
+
+describe('AdminUserDetail — ban and delete only where the server allows them', () => {
+  // routes/admin.ts: an admin may ban or delete members only; a superadmin
+  // anyone but another superadmin. The buttons used to show regardless and
+  // fail with a generic error.
+  const buttonTexts = () => qa('button').map((b) => b.textContent?.trim());
+
+  it('an admin viewing another admin sees neither button, with the reason', async () => {
+    viewer.role = 'admin';
+    store.selectedUser = { ...USER, role: 'admin' };
+    await render();
+    expect(buttonTexts()).not.toContain('Ban User');
+    expect(buttonTexts()).not.toContain('Delete User');
+    expect(document.body.textContent).toContain('Only a superadmin can ban or delete an admin.');
+  });
+
+  it('a superadmin viewing an admin sees both; viewing a superadmin sees neither', async () => {
+    viewer.role = 'superadmin';
+    store.selectedUser = { ...USER, role: 'admin' };
+    await render();
+    expect(buttonTexts()).toContain('Ban User');
+    expect(buttonTexts()).toContain('Delete User');
+
+    // a superadmin target has no action row at all (pre-existing guard)
+    store.selectedUser = { ...USER, role: 'superadmin' };
+    await act(async () => { root.render(<AdminUserDetail userId="u-1" onBack={() => {}} />); });
+    expect(buttonTexts()).not.toContain('Ban User');
+    expect(buttonTexts()).not.toContain('Delete User');
+  });
+
+  it('an admin viewing a member still sees both', async () => {
+    viewer.role = 'admin';
+    await render();
+    expect(buttonTexts()).toContain('Ban User');
+    expect(buttonTexts()).toContain('Delete User');
+  });
+});

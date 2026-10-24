@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
@@ -25,20 +26,21 @@ interface DeviceInfo {
 // `SettingsTab` now lives in settingsStore so `openSettings('security')` can
 // deep-link here without importing this module.
 
-function formatKeyCode(code: string): string {
+function formatKeyCode(code: string, t: TFunction): string {
+  // Named keys read in the user's language; punctuation is its own label
   const map: Record<string, string> = {
-    Backquote: '` (Backtick)',
-    Space: 'Space',
-    Tab: 'Tab',
-    CapsLock: 'Caps Lock',
-    ShiftLeft: 'Left Shift',
-    ShiftRight: 'Right Shift',
-    ControlLeft: 'Left Ctrl',
-    ControlRight: 'Right Ctrl',
-    AltLeft: 'Left Alt',
-    AltRight: 'Right Alt',
-    MetaLeft: 'Left Meta',
-    MetaRight: 'Right Meta',
+    Backquote: t('settings.audio.keys.backquote'),
+    Space: t('settings.audio.keys.space'),
+    Tab: t('settings.audio.keys.tab'),
+    CapsLock: t('settings.audio.keys.capsLock'),
+    ShiftLeft: t('settings.audio.keys.shiftLeft'),
+    ShiftRight: t('settings.audio.keys.shiftRight'),
+    ControlLeft: t('settings.audio.keys.controlLeft'),
+    ControlRight: t('settings.audio.keys.controlRight'),
+    AltLeft: t('settings.audio.keys.altLeft'),
+    AltRight: t('settings.audio.keys.altRight'),
+    MetaLeft: t('settings.audio.keys.metaLeft'),
+    MetaRight: t('settings.audio.keys.metaRight'),
     Backslash: '\\',
     BracketLeft: '[',
     BracketRight: ']',
@@ -53,7 +55,7 @@ function formatKeyCode(code: string): string {
   if (map[code]) return map[code];
   if (code.startsWith('Key')) return code.slice(3);
   if (code.startsWith('Digit')) return code.slice(5);
-  if (code.startsWith('Numpad')) return 'Numpad ' + code.slice(6);
+  if (code.startsWith('Numpad')) return t('settings.audio.keys.numpad', { key: code.slice(6) });
   return code;
 }
 
@@ -90,7 +92,7 @@ function KeyBindingPicker({ value, onChange }: { value: string; onChange: (code:
       }`}
     >
       <Keyboard size={14} />
-      {listening ? t('settings.audio.pressAKey') : formatKeyCode(value)}
+      {listening ? t('settings.audio.pressAKey') : formatKeyCode(value, t)}
     </button>
   );
 }
@@ -476,7 +478,7 @@ function TwoFactorSection() {
 
           <div className="flex justify-center">
             <div className="rounded-xl bg-white p-3">
-              <img src={qrCodeDataUrl} alt="TOTP QR Code" className="h-48 w-48" />
+              <img src={qrCodeDataUrl} alt={t('settings.security.qrCodeAlt')} className="h-48 w-48" />
             </div>
           </div>
 
@@ -701,12 +703,12 @@ function AppearanceTab() {
         <h3 className="text-sm font-semibold text-vox-text-primary mb-1">{t('settings.appearance.builtInThemes')}</h3>
         <p className="text-xs text-vox-text-muted mb-3">{t('settings.appearance.builtInThemesDesc')}</p>
         <div className="flex gap-3">
-          {THEMES.map((t) => (
+          {THEMES.map((th) => (
             <button
-              key={t.id}
-              onClick={() => setTheme(t.id)}
+              key={th.id}
+              onClick={() => setTheme(th.id)}
               className={`relative flex flex-col items-center gap-2 rounded-xl border-2 p-3 transition-colors ${
-                theme === t.id
+                theme === th.id
                   ? 'border-vox-accent-primary bg-vox-accent-primary/10'
                   : 'border-vox-border hover:border-vox-text-muted'
               }`}
@@ -719,7 +721,7 @@ function AppearanceTab() {
                   midnight: { bg: '#0a0a12', sidebar: '#060610', channel: '#0c0c18', line: '#1a1a30' },
                   tactical: { bg: '#1a1c1a', sidebar: '#121412', channel: '#181a18', line: '#2a2c28', accent: '#4ade50' },
                 };
-                const c = p[t.id] || p.dark;
+                const c = p[th.id] || p.dark;
                 return (
                   <div className="w-full h-16 rounded-lg overflow-hidden flex relative" style={{ background: c.bg }}>
                     <div className="w-1/4 h-full" style={{ background: c.sidebar }} />
@@ -740,10 +742,10 @@ function AppearanceTab() {
                   </div>
                 );
               })()}
-              <span className={`text-xs font-medium ${theme === t.id ? 'text-vox-accent-primary' : 'text-vox-text-secondary'}`}>
-                {t.label}
+              <span className={`text-xs font-medium ${theme === th.id ? 'text-vox-accent-primary' : 'text-vox-text-secondary'}`}>
+                {t(th.labelKey)}
               </span>
-              {theme === t.id && (
+              {theme === th.id && (
                 <div className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-vox-accent-primary flex items-center justify-center">
                   <Check size={12} className="text-white" />
                 </div>
@@ -827,7 +829,7 @@ function AppearanceTab() {
                           onClick={() => handleUnpublish(ct.localId)}
                           disabled={publishing === ct.localId}
                           className="px-1.5 py-0.5 rounded text-[9px] font-medium border border-vox-border text-vox-text-muted hover:text-vox-accent-danger hover:border-vox-accent-danger transition-colors"
-                          title="Unpublish from marketplace"
+                          title={t('settings.appearance.unpublishTitle')}
                         >
                           {publishing === ct.localId ? '...' : t('settings.appearance.unpublish')}
                         </button>
@@ -836,7 +838,7 @@ function AppearanceTab() {
                           onClick={() => handlePublish(ct.localId)}
                           disabled={publishing === ct.localId}
                           className="px-1.5 py-0.5 rounded text-[9px] font-medium border border-vox-accent-primary text-vox-accent-primary hover:bg-vox-accent-primary/10 transition-colors"
-                          title="Publish to marketplace"
+                          title={t('settings.appearance.publishTitle')}
                         >
                           {publishing === ct.localId ? '...' : t('settings.appearance.publish')}
                         </button>
@@ -845,14 +847,14 @@ function AppearanceTab() {
                     <button
                       onClick={() => handleEdit(ct.localId)}
                       className="p-1 rounded text-vox-text-muted hover:text-vox-text-primary transition-colors"
-                      title="Edit"
+                      title={t('common.edit')}
                     >
                       <Pencil size={12} />
                     </button>
                     <button
                       onClick={() => handleDelete(ct.localId)}
                       className="p-1 rounded text-vox-text-muted hover:text-vox-accent-danger transition-colors"
-                      title="Delete"
+                      title={t('common.delete')}
                     >
                       <Trash2 size={12} />
                     </button>
@@ -999,12 +1001,12 @@ function AudioTab() {
         setInputDevices(
           devices
             .filter((d) => d.kind === 'audioinput')
-            .map((d) => ({ deviceId: d.deviceId, label: d.label || `Microphone ${d.deviceId.slice(0, 8)}` }))
+            .map((d) => ({ deviceId: d.deviceId, label: d.label || t('settings.audio.microphoneFallback', { id: d.deviceId.slice(0, 8) }) }))
         );
         setOutputDevices(
           devices
             .filter((d) => d.kind === 'audiooutput')
-            .map((d) => ({ deviceId: d.deviceId, label: d.label || `Speaker ${d.deviceId.slice(0, 8)}` }))
+            .map((d) => ({ deviceId: d.deviceId, label: d.label || t('settings.audio.speakerFallback', { id: d.deviceId.slice(0, 8) }) }))
         );
       } catch (err) {
         console.warn('[Settings] enumerateDevices failed:', err);

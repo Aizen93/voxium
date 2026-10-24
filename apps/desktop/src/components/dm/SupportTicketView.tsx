@@ -147,7 +147,7 @@ export function SupportTicketView() {
       <div className="border-t border-vox-border px-4 py-3">
         {isClosed ? (
           <div className="flex items-center gap-3">
-            <p className="flex-1 text-sm text-vox-text-muted">Ticket is closed.</p>
+            <p className="flex-1 text-sm text-vox-text-muted">{t('support.ticketClosed')}</p>
             <button
               onClick={handleReopen}
               className="flex items-center gap-1.5 rounded-md bg-vox-accent-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-vox-accent-primary/90 transition-colors"
