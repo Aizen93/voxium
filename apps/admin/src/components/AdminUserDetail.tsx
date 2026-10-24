@@ -392,7 +392,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
       {confirmAction === 'promote' && (
         <AdminConfirmModal
           title="Promote to Admin"
-          message={`Promote "${selectedUser.username}" to admin? They will have full access to the admin dashboard.`}
+          message={`Promote "${selectedUser.username}" to admin? They will get access to the admin dashboard; changing roles, managing infrastructure servers and banning or deleting other admins stay superadmin-only.`}
           confirmLabel="Promote"
           danger={false}
           onConfirm={async () => {

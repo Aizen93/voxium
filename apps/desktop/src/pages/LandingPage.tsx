@@ -1136,7 +1136,8 @@ function ComparisonTable() {
     { feature: t('landing.comparison.lightweightClient'), voxium: 'Tauri (~10MB)',      discord: 'Electron',     teamspeak: 'Native',       matrix: 'Electron' },
     { feature: t('landing.comparison.encryption'),        voxium: 'E2E (Olm/Megolm)',  discord: 'TLS',          teamspeak: 'AES',          matrix: 'E2E (Olm)' },
     { feature: t('landing.comparison.encryptedChannels'), voxium: true,                discord: false,          teamspeak: false,          matrix: true },
-    { feature: t('landing.comparison.customBots'),        voxium: t('landing.comparison.planned'), discord: true, teamspeak: 'Plugins + SDK', matrix: true },
+    // Incoming webhooks shipped (routes/webhooks.ts, webhookExecute.ts); bots have not
+    { feature: t('landing.comparison.customBots'),        voxium: t('landing.comparison.webhooksBotsPlanned'), discord: true, teamspeak: 'Plugins + SDK', matrix: true },
     { feature: t('landing.comparison.mobileApp'),         voxium: t('landing.comparison.planned'), discord: true, teamspeak: true,           matrix: true },
   ];
 
