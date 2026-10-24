@@ -51,6 +51,7 @@ const SOURCES = [
   'components/voice/AnnotationToolbar.tsx',
   'components/voice/ConnectionQuality.tsx',
   'components/voice/DMVoicePanel.tsx',
+  'pages/CookiePolicyPage.tsx',
   'pages/LandingPage.tsx',
   'pages/PrivacyPage.tsx',
   'pages/TermsPage.tsx',
@@ -269,9 +270,11 @@ describe('the migrated surfaces', () => {
 });
 
 describe('no hard-coded English anywhere in the desktop app', () => {
-  // The legal documents are excluded: their text is maintained as the
-  // binding English original (components/legal, CookiePolicyPage).
-  const EXCLUDED = /__tests__|[\\/]locales[\\/]|[\\/]components[\\/]legal[\\/]|CookiePolicyPage\.tsx$/;
+  // The legal documents are excluded: their text is maintained as documents,
+  // one file per language (components/legal/*.en.tsx, *.fr.tsx), not as i18n
+  // keys. The pages around them (pages/PrivacyPage, TermsPage,
+  // CookiePolicyPage) are chrome like any other and are scanned.
+  const EXCLUDED = /__tests__|[\\/]locales[\\/]|[\\/]components[\\/]legal[\\/]/;
   function walk(dir: string): string[] {
     return readdirSync(dir).flatMap((entry) => {
       const full = join(dir, entry);

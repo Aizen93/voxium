@@ -10,7 +10,8 @@ import { createRoot, type Root } from 'react-dom/client';
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
-  return { ...actual, useTranslation: () => ({ t: (k: string) => k }) };
+  // i18n too, as the real hook always returns it: the legal documents read the language from it
+  return { ...actual, useTranslation: () => ({ t: (k: string) => k, i18n: { language: 'en' } }) };
 });
 
 const acceptConsent = vi.fn();

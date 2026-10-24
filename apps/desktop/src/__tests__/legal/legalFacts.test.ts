@@ -2,9 +2,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
-import { createElement, type ReactElement } from 'react';
+import { createElement, type ComponentType } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MemoryRouter } from 'react-router-dom';
 import {
   IP_RECORD_RETENTION_DAYS,
   ORPHAN_GRACE_DAYS,
@@ -14,9 +13,10 @@ import {
   JOIN_REQUEST_DECLINE_COOLDOWN_DAYS,
   E2E_LIMITS,
 } from '@voxium/shared';
-import { PrivacyContent } from '../../components/legal/PrivacyContent';
-import { TermsContent } from '../../components/legal/TermsContent';
-import { CookiePolicyPage } from '../../pages/CookiePolicyPage';
+import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/legalLanguage';
+import { PRIVACY_CONTENT } from '../../components/legal/PrivacyContent';
+import { TERMS_CONTENT } from '../../components/legal/TermsContent';
+import { COOKIE_POLICY_CONTENT } from '../../components/legal/CookiePolicyContent';
 
 /**
  * The legal pages state facts the code implements, pinned to the code.
@@ -32,6 +32,13 @@ import { CookiePolicyPage } from '../../pages/CookiePolicyPage';
  *
  * The pages must also never describe our infrastructure: no product,
  * provider, host or port. They say "our servers" and "server logs".
+ *
+ * Every document exists in English and in French (components/legal/*.en.tsx,
+ * *.fr.tsx), and both are checked here alike: each pin, each phrase the code
+ * backs, is written once per language, next to each other, so a constant that
+ * changes is followed in both. The French must also keep the English's shape
+ * (same sections, list items and table rows: a line added to one language
+ * only fails) and French spacing.
  *
  * Node environment: the pages render with react-dom/server, and the
  * server-side values the desktop package cannot import are read from source.
@@ -89,89 +96,180 @@ function decodeEntities(text: string): string {
     .replace(/&#x27;|&#39;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
+    .replace(/&nbsp;/g, String.fromCharCode(0x00a0))
     .replace(/&amp;/g, '&');
 }
 
-/** What a reader sees: inline tags vanish, every other tag separates words. */
-function visibleText(html: string): string {
+/** Inline tags vanish, every other tag separates words; no-break spaces are kept. */
+function rawText(html: string): string {
   return decodeEntities(
     html
       .replace(/<\/?(?:strong|em|a|span)\b[^>]*>/g, '')
-      .replace(/<[^>]+>/g, ' '),
-  ).replace(/\s+/g, ' ').trim();
+      .replace(/<[^>]+>/g, '\n'),
+  );
 }
 
-function render(element: ReactElement) {
-  const html = renderToStaticMarkup(element);
+/** What a reader sees, with every run of spaces (no-break ones included) made one plain space. */
+function visibleText(html: string): string {
+  return rawText(html).replace(/\s+/g, ' ').trim();
+}
+
+function render(Document: ComponentType) {
+  const html = renderToStaticMarkup(createElement(Document));
   const headings = Array.from(html.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/g), (m) => visibleText(m[1]));
   return { html, text: visibleText(html), headings };
 }
 
 type PageName = 'privacy' | 'terms' | 'cookies';
+type Rendered = ReturnType<typeof render>;
+/** One string per document language, written side by side. */
+type PerLanguage = Record<LegalLanguage, string>;
 
-const pages: Record<PageName, ReturnType<typeof render>> = {
-  privacy: render(createElement(PrivacyContent)),
-  terms: render(createElement(TermsContent)),
-  cookies: render(createElement(MemoryRouter, null, createElement(CookiePolicyPage))),
+/** What each dispatcher can render, per language: the documents users are actually shown. */
+const DOCUMENTS: Record<PageName, Record<LegalLanguage, ComponentType>> = {
+  privacy: PRIVACY_CONTENT,
+  terms: TERMS_CONTENT,
+  cookies: COOKIE_POLICY_CONTENT,
 };
-const pageNames = Object.keys(pages) as PageName[];
+const pageNames = Object.keys(DOCUMENTS) as PageName[];
 
-const LAST_UPDATED = 'Last updated: October 24, 2026';
+const pages = Object.fromEntries(pageNames.map((name) => [
+  name,
+  Object.fromEntries(LEGAL_LANGUAGES.map((lang) => [lang, render(DOCUMENTS[name][lang])])),
+])) as Record<PageName, Record<LegalLanguage, Rendered>>;
 
-/** Every number a page states, as the phrase that states it, with where the value comes from. */
-const PINS: Record<PageName, Array<{ phrase: string; source: string }>> = {
+/** Every (document, language) pair, for it.each. */
+const cases = pageNames.flatMap((name) => LEGAL_LANGUAGES.map((lang) => [name, lang] as const));
+
+const LAST_UPDATED: PerLanguage = {
+  en: 'Last updated: October 24, 2026',
+  fr: 'Dernière mise à jour : 24 octobre 2026',
+};
+
+/** Every number a page states, as the phrase that states it in each language, with where the value comes from. */
+const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
   privacy: [
-    { phrase: `never more than ${ANNOTATION_TTL_HOURS} hours after the last change`, source: 'ANNOTATION_STATE_TTL_SECONDS (server utils/annotationState.ts)' },
-    { phrase: `deleted ${LIMITS.ATTACHMENT_RETENTION_DAYS} days after the message they were sent with`, source: 'LIMITS.ATTACHMENT_RETENTION_DAYS' },
-    { phrase: `deleted after ${IP_RECORD_RETENTION_DAYS} days without activity from that address`, source: 'IP_RECORD_RETENTION_DAYS' },
-    { phrase: `deleted ${UNVERIFIED_ACCOUNT_TTL_DAYS} days after registration`, source: 'UNVERIFIED_ACCOUNT_TTL_DAYS (server utils/registrationHygiene.ts)' },
-    { phrase: `deleted ${JOIN_REQUEST_PENDING_TTL_DAYS} days after being sent`, source: 'JOIN_REQUEST_PENDING_TTL_DAYS' },
-    { phrase: `kept for ${JOIN_REQUEST_DECLINE_COOLDOWN_DAYS} days, so the same server`, source: 'JOIN_REQUEST_DECLINE_COOLDOWN_DAYS' },
-    { phrase: `Undelivered encryption key material is deleted after ${KEYSHARE_MAX_AGE_DAYS} days`, source: 'E2E_LIMITS.KEYSHARE_MAX_AGE_MS' },
-    { phrase: `at least ${ORPHAN_GRACE_DAYS} days old`, source: 'ORPHAN_GRACE_DAYS' },
+    {
+      source: 'ANNOTATION_STATE_TTL_SECONDS (server utils/annotationState.ts)',
+      en: `never more than ${ANNOTATION_TTL_HOURS} hours after the last change`,
+      fr: `jamais plus de ${ANNOTATION_TTL_HOURS} heures après la dernière modification`,
+    },
+    {
+      source: 'LIMITS.ATTACHMENT_RETENTION_DAYS',
+      en: `deleted ${LIMITS.ATTACHMENT_RETENTION_DAYS} days after the message they were sent with`,
+      fr: `supprimées ${LIMITS.ATTACHMENT_RETENTION_DAYS} jours après le message avec lequel elles ont été envoyées`,
+    },
+    {
+      source: 'IP_RECORD_RETENTION_DAYS',
+      en: `deleted after ${IP_RECORD_RETENTION_DAYS} days without activity from that address`,
+      fr: `supprimées après ${IP_RECORD_RETENTION_DAYS} jours sans activité depuis cette adresse`,
+    },
+    {
+      source: 'UNVERIFIED_ACCOUNT_TTL_DAYS (server utils/registrationHygiene.ts)',
+      en: `deleted ${UNVERIFIED_ACCOUNT_TTL_DAYS} days after registration`,
+      fr: `supprimés ${UNVERIFIED_ACCOUNT_TTL_DAYS} jours après l'inscription`,
+    },
+    {
+      source: 'JOIN_REQUEST_PENDING_TTL_DAYS',
+      en: `deleted ${JOIN_REQUEST_PENDING_TTL_DAYS} days after being sent`,
+      fr: `supprimées ${JOIN_REQUEST_PENDING_TTL_DAYS} jours après leur envoi`,
+    },
+    {
+      source: 'JOIN_REQUEST_DECLINE_COOLDOWN_DAYS',
+      en: `kept for ${JOIN_REQUEST_DECLINE_COOLDOWN_DAYS} days, so the same server`,
+      fr: `conservée ${JOIN_REQUEST_DECLINE_COOLDOWN_DAYS} jours, afin que le même serveur`,
+    },
+    {
+      source: 'E2E_LIMITS.KEYSHARE_MAX_AGE_MS',
+      en: `Undelivered encryption key material is deleted after ${KEYSHARE_MAX_AGE_DAYS} days`,
+      fr: `Les éléments de clé de chiffrement non remis sont supprimés après ${KEYSHARE_MAX_AGE_DAYS} jours`,
+    },
+    {
+      source: 'ORPHAN_GRACE_DAYS',
+      en: `at least ${ORPHAN_GRACE_DAYS} days old`,
+      fr: `datent d'au moins ${ORPHAN_GRACE_DAYS} jours`,
+    },
   ],
   terms: [
     // A legal decision, not a code constant: nothing in the code checks age.
-    { phrase: 'at least 13 years old', source: 'the minimum age (no code constant)' },
+    { source: 'the minimum age (no code constant)', en: 'at least 13 years old', fr: 'avoir au moins 13 ans' },
   ],
   cookies: [
-    { phrase: `${ACCESS_TOKEN_MINUTES} minutes, renewed automatically`, source: 'generateTokens() JWT_EXPIRES_IN default' },
-    { phrase: `Up to ${REFRESH_REMEMBERED_DAYS} days with “Remember me”`, source: 'generateTokens() JWT_REFRESH_EXPIRES_IN default' },
-    { phrase: `${REFRESH_SESSION_HOURS} hours without`, source: 'generateTokens() refresh lifetime without "Remember me"' },
-    { phrase: `${TRUSTED_DEVICE_TTL_DAYS} days; kept when you sign out`, source: 'TRUSTED_DEVICE_TTL_DAYS' },
+    {
+      source: 'generateTokens() JWT_EXPIRES_IN default',
+      en: `${ACCESS_TOKEN_MINUTES} minutes, renewed automatically`,
+      fr: `${ACCESS_TOKEN_MINUTES} minutes, renouvelé automatiquement`,
+    },
+    {
+      source: 'generateTokens() JWT_REFRESH_EXPIRES_IN default',
+      en: `Up to ${REFRESH_REMEMBERED_DAYS} days with “Remember me”`,
+      fr: `Jusqu'à ${REFRESH_REMEMBERED_DAYS} jours avec « Se souvenir de moi »`,
+    },
+    {
+      source: 'generateTokens() refresh lifetime without "Remember me"',
+      en: `${REFRESH_SESSION_HOURS} hours without`,
+      fr: `${REFRESH_SESSION_HOURS} heures sans`,
+    },
+    {
+      source: 'TRUSTED_DEVICE_TTL_DAYS',
+      en: `${TRUSTED_DEVICE_TTL_DAYS} days; kept when you sign out`,
+      fr: `${TRUSTED_DEVICE_TTL_DAYS} jours ; conservé lorsque vous vous déconnectez`,
+    },
   ],
 };
 
-/** Statements the code proved false; none may come back. */
-const KNOWN_FALSE = [
-  'Until logout',
-  'local storage for authentication',
-  'never leave your device',
-  'All stored data is anonymous',
-  'Export your data',
-  'solely for security',
-  'server-side encryption at rest',
-  'delete your account at any time',
-  'promptly update it',
-  'days after upload',
-  'in shared servers',
-];
+/** Statements the code proved false; none may come back, in either language. */
+const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
+  en: [
+    'Until logout',
+    'local storage for authentication',
+    'never leave your device',
+    'All stored data is anonymous',
+    'Export your data',
+    'solely for security',
+    'server-side encryption at rest',
+    'delete your account at any time',
+    'promptly update it',
+    'days after upload',
+    'in shared servers',
+  ],
+  // The same statements, as a French translation would make them
+  fr: [
+    "jusqu'à la déconnexion",
+    "stockage local pour l'authentification",
+    'ne quittent jamais votre appareil',
+    'toutes les données stockées sont anonymes',
+    'exporter vos données',
+    'uniquement à des fins de sécurité',
+    'chiffrement côté serveur au repos',
+    'supprimer votre compte à tout moment',
+    'la mettre à jour sans délai',
+    'jours après le téléversement',
+    "jours après l'envoi du fichier",
+    'dans les serveurs partagés',
+  ],
+};
 
-/** Infrastructure the pages must never name: products, providers, tooling. */
+/**
+ * Infrastructure the pages must never name: products, providers, tooling.
+ * Product names are spelled alike in English and French; the hosting and
+ * e-mail providers of the French market are listed too, since a French text
+ * is the one most tempted to name them.
+ */
 const INFRASTRUCTURE_WORDS = [
   'redis', 'postgres', 'postgresql', 'prisma', 's3', 'minio', 'nginx', 'pm2', 'ovh', 'docker',
   'kubernetes', 'k8s', 'mediasoup', 'coturn', 'aws', 'amazon', 'cloudflare', 'hetzner', 'smtp',
   'geoip', 'pg_dump', 'logrotate', 'localhost',
+  'scaleway', 'gandi', 'infomaniak', 'brevo', 'sendinblue', 'mailjet',
 ];
 
 describe('legal pages: dates and structure', () => {
-  it.each(pageNames)('%s shows the date of the last revision', (name) => {
-    expect(pages[name].text).toContain(LAST_UPDATED);
+  it.each(cases)('%s (%s) shows the date of the last revision', (name, lang) => {
+    expect(pages[name][lang].text).toContain(LAST_UPDATED[lang]);
   });
 
-  it.each(pageNames)('%s numbers its sections 1..n in order', (name) => {
-    const numbers = pages[name].headings.map((h) => Number(/^(\d+)\. /.exec(h)?.[1]));
+  it.each(cases)('%s (%s) numbers its sections 1..n in order', (name, lang) => {
+    const numbers = pages[name][lang].headings.map((h) => Number(/^(\d+)\. /.exec(h)?.[1]));
     expect(numbers.length).toBeGreaterThan(0);
     expect(numbers).toEqual(numbers.map((_, i) => i + 1));
   });
@@ -184,87 +282,115 @@ describe('legal pages state the numbers the code implements', () => {
     }
   });
 
-  it.each(pageNames)('%s states each pinned number from its constant', (name) => {
-    for (const { phrase, source } of PINS[name]) {
-      expect(pages[name].text, `${name}: "${phrase}" (${source})`).toContain(phrase);
+  it.each(cases)('%s (%s) states each pinned number from its constant', (name, lang) => {
+    for (const pin of PINS[name]) {
+      expect(pages[name][lang].text, `${name} (${lang}): "${pin[lang]}" (${pin.source})`).toContain(pin[lang]);
     }
   });
 
-  it.each(pageNames)('%s states no number that is not pinned here', (name) => {
-    let rest = pages[name].text.replace(LAST_UPDATED, ' ');
-    for (const heading of pages[name].headings) {
+  it.each(cases)('%s (%s) states no number that is not pinned here', (name, lang) => {
+    const page = pages[name][lang];
+    let rest = page.text.replace(LAST_UPDATED[lang], ' ');
+    for (const heading of page.headings) {
       rest = rest.replace(heading, heading.replace(/^\d+\. /, ''));
     }
-    for (const { phrase } of PINS[name]) rest = rest.split(phrase).join(' ');
+    for (const pin of PINS[name]) rest = rest.split(pin[lang]).join(' ');
     const stray = rest.match(/\S*\d\S*/g) ?? [];
-    expect(stray, `${name}: every number must be pinned to the constant it describes (add it to PINS)`).toEqual([]);
+    expect(stray, `${name} (${lang}): every number must be pinned to the constant it describes (add it to PINS)`).toEqual([]);
   });
 });
 
 describe('legal pages no longer make the statements the code contradicts', () => {
-  it.each(pageNames)('%s carries none of the known-false phrases', (name) => {
-    const text = pages[name].text.toLowerCase();
-    for (const phrase of KNOWN_FALSE) {
-      expect(text, `${name}: "${phrase}"`).not.toContain(phrase.toLowerCase());
+  it.each(cases)('%s (%s) carries none of the known-false phrases', (name, lang) => {
+    const text = pages[name][lang].text.toLowerCase();
+    for (const phrase of KNOWN_FALSE[lang]) {
+      expect(text, `${name} (${lang}): "${phrase}"`).not.toContain(phrase.toLowerCase());
     }
   });
 
-  it.each(pageNames)('%s names no infrastructure component, provider, host or address', (name) => {
-    const html = pages[name].html.toLowerCase();
+  it.each(cases)('%s (%s) names no infrastructure component, provider, host or address', (name, lang) => {
+    const html = pages[name][lang].html.toLowerCase();
     for (const word of INFRASTRUCTURE_WORDS) {
-      expect(new RegExp(`\\b${word}\\b`).test(html), `${name} names "${word}"`).toBe(false);
+      expect(new RegExp(`\\b${word}\\b`).test(html), `${name} (${lang}) names "${word}"`).toBe(false);
     }
-    expect(/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(html), `${name} contains an IPv4 address`).toBe(false);
+    expect(/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(html), `${name} (${lang}) contains an IPv4 address`).toBe(false);
   });
 
-  it('the account-deletion conditions the pages state are the ones the server enforces', () => {
+  /** deleteOwnAccount(): where to find it, then password + TOTP, then the owned-servers refusal. */
+  const DELETION_CONDITIONS: PerLanguage[] = [
+    { en: 'settings → security', fr: 'paramètres → sécurité' },
+    {
+      en: 'you confirm with your password, and with your two-factor code if it',
+      fr: "vous confirmez avec votre mot de passe, et avec votre code d'authentification à deux facteurs s'il",
+    },
+    {
+      en: 'if you still own servers, transfer or delete them first',
+      fr: "si vous possédez encore des serveurs, transférez-les ou supprimez-les d'abord",
+    },
+  ];
+
+  it.each(LEGAL_LANGUAGES)('the account-deletion conditions the pages state are the ones the server enforces (%s)', (lang) => {
     // deleteOwnAccount(): password, then the TOTP code when enabled, then the owned-servers refusal
     expect(authService).toContain("throw new BadRequestError('Password is incorrect')");
     expect(authService).toContain("throw new BadRequestError('Two-factor authentication code is required')");
     expect(authService).toContain('throw new OwnedServersError(user.ownedServers)');
     for (const name of ['privacy', 'terms'] as const) {
-      const text = pages[name].text.toLowerCase();
-      expect(text, name).toContain('settings → security');
-      expect(text, name).toContain('you confirm with your password, and with your two-factor code if it');
-      expect(text, name).toContain('if you still own servers, transfer or delete them first');
+      const text = pages[name][lang].text.toLowerCase();
+      for (const condition of DELETION_CONDITIONS) expect(text, `${name} (${lang})`).toContain(condition[lang]);
     }
   });
 
-  it('there is still no self-service export, nor a username or email change, as the pages say', () => {
+  const NO_EXPORT: PerLanguage = {
+    en: 'the app has no download for it yet',
+    fr: "l'application ne propose pas encore de téléchargement",
+  };
+  const NO_ACCOUNT_CHANGE: PerLanguage = {
+    en: 'your username and email address cannot be changed from the app',
+    fr: "votre nom d'utilisateur et votre adresse e-mail ne peuvent pas être modifiés depuis l'application",
+  };
+
+  it.each(LEGAL_LANGUAGES)('there is still no self-service export, nor a username or email change, as the pages say (%s)', (lang) => {
     const routes = ['routes/auth.ts', 'routes/users.ts'].flatMap((file) =>
       Array.from(readServer(file).matchAll(/Router\.(?:get|post|put|patch|delete)\(\s*'([^']*)'/g), (m) => m[1]));
     expect(routes).toContain('/me/profile');
     const offending = routes.filter((path) => /export|username|email/i.test(path) && path !== '/verify-email');
     expect(offending, 'a new account route: update the Terms (section 2) and the Privacy Policy (Your Rights)').toEqual([]);
-    expect(pages.privacy.text).toContain('the app has no download for it yet');
-    expect(pages.terms.text).toContain('your username and email address cannot be changed from the app');
+    expect(pages.privacy[lang].text).toContain(NO_EXPORT[lang]);
+    expect(pages.terms[lang].text).toContain(NO_ACCOUNT_CHANGE[lang]);
   });
 });
 
 describe('the outside services the pages disclose are the ones the app contacts', () => {
-  it('discloses GitHub as the update source, and the updater still points only there', () => {
+  const ASKS_GITHUB: PerLanguage = { en: 'the desktop app asks GitHub', fr: "l'application de bureau demande à GitHub" };
+  const GITHUB_ONLY: PerLanguage = { en: 'GitHub, to check for updates', fr: 'GitHub, pour vérifier les mises à jour' };
+  const EMAIL_PROVIDER: PerLanguage = {
+    en: 'sent through an email delivery provider',
+    fr: "envoyés par l'intermédiaire d'un prestataire d'envoi d'e-mails",
+  };
+
+  it.each(LEGAL_LANGUAGES)('discloses GitHub as the update source, and the updater still points only there (%s)', (lang) => {
     const conf = JSON.parse(readFileSync(join(REPO, 'apps', 'desktop', 'src-tauri', 'tauri.conf.json'), 'utf-8')) as {
       plugins?: { updater?: { endpoints?: string[] } };
     };
     const endpoints = conf.plugins?.updater?.endpoints ?? [];
     expect(endpoints.length).toBeGreaterThan(0);
     for (const url of endpoints) expect(new URL(url).hostname).toBe('github.com');
-    expect(pages.privacy.text).toContain('the desktop app asks GitHub');
-    expect(pages.cookies.text).toContain('GitHub, to check for updates');
+    expect(pages.privacy[lang].text).toContain(ASKS_GITHUB[lang]);
+    expect(pages.cookies[lang].text).toContain(GITHUB_ONLY[lang]);
   });
 
-  it('discloses the email delivery provider for account emails', () => {
-    expect(pages.privacy.text).toContain('sent through an email delivery provider');
+  it.each(LEGAL_LANGUAGES)('discloses the email delivery provider for account emails (%s)', (lang) => {
+    expect(pages.privacy[lang].text).toContain(EMAIL_PROVIDER[lang]);
   });
 });
 
 describe('the Cookie Policy lists every storage key the app writes', () => {
   /** Keys the policy describes by name of the row rather than by key. */
-  const DESCRIBED_BY_ROW: Record<string, string> = {
-    voxium_access_token: 'Access token',
-    voxium_refresh_token: 'Refresh token',
-    voxium_trusted_device: 'Trusted-device token',
-    voxium_e2e_pk_: 'Vault key',
+  const DESCRIBED_BY_ROW: Record<string, PerLanguage> = {
+    voxium_access_token: { en: 'Access token', fr: "Jeton d'accès" },
+    voxium_refresh_token: { en: 'Refresh token', fr: 'Jeton de rafraîchissement' },
+    voxium_trusted_device: { en: 'Trusted-device token', fr: "Jeton d'appareil de confiance" },
+    voxium_e2e_pk_: { en: 'Vault key', fr: 'Clé du coffre' },
   };
 
   function sourceFiles(dir: string): string[] {
@@ -288,8 +414,75 @@ describe('the Cookie Policy lists every storage key the app writes', () => {
     expect(keys).toContain('vox:securePins:');
   });
 
-  it.each([...keys].sort())('names %s', (key) => {
-    const row = DESCRIBED_BY_ROW[key];
-    expect(pages.cookies.text, `a new storage key: list "${key}" on the Cookie Policy`).toContain(row ?? key);
+  const keyCases = [...keys].sort().flatMap((key) => LEGAL_LANGUAGES.map((lang) => [key, lang] as const));
+
+  it.each(keyCases)('names %s (%s)', (key, lang) => {
+    const row = DESCRIBED_BY_ROW[key]?.[lang];
+    expect(pages.cookies[lang].text, `a new storage key: list "${key}" on the Cookie Policy (${lang})`).toContain(row ?? key);
+  });
+});
+
+describe('every translation keeps the shape of the English document', () => {
+  const count = (html: string, tag: string) => (html.match(new RegExp(`<${tag}\\b`, 'g')) ?? []).length;
+  const mailtos = (html: string) => Array.from(html.matchAll(/href="(mailto:[^"]+)"/g), (m) => m[1]).sort();
+
+  /** The elements a translation keeps one for one: blocks, list items, table cells, emphasis and links. */
+  const SHAPE_TAGS = ['section', 'h2', 'p', 'li', 'tr', 'th', 'table', 'strong', 'em', 'a'];
+
+  it.each(pageNames)('%s has as many sections, headings, paragraphs, list items, table rows, emphases and links in every language', (name) => {
+    expect(count(pages[name].en.html, 'section'), `${name}: the count is not vacuous`).toBeGreaterThan(0);
+    expect(count(pages[name].en.html, 'li') + count(pages[name].en.html, 'tr'), `${name}: the count is not vacuous`).toBeGreaterThan(0);
+    for (const tag of SHAPE_TAGS) {
+      const english = count(pages[name].en.html, tag);
+      for (const lang of LEGAL_LANGUAGES) {
+        expect(count(pages[name][lang].html, tag), `${name}: <${tag}> in ${lang} against English — a line added to one language only`).toBe(english);
+      }
+    }
+  });
+
+  it.each(pageNames)('%s gives the same contact addresses in every language', (name) => {
+    const english = mailtos(pages[name].en.html);
+    expect(english.length).toBeGreaterThan(0);
+    for (const lang of LEGAL_LANGUAGES) expect(mailtos(pages[name][lang].html), `${name} (${lang})`).toEqual(english);
+  });
+});
+
+describe('the French documents follow French typography', () => {
+  const NO_BREAK = new Set([String.fromCharCode(0x00a0), String.fromCharCode(0x202f)]);
+
+  /** Every place a line could break where French typography forbids it, with some context. */
+  function spacingFaults(html: string): string[] {
+    const text = rawText(html);
+    const faults: string[] = [];
+    const at = (i: number) => JSON.stringify(text.slice(Math.max(0, i - 25), i + 10).replace(/\s+/g, ' '));
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      const before = text[i - 1] ?? '';
+      const after = text[i + 1] ?? '';
+      // : ; ? ! used as punctuation (followed by a space or the end, unlike "vox:securePins:")
+      const punctuation = ':;?!'.includes(char) && (after === '' || /\s/.test(after));
+      // « and » are always spaced, with a no-break space; so is punctuation
+      if (char === '«' && !NO_BREAK.has(after)) faults.push(`after «: ${at(i)}`);
+      else if ((char === '»' || punctuation) && !NO_BREAK.has(before)) faults.push(`before ${char}: ${at(i)}`);
+      // and a plain space never precedes one of them, whatever follows
+      else if (':;?!»'.includes(char) && before === ' ') faults.push(`plain space before ${char}: ${at(i)}`);
+      // English quotation marks
+      if ('"“”'.includes(char)) faults.push(`quotation mark ${char}: ${at(i)}`);
+    }
+    return faults;
+  }
+
+  it.each(pageNames)('%s puts a no-break space before : ; ? ! and inside « », and quotes with « »', (name) => {
+    expect(spacingFaults(pages[name].fr.html)).toEqual([]);
+  });
+
+  it('the check finds the faults it is meant to find (it is not vacuous)', () => {
+    // a plain space before ":", after "«" and before "»", none before ";", two straight quotes
+    expect(spacingFaults('<p>Contact : « Voxium »; "ok"</p>')).toHaveLength(6);
+    // a plain space before a colon that is not followed by a space
+    expect(spacingFaults('<p>voir :suite</p>')).toHaveLength(1);
+    // no-break spaces, storage keys, addresses and host names pass
+    const nbsp = String.fromCharCode(0x00a0);
+    expect(spacingFaults(`<p>Contact${nbsp}: «${nbsp}Voxium${nbsp}» vox:securePins:… dpo@voxium.app com.voxium.app</p>`)).toEqual([]);
   });
 });
