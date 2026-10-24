@@ -4,6 +4,7 @@ import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { validateChannelName, WS_EVENTS, Permissions, E2E_LIMITS, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
+import { replayVoiceState } from '../websocket/voiceHandler';
 import { rateLimitSecureChannelManage, rateLimitMemberManage } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
@@ -243,6 +244,15 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
     const io = getIO();
     io.to(`user:${targetUserId}`).emit(WS_EVENTS.CHANNEL_CREATED, channel as unknown as Channel);
     io.in(`user:${targetUserId}`).socketsJoin(`channel:${channelId}`);
+    // Every voice event in that room happened before their sockets were in
+    // it: replay the occupants, as the connect path does, or a call already
+    // in progress reads empty to the invitee until someone moves. Best
+    // effort — the invitation stands either way.
+    try {
+      await replayVoiceState(io.to(`user:${targetUserId}`), [serverId], new Set([channelId]), { source: 'connect' });
+    } catch (err) {
+      console.warn('[SecureChannels] Could not replay voice occupancy to the invitee:', err instanceof Error ? err.message : err);
+    }
 
     await broadcastSecureMembersUpdated(channelId, serverId);
 

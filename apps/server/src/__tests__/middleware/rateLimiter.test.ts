@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createHmac } from 'node:crypto';
 import { RateLimiterRedis } from 'rate-limiter-flexible';
 import { getRedis } from '../../utils/redis';
 
@@ -559,7 +560,7 @@ describe('the budgets a NAT shares (issue 4)', () => {
     expect(rows.profileUpdate).toMatchObject({ keyType: 'userId', points: 10, duration: 60 });
     expect(rows.inviteUse).toMatchObject({ keyType: 'userId', points: 20, duration: 60 });
     expect(rows.dmOpen).toMatchObject({ keyType: 'userId', points: 30, duration: 60 });
-    expect(rows.attachmentRead).toMatchObject({ keyType: 'ip', points: 300, duration: 60 });
+    expect(rows.attachmentRead).toMatchObject({ keyType: 'ip', points: 2000, duration: 60 });
   });
 
   it('every key prefix is still distinct', () => {
@@ -592,10 +593,14 @@ describe('loginAccountKey / totpAccountKey — the account a sign-in is for', ()
     for (const bad of [undefined, null, 42, '', '   ']) expect(loginAccountKey(bad, '203.0.113.0/24')).toBeNull();
   });
 
-  it('keys the TOTP step on the userId of a challenge token whose signature VERIFIES, an expired one included', () => {
+  it('keys the TOTP step on the userId of a challenge token whose signature VERIFIES and that is still valid — an expired one names nobody', () => {
     expect(totpAccountKey(totpToken('clx1user'))).toBe('t:clx1user');
-    const expired = jwt.sign({ userId: 'clx1user', purpose: 'totp-verify', exp: Math.floor(Date.now() / 1000) - 60 }, TEST_SECRET);
-    expect(totpAccountKey(expired)).toBe('t:clx1user');
+    // Two minutes of clock skew are tolerated, no more: a challenge obtained
+    // once (it takes the password) must not fill its user's bucket forever
+    const skewed = jwt.sign({ userId: 'clx1user', purpose: 'totp-verify', exp: Math.floor(Date.now() / 1000) - 60 }, TEST_SECRET);
+    expect(totpAccountKey(skewed)).toBe('t:clx1user');
+    const expired = jwt.sign({ userId: 'clx1user', purpose: 'totp-verify', exp: Math.floor(Date.now() / 1000) - 600 }, TEST_SECRET);
+    expect(totpAccountKey(expired)).toBeNull();
   });
 
   it('a FORGED token names no account: it used to pick any victim\'s bucket with nothing but their public userId', () => {
@@ -796,6 +801,33 @@ describe('clearUserRateLimits — the admin tool reaches the account buckets too
     for (const key of scanned) expect(del).toHaveBeenCalledWith(key);
     expect(cleared).toBeGreaterThan(0);
   });
+
+  it('an address clears its network\'s buckets and its "names no account" sender bucket too (an IPv6 address through its canonical form)', async () => {
+    const del = vi.fn(async () => 1);
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator: vi.fn(async function* () { /* none */ }) } as never);
+    const mod = await freshRateLimiter();
+
+    await mod.clearUserRateLimits('203.0.113.7');
+    expect(del).toHaveBeenCalledWith('rl:general:203.0.113.7');
+    expect(del).toHaveBeenCalledWith('rl:loginnet:203.0.113.0/24');
+    expect(del).toHaveBeenCalledWith('rl:regnet:203.0.113.0/24');
+    expect(del).toHaveBeenCalledWith('rl:regattnet:203.0.113.0/24');
+    expect(del).toHaveBeenCalledWith('rl:loginacct:x:203.0.113.7');
+
+    del.mockClear();
+    await mod.clearUserRateLimits('2001:DB8:1:2:3:4:5:6');
+    expect(del).toHaveBeenCalledWith('rl:loginnet:2001:db8:1::/48');
+    expect(del).toHaveBeenCalledWith('rl:loginacct:x:2001:db8:1:2:3:4:5:6');
+    expect(del).toHaveBeenCalledWith('rl:general:2001:db8:1:2:3:4:5:6');
+  });
+
+  it('the e-mail digest is an HMAC under a key DERIVED from the secret, never under the signing key itself', () => {
+    const digest = loginEmailDigest('alice@example.com')!;
+    const underSigningKey = createHmac('sha256', TEST_SECRET).update('alice@example.com').digest('hex').slice(0, 32);
+    expect(digest).toHaveLength(32);
+    expect(digest).not.toBe(underSigningKey);
+    expect(loginEmailDigest('  Alice@Example.com ')).toBe(digest);
+  });
 });
 
 describe('the routes carry their buckets', () => {
@@ -859,10 +891,24 @@ describe('verifiedBearerUserId — who a request is from, before authenticate ru
   beforeEach(() => { process.env.JWT_SECRET = TEST_SECRET; });
   afterEach(() => { process.env.JWT_SECRET = secretBefore; });
 
-  it('names the user of a bearer whose signature verifies — an expired one included (the route answers it 401, the budget is still that user\'s)', () => {
+  it('names the user of a bearer whose signature verifies and that is still valid (two minutes of skew tolerated)', () => {
     expect(verifiedBearerUserId(authedReq('203.0.113.1', accessToken('clxalice')) as never)).toBe('clxalice');
-    const expired = jwt.sign({ userId: 'clxalice', exp: Math.floor(Date.now() / 1000) - 60 }, TEST_SECRET);
-    expect(verifiedBearerUserId(authedReq('203.0.113.1', expired) as never)).toBe('clxalice');
+    const skewed = jwt.sign({ userId: 'clxalice', exp: Math.floor(Date.now() / 1000) - 60 }, TEST_SECRET);
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', skewed) as never)).toBe('clxalice');
+  });
+
+  it('names nobody for an EXPIRED bearer: an old token of a user (a log, a HAR file, a shared machine) must not spend that user\'s budget from anywhere, forever', () => {
+    const expired = jwt.sign({ userId: 'clxalice', exp: Math.floor(Date.now() / 1000) - 600 }, TEST_SECRET);
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', expired) as never)).toBeNull();
+  });
+
+  it('reads the `token` query parameter for the tags that cannot set a header (an attachment <img>), the header first when both are there', () => {
+    const byQuery = { ...fakeReq('203.0.113.1'), query: { token: accessToken('clxalice') } };
+    expect(verifiedBearerUserId(byQuery as never)).toBe('clxalice');
+    const both = { ...authedReq('203.0.113.1', accessToken('clxbob')), query: { token: accessToken('clxalice') } };
+    expect(verifiedBearerUserId(both as never)).toBe('clxbob');
+    expect(verifiedBearerUserId({ ...fakeReq('203.0.113.1'), query: { token: ['a', 'b'] } } as never)).toBeNull();
+    expect(verifiedBearerUserId({ ...fakeReq('203.0.113.1'), query: { token: '' } } as never)).toBeNull();
   });
 
   it('names nobody for a forged, malformed or missing bearer, or a token with a purpose (TOTP challenge, trusted device)', () => {
@@ -898,6 +944,23 @@ describe('rateLimitGeneral — per user once signed in, per address otherwise', 
     const rows = Object.fromEntries(mod.getAllRateLimits().map((l) => [l.name, l]));
     expect(rows.general).toMatchObject({ keyType: 'ip', points: 1000, duration: 60 });
     expect(rows.generalUser).toMatchObject({ keyType: 'userId', points: 600, duration: 60, blockDuration: 0, keyPrefix: 'rl:generaluser' });
+  });
+
+  it('the anonymous public asset GETs (avatars, icons) are not charged at all here — one <img> per picture on screen must not spend a NAT\'s sign-ins; attachments are', async () => {
+    const egress = '203.0.113.150';
+    const avatar = { ...fakeReq(egress), method: 'GET', path: '/uploads/avatars/u-1.webp' };
+    const attachment = { ...fakeReq(egress), method: 'GET', path: '/uploads/attachments/ch-1/a.png' };
+    // Fifty people launching behind one address, a hundred avatars each
+    for (let r = 0; r < 5000; r++) expect((await hit(mod.rateLimitGeneral as Middleware, avatar)).passed).toBe(true);
+    // The anonymous budget is untouched: a thousand sign-in-shaped requests still pass
+    for (let r = 0; r < 1000; r++) expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq(egress))).passed).toBe(true);
+    expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq(egress))).passed).toBe(false);
+    // An attachment read is an ordinary request on that bucket
+    expect((await hit(mod.rateLimitGeneral as Middleware, attachment)).passed).toBe(false);
+    // A picture still loads
+    expect((await hit(mod.rateLimitGeneral as Middleware, avatar)).passed).toBe(true);
+    // Only a GET is exempt (there is no public write under /uploads, and never may be)
+    expect((await hit(mod.rateLimitGeneral as Middleware, { ...avatar, method: 'POST' })).passed).toBe(false);
   });
 
   it('a company of 500 behind ONE address, every one of them doing a full measured session within the same minute, is never refused', async () => {

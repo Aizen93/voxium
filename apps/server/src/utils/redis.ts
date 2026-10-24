@@ -169,6 +169,25 @@ end
 return { userId, 0 }
 `;
 
+// Clear a user the column reconciliation found no live socket for — unless,
+// in the SAME atomic step, a socket of theirs is mapped in socket:users. The
+// reaper reads its candidates, then the hash, then takes the cluster snapshot:
+// a registration that lands after the hash read is a connected user whose
+// socket is in neither, and a DEL + SREM pipeline wiped it with the set and
+// announced the user offline while they were connected. Answers 1 when the
+// user was cleared, 0 when a registered socket of theirs was found (left to
+// the ordinary disconnect path).
+const CLEAR_GHOST_USER_LUA = `
+local userId = ARGV[1]
+local socketsKey = ARGV[2] .. userId
+for _, sid in ipairs(redis.call('smembers', socketsKey)) do
+  if redis.call('hget', KEYS[1], sid) == userId then return 0 end
+end
+redis.call('del', socketsKey)
+redis.call('srem', KEYS[2], userId)
+return 1
+`;
+
 export async function setUserOffline(socketId: string): Promise<{ userId: string; fullyOffline: boolean } | undefined> {
   const redis = getRedis();
   const result = await redis.eval(SET_USER_OFFLINE_LUA, {
@@ -429,17 +448,20 @@ export async function clearPresenceState(
     // ghost, whatever Redis or the column still say about them
     if (userCandidates) {
       const ghosts = [...userCandidates].filter((id) => !liveUsers.has(id) && !fullyOffline.includes(id));
-      if (ghosts.length > 0) {
-        const pipeline = redis.multi();
-        for (const userId of ghosts) {
-          pipeline.del(`user:sockets:${userId}`);
-          pipeline.sRem('online_users', userId);
-        }
+      for (const userId of ghosts) {
+        // One atomic step per ghost, like the socket walk's: the clear is
+        // REFUSED when a socket of theirs is registered by now — a connection
+        // that landed after this sweep read the hash is in neither the hash
+        // nor the snapshot, yet its user is online. Each on its own, so a
+        // throw never loses the ghosts already cleared.
         try {
-          await pipeline.exec();
-          fullyOffline.push(...ghosts);
+          const cleared = await redis.eval(CLEAR_GHOST_USER_LUA, {
+            keys: ['socket:users', 'online_users'],
+            arguments: [userId, 'user:sockets:'],
+          });
+          if (Number(cleared) === 1) fullyOffline.push(userId);
         } catch (err) {
-          console.warn('[Presence] Could not clear ghost users (next tick):', err instanceof Error ? err.message : err);
+          console.warn('[Presence] Could not clear ghost user', userId, '(next tick):', err instanceof Error ? err.message : err);
         }
       }
     }

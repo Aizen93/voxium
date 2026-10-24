@@ -326,20 +326,48 @@ export const INVITE_CODE_LENGTH = 8;
 /** Regex to match @[userId] mention tokens in message content */
 export const MENTION_RE = /@\[([^\]]{1,30})\]/g;
 
-/**
- * An `@everyone` token: not preceded by a word character or another `@`
- * (`me@everyone`, `@@everyone` are not it), and not a prefix of a longer word
- * (`@everyone-else`, `@everyone2` are not it). A lookbehind, so the match is
- * the token alone — the server and the renderer agree on `@[id]@everyone` too.
- * Whether the token PINGS anyone is the server's decision at send time
- * (`Message.mentionsEveryone`: the author held MENTION_EVERYONE in the
- * channel); a renderer must never treat the bare text as a mention.
- */
-export const EVERYONE_MENTION_RE = /(?<![\w@])@everyone(?![\w-])/g;
+/** The `@everyone` token, exactly this spelling. */
+export const EVERYONE_MENTION = '@everyone';
 
-/** Whether `content` contains an @everyone token (a fresh regex: the shared one is global). */
+/**
+ * Where `@everyone` tokens start in `content`: the token is not preceded by
+ * a word character or another `@` (`me@everyone`, `@@everyone` are not it),
+ * not a prefix of a longer word (`@everyone-else`, `@everyone2` are not it),
+ * and never inside a user mention (`@[…]`). One function for the server (does
+ * the message ping?) and the renderer (where to draw the badge), so the two
+ * can never disagree — and a plain scan rather than a lookbehind regex, which
+ * the oldest WebKit the desktop app runs on rejects at parse time (a syntax
+ * error there takes the whole bundle down). Whether the token PINGS anyone is
+ * the server's decision at send time (`Message.mentionsEveryone`: the author
+ * held MENTION_EVERYONE in the channel); a renderer must never treat the bare
+ * text as a mention.
+ */
+export function findEveryoneMentions(content: string): number[] {
+  const mentionSpans: Array<[number, number]> = [];
+  const re = new RegExp(MENTION_RE.source, MENTION_RE.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) mentionSpans.push([m.index, m.index + m[0].length]);
+  const insideMention = (i: number) => mentionSpans.some(([s, e]) => i >= s && i < e);
+
+  const found: number[] = [];
+  let from = 0;
+  for (;;) {
+    const i = content.indexOf(EVERYONE_MENTION, from);
+    if (i < 0) break;
+    from = i + EVERYONE_MENTION.length;
+    const before = i === 0 ? '' : content[i - 1];
+    const after = content[i + EVERYONE_MENTION.length] ?? '';
+    if (before !== '' && /[\w@]/.test(before)) continue;
+    if (after !== '' && /[\w-]/.test(after)) continue;
+    if (insideMention(i)) continue;
+    found.push(i);
+  }
+  return found;
+}
+
+/** Whether `content` contains an @everyone token. */
 export function mentionsEveryone(content: string): boolean {
-  return new RegExp(EVERYONE_MENTION_RE.source).test(content);
+  return findEveryoneMentions(content).length > 0;
 }
 
 export const WS_EVENTS = {

@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { EVERYONE_MENTION_RE, mentionsEveryone, PERMISSION_LIST, Permissions } from '@voxium/shared';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { findEveryoneMentions, mentionsEveryone, PERMISSION_LIST, Permissions } from '@voxium/shared';
 
 // The MENTION_EVERYONE flag existed with nothing checking it. The token the
 // permission gates is this one; whether it PINGS is the server's decision at
@@ -22,14 +24,21 @@ describe('mentionsEveryone — the @everyone token', () => {
     expect(mentionsEveryone('@EVERYONE')).toBe(false);
   });
 
-  it('the shared regex matches the token alone (a lookbehind), so the server and the renderer agree on where it starts', () => {
-    const re = new RegExp(EVERYONE_MENTION_RE.source, EVERYONE_MENTION_RE.flags);
-    const match = re.exec('hey @everyone');
-    expect(match?.[0]).toBe('@everyone');
-    expect(match?.index).toBe(4);
-    // right after a user mention — the renderer's combined regex sees the same token
-    expect(mentionsEveryone('@[clx1]@everyone')).toBe(true);
-    expect(new RegExp(EVERYONE_MENTION_RE.source).exec('@[clx1]@everyone')?.index).toBe(7);
+  it('findEveryoneMentions reports where each token starts — the ONE scan the server flags with and the renderer segments with', () => {
+    expect(findEveryoneMentions('hey @everyone')).toEqual([4]);
+    // right after a user mention: the server flags it, the renderer draws it
+    expect(findEveryoneMentions('@[clx1]@everyone')).toEqual([7]);
+    expect(findEveryoneMentions('@everyone twice: @everyone')).toEqual([0, 17]);
+    expect(findEveryoneMentions('@everyone')).toEqual([0]);
+    // inside a user mention it is part of the mention, not a token
+    expect(findEveryoneMentions('@[@everyone] hi')).toEqual([]);
+    expect(findEveryoneMentions('me@everyone @everyones @everyone-ish @@everyone')).toEqual([]);
+    expect(findEveryoneMentions('')).toEqual([]);
+  });
+
+  it('the shared module compiles no lookbehind: the oldest WebKit the desktop app runs on rejects one at PARSE time, taking the whole bundle down', () => {
+    const source = readFileSync(resolve(__dirname, '../../../../../packages/shared/src/constants.ts'), 'utf8');
+    expect(source).not.toMatch(/\(\?<[!=]/);
   });
 
   it('the permission the token is gated on is a channel-level text flag', () => {

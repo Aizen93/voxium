@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
@@ -146,11 +146,16 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   inviteUse:      { keyPrefix: 'rl:invite',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Invite Use' },
   // Opening (or re-opening) a DM conversation.
   dmOpen:         { keyPrefix: 'rl:dmopen',    points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'DM Open' },
-  // The public avatar / icon proxy (`GET /uploads/*`, no sign-in: a notification
-  // toast fetches it): per address, sized for a media-heavy channel on a NAT.
-  // It used to ride the general budget TWICE (once at the api level, once on
-  // the route), an effective 50 a minute — a channel with sixty images 429'd.
-  attachmentRead: { keyPrefix: 'rl:attread',   points: 300, duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Attachment Read' },
+  // The public avatar / icon proxy (`GET /uploads/*`, no sign-in: an `<img>`
+  // tag, a notification toast). Its ONLY budget: `rateLimitGeneral` lets it
+  // through (every avatar on screen would otherwise spend the address's
+  // anonymous budget — a few dozen users launching behind one egress, fifty
+  // images each, 429'd that address's sign-ins). Per address, sized for a
+  // room of people opening media-heavy channels: the handler is a 302 to a
+  // signed link (cached for 50 minutes by the browser) or, with `?inline`,
+  // a proxied image. It used to ride the general budget TWICE (api level and
+  // route), an effective 50 a minute — a channel with sixty images 429'd.
+  attachmentRead: { keyPrefix: 'rl:attread',   points: 2000, duration: 60, blockDuration: 0,   keyType: 'ip',     label: 'Attachment Read' },
   memberManage:   { keyPrefix: 'rl:member',    points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Member Manage' },
   // Reads of the moderation lists (join requests, bans): the client follows
   // pages and refetches on open, so they must not share the write budget.
@@ -369,6 +374,16 @@ export async function clearUserRateLimits(key: string): Promise<number> {
   const prefixes = Object.values(DEFAULTS).map((d) => d.keyPrefix);
   const exact = prefixes.map((prefix) => `${prefix}:${key}`);
   exact.push(`${DEFAULTS.loginAccount.keyPrefix}:t:${key}`);
+  if (net.isIP(key)) {
+    // An address also owns its network's buckets and its "names no account" sender bucket
+    const ip = normalizeIp(key);
+    const subnet = subnetOf(key);
+    for (const row of Object.values(DEFAULTS)) {
+      if (row.keyType === 'subnet') exact.push(`${row.keyPrefix}:${subnet}`);
+    }
+    exact.push(`${DEFAULTS.loginAccount.keyPrefix}:x:${ip}`);
+    if (ip !== key) exact.push(...prefixes.map((prefix) => `${prefix}:${ip}`));
+  }
   const digest = key.includes('@') ? loginEmailDigest(key) : null;
   if (digest !== null) {
     for await (const batch of redis.scanIterator({ MATCH: `${DEFAULTS.loginAccount.keyPrefix}:e:${digest}|*`, COUNT: 100 })) {
@@ -488,7 +503,10 @@ const byUserId = (req: Request) => req.user?.userId || req.ip || 'unknown';
  *  Null for a body without a usable e-mail (the route answers it 400). */
 export function loginEmailDigest(email: unknown): string | null {
   if (typeof email !== 'string' || email.trim() === '') return null;
-  return createHmac('sha256', process.env.JWT_SECRET ?? '').update(email.toLowerCase().trim()).digest('hex').slice(0, 32);
+  // A domain-separated key derived from the secret, never the signing key
+  // itself (the proof-of-work and the signed cursors derive theirs the same way)
+  const key = createHash('sha256').update(`voxium-login-account:${process.env.JWT_SECRET ?? ''}`).digest();
+  return createHmac('sha256', key).update(email.toLowerCase().trim()).digest('hex').slice(0, 32);
 }
 
 /** The password step's account bucket: the account AND the caller's network
@@ -498,15 +516,22 @@ export function loginAccountKey(email: unknown, subnet: string): string | null {
   return digest === null ? null : `e:${digest}|${subnet}`;
 }
 
+/** Clock skew tolerated when a limiter key is read from a token's expiry. */
+const TOKEN_KEY_CLOCK_TOLERANCE_S = 120;
+
 /** The TOTP step's account bucket: the userId of a challenge token whose
- *  signature VERIFIES (`purpose: 'totp-verify'`, HS256, our own secret) —
- *  an expired one included, so a real token keeps landing in its own user's
- *  bucket. Null for anything else: a forged payload used to be able to pick
- *  any victim's bucket, and read unverified a userId is public knowledge. */
+ *  signature VERIFIES (`purpose: 'totp-verify'`, HS256, our own secret) and
+ *  that is still valid. Null for anything else: a forged payload used to be
+ *  able to pick any victim's bucket (a userId is public knowledge), and an
+ *  EXPIRED token must not name one either — a challenge obtained once (it
+ *  takes the password) would otherwise fill the victim's bucket forever, a
+ *  password change notwithstanding. An expired challenge is refused by the
+ *  route before any code is checked, so sending it to the address bucket
+ *  opens no guessing. */
 export function totpAccountKey(totpToken: unknown): string | null {
   if (typeof totpToken !== 'string' || totpToken.length === 0 || totpToken.length > 4096) return null;
   try {
-    const payload = jwt.verify(totpToken, process.env.JWT_SECRET!, { algorithms: ['HS256'], ignoreExpiration: true }) as { userId?: unknown; purpose?: unknown };
+    const payload = jwt.verify(totpToken, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown; purpose?: unknown };
     const userId = payload?.userId;
     return payload?.purpose === 'totp-verify' && typeof userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(userId) ? `t:${userId}` : null;
   } catch {
@@ -522,26 +547,37 @@ const bySenderAddress = (req: Request) => `x:${byIp(req)}`;
 // The verified bearer, once per request: `rateLimitGeneral` runs BEFORE the
 // routes' `authenticate`, so it checks the signature itself (an HMAC, a few
 // microseconds; `authenticate` checks again and asks the database — this never
-// does). The user, not the token's validity, is what the bucket is keyed on:
-// an expired token still names its own user (the route answers it 401), a
-// forged one names nobody and is charged on the address.
+// does). A token that verifies AND is still valid names its user; an expired
+// one names nobody (it is charged on the address, like a forged one): the
+// 15-minute lifetime is what caps what a leaked token can do, and keying a
+// bucket on an expired token let any old token of a user — a HAR file, a log,
+// a shared machine — drain that user's budget forever from anywhere. The
+// desktop renews before sending, so an expired bearer is a handful of
+// requests per launch at most.
 const verifiedBearers = new WeakMap<Request, string | null>();
 
-/** The userId a request's bearer carries, if the signature verifies and it is
- *  an ACCESS token (one with a `purpose` — TOTP challenge, trusted device —
- *  is not a session); null otherwise. Memoised per request. */
+/** The userId a request's bearer carries, if the signature verifies, the
+ *  token is not expired and it is an ACCESS token (one with a `purpose` —
+ *  TOTP challenge, trusted device — is not a session); null otherwise. The
+ *  bearer is the Authorization header or, for the tags that cannot set one
+ *  (an attachment `<img>`), the `token` query parameter. Memoised per request. */
 export function verifiedBearerUserId(req: Request): string | null {
   if (verifiedBearers.has(req)) return verifiedBearers.get(req) ?? null;
   let userId: string | null = null;
   const header = req.headers.authorization;
-  if (typeof header === 'string' && header.startsWith('Bearer ') && header.length <= 4096) {
+  const queryToken = (req.query as { token?: unknown } | undefined)?.token;
+  const token = typeof header === 'string' && header.startsWith('Bearer ')
+    ? header.slice('Bearer '.length)
+    : typeof queryToken === 'string' ? queryToken : null;
+  if (token !== null && token.length > 0 && token.length <= 4096) {
     try {
-      const payload = jwt.verify(header.slice('Bearer '.length), process.env.JWT_SECRET!, { algorithms: ['HS256'], ignoreExpiration: true }) as { userId?: unknown; purpose?: unknown };
+      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown; purpose?: unknown };
       if (payload?.purpose === undefined && typeof payload?.userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(payload.userId)) {
         userId = payload.userId;
       }
     } catch {
-      // Not our token: anonymous for the limiter, refused by authenticate later
+      // Not our token, or no longer valid: anonymous for the limiter,
+      // refused by authenticate later
     }
   }
   verifiedBearers.set(req, userId);
@@ -826,8 +862,20 @@ export const rateLimitSecureChannelManage = createMiddleware('secureChannelManag
 // app.ts mounts it once and a route never charges it a second time.
 const generalByAddress = createMiddleware('general', byIp);
 const generalByUser = createMiddleware('generalUser', (req) => verifiedBearerUserId(req) ?? byIp(req));
-export const rateLimitGeneral = (req: Request, res: Response, next: NextFunction): Promise<void> =>
-  (verifiedBearerUserId(req) !== null ? generalByUser : generalByAddress)(req, res, next);
+
+/** The public avatar / icon proxy: no sign-in (an `<img>` carries no bearer),
+ *  one request per picture on screen. It has a per-address budget of its own
+ *  (`attachmentRead`) and must not spend the address's anonymous budget, or a
+ *  busy NAT's sign-ins pay for everyone's avatars. Attachments carry a token
+ *  and are charged on their user like any other request. */
+function isPublicAssetRead(req: Request): boolean {
+  return req.method === 'GET' && req.path.startsWith('/uploads/') && !req.path.startsWith('/uploads/attachments/');
+}
+
+export const rateLimitGeneral = (req: Request, res: Response, next: NextFunction): Promise<void> | void => {
+  if (isPublicAssetRead(req)) return next();
+  return (verifiedBearerUserId(req) !== null ? generalByUser : generalByAddress)(req, res, next);
+};
 // Authenticated message interactions (edit/delete/react). Keyed by userId — the
 // old per-route rateLimitGeneral shared ONE IP bucket with the global api-level
 // limiter, so users behind a NAT split a halved 429 budget between them.
