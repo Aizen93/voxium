@@ -12,12 +12,12 @@ test.describe('Critical path: register -> create server -> invite -> message', (
 
     // === Step 2: Create a server ===
     // "New space" in the strip (its accessible name is the create-or-join label)
-    await page.getByTestId('spaces-strip').getByRole('button', { name: 'Create or join a server' }).click();
-    await expect(page.getByText('Create a Server')).toBeVisible();
+    await page.getByTestId('spaces-strip').getByRole('button', { name: 'Create or join a space' }).click();
+    await expect(page.getByText('Create a Space')).toBeVisible();
 
     const serverName = `TestServer-${Date.now()}`;
-    await page.getByPlaceholder('My Awesome Server').fill(serverName);
-    await page.getByRole('button', { name: 'Create Server' }).click();
+    await page.getByPlaceholder('My Awesome Space').fill(serverName);
+    await page.getByRole('button', { name: 'Create Space' }).click();
 
     // Wait for the server to be active — channel sidebar should show #general
     await expect(page.getByText('general').first()).toBeVisible({ timeout: 10_000 });

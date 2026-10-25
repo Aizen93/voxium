@@ -102,7 +102,7 @@ const PREFERENCE_ROWS: StorageRow[] = withFrenchSpacing([
   },
   {
     item: 'voxium_collapsed_categories, voxium_pinned_spaces, voxium_dismissed_announcements, vox:annotations:prefs',
-    purpose: 'Les catégories de salons que vous avez réduites, les serveurs que vous avez épinglés, les annonces que vous avez fermées, et les réglages de vos outils de dessin du partage d’écran',
+    purpose: 'Les catégories de salons que vous avez réduites, les espaces que vous avez épinglés, les annonces que vous avez fermées, et les réglages de vos outils de dessin du partage d’écran',
     where: 'Stockage local',
     duration: 'Jusqu’à ce que vous les changiez',
   },

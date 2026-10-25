@@ -142,7 +142,7 @@ test.describe('Member lists — big servers', () => {
     await expect(people.getByTestId('people-browse-all')).toHaveCount(0);
     await expect(people.getByTestId('people-online-count')).toHaveText('1');
 
-    await page.getByLabel('Server Settings').click();
+    await page.getByLabel('Space Settings').click();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: /^Members/ }).click();
     await expect(dialog.getByTestId('member-row')).toHaveCount(2, { timeout: 15_000 });

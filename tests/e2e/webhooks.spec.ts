@@ -55,7 +55,7 @@ async function openChannel(page: Page) {
 
 /** Server settings → Integrations, once the list has loaded. */
 async function openIntegrations(page: Page): Promise<Locator> {
-  await page.getByLabel('Server Settings').click();
+  await page.getByLabel('Space Settings').click();
   await page.getByTestId('tab-integrations').click();
   const tab = page.getByTestId('integrations-tab');
   await expect(tab.getByTestId('integrations-count')).toBeVisible({ timeout: 15_000 });
