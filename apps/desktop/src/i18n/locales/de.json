@@ -237,7 +237,10 @@
       "failedToUnpublish": "Veröffentlichung konnte nicht zurückgezogen werden",
       "failedToImport": "Design konnte nicht importiert werden",
       "publishTitle": "Im Marktplatz veröffentlichen",
-      "unpublishTitle": "Aus dem Marktplatz entfernen"
+      "unpublishTitle": "Aus dem Marktplatz entfernen",
+      "stripTitle": "Space-Leiste",
+      "stripAutoHide": "Space-Leiste ausblenden, bis der Zeiger den oberen Rand berührt",
+      "stripAutoHideDesc": "Die Leiste faltet sich zu einem kleinen Reiter unter der Titelleiste und fährt aus, wenn du darauf zeigst, das Space-Kürzel drückst oder sie antippst. Die Pinnadel auf der Leiste holt sie dauerhaft zurück."
     },
     "audio": {
       "inputDevice": "Eingabegerät",
@@ -631,6 +634,11 @@
     "switcherEmpty": "Kein Server passt zu diesem Namen.",
     "switcherHint": "Tippen zum Filtern · ↑↓ zum Wechseln · Enter zum Öffnen",
     "createOrJoin": "Server erstellen oder beitreten",
+    "messagesTab": "Nachrichten",
+    "spacesZone": "Spaces",
+    "newSpace": "Neuer Space",
+    "stripRevealHandle": "Space-Leiste einblenden",
+    "stripKeepOpen": "Space-Leiste offen halten",
     "joinRequests": {
       "title": "Beitrittsanfragen",
       "empty": "Keine offenen Anfragen.",

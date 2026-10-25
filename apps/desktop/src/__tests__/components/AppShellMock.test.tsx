@@ -61,6 +61,19 @@ describe('AppShellMock — the shell both consumers draw', () => {
     expect(container.querySelector('.w-14'), 'the retired icon rail is back').toBeNull();
   });
 
+  it('mirrors the strip of issue 6: a labelled Messages tab and a labelled New space, no logo tab, no round plus', () => {
+    render(<AppShellMock variant="full" />);
+
+    const strip = find('[data-testid="app-mock-strip"]')!;
+    expect(strip.textContent).toContain('Messages');
+    expect(strip.textContent).toContain('New space');
+    expect(strip.querySelector('img'), 'the logo is the title bar\'s, not a tab').toBeNull();
+    // New space follows the overflow chip, where the tab row ends.
+    const text = strip.textContent!;
+    expect(text.indexOf('+2')).toBeLessThan(text.indexOf('New space'));
+    expect(strip.querySelector('.h-6.w-6.rounded-full'), 'the round plus at the far right is gone').toBeNull();
+  });
+
   it('keeps the hero variant free of the editor-only surfaces', () => {
     render(<AppShellMock variant="hero" />);
 

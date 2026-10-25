@@ -237,7 +237,10 @@
       "failedToUnpublish": "取消发布失败",
       "failedToImport": "主题导入失败",
       "publishTitle": "发布到商城",
-      "unpublishTitle": "从商城下架"
+      "unpublishTitle": "从商城下架",
+      "stripTitle": "空间栏",
+      "stripAutoHide": "将指针移到顶部前隐藏空间栏",
+      "stripAutoHideDesc": "空间栏会折叠成标题栏下方的小标签，当你将指针移到它上面、按下空间快捷键或点按它时会滑出。空间栏上的图钉可将其重新固定。"
     },
     "audio": {
       "inputDevice": "输入设备",
@@ -631,6 +634,11 @@
     "switcherEmpty": "没有名称匹配的服务器。",
     "switcherHint": "输入以筛选 · ↑↓ 移动 · Enter 打开",
     "createOrJoin": "创建或加入服务器",
+    "messagesTab": "消息",
+    "spacesZone": "空间",
+    "newSpace": "新建空间",
+    "stripRevealHandle": "显示空间栏",
+    "stripKeepOpen": "保持空间栏展开",
     "joinRequests": {
       "title": "加入申请",
       "empty": "没有待处理的申请。",

@@ -237,7 +237,10 @@
       "failedToUnpublish": "Impossible de retirer le thème",
       "failedToImport": "Impossible d'importer le thème",
       "publishTitle": "Publier sur la boutique",
-      "unpublishTitle": "Retirer de la boutique"
+      "unpublishTitle": "Retirer de la boutique",
+      "stripTitle": "Barre des espaces",
+      "stripAutoHide": "Masquer la barre des espaces tant que le pointeur n'est pas en haut",
+      "stripAutoHideDesc": "La barre se replie en un petit onglet sous la barre de titre et se déploie quand vous la pointez, utilisez le raccourci des espaces ou la touchez. L'épingle sur la barre la fixe à nouveau."
     },
     "audio": {
       "inputDevice": "Périphérique d'entrée",
@@ -631,6 +634,11 @@
     "switcherEmpty": "Aucun serveur ne correspond à ce nom.",
     "switcherHint": "Tapez pour filtrer · ↑↓ pour naviguer · Entrée pour ouvrir",
     "createOrJoin": "Créer ou rejoindre un serveur",
+    "messagesTab": "Messages",
+    "spacesZone": "Espaces",
+    "newSpace": "Nouvel espace",
+    "stripRevealHandle": "Afficher la barre des espaces",
+    "stripKeepOpen": "Garder la barre des espaces ouverte",
     "joinRequests": {
       "title": "Demandes d’adhésion",
       "empty": "Aucune demande en attente.",

@@ -237,7 +237,10 @@
       "failedToUnpublish": "No se pudo retirar el tema",
       "failedToImport": "No se pudo importar el tema",
       "publishTitle": "Publicar en la tienda",
-      "unpublishTitle": "Retirar de la tienda"
+      "unpublishTitle": "Retirar de la tienda",
+      "stripTitle": "Barra de espacios",
+      "stripAutoHide": "Ocultar la barra de espacios hasta que apuntes arriba",
+      "stripAutoHideDesc": "La barra se pliega en una pestaña pequeña bajo la barra de título y se despliega al apuntarla, pulsar el atajo de espacios o tocarla. El pin de la barra la vuelve a fijar."
     },
     "audio": {
       "inputDevice": "Dispositivo de entrada",
@@ -631,6 +634,11 @@
     "switcherEmpty": "Ningún servidor coincide con ese nombre.",
     "switcherHint": "Escribe para filtrar · ↑↓ para moverte · Enter para abrir",
     "createOrJoin": "Crear o unirse a un servidor",
+    "messagesTab": "Mensajes",
+    "spacesZone": "Espacios",
+    "newSpace": "Nuevo espacio",
+    "stripRevealHandle": "Mostrar la barra de espacios",
+    "stripKeepOpen": "Mantener abierta la barra de espacios",
     "joinRequests": {
       "title": "Solicitudes de ingreso",
       "empty": "No hay solicitudes pendientes.",

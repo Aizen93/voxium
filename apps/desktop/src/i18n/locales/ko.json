@@ -237,7 +237,10 @@
       "failedToUnpublish": "게시 취소에 실패했습니다",
       "failedToImport": "테마 가져오기에 실패했습니다",
       "publishTitle": "마켓플레이스에 게시",
-      "unpublishTitle": "마켓플레이스 게시 취소"
+      "unpublishTitle": "마켓플레이스 게시 취소",
+      "stripTitle": "스페이스 탭 바",
+      "stripAutoHide": "위쪽을 가리킬 때까지 스페이스 탭 바 숨기기",
+      "stripAutoHideDesc": "탭 바가 제목 표시줄 아래의 작은 탭으로 접히고, 가리키거나 스페이스 단축키를 누르거나 탭하면 펼쳐집니다. 탭 바의 핀으로 다시 고정할 수 있습니다."
     },
     "audio": {
       "inputDevice": "입력 장치",
@@ -631,6 +634,11 @@
     "switcherEmpty": "이름이 일치하는 서버가 없습니다.",
     "switcherHint": "입력해 필터 · ↑↓ 이동 · Enter 열기",
     "createOrJoin": "서버 만들기 또는 참여",
+    "messagesTab": "메시지",
+    "spacesZone": "스페이스",
+    "newSpace": "새 스페이스",
+    "stripRevealHandle": "스페이스 탭 바 표시",
+    "stripKeepOpen": "스페이스 탭 바 항상 표시",
     "joinRequests": {
       "title": "참여 요청",
       "empty": "대기 중인 요청이 없습니다.",

@@ -11,7 +11,8 @@ test.describe('Critical path: register -> create server -> invite -> message', (
     await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
 
     // === Step 2: Create a server ===
-    await page.locator('button:has(svg.lucide-plus)').click();
+    // "New space" in the strip (its accessible name is the create-or-join label)
+    await page.getByTestId('spaces-strip').getByRole('button', { name: 'Create or join a server' }).click();
     await expect(page.getByText('Create a Server')).toBeVisible();
 
     const serverName = `TestServer-${Date.now()}`;
@@ -28,6 +29,13 @@ test.describe('Critical path: register -> create server -> invite -> message', (
     await page.locator('textarea').fill(messageContent);
     await page.keyboard.press('Enter');
     await expect(page.locator(`text=${messageContent}`)).toBeVisible({ timeout: 10_000 });
+
+    // === Step 3b: the strip leads from the space to Messages and back ===
+    const strip = page.getByTestId('spaces-strip');
+    await strip.getByRole('button', { name: 'Messages', exact: true }).click();
+    await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
+    await strip.getByRole('button', { name: serverName, exact: true }).click();
+    await expect(page.getByText('general').first()).toBeVisible({ timeout: 10_000 });
 
     // === Step 4: Create an invite via API ===
     const tokenA = await page.evaluate(() => localStorage.getItem('voxium_access_token'));

@@ -237,7 +237,10 @@
       "failedToUnpublish": "Failed to unpublish",
       "failedToImport": "Failed to import theme",
       "publishTitle": "Publish to marketplace",
-      "unpublishTitle": "Unpublish from marketplace"
+      "unpublishTitle": "Unpublish from marketplace",
+      "stripTitle": "Spaces strip",
+      "stripAutoHide": "Hide the spaces strip until you point at the top",
+      "stripAutoHideDesc": "The strip folds into a small tab under the title bar and slides out when you point at it, press the spaces shortcut or tap it. The pin on the strip brings it back for good."
     },
     "audio": {
       "inputDevice": "Input Device",
@@ -631,6 +634,11 @@
     "switcherEmpty": "No server matches that name.",
     "switcherHint": "Type to filter · ↑↓ to move · Enter to open",
     "createOrJoin": "Create or join a server",
+    "messagesTab": "Messages",
+    "spacesZone": "Spaces",
+    "newSpace": "New space",
+    "stripRevealHandle": "Show the spaces strip",
+    "stripKeepOpen": "Keep the spaces strip open",
     "joinRequests": {
       "title": "Join requests",
       "empty": "No pending requests.",

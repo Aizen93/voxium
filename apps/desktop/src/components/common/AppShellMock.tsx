@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, Plus, Volume2, Mic, MicOff, Headphones, AudioLines, Minus, Square, X } from 'lucide-react';
+import { Search, Plus, Volume2, Mic, MicOff, Headphones, AudioLines, Minus, Square, X, MessageCircle } from 'lucide-react';
 import type { ThemeColors, ThemePattern, ThemePatterns } from '@voxium/shared';
 import { getPatternStyle, getThemeScopeStyle } from '../../services/themeEngine';
 
@@ -138,7 +138,13 @@ export function AppShellMock({
 
       {/* Spaces strip — communities as tabs along the top */}
       <div data-testid="app-mock-strip" className="flex items-center gap-1 bg-vox-bg-primary px-2 py-1.5">
-        <img src="/logo_static.svg" alt="" className="h-5 w-5 rounded-md" />
+        {/* Messages — the labelled tab that leads to Direct Messages in both contexts */}
+        <div className="flex h-7 items-center gap-1 rounded-lg px-1 pr-2">
+          <span className="flex h-[18px] w-[18px] items-center justify-center rounded-md bg-vox-accent-tint text-vox-accent-primary">
+            <MessageCircle className="h-2.5 w-2.5" />
+          </span>
+          <span className="whitespace-nowrap text-[9px] font-semibold text-vox-text-primary">{t('server.messagesTab')}</span>
+        </div>
         <div className="mx-0.5 h-4 w-px bg-vox-border" />
         {/* Active space — expanded tab carrying its name */}
         <div
@@ -183,13 +189,15 @@ export function AppShellMock({
         <div className="flex h-7 items-center rounded-lg border border-dashed border-vox-border px-1.5 text-[9px] text-vox-text-muted">
           +2
         </div>
+        {/* New space — the labelled plus where the tab row ends */}
+        <div className="flex h-7 items-center gap-1 whitespace-nowrap rounded-lg border border-dashed border-vox-border px-1.5 text-[9px] text-vox-text-secondary">
+          <Plus className="h-2.5 w-2.5" />
+          {t('server.newSpace')}
+        </div>
         <div className="min-w-0 flex-1" />
         <div className="flex h-6 items-center gap-1 whitespace-nowrap rounded-full border border-vox-border px-2 text-[9px] text-vox-text-muted">
           <Search className="h-2.5 w-2.5" />
           {t('server.findSpace')}
-        </div>
-        <div className="flex h-6 w-6 items-center justify-center rounded-full border border-vox-border text-vox-text-muted">
-          <Plus className="h-3 w-3" />
         </div>
       </div>
 

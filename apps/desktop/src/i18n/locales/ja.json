@@ -237,7 +237,10 @@
       "failedToUnpublish": "公開の取消に失敗しました",
       "failedToImport": "テーマのインポートに失敗しました",
       "publishTitle": "マーケットプレイスに公開",
-      "unpublishTitle": "マーケットプレイスでの公開を停止"
+      "unpublishTitle": "マーケットプレイスでの公開を停止",
+      "stripTitle": "スペース一覧バー",
+      "stripAutoHide": "上端にポインターを置くまでスペース一覧バーを隠す",
+      "stripAutoHideDesc": "バーはタイトルバーの下の小さなタブに折りたたまれ、ポインターを置くか、スペースのショートカットを押すか、タップすると表示されます。バーのピンで常時表示に戻せます。"
     },
     "audio": {
       "inputDevice": "入力デバイス",
@@ -631,6 +634,11 @@
     "switcherEmpty": "一致するサーバーはありません。",
     "switcherHint": "入力で絞り込み · ↑↓ で移動 · Enter で開く",
     "createOrJoin": "サーバーを作成または参加",
+    "messagesTab": "メッセージ",
+    "spacesZone": "スペース",
+    "newSpace": "新しいスペース",
+    "stripRevealHandle": "スペース一覧バーを表示",
+    "stripKeepOpen": "スペース一覧バーを常に表示",
     "joinRequests": {
       "title": "参加リクエスト",
       "empty": "保留中のリクエストはありません。",
