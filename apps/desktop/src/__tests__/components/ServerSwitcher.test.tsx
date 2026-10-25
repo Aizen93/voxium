@@ -10,6 +10,10 @@ import { createRoot, type Root } from 'react-dom/client';
  * it filters, unread sorts to the top, the keyboard drives it, and Enter opens
  * exactly the row that is highlighted — not the first one, and not one that
  * scrolled under the cursor.
+ *
+ * Anchored under the strip's "Find a space" control it is a dropdown that
+ * must be positioned on its FIRST render (the anchor is mounted already),
+ * never painted at the window's left edge and then moved.
  */
 
 vi.mock('react-i18next', async (importOriginal) => {
@@ -234,5 +238,61 @@ describe('ServerSwitcher', () => {
     key('Escape');
     expect(onClose).toHaveBeenCalled();
     expect(setActiveServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('ServerSwitcher — anchored under the strip', () => {
+  let anchor: HTMLButtonElement;
+  const dialog = () => document.body.querySelector('[data-testid="server-switcher"]') as HTMLElement;
+  const rect = (left: number, right: number) =>
+    ({ top: 10, bottom: 50, left, right, width: right - left, height: 40, x: left, y: 10, toJSON: () => ({}) });
+
+  beforeEach(() => {
+    anchor = document.createElement('button');
+    document.body.appendChild(anchor);
+    // jsdom has no layout: the anchor reports where the strip's control sits.
+    anchor.getBoundingClientRect = () => rect(900, 1180);
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 1280 });
+  });
+
+  afterEach(() => {
+    anchor.remove();
+  });
+
+  it('is positioned under the anchor on its first render, never shown unpositioned', () => {
+    act(() => {
+      root.render(<ServerSwitcher onClose={onClose} anchorRef={{ current: anchor }} />);
+    });
+    const el = dialog();
+    expect(el.className).toContain('fixed');
+    expect(el.style.top).toBe('58px'); // anchor bottom + 8
+    expect(el.style.right).toBe('100px'); // window width − anchor right
+    expect(el.style.visibility).toBe('');
+  });
+
+  it('follows the anchor when the window is resized', () => {
+    act(() => {
+      root.render(<ServerSwitcher onClose={onClose} anchorRef={{ current: anchor }} />);
+    });
+    anchor.getBoundingClientRect = () => rect(500, 780);
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 940 });
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(dialog().style.right).toBe('160px');
+  });
+
+  it('hides itself rather than painting at the left edge when the anchor cannot be measured', () => {
+    act(() => {
+      root.render(<ServerSwitcher onClose={onClose} anchorRef={{ current: null }} />);
+    });
+    expect(dialog().style.visibility).toBe('hidden');
+  });
+
+  it('is a centred palette, not a fixed dropdown, without an anchor', () => {
+    render();
+    const el = dialog();
+    expect(el.className).not.toContain('fixed');
+    expect(el.style.top).toBe('');
   });
 });
