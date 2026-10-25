@@ -1606,6 +1606,8 @@
     "selectedMembers": "المحددون ({{count}})",
     "noneSelected": "لم يتم اختيار أحد بعد. اختر أعضاء من القائمة أدناه.",
     "removeFromInvite": "إزالة {{name}} من قائمة الدعوة",
+    "loadMore": "تحميل المزيد",
+    "directoryCount": "{{shown}} من أصل {{total}} عضوًا",
     "noMembersFound": "لم يتم العثور على أعضاء",
     "create": "إنشاء",
     "creating": "جارٍ الإنشاء…",

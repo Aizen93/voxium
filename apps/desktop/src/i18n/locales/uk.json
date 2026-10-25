@@ -1600,6 +1600,8 @@
     "selectedMembers": "Вибрано ({{count}})",
     "noneSelected": "Поки нікого не вибрано. Виберіть учасників зі списку нижче.",
     "removeFromInvite": "Прибрати {{name}} зі списку запрошених",
+    "loadMore": "Завантажити ще",
+    "directoryCount": "{{shown}} з {{total}} учасників",
     "noMembersFound": "Учасників не знайдено",
     "create": "Створити",
     "creating": "Створення…",

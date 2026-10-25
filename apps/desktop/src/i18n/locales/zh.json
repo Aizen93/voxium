@@ -1591,6 +1591,8 @@
     "selectedMembers": "已选择（{{count}}）",
     "noneSelected": "尚未选择任何人。请从下方列表中选择成员。",
     "removeFromInvite": "将 {{name}} 从邀请列表中移除",
+    "loadMore": "加载更多",
+    "directoryCount": "{{total}} 位成员中的 {{shown}} 位",
     "noMembersFound": "未找到成员",
     "create": "创建",
     "creating": "创建中…",

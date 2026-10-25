@@ -1600,6 +1600,8 @@
     "selectedMembers": "Выбрано ({{count}})",
     "noneSelected": "Пока никто не выбран. Выберите участников из списка ниже.",
     "removeFromInvite": "Убрать {{name}} из списка приглашённых",
+    "loadMore": "Загрузить ещё",
+    "directoryCount": "{{shown}} из {{total}} участников",
     "noMembersFound": "Участники не найдены",
     "create": "Создать",
     "creating": "Создание…",

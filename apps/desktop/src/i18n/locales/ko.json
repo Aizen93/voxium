@@ -1591,6 +1591,8 @@
     "selectedMembers": "선택됨 ({{count}})",
     "noneSelected": "아직 아무도 선택하지 않았습니다. 아래 목록에서 멤버를 선택하세요.",
     "removeFromInvite": "{{name}}을(를) 초대 목록에서 제거",
+    "loadMore": "더 불러오기",
+    "directoryCount": "멤버 {{total}}명 중 {{shown}}명",
     "noMembersFound": "멤버를 찾을 수 없습니다",
     "create": "만들기",
     "creating": "만드는 중…",

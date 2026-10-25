@@ -44,11 +44,11 @@ vi.mock('../../stores/authStore', () => {
   return { useAuthStore };
 });
 vi.mock('../../stores/toastStore', () => ({ toast: { error: toastError, success: toastSuccess } }));
-vi.mock('../../hooks/useMemberSearch', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../hooks/useMemberSearch')>();
-  // No server-side search in the test: the client's rows filter locally.
-  return { ...actual, useMemberSearch: () => null };
-});
+// The directory has not answered in these tests: the dialog shows the rows
+// the client holds, filtered locally (the hook has its own test file).
+vi.mock('../../hooks/useMemberDirectory', () => ({
+  useMemberDirectory: () => ({ rows: null, total: null, hasMore: false, loading: false, error: false, loadMore: () => {} }),
+}));
 vi.mock('../../services/e2e/voiceFrameTransform', () => ({ isSecureVoiceSupported: () => true }));
 
 import { SecureChannelCreateModal } from '../../components/server/SecureChannelCreateModal';

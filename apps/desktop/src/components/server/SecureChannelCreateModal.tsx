@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
-import { useMemberSearch, memberMatches } from '../../hooks/useMemberSearch';
+import { memberMatches } from '../../hooks/useMemberSearch';
+import { useMemberDirectory } from '../../hooks/useMemberDirectory';
+import { MemberDirectoryFooter } from './MemberDirectoryFooter';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
 import type { ServerMember } from '@voxium/shared';
@@ -45,12 +47,13 @@ export function SecureChannelCreateModal({ serverId, onClose }: Props) {
 
   const maxInvitees = E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP - 1;
 
-  // No text: the rows the client holds (everyone, on a small server). Text:
-  // the server's search — the rows here are only a slice of a big server.
-  const results = useMemberSearch(serverId, query);
+  // The directory, paged: everyone in the space, filtered server-side by the
+  // search text. The rows the client holds (the People slice: online only on
+  // a big server) show while the first page loads, and if the directory fails.
+  const directory = useMemberDirectory(serverId, query);
   const candidates = useMemo(
-    () => (results ?? members.filter((m) => memberMatches(m, query))).filter((m) => m.userId !== user?.id),
-    [members, results, user?.id, query],
+    () => (directory.rows ?? members.filter((m) => memberMatches(m, query))).filter((m) => m.userId !== user?.id),
+    [members, directory.rows, user?.id, query],
   );
 
   const displayName = (m: ServerMember) => m.nickname || m.user.displayName;
@@ -245,6 +248,7 @@ export function SecureChannelCreateModal({ serverId, onClose }: Props) {
                   </button>
                 );
               })}
+              <MemberDirectoryFooter directory={directory} shown={candidates.length} />
             </div>
           </div>
         </div>

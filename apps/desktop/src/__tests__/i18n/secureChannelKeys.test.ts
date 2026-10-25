@@ -15,6 +15,7 @@ const SOURCES = [
   fileURLToPath(new URL('../../components/channel/ChannelSidebar.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/ServerSettingsModal.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/SecureChannelCreateModal.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/server/MemberDirectoryFooter.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/SecureChannelMembersModal.tsx', import.meta.url)),
   // membersNotReady toast lives in the store's send path, reached via i18n.t()
   fileURLToPath(new URL('../../stores/chatStore.ts', import.meta.url)),

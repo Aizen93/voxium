@@ -1594,6 +1594,8 @@
     "selectedMembers": "Seleccionados ({{count}})",
     "noneSelected": "Aún no has seleccionado a nadie. Elige miembros en la lista de abajo.",
     "removeFromInvite": "Quitar a {{name}} de la lista de invitados",
+    "loadMore": "Cargar más",
+    "directoryCount": "{{shown}} de {{total}} miembros",
     "noMembersFound": "No se encontraron miembros",
     "create": "Crear",
     "creating": "Creando…",
