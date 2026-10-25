@@ -29,7 +29,6 @@ import { FriendsView } from '../friends/FriendsView';
 import { SupportTicketView } from '../dm/SupportTicketView';
 import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
-import { Search } from 'lucide-react';
 import { UserCard } from './UserCard';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
@@ -66,7 +65,6 @@ function activeVoiceServerIs(serverId: string): boolean {
 }
 
 export function MainLayout() {
-  const { t } = useTranslation();
   const { fetchServers, activeServerId, channels } = useServerStore();
   const { user } = useAuthStore();
   const activeConversationId = useDMStore((s) => s.activeConversationId);
@@ -925,17 +923,13 @@ export function MainLayout() {
       <SpacesStrip />
       <div className="flex flex-1 min-h-0 gap-2 bg-vox-bg-primary p-2 pt-0">
         <div className="flex w-[248px] flex-none flex-col min-h-0">
-          <div className="px-1 pb-1 pt-2">
-            <button
-              onClick={() => setShowGlobalSearch(true)}
-              className="flex h-[34px] w-full items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-tertiary px-2.5 text-vox-text-muted transition-colors hover:border-vox-border-strong hover:text-vox-text-secondary"
-            >
-              <Search size={14} className="shrink-0" />
-              <span className="truncate text-[13px]">{t('search.placeholder')}</span>
-              <kbd className="ml-auto shrink-0 rounded-sm bg-vox-bg-hover px-1.5 py-0.5 font-mono text-[10px] text-vox-text-muted/80">
-                {navigator.platform.toUpperCase().includes('MAC') ? '⌘K' : `${t('common.ctrlKey')} K`}
-              </kbd>
-            </button>
+          {/* The brand mark heads the sidebar column (the browser build has no
+              title bar). The message search is a field in each chat header: it
+              searches one space or one conversation, so it sits where that
+              context is shown. Ctrl/⌘K still opens it from anywhere. */}
+          <div className="flex h-[46px] flex-none items-center gap-2 px-2.5 pb-1 pt-2" data-testid="sidebar-brand">
+            <img src="/logo.svg" alt="" className="h-6 w-6 rounded-[8px]" draggable={false} />
+            <span className="text-[14px] font-semibold tracking-tight text-vox-text-primary">Voxium</span>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">
             {activeServerId ? <ChannelSidebar /> : <DMList />}

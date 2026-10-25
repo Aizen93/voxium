@@ -74,6 +74,19 @@ describe('AppShellMock — the shell both consumers draw', () => {
     expect(strip.querySelector('.h-6.w-6.rounded-full'), 'the round plus at the far right is gone').toBeNull();
   });
 
+  it('heads the sidebar column with the brand mark and puts the search in the chat header', () => {
+    render(<AppShellMock variant="full" />);
+
+    const brand = find('[data-testid="app-mock-brand"]')!;
+    expect(brand.textContent).toContain('Voxium');
+    expect(brand.querySelector('img')).toBeTruthy();
+    const search = find('[data-testid="app-mock-search"]')!;
+    expect(search.textContent).toContain('Search');
+    // The search field sits in the chat panel's header, not in the sidebar column.
+    expect(search.closest('.bg-vox-chat')).toBeTruthy();
+    expect(find('[data-testid="app-mock-channels"]')!.contains(search)).toBe(false);
+  });
+
   it('keeps the hero variant free of the editor-only surfaces', () => {
     render(<AppShellMock variant="hero" />);
 

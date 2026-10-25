@@ -205,15 +205,11 @@ export function AppShellMock({
       <div className="flex gap-1.5 bg-vox-bg-primary p-1.5 pt-1" style={{ height: bodyHeight }}>
         {/* Sidebar column — search, channels, voice card, user card, on the page */}
         <div className="flex w-[148px] flex-none flex-col min-h-0">
-          {full && (
-            <div className="mb-1 flex h-[22px] items-center gap-1.5 rounded-md border border-vox-border bg-vox-bg-tertiary px-1.5">
-              <Search className="h-2.5 w-2.5 shrink-0 text-vox-text-muted" />
-              <span className="truncate text-[9px] text-vox-text-muted">{t('appMock.search')}</span>
-              <span className="ml-auto shrink-0 rounded-[3px] bg-vox-bg-hover px-1 font-mono text-[7px] text-vox-text-muted">
-                {`${t('common.ctrlKey')} K`}
-              </span>
-            </div>
-          )}
+          {/* The brand mark heads the column; the message search is a field in the chat header */}
+          <div data-testid="app-mock-brand" className="mb-1 flex h-[22px] items-center gap-1.5 px-1.5">
+            <img src="/logo_static.svg" alt="" className="h-3.5 w-3.5 rounded-[4px]" />
+            <span className="text-[9.5px] font-semibold tracking-tight text-vox-text-primary">Voxium</span>
+          </div>
           {/* The channel column is what wears the `channel` color + pattern */}
           <div
             data-testid="app-mock-channels"
@@ -287,6 +283,16 @@ export function AppShellMock({
           <div className="flex items-center gap-1 border-b border-vox-border px-2.5 py-1.5">
             <span className="font-mono text-[10px] text-vox-accent-primary">#</span>
             <span className="text-[10px] font-semibold text-vox-text-primary">general</span>
+            {/* The message search is a field in the header: it searches this space */}
+            {full && (
+              <div data-testid="app-mock-search" className="ml-auto flex h-[18px] w-[104px] items-center gap-1 rounded-md border border-vox-border bg-vox-bg-tertiary px-1.5">
+                <Search className="h-2.5 w-2.5 shrink-0 text-vox-text-muted" />
+                <span className="truncate text-[8.5px] text-vox-text-muted">{t('appMock.search')}</span>
+                <span className="ml-auto shrink-0 rounded-[3px] bg-vox-bg-hover px-1 font-mono text-[7px] text-vox-text-muted">
+                  {`${t('common.ctrlKey')} K`}
+                </span>
+              </div>
+            )}
           </div>
           {/* Messages */}
           <div className="flex flex-1 flex-col justify-end gap-2.5 overflow-hidden p-3">
