@@ -19,8 +19,10 @@ const store = vi.hoisted(() => ({
   toggleSupporter: vi.fn(),
 }));
 vi.mock('../../stores/adminStore', () => ({ useAdminStore: Object.assign(() => store, { getState: () => store }) }));
+// The viewer's role: admin unless a test raises it (only a superadmin sees Promote)
+const viewer = vi.hoisted(() => ({ role: 'admin' }));
 vi.mock('../../stores/authStore', () => ({
-  useAuthStore: (selector: (s: { user: { role: string } }) => unknown) => selector({ user: { role: 'admin' } }),
+  useAuthStore: (selector: (s: { user: { role: string } }) => unknown) => selector({ user: { role: viewer.role } }),
 }));
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
 vi.mock('../../stores/toastStore', () => ({ toast }));
@@ -52,6 +54,7 @@ async function render() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  viewer.role = 'admin';
   store.selectedUser = USER;
   store.fetchUserOwnedServers.mockResolvedValue([
     owned({ id: 's-1', name: 'Raid Night', memberCount: 12, description: 'EU evenings, no drama.', tags: ['gaming', 'esports'], joinMode: 'open' }),
@@ -124,5 +127,61 @@ describe('AdminUserDetail — owned servers', () => {
     expect(spy).toHaveBeenCalledWith('Failed to load owned servers:', 'boom');
     expect(q('[data-testid="owned-servers-panel"]')).toBeNull();
     spy.mockRestore();
+  });
+});
+
+describe('AdminUserDetail — promote confirmation', () => {
+  it('does not promise "full access": role changes, infrastructure and acting on other admins stay superadmin-only', async () => {
+    viewer.role = 'superadmin';
+    await render();
+    const promote = qa('button').find((b) => b.textContent?.includes('Promote to Admin'));
+    expect(promote, 'a superadmin sees Promote to Admin').toBeDefined();
+    await act(async () => { promote!.click(); });
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('Promote "owner1" to admin?');
+    expect(text).not.toMatch(/full access/i);
+    expect(text).toMatch(/changing roles, managing infrastructure servers and banning or deleting other admins stay superadmin-only/);
+  });
+
+  it('an admin viewer is not offered Promote at all', async () => {
+    await render();
+    expect(qa('button').some((b) => b.textContent?.includes('Promote to Admin'))).toBe(false);
+  });
+});
+
+describe('AdminUserDetail — ban and delete only where the server allows them', () => {
+  // routes/admin.ts: an admin may ban or delete members only; a superadmin
+  // anyone but another superadmin. The buttons used to show regardless and
+  // fail with a generic error.
+  const buttonTexts = () => qa('button').map((b) => b.textContent?.trim());
+
+  it('an admin viewing another admin sees neither button, with the reason', async () => {
+    viewer.role = 'admin';
+    store.selectedUser = { ...USER, role: 'admin' };
+    await render();
+    expect(buttonTexts()).not.toContain('Ban User');
+    expect(buttonTexts()).not.toContain('Delete User');
+    expect(document.body.textContent).toContain('Only a superadmin can ban or delete an admin.');
+  });
+
+  it('a superadmin viewing an admin sees both; viewing a superadmin sees neither', async () => {
+    viewer.role = 'superadmin';
+    store.selectedUser = { ...USER, role: 'admin' };
+    await render();
+    expect(buttonTexts()).toContain('Ban User');
+    expect(buttonTexts()).toContain('Delete User');
+
+    // a superadmin target has no action row at all (pre-existing guard)
+    store.selectedUser = { ...USER, role: 'superadmin' };
+    await act(async () => { root.render(<AdminUserDetail userId="u-1" onBack={() => {}} />); });
+    expect(buttonTexts()).not.toContain('Ban User');
+    expect(buttonTexts()).not.toContain('Delete User');
+  });
+
+  it('an admin viewing a member still sees both', async () => {
+    viewer.role = 'admin';
+    await render();
+    expect(buttonTexts()).toContain('Ban User');
+    expect(buttonTexts()).toContain('Delete User');
   });
 });

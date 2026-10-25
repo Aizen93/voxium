@@ -175,3 +175,33 @@ describe('parseDateParam', () => {
     expect(() => parseDateParam('invalid')).toThrow('Invalid date parameter');
   });
 });
+
+describe('every subclass is an instance of ITSELF, not only of AppError', () => {
+  // The base constructor pinned the prototype to AppError.prototype, so
+  // `err instanceof ForbiddenError` was false for a ForbiddenError: the two
+  // catch blocks that asked (the auth middleware, the token refresh) always
+  // fell through to their generic answer.
+  it('instanceof matches the class that was constructed, its base and Error', () => {
+    const cases: Array<[AppError, abstract new (...args: never[]) => AppError]> = [
+      [new BadRequestError('x'), BadRequestError],
+      [new UnauthorizedError(), UnauthorizedError],
+      [new ForbiddenError(), ForbiddenError],
+      [new NotFoundError('Server'), NotFoundError],
+      [new ConflictError('x'), ConflictError],
+      [new UnsupportedMediaTypeError('x'), UnsupportedMediaTypeError],
+      [new ServiceUnavailableError('x'), ServiceUnavailableError],
+    ];
+    for (const [err, cls] of cases) {
+      expect(err).toBeInstanceOf(cls);
+      expect(err).toBeInstanceOf(AppError);
+      expect(err).toBeInstanceOf(Error);
+      expect(Object.getPrototypeOf(err)).toBe(cls.prototype);
+    }
+  });
+
+  it('a sibling class never matches', () => {
+    expect(new ForbiddenError()).not.toBeInstanceOf(UnauthorizedError);
+    expect(new UnauthorizedError()).not.toBeInstanceOf(ForbiddenError);
+    expect(new AppError('x', 418)).not.toBeInstanceOf(ForbiddenError);
+  });
+});

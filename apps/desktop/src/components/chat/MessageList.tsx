@@ -282,8 +282,8 @@ export function MessageList() {
             Header: () =>
               !hasMore && messages.length > 0 ? (
                 <div className="mb-2 w-full px-6 pb-2 pt-5">
-                  <h4 className="text-xl font-semibold tracking-[-0.01em] text-vox-text-primary">Welcome to the channel!</h4>
-                  <p className="mt-0.5 text-[13px] text-vox-text-secondary">This is the beginning of the conversation.</p>
+                  <h4 className="text-xl font-semibold tracking-[-0.01em] text-vox-text-primary">{t('chat.welcomeTitle')}</h4>
+                  <p className="mt-0.5 text-[13px] text-vox-text-secondary">{t('chat.welcomeSubtitle')}</p>
                 </div>
               ) : null,
             Footer: () => (
@@ -305,7 +305,7 @@ export function MessageList() {
       {showScrollButton && (
         <button
           onClick={scrollToBottom}
-          aria-label="Scroll to bottom"
+          aria-label={t('chat.jumpToBottom')}
           className="absolute bottom-4 left-1/2 -translate-x-1/2 flex h-8 w-8 items-center justify-center rounded-full bg-vox-bg-tertiary text-vox-text-secondary shadow-lg hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
         >
           <ArrowDown size={16} />

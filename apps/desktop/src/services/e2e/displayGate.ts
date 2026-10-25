@@ -43,19 +43,25 @@ export function lockedQuote(quote: NonNullable<Message['replyTo']>): NonNullable
  *    posted the row — but a webhook never posts an encrypted row, nor into a
  *    DM, so on one of these rows it is the server relabelling an authentic
  *    message as an app: an APP tag, no profile, no Report on a DM (which must
- *    stay reportable), no Edit on the user's own message.
+ *    stay reportable), no Edit on the user's own message;
+ *  - `mentionsEveryone` is the server's word that the author held
+ *    MENTION_EVERYONE and wrote `@everyone` — it never reads ciphertext, so on
+ *    an encrypted row it is the server deciding that an authentic message
+ *    pings everyone (a badge, the mention sound, a "mentioned everyone" title).
  */
 export function withoutServerAssertions(message: Message): Message {
   const author = message.author as MessageAuthor | undefined;
   const authorClaimsWebhook = author !== undefined && author !== null && 'isWebhook' in author;
   const rowClaimsWebhook = 'webhookId' in message || 'webhookName' in message;
-  if (message.e2eAttachments === undefined && !message.mentions?.length && !authorClaimsWebhook && !rowClaimsWebhook) {
+  const rowClaimsPing = 'mentionsEveryone' in message;
+  if (message.e2eAttachments === undefined && !message.mentions?.length && !authorClaimsWebhook && !rowClaimsWebhook && !rowClaimsPing) {
     return message;
   }
   const rest: Message = { ...message, mentions: [] };
   delete rest.e2eAttachments;
   delete rest.webhookId;
   delete rest.webhookName;
+  delete rest.mentionsEveryone;
   if (authorClaimsWebhook) {
     const human: MessageAuthor = { ...author };
     delete human.isWebhook;

@@ -136,8 +136,11 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
     const existing = await prisma.role.findFirst({ where: { serverId, name } });
     if (existing) throw new ConflictError('A role with this name already exists');
 
-    // Check role limit
-    const roleCount = await prisma.role.count({ where: { serverId } });
+    // Check role limit: the roles members create, not the @everyone row every
+    // server carries (the client counts the same way, so its "max roles"
+    // notice and this refusal agree — counting @everyone here made the 25th
+    // custom role fail with a message the client never showed)
+    const roleCount = await prisma.role.count({ where: { serverId, isDefault: false } });
     if (roleCount >= LIMITS.MAX_ROLES_PER_SERVER) {
       throw new BadRequestError(`Server can have at most ${LIMITS.MAX_ROLES_PER_SERVER} roles`);
     }

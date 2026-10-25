@@ -135,8 +135,9 @@ describe('Search routes — server search respects visibility and encryption', (
         createdAt: new Date('2026-10-17T12:00:00Z'), editedAt: null,
       },
       {
-        id: 'msg-human', content: 'hello', type: 'user', channelId: 'ch-1', authorId: 'user-2',
+        id: 'msg-human', content: 'hello @everyone', type: 'user', channelId: 'ch-1', authorId: 'user-2',
         webhookId: null, webhookName: null, author: human, channel: { name: 'general' },
+        mentionsEveryone: true,
         createdAt: new Date('2026-10-16T12:00:00Z'), editedAt: null,
       },
     ] as any);
@@ -152,6 +153,10 @@ describe('Search routes — server search respects visibility and encryption', (
     expect(gone.webhookId).toBeNull();
     expect(person.author).toEqual(human);
     expect(person.webhookId).toBeNull();
+    // The server's @everyone decision travels with a result, so it renders as
+    // a mention there exactly as it does in the channel
+    expect(person.mentionsEveryone).toBe(true);
+    expect(hook.mentionsEveryone).toBeUndefined();
   });
 
   it('rejects a channelId the member cannot VIEW with the same generic error', async () => {

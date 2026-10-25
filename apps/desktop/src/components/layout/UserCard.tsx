@@ -134,8 +134,8 @@ export function UserCard() {
           <button
             onClick={logout}
             className="flex h-[26px] w-[26px] items-center justify-center rounded-md text-vox-text-muted hover:bg-vox-accent-danger/15 hover:text-vox-accent-danger transition-colors"
-            title="Logout"
-            aria-label="Logout"
+            title={t('common.logout')}
+            aria-label={t('common.logout')}
           >
             <LogOut size={14} />
           </button>

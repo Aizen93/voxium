@@ -22,11 +22,12 @@ export type ThemeId = BuiltInThemeId | `custom:${string}`;
  */
 export type SettingsTab = 'account' | 'security' | 'appearance' | 'audio' | 'language';
 
-export const THEMES: { id: BuiltInThemeId; label: string }[] = [
-  { id: 'dark', label: 'Dark' },
-  { id: 'light', label: 'Light' },
-  { id: 'midnight', label: 'Midnight' },
-  { id: 'tactical', label: 'Tactical' },
+/** The built-in themes, in picker order; the name each shows is a translation (`themes.builtIn.*`). */
+export const THEMES: { id: BuiltInThemeId; labelKey: string }[] = [
+  { id: 'dark', labelKey: 'themes.builtIn.dark' },
+  { id: 'light', labelKey: 'themes.builtIn.light' },
+  { id: 'midnight', labelKey: 'themes.builtIn.midnight' },
+  { id: 'tactical', labelKey: 'themes.builtIn.tactical' },
 ];
 
 /** Opus maxBitrate in bps for each quality level */

@@ -306,7 +306,7 @@ export function SpacesStrip() {
           <Search size={13} />
           <span className="hidden sm:inline">{t('server.findSpace')}</span>
           <kbd className="hidden rounded-sm bg-vox-bg-hover px-1.5 py-0.5 font-mono text-[10px] text-vox-text-muted/80 md:inline">
-            {isMac ? '⌘⇧L' : 'Ctrl⇧L'}
+            {isMac ? '⌘⇧L' : `${t('common.ctrlKey')}⇧L`}
           </kbd>
         </button>
 

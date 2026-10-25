@@ -1,6 +1,7 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
+import { isRTL } from './direction';
 
 import en from './locales/en.json';
 import fr from './locales/fr.json';
@@ -30,11 +31,8 @@ export const SUPPORTED_LANGUAGES = [
 
 export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]['code'];
 
-const RTL_LANGUAGES = new Set(['ar']);
-
-export function isRTL(lang: string): boolean {
-  return RTL_LANGUAGES.has(lang);
-}
+// The right-to-left list lives in ./direction (no side effects on import)
+export { isRTL };
 
 /** Apply document direction based on language.
  *  Only set dir="rtl" explicitly — for LTR languages, remove the attribute

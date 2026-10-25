@@ -6,10 +6,11 @@ import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { AppTag } from '../common/AppTag';
-import { MentionAutocomplete, getMentionQuery, handleMentionKeyDown } from './MentionAutocomplete';
+import { MentionAutocomplete, getMentionQuery, handleMentionKeyDown, type MentionCandidate } from './MentionAutocomplete';
 import { api } from '../../services/api';
-import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME } from '@voxium/shared';
-import type { ServerMember } from '@voxium/shared';
+import { useAuthStore } from '../../stores/authStore';
+import { useServerPermissions } from '../../hooks/useServerPermissions';
+import { LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, Permissions } from '@voxium/shared';
 import { PlusCircle, Smile, Send, X, FileText, Image, Film, Music, Upload } from 'lucide-react';
 
 interface Props {
@@ -73,7 +74,14 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const [cursorPos, setCursorPos] = useState(0);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionIndex, setMentionIndex] = useState(0);
-  const mentionResultsRef = useRef<ServerMember[]>([]);
+  const mentionResultsRef = useRef<MentionCandidate[]>([]);
+  // The `@everyone` row is offered only to members who may ping the channel
+  // (the server decides again on send; this spares the others a dead option)
+  const activeServerId = useServerStore((s) => s.activeServerId);
+  const currentUserId = useAuthStore((s) => s.user?.id);
+  const serverPermissions = useServerPermissions(channelId ? activeServerId : null, currentUserId);
+  // Never in a secure channel: the server never flags an encrypted row
+  const canMentionEveryone = !isSecureChannel && serverPermissions !== null && (serverPermissions & Permissions.MENTION_EVERYONE) !== 0n;
 
   // Focus textarea when replying to a message
   useEffect(() => {
@@ -117,11 +125,11 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     }, 2000);
   };
 
-  const handleMentionSelect = useCallback((userId: string, displayName: string, mentionStart: number, mentionEnd: number) => {
-    // Replace @query with @[userId] followed by a space
+  /** Replace the `@query` under the cursor with `token` (followed by a space). */
+  const insertMentionToken = useCallback((token: string, mentionStart: number, mentionEnd: number) => {
     const before = content.slice(0, mentionStart);
     const after = content.slice(mentionEnd);
-    const mention = `@[${userId}] `;
+    const mention = `${token} `;
     const newContent = before + mention + after;
     setContent(newContent);
     setShowMentions(false);
@@ -138,12 +146,24 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     });
   }, [content]);
 
-  const handleMentionMemberSelect = useCallback((member: ServerMember) => {
+  // A member becomes `@[userId]`; the server resolves it to a name on read
+  const handleMentionSelect = useCallback((userId: string, _displayName: string, mentionStart: number, mentionEnd: number) => {
+    insertMentionToken(`@[${userId}]`, mentionStart, mentionEnd);
+  }, [insertMentionToken]);
+
+  // `@everyone` stays the literal token: the server flags the message when the
+  // author may ping the channel, and renders it as text otherwise
+  const handleMentionEveryoneSelect = useCallback((mentionStart: number, mentionEnd: number) => {
+    insertMentionToken('@everyone', mentionStart, mentionEnd);
+  }, [insertMentionToken]);
+
+  const handleMentionCandidateSelect = useCallback((candidate: MentionCandidate) => {
     const mention = getMentionQuery(content, cursorPos);
     if (!mention) return;
     const mentionEnd = mention.start + 1 + mention.query.length;
-    handleMentionSelect(member.user.id, member.user.displayName, mention.start, mentionEnd);
-  }, [content, cursorPos, handleMentionSelect]);
+    if (candidate.kind === 'everyone') handleMentionEveryoneSelect(mention.start, mentionEnd);
+    else handleMentionSelect(candidate.member.user.id, candidate.member.user.displayName, mention.start, mentionEnd);
+  }, [content, cursorPos, handleMentionSelect, handleMentionEveryoneSelect]);
 
   const uploadFile = async (file: File, fileId: string) => {
     try {
@@ -323,7 +343,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     // Let mention autocomplete consume keys first (only in server channels)
     if (showMentions && channelId) {
       const consumed = handleMentionKeyDown(
-        e, mentionResultsRef.current, mentionIndex, setMentionIndex, handleMentionMemberSelect,
+        e, mentionResultsRef.current, mentionIndex, setMentionIndex, handleMentionCandidateSelect,
       );
       if (consumed) return;
     }
@@ -472,7 +492,9 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         <MentionAutocomplete
           text={content}
           cursorPos={cursorPos}
+          canMentionEveryone={canMentionEveryone}
           onSelect={handleMentionSelect}
+          onSelectEveryone={handleMentionEveryoneSelect}
           onClose={() => setShowMentions(false)}
           onResultsChange={(r) => { mentionResultsRef.current = r; }}
         />
@@ -521,7 +543,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
           onPaste={handlePaste}
           onClick={(e) => setCursorPos((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onKeyUp={(e) => setCursorPos((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
-          placeholder={conversationId ? `Message @${placeholderName}` : `Message #${channelName}`}
+          placeholder={conversationId ? t('chat.dmPlaceholder', { user: placeholderName }) : t('chat.messagePlaceholder', { channel: channelName })}
           className="max-h-36 min-w-0 flex-1 resize-none bg-transparent px-2 py-[4.5px] text-[14.5px] leading-relaxed text-vox-text-primary
                      placeholder:text-vox-text-muted focus:outline-none"
           rows={1}

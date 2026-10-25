@@ -92,7 +92,8 @@ serverRouter.get('/', async (req: Request, res: Response, next: NextFunction) =>
 });
 
 // Create a new server
-serverRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
+// Server create, leave and edit share the management bucket its delete already uses
+serverRouter.post('/', rateLimitMemberManage, async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('server_creation')) throw new ForbiddenError('Server creation is currently disabled');
     const name = sanitizeText(req.body.name ?? '');
@@ -554,7 +555,7 @@ serverRouter.get('/:serverId/members/search', rateLimitSearch, async (req: Reque
 // helper was HIGH-6 in the stabilization audit.
 
 // Leave a server
-serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+serverRouter.post('/:serverId/leave', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 
@@ -576,7 +577,7 @@ serverRouter.post('/:serverId/leave', async (req: Request<{ serverId: string }>,
 });
 
 // Update server settings (owner only)
-serverRouter.patch('/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
 

@@ -189,6 +189,170 @@ fn e2e_pickle_key_set(user_id: String, key_b64: String) -> Result<(), String> {
     entry.set_password(&key_b64).map_err(|e| e.to_string())
 }
 
+// ─── Session credentials in the OS keychain ──────────────────────────────────
+// The signed-in session ("Remember me": the access + refresh token pair) and
+// the trusted-device token (skips TOTP for 30 days) are bearer credentials.
+// They used to sit in the webview's localStorage — a plaintext LevelDB under
+// the user's profile, copied into every backup and readable by anything that
+// can read the user's files — and now live in the platform credential store,
+// like the pickle key above: encrypted at rest under the OS user's login
+// (macOS also gates access per application; Windows and the Secret Service
+// grant it to the user's processes). The same shape as the pickle key: a
+// fixed service name and a closed set of entry names on the Rust side of the
+// IPC boundary, so webview code can only ever reach Voxium's own entries, and
+// a value is shape-checked before it is written. The webview side is
+// services/tokenStorage.ts (`createKeychainSessionStore`).
+
+const SESSION_KEYCHAIN_SERVICE: &str = "app.voxium.session";
+const SESSION_SECRET_NAMES: &[&str] = &["tokens", "trusted-device"];
+/// Windows caps a generic credential's blob at 2560 bytes and the keyring
+/// crate stores a password as UTF-16: 1280 code units. Two JWTs in the JSON
+/// pair the webview writes are ~600 ASCII characters; anything past this cap
+/// is a bug, not a credential.
+const SESSION_SECRET_MAX_CHARS: usize = 1280;
+
+fn session_entry(name: &str) -> Result<keyring::Entry, String> {
+    if !SESSION_SECRET_NAMES.contains(&name) {
+        return Err("unknown credential".to_string());
+    }
+    keyring::Entry::new(SESSION_KEYCHAIN_SERVICE, name).map_err(|e| e.to_string())
+}
+
+/// Printable ASCII without spaces, bounded: a JWT (base64url and dots) or the
+/// JSON pair the webview wraps two of them in. Nothing else is ours to store.
+fn valid_session_secret_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= SESSION_SECRET_MAX_CHARS
+        && value.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// The stored value, `None` when there is no such entry.
+fn read_session_secret(name: &str) -> Result<Option<String>, String> {
+    match session_entry(name)?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn write_session_secret(name: &str, value: &str) -> Result<(), String> {
+    if !valid_session_secret_value(value) {
+        return Err("invalid credential format".to_string());
+    }
+    session_entry(name)?.set_password(value).map_err(|e| e.to_string())
+}
+
+/// Removing an entry that is not there is the state the caller asked for.
+fn delete_session_secret(name: &str) -> Result<(), String> {
+    match session_entry(name)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+// The keyring calls block (Credential Manager, the Keychain, a D-Bus round
+// trip to the Secret Service): they run on the blocking pool, off the thread
+// that paints the window.
+
+#[tauri::command]
+async fn session_secret_get(name: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_session_secret(&name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn session_secret_set(name: String, value: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_session_secret(&name, &value))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn session_secret_delete(name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_session_secret(&name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod session_secret_tests {
+    use super::*;
+
+    /// Every test in this binary shares the process-wide default builder:
+    /// the in-memory mock store, never the machine's own credential store.
+    fn use_mock_store() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| keyring::set_default_credential_builder(keyring::mock::default_credential_builder()));
+    }
+
+    #[test]
+    fn only_the_known_entry_names_resolve() {
+        use_mock_store();
+        assert!(session_entry("tokens").is_ok());
+        assert!(session_entry("trusted-device").is_ok());
+        for name in ["", "token", "Tokens", "../tokens", "e2e-pickle-key", "alice"] {
+            assert_eq!(session_entry(name).unwrap_err(), "unknown credential", "{name:?}");
+            assert_eq!(read_session_secret(name).unwrap_err(), "unknown credential");
+            assert_eq!(write_session_secret(name, "abc").unwrap_err(), "unknown credential");
+            assert_eq!(delete_session_secret(name).unwrap_err(), "unknown credential");
+        }
+    }
+
+    #[test]
+    fn a_missing_entry_reads_as_none_and_deletes_as_ok() {
+        use_mock_store();
+        // the two entries are independent: this one is never written here
+        assert_eq!(read_session_secret("trusted-device"), Ok(None));
+        assert_eq!(delete_session_secret("trusted-device"), Ok(()));
+        assert_eq!(read_session_secret("trusted-device"), Ok(None));
+    }
+
+    /// The mock store holds one credential PER `Entry` (no shared table), so a
+    /// round trip across two helper calls cannot be observed here; it was
+    /// exercised against the real Windows Credential Manager (set, read back,
+    /// overwrite, delete, read after delete, two independent entry names)
+    /// when this landed. What the mock does show: the pair the webview writes
+    /// passes the shape check and a write of it succeeds.
+    #[test]
+    fn the_pair_the_webview_writes_is_accepted() {
+        use_mock_store();
+        let pair = r#"{"accessToken":"eyJhbGciOiJIUzI1NiJ9.a.b","refreshToken":"eyJhbGciOiJIUzI1NiJ9.c.d"}"#;
+        assert_eq!(write_session_secret("tokens", pair), Ok(()));
+        assert_eq!(write_session_secret("trusted-device", "eyJhbGciOiJIUzI1NiJ9.a.b"), Ok(()));
+        // a second delete is still the state the caller asked for
+        assert_eq!(delete_session_secret("tokens"), Ok(()));
+        assert_eq!(delete_session_secret("tokens"), Ok(()));
+    }
+
+    #[test]
+    fn a_malformed_value_is_refused_before_the_store_is_touched() {
+        use_mock_store();
+        for bad in ["", "with space", "héllo", &"a".repeat(SESSION_SECRET_MAX_CHARS + 1)] {
+            assert_eq!(write_session_secret("tokens", bad).unwrap_err(), "invalid credential format");
+        }
+        assert_eq!(read_session_secret("tokens"), Ok(None));
+    }
+
+    #[test]
+    fn a_value_is_bounded_printable_ascii_without_spaces() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiJjbHgxIn0.abc-_DEF";
+        assert!(valid_session_secret_value(jwt));
+        assert!(valid_session_secret_value(&format!(
+            "{{\"accessToken\":\"{jwt}\",\"refreshToken\":\"{jwt}\"}}"
+        )));
+        assert!(valid_session_secret_value(&"a".repeat(SESSION_SECRET_MAX_CHARS)));
+
+        assert!(!valid_session_secret_value(""));
+        assert!(!valid_session_secret_value(&"a".repeat(SESSION_SECRET_MAX_CHARS + 1)));
+        assert!(!valid_session_secret_value("with space"));
+        assert!(!valid_session_secret_value("line\nbreak"));
+        assert!(!valid_session_secret_value("nul\0byte"));
+        assert!(!valid_session_secret_value("héllo"));
+        assert!(!valid_session_secret_value("\u{7f}"));
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -198,7 +362,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             notify_with_avatar,
             e2e_pickle_key_get,
-            e2e_pickle_key_set
+            e2e_pickle_key_set,
+            session_secret_get,
+            session_secret_set,
+            session_secret_delete
         ])
         .setup(|app| {
             use tauri::Manager;

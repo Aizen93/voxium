@@ -29,7 +29,7 @@ describe('translateServerError', () => {
   });
 
   it('returns an unmapped message raw, and the fallback key for none', () => {
-    expect(translateServerError('Server can have at most 20 channels', t)).toBe('Server can have at most 20 channels');
+    expect(translateServerError('A sentence no server version has ever sent', t)).toBe('A sentence no server version has ever sent');
     expect(translateServerError(undefined, t)).toBe('common.somethingWentWrong|{}');
   });
 
@@ -98,7 +98,7 @@ describe('translateServerError — incoming webhooks', () => {
       .toBe(`serverErrors.webhookCap|${JSON.stringify({ defaultValue: 'Server can have at most 3 webhooks', max: 3 })}`);
     expect(translateServerError('Server can have at most 0 webhooks', t)).toContain('"max":0');
     expect(WEBHOOK_ERROR_KEYS).toContain('webhookCap');
-    // anchored: a lookalike is not rewritten, and the channel cap stays raw
+    // anchored: a lookalike is not rewritten
     expect(translateServerError('Server can have at most 3 webhooks!', t)).toBe('Server can have at most 3 webhooks!');
     expect(translateServerError('Server can have at most many webhooks', t)).toBe('Server can have at most many webhooks');
   });
@@ -133,6 +133,28 @@ describe('translateServerError — the rate-limit 429', () => {
       const bundle = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as { serverErrors?: Record<string, unknown> };
       const text = bundle.serverErrors?.tooManyRequests;
       expect(typeof text === 'string' && text.length > 0, `${file} → serverErrors.tooManyRequests`).toBe(true);
+    }
+  });
+});
+
+describe('translateServerError — the voice session takeover', () => {
+  // voiceHandler's VOICE_SESSION_TAKEN_OVER: a newer connection of the same
+  // account took the voice session (a second device joined voice or a DM
+  // call). The client leaves on it; the toast must read in the user's language
+  const MSG = 'Your voice session moved to another device.';
+
+  it('maps the exact sentence the server emits', () => {
+    expect(translateServerError(MSG, t)).toBe(`serverErrors.voiceSessionTakenOver|${JSON.stringify({ defaultValue: MSG })}`);
+  });
+
+  it('is translated in all 11 locales', () => {
+    const dir = join(__dirname, '..', '..', 'i18n', 'locales');
+    const langs = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    expect(langs).toHaveLength(11);
+    for (const file of langs) {
+      const bundle = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as { serverErrors?: Record<string, unknown> };
+      const text = bundle.serverErrors?.voiceSessionTakenOver;
+      expect(typeof text === 'string' && text.length > 0, `${file} → serverErrors.voiceSessionTakenOver`).toBe(true);
     }
   });
 });

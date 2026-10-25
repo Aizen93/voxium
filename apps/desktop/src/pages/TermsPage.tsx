@@ -1,8 +1,10 @@
 import { useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { TermsContent } from '../components/legal/TermsContent';
 
 export function TermsPage() {
+  const { t } = useTranslation();
   useEffect(() => {
     document.documentElement.classList.add('landing-scroll');
     window.scrollTo(0, 0);
@@ -21,7 +23,7 @@ export function TermsPage() {
             <span className="text-lg font-bold text-vox-text-primary">Voxium</span>
           </Link>
           <span className="text-vox-text-muted">/</span>
-          <span className="text-sm text-vox-text-secondary">Terms of Service</span>
+          <span className="text-sm text-vox-text-secondary">{t('landing.footer.termsOfService')}</span>
         </div>
       </header>
 
@@ -31,7 +33,7 @@ export function TermsPage() {
 
         <div className="mt-12 pt-6 border-t border-vox-border">
           <Link to="/" className="text-sm text-vox-accent-primary hover:underline">
-            &larr; Back to home
+            &larr; {t('landing.footer.backToHome')}
           </Link>
         </div>
       </main>

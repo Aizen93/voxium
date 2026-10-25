@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Avatar } from './Avatar';
 import { Camera } from 'lucide-react';
 
@@ -18,6 +19,7 @@ export function ImageUploadButton({
   uploading = false,
   variant = 'create',
 }: ImageUploadButtonProps) {
+  const { t } = useTranslation();
   const [preview, setPreview] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -50,13 +52,13 @@ export function ImageUploadButton({
         disabled={uploading}
       >
         {preview ? (
-          <img src={preview} alt="Preview" className="h-20 w-20 rounded-full object-cover" />
+          <img src={preview} alt={t('common.preview')} className="h-20 w-20 rounded-full object-cover" />
         ) : variant === 'edit' ? (
           <Avatar avatarUrl={currentImageUrl} displayName={displayName} size="lg" />
         ) : (
           <div className="flex flex-col items-center gap-1 text-vox-text-muted group-hover:text-vox-accent-primary transition-colors">
             <Camera size={24} />
-            <span className="text-[10px]">Icon</span>
+            <span className="text-[10px]">{t('common.icon')}</span>
           </div>
         )}
         {uploading ? (
@@ -66,7 +68,7 @@ export function ImageUploadButton({
         ) : variant === 'edit' && (
           <div className="absolute inset-0 flex items-center justify-center rounded-full bg-black/0 group-hover:bg-black/40 transition-colors">
             <span className="text-xs font-medium text-white opacity-0 group-hover:opacity-100 transition-opacity">
-              Change
+              {t('common.change')}
             </span>
           </div>
         )}

@@ -3,7 +3,7 @@ import { logAuditEvent } from '../utils/auditLog';
 import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
@@ -68,7 +68,8 @@ authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLi
   }
 });
 
-authRouter.post('/login', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
+// Per address, per network, then per account and network (all count failures only, middleware/rateLimiter.ts)
+authRouter.post('/login', rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email, password, rememberMe, trustedDeviceToken } = req.body;
     if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
@@ -266,7 +267,8 @@ authRouter.post('/resend-verification', authenticate, rateLimitResendVerificatio
 
 // ─── TOTP (Two-Factor Authentication) ──────────────────────────────────────
 
-authRouter.post('/totp/verify', rateLimitLogin, async (req: Request, res: Response, next: NextFunction) => {
+// The per-address and per-network sign-in buckets, then the per-account one keyed on the verified challenge token's user
+authRouter.post('/totp/verify', rateLimitLogin, rateLimitLoginSubnet, rateLimitTotpAccount, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { totpToken, code } = req.body;
     if (!totpToken || typeof totpToken !== 'string') {

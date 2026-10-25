@@ -6,6 +6,7 @@ import { validateDisplayName, validateBio, WS_EVENTS } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
+import { rateLimitProfileUpdate } from '../middleware/rateLimiter';
 
 export const userRouter = Router();
 
@@ -39,7 +40,8 @@ userRouter.get('/:userId', async (req: Request<{ userId: string }>, res: Respons
 });
 
 // Update own profile
-userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFunction) => {
+// Per user: every edit fans `user:updated` out to every server room the user is in
+userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { avatarUrl } = req.body;
     let { displayName, bio } = req.body;

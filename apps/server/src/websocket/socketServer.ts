@@ -3,9 +3,10 @@ import { Server as SocketServer } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import jwt from 'jsonwebtoken';
 import { consentIsRequired, type AuthPayload } from '../middleware/auth';
-import { setUserOnline, setUserOffline, getRedisPubSub } from '../utils/redis';
+import { isJwtExpiredError, isJwtVerifyError } from '../utils/jwtErrors';
+import { setUserOnline, setUserOffline, isUserOnline, getRedisPubSub } from '../utils/redis';
 import { prisma } from '../utils/prisma';
-import { handleVoiceEvents, getVoiceStateForServers, getScreenShareState } from './voiceHandler';
+import { handleVoiceEvents, replayVoiceState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { handleAnnotationEvents } from './annotationHandler';
 import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
@@ -15,6 +16,9 @@ import { Permissions } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
+
+/** Before the one retry of a presence registration Redis refused. */
+export const PRESENCE_RETRY_DELAY_MS = 500;
 
 /**
  * Get the real client IP. Reads X-Forwarded-For only when a trusted reverse
@@ -107,7 +111,25 @@ export function initSocketServer(httpServer: HttpServer) {
       if (err instanceof Error && err.message === 'Account banned') {
         return next(err);
       }
-      next(new Error('Invalid token'));
+      // An EXPIRED access token is the one refusal the client repairs on its
+      // own, with a refresh before the next attempt (services/socket.ts): a
+      // window restored after a long minimize handshakes with the token it
+      // had when it was hidden. Named so the client refreshes for this and
+      // for nothing else; every other TOKEN failure stays the generic answer.
+      if (isJwtExpiredError(err)) {
+        return next(new Error('Token expired'));
+      }
+      if (isJwtVerifyError(err)) {
+        return next(new Error('Invalid token'));
+      }
+      // Not the token: the user or IP-ban lookup failed (database down, pool
+      // exhausted). Answered 'Invalid token' this made the client renew and,
+      // the renewal meeting the same outage, sign out — a database blip
+      // during a reconnect storm signed everyone out. Named so the client
+      // tries the handshake again later instead (a middleware refusal closes
+      // its manager: nothing else would retry).
+      console.error('[WS] Handshake could not be verified:', err instanceof Error ? err.message : err);
+      next(new Error('Authentication unavailable'));
     }
   });
 
@@ -118,6 +140,15 @@ export function initSocketServer(httpServer: HttpServer) {
 
     // Join per-user room for targeted operations (e.g., support room joins)
     socket.join(`user:${userId}`);
+
+    // Settled once this socket is registered as online (Redis + the DB
+    // column), or once that attempt failed. The disconnect handler WAITS for
+    // it: a socket that drops during the setup below used to run its
+    // unregistration before the registration had landed, find nothing to
+    // remove, and leave the user online with a dead socket behind them until
+    // the next boot sweep — the "still shows online" ghost.
+    let presenceRegistered!: () => void;
+    const presenceReady = new Promise<void>((resolve) => { presenceRegistered = resolve; });
 
     // ═══════════════════════════════════════════════════════════════════
     // CRITICAL: Register ALL event handlers SYNCHRONOUSLY before any
@@ -292,6 +323,8 @@ export function initSocketServer(httpServer: HttpServer) {
       // the variable from the outer scope — it may not be set yet if
       // the connection handler's async work hasn't finished)
       try {
+        // Never unregister before the registration landed (see presenceReady)
+        await presenceReady;
         const result = await setUserOffline(socket.id);
 
         // Only broadcast offline and update DB if the user has no remaining
@@ -308,6 +341,13 @@ export function initSocketServer(httpServer: HttpServer) {
             }),
           ]);
 
+          // Reconnected while the queries above ran (a page reload, a network
+          // blip — the new socket registers in parallel with this teardown):
+          // the new connection's online write and broadcast are the truth, and
+          // an offline write landing AFTER them would show a connected user as
+          // offline to everyone until their next presence event.
+          if (await isUserOnline(userId)) return;
+
           // updateMany with a status filter: no-op write skipped when already offline
           await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'offline' } }, data: { status: 'offline' } });
 
@@ -316,6 +356,21 @@ export function initSocketServer(httpServer: HttpServer) {
           }
           for (const c of dmConversations) {
             socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'offline' });
+          }
+
+          // The re-check and the write are two steps: a registration landing
+          // between them leaves the user online in Redis and offline in the
+          // column (the new socket's own write was a no-op while the row still
+          // read online) and announced offline. Look once more and put it
+          // right: the column back online, and every room told so.
+          if (await isUserOnline(userId)) {
+            await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'online' } }, data: { status: 'online' } });
+            for (const m of membershipList) {
+              socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
+            }
+            for (const c of dmConversations) {
+              socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
+            }
           }
         }
       } catch (err) {
@@ -329,25 +384,72 @@ export function initSocketServer(httpServer: HttpServer) {
     // synchronously-registered handlers above.
     // ═══════════════════════════════════════════════════════════════════
 
-    try {
-      // Track online presence
-      await setUserOnline(userId, socket.id);
-
-      // Upsert IP record
-      const connectIp = getSocketIp(socket);
-      if (connectIp) {
-        await prisma.ipRecord.upsert({
-          where: { userId_ip: { userId, ip: connectIp } },
-          update: { lastSeenAt: new Date() },
-          create: { userId, ip: connectIp },
-        }).catch((err) => console.warn('[WS] IP record upsert failed:', err));
+    // Presence FIRST, Redis and the DB column together, before anything that
+    // can take long: the disconnect handler unwinds exactly this pair once
+    // presenceReady settles. The column used to be written at the very end of
+    // the setup, after a dozen queries — a socket that dropped meanwhile had
+    // already been marked offline when the belated write flipped it back to
+    // online, with no socket behind it.
+    //
+    // `registered` gates the online broadcast below: a registration Redis
+    // refused (a failover's READONLY, LOADING, a closed client) leaves nothing
+    // for the disconnect handler or the reaper to find, so announcing the
+    // socket online would show the user online to every contact until they
+    // refetch. One retry covers a blip; after that the socket serves without
+    // presence and says so in the log.
+    let registered = false;
+    for (let attempt = 0; attempt < 2 && !registered; attempt++) {
+      try {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, PRESENCE_RETRY_DELAY_MS));
+        await setUserOnline(userId, socket.id);
+        registered = true;
+      } catch (err) {
+        console.error(`[WS] Presence registration failed for ${userId} (attempt ${attempt + 1}):`, err);
       }
+    }
+    if (registered) {
+      try {
+        // updateMany with a status filter: reconnect churn / multi-device connects
+        // otherwise rewrite the same 'online' row on every socket (write amplification)
+        await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'online' } }, data: { status: 'online' } });
+      } catch (err) {
+        // Redis holds the truth; the reaper's column reconciliation and the
+        // next presence transition put the column right
+        console.error(`[WS] Presence column write failed for ${userId}:`, err);
+      }
+    }
+    presenceRegistered();
 
+    // A socket that dropped during the registration has already been unwound
+    // by its disconnect handler: there is nothing left to set up for it
+    // (socket.io turns its join() into a no-op once it is cleaned up, so the
+    // queries and the replay below would only be wasted work). Checked again
+    // before every later step, the same way.
+    if (socket.disconnected) return;
+
+    // Upsert IP record
+    const connectIp = getSocketIp(socket);
+    if (connectIp) {
+      await prisma.ipRecord.upsert({
+        where: { userId_ip: { userId, ip: connectIp } },
+        update: { lastSeenAt: new Date() },
+        create: { userId, ip: connectIp },
+      }).catch((err) => console.warn('[WS] IP record upsert failed:', err));
+    }
+
+    // The rooms, then the replays and broadcasts that depend on them. Each
+    // step below guards itself: one failing query must not abandon the rest
+    // of the setup (a thrown unread count used to leave the socket without
+    // its DM rooms, its voice replay and its presence broadcast).
+    let memberships: Array<{ serverId: string }> = [];
+    let visibleChannels: Array<{ id: string; serverId: string; type: string; secure: boolean }> = [];
+    try {
       // Join rooms for all servers the user is a member of
-      const memberships = await prisma.serverMember.findMany({
+      memberships = await prisma.serverMember.findMany({
         where: { userId },
         select: { serverId: true },
       });
+      if (socket.disconnected) return;
       for (const m of memberships) {
         socket.join(`server:${m.serverId}`);
       }
@@ -366,19 +468,74 @@ export function initSocketServer(httpServer: HttpServer) {
         select: { id: true, serverId: true, type: true, secure: true },
       });
       const { filterVisibleChannelsMulti } = await import('../utils/permissionCalculator');
-      const visibleChannels = await filterVisibleChannelsMulti(userId, allChannels);
+      visibleChannels = await filterVisibleChannelsMulti(userId, allChannels);
+      if (socket.disconnected) return;
       for (const ch of visibleChannels) {
         socket.join(`channel:${ch.id}`);
       }
-      const textChannels = visibleChannels.filter((ch) => ch.type === 'text');
+    } catch (err) {
+      console.error(`[WS] Error joining server/channel rooms for ${userId}:`, err);
+    }
+    if (socket.disconnected) return;
 
-      // Compute unread counts across all text channels in a single query.
-      // Uses LATERAL JOIN with LIMIT 100 to cap per-channel scanning — the frontend
-      // shows "99+" anyway, so exact counts beyond 100 are unnecessary. This prevents
-      // full table scans on channels with thousands of unread messages.
-      // `IS DISTINCT FROM`, never `!=`: a webhook-posted row has author_id
-      // NULL, `NULL != $1` is NULL (row dropped), and the live message:new
-      // handler on the client DOES count it, so a reconnect would lose it.
+    // Send existing voice channel users for all servers (reads from Redis for
+    // cross-node visibility), right after the channel rooms are joined: every
+    // event from here on reaches the socket live, so the replay is the only
+    // thing that can be stale, and the later it is sent the larger the window
+    // for a leave to land before it. One batched Redis read for ALL
+    // memberships; the VIEW_CHANNEL decision reuses the bulk visibility result
+    // computed above (the old loop did a per-membership Redis scan over every
+    // globally-active channel plus a multi-query permission check per voice
+    // channel). The client clears every voice list on (re)connect, so a channel
+    // that emptied while it was away is absent here and stays empty there.
+    try {
+      const visibleChannelIds = new Set(visibleChannels.map((ch) => ch.id));
+      await replayVoiceState(socket, memberships.map((m) => m.serverId), visibleChannelIds, { source: 'connect' });
+    } catch (err) {
+      console.error(`[WS] Error replaying voice state for ${userId}:`, err);
+    }
+    if (socket.disconnected) return;
+
+    // Auto-join all conversation rooms for DMs
+    let conversations: Array<{ id: string }> = [];
+    try {
+      conversations = await prisma.conversation.findMany({
+        where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
+        select: { id: true },
+      });
+      if (socket.disconnected) return;
+      for (const conv of conversations) {
+        socket.join(`dm:${conv.id}`);
+      }
+    } catch (err) {
+      console.error(`[WS] Error joining DM rooms for ${userId}:`, err);
+    }
+
+    // Broadcast online status to all servers and DM conversation rooms (the
+    // conversation list fetched above — this was a duplicate query). Guarded:
+    // a socket that disconnected during the setup has already been unwound by
+    // its disconnect handler, and announcing it online now would leave every
+    // contact showing a user who is gone; a socket Redis never registered
+    // (above) has nobody to unwind it at all.
+    if (socket.disconnected) return;
+    if (registered) {
+      for (const m of memberships) {
+        socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
+      }
+      for (const c of conversations) {
+        socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
+      }
+    }
+
+    // Compute unread counts across all text channels in a single query.
+    // Uses LATERAL JOIN with LIMIT 100 to cap per-channel scanning — the frontend
+    // shows "99+" anyway, so exact counts beyond 100 are unnecessary. This prevents
+    // full table scans on channels with thousands of unread messages.
+    // `IS DISTINCT FROM`, never `!=`: a webhook-posted row has author_id
+    // NULL, `NULL != $1` is NULL (row dropped), and the live message:new
+    // handler on the client DOES count it, so a reconnect would lose it.
+    try {
+      const textChannels = visibleChannels.filter((ch) => ch.type === 'text');
       if (textChannels.length > 0) {
         const textChannelIds = textChannels.map((ch) => ch.id);
         const unreads = await prisma.$queryRawUnsafe<
@@ -412,17 +569,12 @@ export function initSocketServer(httpServer: HttpServer) {
           });
         }
       }
+    } catch (err) {
+      console.error(`[WS] Error computing channel unread counts for ${userId}:`, err);
+    }
 
-      // Auto-join all conversation rooms for DMs
-      const conversations = await prisma.conversation.findMany({
-        where: { OR: [{ user1Id: userId }, { user2Id: userId }] },
-        select: { id: true },
-      });
-      for (const conv of conversations) {
-        socket.join(`dm:${conv.id}`);
-      }
-
-      // Compute DM unread counts — same LATERAL + LIMIT 100 optimization as channels
+    // Compute DM unread counts — same LATERAL + LIMIT 100 optimization as channels
+    try {
       if (conversations.length > 0) {
         const convIds = conversations.map((c) => c.id);
         const dmUnreads = await prisma.$queryRawUnsafe<
@@ -454,134 +606,64 @@ export function initSocketServer(httpServer: HttpServer) {
           });
         }
       }
-
-      // Auto-join support ticket room if user has an open/claimed ticket
-      try {
-        const supportTicket = await prisma.supportTicket.findUnique({
-          where: { userId },
-          select: { id: true, status: true },
-        });
-        if (supportTicket && (supportTicket.status === 'open' || supportTicket.status === 'claimed')) {
-          socket.join(`support:${supportTicket.id}`);
-        }
-      } catch (supportErr) {
-        console.error(`[WS] Error joining support room for ${userId}:`, supportErr);
-      }
-
-      // Send active announcements
-      try {
-        const memberServerIds = memberships.map((m) => m.serverId);
-        const now = new Date();
-        const activeAnnouncements = await prisma.announcement.findMany({
-          where: {
-            publishedAt: { not: null },
-            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-            AND: [
-              {
-                OR: [
-                  { scope: 'global' },
-                  { scope: 'servers', serverIds: { hasSome: memberServerIds.length > 0 ? memberServerIds : ['__none__'] } },
-                ],
-              },
-            ],
-          },
-          include: { createdBy: { select: { username: true } } },
-          orderBy: { publishedAt: 'desc' },
-          take: 10,
-        });
-
-        if (activeAnnouncements.length > 0) {
-          socket.emit('announcement:init', {
-            announcements: activeAnnouncements.map((a) => ({
-              id: a.id,
-              title: a.title,
-              content: a.content,
-              type: a.type as import('@voxium/shared').AnnouncementType,
-              scope: a.scope as import('@voxium/shared').AnnouncementScope,
-              serverIds: a.serverIds,
-              createdById: a.createdById,
-              createdByUsername: a.createdBy?.username ?? 'Deleted',
-              publishedAt: a.publishedAt!.toISOString(),
-              expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
-              createdAt: a.createdAt.toISOString(),
-            })),
-          });
-        }
-      } catch (annErr) {
-        console.error(`[WS] Error fetching announcements for ${userId}:`, annErr);
-      }
-
-      // Broadcast online status to all servers
-      for (const m of memberships) {
-        socket.to(`server:${m.serverId}`).emit('presence:update', { userId, status: 'online' });
-      }
-
-      // Broadcast online status to all DM conversation rooms (reuses the
-      // conversation list fetched above — this was a duplicate query)
-      try {
-        for (const c of conversations) {
-          socket.to(`dm:${c.id}`).emit('presence:update', { userId, status: 'online' });
-        }
-      } catch (dmPresErr) {
-        console.error(`[WS] Error broadcasting DM presence for ${userId}:`, dmPresErr);
-      }
-
-      // Send existing voice channel users for all servers (reads from Redis for
-      // cross-node visibility). One batched Redis read for ALL memberships; the
-      // VIEW_CHANNEL decision reuses the bulk visibility result computed above
-      // (the old loop did a per-membership Redis scan over every globally-active
-      // channel plus a multi-query permission check per voice channel).
-      const visibleChannelIds = new Set(visibleChannels.map((ch) => ch.id));
-      const voiceStates = (await getVoiceStateForServers(memberships.map((m) => m.serverId)))
-        .filter(({ channelId }) => visibleChannelIds.has(channelId));
-
-      if (voiceStates.length > 0) {
-        // Single user-info query across all visible voice channels
-        const allVoiceUserIds = [...new Set(voiceStates.flatMap((v) => v.userIds))];
-        const userInfos = await prisma.user.findMany({
-          where: { id: { in: allVoiceUserIds } },
-          select: { id: true, username: true, displayName: true, avatarUrl: true },
-        });
-        const userInfoById = new Map(userInfos.map((u) => [u.id, u]));
-
-        for (const { channelId, serverId, userIds, userStates } of voiceStates) {
-          const voiceUsers = userIds
-            .map((uid) => userInfoById.get(uid))
-            .filter((u): u is NonNullable<typeof u> => !!u)
-            .map((u) => {
-              const state = userStates.get(u.id);
-              return {
-                ...u,
-                selfMute: state?.selfMute ?? false,
-                selfDeaf: state?.selfDeaf ?? false,
-                serverMuted: state?.serverMuted ?? false,
-                serverDeafened: state?.serverDeafened ?? false,
-                speaking: false,
-                // Same conditional-spread shape the voice:join replay uses —
-                // this list has to be indistinguishable from that one, because
-                // a secure-voice client feeds BOTH to onParticipantJoined and
-                // an entry missing these is excluded from keying for the rest
-                // of the call (spec §21).
-                ...(state?.e2eDeviceId && { deviceId: state.e2eDeviceId }),
-                ...(state?.e2eEpoch && { epoch: state.e2eEpoch }),
-              };
-            });
-          socket.emit('voice:channel_users', { channelId, serverId, users: voiceUsers });
-
-          // Send screen share state if someone is sharing in this channel
-          const sharingUserId = await getScreenShareState(channelId);
-          if (sharingUserId) {
-            socket.emit('voice:screen_share:state', { channelId, sharingUserId });
-          }
-        }
-      }
-
-      // Update DB status
-      // updateMany with a status filter: reconnect churn / multi-device connects
-      // otherwise rewrite the same 'online' row on every socket (write amplification)
-      await prisma.user.updateMany({ where: { id: userId, NOT: { status: 'online' } }, data: { status: 'online' } });
     } catch (err) {
-      console.error(`[WS] Error during connection setup for ${userId}:`, err);
+      console.error(`[WS] Error computing DM unread counts for ${userId}:`, err);
+    }
+
+    // Auto-join support ticket room if user has an open/claimed ticket
+    try {
+      const supportTicket = await prisma.supportTicket.findUnique({
+        where: { userId },
+        select: { id: true, status: true },
+      });
+      if (supportTicket && (supportTicket.status === 'open' || supportTicket.status === 'claimed')) {
+        socket.join(`support:${supportTicket.id}`);
+      }
+    } catch (supportErr) {
+      console.error(`[WS] Error joining support room for ${userId}:`, supportErr);
+    }
+
+    // Send active announcements
+    try {
+      const memberServerIds = memberships.map((m) => m.serverId);
+      const now = new Date();
+      const activeAnnouncements = await prisma.announcement.findMany({
+        where: {
+          publishedAt: { not: null },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          AND: [
+            {
+              OR: [
+                { scope: 'global' },
+                { scope: 'servers', serverIds: { hasSome: memberServerIds.length > 0 ? memberServerIds : ['__none__'] } },
+              ],
+            },
+          ],
+        },
+        include: { createdBy: { select: { username: true } } },
+        orderBy: { publishedAt: 'desc' },
+        take: 10,
+      });
+
+      if (activeAnnouncements.length > 0) {
+        socket.emit('announcement:init', {
+          announcements: activeAnnouncements.map((a) => ({
+            id: a.id,
+            title: a.title,
+            content: a.content,
+            type: a.type as import('@voxium/shared').AnnouncementType,
+            scope: a.scope as import('@voxium/shared').AnnouncementScope,
+            serverIds: a.serverIds,
+            createdById: a.createdById,
+            createdByUsername: a.createdBy?.username ?? 'Deleted',
+            publishedAt: a.publishedAt!.toISOString(),
+            expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
+            createdAt: a.createdAt.toISOString(),
+          })),
+        });
+      }
+    } catch (annErr) {
+      console.error(`[WS] Error fetching announcements for ${userId}:`, annErr);
     }
   });
 

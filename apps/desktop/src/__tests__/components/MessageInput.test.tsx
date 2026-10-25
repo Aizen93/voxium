@@ -32,7 +32,9 @@ vi.mock('../../stores/chatStore', () => {
   return { useChatStore };
 });
 
-vi.mock('../../services/socket', () => ({ getSocket: () => null }));
+// getSocket for typing events; onSocketReconnect for the permissions hook the
+// @everyone suggestion reads
+vi.mock('../../services/socket', () => ({ getSocket: () => null, onSocketReconnect: () => () => {} }));
 vi.mock('../../services/api', () => ({ api: { post: vi.fn() } }));
 vi.mock('../../stores/toastStore', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },

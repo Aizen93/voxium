@@ -11,8 +11,19 @@ interface EditState {
   blockDuration: number;
 }
 
+/** The badge for what a bucket is keyed on (middleware/rateLimiter.ts `keyType`). */
+const KEY_TYPE_LABEL: Record<string, string> = {
+  ip: 'IP',
+  subnet: 'Subnet',
+  userId: 'User',
+  account: 'Account',
+  inbox: 'Inbox',
+  domain: 'Domain',
+  webhook: 'Webhook',
+};
+
 const RULE_DESCRIPTIONS: Record<string, string> = {
-  login: 'Limits login attempts to prevent brute-force password guessing.',
+  login: 'Failed sign-in attempts per IP address, against brute-force password guessing. A successful sign-in is not counted.',
   register: 'Limits account creation to prevent spam registrations.',
   forgotPassword: 'Limits password reset email requests to prevent email flooding.',
   resetPassword: 'Limits password reset submissions to prevent token brute-forcing.',
@@ -20,20 +31,21 @@ const RULE_DESCRIPTIONS: Record<string, string> = {
   changePassword: 'Limits password change attempts for logged-in users.',
   totp: 'Limits TOTP two-factor authentication actions (setup, enable, disable).',
   messageSend: 'Limits how many messages a user can send per time window.',
-  upload: 'Limits file upload requests (avatars, server icons).',
-  friendRequest: 'Limits friend request sending to prevent spam.',
+  upload: 'Limits file upload requests (avatars, server icons, message attachments).',
+  friendRequest: 'Limits sending, accepting, declining and cancelling friend requests and removing friends, to prevent spam.',
   memberManage: 'Limits server member actions (kick, role change, etc).',
   categoryManage: 'Limits channel/category create, update, delete, and reorder actions.',
   search: 'Limits search queries to prevent abuse.',
-  stats: 'Limits stats/health endpoint requests.',
+  stats: 'Limits requests to the public stats endpoint (the landing-page counters).',
   admin: 'Limits admin panel API requests.',
   report: 'Limits how often a user can submit reports.',
-  support: 'Limits support ticket message sending.',
+  support: 'Limits opening support tickets and sending ticket messages.',
   webhookExecute: 'Deliveries accepted per webhook per minute, charged only after the token matched.',
   webhookExecuteIp: "Webhook deliveries per client address per minute; generous because GitHub's deliveries share a few egress addresses.",
   webhookManage: 'Webhook create, edit, rotate and delete per user per hour.',
   webhookRead: 'Webhook list reads per user per minute.',
-  general: 'Catch-all limiter applied to all other API routes.',
+  general: 'Per-IP budget for requests without a valid sign-in, charged on every route under /api/v1 except webhook deliveries (mounted outside it), on top of any route-specific limit.',
+  generalUser: 'Per-user budget for signed-in requests, charged on every route under /api/v1 except webhook deliveries (mounted outside it), on top of any route-specific limit.',
 };
 
 function Tip({ text }: { text: string }) {
@@ -137,13 +149,13 @@ export function AdminRateLimits() {
       {/* Clear user rate limits */}
       <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4">
         <h3 className="text-sm font-semibold text-vox-text-primary mb-2 inline-flex items-center">Clear User Rate Limits<Tip text="This resets the user's request counters back to zero, giving them a fresh quota. It does NOT remove rate limiting, the rules still apply, the user just gets a clean slate." /></h3>
-        <p className="text-xs text-vox-text-muted mb-3">Reset all rate limit counters for a specific user ID or IP address.</p>
+        <p className="text-xs text-vox-text-muted mb-3">Reset all rate limit counters for a specific user ID, IP address or e-mail address (an e-mail clears its sign-in counters on every network).</p>
         <form onSubmit={handleClearUser} className="flex gap-2">
           <input
             type="text"
             value={clearKey}
             onChange={(e) => setClearKey(e.target.value)}
-            placeholder="User ID or IP address"
+            placeholder="User ID, IP address or e-mail"
             className="flex-1 rounded-md border border-vox-border bg-vox-bg-hover px-3 py-1.5 text-sm text-vox-text-primary placeholder:text-vox-text-muted focus:border-vox-accent-primary focus:outline-none"
           />
           <button
@@ -164,7 +176,7 @@ export function AdminRateLimits() {
               <th className="px-4 py-3 text-left text-xs font-medium text-vox-text-muted uppercase">Rule</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-vox-text-muted uppercase">Key Type</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-vox-text-muted uppercase"><span className="inline-flex items-center">Max Requests<Tip text="Maximum number of requests allowed within the time window before the user gets rate limited." /></span></th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-vox-text-muted uppercase"><span className="inline-flex items-center">Time Window<Tip text="The rolling time period (in seconds) during which requests are counted. Counters reset after this period." /></span></th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-vox-text-muted uppercase"><span className="inline-flex items-center">Time Window<Tip text="The window (in seconds) during which requests are counted. It starts at the first counted request, and the counter resets when it ends." /></span></th>
               <th className="px-4 py-3 text-left text-xs font-medium text-vox-text-muted uppercase"><span className="inline-flex items-center">Block Duration<Tip text="How long (in seconds) the user is locked out after exceeding the max requests. Set to 0 for no lockout." /></span></th>
               <th className="px-4 py-3 text-left text-xs font-medium text-vox-text-muted uppercase w-[140px]">Actions</th>
             </tr>
@@ -185,9 +197,9 @@ export function AdminRateLimits() {
                   </td>
                   <td className="px-4 py-3">
                     <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                      rule.keyType === 'ip' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
+                      rule.keyType === 'ip' || rule.keyType === 'subnet' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'
                     }`}>
-                      {rule.keyType === 'ip' ? 'IP' : rule.keyType === 'webhook' ? 'Webhook' : 'User'}
+                      {KEY_TYPE_LABEL[rule.keyType] ?? rule.keyType}
                     </span>
                   </td>
                   <td className="px-4 py-3">

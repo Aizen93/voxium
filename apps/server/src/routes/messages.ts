@@ -3,7 +3,7 @@ import { authenticate, requireVerifiedEmail, requireConsent } from '../middlewar
 import { rateLimitMessageSend, rateLimitInteract } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, mentionsEveryone as contentMentionsEveryone, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
@@ -266,11 +266,19 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       if (!parent || parent.channelId !== channelId) throw new BadRequestError('Invalid replyToId');
     }
 
+    // @everyone pings the channel only when the author holds MENTION_EVERYONE
+    // there — decided NOW and stored on the row, never re-derived from the text
+    // (ciphertext is never read; a secure channel's member list is not a ping
+    // list either)
+    const pingsEveryone = !channel.secure && contentMentionsEveryone(content)
+      && await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.MENTION_EVERYONE);
+
     const created = await prisma.$transaction(async (tx) => {
       const msg = await tx.message.create({
         data: {
           content,
           encrypted: channel.secure,
+          mentionsEveryone: pingsEveryone,
           channelId,
           authorId: req.user!.userId,
           ...(replyToId && { replyToId }),
@@ -380,9 +388,15 @@ messageRouter.patch('/:messageId', rateLimitInteract, async (req: Request<{ chan
       if (contentErr) throw new BadRequestError(contentErr);
     }
 
+    // Re-decided on every edit with the editor's CURRENT permission: an
+    // @everyone edited in by someone who may not ping the channel stays text,
+    // and one edited out stops pinging
+    const pingsEveryone = !message.channel!.secure && contentMentionsEveryone(content)
+      && await hasChannelPermission(req.user!.userId, channelId, message.channel!.serverId, Permissions.MENTION_EVERYONE);
+
     const updated = shapeMessageRow(await prisma.message.update({
       where: { id: messageId },
-      data: { content, editedAt: new Date() },
+      data: { content, editedAt: new Date(), mentionsEveryone: pingsEveryone },
       include: {
         author: authorSelect,
         replyTo: replyToSelect,

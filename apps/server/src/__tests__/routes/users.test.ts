@@ -49,6 +49,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitGeneral: passthrough,
+    rateLimitProfileUpdate: passthrough,
   };
 });
 

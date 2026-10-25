@@ -231,6 +231,10 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('at most');
+      // The roles members created, not the @everyone row every server carries:
+      // counting it made the 25th custom role fail while the client, counting
+      // custom roles, still offered the button
+      expect(prismaMock.role.count).toHaveBeenCalledWith({ where: { serverId: 'srv1', isDefault: false } });
     });
 
     it('creates a role with permissions when actor is owner', async () => {

@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
-import { rateLimitSupport, rateLimitGeneral } from '../middleware/rateLimiter';
+import { rateLimitSupport } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { LIMITS, WS_EVENTS } from '@voxium/shared';
@@ -54,7 +54,9 @@ async function emitTicketCount() {
 
 // ─── Open / Reopen ticket ────────────────────────────────────────────────────
 
-supportRouter.post('/open', rateLimitGeneral, async (req: Request, res: Response, next: NextFunction) => {
+// The support bucket, not the api-level general one: that is charged once per
+// request already, and charging it here again halved this user's budget
+supportRouter.post('/open', rateLimitSupport, async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('support')) throw new ForbiddenError('Support tickets are currently disabled');
     const userId = req.user!.userId;
@@ -127,7 +129,7 @@ supportRouter.post('/open', rateLimitGeneral, async (req: Request, res: Response
 
 // ─── Get user's ticket + messages ────────────────────────────────────────────
 
-supportRouter.get('/ticket', rateLimitGeneral, async (req: Request, res: Response, next: NextFunction) => {
+supportRouter.get('/ticket', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
 

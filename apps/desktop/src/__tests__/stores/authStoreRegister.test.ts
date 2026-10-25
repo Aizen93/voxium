@@ -31,6 +31,10 @@ vi.mock('../../services/tokenStorage', () => ({
   setTokens: vi.fn(),
   clearTokens: vi.fn(),
   isRemembered: vi.fn(() => true),
+  hydrateTokens: vi.fn(async () => true),
+  getTrustedDeviceToken: vi.fn(() => null),
+  setTrustedDeviceToken: vi.fn(),
+  clearTrustedDeviceToken: vi.fn(),
 }));
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
 
