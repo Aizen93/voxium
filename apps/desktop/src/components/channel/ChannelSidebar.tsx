@@ -359,10 +359,11 @@ function SortableCategoryHeader({
         )}
         <button
           onClick={onToggle}
-          className="section-label flex min-w-0 flex-1 items-center gap-1 hover:text-vox-text-secondary transition-colors"
+          className="category-label flex min-w-0 flex-1 items-center gap-1 hover:text-vox-text-secondary transition-colors"
+          data-testid="category-header"
         >
           <ChevronRight
-            size={12}
+            size={13}
             className={clsx('shrink-0 transition-transform', !isCollapsed && 'rotate-90')}
           />
           <span className="truncate">{category.name}</span>
@@ -389,7 +390,13 @@ function SortableCategoryHeader({
         )}
       </div>
 
-      {!isCollapsed && children}
+      {/* The rail: a line down the left of the category's channels, so each
+          channel reads as belonging to the heading above it. */}
+      {!isCollapsed && (
+        <div className="ml-[18px] border-l-2 border-vox-border pl-1" data-testid="category-rail">
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -934,23 +941,26 @@ export function ChannelSidebar() {
             categorizable, no permission overrides. */}
         {(secureChannels.length > 0 || canCreateSecure) && (
           <div className="mt-2" data-testid="secure-channels-section">
-            <div className="group mb-0.5 flex items-center gap-1 px-1.5">
-              <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-vox-text-muted">
-                <Lock size={10} />
-                {t('secureChannel.sectionTitle')}
+            <div className="mb-1 flex items-center gap-1 px-1">
+              <span className="category-label flex min-w-0 items-center gap-1">
+                <Lock size={12} className="shrink-0" />
+                <span className="truncate">{t('secureChannel.sectionTitle')}</span>
               </span>
+              {/* Always visible: a control that only appears on hover is one
+                  nobody finds (the owner, 2026-10-25). */}
               {canCreateSecure && (
                 <button
                   onClick={() => setShowSecureCreate(true)}
-                  className="ml-auto flex h-5 w-5 items-center justify-center rounded text-vox-text-muted opacity-0 transition-opacity hover:text-vox-text-primary group-hover:opacity-100"
+                  className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-vox-border text-vox-accent-primary transition-colors hover:border-vox-accent-primary hover:bg-vox-accent-tint"
                   title={t('secureChannel.createTitle')}
                   aria-label={t('secureChannel.createTitle')}
                   data-testid="secure-channel-create-open"
                 >
-                  <Plus size={13} />
+                  <Plus size={14} />
                 </button>
               )}
             </div>
+            <div className="ml-[13px] border-l-2 border-vox-border pl-1" data-testid="secure-rail">
             {secureChannels.map((ch) => {
               // Secure VOICE channel: joins E2E voice instead of opening chat.
               // Hard-gated on encoded-transform support — no plaintext fallback.
@@ -1011,6 +1021,7 @@ export function ChannelSidebar() {
                 </button>
               );
             })}
+            </div>
           </div>
         )}
 
@@ -1078,9 +1089,10 @@ export function ChannelSidebar() {
         {isAdmin && !showCreateCategory && (
           <button
             onClick={() => setShowCreateCategory(true)}
-            className="mt-2 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-vox-text-muted hover:text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
+            className="mt-3 flex w-full items-center gap-2 rounded-md border border-dashed border-vox-border px-2 py-1.5 text-[13px] font-medium text-vox-accent-primary transition-colors hover:border-vox-accent-primary hover:bg-vox-accent-tint"
+            data-testid="create-category-open"
           >
-            <FolderPlus size={14} />
+            <FolderPlus size={15} />
             <span>{t('channel.createCategory')}</span>
           </button>
         )}
