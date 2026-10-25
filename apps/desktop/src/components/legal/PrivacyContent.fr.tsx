@@ -274,7 +274,10 @@ export function PrivacyContentFr() {
             <li>
               <strong className="text-vox-text-primary">E-mail.</strong> Les e-mails liés au compte (vérification de
               l’adresse et réinitialisation du mot de passe) sont envoyés par l’intermédiaire d’un prestataire d’envoi
-              d’e-mails, qui reçoit votre adresse e-mail et le message
+              d’e-mails, qui reçoit votre adresse e-mail et le message. Chacun de ces e-mails contient un lien qui
+              permet à la personne qui le reçoit de bloquer tout nouvel e-mail de Voxium vers cette adresse&nbsp;; nous
+              conservons alors une forme hachée de l’adresse, dont elle ne peut être retrouvée, tant que le blocage
+              est en vigueur
             </li>
             <li>
               <strong className="text-vox-text-primary">Mises à jour de l’application.</strong> À son démarrage,

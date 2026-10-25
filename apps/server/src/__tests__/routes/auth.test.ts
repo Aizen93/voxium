@@ -14,7 +14,7 @@ process.env.JWT_REFRESH_SECRET = JWT_REFRESH_SECRET;
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
-const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, passthroughMiddleware } = vi.hoisted(() => {
+const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockPrismaMailSuppression, mockRedisClient, passthroughMiddleware } = vi.hoisted(() => {
   const mockPrismaUser = {
     findUnique: vi.fn(),
     findFirst: vi.fn(),
@@ -25,6 +25,12 @@ const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, pa
 
   const mockPrismaIpBan = {
     findUnique: vi.fn(),
+  };
+
+  const mockPrismaMailSuppression = {
+    findUnique: vi.fn(),
+    upsert: vi.fn(),
+    deleteMany: vi.fn(),
   };
 
   const mockPrismaIpRecord = {
@@ -53,7 +59,7 @@ const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, pa
 
   const passthroughMiddleware = (_req: unknown, _res: unknown, next: () => void) => next();
 
-  return { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, passthroughMiddleware };
+  return { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockPrismaMailSuppression, mockRedisClient, passthroughMiddleware };
 });
 
 // Mock Prisma — must be declared before app import
@@ -62,6 +68,7 @@ vi.mock('../../utils/prisma', () => ({
     user: mockPrismaUser,
     ipBan: mockPrismaIpBan,
     ipRecord: mockPrismaIpRecord,
+    mailSuppression: mockPrismaMailSuppression,
     $queryRaw: vi.fn().mockResolvedValue([{ result: 1 }]),
   },
 }));
@@ -83,6 +90,7 @@ vi.mock('../../utils/redis', () => ({
 vi.mock('../../utils/email', () => ({
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
+  MailSuppressedError: class MailSuppressedError extends Error {},
 }));
 
 // Mock feature flags
@@ -154,6 +162,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitChangePassword: passthroughMiddleware,
   rateLimitTOTP: passthroughMiddleware,
   rateLimitVerifyEmail: passthroughMiddleware,
+  rateLimitMailBlock: passthroughMiddleware,
   rateLimitResendVerification: passthroughMiddleware,
   rateLimitConsent: passthroughMiddleware,
   rateLimitDeleteAccount: passthroughMiddleware,
@@ -1142,6 +1151,91 @@ describe('POST /api/v1/auth/forgot-password', () => {
     // requestPasswordReset calls prisma.user.findUnique with lowercased email
     const findCall = mockPrismaUser.findUnique.mock.calls[0]?.[0];
     expect(findCall?.where?.email).toBe('test@example.com');
+  });
+});
+
+describe('POST /api/v1/auth/mail-block — "Not you? Block Voxium mail to this address"', () => {
+  // The real token helpers: this is the signature, purpose and digest check
+  // the routes rely on, against the JWT_SECRET this file sets.
+  let mailBlockToken: (email: string) => string;
+  let mailboxDigest: (email: string) => string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    ({ mailBlockToken, mailboxDigest } = await import('../../utils/mailSuppression'));
+    mockPrismaMailSuppression.findUnique.mockResolvedValue(null);
+    mockPrismaMailSuppression.upsert.mockResolvedValue({});
+    mockPrismaMailSuppression.deleteMany.mockResolvedValue({ count: 1 });
+  });
+
+  it('status answers whether the mailbox the token names is blocked', async () => {
+    const token = mailBlockToken('victim+1@outlook.com');
+
+    let res = await request(app).post('/api/v1/auth/mail-block/status').send({ token });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { blocked: false } });
+    expect(mockPrismaMailSuppression.findUnique).toHaveBeenCalledWith({
+      where: { mailboxHash: mailboxDigest('victim@outlook.com') },
+      select: { mailboxHash: true },
+    });
+
+    mockPrismaMailSuppression.findUnique.mockResolvedValue({ mailboxHash: mailboxDigest('victim@outlook.com') });
+    res = await request(app).post('/api/v1/auth/mail-block/status').send({ token });
+    expect(res.body).toEqual({ success: true, data: { blocked: true } });
+  });
+
+  it('block puts the mailbox digest on the list — one click, no session, no address in the request', async () => {
+    const token = mailBlockToken('victim@example.com');
+    const res = await request(app).post('/api/v1/auth/mail-block').send({ token });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { blocked: true } });
+    expect(mockPrismaMailSuppression.upsert).toHaveBeenCalledWith({
+      where: { mailboxHash: mailboxDigest('victim@example.com') },
+      create: { mailboxHash: mailboxDigest('victim@example.com') },
+      update: {},
+    });
+    expect(JSON.stringify(mockPrismaMailSuppression.upsert.mock.calls)).not.toContain('victim@example.com');
+  });
+
+  it('unblock takes it off again (the mailbox owner can change their mind from the same link)', async () => {
+    const token = mailBlockToken('victim@example.com');
+    const res = await request(app).post('/api/v1/auth/mail-unblock').send({ token });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { blocked: false } });
+    expect(mockPrismaMailSuppression.deleteMany).toHaveBeenCalledWith({
+      where: { mailboxHash: mailboxDigest('victim@example.com') },
+    });
+  });
+
+  it.each(['/mail-block/status', '/mail-block', '/mail-unblock'])('%s answers one 400 for a missing, malformed, forged or foreign-purpose token', async (path) => {
+    const forged = jwt.sign({ purpose: 'mail-block', m: 'a'.repeat(64) }, 'wrong-secret', { algorithm: 'HS256' });
+    const access = jwt.sign({ userId: 'u-1', username: 'alice' }, JWT_SECRET, { algorithm: 'HS256' });
+    const totp = jwt.sign({ userId: 'u-1', purpose: 'totp-verify' }, JWT_SECRET, { algorithm: 'HS256' });
+
+    for (const body of [{}, { token: '' }, { token: 42 }, { token: 'garbage' }, { token: forged }, { token: access }, { token: totp }, { token: 'x'.repeat(1025) }]) {
+      const res = await request(app).post(`/api/v1/auth${path}`).send(body);
+      expect(res.status, JSON.stringify(body).slice(0, 60)).toBe(400);
+      expect(res.body).toEqual({ success: false, error: 'Invalid or expired mail-block link' });
+    }
+    expect(mockPrismaMailSuppression.findUnique).not.toHaveBeenCalled();
+    expect(mockPrismaMailSuppression.upsert).not.toHaveBeenCalled();
+    expect(mockPrismaMailSuppression.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('a store failure is a 500, never a false "blocked" or a silent success', async () => {
+    const token = mailBlockToken('victim@example.com');
+    mockPrismaMailSuppression.upsert.mockRejectedValueOnce(new Error('db down'));
+    const res = await request(app).post('/api/v1/auth/mail-block').send({ token });
+    expect(res.status).toBe(500);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('the token opens nothing else: /auth/me refuses it', async () => {
+    const token = mailBlockToken('victim@example.com');
+    const res = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(401);
   });
 });
 

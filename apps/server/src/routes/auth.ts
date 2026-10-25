@@ -3,8 +3,9 @@ import { logAuditEvent } from '../utils/auditLog';
 import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitMailBlock, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
+import { readMailBlockToken, isDigestSuppressed, suppressDigest, unsuppressDigest } from '../utils/mailSuppression';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 
@@ -251,6 +252,56 @@ authRouter.post('/verify-email', rateLimitVerifyEmail, async (req: Request, res:
     }
     await verifyEmail(normalizedToken);
     res.json({ success: true, message: 'Email verified successfully.' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// "Not you? Block Voxium mail to this address" — the link every account e-mail
+// carries (utils/mailSuppression.ts). Three calls, all on the token from that
+// link and nothing else: no session, no address in the request. The token
+// names a mailbox DIGEST, so the page never learns the address either, and a
+// bad token answers one sentence whatever is wrong with it.
+const MAIL_BLOCK_INVALID = 'Invalid or expired mail-block link';
+const MAIL_BLOCK_TOKEN_MAX_CHARS = 1024;
+
+/** The mailbox digest the request's token names, or null after a 400 was sent. */
+function mailBlockDigest(req: Request, res: Response): string | null {
+  const token: unknown = req.body?.token;
+  const digest = typeof token === 'string' && token.length > 0 && token.length <= MAIL_BLOCK_TOKEN_MAX_CHARS
+    ? readMailBlockToken(token)
+    : null;
+  if (!digest) res.status(400).json({ success: false, error: MAIL_BLOCK_INVALID });
+  return digest;
+}
+
+authRouter.post('/mail-block/status', rateLimitMailBlock, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const digest = mailBlockDigest(req, res);
+    if (!digest) return;
+    res.json({ success: true, data: { blocked: await isDigestSuppressed(digest) } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/mail-block', rateLimitMailBlock, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const digest = mailBlockDigest(req, res);
+    if (!digest) return;
+    await suppressDigest(digest);
+    res.json({ success: true, data: { blocked: true } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/mail-unblock', rateLimitMailBlock, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const digest = mailBlockDigest(req, res);
+    if (!digest) return;
+    await unsuppressDigest(digest);
+    res.json({ success: true, data: { blocked: false } });
   } catch (err) {
     next(err);
   }

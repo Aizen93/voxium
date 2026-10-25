@@ -127,6 +127,22 @@
       "missingToken": "Token de verificación no encontrado.",
       "failed": "La verificación falló. El enlace puede ser inválido o haber expirado."
     },
+    "mailBlock": {
+      "title": "Correos de Voxium a esta dirección",
+      "checking": "Comprobando este enlace…",
+      "intro": "Si no creaste una cuenta de Voxium ni pediste restablecer una contraseña, otra persona escribió tu dirección. Un clic detiene todos los correos de Voxium a esta dirección.",
+      "block": "Bloquear los correos de Voxium a esta dirección",
+      "blockedIntro": "Voxium ya no envía correos a esta dirección.",
+      "allow": "Permitir de nuevo los correos de Voxium",
+      "working": "Guardando…",
+      "blockedDone": "Listo. Esta dirección no recibirá más correos de Voxium. Puedes permitirlos de nuevo desde esta página en cualquier momento.",
+      "allowedDone": "Los correos de Voxium a esta dirección están permitidos de nuevo.",
+      "note": "Esto solo afecta a los correos de cuenta que envía Voxium (verificación de la dirección y restablecimiento de contraseña). No crea ni elimina ninguna cuenta.",
+      "invalidLink": "Este enlace no es válido o ha caducado. Usa el enlace de un correo de Voxium más reciente.",
+      "failed": "Algo salió mal. Inténtalo de nuevo.",
+      "retry": "Intentar de nuevo",
+      "home": "Volver a Voxium"
+    },
     "consent": {
       "title": "Antes de continuar",
       "description": "Voxium necesita que aceptes los Términos del servicio y la Política de privacidad para seguir usando tu cuenta.",
@@ -1316,6 +1332,7 @@
     "invalidTwoFactorCode": "Código de autenticación en dos pasos no válido",
     "emailAlreadyVerified": "Tu dirección de correo ya está verificada",
     "tooManyVerificationEmails": "Se solicitaron demasiados correos de verificación: inténtalo mañana",
+    "mailBlocked": "Los correos a esta dirección están bloqueados: usa el enlace de un correo anterior de Voxium para permitirlos de nuevo",
     "tooManyDomainRegistrations": "Demasiados registros desde este dominio de correo hoy: inténtalo más tarde",
     "registrationChallengeInvalid": "La verificación de registro no es válida o caducó: actualiza e inténtalo de nuevo",
     "powExpired": "La verificación de registro tardó demasiado: inténtalo de nuevo",

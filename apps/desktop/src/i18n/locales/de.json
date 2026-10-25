@@ -127,6 +127,22 @@
       "missingToken": "Bestätigungstoken fehlt.",
       "failed": "Verifizierung fehlgeschlagen. Der Link ist möglicherweise ungültig oder abgelaufen."
     },
+    "mailBlock": {
+      "title": "Voxium-E-Mails an diese Adresse",
+      "checking": "Link wird geprüft…",
+      "intro": "Wenn du kein Voxium-Konto erstellt und kein Zurücksetzen des Passworts angefordert hast, hat jemand anderes deine Adresse eingegeben. Ein Klick stoppt jede E-Mail von Voxium an diese Adresse.",
+      "block": "Voxium-E-Mails an diese Adresse blockieren",
+      "blockedIntro": "Voxium sendet keine E-Mails mehr an diese Adresse.",
+      "allow": "Voxium-E-Mails wieder erlauben",
+      "working": "Wird gespeichert…",
+      "blockedDone": "Erledigt. Diese Adresse erhält keine E-Mails von Voxium mehr. Du kannst sie auf dieser Seite jederzeit wieder erlauben.",
+      "allowedDone": "E-Mails von Voxium an diese Adresse sind wieder erlaubt.",
+      "note": "Das betrifft nur die Konto-E-Mails, die Voxium sendet (Adressbestätigung und Zurücksetzen des Passworts). Es wird kein Konto erstellt oder gelöscht.",
+      "invalidLink": "Dieser Link ist ungültig oder abgelaufen. Verwende den Link aus einer neueren Voxium-E-Mail.",
+      "failed": "Etwas ist schiefgelaufen. Bitte versuche es erneut.",
+      "retry": "Erneut versuchen",
+      "home": "Zurück zu Voxium"
+    },
     "consent": {
       "title": "Bevor es weitergeht",
       "description": "Voxium benötigt deine Zustimmung zu den Nutzungsbedingungen und der Datenschutzerklärung, damit du dein Konto weiter nutzen kannst.",
@@ -1316,6 +1332,7 @@
     "invalidTwoFactorCode": "Ungültiger Code für die Zwei-Faktor-Authentifizierung",
     "emailAlreadyVerified": "Deine E-Mail-Adresse ist bereits bestätigt",
     "tooManyVerificationEmails": "Zu viele Bestätigungs-E-Mails angefordert — versuche es morgen erneut",
+    "mailBlocked": "E-Mails an diese Adresse sind blockiert — verwende den Link aus einer früheren Voxium-E-Mail, um sie wieder zu erlauben",
     "tooManyDomainRegistrations": "Heute zu viele Registrierungen von dieser E-Mail-Domain — versuche es später erneut",
     "registrationChallengeInvalid": "Die Registrierungsprüfung ist ungültig oder abgelaufen — lade neu und versuche es erneut",
     "powExpired": "Die Registrierungsprüfung hat zu lange gedauert — bitte versuche es erneut",

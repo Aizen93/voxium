@@ -647,6 +647,18 @@ model IpBan {
   @@map("ip_bans")
 }
 
+/// Mailboxes that asked never to receive Voxium mail again ("Not you? Block
+/// Voxium mail to this address", one click from any account e-mail). Keyed by
+/// the digest of the MAILBOX form of the address (`utils/mailSuppression.ts`),
+/// never the address: the list must not become an address book of people who
+/// are not users. Every user-facing sender in `utils/email.ts` consults it.
+model MailSuppression {
+  mailboxHash String   @id @map("mailbox_hash")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("mail_suppressions")
+}
+
 // ─── Audit Log ─────────────────────────────────────────────────────────────
 
 model AuditLog {

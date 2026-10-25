@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
+import { isMailSuppressed, mailBlockUrl } from './mailSuppression';
 
 // Lazy-initialized to avoid reading env vars at module scope (ES import hoisting)
 let _transporter: Transporter | null = null;
@@ -127,15 +128,54 @@ export async function sendCleanupReport(to: string, report: CleanupReport): Prom
   });
 }
 
+/**
+ * The address asked us never to mail it (`utils/mailSuppression.ts`). Thrown
+ * by every user-facing sender BEFORE anything is handed to the transport;
+ * callers that cannot answer differently (registration, password reset) log
+ * it at warn level and move on, the resend route answers it as a 400.
+ */
+export class MailSuppressedError extends Error {
+  constructor() {
+    super('Mail to this address is blocked');
+    this.name = 'MailSuppressedError';
+  }
+}
+
+export const MAIL_BLOCK_PROMPT = 'Not you? Block Voxium mail to this address';
+
+interface UserMailContent {
+  subject: string;
+  text: string;
+  html: string;
+}
+
+/**
+ * The ONE path every e-mail to a USER-TYPED address takes. It refuses a
+ * suppressed mailbox and hands the template the block link to print, so no
+ * account e-mail can leave without the way to stop the next one. Operator
+ * mail (`sendCleanupReport`, `sendAdminAlert`) goes to a configured address
+ * and does not come through here.
+ */
+async function sendUserMail(to: string, content: (blockUrl: string) => UserMailContent): Promise<void> {
+  if (await isMailSuppressed(to)) throw new MailSuppressedError();
+  await getTransporter().sendMail({ from: getSenderFrom(), to, ...content(mailBlockUrl(to)) });
+}
+
+function blockFooterText(blockUrl: string): string {
+  return `${MAIL_BLOCK_PROMPT}:\n${blockUrl}`;
+}
+
+function blockFooterHtml(blockUrl: string): string {
+  return `<p style="font-size: 12px; color: #999; margin-top: 24px; border-top: 1px solid #eee; padding-top: 12px;">${MAIL_BLOCK_PROMPT}: <a href="${blockUrl}" style="color: #666;">block this address</a></p>`;
+}
+
 export async function sendVerificationEmail(to: string, token: string): Promise<void> {
   const clientUrl = process.env.CLIENT_URL || 'http://localhost:8080';
   const verifyUrl = `${clientUrl}/verify-email/${token}`;
 
-  await getTransporter().sendMail({
-    from: getSenderFrom(),
-    to,
+  await sendUserMail(to, (blockUrl) => ({
     subject: 'Verify your Voxium email address',
-    text: `Welcome to Voxium! Please verify your email address by clicking the link below:\n\n${verifyUrl}\n\nThis link expires in 24 hours. If you did not create an account, ignore this email.`,
+    text: `Welcome to Voxium! Please verify your email address by clicking the link below:\n\n${verifyUrl}\n\nThis link expires in 24 hours. If you did not create an account, ignore this email.\n\n${blockFooterText(blockUrl)}`,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
         <h2 style="color: #5865f2;">Welcome to Voxium!</h2>
@@ -144,20 +184,19 @@ export async function sendVerificationEmail(to: string, token: string): Promise<
           Verify Email
         </a>
         <p style="font-size: 13px; color: #666;">This link expires in 24 hours. If you did not create this account, you can safely ignore this email.</p>
+        ${blockFooterHtml(blockUrl)}
       </div>
     `,
-  });
+  }));
 }
 
 export async function sendPasswordResetEmail(to: string, token: string): Promise<void> {
   const clientUrl = process.env.CLIENT_URL || 'http://localhost:8080';
   const resetUrl = `${clientUrl}/reset-password/${token}`;
 
-  await getTransporter().sendMail({
-    from: getSenderFrom(),
-    to,
+  await sendUserMail(to, (blockUrl) => ({
     subject: 'Reset your Voxium password',
-    text: `You requested a password reset. Click the link below to set a new password:\n\n${resetUrl}\n\nThis link expires in 1 hour. If you did not request this, ignore this email.`,
+    text: `You requested a password reset. Click the link below to set a new password:\n\n${resetUrl}\n\nThis link expires in 1 hour. If you did not request this, ignore this email.\n\n${blockFooterText(blockUrl)}`,
     html: `
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
         <h2 style="color: #5865f2;">Voxium Password Reset</h2>
@@ -166,9 +205,10 @@ export async function sendPasswordResetEmail(to: string, token: string): Promise
           Reset Password
         </a>
         <p style="font-size: 13px; color: #666;">This link expires in 1 hour. If you did not request this, you can safely ignore this email.</p>
+        ${blockFooterHtml(blockUrl)}
       </div>
     `,
-  });
+  }));
 }
 
 /** Plain operational alert to the configured admin address (spike warnings,

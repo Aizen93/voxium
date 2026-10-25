@@ -127,6 +127,22 @@
       "missingToken": "缺少验证令牌。",
       "failed": "验证失败。链接可能无效或已过期。"
     },
+    "mailBlock": {
+      "title": "Voxium 发送至此地址的邮件",
+      "checking": "正在检查此链接…",
+      "intro": "如果你没有创建 Voxium 账户，也没有申请重置密码，那么是其他人输入了你的地址。只需一次点击，Voxium 就不会再向此地址发送任何邮件。",
+      "block": "屏蔽 Voxium 发送至此地址的邮件",
+      "blockedIntro": "Voxium 不再向此地址发送邮件。",
+      "allow": "重新允许 Voxium 邮件",
+      "working": "正在保存…",
+      "blockedDone": "完成。此地址将不再收到 Voxium 的邮件。你可以随时在此页面重新允许。",
+      "allowedDone": "Voxium 发送至此地址的邮件已重新允许。",
+      "note": "这只涉及 Voxium 发送的账户邮件（地址验证和密码重置）。不会创建或删除任何账户。",
+      "invalidLink": "此链接无效或已过期。请使用较新的 Voxium 邮件中的链接。",
+      "failed": "出了点问题。请重试。",
+      "retry": "重试",
+      "home": "返回 Voxium"
+    },
     "consent": {
       "title": "继续之前",
       "description": "要继续使用您的账户，Voxium 需要您接受服务条款和隐私政策。",
@@ -1315,6 +1331,7 @@
     "invalidTwoFactorCode": "双重验证码无效",
     "emailAlreadyVerified": "你的邮箱地址已验证",
     "tooManyVerificationEmails": "请求的验证邮件过多 — 请明天再试",
+    "mailBlocked": "发送至此地址的邮件已被屏蔽 — 请使用之前 Voxium 邮件中的链接重新允许",
     "tooManyDomainRegistrations": "今天来自该邮箱域名的注册过多 — 请稍后再试",
     "registrationChallengeInvalid": "注册校验无效或已过期 — 请刷新后重试",
     "powExpired": "注册校验耗时过长 — 请重试",

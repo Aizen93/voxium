@@ -7,6 +7,7 @@ import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { InvitePage } from './pages/InvitePage';
 import { VerifyEmailPage } from './pages/VerifyEmailPage';
+import { MailBlockPage } from './pages/MailBlockPage';
 import { EmailVerificationPendingPage } from './pages/EmailVerificationPendingPage';
 import { ConsentPage } from './pages/ConsentPage';
 import { LandingPage } from './pages/LandingPage';
@@ -115,6 +116,8 @@ export function App({ onReady }: { onReady?: () => void }) {
             }
           />
           <Route path="/verify-email/:token" element={<VerifyEmailPage />} />
+          {/* "Not you? Block Voxium mail to this address": public, the token is the right */}
+          <Route path="/mail-block/:token" element={<MailBlockPage />} />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/cookies" element={<CookiePolicyPage />} />

@@ -260,7 +260,9 @@ export function PrivacyContentEn() {
             <li>
               <strong className="text-vox-text-primary">Email.</strong> Account emails (address verification and
               password reset) are sent through an email delivery provider, which receives your email address and the
-              message
+              message. Every such email carries a link that lets whoever receives it block all further email from
+              Voxium to that address; we then keep a hashed form of the address, from which it cannot be read back,
+              for as long as the block stands
             </li>
             <li>
               <strong className="text-vox-text-primary">App updates.</strong> When it starts, the desktop app asks

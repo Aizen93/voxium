@@ -19,7 +19,16 @@ vi.mock('../../utils/email', () => ({
   sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   describeEmailError: vi.fn((e: unknown) => String(e)),
+  // A real class: the service tells it apart with instanceof
+  MailSuppressedError: class MailSuppressedError extends Error {
+    constructor() { super('Mail to this address is blocked'); this.name = 'MailSuppressedError'; }
+  },
 }));
+
+// The suppression list ("Not you? Block Voxium mail to this address"), asked
+// by the resend path before it spends a cap or rewrites a token.
+const { mailSuppressed } = vi.hoisted(() => ({ mailSuppressed: vi.fn().mockResolvedValue(false) }));
+vi.mock('../../utils/mailSuppression', () => ({ isMailSuppressed: (...a: unknown[]) => mailSuppressed(...a) }));
 
 const redisIncr = vi.fn();
 const redisExpire = vi.fn();
@@ -294,6 +303,94 @@ describe('authService — verification email hygiene', () => {
     mailCap.mockResolvedValueOnce(true);
 
     await expect(resendVerificationEmail('user-1')).resolves.toBeUndefined();
+  });
+});
+
+describe('authService — a mailbox that blocked Voxium mail', () => {
+  beforeEach(() => {
+    mailSuppressed.mockReset().mockResolvedValue(false);
+    mailCap.mockClear();
+  });
+
+  it('resend answers a 400 that says how to undo the block, BEFORE any cap is spent or token rewritten', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      id: 'user-1', email: 'victim+7@outlook.com', emailVerified: false,
+    } as any);
+    vi.mocked(prisma.user.update).mockClear();
+    mailSuppressed.mockResolvedValueOnce(true);
+
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again',
+    });
+    expect(mailSuppressed).toHaveBeenCalledWith('victim+7@outlook.com');
+    expect(mailCap).not.toHaveBeenCalled();
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    const { sendVerificationEmail } = await import('../../utils/email');
+    expect(sendVerificationEmail).not.toHaveBeenCalled();
+  });
+
+  it('resend maps the sender\'s own refusal (a block landing between the check and the send) to the same 400', async () => {
+    const { sendVerificationEmail, MailSuppressedError } = await import('../../utils/email');
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      id: 'user-1', email: 'victim@example.com', emailVerified: false,
+    } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new MailSuppressedError());
+
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({ statusCode: 400, message: /blocked/ });
+  });
+
+  it('resend still surfaces a transport failure as the error it is', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      id: 'user-1', email: 'victim@example.com', emailVerified: false,
+    } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new Error('relay refused'));
+
+    await expect(resendVerificationEmail('user-1')).rejects.toThrow('relay refused');
+  });
+
+  it('registration goes through unchanged and logs the skipped mail at WARN, without the address', async () => {
+    const { sendVerificationEmail, MailSuppressedError } = await import('../../utils/email');
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new MailSuppressedError());
+    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
+    vi.mocked(prisma.user.create).mockResolvedValueOnce({
+      id: 'user-1', username: 'testuser', displayName: 'testuser',
+      email: 'victim@example.com', avatarUrl: null, bio: null, status: 'offline',
+      role: 'user', totpEnabled: false, emailVerified: false,
+      isSupporter: false, supporterTier: null, tokenVersion: 0, createdAt: new Date(),
+    } as any);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await registerUser('testuser', 'victim@example.com', 'ValidPass123', undefined, undefined, CONSENT);
+    await new Promise((r) => setImmediate(r)); // the fire-and-forget catch
+
+    expect(result.user.email).toBe('victim@example.com');
+    expect(warn).toHaveBeenCalledWith('[Auth] Verification mail skipped: the mailbox blocked Voxium mail');
+    expect(error).not.toHaveBeenCalledWith('[Auth] Failed to send verification email:', expect.anything());
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('victim@example.com');
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
+  it('password reset answers as always and logs the skipped mail at WARN', async () => {
+    const { sendPasswordResetEmail, MailSuppressedError } = await import('../../utils/email');
+    vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(new MailSuppressedError());
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'victim@example.com' } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(requestPasswordReset('victim@example.com')).resolves.toBeUndefined();
+    await new Promise((r) => setImmediate(r));
+
+    expect(warn).toHaveBeenCalledWith('[Auth] Password-reset mail skipped: the mailbox blocked Voxium mail');
+    expect(error).not.toHaveBeenCalled();
+    warn.mockRestore();
+    error.mockRestore();
   });
 });
 

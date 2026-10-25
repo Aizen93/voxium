@@ -203,6 +203,8 @@ const ERROR_MAP: Record<string, string> = {
   'Invalid two-factor authentication code': 'invalidTwoFactorCode',
   'Email already verified': 'emailAlreadyVerified',
   'Too many verification emails requested — try again tomorrow': 'tooManyVerificationEmails',
+  // The mailbox blocked Voxium mail ("Not you? …" in an earlier e-mail); only a resend can hear it
+  'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again': 'mailBlocked',
   'Too many registrations from this email domain today — try again later': 'tooManyDomainRegistrations',
   'Registration challenge is invalid or expired — refresh and try again': 'registrationChallengeInvalid',
   // The registration proof of work fails on the CLIENT too (shared/pow.ts,

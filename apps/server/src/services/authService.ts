@@ -7,7 +7,8 @@ import type { AuthPayload } from '../middleware/auth';
 import type { UserRole, RegistrationConsent } from '@voxium/shared';
 import { AppError, BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
-import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError } from '../utils/email';
+import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError, MailSuppressedError } from '../utils/email';
+import { isMailSuppressed } from '../utils/mailSuppression';
 import { sanitizeText } from '../utils/sanitize';
 import { isJwtVerifyError } from '../utils/jwtErrors';
 import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
@@ -203,8 +204,14 @@ export async function registerUser(
     }).catch((err) => console.warn('[Auth] Registration IP record failed:', err));
   }
 
-  // Send verification email (fire-and-forget)
+  // Send verification email (fire-and-forget). A mailbox on the suppression
+  // list is not a failure: its owner asked for exactly this, and the response
+  // does not change (the account exists; a resend explains, see below).
   sendVerificationEmail(user.email, rawVerifyToken).catch((err) => {
+    if (err instanceof MailSuppressedError) {
+      console.warn('[Auth] Verification mail skipped: the mailbox blocked Voxium mail');
+      return;
+    }
     console.error('[Auth] Failed to send verification email:', describeEmailError(err));
   });
 
@@ -472,7 +479,16 @@ export async function requestPasswordReset(email: string) {
       return; // no token in the DB — a link would be dead on arrival
     }
     await sendPasswordResetEmail(user.email, rawToken)
-      .catch((err) => console.error('[Auth] Failed to send password reset email:', describeEmailError(err)));
+      .catch((err) => {
+        // The mailbox blocked Voxium mail (utils/mailSuppression.ts): the
+        // sender refused before the transport, the token stored above is
+        // unusable without the mail, and the response was already sent.
+        if (err instanceof MailSuppressedError) {
+          console.warn('[Auth] Password-reset mail skipped: the mailbox blocked Voxium mail');
+          return;
+        }
+        console.error('[Auth] Failed to send password reset email:', describeEmailError(err));
+      });
   })();
 }
 
@@ -568,6 +584,9 @@ export async function verifyEmail(token: string) {
   });
 }
 
+/** What a resend answers for a mailbox on the suppression list (mapped in the desktop's serverErrors.ts). */
+export const MAIL_BLOCKED_MESSAGE = 'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again';
+
 export async function resendVerificationEmail(userId: string) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -575,6 +594,13 @@ export async function resendVerificationEmail(userId: string) {
   });
   if (!user) throw new UnauthorizedError('User not found');
   if (user.emailVerified) throw new BadRequestError('Email already verified');
+
+  // The mailbox asked never to receive Voxium mail ("Not you? Block Voxium
+  // mail to this address"). The one caller who may legitimately hear this is
+  // the mailbox's owner, signed in to an account they created after blocking
+  // us — so say what happened and how to undo it, before any cap is spent or
+  // token rewritten. (The sender refuses too, for a block landing in between.)
+  if (await isMailSuppressed(user.email)) throw new BadRequestError(MAIL_BLOCKED_MESSAGE);
 
   // Hard daily cap PER INBOX, keyed on the canonical form: the per-user
   // limiter (3/5min) bounds the burst rate, but a bot that owns the account
@@ -597,7 +623,12 @@ export async function resendVerificationEmail(userId: string) {
     },
   });
 
-  await sendVerificationEmail(user.email, rawToken);
+  try {
+    await sendVerificationEmail(user.email, rawToken);
+  } catch (err) {
+    if (err instanceof MailSuppressedError) throw new BadRequestError(MAIL_BLOCKED_MESSAGE);
+    throw err;
+  }
 }
 
 /**

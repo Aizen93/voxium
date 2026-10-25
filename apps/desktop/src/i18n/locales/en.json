@@ -127,6 +127,22 @@
       "missingToken": "Missing verification token.",
       "failed": "Verification failed. The link may be invalid or expired."
     },
+    "mailBlock": {
+      "title": "Voxium email to this address",
+      "checking": "Checking this link…",
+      "intro": "If you did not create a Voxium account or ask for a password reset, someone else typed your address. One click stops every email from Voxium to this address.",
+      "block": "Block Voxium mail to this address",
+      "blockedIntro": "Voxium no longer sends email to this address.",
+      "allow": "Allow Voxium mail again",
+      "working": "Saving…",
+      "blockedDone": "Done. This address will receive no more email from Voxium. You can allow it again from this page at any time.",
+      "allowedDone": "Email from Voxium to this address is allowed again.",
+      "note": "This only concerns the account emails Voxium sends (address verification and password reset). It creates or deletes no account.",
+      "invalidLink": "This link is invalid or has expired. Use the link from a more recent Voxium email.",
+      "failed": "Something went wrong. Please try again.",
+      "retry": "Try again",
+      "home": "Back to Voxium"
+    },
     "consent": {
       "title": "Before you continue",
       "description": "Voxium needs you to accept the Terms of Service and the Privacy Policy to keep using your account.",
@@ -1316,6 +1332,7 @@
     "invalidTwoFactorCode": "Invalid two-factor authentication code",
     "emailAlreadyVerified": "Your email address is already verified",
     "tooManyVerificationEmails": "Too many verification emails requested — try again tomorrow",
+    "mailBlocked": "Mail to this address is blocked — use the link in an earlier Voxium email to allow it again",
     "tooManyDomainRegistrations": "Too many registrations from this email domain today — try again later",
     "registrationChallengeInvalid": "Registration check is invalid or expired — refresh and try again",
     "powExpired": "The registration check took too long — please try again",

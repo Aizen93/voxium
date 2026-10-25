@@ -65,6 +65,7 @@ const EXACT: Row[] = [
   { msg: 'Invalid two-factor authentication code', key: 'invalidTwoFactorCode' },
   { msg: 'Email already verified', key: 'emailAlreadyVerified' },
   { msg: 'Too many verification emails requested — try again tomorrow', key: 'tooManyVerificationEmails' },
+  { msg: 'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again', key: 'mailBlocked' },
   { msg: 'Too many registrations from this email domain today — try again later', key: 'tooManyDomainRegistrations' },
   { msg: 'Registration challenge is invalid or expired — refresh and try again', key: 'registrationChallengeInvalid' },
   { msg: 'Registration challenge expired before it was solved', key: 'powExpired' },

@@ -127,6 +127,22 @@
       "missingToken": "Jeton de vérification manquant.",
       "failed": "La vérification a échoué. Le lien est peut-être invalide ou expiré."
     },
+    "mailBlock": {
+      "title": "E-mails de Voxium à cette adresse",
+      "checking": "Vérification du lien…",
+      "intro": "Si vous n'avez pas créé de compte Voxium ni demandé de réinitialisation de mot de passe, quelqu'un d'autre a saisi votre adresse. Un clic suffit pour que Voxium n'envoie plus aucun e-mail à cette adresse.",
+      "block": "Bloquer les e-mails de Voxium à cette adresse",
+      "blockedIntro": "Voxium n'envoie plus d'e-mails à cette adresse.",
+      "allow": "Autoriser de nouveau les e-mails de Voxium",
+      "working": "Enregistrement…",
+      "blockedDone": "C'est fait. Cette adresse ne recevra plus aucun e-mail de Voxium. Vous pourrez les autoriser de nouveau depuis cette page à tout moment.",
+      "allowedDone": "Les e-mails de Voxium à cette adresse sont de nouveau autorisés.",
+      "note": "Cela ne concerne que les e-mails de compte envoyés par Voxium (vérification de l'adresse et réinitialisation du mot de passe). Aucun compte n'est créé ni supprimé.",
+      "invalidLink": "Ce lien est invalide ou a expiré. Utilisez le lien d'un e-mail Voxium plus récent.",
+      "failed": "Une erreur s'est produite. Veuillez réessayer.",
+      "retry": "Réessayer",
+      "home": "Retour à Voxium"
+    },
     "consent": {
       "title": "Avant de continuer",
       "description": "Voxium a besoin que vous acceptiez les Conditions d'utilisation et la Politique de confidentialité pour continuer à utiliser votre compte.",
@@ -1316,6 +1332,7 @@
     "invalidTwoFactorCode": "Code d'authentification à deux facteurs invalide",
     "emailAlreadyVerified": "Votre adresse e-mail est déjà vérifiée",
     "tooManyVerificationEmails": "Trop d'e-mails de vérification demandés — réessayez demain",
+    "mailBlocked": "Les e-mails à cette adresse sont bloqués — utilisez le lien d'un e-mail Voxium précédent pour les autoriser de nouveau",
     "tooManyDomainRegistrations": "Trop d'inscriptions depuis ce domaine e-mail aujourd'hui — réessayez plus tard",
     "registrationChallengeInvalid": "La vérification d'inscription est invalide ou a expiré — actualisez la page et réessayez",
     "powExpired": "La vérification d'inscription a pris trop de temps — veuillez réessayer",
