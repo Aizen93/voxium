@@ -2,7 +2,7 @@
 // Pure filesystem check — no DOM, and jsdom does not give this module a
 // file:// import.meta.url to resolve the locale directory against.
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -15,6 +15,10 @@ import { fileURLToPath } from 'node:url';
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 const en = JSON.parse(readFileSync(`${LOCALE_DIR}en.json`, 'utf8')) as Record<string, unknown>;
 const indexHtml = readFileSync(fileURLToPath(new URL('../../../index.html', import.meta.url)), 'utf8');
+const E2E_DIR = fileURLToPath(new URL('../../../../../tests/e2e/', import.meta.url));
+
+/** The old English the Playwright specs used to click by name; a spec still matching it times out in CI. */
+const OLD_E2E_WORDING = /server settings|create (?:a |or join a )?server|join server|my awesome server|switch server|leave server/i;
 
 /** Where "server" means our machines, not a community. */
 const MACHINE_SENSE = new Set([
@@ -51,6 +55,16 @@ describe('a community is a space in the English UI', () => {
     expect(lookup('server.createOrJoin')).toBe('Create or join a space');
     expect(lookup('serverSettings.title')).toBe('Space Settings');
     expect(lookup('channel.serverSettings')).toBe('Space Settings');
+  });
+
+  it('no Playwright spec still matches the old English (the secure-channels spec waited 10 s for "Server Settings" in CI)', () => {
+    const specs = readdirSync(E2E_DIR).filter((f) => f.endsWith('.spec.ts'));
+    expect(specs.length).toBeGreaterThan(10);
+    const offenders = specs.flatMap((f) => readFileSync(`${E2E_DIR}${f}`, 'utf8').split('\n')
+      .map((line, i) => ({ line, i }))
+      .filter(({ line }) => OLD_E2E_WORDING.test(line))
+      .map(({ line, i }) => `${f}:${i + 1}: ${line.trim()}`));
+    expect(offenders).toEqual([]);
   });
 
   it('the landing page markup says space for communities too', () => {

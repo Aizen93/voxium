@@ -83,7 +83,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
     const dataOwner = await registerUser(request, owner);
     const server = await createServer(request, dataOwner.accessToken, serverName);
 
-    // ── Owner fills the card from Server settings → Discovery and opens the server ──
+    // ── Owner fills the card from Space settings → Discovery and opens the server ──
     await injectAuth(page, dataOwner);
     await openServer(page, serverName);
     await page.getByLabel('Space Settings').click();

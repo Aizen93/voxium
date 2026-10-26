@@ -10,7 +10,7 @@ import { MEMBER_LIST } from '@voxium/shared';
 //       it loads the online members only, the Offline section becomes a count
 //       and a way into the directory, and a member coming online appears live
 //       (the client had no row for them: the batched lookup fetched it);
-//   (b) Server settings → Members is a server-paged directory — the first
+//   (b) Space settings → Members is a server-paged directory — the first
 //       page, the next page, a search for a member deep in the list, and the
 //       role filter — reading the server's figures, never the rows on screen;
 //   (c) a small server keeps listing its offline members in the panel.
@@ -80,7 +80,7 @@ test.describe('Member lists — big servers', () => {
       await expect(people.getByTestId('people-online-count')).toHaveText('2');
       await expect(people.getByText(`Offline · ${total - 2}`)).toBeVisible();
 
-      // ── (b) the directory, from the panel's link: a plain dialog, never Server settings ──
+      // ── (b) the directory, from the panel's link: a plain dialog, never Space settings ──
       await browse.click();
       const dialog = page.getByTestId('members-dialog');
       await expect(dialog).toBeVisible({ timeout: 15_000 });

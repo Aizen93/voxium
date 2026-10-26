@@ -27,7 +27,7 @@ test.describe('Email Verification', () => {
     const user = testUser('apib');
     const data = await registerUserUnverified(request, user);
 
-    // Try to create a server — should be blocked by requireVerifiedEmail
+    // Try to create a space — should be blocked by requireVerifiedEmail
     const res = await request.post(`${API_URL}/servers`, {
       data: { name: 'Test Server' },
       headers: { Authorization: `Bearer ${data.accessToken}` },

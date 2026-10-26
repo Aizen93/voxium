@@ -145,7 +145,7 @@ test.describe('Secure channels — invite-only E2E-encrypted', () => {
     await expect(pageC.getByText(whileRemoved)).toHaveCount(0);
 
     // ── 8. Opaque moderation: the owner's settings show a COUNT, nothing more ──
-    await page.getByRole('button', { name: /server settings/i }).first().click();
+    await page.getByRole('button', { name: /space settings/i }).first().click();
     await expect(page.getByTestId('secure-moderation-delete-id')).toBeVisible({ timeout: 10_000 });
 
     await contextB.close();

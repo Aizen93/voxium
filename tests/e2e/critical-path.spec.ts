@@ -3,14 +3,14 @@ import { testUser, registerViaUI, injectAuth } from './helpers/auth';
 import { registerUser, createInvite } from './helpers/api';
 import { dmHeading } from './helpers/selectors';
 
-test.describe('Critical path: register -> create server -> invite -> message', () => {
+test.describe('Critical path: register -> create space -> invite -> message', () => {
   test('full flow', async ({ page, request, browser }) => {
     // === Step 1: Register user A via UI ===
     const userA = testUser('alice');
     await registerViaUI(page, userA);
     await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
 
-    // === Step 2: Create a server ===
+    // === Step 2: Create a space ===
     // "New space" in the strip (its accessible name is the create-or-join label)
     await page.getByTestId('spaces-strip').getByRole('button', { name: 'Create or join a space' }).click();
     await expect(page.getByText('Create a Space')).toBeVisible();
