@@ -72,6 +72,7 @@ Voxium/
 3. Run `pnpm typecheck` — this also runs as a pre-commit hook and must pass
 4. Run `pnpm test:e2e` if your changes affect user-facing behavior
 5. Open a PR against `develop` — PRs to `main` are only accepted from `develop`
+6. Fill in the pull request template, including the box that confirms the [contribution terms](#license-and-contributions)
 
 ### Code Conventions
 
@@ -123,6 +124,8 @@ Use the GitHub issue templates:
 - **Bug Report** — for something broken
 - **Feature Request** — for new ideas
 
+Security vulnerabilities never go in a public issue, pull request or discussion: report them privately, as described in [SECURITY.md](SECURITY.md).
+
 ## Questions?
 
 Open a [GitHub Discussion](../../discussions) for questions, ideas, or general conversation.
@@ -143,4 +146,5 @@ By submitting a contribution, you agree that:
 
 This grant is what lets the project stay under a single license and remain
 sustainably funded. Your contribution is distributed to everyone else under
-the Voxium Community License like the rest of the codebase.
+the Voxium Community License like the rest of the codebase. The pull
+request template asks you to confirm these terms.
