@@ -1,5 +1,4 @@
 import { useEffect } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 import { AdminLoginPage } from './pages/AdminLoginPage';
 import { AdminGuard } from './components/AdminGuard';
@@ -41,7 +40,3 @@ export function App() {
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <ToastContainer />
-    </>
-  );
-}
