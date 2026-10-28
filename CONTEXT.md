@@ -2,35 +2,37 @@
 
 ## Overview
 
-**Voxium** is a modern, source-available voice and text communication platform. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, and shared types package.
+**Voxium** is a modern, source-available voice and text communication platform. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, a shared types package, and a Rust/WASM end-to-end encryption engine.
 
-**Version:** 1.7.3
-**Date:** 2026-04-10
+**Version:** 2.0.0 (2.1.0 in preparation)
+**Date:** 2026-10-27
 
 ## Project Structure
 
 ```
 Voxium/
 ├── apps/
-│   ├── server/           # Express API + Socket.IO + WebRTC signaling
+│   ├── server/           # Express API + Socket.IO + mediasoup SFU
 │   ├── desktop/          # Tauri 2 + React 19 + Vite (cross-platform desktop)
 │   └── admin/            # Standalone admin dashboard (React + Vite, port 8082)
 ├── packages/
-│   └── shared/           # TypeScript types, validators, constants
+│   ├── shared/           # TypeScript types, validators, constants
+│   └── crypto-engine/    # Rust/WASM E2E engine (vodozemac), committed pkg/
 ├── docker-compose.yml    # Redis + coturn STUN server
 └── CLAUDE.md             # Conventions and commands
 ```
 
 ## Key Features Implemented
 
-- Real-time text messaging with editing, deletion, reactions, replies, search, @mentions with server-side autocomplete search + styled mention badges + mention highlight + distinct notification sound
+- Real-time text messaging with editing, deletion, reactions, replies, search (a field in each chat header), @mentions with autocomplete search + styled mention badges + mention highlight + distinct notification sound; @everyone pings only when the server flagged the message and the author holds Mention Everyone
 - **mediasoup SFU voice** (server channels) + WebRTC P2P DM calls with global call status panel (visible from any view), push-to-talk, noise suppression, screen sharing, silence detection (producer pause/resume), voice quality selector (low/medium/high bitrate), adaptive bandwidth caps
-- Server/channel/category management with drag-and-drop reordering
+- Space/channel/category management with drag-and-drop reordering; categories show a heading over a rail down the left of their channels, with always-visible create controls
+- **Spaces strip** — a 64 px bar across the top in two captioned zones: Messages (a labelled tab and the three most recent conversations as presence avatars) and Spaces (tabs, +N overflow, a dashed New space tab that opens the create-or-join dialog), with Find a space and Explore at the right end (icon-only below 1200 px). The Appearance setting 'Spaces strip' (`spacesStripMode`: pinned by default, or auto) folds it into a small notch under the title bar; a chamfered panel slides out on hover, focus, Ctrl+Shift+L or tap and folds after the pointer leaves or 1.5 s after a choice
 - **Advanced permission system** — Bitmask roles with 22 permission flags (VIEW_CHANNEL, SEND_MESSAGES, MANAGE_CHANNELS, MANAGE_ROLES, KICK_MEMBERS, MUTE_MEMBERS, ATTACH_FILES, ADMINISTRATOR, etc.), role hierarchy enforcement (actors cannot modify roles at or above their position), channel-level permission overrides (allow/deny/inherit tri-state per role), @everyone default role per server with restricted defaults (no ATTACH_FILES, CREATE_INVITES, CHANGE_NICKNAME), permission calculator resolves @everyone base → OR all role permissions → channel overrides (ADMINISTRATOR bypasses everything), VIEW_CHANNEL enforcement on channel list filtering, message access, and socket auto-join, role CRUD + member role assignment + channel override management UI
 - **Voice moderation** — server mute/deafen with Redis persistence (`voice:server_muted:{serverId}:{userId}`), re-applied on voice:join, cannot be self-bypassed, deafen implies mute (both server-side and client-side), cross-channel force-move, role hierarchy enforcement on moderation actions
-- **Per-server nicknames** — `ServerMember.nickname` nullable field, CHANGE_NICKNAME permission for self-nickname, MANAGE_NICKNAMES for managing others, displayed in MemberSidebar, voice panel, and message author names (falls back to displayName)
+- **Per-space nicknames** — `ServerMember.nickname` nullable field, CHANGE_NICKNAME permission for self-nickname, MANAGE_NICKNAMES for managing others, displayed in MemberSidebar, voice panel, and message author names (falls back to displayName)
 - JWT auth with refresh tokens, password reset, Remember Me
-- S3 file uploads (avatars, server icons, message attachments) with presigned URLs; attachments proxied through server (S3 URL never exposed to client); `?inline` proxy for avatars/server-icons (used by notifications); 3-day retention with daily 4 AM cleanup job + email report; expired attachments show placeholder in chat
+- S3 file uploads (avatars, space icons, message attachments) with presigned URLs; attachments proxied through server (S3 URL never exposed to client); `?inline` proxy for avatars/server-icons (used by notifications); 3-day retention with daily 4 AM cleanup job + email report; expired attachments show placeholder in chat
 - Direct messages with typing indicators, reactions, unread tracking
 - Friend request system with real-time notifications
 - Unread indicators (channel + server level, persistent via DB)
@@ -38,22 +40,31 @@ Voxium/
 - Admin user deletion with server ownership transfer
 - Comprehensive security hardening: JWT algorithm pinning (`HS256`), token purpose validation, IDOR prevention on message routes, admin role hierarchy enforcement, email enumeration prevention (generic registration errors + timing-safe password reset), email verification gate, TOTP replay protection (Redis), bcrypt 72-byte input limit, Tauri CSP, socket payload runtime type validation, presigned URL content-type enforcement, trust proxy conditional, GitHub Actions injection prevention
 - Rate limiting (per-endpoint + socket-level, admin-editable via Redis-backed registry) and input sanitization
-- Feature flags (registration, invites, server creation, voice, DM voice, support) — Redis-backed, toggleable from admin dashboard without redeploying
-- Per-server invite lock (owners/admins can lock/unlock invites independently of global flag)
+- Feature flags (registration, invites, space creation, voice, DM voice, support, space discovery, webhooks) — Redis-backed, toggleable from admin dashboard without redeploying
+- Per-space invite lock (owners/admins can lock/unlock invites independently of global flag)
 - Tauri 2 desktop wrapper with native notifications (avatar support: WinRT circular icon on Windows, blob URL icon in browser), auto-update with signed builds via `tauri-plugin-updater`
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
-- **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members; admin UI for global + per-server management; read-only limits tab in server settings
+- **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, members and webhooks; admin UI for global + per-space management; read-only limits tab in Space Settings
 - Custom frameless title bar with system tray (close-to-tray with graceful fallback on Linux — quit cleanly if tray unavailable), splash screen window, infrastructure server management with interactive 3D globe visualization in admin geography dashboard
 - **Community themes** — create, publish, browse, install/uninstall themes with live preview editor, JSON import/export, marketplace with search/sort/tag filtering, admin moderation (remove)
 - **Internationalization (i18n)** — 11 languages (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL support for Arabic, browser language detection, localStorage persistence, language settings tab
+- **End-to-end encryption** — DMs sealed on the sending device (vodozemac via the Rust/WASM crypto engine), encrypted attachments, device linking with a displayed code, cross-signing with safety numbers, encrypted key backup, E2E-sealed DM call signaling; no plaintext fallback
+- **Secure channels** — invite-only E2E space channels invisible to non-members (owners and admins included); **secure voice channels** encrypt audio per frame with rotating keys (audio only)
+  - Secure channel pickers list the whole space from the member directory (search on the server, 100 a page) and show picked members as chips
+- **Space discovery (Explore)** — searchable directory with tags, sorts, Featured row, Bronze to Diamond activity badges, approval-first join requests, removal = ban, admin Feature/Block curation, `server_discovery` flag
+- **Incoming webhooks** — secret URL per text channel (Space Settings → Integrations, Manage Webhooks permission), Discord-format payloads plus a signed GitHub type, APP tag, no third-party fetches, `webhooks` flag
+- **Screen-share annotations and privacy masks** — live pen, highlighter, shapes, captions and image overlays as vector data; masks composited on the sharer's machine and failing closed
+- **Registration abuse defenses** — canonical emails, invisible proof-of-work, daily IP/subnet/domain budgets, mail caps, 7-day unverified sweep, admin Registrations panel
+- **Space-first wording** — a community is a space in every user-facing string (11 locales, landing page, legal documents in English and French); code, API and admin keep 'server'
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
 | Backend | Node.js, Express 5, TypeScript, Prisma 7, PostgreSQL, Redis, Socket.IO |
-| Frontend | React 19, Vite 7, Zustand, Tailwind CSS 4, Tauri 2 |
+| Frontend | React 19, Vite 8, Zustand, Tailwind CSS 4, Tauri 2 |
 | Voice | mediasoup SFU (server), WebRTC P2P (DM), RNNoise WASM noise suppression |
+| E2E crypto | Rust/WASM engine (wasm-bindgen over vodozemac), OS keychain session storage in Tauri |
 | Storage | S3-compatible (presigned URL upload, proxy streaming for attachments) |
 | Admin | React 19, Vite, Zustand (standalone app, port 8082) |
 
@@ -70,10 +81,14 @@ Voxium/
 - [x] ~~@Mention system~~ (done — server-side search, styled badges, highlight, mention sound)
 - [x] ~~Global DM call panel~~ (done — DMVoicePanel visible from any view)
 - [ ] Mobile app (React Native)
-- [ ] E2E encryption for DMs
+- [x] ~~E2E encryption for DMs~~ (done in 2.0.0 — also secure channels, secure voice and sealed call signaling)
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
+
+- **v2.1.0 (unreleased) — Spaces navigation and wording** (2026-10-27) -- Two-zone spaces strip (Messages | Spaces) with pinned/auto modes; message search moved into the chat headers; categories with rails and visible create controls; two-column secure-channel dialog with member-directory pickers; 'space' wording in every user-facing string (11 locales, landing page, legal EN+FR), guarded by spaceWording.test.ts. Also in 2.1.0: space discovery, incoming webhooks, annotations and masks, registration abuse defenses.
+
+- **v2.0.0 — End-to-end encryption and redesign** (2026-08-16) -- E2E DMs, secure channels and secure voice, sealed call signaling, redesigned interface, Voxium Community License 1.0.
 
 - **RNNoise Suppression Production Fix** (2026-04-10) -- Fixed WASM noise suppression silencing audio in production builds via CSP `wasm-unsafe-eval`, Vite ES worker format, and `processorerror` fallback detection.
 
@@ -153,5 +168,7 @@ Voxium/
 ## Related Documents
 
 - **`CLAUDE.md`** — Commands, conventions, architecture patterns, important invariants
-- **`Architecture.md`** — Detailed system architecture, database design, scalability strategy
+- **`CHANGELOG.md`** — Release notes (2.0.0, Unreleased = 2.1.0)
+- **`docs/e2e-dm-spec.md`** — End-to-end encryption protocol
+- **`ARCHITECTURE.md`** — Detailed system architecture, database design, scalability strategy
 - **`CONTEXT_CHANGELOG.md`** — Full feature-by-feature development history with file changes and review notes

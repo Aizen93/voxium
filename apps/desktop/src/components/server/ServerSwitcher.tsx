@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { Pin, Search, Hash, Volume2 } from 'lucide-react';
@@ -68,15 +68,19 @@ export function ServerSwitcher({
     inputRef.current?.focus();
   }, []);
 
-  // Anchored mode: sit under the trigger, right edges aligned. Repositions on
-  // resize only (portal-popup convention).
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
-  useEffect(() => {
+  // Anchored mode: sit under the trigger, right edges aligned. The anchor is
+  // mounted before this opens, so the first render measures it synchronously
+  // and the layout effect re-measures before paint: positioned in an effect,
+  // the dropdown painted one frame at the window's left edge, then jumped.
+  // Repositions on resize only (portal-popup convention).
+  const measure = () => {
+    const r = anchorRef?.current?.getBoundingClientRect();
+    return r ? { top: r.bottom + 8, right: Math.max(8, window.innerWidth - r.right) } : null;
+  };
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(measure);
+  useLayoutEffect(() => {
     if (!anchorRef) return;
-    const update = () => {
-      const r = anchorRef.current?.getBoundingClientRect();
-      if (r) setPos({ top: r.bottom + 8, right: Math.max(8, window.innerWidth - r.right) });
-    };
+    const update = () => setPos(measure());
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
@@ -203,7 +207,7 @@ export function ServerSwitcher({
         'overflow-hidden rounded-xl border border-vox-border bg-vox-bg-floating shadow-float',
         anchorRef ? 'fixed z-[100] w-[340px]' : 'w-full max-w-[520px]'
       )}
-      style={anchorRef && pos ? { top: pos.top, right: pos.right } : undefined}
+      style={anchorRef ? (pos ? { top: pos.top, right: pos.right } : { visibility: 'hidden' }) : undefined}
       role="dialog"
       aria-label={t('server.switcherTitle')}
       data-testid="server-switcher"

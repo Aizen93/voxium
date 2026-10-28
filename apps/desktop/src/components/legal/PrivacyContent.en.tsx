@@ -44,7 +44,7 @@ export function PrivacyContentEn() {
             </li>
             <li>
               <strong className="text-vox-text-primary">Profile data</strong>, display name, avatar, bio and the
-              per-server nicknames you choose to provide. Your profile (username, display name, avatar, bio, online
+              per-space nicknames you choose to provide. Your profile (username, display name, avatar, bio, online
               status, a supporter badge if you have one, and the date you joined) can be seen by any other signed-in
               user
             </li>
@@ -52,8 +52,8 @@ export function PrivacyContentEn() {
               <strong className="text-vox-text-primary">Messages and attachments</strong>, the text and files you send
               and the reactions you add. Direct messages, secure channels and their attachments are end-to-end
               encrypted: our servers store and relay their content as ciphertext they cannot read (see
-              &ldquo;End-to-End Encryption&rdquo; below for what they can still see). Messages in standard server
-              channels are stored in readable form so that servers can be searched and moderated
+              &ldquo;End-to-End Encryption&rdquo; below for what they can still see). Messages in standard space
+              channels are stored in readable form so that spaces can be searched and moderated
             </li>
             <li>
               <strong className="text-vox-text-primary">Encryption keys</strong>, the <em>public</em> keys of each of
@@ -62,7 +62,7 @@ export function PrivacyContentEn() {
               read
             </li>
             <li>
-              <strong className="text-vox-text-primary">Usage data</strong>, server memberships, friends, channel
+              <strong className="text-vox-text-primary">Usage data</strong>, space memberships, friends, channel
               participation, which messages you have read (for unread counts), and online presence
             </li>
             <li>
@@ -75,7 +75,7 @@ export function PrivacyContentEn() {
             <li>
               <strong className="text-vox-text-primary">Support and moderation records</strong>, the support
               conversations you open with us, the reports you file (with a copy of the reported message, or of the
-              reported server&apos;s name and description, as it was when you reported it), reports filed about you,
+              reported space&apos;s name and description, as it was when you reported it), reports filed about you,
               and records of the moderation and administrative actions taken on the Service
             </li>
             <li>
@@ -101,15 +101,15 @@ export function PrivacyContentEn() {
             <li>Answering your support requests and handling reports</li>
           </ul>
           <p className="mt-3">
-            <strong className="text-vox-text-primary">Server directory (Explore).</strong> Servers are listed in
-            Explore by default, and a server&apos;s managers can hide it at any time from its settings. A listing
-            shows the server&apos;s name, icon, description, tags, join mode, creation date and member count, its
+            <strong className="text-vox-text-primary">Space directory (Explore).</strong> Spaces are listed in
+            Explore by default, and a space&apos;s managers can hide it at any time from its settings. A listing
+            shows the space&apos;s name, icon, description, tags, join mode, creation date and member count, its
             online and weekly-message counts from the last daily check (with the time of that check), and whether
             it is featured, to signed-in users with a verified email who have accepted these terms, and nothing
             about individual members. A listing can also carry an activity badge (Bronze to Diamond), which ranks
-            the server among listed servers by a score computed from those same aggregate counts. Sending a join
+            the space among listed spaces by a score computed from those same aggregate counts. Sending a join
             request shares your public profile (username, display name, avatar) and the message you write with
-            that server&apos;s moderators only (see &ldquo;Retention&rdquo; below for how long a request is kept).
+            that space&apos;s moderators only (see &ldquo;Retention&rdquo; below for how long a request is kept).
           </p>
           <p className="mt-3">
             We do <strong className="text-vox-text-primary">not</strong> sell your data, serve ads, profile you, or use
@@ -120,7 +120,7 @@ export function PrivacyContentEn() {
         <section>
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">3. Voice, Video and Screen Sharing</h2>
           <p className="mb-3">
-            <strong className="text-vox-text-primary">Voice channels in servers.</strong> Audio and screen-share
+            <strong className="text-vox-text-primary">Voice channels in spaces.</strong> Audio and screen-share
             video are relayed in real time through our media servers, which is what lets several people talk at
             once. The media is encrypted in transit between your device and our servers (DTLS-SRTP). It is
             processed only in memory for forwarding and is{' '}
@@ -168,7 +168,7 @@ export function PrivacyContentEn() {
               a local cache in readable form so that they can be displayed and searched (see the Cookie Policy) —
               anyone with access to your device account can read that cache
             </li>
-            <li>We cannot read, and therefore cannot moderate, their content. A reported direct message carries only the text the reporter provides; messages in secure channels cannot be reported at all, and a server administrator's only recourse is to delete the channel</li>
+            <li>We cannot read, and therefore cannot moderate, their content. A reported direct message carries only the text the reporter provides; messages in secure channels cannot be reported at all, and a space administrator's only recourse is to delete the channel</li>
             <li>Your devices' public keys are published to our servers so that others can encrypt to you; you can verify them with the safety number shown in the app</li>
           </ul>
         </section>
@@ -180,7 +180,7 @@ export function PrivacyContentEn() {
             text. Sessions use signed tokens that we can revoke, and optional two-factor authentication whose
             secrets are stored encrypted and whose backup codes are stored hashed. Files you upload are kept in
             private storage that nothing can reach without a link our servers sign: your device uploads them
-            directly through such a short-lived link. Avatars and server icons are served to anyone who has their
+            directly through such a short-lived link. Avatars and space icons are served to anyone who has their
             link; message attachments are fetched through our servers, which hand them only to the people allowed
             to see the channel or conversation they were sent in. End-to-end encrypted attachments are encrypted on
             your device before upload, so our storage only ever holds them as unreadable data. Backups of our
@@ -206,11 +206,11 @@ export function PrivacyContentEn() {
             </li>
             <li><strong className="text-vox-text-primary">Accounts whose email is never verified</strong> are deleted 7 days after registration</li>
             <li>
-              <strong className="text-vox-text-primary">Join requests</strong> to a server are deleted 30 days after
-              being sent if nobody has decided on them; a declined request is kept for 7 days, so the same server
+              <strong className="text-vox-text-primary">Join requests</strong> to a space are deleted 30 days after
+              being sent if nobody has decided on them; a declined request is kept for 7 days, so the same space
               is not asked again straight away, then deleted
             </li>
-            <li><strong className="text-vox-text-primary">Removals from a server</strong> are recorded as a ban on that server until one of its moderators lifts it</li>
+            <li><strong className="text-vox-text-primary">Removals from a space</strong> are recorded as a ban on that space until one of its moderators lifts it</li>
             <li><strong className="text-vox-text-primary">Undelivered encryption key material</strong> is deleted after 30 days</li>
             <li>
               <strong className="text-vox-text-primary">Support conversations and reports</strong> have no automatic
@@ -232,7 +232,7 @@ export function PrivacyContentEn() {
             <li>
               <strong className="text-vox-text-primary">After you delete your account</strong>, some data remains:
               records of moderation and administrative actions, no longer linked to your account (an entry can still
-              hold the identifier or username it recorded); webhooks you created in a server, no longer linked to
+              hold the identifier or username it recorded); webhooks you created in a space, no longer linked to
               you; IP addresses on our block list, until the block is lifted; files you uploaded, until a daily
               clean-up removes them once nothing refers to them and they are at least 7 days old; and our server
               logs and encrypted backups, until they are replaced after a limited period
@@ -292,8 +292,8 @@ export function PrivacyContentEn() {
           <ul className="list-disc list-inside space-y-1.5 ml-2">
             <li>Access the personal data we hold about you: most of it is shown in the app itself, and you can ask us for a copy of all of it by writing to the address below</li>
             <li>Receive the data you provided to us in a portable format: the app has no download for it yet, so ask us by writing to the address below</li>
-            <li>Correct inaccurate information: your display name, bio and avatar can be changed in the app, and so can your server nicknames where the server allows it; to correct your username or email address, contact us</li>
-            <li>Delete your account and associated data yourself, from Settings → Security. You confirm with your password, and with your two-factor code if it is turned on; if you still own servers, transfer or delete them first</li>
+            <li>Correct inaccurate information: your display name, bio and avatar can be changed in the app, and so can your space nicknames where the space allows it; to correct your username or email address, contact us</li>
+            <li>Delete your account and associated data yourself, from Settings → Security. You confirm with your password, and with your two-factor code if it is turned on; if you still own spaces, transfer or delete them first</li>
             <li>Object to processing based on our legitimate interest, and withdraw consent — withdrawing consent to this policy means closing your account, since the Service cannot operate without the data described here</li>
             <li>
               Lodge a complaint with your supervisory authority — in France, the CNIL (

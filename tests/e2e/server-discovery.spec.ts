@@ -83,10 +83,10 @@ test.describe('Server discovery — Explore and the request flow', () => {
     const dataOwner = await registerUser(request, owner);
     const server = await createServer(request, dataOwner.accessToken, serverName);
 
-    // ── Owner fills the card from Server settings → Discovery and opens the server ──
+    // ── Owner fills the card from Space settings → Discovery and opens the server ──
     await injectAuth(page, dataOwner);
     await openServer(page, serverName);
-    await page.getByLabel('Server Settings').click();
+    await page.getByLabel('Space Settings').click();
     await page.getByTestId('tab-discovery').click();
     await page.getByTestId('discovery-description').fill('EU-evening raid group, no drama.');
     await page.getByTestId('discovery-tag-gaming').click();
@@ -129,7 +129,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
     // The member count is live on the owner's side (Settings → Discovery reads
     // the server row); the directory page itself is cached for a minute, so
     // the card may still say 1 for other viewers — never asserted here.
-    await page.getByLabel('Server Settings').click();
+    await page.getByLabel('Space Settings').click();
     await page.getByTestId('tab-discovery').click();
     await expect(page.getByTestId('discovery-stats')).toContainText('Members: 2', { timeout: 15_000 });
     await page.getByRole('dialog').getByLabel('Close').first().click();
@@ -197,7 +197,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
 
     // ── The owner sees it under Members → Join requests, with the message, and approves ──
     await expect(toasts(page)).toContainText(`asked to join ${serverName}`, { timeout: 15_000 });
-    await page.getByLabel('Server Settings').click();
+    await page.getByLabel('Space Settings').click();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: /^Members/ }).click();
     const rowB = page.getByTestId('join-request-row').filter({ hasText: b.user.username });
@@ -330,7 +330,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
     await expect(b.page.locator(`[data-testid="discovery-card"][data-server-id="${server.id}"]`)).toHaveCount(0, { timeout: 15_000 });
     // the owner's own settings say why
     await page.getByRole('button', { name: serverName, exact: true }).click({ timeout: 15_000 });
-    await page.getByLabel('Server Settings').click();
+    await page.getByLabel('Space Settings').click();
     await page.getByTestId('tab-discovery').click();
     await expect(page.getByTestId('discovery-blocked-notice')).toBeVisible({ timeout: 15_000 });
     await page.getByRole('dialog').getByLabel('Close').first().click();
@@ -389,7 +389,7 @@ test.describe('Server discovery — Explore and the request flow', () => {
 
     // Approved from Members → Join requests: listed again in the tab, in the panel, and after a reload
     await expect(toasts(page)).toContainText(`asked to join ${serverName}`, { timeout: 15_000 });
-    await page.getByLabel('Server Settings').click();
+    await page.getByLabel('Space Settings').click();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: /^Members/ }).click();
     const row = page.getByTestId('join-request-row').filter({ hasText: b.user.username });

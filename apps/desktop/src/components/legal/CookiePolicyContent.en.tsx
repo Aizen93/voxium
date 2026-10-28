@@ -82,7 +82,7 @@ const PREFERENCE_ROWS: StorageRow[] = [
   },
   {
     item: 'voxium_collapsed_categories, voxium_pinned_spaces, voxium_dismissed_announcements, vox:annotations:prefs',
-    purpose: 'Channel categories you collapsed, servers you pinned, announcements you dismissed, and the settings of your screen-share drawing tools',
+    purpose: 'Channel categories you collapsed, spaces you pinned, announcements you dismissed, and the settings of your screen-share drawing tools',
     where: 'Local storage',
     duration: 'Until you change them',
   },

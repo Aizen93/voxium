@@ -72,7 +72,7 @@ JWT with HS256 pinning, TOTP 2FA with encrypted secrets, bcrypt with 72-byte lim
 <td width="50%">
 
 ### End-to-End Encryption
-All DMs are end-to-end encrypted by default — Olm/Megolm double-ratchet (vodozemac WASM), always on, with no plaintext fallback. Up to 5 devices per account with cross-signing, one safety number per account, device linking by short code, and instant revocation with re-keying. Invite-only **secure channels** bring E2E to servers: not even the server owner or admins can read them. Encrypted attachments, encrypted key backup with a recovery key, and DM call signaling sealed in Olm envelopes so not even the relay can tamper with a call.
+All DMs are end-to-end encrypted by default — Olm/Megolm double-ratchet (vodozemac WASM), always on, with no plaintext fallback. Up to 5 devices per account with cross-signing, one safety number per account, device linking by short code, and instant revocation with re-keying. Invite-only **secure channels** bring E2E to spaces: not even the space owner or admins can read them. Encrypted attachments, encrypted key backup with a recovery key, and DM call signaling sealed in Olm envelopes so not even the relay can tamper with a call.
 
 </td>
 <td width="50%">
@@ -90,18 +90,18 @@ The code is multi-node capable: shared state lives in Redis, voice channels foll
 
 | Category | Feature | Description |
 |----------|---------|-------------|
-| **Communication** | Servers & Channels | Create servers, organize with categories, text and voice channels, drag-and-drop reordering, single-use invite links |
-| | Real-Time Messaging | Instant delivery, typing indicators, cursor-based pagination, unread badges per channel and server |
+| **Communication** | Spaces & Channels | Create spaces, organize with categories, text and voice channels, drag-and-drop reordering, single-use invite links |
+| | Real-Time Messaging | Instant delivery, typing indicators, cursor-based pagination, unread badges per channel and space |
 | | Message Replies | Reply with compact preview, click to scroll to original, graceful handling of deleted parents |
 | | Message Editing & Deletion | Edit inline, delete with confirmation; members with Manage Messages can delete any message |
 | | Reactions | Emoji reactions with grouped display and toggle support (channels and DMs) |
 | | Direct Messages | 1-on-1 text with real-time delivery, typing indicators, reactions, persistent unread tracking, conversation deletion |
-| | Message Search | Case-insensitive search across server channels and DM conversations with jump-to-message navigation; encrypted conversations search this device's decrypted history locally |
-| | Server Discovery | Public server directory (Explore) with search, tags and transparent activity-based sorts; owners choose open joins or approval-based join requests and can hide their server from the directory |
+| | Message Search | Case-insensitive search from the header of every channel and DM conversation, with jump-to-message navigation; encrypted conversations search this device's decrypted history locally |
+| | Space Discovery | Public space directory (Explore) with search, tags and transparent activity-based sorts; owners choose open joins or approval-based join requests and can hide their space from the directory |
 | **Encryption** | E2E Direct Messages | Always-on end-to-end encryption for every DM (Olm/Megolm via vodozemac WASM) — no opt-in, no plaintext fallback; the server stores only ciphertext |
 | | Multi-Device | Up to 5 devices per account with per-device key shares; link a new device with a short code; revoke any device and conversations re-key instantly |
 | | Cross-Signing & Safety Numbers | One safety number per account, verified out-of-band; key changes surface loud warnings that must be explicitly accepted |
-| | Secure Channels | Invite-only E2E-encrypted server channels — invisible and unreadable to non-members, including the server owner and admins; membership changes rotate keys, new members see no history |
+| | Secure Channels | Invite-only E2E-encrypted space channels — invisible and unreadable to non-members, including the space owner and admins; members are picked from the whole space directory; membership changes rotate keys, new members see no history |
 | | E2E-Authenticated Calls | DM calls are P2P DTLS-SRTP with signaling sealed in Olm envelopes pinned to the peer's device — a compromised relay cannot substitute or inject call setup; plaintext signals abort the call |
 | | Encrypted Attachments | DM and secure-channel attachments are encrypted client-side; the server stores opaque blobs with forced generic names |
 | | Key & History Backup | Encrypted account-key backup with a recovery key, plus message-key backup so history follows the account to new devices |
@@ -121,13 +121,13 @@ The code is multi-node capable: shared state lives in Redis, voice channels foll
 | | Channel Overrides | Per-channel permission overrides with allow/deny/inherit tri-state per role — restrict #announcements to read-only, hide #staff channels |
 | | Permission Calculator | Layered resolution: @everyone base → OR all role permissions → channel overrides; ADMINISTRATOR bypasses everything |
 | | Voice Moderation | Server mute/deafen (persists across reconnect via Redis), cross-channel force-move, role hierarchy enforcement |
-| | Per-Server Nicknames | Members can set server-specific display names; admins can manage others' nicknames |
+| | Per-Space Nicknames | Members can set space-specific display names; admins can manage others' nicknames |
 | **Social** | Friend System | Send, accept, decline, and remove friend requests with real-time notifications |
 | | User Profiles | Avatars with online/offline status, display names, bios with real-time sync across all clients |
-| | Presence | Real-time online/offline status for all server members and DM participants |
-| **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/server/ban management, storage management (avatars/icons/attachments with top uploaders and orphan cleanup), live metrics, audit log, moderation queue |
-| | Resource Limits | Dynamic limits (max channels, voice users, categories, members) — global defaults with per-server overrides |
-| | Feature Flags | Toggle registration, invites, server creation, voice, DM voice, support, server discovery and more — Redis-backed, no redeploy needed |
+| | Presence | Real-time online/offline status for all space members and DM participants |
+| **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/space/ban management, storage management (avatars/icons/attachments with top uploaders and orphan cleanup), live metrics, audit log, moderation queue |
+| | Resource Limits | Dynamic limits (max channels, voice users, categories, members) — global defaults with per-space overrides |
+| | Feature Flags | Toggle registration, invites, space creation, voice, DM voice, support, space discovery and more — Redis-backed, no redeploy needed |
 | | Reports & Moderation | User/message reports, admin moderation queue with resolve/dismiss/ban workflows |
 | | Support Tickets | One-per-user real-time chat with staff, admin claim/close workflow, audit logging |
 | **Security** | Two-Factor Auth | TOTP 2FA with authenticator app support, QR code setup, 8 backup codes, 30-day trusted device tokens |
@@ -140,9 +140,10 @@ The code is multi-node capable: shared state lives in Redis, voice channels foll
 | | Theme Marketplace | Publish your custom themes for the community; browse, preview, and install themes created by other users |
 | **Internationalization** | 11 Languages | English, French, Spanish, Portuguese, German, Russian, Ukrainian, Korean, Chinese, Japanese, Arabic (RTL) |
 | | Auto-Detection | Language auto-detected from browser locale; switchable in settings; RTL layout for Arabic |
-| **Platform** | File Uploads | S3-compatible storage for avatars, server icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
+| **Platform** | File Uploads | S3-compatible storage for avatars, space icons, and message attachments with presigned URLs; attachments proxied through server (S3 URL never exposed); 3-day retention with automated daily cleanup + email report |
 | | Notifications | In-app toasts, notification sounds for voice join/leave and messages, native desktop notifications |
 | | Cross-Platform Desktop | Tauri 2 native apps (Windows, macOS, Linux) with polished dark UI |
+| | Spaces Strip | A 64 px strip in two captioned zones: Messages (your most recent conversations as presence avatars, one click to the person) and Spaces (tabs, overflow, a dashed New space tab, Find a space and Explore). An Appearance setting folds it into a small notch under the title bar that slides out on hover, focus, Ctrl/Cmd+Shift+L or tap |
 | | Multi-Node Capable | The code runs across several nodes with shared Redis state, voice channels that survive a node crash and cross-node DM calls — validated with `scripts/test-multi-node.ts` |
 | | Self-Hosted STUN | Private coturn STUN server for P2P WebRTC — STUN URL derived from your server hostname (or set explicitly with `VITE_STUN_URL`), zero reliance on Google or third-party STUN/TURN services |
 | | Landing Page | Public-facing page for browser visitors with animated SVG illustrations |
@@ -279,7 +280,7 @@ Open **`http://localhost:8080`** in your browser to use Voxium. No additional se
 
 ### 9. Admin Dashboard (Optional)
 
-The admin dashboard is a separate React app for managing users, servers, bans, feature flags, resource limits, and viewing live metrics.
+The admin dashboard is a separate React app for managing users, spaces, bans, feature flags, resource limits, and viewing live metrics.
 
 Start it in a new terminal:
 
@@ -619,7 +620,7 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 
 ## Testing
 
-Voxium has three Vitest suites — over 2,000 server, 1,300 desktop and 25 admin unit and integration tests as of 2026-10-17 — plus a Playwright E2E suite.
+Voxium has three Vitest suites — over 3,000 server, 2,500 desktop and 120 admin unit and integration tests as of 2026-10-27 — plus a Playwright E2E suite.
 
 ### Running Tests
 

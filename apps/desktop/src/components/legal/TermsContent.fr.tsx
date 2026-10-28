@@ -88,7 +88,7 @@ export function TermsContentFr() {
             adoptez un comportement que nous jugeons préjudiciable au Service ou aux autres utilisateurs. Vous pouvez
             supprimer vous-même votre compte depuis Paramètres → Sécurité&nbsp;: vous confirmez avec votre mot de
             passe, et avec votre code d’authentification à deux facteurs s’il est activé, et si vous possédez encore
-            des serveurs, transférez-les ou supprimez-les d’abord. En cas de résiliation, votre droit d’utiliser le
+            des espaces, transférez-les ou supprimez-les d’abord. En cas de résiliation, votre droit d’utiliser le
             Service prend fin immédiatement.
           </p>
         </section>

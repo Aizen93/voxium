@@ -10,7 +10,7 @@ import { deleteSeededUsers, deleteServersNamed } from './helpers/db';
 // Live test of incoming webhooks (docs/local/webhooks-plan.html, step 4):
 // one owner, one server, one text channel kept OPEN in one page for the whole
 // run, so every message (and every purge) is seen arriving live:
-//   1. a generic webhook is created from Server settings → Integrations; the
+//   1. a generic webhook is created from Space settings → Integrations; the
 //      copy-once panel is the only place its URL is shown;
 //   2. a Discord-shaped POST lands in the open channel under the webhook's
 //      name, marked APP, embed flattened, no profile hover — live and after
@@ -53,9 +53,9 @@ async function openChannel(page: Page) {
   await expect(page.getByPlaceholder(`Message #${CHANNEL}`)).toBeVisible({ timeout: 15_000 });
 }
 
-/** Server settings → Integrations, once the list has loaded. */
+/** Space settings → Integrations, once the list has loaded. */
 async function openIntegrations(page: Page): Promise<Locator> {
-  await page.getByLabel('Server Settings').click();
+  await page.getByLabel('Space Settings').click();
   await page.getByTestId('tab-integrations').click();
   const tab = page.getByTestId('integrations-tab');
   await expect(tab.getByTestId('integrations-count')).toBeVisible({ timeout: 15_000 });

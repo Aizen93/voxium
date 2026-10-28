@@ -88,7 +88,7 @@ export function TermsContentEn() {
             We may suspend or terminate your account at any time if you violate these terms or engage in
             conduct that we determine is harmful to the Service or other users. You may delete your account
             yourself from Settings → Security: you confirm with your password, and with your two-factor code if it
-            is turned on, and if you still own servers, transfer or delete them first. Upon termination, your right
+            is turned on, and if you still own spaces, transfer or delete them first. Upon termination, your right
             to use the Service ceases immediately.
           </p>
         </section>

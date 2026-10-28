@@ -35,7 +35,7 @@ export function PrivacyContentFr() {
             </li>
             <li>
               <strong className="text-vox-text-primary">Données de profil</strong>, nom d’affichage, avatar, bio et
-              les pseudos par serveur que vous choisissez de fournir. Votre profil (nom d’utilisateur, nom d’affichage,
+              les pseudos par espace que vous choisissez de fournir. Votre profil (nom d’utilisateur, nom d’affichage,
               avatar, bio, statut en ligne, un badge de supporteur si vous en avez un, et la date de votre inscription)
               peut être vu par tout autre utilisateur connecté
             </li>
@@ -44,8 +44,8 @@ export function PrivacyContentFr() {
               que vous envoyez et les réactions que vous ajoutez. Les messages privés, les salons sécurisés et leurs
               pièces jointes sont chiffrés de bout en bout&nbsp;: nos serveurs en stockent et en relaient le contenu
               sous forme chiffrée, qu’ils ne peuvent pas lire (voir «&nbsp;Chiffrement de bout en bout&nbsp;»
-              ci-dessous pour ce qu’ils peuvent encore voir). Les messages des salons standard des serveurs sont
-              stockés sous forme lisible afin de permettre la recherche et la modération au sein des serveurs
+              ci-dessous pour ce qu’ils peuvent encore voir). Les messages des salons standard des espaces sont
+              stockés sous forme lisible afin de permettre la recherche et la modération au sein des espaces
             </li>
             <li>
               <strong className="text-vox-text-primary">Clés de chiffrement</strong>, les clés <em>publiques</em> de
@@ -54,7 +54,7 @@ export function PrivacyContentFr() {
               serveurs sous une forme que nous pourrions lire
             </li>
             <li>
-              <strong className="text-vox-text-primary">Données d’utilisation</strong>, appartenance aux serveurs,
+              <strong className="text-vox-text-primary">Données d’utilisation</strong>, appartenance aux espaces,
               amis, participation aux salons, messages que vous avez lus (pour le décompte des messages non lus), et
               présence en ligne
             </li>
@@ -69,7 +69,7 @@ export function PrivacyContentFr() {
             <li>
               <strong className="text-vox-text-primary">Données de support et de modération</strong>, les
               conversations de support que vous ouvrez avec nous, les signalements que vous effectuez (avec une copie
-              du message signalé, ou du nom et de la description du serveur signalé, tels qu’ils étaient au moment de
+              du message signalé, ou du nom et de la description de l’espace signalé, tels qu’ils étaient au moment de
               votre signalement), les signalements vous concernant, et les traces des actions de modération et
               d’administration effectuées sur le Service
             </li>
@@ -96,17 +96,17 @@ export function PrivacyContentFr() {
             <li>Répondre à vos demandes de support et traiter les signalements</li>
           </ul>
           <p className="mt-3">
-            <strong className="text-vox-text-primary">Annuaire des serveurs (Explorer).</strong> Les serveurs sont
-            répertoriés dans Explorer par défaut, et les gestionnaires d’un serveur peuvent le masquer à tout moment
+            <strong className="text-vox-text-primary">Annuaire des espaces (Explorer).</strong> Les espaces sont
+            répertoriés dans Explorer par défaut, et les gestionnaires d’un espace peuvent le masquer à tout moment
             depuis ses paramètres. Une fiche est visible par les utilisateurs connectés dont l’adresse e-mail est vérifiée
             et qui ont accepté les présentes conditions&nbsp;; elle présente le nom, l’icône, la description, les
-            tags, le mode d’adhésion, la date de création et le nombre de membres du serveur, ses nombres de membres
+            tags, le mode d’adhésion, la date de création et le nombre de membres de l’espace, ses nombres de membres
             en ligne et de messages de la semaine issus du dernier contrôle quotidien (avec l’heure de ce contrôle),
             et indique s’il est «&nbsp;À la une&nbsp;», sans rien révéler des membres individuels. Une fiche peut également
-            porter un badge d’activité (de Bronze à Diamant), qui classe le serveur parmi les serveurs répertoriés
+            porter un badge d’activité (de Bronze à Diamant), qui classe l’espace parmi les espaces répertoriés
             selon un score calculé à partir de ces mêmes décomptes agrégés. L’envoi d’une demande d’adhésion
             communique votre profil public (nom d’utilisateur, nom d’affichage, avatar) et le message que vous
-            rédigez aux seuls modérateurs de ce serveur (voir «&nbsp;Conservation&nbsp;» ci-dessous pour la durée de
+            rédigez aux seuls modérateurs de cet espace (voir «&nbsp;Conservation&nbsp;» ci-dessous pour la durée de
             conservation d’une demande).
           </p>
           <p className="mt-3">
@@ -119,7 +119,7 @@ export function PrivacyContentFr() {
         <section>
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">3. Voix, vidéo et partage d’écran</h2>
           <p className="mb-3">
-            <strong className="text-vox-text-primary">Salons vocaux des serveurs.</strong> L’audio et la vidéo des
+            <strong className="text-vox-text-primary">Salons vocaux des espaces.</strong> L’audio et la vidéo des
             partages d’écran sont relayés en temps réel par nos serveurs multimédias, ce qui permet à plusieurs
             personnes de parler en même temps. Les flux sont chiffrés en transit entre votre appareil et nos serveurs
             (DTLS-SRTP). Ils ne sont traités qu’en mémoire, pour être retransmis, et ne sont{' '}
@@ -174,7 +174,7 @@ export function PrivacyContentFr() {
               Politique de cookies) — toute personne ayant accès à votre compte utilisateur sur cet appareil peut lire
               ce cache
             </li>
-            <li>Nous ne pouvons pas lire leur contenu, et ne pouvons donc pas le modérer. Un message privé signalé ne comporte que le texte fourni par l’auteur du signalement&nbsp;; les messages des salons sécurisés ne peuvent pas être signalés du tout, et le seul recours d’un administrateur de serveur est de supprimer le salon</li>
+            <li>Nous ne pouvons pas lire leur contenu, et ne pouvons donc pas le modérer. Un message privé signalé ne comporte que le texte fourni par l’auteur du signalement&nbsp;; les messages des salons sécurisés ne peuvent pas être signalés du tout, et le seul recours d’un administrateur d’espace est de supprimer le salon</li>
             <li>Les clés publiques de vos appareils sont publiées sur nos serveurs afin que d’autres puissent chiffrer à votre intention&nbsp;; vous pouvez les vérifier grâce au numéro de sécurité affiché dans l’application</li>
           </ul>
         </section>
@@ -187,7 +187,7 @@ export function PrivacyContentFr() {
             authentification à deux facteurs facultative, dont les secrets sont stockés chiffrés et les codes de
             secours stockés hachés. Les fichiers que vous envoyez sont conservés dans un stockage privé dont rien n’est
             accessible sans un lien signé par nos serveurs&nbsp;: votre appareil les envoie directement au moyen d’un
-            tel lien, à durée de vie limitée. Les avatars et les icônes de serveur sont servis à toute personne qui en
+            tel lien, à durée de vie limitée. Les avatars et les icônes d’espace sont servis à toute personne qui en
             possède le lien&nbsp;; les pièces jointes des messages transitent par nos serveurs, qui ne les remettent
             qu’aux personnes autorisées à voir le salon ou la conversation dans lesquels elles ont été envoyées. Les
             pièces jointes chiffrées de bout en bout sont chiffrées sur votre appareil avant l’envoi, de
@@ -216,11 +216,11 @@ export function PrivacyContentFr() {
             </li>
             <li><strong className="text-vox-text-primary">Les comptes dont l’adresse e-mail n’est jamais vérifiée</strong> sont supprimés 7&nbsp;jours après l’inscription</li>
             <li>
-              <strong className="text-vox-text-primary">Les demandes d’adhésion</strong> à un serveur sont supprimées
+              <strong className="text-vox-text-primary">Les demandes d’adhésion</strong> à un espace sont supprimées
               30&nbsp;jours après leur envoi si personne n’a statué sur elles&nbsp;; une demande refusée est conservée 7&nbsp;jours,
-              afin que le même serveur ne soit pas sollicité de nouveau tout de suite, puis supprimée
+              afin que le même espace ne soit pas sollicité de nouveau tout de suite, puis supprimée
             </li>
-            <li><strong className="text-vox-text-primary">Les membres retirés d’un serveur</strong> y sont enregistrés comme bannis jusqu’à ce que l’un de ses modérateurs lève ce bannissement</li>
+            <li><strong className="text-vox-text-primary">Les membres retirés d’un espace</strong> y sont enregistrés comme bannis jusqu’à ce que l’un de ses modérateurs lève ce bannissement</li>
             <li><strong className="text-vox-text-primary">Les éléments de clé de chiffrement non remis</strong> sont supprimés après 30&nbsp;jours</li>
             <li>
               <strong className="text-vox-text-primary">Les conversations de support et les signalements</strong>{' '}
@@ -244,7 +244,7 @@ export function PrivacyContentFr() {
               <strong className="text-vox-text-primary">Après la suppression de votre compte</strong>, certaines
               données subsistent&nbsp;: les traces des actions de modération et d’administration, qui ne sont plus
               liées à votre compte (une entrée peut encore contenir l’identifiant ou le nom d’utilisateur qu’elle a
-              enregistré)&nbsp;; les webhooks que vous avez créés dans un serveur, qui ne vous sont plus liés&nbsp;;
+              enregistré)&nbsp;; les webhooks que vous avez créés dans un espace, qui ne vous sont plus liés&nbsp;;
               les adresses IP figurant sur notre liste de blocage, jusqu’à la levée du blocage&nbsp;; les fichiers que
               vous avez envoyés, jusqu’à ce qu’un nettoyage quotidien les supprime, une fois que plus rien n’y fait
               référence et qu’ils datent d’au moins 7&nbsp;jours&nbsp;; et nos journaux serveur et nos sauvegardes
@@ -309,8 +309,8 @@ export function PrivacyContentFr() {
           <ul className="list-disc list-inside space-y-1.5 ml-2">
             <li>Accéder aux données à caractère personnel que nous détenons à votre sujet&nbsp;: la plupart sont affichées dans l’application elle-même, et vous pouvez nous en demander une copie complète en écrivant à l’adresse ci-dessous</li>
             <li>Recevoir dans un format portable les données que vous nous avez fournies&nbsp;: l’application ne propose pas encore de téléchargement, vous pouvez donc nous en faire la demande en écrivant à l’adresse ci-dessous</li>
-            <li>Rectifier des informations inexactes&nbsp;: votre nom d’affichage, votre bio et votre avatar peuvent être modifiés dans l’application, de même que vos pseudos de serveur lorsque le serveur le permet&nbsp;; pour corriger votre nom d’utilisateur ou votre adresse e-mail, contactez-nous</li>
-            <li>Supprimer vous-même votre compte et les données associées, depuis Paramètres → Sécurité. Vous confirmez avec votre mot de passe, et avec votre code d’authentification à deux facteurs s’il est activé&nbsp;; si vous possédez encore des serveurs, transférez-les ou supprimez-les d’abord</li>
+            <li>Rectifier des informations inexactes&nbsp;: votre nom d’affichage, votre bio et votre avatar peuvent être modifiés dans l’application, de même que vos pseudos d’espace lorsque l’espace le permet&nbsp;; pour corriger votre nom d’utilisateur ou votre adresse e-mail, contactez-nous</li>
+            <li>Supprimer vous-même votre compte et les données associées, depuis Paramètres → Sécurité. Vous confirmez avec votre mot de passe, et avec votre code d’authentification à deux facteurs s’il est activé&nbsp;; si vous possédez encore des espaces, transférez-les ou supprimez-les d’abord</li>
             <li>Vous opposer au traitement fondé sur notre intérêt légitime, et retirer votre consentement — retirer votre consentement à la présente politique implique de fermer votre compte, puisque le Service ne peut pas fonctionner sans les données décrites ici</li>
             <li>
               Introduire une réclamation auprès de votre autorité de contrôle — en France, la CNIL (

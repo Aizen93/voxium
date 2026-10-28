@@ -202,6 +202,13 @@
   @apply text-[10.5px] font-semibold uppercase tracking-[0.1em] text-vox-text-muted;
 }
 
+/* The channel sidebar's category and section headings: 3px larger than a
+   section label, so a category reads as a heading over its rail of channels
+   (owner, 2026-10-25). */
+@utility category-label {
+  @apply text-[13.5px] font-semibold uppercase tracking-[0.08em] text-vox-text-muted;
+}
+
 /* Accent-tinted chip/button fill (Join voice, active channel, Voice pill).
  * Pair with text-vox-accent-primary; hover with hover:bg-vox-accent-tint-strong. */
 @utility tint {

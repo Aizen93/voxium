@@ -3,20 +3,21 @@ import { testUser, registerViaUI, injectAuth } from './helpers/auth';
 import { registerUser, createInvite } from './helpers/api';
 import { dmHeading } from './helpers/selectors';
 
-test.describe('Critical path: register -> create server -> invite -> message', () => {
+test.describe('Critical path: register -> create space -> invite -> message', () => {
   test('full flow', async ({ page, request, browser }) => {
     // === Step 1: Register user A via UI ===
     const userA = testUser('alice');
     await registerViaUI(page, userA);
     await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
 
-    // === Step 2: Create a server ===
-    await page.locator('button:has(svg.lucide-plus)').click();
-    await expect(page.getByText('Create a Server')).toBeVisible();
+    // === Step 2: Create a space ===
+    // "New space" in the strip (its accessible name is the create-or-join label)
+    await page.getByTestId('spaces-strip').getByRole('button', { name: 'Create or join a space' }).click();
+    await expect(page.getByText('Create a Space')).toBeVisible();
 
     const serverName = `TestServer-${Date.now()}`;
-    await page.getByPlaceholder('My Awesome Server').fill(serverName);
-    await page.getByRole('button', { name: 'Create Server' }).click();
+    await page.getByPlaceholder('My Awesome Space').fill(serverName);
+    await page.getByRole('button', { name: 'Create Space' }).click();
 
     // Wait for the server to be active — channel sidebar should show #general
     await expect(page.getByText('general').first()).toBeVisible({ timeout: 10_000 });
@@ -28,6 +29,13 @@ test.describe('Critical path: register -> create server -> invite -> message', (
     await page.locator('textarea').fill(messageContent);
     await page.keyboard.press('Enter');
     await expect(page.locator(`text=${messageContent}`)).toBeVisible({ timeout: 10_000 });
+
+    // === Step 3b: the strip leads from the space to Messages and back ===
+    const strip = page.getByTestId('spaces-strip');
+    await strip.getByRole('button', { name: 'Messages', exact: true }).click();
+    await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
+    await strip.getByRole('button', { name: serverName, exact: true }).click();
+    await expect(page.getByText('general').first()).toBeVisible({ timeout: 10_000 });
 
     // === Step 4: Create an invite via API ===
     const tokenA = await page.evaluate(() => localStorage.getItem('voxium_access_token'));

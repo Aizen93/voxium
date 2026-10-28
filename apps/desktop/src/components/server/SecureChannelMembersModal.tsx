@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useMemberSearch, memberMatches } from '../../hooks/useMemberSearch';
+import { memberMatches } from '../../hooks/useMemberSearch';
+import { useMemberDirectory } from '../../hooks/useMemberDirectory';
+import { MemberDirectoryFooter } from './MemberDirectoryFooter';
 import { useTranslation } from 'react-i18next';
 import { useServerStore, NO_SECURE_MEMBERS } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -67,12 +69,13 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
 
   const isCreator = channelMembers.some((m) => m.userId === user?.id && m.isCreator);
   const memberIds = useMemo(() => new Set(channelMembers.map((m) => m.userId)), [channelMembers]);
-  // No text: the rows the client holds (everyone, on a small server). Text:
-  // the server's search — the rows here are only a slice of a big server.
-  const searched = useMemberSearch(serverId, inviteQuery);
+  // The directory, paged: everyone in the space, filtered server-side by the
+  // search text; the rows the client holds (the People slice) show while the
+  // first page loads and if the directory fails.
+  const directory = useMemberDirectory(serverId, inviteQuery);
   const invitable = useMemo(
-    () => (searched ?? serverMembers.filter((m) => memberMatches(m, inviteQuery))).filter((m) => !memberIds.has(m.userId)),
-    [searched, serverMembers, memberIds, inviteQuery],
+    () => (directory.rows ?? serverMembers.filter((m) => memberMatches(m, inviteQuery))).filter((m) => !memberIds.has(m.userId)),
+    [directory.rows, serverMembers, memberIds, inviteQuery],
   );
   const atCap = channelMembers.length >= E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP;
 
@@ -210,7 +213,7 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
               </div>
             )}
             {isCreator && showInvitePicker && (
-              <div className="max-h-48 overflow-y-auto rounded-lg border border-vox-border">
+              <div className="max-h-72 overflow-y-auto rounded-lg border border-vox-border" data-testid="secure-invite-candidates">
                 {invitable.length === 0 && (
                   <p className="px-3 py-4 text-center text-sm text-vox-text-muted">{t('secureChannel.noMembersFound')}</p>
                 )}
@@ -230,6 +233,7 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
                     <UserPlus size={14} className="text-vox-text-muted" />
                   </button>
                 ))}
+                <MemberDirectoryFooter directory={directory} shown={invitable.length} />
               </div>
             )}
           </>

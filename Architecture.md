@@ -20,16 +20,16 @@
 
 ## System Overview
 
-Voxium is a real-time communication platform enabling users to create communities (servers), organize conversations into channels, and communicate via text messages and voice chat. The system is designed to handle 1,000+ concurrent users in V1, with a clear path to scale to millions.
+Voxium is a real-time communication platform enabling users to create communities (called spaces in the app; `server` in the code, API and database), organize conversations into channels, and communicate via text messages and voice chat. The system is designed to handle 1,000+ concurrent users in V1, with a clear path to scale to millions.
 
 ### Core Principles
 
 - **Real-time first:** All interactions are immediately reflected across connected clients
 - **Low latency:** Voice and messaging prioritize sub-100ms delivery
-- **Horizontal scalability:** Multi-node in production — Socket.IO Redis adapter, Redis-backed shared state, channel-affinity voice relay with crash takeover
+- **Horizontal scalability:** The code is multi-node correct (production runs one instance today) — Socket.IO Redis adapter, Redis-backed shared state, channel-affinity voice relay with crash takeover
 - **Cross-platform:** Single codebase serves Windows, macOS, Linux, and web browsers (future: mobile)
 - **Privacy-first:** No third-party services — all traffic stays on user's own infrastructure
-- **End-to-end encrypted where it matters:** DMs (always on), invite-only secure channels, and DM call signaling use Olm/Megolm; the server stores ciphertext it cannot read
+- **End-to-end encrypted where it matters:** DMs (always on), invite-only secure channels (text and voice), and DM call signaling use Olm/Megolm; the server stores ciphertext it cannot read
 - **Security:** JWT auth, input validation, rate limiting, CORS protection
 
 ---
@@ -45,17 +45,24 @@ graph TD
         Web["Web Browser<br/>(same React app)"]
     end
 
-    Win & Mac & Lin & Web -->|"HTTPS + WebSocket<br/>(REST API + Socket.IO)"| LB
+    Win & Mac & Lin & Web -->|"HTTPS + WebSocket<br/>(REST API + Socket.IO)"| Proxy
 
     subgraph Backend
-        LB["Load Balancer<br/>(nginx / Cloudflare)"]
-        LB --> Node1["API Node<br/>(Express + Socket.IO)"]
-        LB --> Node2["API Node<br/>(Express + Socket.IO)"]
-        Node1 & Node2 --> Redis[("Redis<br/>Pub/Sub + Presence + Cache")]
-        Redis --> PG[("PostgreSQL<br/>Primary data store")]
-        SFU["SFU Media Server<br/>(mediasoup)<br/>Voice/Video routing"]
+        Proxy["Reverse proxy<br/>(nginx, TLS)"]
+        Proxy --> Node1["API Node<br/>(Express + Socket.IO<br/>+ mediasoup SFU)"]
+        Node1 --> Redis[("Redis<br/>Pub/Sub + Presence + Cache")]
+        Node1 --> PG[("PostgreSQL<br/>Primary data store")]
     end
+
+    subgraph MultiNode["What a multi-node deployment adds (not shipped)"]
+        Node2["More API Nodes<br/>(sticky sessions at the proxy)"]
+    end
+    Proxy -.-> Node2
+    Node2 -.-> Redis
+    Node2 -.-> PG
 ```
+
+Solid lines are the topology the repository documents and production runs (one node behind a TLS reverse proxy; media goes from the clients straight to the node's mediasoup ports, not through the proxy). Dotted lines are what a multi-node deployment would add; see Scalability Strategy, Phase 2.
 
 ---
 
@@ -74,18 +81,18 @@ graph TD
 | Cache / Pub/Sub | Redis (node-redis) | 5.x |
 | Voice (SFU) | mediasoup | 3.x |
 | Auth | JWT (jsonwebtoken) | 9.x |
-| Rate Limiting | rate-limiter-flexible | 9.x |
+| Rate Limiting | rate-limiter-flexible | 10.x |
 | Password Hashing | bcryptjs | 3.x |
 | File Storage | S3-compatible object storage | — |
 | S3 Presigning | @aws-sdk/s3-request-presigner | — |
-| Email | Nodemailer | 8.x |
+| Email | Nodemailer | 9.x |
 
 ### Frontend
 | Layer | Technology | Version |
 |-------|-----------|---------|
 | Framework | React | 19 |
 | Language | TypeScript | 5.6+ |
-| Build Tool | Vite | 7.x |
+| Build Tool | Vite | 8.x |
 | Desktop Shell | Tauri | 2.x |
 | Styling | Tailwind CSS | 4.x (CSS-first `@theme` config) |
 | State | Zustand | 5.x |
@@ -119,7 +126,12 @@ apps/server/
 │   ├── app.ts              # Express app configuration, middleware, routes
 │   ├── routes/
 │   │   ├── auth.ts         # Register, login, refresh, me, forgot/reset/change password
-│   │   ├── servers.ts      # CRUD servers, join/leave, members, settings, member search
+│   │   ├── servers.ts      # CRUD servers, join/leave, settings, members (online People slice, signed-keyset directory, batched lookup), member search
+│   │   ├── secureChannels.ts # Invite-only E2E channels: create, rename, members, moderation count
+│   │   ├── e2e.ts          # E2E device keys, key shares, master-key transfers, backup, message keys
+│   │   ├── discovery.ts    # Space discovery (Explore): directory, join requests
+│   │   ├── webhooks.ts     # Incoming-webhook management (servers/:serverId/webhooks)
+│   │   ├── webhookExecute.ts # Public webhook execute route, mounted outside the api router
 │   │   ├── channels.ts     # CRUD channels, mark-as-read, bulk reorder
 │   │   ├── categories.ts   # CRUD categories, bulk reorder
 │   │   ├── messages.ts     # CRUD messages with pagination, reactions, @mention resolution
@@ -136,17 +148,25 @@ apps/server/
 │   │   ├── admin.ts        # Admin API (users, servers, bans, storage, reports, support, rate limits, feature flags, audit log, export)
 │   │   └── stats.ts        # Public stats endpoint
 │   ├── services/
-│   │   └── authService.ts  # Auth business logic
+│   │   ├── authService.ts  # Auth business logic
+│   │   └── totpService.ts  # TOTP 2FA (encrypted secrets, backup codes, replay protection)
 │   ├── middleware/
 │   │   ├── auth.ts         # JWT authentication middleware
 │   │   ├── rateLimiter.ts  # Per-endpoint + per-socket rate limiting (Redis-backed registry, admin-editable)
 │   │   ├── requireSuperAdmin.ts # Admin/superadmin role guards
+│   │   ├── requireFeature.ts # Feature-flag kill switch (403 when a flag is off)
 │   │   └── errorHandler.ts # Global error handler
 │   ├── websocket/
 │   │   ├── socketServer.ts  # Socket.IO setup, connection handler
 │   │   ├── voiceHandler.ts  # Voice channel state management
+│   │   ├── voiceRelay.ts    # Cross-node voice event relay (shim sockets)
+│   │   ├── voiceCluster.ts  # Channel ownership, takeover, eviction fan-out
+│   │   ├── annotationHandler.ts # Screen-share annotations (ops/live planes)
 │   │   ├── dmVoiceHandler.ts # DM call signaling + system messages
 │   │   └── adminMetrics.ts  # Live metrics emitter for admin dashboard
+│   ├── mediasoup/
+│   │   ├── mediasoupManager.ts # Workers, routers, WebRtcServer per worker, transports
+│   │   └── mediasoupConfig.ts  # Codecs, bitrates, port range
 │   └── utils/
 │       ├── prisma.ts            # Prisma client singleton (v7 adapter pattern via @prisma/adapter-pg)
 │       ├── redis.ts             # Redis client + presence helpers
@@ -161,7 +181,17 @@ apps/server/
 │       ├── mentions.ts          # @mention extraction, resolution, batch resolution (server members only)
 │       ├── memberBroadcast.ts   # Server room join + member event broadcast
 │       ├── auditLog.ts         # Fire-and-forget audit event logger
-│       └── featureFlags.ts     # Redis-backed feature flag registry
+│       ├── featureFlags.ts     # Redis-backed feature flag registry
+│       ├── permissionCalculator.ts # Server/channel permission bitmask calculation
+│       ├── channelVisibilityRooms.ts # Re-syncs channel:{id} rooms after a VIEW_CHANNEL change
+│       ├── serverJoin.ts       # joinServerMember(): ban check, limits, memberCount, room join
+│       ├── removeMember.ts     # removeMemberFromServer(): leave/kick (a kick is a ban)
+│       ├── messageAuthor.ts    # shapeMessageRow(): author shape incl. webhook rows
+│       ├── presenceReaper.ts   # 60 s ghost-presence reconciliation under a cluster lock
+│       ├── dailySchedule.ts    # withClusterLock() slot scheduling for nightly jobs
+│       ├── accountDeletion.ts  # deleteUserAccount(): the one account-deletion sequence
+│       ├── redactUrl.ts / trustProxy.ts # Credential-in-URL log redaction; trusted-proxy hop parsing
+│       └── webhooks/           # Webhook payload formatters (generic, GitHub)
 ```
 
 ### Request Flow
@@ -171,10 +201,13 @@ graph TD
     A["Client Request"] --> B["Express Middleware Pipeline"]
     B --> B1["helmet() — Security headers"]
     B1 --> B2["cors() — CORS validation"]
-    B2 --> B3["morgan() — Request logging"]
-    B3 --> B4["express.json() — Body parsing"]
+    B2 --> B3["X-Request-ID + morgan() — Request logging<br/>(credential URLs redacted)"]
+    B3 --> B3a["compression()"]
+    B3a --> W["/api/v1/webhooks execute router<br/>(own 1 MB parser, outside the general limiter)"]
+    B3a --> B4["express.json() — Body parsing (100 KB)"]
     B4 --> B5["cookieParser() — Cookie parsing"]
-    B5 --> C["Route Handler"]
+    B5 --> G["/api/v1 router: rateLimitGeneral<br/>(per user when the bearer verifies, else per IP)"]
+    G --> C["Route Handler"]
     C --> C1["rateLimiter() — Per-endpoint rate limiting<br/>(Redis + memory fallback)"]
     C1 --> C2["authenticate() — JWT verification<br/>(protected routes)"]
     C2 --> C3["sanitizeText() — HTML tag stripping<br/>on user input"]
@@ -219,18 +252,25 @@ apps/desktop/
 │   │   └── InvitePage.tsx         # Invite preview + join
 │   ├── components/
 │   │   ├── layout/
-│   │   │   ├── MainLayout.tsx    # 3-panel Discord-like layout
+│   │   │   ├── MainLayout.tsx    # Shell: spaces strip on top, then sidebar column + chat panel + People panel
+│   │   │   ├── TitleBar.tsx      # Custom window chrome (minimize/maximize/close, drag region; the Tauri window has no native decorations)
+│   │   │   ├── UserCard.tsx      # Current user card (bottom of the sidebar column)
+│   │   │   ├── ConnectionBanner.tsx / AnnouncementBanner.tsx / ErrorBoundary.tsx
 │   │   │   └── ToastContainer.tsx # Fixed-position toast notification overlay
 │   │   ├── auth/
 │   │   │   ├── AuthBackground.tsx     # Animated auth page background
 │   │   │   └── PeekingThief.tsx       # SVG thief character (reacts to password typing)
 │   │   ├── server/
-│   │   │   ├── ServerSidebar.tsx      # Server icon strip (far left)
-│   │   │   ├── CreateServerModal.tsx  # Create/join server with icon upload
-│   │   │   ├── ServerSettingsModal.tsx # Edit server name/icon (owner only)
-│   │   │   └── MemberSidebar.tsx      # Member list (far right)
+│   │   │   ├── SpacesStrip.tsx        # Spaces strip along the top: Messages tab + 3 recent people | space tabs, +N, dashed "New space" tab, Find a space, Explore; pinned (default) or auto-hide notch (settingsStore.spacesStripMode)
+│   │   │   ├── ServerSwitcher.tsx     # "Find a space" menu: Live now / Pinned / All spaces, type to jump
+│   │   │   ├── CreateServerModal.tsx  # Create or join a space, with icon upload
+│   │   │   ├── ServerSettingsModal.tsx # Space settings (permission-gated tabs, incl. integrations and discovery)
+│   │   │   ├── SecureChannelCreateModal.tsx  # Create a secure channel (member picker)
+│   │   │   ├── SecureChannelMembersModal.tsx # Secure-channel membership; lists the directory via useMemberDirectory
+│   │   │   ├── MemberDirectoryFooter.tsx     # Next-page sentinel/button for directory pickers
+│   │   │   └── MemberSidebar.tsx      # People panel (far right, 272 px)
 │   │   ├── channel/
-│   │   │   └── ChannelSidebar.tsx # Channel list (left panel)
+│   │   │   └── ChannelSidebar.tsx # Channel list (sidebar column): category headings (category-label) over a rail of their channels, always-visible secure-channel and create-category controls
 │   │   ├── common/
 │   │   │   ├── Avatar.tsx           # Shared avatar with img/initials fallback
 │   │   │   ├── EmojiPicker.tsx      # Portal-based emoji picker (shared)
@@ -261,7 +301,8 @@ apps/desktop/
 │   │   │   ├── ScreenShareViewer.tsx   # Inline screen share viewer (replaces ChatArea)
 │   │   │   └── ScreenShareFloating.tsx # Draggable/resizable floating viewer
 │   │   └── search/
-│   │       └── SearchModal.tsx      # Full-text message search (server + DM)
+│   │       ├── SearchField.tsx      # Search field in each chat header (space channel / DM); opens SearchModal
+│   │       └── SearchModal.tsx      # Full-text message search (space + DM); Ctrl/Cmd+K opens it from anywhere
 │   ├── stores/
 │   │   ├── authStore.ts      # Auth state (user, tokens)
 │   │   ├── serverStore.ts    # Server/channel state
@@ -269,7 +310,12 @@ apps/desktop/
 │   │   ├── voiceStore.ts     # Voice connection state (server + DM calls)
 │   │   ├── dmStore.ts        # DM conversations, unread tracking, deletion
 │   │   ├── friendStore.ts    # Friends list, friend requests, real-time events
-│   │   ├── settingsStore.ts  # Audio devices, notifications, PTT (localStorage)
+│   │   ├── settingsStore.ts  # Audio devices, notifications, PTT, theme, spacesStripMode (localStorage)
+│   │   ├── discoveryStore.ts # Explore directory, join requests (reconciled against serverStore)
+│   │   ├── e2eStore.ts       # E2E state
+│   │   ├── supportStore.ts / announcementStore.ts # Support tickets, admin announcements
+│   │   ├── annotationStore.ts / annotationLiveStore.ts / maskLayoutStore.ts # Screen-share annotations, live ink, privacy-mask layouts
+│   │   ├── resetStores.ts    # ACCOUNT_STORES list wiped on logout
 │   │   └── toastStore.ts     # Toast notification queue + convenience helpers
 │   ├── services/
 │   │   ├── api.ts               # Axios instance with interceptors
@@ -278,7 +324,12 @@ apps/desktop/
 │   │   ├── notificationSounds.ts # Sound effects (message, mention, join, leave, looping call ringtone)
 │   │   ├── tokenStorage.ts      # Session store: memory + write-through (OS credential store in the Tauri app, localStorage/sessionStorage on the web)
 │   │   └── notifications.ts     # 3-tier notifications: WinRT toast (avatar) → Tauri plugin → Web API (blob URL avatar)
+│   ├── hooks/
+│   │   ├── useMemberDirectory.ts # Paged member directory for pickers (GET /servers/:id/members by cursor, q server-side, 100 a page)
+│   │   ├── useMember.ts / useMemberSearch.ts / useServerPermissions.ts # Member lookup, mention search, permission checks
+│   │   └── usePushToTalk.ts, useConnectionStatus.ts, ...
 │   ├── utils/
+│   │   ├── platform.ts          # isMacPlatform() (⌘ vs Ctrl in shortcut labels)
 │   │   ├── imageProcessing.ts   # Client-side image resize + WebP via Canvas API
 │   │   └── serverErrors.ts    # Server error message → i18n key mapping for translated error display
 │   ├── i18n/
@@ -290,55 +341,53 @@ apps/desktop/
 ├── src-tauri/                # Tauri Rust backend
 │   ├── src/
 │   │   ├── main.rs           # Desktop entry point
-│   │   └── lib.rs            # Tauri setup + notify_with_avatar command (WinRT toast with circular avatar) + graceful tray (Linux)
+│   │   └── lib.rs            # Tauri setup + notify_with_avatar (WinRT toast with circular avatar) + e2e_pickle_key_* and session_secret_* (OS credential store) + graceful tray (Linux)
 │   ├── Cargo.toml
-│   └── tauri.conf.json       # Tauri configuration
+│   └── tauri.conf.json       # Two undecorated windows: splash (360x240) and main (1280x800, min 940x560; React TitleBar is its chrome), CSP
 ```
 
 ### UI Layout
 
 ```
-+-------+------------+-------------------------------+----------+
-|       |            |  # channel-name               |          |
-|  S    | Channels   |-------------------------------|  Members |
-|  e    |            |                               |          |
-|  r    | # general  |  [Avatar] Username    12:30   | - Owner  |
-|  v    | # random   |  Message content here...      |   Alice  |
-|  e    |            |                               |          |
-|  r    | Voice      |  [Avatar] Username    12:31   | - Admins |
-|  s    |   General  |  Another message...           |   Bob    |
-|       |   Gaming   |                               |          |
-|  +    |            |                               | - Members|
-|       |            |                               |   Charlie|
-|       |------------|                               |          |
-|       | User  [G]  |  [Message input box]          |          |
-+-------+------------+-------------------------------+----------+
-| 72px  |   240px    |         flex-1                |  240px   |
++----------------------------------------------------------------------+
+| Messages (+3 recent) | [Space][Space] +N [+ New space]  Find Explore |  64px spaces strip
++------------+---------------------------------------+-----------------+
+| [logo] Voxium | # channel-name              [Search] | People          |
+|------------+---------------------------------------+                 |
+| CATEGORY   | [Avatar] Username          12:30      | - Owner         |
+| | # general| Message content here...               |   Alice         |
+| | # random |                                       |                 |
+| VOICE      | [Avatar] Username          12:31      | - Members       |
+| | General  | Another message...                    |   Bob           |
+|------------|                                       |                 |
+| User  [G]  | [Message input box]                   |                 |
++------------+---------------------------------------+-----------------+
+|   248px    |                flex-1                 |      272px      |
 ```
 
-**DM View** (when no server is active):
+The strip is pinned (default) or, with Appearance > auto-hide, folds into a 132x12 notch under the title bar and slides out as a chamfered panel on hover, focus, Ctrl/Cmd+Shift+L or tap.
+
+**DM View** (when no space is active; the same strip sits on top, with the Messages tab selected):
 
 ```
-+-------+------------+-------------------------------+
-|       |            |  @ Username        [P]  [V]   |
-|  S    | DMs        |-------------------------------|
-|  e    |            |                               |
-|  r    | * Alice    |  [Avatar] Alice      12:30    |
-|  v    |  Last msg  |  Hey, how are you?            |
-|  e    |            |                               |
-|  r    | o Bob      |  [Voice call ended]           |
-|  s    |  Hi!       |                               |
-|       |            |  [Avatar] You        12:31    |
-|  +    | * Char     |  I'm good, thanks!            |
-|       |            |                               |
-|       |            |  [Message input box]          |
-+-------+------------+-------------------------------+
-| 72px  |   240px    |         flex-1                |
++----------------------------------------------------------+
+| Messages (+3 recent) | [Space][Space] ...                 |  64px spaces strip
++------------+---------------------------------------------+
+| [logo] Voxium | @ Username      [Search] [P] [V]          |
+|------------+---------------------------------------------+
+| * Alice    | [Avatar] Alice      12:30                    |
+|  Last msg  | Hey, how are you?                           |
+| o Bob      |                                             |
+|  Hi!       | [Avatar] You        12:31                    |
+|            | I'm good, thanks!                           |
+| User  [G]  | [Message input box]                         |
++------------+---------------------------------------------+
+|   248px    |                  flex-1                     |
 ```
 
 ### State Management (Zustand)
 
-Eight independent stores, each managing a domain:
+Fifteen independent stores, each managing a domain (the eight core ones below; `discoveryStore`, `e2eStore`, `supportStore`, `announcementStore`, `annotationStore`, `annotationLiveStore` and `maskLayoutStore` follow the same pattern, and `resetStores.ts` wipes every account-scoped one on logout):
 
 | Store | Responsibilities |
 |-------|-----------------|
@@ -348,21 +397,25 @@ Eight independent stores, each managing a domain:
 | `voiceStore` | Server voice channel connection, DM call state (`dmCallConversationId`, `dmCallUsers`, `incomingCall`), mute/deaf, `pttActive` (PTT override), peer management (WebRTC), noise suppression pipeline lifecycle. Server and DM voice are mutually exclusive. |
 | `dmStore` | DM conversation list, active conversation, participant online/offline status, DM unread counts (persisted via `ConversationRead` + `dm:unread:init`), conversation deletion. Owns `clearMessages()` calls for DM view transitions. |
 | `friendStore` | Friends list (accepted/pending incoming/pending outgoing), friend request CRUD, real-time friend event handlers, friendship status lookups, `showFriendsView` toggle |
-| `settingsStore` | Audio devices, noise gate, notification prefs, PTT key (persisted to localStorage) |
+| `settingsStore` | Audio devices, noise gate, notification prefs, PTT key, theme, `spacesStripMode` (`'pinned'` default or `'auto'` notch, Appearance tab) (persisted to localStorage) |
 | `toastStore` | Toast notification queue, auto-dismiss timers, convenience helpers |
 
 ### Data Flow
+
+Reads update the store from the API response. For server-mutating routes (messages, channels, spaces, ...) the response only answers the caller: the store changes when the resulting Socket.IO event arrives, the single source of truth, which prevents duplicates. A few self-scoped responses (auth, profile) are merged directly.
 
 ```mermaid
 graph LR
     A["User Action"] --> B["Zustand Store"]
     B --> C["API Call<br/>(Axios)"]
     C --> D["Backend Response"]
-    D --> E["Store Update"]
-    E --> F["React Re-render"]
-    B --> G["Socket.IO Emit"]
-    G --> H["WebSocket Event"]
+    D -->|"read (GET)"| E["Store Update"]
+    D -->|"mutation"| X["Server emits Socket.IO event"]
+    X --> H["WebSocket Event"]
     H --> E
+    B --> G["Socket.IO Emit"]
+    G --> X
+    E --> F["React Re-render"]
 ```
 
 ---
@@ -389,6 +442,8 @@ erDiagram
         string totpSecret
         boolean totpEnabled
         string totpBackupCodes
+        string role
+        datetime bannedAt
     }
 
     Server {
@@ -426,6 +481,15 @@ erDiagram
         string serverId FK
         string categoryId FK
         int position
+        boolean secure
+        string createdById FK
+    }
+
+    ChannelMember {
+        string channelId PK
+        string userId PK
+        boolean isCreator
+        datetime addedAt
     }
 
     Category {
@@ -548,8 +612,9 @@ erDiagram
     }
 
     MemberRole {
-        string memberId FK
-        string roleId FK
+        string userId PK
+        string serverId PK
+        string roleId PK
     }
 
     ChannelPermissionOverride {
@@ -571,6 +636,170 @@ erDiagram
         string status
         int installCount
         string authorId FK
+    }
+
+    InfraServer {
+        string id PK
+        string name
+        string country
+        string city
+        string provider
+        float latitude
+        float longitude
+    }
+
+    MessageAttachment {
+        string id PK
+        string messageId FK
+        string s3Key UK
+        string fileName
+        int fileSize
+        string mimeType
+        boolean expired
+    }
+
+    Friendship {
+        string id PK
+        string requesterId FK
+        string addresseeId FK
+        string status
+        datetime createdAt
+    }
+
+    IpRecord {
+        string id PK
+        string userId FK
+        string ip
+        string countryCode
+        string kind
+        datetime lastSeenAt
+    }
+
+    IpBan {
+        string id PK
+        string ip UK
+        string reason
+        string bannedBy FK
+        datetime createdAt
+    }
+
+    AuditLog {
+        string id PK
+        string actorId FK
+        string action
+        string targetType
+        string targetId
+        json metadata
+        datetime createdAt
+    }
+
+    Announcement {
+        string id PK
+        string title
+        string content
+        string type
+        string scope
+        string serverIds
+        string createdById FK
+        datetime publishedAt
+        datetime expiresAt
+    }
+
+    Report {
+        string id PK
+        string type
+        string status
+        string reason
+        string reporterId FK
+        string reportedUserId FK
+        string messageId FK
+        string contentSource
+        string resolvedById FK
+        datetime resolvedAt
+    }
+
+    SupportTicket {
+        string id PK
+        string userId FK
+        string status
+        string claimedById FK
+        datetime claimedAt
+        datetime closedAt
+    }
+
+    SupportMessage {
+        string id PK
+        string ticketId FK
+        string authorId FK
+        string content
+        string type
+        datetime createdAt
+    }
+
+    E2EDevice {
+        string id PK
+        string userId FK
+        string deviceId
+        string curve25519Key
+        string ed25519Key
+        string deviceSignature
+        string masterSignature
+    }
+
+    E2EDeviceRegistry {
+        string userId PK
+        int version
+    }
+
+    E2EKeyBackup {
+        string id PK
+        string userId FK
+        string blob
+        datetime updatedAt
+    }
+
+    E2EMessageKeyBackup {
+        string id PK
+        string userId FK
+        string conversationId
+        string sessionId
+        string blob
+        int firstKnownIndex
+    }
+
+    E2EKeyShare {
+        string id PK
+        string recipientUserId
+        string recipientDeviceId
+        string senderUserId
+        string conversationId
+        string sessionId
+        string body
+    }
+
+    E2EMasterKey {
+        string userId PK
+        string publicKey
+        string signature
+        datetime updatedAt
+    }
+
+    E2EMasterTransfer {
+        string id PK
+        string userId
+        string recipientDeviceId
+        string senderDeviceId
+        string body
+        datetime createdAt
+    }
+
+    E2EOneTimeKey {
+        string id PK
+        string deviceId FK
+        string keyId
+        string publicKey
+        string signature
+        datetime createdAt
     }
 
     User ||--o{ ServerMember : "has many"
@@ -607,7 +836,30 @@ erDiagram
     Channel ||--o{ ChannelPermissionOverride : "has many"
     Role ||--o{ ChannelPermissionOverride : "has many"
     User ||--o{ CommunityTheme : "authors"
+    Channel ||--o{ ChannelMember : "secure members"
+    User ||--o{ ChannelMember : "has many"
+    Message ||--o{ MessageAttachment : "has many"
+    User ||--o{ Friendship : "requests"
+    User ||--o{ Friendship : "receives"
+    User ||--o{ IpRecord : "seen at"
+    User ||--o{ IpBan : "creates"
+    User ||--o{ AuditLog : "acts in"
+    User ||--o{ Announcement : "creates"
+    User ||--o{ Report : "files"
+    User ||--o{ Report : "reported in"
+    User ||--o{ Report : "resolves"
+    Message ||--o{ Report : "subject of"
+    User ||--o| SupportTicket : "opens"
+    User ||--o{ SupportTicket : "claims"
+    SupportTicket ||--o{ SupportMessage : "has many"
+    User ||--o{ SupportMessage : "writes"
+    User ||--o{ E2EDevice : "owns"
+    E2EDevice ||--o{ E2EOneTimeKey : "has many"
+    User ||--o| E2EKeyBackup : "has one"
+    User ||--o{ E2EMessageKeyBackup : "has many"
 ```
+
+Not every table is drawn as a relation. `InfraServer` (the hosting locations an admin lists under `/admin/infra-servers`) stands alone. Four E2E tables (`E2EDeviceRegistry`, `E2EMasterKey`, `E2EKeyShare`, `E2EMasterTransfer`) hold user and device ids by value, with no foreign key: `purgeE2EMaterial()` (`utils/e2ePurge.ts`) deletes them explicitly when an account goes, and only ciphertext, public keys and sealed envelopes ever reach any of the E2E tables. `Report` likewise carries `channelId`, `conversationId` and `serverId` as plain ids, and keeps a copy of the reported text (`messageContent`).
 
 ### Key Indexes
 
@@ -620,7 +872,10 @@ erDiagram
 - `users(email)` UNIQUE — Email lookup
 - `users(reset_token)` UNIQUE — Password reset token lookup
 - `users(email_verification_token)` UNIQUE — Email verification token lookup
-- `server_members(userId, serverId)` COMPOSITE PK — Membership checks
+- `server_members(userId, serverId)` COMPOSITE PK — Membership checks; `server_members(serverId)` — member lists per server
+- `channel_members(channelId, userId)` COMPOSITE PK, `channel_members(userId)` — Secure channel membership (the only access path to a secure channel)
+- `messages USING GIN (content gin_trgm_ops)` — substring message search
+- `users(email_canonical)` UNIQUE — Email dedupe across aliases
 - `channel_reads(userId, channelId)` COMPOSITE PK — Read position lookups
 - `conversations(user1Id, user2Id)` UNIQUE — Conversation dedup
 - `conversation_reads(userId, conversationId)` COMPOSITE PK — DM read positions
@@ -660,7 +915,7 @@ sequenceDiagram
     Server->>Server: verify JWT
     Server->>Server: setUserOnline(Redis)
     Server->>Server: join server:{id} rooms
-    Server->>Server: join channel:{id} rooms (all text channels)
+    Server->>Server: join channel:{id} rooms (all visible text and voice channels)
     Server->>Server: compute unread counts (SQL)
     Server-->>Client: unread:init (if any)
     Server->>Server: broadcast presence:update
@@ -677,10 +932,12 @@ sequenceDiagram
     Server-->>Client: presence:update
 
     Client->>Server: voice:join
-    Server->>Server: track voice state
+    Server->>Server: track voice state, create send + recv transports
     Server-->>Client: voice:user_joined (broadcast)
-    Client->>Server: voice:signal
-    Server-->>Client: voice:signal (from another peer)
+    Server-->>Client: voice:transport_created
+    Client->>Server: voice:rtp_capabilities
+    Client->>Server: voice:transport:connect / voice:produce
+    Server-->>Client: voice:new_consumer (one per remote producer)
 
     Client->>Server: dm:join (verify membership via DB)
     Server->>Server: socket.join(dm:{id})
@@ -707,14 +964,17 @@ sequenceDiagram
 
 | Room Pattern | Purpose | When Joined |
 |-------------|---------|-------------|
-| `server:{id}` | Server-wide events (member join/leave, presence, voice) | On socket connect (all memberships) + dynamically on server create/join via `memberBroadcast.ts` |
-| `channel:{id}` | Channel-specific events (messages, typing) | Auto-joined on socket connect for all text channels the user is a member of. Client also emits `channel:join` when selecting a channel (needed for channels created after connect). **Never left** — the socket stays subscribed for the connection's lifetime so `message:new` events reach the client for unread tracking. |
+| `server:{id}` | Server-wide events (member join/leave, presence, space/channel/role/webhook changes). Voice presence is NOT sent here; it goes to `channel:{id}` | On socket connect (all memberships) + dynamically on server create/join via `memberBroadcast.ts` |
+| `channel:{id}` | The VIEW_CHANNEL boundary: messages, typing, voice presence and screen share events for text and voice channels | Auto-joined on socket connect for every text and voice channel the user can view (not only channels they are a member of). Client also emits `channel:join` when selecting a channel (needed for channels created after connect); the server re-checks VIEW_CHANNEL. Permission changes re-sync the rooms via `syncChannelVisibilityRooms()`. **Never left** — the socket stays subscribed for the connection's lifetime so `message:new` events reach the client for unread tracking. |
 | `voice:{id}` | Voice channel (voice state, signaling) | Client emits `voice:join` when joining voice |
 | `dm:{id}` | DM messages, typing, reactions | Auto-joined on socket connect for all conversations; `dm:join` emitted for new conversations. Authorization verified via DB query before joining. |
 | `dm:voice:{id}` | DM call signaling | Joined on `dm:voice:join`, left on call end |
+| `user:{id}` | Every socket of one user: targeted events (join approvals, secure channel membership), moderator fan-out, `socketsJoin`/`socketsLeave` by user | On socket connect |
+| `support:{id}` | A support ticket thread (requester and claiming admin) | Joined via their `user:{id}` room when the ticket is opened or claimed, and on connect while the ticket is open or claimed |
+| `admin:support` | The support queue for platform staff: `support:ticket:new`, `support:message:new` and `support:status_change`, emitted by `routes/support.ts` (a user opens a ticket or writes) and `routes/admin.ts` (an admin claims, replies or closes). Sibling rooms `admin:reports` (`report:new`) and `admin:metrics` (the live dashboard snapshot) work the same way | On the `admin:subscribe_support` socket event, accepted only when the socket's platform role is `admin` or `superadmin`; left on `admin:unsubscribe_support` or disconnect |
 
 **Critical invariants:**
-- Every code path that makes a user a server member (create, join, invite) must also add their socket(s) to the `server:{id}` room and seed `ChannelRead` records for all text channels (`lastReadAt = now()`). Failure to join the room breaks all server-scoped real-time features; missing ChannelRead records cause existing message history to show as unread.
+- Every code path that makes a user a server member (create, join, invite) must also add their socket(s) to the `server:{id}` room and seed `ChannelRead` records for all text channels (`lastReadAt = now()`), excluding `secure: true` channels: a secure text channel seeds its own members' rows when it is created or a member is added (`routes/secureChannels.ts`), so a user who was never invited has none. Failure to join the room breaks all server-scoped real-time features; missing ChannelRead records cause existing message history to show as unread.
 - `channel:leave` must NOT be emitted by the client — it undoes the server's auto-subscription, breaking `message:new` delivery for that channel. Since the socket stays in all channel rooms, typing events are filtered by `channelId` on the frontend.
 - `dm:join` must verify conversation membership via DB query before adding the socket to the room — prevents eavesdropping. `dm:typing` handlers must check `socket.rooms.has()` to prevent unauthorized emission.
 - DM voice event handlers on the frontend must guard by `conversationId === dmCallConversationId` — the socket receives events for ALL conversations it's subscribed to, so unguarded handlers would leak voice events from other conversations into the active call state.
@@ -730,7 +990,7 @@ sequenceDiagram
 - `member:joined` / `member:left`
 - `presence:update`
 - `voice:user_joined` / `voice:user_left` / `voice:state_update` / `voice:speaking`
-- `voice:signal` (WebRTC signaling relay)
+- `voice:transport_created` / `voice:new_consumer` / `voice:producer_closed` (mediasoup SFU negotiation)
 - `voice:screen_share:start` / `voice:screen_share:stop` / `voice:screen_share:state`
 - `typing:start` / `typing:stop`
 - `server:updated` (server name/icon changed)
@@ -740,6 +1000,11 @@ sequenceDiagram
 - `dm:typing:start` / `dm:typing:stop`
 - `dm:unread:init` (persistent DM unread counts)
 - `dm:voice:offer` / `dm:voice:joined` / `dm:voice:left` / `dm:voice:ended`
+- `voice:channel_users` (occupancy replay on connect and join) / `voice:error` / `voice:force_moved` / `voice:e2e:key` / `voice:e2e:key_request`
+- `voice:annotation:state` / `voice:annotation:ops` / `voice:annotation:live`
+- `channel:members_updated` (secure channel membership)
+- `role:created` / `role:updated` / `role:deleted` / `role:reordered` / `member:roles_updated` / `member:nickname_updated` / `channel:permissions_updated`
+- `theme:published` / `theme:updated` / `theme:removed`
 - `dm:voice:state_update` / `dm:voice:speaking` / `dm:voice:signal`
 - `dm:conversation:deleted`
 - `friend:request_received` / `friend:request_accepted` / `friend:removed`
@@ -753,13 +1018,13 @@ sequenceDiagram
 **Client → Server:**
 - `channel:join` (for newly created channels only; `channel:leave` is NOT used — auto-subscription persists)
 - `voice:join` / `voice:leave` / `voice:mute` / `voice:deaf` / `voice:speaking`
-- `voice:signal` (WebRTC signaling relay)
 - `voice:screen_share:start` / `voice:screen_share:stop`
 - `typing:start` / `typing:stop`
 - `dm:join` (join DM room for new conversation, with authorization check)
 - `dm:typing:start` / `dm:typing:stop`
 - `dm:voice:join` / `dm:voice:leave` / `dm:voice:mute` / `dm:voice:deaf` / `dm:voice:speaking`
-- `dm:voice:signal` (WebRTC signaling relay for DM calls)
+- `dm:voice:signal` (E2E-sealed signaling relay for DM calls) / `dm:voice:decline`
+- `voice:rtp_capabilities` / `voice:transport:connect` / `voice:produce` / `voice:consumer:resume` / `voice:producer:close` / `voice:e2e:key` (mediasoup SFU negotiation)
 
 ---
 
@@ -783,7 +1048,7 @@ graph TD
 - Each client sends one upstream (Producer) to the SFU
 - SFU selectively forwards streams to recipients via Consumers
 - Each voice channel gets its own mediasoup Router (lazy-created, round-robin across Workers)
-- Each user gets 2 WebRTC transports (send + recv), each using one UDP port from shared range
+- Each user gets 2 WebRTC transports (send + recv), multiplexed on their worker's single WebRtcServer port (UDP + TCP, `MEDIASOUP_MIN_PORT` + worker slot); `MEDIASOUP_WEBRTC_SERVER=false` falls back to one port per transport
 - Workers: 1 per CPU core (capped at 8), auto-restart on death
 - Configuration: `MEDIASOUP_LISTEN_IP`, `MEDIASOUP_ANNOUNCED_IP` (LAN IP), `MEDIASOUP_MIN_PORT`/`MAX_PORT`
 - Key files: `mediasoup/mediasoupManager.ts`, `mediasoup/mediasoupConfig.ts`, `websocket/voiceHandler.ts`
@@ -809,7 +1074,7 @@ Map<channelId, Map<userId, {
 Map<channelId, userId>  // screenSharers
 ```
 
-For multi-node deployment, this will migrate to Redis with pub/sub for cross-node synchronization.
+For multi-node deployment the channel's owner node runs every voice event (`voice:channel:node:{id}`); remote sockets are relayed as shims and cross-node state (occupancy, screen-share mirror, annotation scenes) lives in Redis. See Phase 2: Multi-Node.
 
 ### Resource Limits
 
@@ -838,7 +1103,7 @@ The active sharer can draw over the shared screen live (Twitch-style): pen/highl
 - **Annotations (metadata plane):** vector ops in normalized [0..1] frame coordinates, batched every 150ms over `voice:annotation:ops`, broadcast to the `voice:{channelId}` room, and rendered by every viewer on a DPR-aware canvas mapped onto the video's object-contain content rect (`AnnotationCanvas`). The authoritative scene lives ONLY in Redis (`voice:annotations:{channelId}`, 4h TTL backstop) with a server-assigned `rev` counter for late-joiner snapshot ordering. Image overlays travel as size-capped webp data-URLs inside ops (session-only — no S3, no cleanup jobs). Caps in `packages/shared/src/constants.ts` (`ANNOTATION_*`); shared reducer in `packages/shared/src/annotations.ts`.
 - **Privacy masks (video plane):** mask geometry NEVER touches the network. While ≥1 mask exists, the sharer's client composites raw frame + masks on a canvas (`services/screenComposite.ts`) and swaps the outgoing producer track via `producer.replaceTrack()` — covered pixels never leave the sharer's machine. The screen-video producer is created with `stopTracks: false, disableTrackOnPause: false, zeroRtpOnPause: true` and the compositor reads a CLONE of the capture track — mediasoup's defaults would otherwise stop the capture on replaceTrack and black out the clone-less source on pause. The whole pipeline is **fail-closed**: the producer is PAUSED synchronously at the 0→1 mask transition, before any async setup (no raw frame can ship between "mask exists" and "composited track live"); it stays paused if setup fails (persistent `sharePaused` banner + `maskFailed` toast; removing the masks resumes); `stopComposite` re-checks the live mask list before restoring raw output (a queued stop must not un-mask a re-added mask); and a generation counter stops an in-flight setup from outliving a stopped share. A mask whose cover image hasn't decoded (or decodes oversized) paints black.
 - **Multi-node:** annotation events deliberately bypass the owner-node voice relay (`ROUTED_VOICE_EVENTS`) — they touch no mediasoup state. `annotationHandler.ts` runs on the sharer's own node, authorizes each batch against the Redis sharer mirror (`voice:screen:{channelId}`), and broadcasts through the Redis adapter — keeping stroke traffic out of the shared 600/min `voice:relay` budget.
-- **Lifecycle:** every screen-share cleanup path clears the scene — `mirrorScreenShare()` deletes it on claim and release (EXCEPT an idempotent same-user re-claim, i.e. a retry after a failed produce, which preserves the scene so the rev counter doesn't restart under viewers), plus the empty-channel pipeline, `cleanupServerVoice`, and the boot/dead-node reap (`utils/voiceMirror.ts`). If the Redis scene is lost mid-share (TTL/failover/corruption), the next accepted batch broadcasts a full `voice:annotation:state` snapshot to viewers and acks `restarted: true` to the sharer, whose client re-sends its complete local scene. Client-side, a `voiceStore.screenSharingUserId` subscription in `annotationStore` clears viewer scenes and tears down the sharer session on every stop/handoff/reconnect path; every rejected batch surfaces a toast (the sharer's local echo is ahead of viewers at that point). Overlay images are dimension-capped server-side by container-header parsing (`utils/imageHeader.ts` — image-bomb guard) with a viewer-side decode cap as backstop, and scenes carry a global stroke-point budget bounding viewer redraw cost.
+- **Lifecycle:** the scene never outlives, or predates, the share it belongs to — `mirrorScreenShare()` is the single choke point: a claim SEEDS a fresh empty scene at rev 0 (`initAnnotationState`, so the share's first ops batch finds its own scene instead of taking the restart path and re-sending every pre-flight draft), and a release deletes it (`deleteAnnotationState`). The one exception is an idempotent same-user re-claim, i.e. a retry after a failed produce (`keepScene`), which keeps the scene so the rev counter doesn't restart under viewers. The other cleanup paths clear it too: the empty-channel pipeline, `cleanupServerVoice`, and the boot/dead-node reap (`utils/voiceMirror.ts`). If the Redis scene is lost mid-share (TTL/failover/corruption), the next accepted batch broadcasts a full `voice:annotation:state` snapshot to viewers and acks `restarted: true` to the sharer, whose client re-sends its complete local scene. Client-side, a `voiceStore.screenSharingUserId` subscription in `annotationStore` clears viewer scenes and tears down the sharer session on every stop/handoff/reconnect path; every rejected batch surfaces a toast (the sharer's local echo is ahead of viewers at that point). Overlay images are dimension-capped server-side by container-header parsing (`utils/imageHeader.ts` — image-bomb guard) with a viewer-side decode cap as backstop, and scenes carry a global stroke-point budget bounding viewer redraw cost.
 - **Secure voice channels:** unaffected — they reject screen sharing entirely, so no `voice:screen` key ever exists and every annotation batch is refused.
 - **Wire v2 (additive, flag-gated):** `arrow`, `callout`, `spotlight` kinds, `stroke.fade` (vanishing ink), a `translate` op (moves a stroke/arrow without re-sending points), an optional `at` z-index on `add` (undo re-inserts a removed object UNDER what was drawn over it; out-of-range appends, v1 clients append) and `width`/`n`/`x1..y2` patch keys. The reducer keeps objects it does not understand and `drawScene` skips them, so an OLD client in a call with a NEW sharer keeps working minus the new kinds; the SERVER rejects what it does not know, so it deploys first and advertises `annotationsVersion` on the `voice:screen_share:start` ack (`voiceStore.screenShareAnnotationsVersion`; the toolbar hides v2 tools below 2). The owner node answers the claim but the sharer's HOME node validates its ops, so the relay dispatch on the home node stamps ITS version over the owner's (`withLocalAnnotationsVersion`) — during a rolling deploy the two can run different code. The `annotations_v2` feature flag turns both the validators and the advertisement off together. A `translate` is validated on its delta AND the resulting geometry is re-checked against the wire bounds (reject, never clamp — the client clamps via `clampTranslation`). Every added object is stamped `by: userId` by the server (the client's value is overwritten, never trusted) so scenes already carry ownership for viewer annotations later.
 - **Ephemeral plane — `voice:annotation:live`:** the fire-and-forget sibling of `:ops` for things that must never persist: the laser pointer (`pointer` / `pointer-off`), reactions (an INDEX into `ANNOTATION_REACTIONS`, never a string) and the snapshot notice. No Redis write, no rev, no ack, no hydration. Authorization is per kind in `LIVE_AUTH` (`annotationHandler.ts`): `sharer` kinds check the Redis sharer mirror with a 2 s per-socket positive cache (a miss is never cached — fail closed); `member` kinds check `socket.rooms` for `voice:{channelId}` (relay shims join rooms adapter-wide, so the real socket's rooms are authoritative on its home node). Each kind has its own `socketRateLimit` bucket; none shares the `:ops` budget or the voice relay. Client-side `annotationLiveStore` records WHAT and WHEN on the local clock (a pointer fades `ANNOTATION_LIVE_POINTER_FADE_MS` after its last update — a lost `pointer-off` costs nothing); the sharer's sends are throttled leading+trailing to `ANNOTATION_LIVE_POINTER_INTERVAL_MS` and survive a wall clock stepping backwards. `useLiveScheduler` (in `AnnotationCanvas`) runs a requestAnimationFrame loop ONLY while `hasLiveActivity()` and stops itself on the first idle frame.
@@ -859,7 +1124,7 @@ graph TD
 
 - WebRTC P2P (1-on-1 only) with self-hosted STUN for NAT traversal — media is end-to-end encrypted by DTLS-SRTP between the two peers
 - **E2E-authenticated signaling** — every SDP offer/answer and ICE candidate travels as a pairwise-Olm envelope sealed to the peer's pinned E2E device (`docs/e2e-dm-spec.md` §20). The server relays signals opaquely and cannot substitute DTLS fingerprints; a plaintext signal aborts the call rather than downgrading. The call panel shows a lock once the peer device is pinned.
-- **Self-hosted STUN server** — coturn in STUN-only mode (`--stun-only --no-auth`) runs alongside the Voxium backend via docker-compose. STUN is stateless UDP (~100 bytes each way) that tells each peer its public IP:port — no media flows through it. Privacy-first: no third-party STUN/TURN servers. Frontend derives STUN URL from `VITE_WS_URL` hostname + port 3478.
+- **Self-hosted STUN server** — coturn in STUN-only mode (`--stun-only --no-auth`) runs alongside the Voxium backend via docker-compose. STUN is stateless UDP (~100 bytes each way) that tells each peer its public IP:port — no media flows through it. Privacy-first: no third-party STUN/TURN servers. The frontend derives the STUN URL from the `VITE_WS_URL` hostname + port 3478, or takes `VITE_STUN_URL` when it is set (`utils/stunUrl.ts`: only `stun:` / `stuns:` `host[:port]` is accepted, a malformed value is logged and ignored in favour of the derived URL, and `turn:` is refused on purpose). It is compiled into the bundle, so changing it means rebuilding the desktop installers.
 - **Perfect Negotiation pattern** — resolves offer glare (both peers sending offers simultaneously) via polite/impolite roles based on userId comparison
 - **Mutually exclusive** with server voice — joining one leaves the other (cross-cleanup on both server and client)
 - Redis-backed call state (`dm:voice:users:{convId}` hashes, `dm:voice:call:{userId}` reverse lookup, `dm:voice:active` set) — DM calls work across cluster nodes
@@ -918,6 +1183,13 @@ Authoritative spec: `docs/e2e-dm-spec.md`. Summary of what ships and how it fits
 - Opacity as a design rule: every non-member probe answers exactly like a nonexistent channel. Moderation is deliberately blind — admins get a count endpoint and delete-by-id, never contents.
 - Same Megolm machinery as DMs via scope strings (`ch:{channelId}`); membership changes rotate the group session, and new members receive no history by design.
 
+### Secure Voice Channels (E2E audio through the SFU)
+
+- A secure channel of type `voice` encrypts every Opus frame on the sender's device (AES-256-GCM, the `voxv1` frame format) before it is packetized, through WebRTC encoded transforms running in a worker (`services/e2e/voiceFrameTransform.ts`, `voiceFrameCipher.ts`, `workers/voiceFrameCrypto.worker.ts`). mediasoup forwards payloads it cannot decrypt. Spec: `docs/e2e-dm-spec.md` §21.
+- Each participant owns a sender key; keys are sealed in pairwise-Olm envelopes (scope `chv:{channelId}`, `services/e2e/secureVoiceKeys.ts`) and relayed by the server as opaque `voice:e2e:key` payloads. The server checks that both ends are in the channel and the envelope's shape, never its contents, and stores no key.
+- Keys follow membership: a joiner receives a hash-ratcheted key (no past audio); a departure, kick or device revocation rotates to fresh keys for everyone remaining (no future audio), and removing a secure member force-evicts their live voice connection cluster-wide.
+- No plaintext fallback: a runtime without encoded transforms cannot join, and a transform failure closes the producer and leaves. v1 is audio-only (screen sharing is refused in a secure voice channel), and the server cannot moderate inside the room by design (members hold CONNECT and SPEAK only).
+
 ### E2E-Authenticated DM Call Signaling
 
 - DM call media was always P2P DTLS-SRTP; the signaling relay was the MITM surface. Every `dm:voice:signal` payload is now a pairwise-Olm envelope pinned to the peer's call device, with epoch/sequence ordering, replay defense, and a hard cutover: non-envelope signals abort the call.
@@ -925,8 +1197,8 @@ Authoritative spec: `docs/e2e-dm-spec.md`. Summary of what ships and how it fits
 ### What stays plaintext (by design)
 
 - Server text channels (except secure channels) — moderation-friendly community spaces.
-- Server voice (SFU) media terminates at mediasoup; true SFU E2E (SFrame-class) is future work.
-- Metadata: participants, timing, sizes — the same envelope visibility as Signal-style designs generally.
+- Voice in ordinary (non-secure) server channels: media terminates at mediasoup, so the SFU can read it; only secure voice channels are end-to-end encrypted. Screen share is never end-to-end encrypted (its video payload descriptors must stay readable by the SFU; partial-frame encryption is deferred).
+- Metadata: participants, timing, sizes, and for secure voice the speaking indicator (a client-reported bit) and the per-packet `ssrc-audio-level` RTP header extension, which rides outside the encrypted payload (spec §21.1) — the same envelope visibility as Signal-style designs generally.
 
 ---
 
@@ -1128,7 +1400,7 @@ Login with TOTP:
     → If totpEnabled → return { totpRequired: true, totpToken } (no auth tokens)
 
   POST /auth/totp/verify { totpToken, code }
-    → Validate totpToken JWT (5min expiry, purpose: 'totp')
+    → Validate totpToken JWT (5min expiry, purpose: 'totp-verify')
     → Try TOTP code first; if invalid try backup codes
     → Backup code match: remove atomically via optimistic concurrency
     → Return { accessToken, refreshToken, trustedDeviceToken }
@@ -1142,12 +1414,19 @@ Disable (authenticated):
 ### Permission Model
 
 ```
-Owner  → Full server control (delete server, manage all)
-Admin  → Create/delete channels, manage messages
-Member → Send messages, join voice, use invites
+Permission = one bit of a 22-flag BigInt bitmask (stored as a decimal string)
+  packages/shared/src/permissions.ts: Permissions, ALL_PERMISSIONS,
+  DEFAULT_EVERYONE_PERMISSIONS (VIEW_CHANNEL, SEND_MESSAGES, ADD_REACTIONS, CONNECT, SPEAK)
+
+Role (per server, with a position)  →  base = @everyone | every role the member holds
+Channel override (per role, per channel: allow / deny / inherit)  →  applied over the base
 ```
 
-Checked server-side on every request via `ServerMember.role`.
+- **Roles and overrides.** Every server has an `@everyone` role (position 0) plus custom roles (`Role.position`, `Role.permissions`), assigned through `MemberRole`. A `ChannelPermissionOverride` carries `allow` and `deny` bitmasks for one role in one channel; a bit in neither is "inherit". Order: `@everyone` override, then the member's role overrides aggregated (allow wins over deny at the same level). Overrides can never grant `ADMINISTRATOR`, `CREATE_SECURE_CHANNELS` or `MANAGE_WEBHOOKS` (stripped in `routes/roles.ts`; the last two are server-level only).
+- **The calculator** (`utils/permissionCalculator.ts`) is the single source of truth: `computeServerPermissions()` and `computeUserChannelPermissions()` give non-members `0n` and the owner every bit, and `ADMINISTRATOR` bypasses channel overrides. Route guards ask it for a flag (`hasServerPermission`, `hasChannelPermission`) instead of comparing a role name; `filterVisibleChannels*` applies `VIEW_CHANNEL` in batches.
+- **Role hierarchy.** An actor cannot create, edit, delete, reorder or assign a role at or above their own highest position (`getHighestRolePosition()`; the owner is `Infinity`), nor set overrides for permissions they do not hold themselves.
+- **Secure channels are membership-derived.** The calculator checks `secure` before the owner and `ADMINISTRATOR` fast paths: only a `ChannelMember` row grants access, the owner and admins are pierced, and a member gets a fixed set (`SECURE_*_PERMISSIONS`) regardless of roles.
+- **Legacy label.** `ServerMember.role` (`owner` | `admin` | `member`) remains as a derived label, re-synced when a member's roles change (`admin` when a role grants `ADMINISTRATOR`, `MANAGE_CHANNELS` or `MANAGE_SERVER`). The admin app and the member lists (the People panel's staff-first ordering, the directory's role filter) read it; permission checks do not.
 
 ### Feature Flags
 
@@ -1203,25 +1482,25 @@ Per-server invite control independent of the global `invites` feature flag:
 - Owners and admins can toggle via `PATCH /servers/:id/invites-lock`
 - Checked on invite creation and invite join (returns 403 when locked)
 - Broadcast to all members via `server:updated` socket event
-- One of the four inputs of the directory listing column (below): locking invites hides the server from Explore
+- One of the four inputs of the directory listing column (below): locking invites hides the space from Explore
 
 ### Server Discovery (Explore)
 
-A searchable, hand-curated directory of servers with join requests.
+A searchable, hand-curated directory of spaces with join requests.
 
 - **Listed by default, approval-first.** Every server is listed unless its owner hides it (`discoverable`), its invites are locked, a platform admin blocked it (`discoveryBlockedAt`) or its owner is platform-banned — the four inputs of the materialised `discoveryListed` column, recomputed by `utils/discoveryListing.ts` at every write site so the listing query never joins. The join mode is `approval` (join requests, decided by holders of KICK_MEMBERS or ADMINISTRATOR and the owner) or `open`.
-- **Profile.** An optional description (≤ 300 characters) and up to 5 tags from a fixed vocabulary of 12 (labels translated in all 11 locales), edited in Server settings → Discovery (MANAGE_SERVER) and broadcast over `server:updated`.
+- **Profile.** An optional description (≤ 300 characters) and up to 5 tags from a fixed vocabulary of 12 (labels translated in all 11 locales), edited in Space Settings → Discovery (MANAGE_SERVER) and broadcast over `server:updated`.
 - **API** (`routes/discovery.ts`, behind the `server_discovery` flag, sign-in required): `GET /discovery/servers?q&tag&sort&cursor&limit` → `{ featured, servers, nextCursor, totalCapped }` (sorts `active` / `members` / `newest` / `name`; 3-character search minimum; 24 per page, 48 max; 1,200-row depth cap; a 60 s Redis cache of the public part of each page with the viewer's `isMember` / `requestPending` computed fresh), `GET /discovery/servers/:id`, `POST /discovery/servers/:id/join` (open mode joins; approval mode creates a pending request, 202) and `DELETE …/join` (cancel). Owner side in `routes/servers.ts`: `GET /servers/:id/discovery` (the tab's figures and curation state, MANAGE_SERVER), `PATCH /servers/:id/discovery`, join-request list / approve / decline, bans list / unban. Admin: `PATCH /admin/servers/:id/discovery` (feature / block, audited) and `GET /admin/servers?listed=1`.
 - **Membership helpers.** `utils/serverJoin.ts` (`joinServerMember`) is the join path for invites, open joins and approved requests: it checks the `ServerBan` first and maintains `Server.memberCount` inline in the same transaction. `utils/removeMember.ts` (`removeMemberFromServer`) serves kick and leave; a kick writes a `ServerBan` (lifted from the Members tab), a voluntary leave does not. The admin delete-user ownership transfer and account deletion (`utils/accountDeletion.ts`) keep the counter themselves.
-- **Scale.** One composite index per sort, signed keyset cursors (`utils/discoveryCursor.ts`), no joins on the listing query, capped totals; measured at one million listed servers with no sequential scan on the request path (`docs/local/discovery-measurement-2026-10-09.md`).
+- **Scale.** One composite index per sort, signed keyset cursors (`utils/discoveryCursor.ts`), no joins on the listing query, capped totals; measured at one million listed spaces with no sequential scan on the request path (`scripts/seed-discovery-load.ts` seeds that load into a throwaway database; `scripts/measure-discovery.ts` times every query shape the directory serves and fails if any plan sequentially scans `servers`, `server_members` or `messages`).
 - **Statistics.** `utils/discoveryStats.ts` refreshes `onlineCount` / `weeklyMessages` / `activityScore` for the stalest listed servers in bounded batches every 5 minutes under a cluster lock (every listed server within 24 h, 48 h under backlog, which is logged); nothing runs on the message path; the Active weights are one shared constant (`DISCOVERY_SCORE_WEIGHTS`) and the card prints the three inputs of the score.
 - **Badges.** An activity tier on every card (Bronze, Silver, Gold, Platinum, Diamond) from the SAME score and nothing else: a rank among listed spaces with any activity — the top half, 25%, 10%, 3% and 1% (`DISCOVERY_TIER_TOP_FRACTION`), none below `DISCOVERY_TIER_MIN_POPULATION` active spaces. `utils/discoveryTiers.ts` computes the cuts in one `percentile_disc` statement (a tier starts one above the boundary score: strictly the top fraction, never more) (hourly with the housekeeping, and at once when the Redis key `discovery:tiers` is missing), the directory stamps `tier` on each public card, and `GET /servers/:id/discovery` tells the owner their tier, their score and the score the next tier starts at. The crest is `components/discovery/TierBadge.tsx` (pure SVG, metal per tier, one to five stars). No votes: Featured stays the hand-picked row.
 - **Safety.** Opacity (a hidden id answers 404 on every directory endpoint, byte-identical to a nonexistent one), `discoveryBrowse` 60/min and `discoveryJoin` 10/h per user, one pending request per server per user, a 7-day cooldown after a decline, join-request events only to the moderator audience (`utils/moderatorAudience.ts`), report-from-card (`POST /reports` with `type: 'server'`: a snapshot of the listing, the owner as the reported user), admin Feature / Block with audit rows, and the `server_discovery` kill switch.
-- **Client.** `components/discovery/DiscoveryModal.tsx` (Explore, reached from the spaces strip compass, the server switcher's no-match offer and the create/join modal), `stores/discoveryStore.ts` (reconciled against the spaces strip), `components/server/DiscoveryTab.tsx` (the Discovery tab), the join-request and banned sections of Server settings → Members, and the four socket handlers in `services/discoverySocketHandlers.ts`.
+- **Client.** `components/discovery/DiscoveryModal.tsx` (Explore, reached from the Explore compass in the spaces strip (icon-only below 1200 px), the space switcher's no-match offer and the create/join dialog, all through the strip's one mount point), `stores/discoveryStore.ts` (reconciled against the spaces strip), `components/server/DiscoveryTab.tsx` (the Discovery tab), the join-request and banned sections of Space Settings → Members, and the four socket handlers in `services/discoverySocketHandlers.ts`.
 
 ### Incoming Webhooks
 
-A text channel gets a secret URL; anything that can POST JSON to it makes a message appear there under a name the server's moderators chose. Incoming only: Voxium makes no outgoing call, and a webhook is not an account.
+A text channel gets a secret URL; anything that can POST JSON to it makes a message appear there under a name the space's moderators chose. Incoming only: Voxium makes no outgoing call, and a webhook is not an account.
 
 - **Data model** (migrations `20261018120000_webhooks` and `20261019090000_webhook_owner_decisions`, both additive). Table `webhooks`: `server_id` and `channel_id` (cascade with the server or channel), `name` (1–64 characters), `type` (`generic` | `github`, chosen at creation), `token_hash` (SHA-256 hex of the token), `secret_enc` (GitHub only, the signing secret sealed with AES-256-GCM), `enabled`, `created_by_id` (SET NULL when the account goes), `last_used_at`, and from the second migration `admin_disabled_at` (the sticky admin lock), `creator_removed_at` (a kick, ban or platform ban of the member who held the live URL disabled it), `last_rotated_at` and `last_rotated_by_id` (FK to `users`, SET NULL); indexed on `server_id` and `channel_id`. `messages.author_id` becomes nullable, and `messages` gains `webhook_id` (FK, `ON DELETE SET NULL`, so a webhook's messages outlive it) and `webhook_name` (the name the message was posted under, frozen at post time), with an index on `webhook_id`. A message has an `author_id` or a `webhook_name`; the write paths that create channel messages (the human POST and the execute route) keep that invariant. `max_webhooks_per_server` joins the resource limits: `global_config` (default 10) and `server_limits` (nullable = inherit); 0 stops creation on a server, existing webhooks keep working.
 - **One author shape on the wire.** Every server reader of messages (channel history, replies and their quotes, search, DMs, DM call notices) shapes its rows through `utils/messageAuthor.ts`: a webhook row gets a synthesised author `{ id: 'webhook:{webhookId}' | 'webhook:deleted', username, displayName: <webhook name>, avatarUrl: null, isWebhook: true }`, so `Message.author` stays non-null for clients. The colon is deliberate: such an id can never pass the server's opaque-id check, so it can never be looked up as a user. The message `type` stays `user`, so webhook posts are searchable.
@@ -1249,7 +1528,7 @@ A text channel gets a secret URL; anything that can POST JSON to it makes a mess
 - **Management API** (`routes/webhooks.ts`, mounted at `/api/v1/servers/:serverId/webhooks` inside the `api` router; signed in, verified email, consent, the `webhooks` flag and `MANAGE_WEBHOOKS` on every route): `GET /` (the webhooks on channels the caller can see, plus the server-wide `total` the cap counts; never a token or a secret), `POST /` (`{ channelId, name, type }`; 201 with the token, and the secret for GitHub), `PATCH /:webhookId` (`name`, `channelId`, `enabled`; moving a webhook moves nothing it already posted), `POST /:webhookId/rotate` (a new token, and a new secret for GitHub; the old ones stop working at the commit), `DELETE /:webhookId?purge=1` (the webhook is disabled first, so new deliveries stop at once; then one transaction of up to 60 s, because clearing `webhook_id` on, or deleting, everything a busy webhook posted touches every index of `messages`: the webhook row is locked, then with `purge` every message it posted, in every channel, is deleted with it; without it the messages stay under their stored name). Create and rotate are the only responses that ever carry a token; the client composes the public URL from its own API base. A webhook can only target a text channel of the server that is not secure and that the caller can view and send messages in (on create and on a move): a secure or invisible channel answers exactly like a nonexistent one, a visible one without `SEND_MESSAGES` answers 403, a voice channel answers 400. PATCH and rotate write only while the webhook is still on the channel the caller was checked against (404 if it moved meanwhile), and create counts against the cap under a lock on the server row. Rotate and `PATCH { enabled: true }` also require `SEND_MESSAGES` on the webhook's current channel (one hands out a credential for it, the other re-arms a poster into it); `GET /targets` lists the channels the caller may bind, by the same check, for the pickers. Rotate records who rotated and when (`last_rotated_at`, `last_rotated_by_id`, SET NULL with the account). While a platform admin's disable is in force (`admin_disabled_at`), the owner's `PATCH { enabled: true }` answers 403 `This webhook was disabled by an administrator`.
 - **Events.** Every mutation emits `webhook:changed { serverId }` to `server:{id}`, a refetch hint that carries nothing else (a restricted channel's id must never reach the server room, and a token never travels on a socket). A purge emits `message:bulk_deleted { channelId, webhookId, count }` to `channel:{id}` of each channel that lost rows (one count-0 receipt to the webhook's channel when there were none), and a client viewing it drops them and clears their quotes from the replies on screen.
 - **Permission.** `MANAGE_WEBHOOKS` (the 22nd flag, bit 21), server-level only: stripped from channel overrides like `CREATE_SECURE_CHANNELS`, part of the admin role preset (`DEFAULT_ADMIN_PERMISSIONS`; no existing role gains it, the migration updates no role), implicit for the owner and ADMINISTRATOR. It is separate from MANAGE_CHANNELS so integrations can be delegated without channel deletion.
-- **Desktop.** Server settings → **Integrations** (`components/server/IntegrationsTab.tsx`), shown to holders of `MANAGE_WEBHOOKS` (a member holding only that bit gets the settings gear and lands on it): the list ("N of M"), a create dialog (name, channel, type), the copy-once panel (`WebhookCreatedPanel.tsx`: the URL, a curl one-liner, and for GitHub the secret with the exact repository settings to enter), an edit dialog (`WebhookEditDialog.tsx`: rename and move; the channel picker lists the targets the caller may bind, keeps the current channel, and sends only the fields the user changed; a fellow moderator's concurrent rename or move is never sent back), rotate, enable / disable, delete with "also delete its messages", and a "turned off" state on the flag's 403. The list is refetched on `webhook:changed`, never written from a mutation response. A webhook message renders with an initials avatar, its name and an APP tag (also in desktop notifications, reply quotes and search results); it opens no profile card, cannot be edited or reported, and is deleted through Manage Messages like any other; the messages of a deleted webhook keep their name, dimmed. `serverStore.ensureMembers` never sends a `webhook:` id to the member lookup, and the E2E display gate strips the webhook fields from every encrypted row (a webhook never posts encrypted or into a DM). The member-facing Limits tab shows the cap.
+- **Desktop.** Space Settings → **Integrations** (`components/server/IntegrationsTab.tsx`), shown to holders of `MANAGE_WEBHOOKS` (a member holding only that bit gets the settings gear and lands on it): the list ("N of M"), a create dialog (name, channel, type), the copy-once panel (`WebhookCreatedPanel.tsx`: the URL, a curl one-liner, and for GitHub the secret with the exact repository settings to enter), an edit dialog (`WebhookEditDialog.tsx`: rename and move; the channel picker lists the targets the caller may bind, keeps the current channel, and sends only the fields the user changed; a fellow moderator's concurrent rename or move is never sent back), rotate, enable / disable, delete with "also delete its messages", and a "turned off" state on the flag's 403. The list is refetched on `webhook:changed`, never written from a mutation response. A webhook message renders with an initials avatar, its name and an APP tag (also in desktop notifications, reply quotes and search results); it opens no profile card, cannot be edited or reported, and is deleted through Manage Messages like any other; the messages of a deleted webhook keep their name, dimmed. `serverStore.ensureMembers` never sends a `webhook:` id to the member lookup, and the E2E display gate strips the webhook fields from every encrypted row (a webhook never posts encrypted or into a DM). The member-facing Limits tab shows the cap.
 - **Admin.** `GET /admin/servers/:serverId/webhooks` (the owner's list shape, no token or secret), `PATCH /admin/webhooks/:webhookId` (`{ enabled }`, audited as `webhook.disable` / `webhook.enable`; an admin's disable is sticky: it sets `admin_disabled_at`, which only an admin's enable clears, so the server cannot re-enable meanwhile) and `DELETE /admin/webhooks/:webhookId?purge=1` (the owner's delete transaction, audited as `webhook.delete`), behind the existing admin guard and limiter and NOT behind the `webhooks` flag, so admins can curate during an incident; a Webhooks action per server in the server list; `maxWebhooksPerServer` in the global limits panel and the per-server limits modal; the four limiter rows in Rate limits (the per-webhook one keyed "Webhook"); the `webhooks` flag in Feature Flags. Limit changes are audited as `limits.update_global`, `limits.update_server` and `limits.reset_server` with the values before and after.
 - **Safety.** The token is the credential: 32 random bytes, only its SHA-256 stored, compared in constant time, shown once, rotatable, never listed, and redacted from every access-log format (`utils/redactUrl.ts`: `/api/v1/webhooks/{id}/[redacted]`); the reverse proxy in front of it must not keep the raw request line for `/api/v1/webhooks/` in any of its logs either, the error log included (it quotes the request line on upstream errors, so excluding the path from the access log alone is not enough); the deployment notes carry the configuration. Limiters, all `rl:` buckets and admin-tunable: `webhookExecuteIp` 1200/min per IP before the token check, `webhookExecute` 30/min per webhook after it (for a GitHub webhook, after the signature too; Discord's figure), `webhookManage` 30/h and `webhookRead` 60/min per user. Body at most 1 MB, JSON only, parsed once, never logged; the body of a request a webhook receives is not kept beyond the message it produced (the access log still records each delivery: its address, method, redacted path, status and response size). Per-server cap through the limits system, per-webhook disable by moderators or an admin, purge on delete, the global kill switch. Unauthenticated posts never ping: no mention resolution and an empty mentions array. A webhook's token belongs to the server, not its creator: it keeps working after the creator leaves on their own, until it is rotated or deleted; a kick or ban disables the webhooks whose live URL the member holds (created by them and never rotated by another, or last rotated by them) and marks them (`creator_removed_at`), since the URL may have left with the member; a platform ban does the same in every server at once; any enable, by the owner or an admin, or a rotate clears the mark (a rotate alone does not re-enable). Deleting a webhook detaches or purges its history in bounded batches before the short locked transaction, so a busy webhook with a long history can always be deleted.
 - **Multi-node.** Nothing is node-local: the lookup is PostgreSQL, the limiters are Redis, the broadcast goes through the Socket.IO Redis adapter and the flag through the Redis-propagated registry. A delivery can land on any node; sticky sessions do not matter because no socket is involved. The execute path is one primary-key lookup (two on a hit), one insert, one broadcast and a throttled timestamp write; nothing touches the message read path.
@@ -1279,10 +1558,16 @@ apps/admin/
 │   │   ├── AdminRateLimits.tsx     # Rate limit controls (edit/reset rules, clear user counters)
 │   │   ├── AdminFeatureFlags.tsx   # Feature flag toggles
 │   │   ├── AdminAuditLog.tsx       # Searchable/filterable audit trail
-│   │   └── AdminDataTools.tsx      # CSV/JSON data export
+│   │   ├── AdminDataTools.tsx      # CSV/JSON data export
+│   │   ├── AdminServerWebhooksModal.tsx # Per-server webhook curation (disable / enable / delete with purge)
+│   │   ├── AdminRegistrationPanel.tsx   # Registration abuse controls
+│   │   ├── AdminUserDetail.tsx     # Single-user detail view
+│   │   ├── AdminGeography.tsx / AdminGlobe.tsx # Geographic view of users
+│   │   └── DirectoryChips.tsx      # Discovery state chips (shared by the server list)
 │   └── services/
 │       ├── api.ts           # Axios with token interceptor
-│       └── socket.ts        # Socket.IO for real-time admin events
+│       ├── socket.ts        # Socket.IO for real-time admin events
+│       └── tokenStorage.ts  # Admin session storage
 ```
 
 ### Admin Permission Model
@@ -1300,6 +1585,7 @@ apps/admin/
 - **Dashboard metrics** — fetched via REST (`GET /admin/stats/live`, `GET /admin/stats/sfu`) with refresh buttons. SFU stats include per-worker transport counts, port utilization, producers/consumers.
 - `admin:reports` — Socket.IO subscription for new report notifications → auto-refresh
 - `admin:support` — Socket.IO subscription for new ticket/message notifications → auto-refresh
+- `admin:metrics` — Socket.IO room for the live metrics stream (`websocket/adminMetrics.ts` emits a snapshot to it while an admin is subscribed)
 
 ### Admin Resource Limits
 
@@ -1373,8 +1659,10 @@ Voice occupancy (`voice:channel_users`) is replayed to a socket on connect and t
 ### Email System
 
 Nodemailer transporter (`utils/email.ts`) with configurable SMTP:
+- **Verification emails** (`sendVerificationEmail`) — HTML + plaintext with the verify link (`/verify-email/{token}`), 24hr expiry; sent fire-and-forget at registration and again on resend (the resend is capped per canonical inbox)
 - **Password reset emails** — HTML + plaintext with reset link, 1hr expiry
 - **Cleanup report emails** — HTML + plaintext summary table sent to `CLEANUP_REPORT_EMAIL` after each daily attachment cleanup run
+- **Admin alerts** (`sendAdminAlert`) — plain operational text to `CLEANUP_REPORT_EMAIL` (opt-in: unset means no alert); the hourly registration-spike check in `utils/registrationHygiene.ts` is the caller today, Redis-deduped so a sustained wave sends one alert per window across the cluster
 
 ### Community Themes
 
@@ -1411,7 +1699,7 @@ User-created themes with a marketplace for sharing. Themes customize all `--vox-
 **Frontend UI** (`components/settings/ThemeEditor.tsx`, `ThemeBrowser.tsx`):
 - **ThemeEditor** — live preview with color pickers for all `--vox-*` variables, pattern config per area, JSON import/export
 - **ThemeBrowser** — marketplace grid with search, tag filter, sort, install/uninstall tracking
-- Settings modal appearance tab: built-in theme selector + custom theme management
+- Settings modal appearance tab: built-in theme selector + custom theme management + the spaces strip mode (`settingsStore.spacesStripMode`: `pinned` keeps the 64 px strip on screen, `auto` folds it into a 132x12 notch under the title bar that slides out as a chamfered panel on hover, focus, Ctrl+Shift+L or tap and folds again after the pointer leaves or 1.5 s after a choice)
 
 **Rate limiting:** `rateLimitThemeManage` (write operations), `rateLimitThemeBrowse` (read operations)
 
@@ -1423,11 +1711,11 @@ User-created themes with a marketplace for sharing. Themes customize all `--vox-
 `en`, `fr`, `es`, `pt`, `de`, `ru`, `uk`, `ko`, `zh`, `ja`, `ar` (RTL)
 
 **Architecture:**
-- Static JSON bundles per language in `i18n/locales/*.json` (~800+ keys each)
+- Static JSON bundles per language in `i18n/locales/*.json` (~1,800 keys each); user-facing strings say "space" for a community, enforced by `__tests__/i18n/spaceWording.test.ts` (keys and code keep `server`)
 - `i18next-browser-languagedetector` for auto-detection (order: `localStorage` → `navigator`)
 - Language persisted in `localStorage` key `voxium_language`
 - RTL handled via `document.documentElement.dir = 'rtl'` on language change (Arabic)
-- Server error messages mapped to i18n keys via `utils/serverErrors.ts` (130+ mappings) — `getTranslatedError()` translates API error responses for display
+- Server error messages mapped to i18n keys via `utils/serverErrors.ts` (230+ mappings) — `getTranslatedError()` translates API error responses for display
 
 **Key design decisions:**
 - All translations are client-side (no server-side i18n) — backend returns English error strings, frontend maps them to localized keys
@@ -1438,31 +1726,39 @@ User-created themes with a marketplace for sharing. Themes customize all `--vox-
 
 ## Scalability Strategy
 
-### Phase 1: Single Node (1K users) — superseded
+### Phase 1: Single Node (1K users) — what production runs today
 - Single Node.js process
 - PostgreSQL + Redis on same machine or nearby
-- Simple deployment (still works: a lone node detects it is the sole node and runs full-cleanup boot paths)
+- Simple deployment (a lone node detects it is the sole node and runs full-cleanup boot paths)
+- Production runs ONE instance today; the code below is written and tested to run as several
 
-### Phase 2: Multi-Node (10K users) — IMPLEMENTED, running in production
+### Phase 2: Multi-Node (10K users) — supported by the code, not shipped as a topology
+
+The code is multi-node correct, but the repository ships no load-balancer configuration, no multi-node manifests (its compose files run one server with Redis and PostgreSQL) and no replica setup, and production runs a single instance. The diagram shows what a multi-node deployment adds around the nodes; none of it is in the repository.
 
 ```mermaid
 graph TD
-    LB["nginx<br/>(LB + SSL)"] --> N1["Node 1<br/>API + WS"]
-    LB --> N2["Node 2<br/>API + WS"]
-    LB --> N3["Node 3<br/>API + WS"]
+    LB["Load balancer<br/>(sticky sessions, TLS)<br/>added by a multi-node deployment"] --> N1["Node 1<br/>API + WS + SFU"]
+    LB --> N2["Node 2<br/>API + WS + SFU"]
+    LB --> N3["Node 3<br/>API + WS + SFU"]
 
-    N1 & N2 & N3 --> RP[("Redis Primary")]
-    N1 & N2 & N3 --> RR[("Redis Replica")]
-    N1 & N2 & N3 --> PG[("PostgreSQL<br/>Primary + Replica")]
+    N1 & N2 & N3 --> R[("Redis<br/>one shared REDIS_URL")]
+    N1 & N2 & N3 --> PG[("PostgreSQL<br/>one shared DATABASE_URL")]
 ```
 
-Implemented (validated live: 35/35 cross-node scenarios in `scripts/test-multi-node.ts`, including real RTP and hard owner-crash takeover):
+What the code supports (validated live: 35/35 cross-node scenarios in `scripts/test-multi-node.ts`, including real RTP and hard owner-crash takeover):
 - Socket.IO Redis adapter for cross-node event distribution (4 Redis clients: data, pub, sub, configSub)
 - Presence, DM-call, and voice-channel metadata fully in Redis; mediasoup objects stay node-local
-- **Channel-affinity voice relay:** each voice channel's mediasoup Router lives on exactly ONE node (claimed atomically via `SET NX`); participants whose sockets live on other nodes are relayed over Redis pub/sub and represented on the owner node by shims. Clients send RTP straight to the owning node's announced IP — media bypasses nginx
+- **Channel-affinity voice relay:** each voice channel's mediasoup Router lives on exactly ONE node (claimed atomically via `SET NX`); participants whose sockets live on other nodes are relayed over Redis pub/sub and represented on the owner node by shims. Clients send RTP straight to the owning node's announced IP — media bypasses the HTTP proxy
 - **Node heartbeats + takeover:** `node:alive:{id}` keys (30s TTL) gate boot cleanups; a 60s reaper takes over channels owned by crashed peers
-- Sticky sessions for WebSocket connections (nginx `ip_hash`); feature flags and rate-limit overrides propagate to every node over Redis pub/sub
+- **Presence reconciliation and scheduled jobs under cluster locks:** the 60s presence reaper and the scheduled jobs (cleanups, discovery stats, key-share retention) take a Redis cluster lock (`withClusterLock`, or an idempotent mutex of their own), so each runs once per interval across the cluster, not once per node; feature flags and rate-limit overrides propagate to every node over Redis pub/sub
 - Cross-cluster room operations only (`socketsJoin`/`socketsLeave`/`io.in(room)`) — `fetchSockets()` is banned in hot paths (it waits on every node and throws when a peer is dead)
+
+What a multi-node deployment must provide:
+- **Sticky sessions** on the load balancer: the client opens Socket.IO with HTTP long-polling first and upgrades to WebSocket, so every request of the polling phase (and the upgrade) must reach the same node
+- **One shared Redis and one shared PostgreSQL:** each node connects to a single `REDIS_URL` and a single `DATABASE_URL` (`utils/redis.ts`, `utils/prisma.ts`); there is no read-replica routing or Redis Sentinel/Cluster client in the code, so replication or failover has to sit behind that one address
+- **Client-reachable WebRtcServer ports on every node** (`MEDIASOUP_ANNOUNCED_IP`, `MEDIASOUP_MIN_PORT`/`MAX_PORT`): RTP goes straight to the node that owns the channel, never through the load balancer
+- **A unique `NODE_ID` per node:** heartbeats, voice-channel ownership and the boot cleanups are keyed on it (a random id is generated at each start when it is unset)
 
 ### Phase 3: Microservices (100K+ users)
 
@@ -1482,7 +1778,7 @@ graph TD
 
 ### Phase 4: Discord-Scale (Millions)
 
-- Global edge network (CDN + edge compute)
+- Regional edge nodes operated by the deployment itself (media and asset serving close to users; no third-party CDN, per the principles above)
 - Regional data centers
 - Database sharding by server_id
 - Dedicated media infrastructure
@@ -1495,14 +1791,14 @@ graph TD
 
 ### Development
 ```bash
-docker compose up -d     # PostgreSQL + Redis
-pnpm dev                 # Backend + Frontend
+docker compose up -d     # Redis + coturn (STUN); PostgreSQL runs locally
+pnpm dev                 # Backend + admin + Tauri app (pnpm dev:web: backend + browser client)
 ```
 
 ### Production (Docker)
 
 ```dockerfile
-# apps/server/Dockerfile (future)
+# Dockerfile (repo root, multi-stage: build -> production; published to GHCR by docker.yml on v* tags). Simplified sketch:
 FROM node:20-alpine
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
@@ -1540,16 +1836,15 @@ mediasoup Deployment (autoscaling)
 | Feature | Architecture Change |
 |---------|-------------------|
 | **Video calls** | mediasoup SFU with video codecs (VP8/VP9/H264) |
-| **~~Screen sharing~~** | ~~mediasoup producer for screen capture~~ **Implemented (v0.9.6)** — `getDisplayMedia()` capture with WebRTC P2P track forwarding; one sharer per channel; inline + floating viewer modes |
+| **~~Screen sharing~~** | ~~mediasoup producer for screen capture~~ **Implemented (v0.9.6)** — `getDisplayMedia()` capture produced into the mediasoup SFU (`screen-video` / `screen-audio` producers, claimed through an ACK'd `voice:screen_share:start`); one sharer per channel; inline + floating viewer modes; annotations and privacy masks since (see Screen-Share Annotations & Overlays) |
 | **~~Direct Messages~~** | ~~New DM channel type, conversation model~~ **Implemented (v0.5.0–v0.7.0)** — 1-on-1 text + voice with `Conversation` model, real-time delivery, typing, reactions, unread tracking, WebRTC P2P calls, conversation deletion with cascade + real-time sync |
 | **~~File uploads~~** | ~~S3-compatible object storage~~ **Implemented (v0.3.2, migrated v0.9.1, attachments v1.2.0)** — presigned URL direct-to-S3 uploads for avatars, server icons, and message attachments; attachments proxied through server (S3 URL never exposed); 3-day retention with daily 4 AM cleanup job + email report; soft-delete preserves DB records for "Expired" UI placeholders |
 | **~~Password reset~~** | ~~Email-based reset flow~~ **Implemented (v0.4.0)** — Nodemailer + SHA-256 hashed tokens + tokenVersion-based session invalidation |
 | **~~Push notifications~~** | ~~FCM/APNs integration service~~ **Partially implemented (v1.2.1)** — Native OS notifications with avatar support (WinRT toast on Windows, Web Notification API in browser); FCM/APNs for mobile remains future work |
-| **~~Message search~~** | ~~Elasticsearch / PostgreSQL full-text search~~ **Implemented (v0.9.5)** — PostgreSQL case-insensitive `contains` search across server channels and DM conversations; cursor-based pagination; "around" mode for jump-to-message with scroll + highlight |
+| **~~Message search~~** | ~~Elasticsearch / PostgreSQL full-text search~~ **Implemented (v0.9.5)** — PostgreSQL case-insensitive `contains` search (trigram-indexed) across space channels and DM conversations; cursor-based pagination; "around" mode for jump-to-message with scroll + highlight; the search field sits in each chat header (`SearchField`) |
 | **Mobile app** | React Native sharing stores/services with web |
 | **Bot API** | Gateway API for third-party integrations |
-| **End-to-end encryption** | Signal Protocol for DMs |
-| **CDN** | CloudFront/Cloudflare for static assets + media |
+| **~~End-to-end encryption~~** | ~~Signal Protocol for DMs~~ **Implemented** — Olm/Megolm (vodozemac, Rust/WASM `packages/crypto-engine`) for DMs, secure channels, secure voice and DM call signaling; see `docs/e2e-dm-spec.md` |
 
 ### Mobile Strategy
 
@@ -1558,9 +1853,9 @@ The frontend architecture is designed for code sharing:
 ```
 packages/shared/     → Types, validators, constants (shared)
 packages/ui/         → UI components (future, shared)
-apps/desktop/        → Tauri + React (desktop)
+apps/desktop/        → Tauri + React (desktop); also the browser build (same code minus Tauri, `pnpm dev:web`)
 apps/mobile/         → React Native (future)
-apps/web/            → React SPA (ships today, same code as desktop minus Tauri)
+apps/admin/          → React admin dashboard
 ```
 
 Zustand stores and service layer (API + Socket) are framework-agnostic and can be reused across all platforms.

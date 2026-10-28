@@ -189,8 +189,8 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
     },
     {
       source: 'JOIN_REQUEST_DECLINE_COOLDOWN_DAYS',
-      en: `kept for ${JOIN_REQUEST_DECLINE_COOLDOWN_DAYS} days, so the same server`,
-      fr: `conservée ${JOIN_REQUEST_DECLINE_COOLDOWN_DAYS} jours, afin que le même serveur`,
+      en: `kept for ${JOIN_REQUEST_DECLINE_COOLDOWN_DAYS} days, so the same space`,
+      fr: `conservée ${JOIN_REQUEST_DECLINE_COOLDOWN_DAYS} jours, afin que le même espace`,
     },
     {
       source: 'E2E_LIMITS.KEYSHARE_MAX_AGE_MS',
@@ -252,6 +252,7 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'promptly update it',
     'days after upload',
     'in shared servers',
+    'in shared spaces', // the same false claim under the product's current word
     // change notices: the only account e-mails are address verification and password reset
     'by email to your account address',
     'notices of changes to these documents',
@@ -270,6 +271,7 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'jours après le téléversement',
     'jours après l’envoi du fichier',
     'dans les serveurs partagés',
+    'dans les espaces partagés',
     'par e-mail à l’adresse de votre compte',
     'avis de modification des présents documents',
   ],
@@ -349,8 +351,8 @@ describe('legal pages no longer make the statements the code contradicts', () =>
       fr: 'vous confirmez avec votre mot de passe, et avec votre code d’authentification à deux facteurs s’il',
     },
     {
-      en: 'if you still own servers, transfer or delete them first',
-      fr: 'si vous possédez encore des serveurs, transférez-les ou supprimez-les d’abord',
+      en: 'if you still own spaces, transfer or delete them first',
+      fr: 'si vous possédez encore des espaces, transférez-les ou supprimez-les d’abord',
     },
   ];
 

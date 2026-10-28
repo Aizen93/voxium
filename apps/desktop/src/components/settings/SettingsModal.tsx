@@ -5,7 +5,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio, Palette, Plus, Globe, Upload, Pencil, Trash2, Languages } from 'lucide-react';
+import { X, Keyboard, Volume2, Bell, User, Headphones, Shield, ShieldCheck, ShieldOff, Lock, Eye, EyeOff, AudioLines, Copy, Check, Radio, Palette, PanelTop, Plus, Globe, Upload, Pencil, Trash2, Languages } from 'lucide-react';
 import { THEMES } from '../../stores/settingsStore';
 import type { VoiceQuality, ThemeId, SettingsTab } from '../../stores/settingsStore';
 import { LIMITS } from '@voxium/shared';
@@ -622,7 +622,7 @@ function SecurityTab() {
 
 function AppearanceTab() {
   const { t } = useTranslation();
-  const { theme, setTheme, customThemes, deleteLocalTheme, setThemeRemoteId } = useSettingsStore();
+  const { theme, setTheme, customThemes, deleteLocalTheme, setThemeRemoteId, spacesStripMode, setSpacesStripMode } = useSettingsStore();
   const [editorOpen, setEditorOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [editingTheme, setEditingTheme] = useState<{ localId: string; data: import('@voxium/shared').CommunityThemeData } | undefined>();
@@ -875,6 +875,36 @@ function AppearanceTab() {
             </p>
           </div>
         )}
+      </div>
+
+      {/* Spaces strip — pinned along the top, or folded into a notch until hovered */}
+      <div className="border-t border-vox-border pt-5">
+        <h3 className="text-sm font-semibold text-vox-text-primary mb-3">{t('settings.appearance.stripTitle')}</h3>
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <PanelTop size={16} className="shrink-0 text-vox-text-muted" />
+            <div>
+              <p className="text-sm text-vox-text-primary">{t('settings.appearance.stripAutoHide')}</p>
+              <p className="text-[10px] text-vox-text-muted">{t('settings.appearance.stripAutoHideDesc')}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={spacesStripMode === 'auto'}
+            data-testid="strip-auto-hide-switch"
+            onClick={() => setSpacesStripMode(spacesStripMode === 'auto' ? 'pinned' : 'auto')}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+              spacesStripMode === 'auto' ? 'bg-vox-accent-primary' : 'bg-vox-bg-secondary'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform mt-0.5 ${
+                spacesStripMode === 'auto' ? 'translate-x-[22px]' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
       </div>
 
       {/* Theme Editor Modal */}
