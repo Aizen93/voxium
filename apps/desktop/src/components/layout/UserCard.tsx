@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
 import { Mic, MicOff, Headphones, HeadphoneOff, Settings, LogOut } from 'lucide-react';
@@ -8,6 +8,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { Avatar } from '../common/Avatar';
 import { APP_VERSION } from '@voxium/shared';
 
@@ -33,6 +34,42 @@ export function UserCard() {
   const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
   const [editingNickname, setEditingNickname] = useState(false);
   const [nicknameInput, setNicknameInput] = useState('');
+  // One save in flight at a time: a blur that lands while Enter's request is
+  // still pending must not fire a second request for the same value.
+  const nicknameSaving = useRef(false);
+  // Escape closes the editor without saving; the blur that follows must not
+  // save. Both live in refs so the async handlers always read the latest flag.
+  const nicknameCancelled = useRef(false);
+  // The value the editor was opened with, so an unchanged value is a no-op.
+  const nicknameOriginal = useRef('');
+
+  const saveNickname = async () => {
+    const value = nicknameInput.trim() || null;
+    // The editor only renders for an active server; guard anyway.
+    if (!activeServerId) return;
+    // Cancelled, or a save already in flight, or nothing changed: close quietly.
+    if (nicknameCancelled.current || nicknameSaving.current) {
+      setEditingNickname(false);
+      return;
+    }
+    if (value === (nicknameOriginal.current.trim() || null)) {
+      setEditingNickname(false);
+      return;
+    }
+    nicknameSaving.current = true;
+    try {
+      await useServerStore.getState().setNickname(activeServerId, value);
+      toast.success(value ? t('channel.nicknameSet') : t('channel.nicknameCleared'));
+    } catch (err) {
+      // Same honest signal on every path: a refused change is an error toast,
+      // never a silent success. Translates the server message when it has a
+      // known mapping, otherwise falls back to the generic failure string.
+      toast.error(getTranslatedError(err, t, 'channel.failedToSetNickname'));
+    } finally {
+      nicknameSaving.current = false;
+      setEditingNickname(false);
+    }
+  };
 
   // Your OWN presence is connection-driven: the server marks you online when
   // this socket connects. authStore's user.status is the DB snapshot from the
@@ -66,7 +103,14 @@ export function UserCard() {
           </p>
           {activeServerId && !editingNickname && (
             <button
-              onClick={() => { setEditingNickname(true); setNicknameInput(currentMember?.nickname || ''); }}
+              onClick={() => {
+                nicknameCancelled.current = false;
+                nicknameSaving.current = false;
+                const original = currentMember?.nickname || '';
+                nicknameOriginal.current = original;
+                setNicknameInput(original);
+                setEditingNickname(true);
+              }}
               className="block max-w-full truncate text-[11px] leading-tight text-vox-text-muted hover:text-vox-text-secondary transition-colors"
             >
               {currentMember?.nickname ? currentMember.nickname : t('channel.setNickname')}
@@ -77,23 +121,19 @@ export function UserCard() {
               type="text"
               value={nicknameInput}
               onChange={(e) => setNicknameInput(e.target.value)}
-              onKeyDown={async (e) => {
+              onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
-                  try {
-                    await useServerStore.getState().setNickname(activeServerId, nicknameInput.trim() || null);
-                    toast.success(nicknameInput.trim() ? t('channel.nicknameSet') : t('channel.nicknameCleared'));
-                  } catch { toast.error(t('channel.failedToSetNickname')); }
-                  setEditingNickname(false);
+                  void saveNickname();
                 } else if (e.key === 'Escape') {
+                  // Mark the closing as a cancel so the blur that follows does
+                  // not save the half-typed value.
+                  nicknameCancelled.current = true;
                   setEditingNickname(false);
                 }
               }}
-              onBlur={async () => {
-                try {
-                  await useServerStore.getState().setNickname(activeServerId, nicknameInput.trim() || null);
-                } catch { /* ignore on blur */ }
-                setEditingNickname(false);
+              onBlur={() => {
+                void saveNickname();
               }}
               placeholder={t('channel.nickname')}
               className="w-full rounded-sm border border-vox-border bg-vox-bg-tertiary px-1 py-0.5 text-[11px] text-vox-text-primary focus:outline-none focus:border-vox-border-strong"
