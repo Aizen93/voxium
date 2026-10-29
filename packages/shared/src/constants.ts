@@ -487,10 +487,6 @@ export const WS_EVENTS = {
   MEMBER_ROLES_UPDATED: 'member:roles_updated',
   CHANNEL_PERMISSIONS_UPDATED: 'channel:permissions_updated',
   MEMBER_NICKNAME_UPDATED: 'member:nickname_updated',
-  // Community Themes
-  THEME_PUBLISHED: 'theme:published',
-  THEME_UPDATED: 'theme:updated',
-  THEME_REMOVED: 'theme:removed',
   // Incoming webhooks: the server's webhook list changed (moderators refetch);
   // a webhook's messages were purged from one channel in one statement.
   WEBHOOK_CHANGED: 'webhook:changed',

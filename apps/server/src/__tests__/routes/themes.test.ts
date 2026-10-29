@@ -28,6 +28,13 @@ vi.mock('../../middleware/rateLimiter', () => ({
 const mockEmit = vi.fn();
 const mockTo = vi.fn().mockReturnValue({ emit: mockEmit });
 
+/** Theme changes are never pushed to sockets: nothing listens for them, and an
+ *  io.emit reaches every connected socket of the deployment. */
+function expectNoBroadcast(): void {
+  expect(mockEmit).not.toHaveBeenCalled();
+  expect(mockTo).not.toHaveBeenCalled();
+}
+
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     emit: mockEmit,
@@ -495,7 +502,7 @@ describe('Themes API', () => {
       expect(res.status).toBe(404);
     });
 
-    it('emits socket event when updating published theme', async () => {
+    it('updates a published theme without broadcasting it', async () => {
       prismaMock.communityTheme.findUnique.mockResolvedValue(makeThemeRow({ status: 'published' }));
       prismaMock.communityTheme.update.mockResolvedValue(makeThemeRow({ status: 'published', name: 'Updated' }));
 
@@ -503,7 +510,7 @@ describe('Themes API', () => {
         .patch('/api/v1/themes/theme-1')
         .send({ name: 'Updated' });
 
-      expect(mockEmit).toHaveBeenCalledWith('theme:updated', expect.objectContaining({ name: 'Updated' }));
+      expectNoBroadcast();
     });
 
     it('does not emit socket event when updating draft theme', async () => {
@@ -539,13 +546,13 @@ describe('Themes API', () => {
       expect(res.status).toBe(403);
     });
 
-    it('emits theme:removed when deleting published theme', async () => {
+    it('deletes a published theme without broadcasting it', async () => {
       prismaMock.communityTheme.findUnique.mockResolvedValue(makeThemeRow({ status: 'published' }));
       prismaMock.communityTheme.delete.mockResolvedValue(makeThemeRow());
 
       await request(app).delete('/api/v1/themes/theme-1');
 
-      expect(mockEmit).toHaveBeenCalledWith('theme:removed', { themeId: 'theme-1' });
+      expectNoBroadcast();
     });
 
     it('does not emit when deleting draft theme', async () => {
@@ -568,7 +575,7 @@ describe('Themes API', () => {
       const res = await request(app).post('/api/v1/themes/theme-1/publish');
 
       expect(res.status).toBe(200);
-      expect(mockEmit).toHaveBeenCalledWith('theme:published', expect.objectContaining({ id: 'theme-1' }));
+      expectNoBroadcast();
     });
 
     it('rejects publishing already published theme', async () => {
@@ -606,7 +613,7 @@ describe('Themes API', () => {
       const res = await request(app).post('/api/v1/themes/theme-1/unpublish');
 
       expect(res.status).toBe(200);
-      expect(mockEmit).toHaveBeenCalledWith('theme:removed', { themeId: 'theme-1' });
+      expectNoBroadcast();
     });
 
     it('rejects unpublishing non-published theme', async () => {
@@ -691,7 +698,7 @@ describe('Themes API', () => {
         where: { id: 'theme-1' },
         data: { status: 'removed' },
       });
-      expect(mockEmit).toHaveBeenCalledWith('theme:removed', { themeId: 'theme-1' });
+      expectNoBroadcast();
     });
 
     it('returns 404 for non-existent theme', async () => {
