@@ -65,7 +65,16 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-      - name: Security audit (dependencies)
+      # What ships to users must have no high or critical advisory: this step fails
+      # the job. An advisory reviewed as not applicable goes into
+      # pnpm.auditConfig.ignoreGhsas in package.json, with the reason next to it.
+      - name: Security audit (production dependencies)
+        if: matrix.node == 26
+        run: pnpm audit --prod --audit-level=high --ignore-registry-errors
+
+      # Build and test tooling: reported, never blocking.
+      - name: Security audit (all dependencies, informational)
+        if: matrix.node == 26
         run: pnpm audit --audit-level=high
         continue-on-error: true
 

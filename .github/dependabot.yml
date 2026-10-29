@@ -1,0 +1,40 @@
+# Weekly, grouped update proposals. Security alerts stay on in the repository
+# settings; this file adds the routine version updates that keep the alert count
+# from piling up between releases.
+#
+# packages/crypto-engine is deliberately absent: vodozemac is pinned exactly and
+# watched by crypto-deps-watch.yml, and every change there needs a WASM rebuild.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      production:
+        dependency-type: production
+        update-types: [minor, patch]
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /apps/desktop/src-tauri
+    target-branch: develop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      desktop-shell:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
