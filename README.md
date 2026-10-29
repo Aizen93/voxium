@@ -557,7 +557,7 @@ curl http://localhost:3001/api/v1/servers \
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers (always on when `NODE_ENV=production`) |
 | `TRUST_PROXY_HOPS` | `1` | Number of reverse proxies in front of the server — must match your setup exactly |
 | `MEDIASOUP_LISTEN_IP` | `0.0.0.0` | IP the mediasoup workers bind to |
-| `MEDIASOUP_ANNOUNCED_IP` | `127.0.0.1` | IP address announced to WebRTC clients for mediasoup SFU connectivity. Set it to the machine's LAN IP for cross-machine voice in development, and its public IP in production. |
+| `MEDIASOUP_ANNOUNCED_IP` | `127.0.0.1` | IP address announced to WebRTC clients for mediasoup SFU connectivity. Set it to the machine's LAN IP for cross-machine voice in development, and its public IP in production. The Vite dev servers listen on localhost only; start them with `VOXIUM_DEV_LAN=1` to reach them from another machine. |
 | `MEDIASOUP_MIN_PORT` / `MEDIASOUP_MAX_PORT` | `10000` / `59999` | mediasoup port range. Each worker (one per CPU core, max 8) binds one UDP + TCP port at `MIN_PORT + slot`, so only the first few ports are used |
 
 ### Frontend Environment Variables (`apps/desktop/.env`)

@@ -13,7 +13,10 @@ export default defineConfig({
   server: {
     port: 8080,
     strictPort: true,
-    host: true,
+    // Loopback only by default: a dev server reachable from the LAN serves source
+    // files and the dev-only middleware to anyone on the network. Set
+    // VOXIUM_DEV_LAN=1 to open it for testing from another machine.
+    host: process.env.VOXIUM_DEV_LAN === '1' ? true : 'localhost',
   },
   worker: {
     format: 'es',
