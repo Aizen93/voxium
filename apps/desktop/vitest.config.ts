@@ -16,8 +16,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@voxium/shared': path.resolve(__dirname, '../../packages/shared/dist'),
-      '@': path.resolve(__dirname, './src'),
+      '@voxium/shared': path.resolve(import.meta.dirname, '../../packages/shared/dist'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
 });

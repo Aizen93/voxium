@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   server: {
@@ -17,6 +17,9 @@ export default defineConfig({
     // files and the dev-only middleware to anyone on the network. Set
     // VOXIUM_DEV_LAN=1 to open it for testing from another machine.
     host: process.env.VOXIUM_DEV_LAN === '1' ? true : 'localhost',
+    // Tauri builds into src-tauri/target while this server runs; watching it locks
+    // the files cargo writes (EBUSY on Windows) and reloads nothing useful.
+    watch: { ignored: ['**/src-tauri/**'] },
   },
   worker: {
     format: 'es',

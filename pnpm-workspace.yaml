@@ -1,3 +1,8 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# pnpm settings live here, not in .npmrc: npm (which npx and the Tauri/Prisma
+# CLIs run through) warns about keys it does not know.
+shamefullyHoist: true
+strictPeerDependencies: false
