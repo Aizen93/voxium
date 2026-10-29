@@ -6,3 +6,7 @@ packages:
 # CLIs run through) warns about keys it does not know.
 shamefullyHoist: true
 strictPeerDependencies: false
+
+# Never install a version published less than 3 days ago (minutes): supply-chain
+# attacks are usually caught and the version pulled within that window.
+minimumReleaseAge: 4320
