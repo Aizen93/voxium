@@ -169,7 +169,7 @@ The code is multi-node capable: shared state lives in Redis, voice channels foll
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| **Node.js** | >= 20.x | JavaScript runtime |
+| **Node.js** | >= 24.x (26 LTS recommended) | JavaScript runtime |
 | **pnpm** | >= 10.x | Package manager |
 | **PostgreSQL** | >= 15.x | Database (local installation) |
 | **Docker** & **Docker Compose** | Latest | Redis (and dev STUN) containers |

@@ -7,6 +7,10 @@ export default defineConfig({
     // .tsx so component tests can use JSX like the components they render
     include: ['src/__tests__/**/*.test.{ts,tsx}'],
     environment: 'jsdom',
+    // Node 25+ defines its own localStorage/sessionStorage globals, and vitest 4's
+    // jsdom environment keeps them instead of jsdom's (vitest 5 fixes it): with
+    // Node's Web Storage off, the tests get jsdom's. Remove with vitest 5.
+    execArgv: ['--no-experimental-webstorage'],
     setupFiles: ['./src/__tests__/setup.ts'],
     testTimeout: 10000,
   },

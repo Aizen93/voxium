@@ -4,12 +4,14 @@
 # injected at runtime via environment variables or a mounted .env file.
 
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM node:20-slim AS build
+# node:26.13.0-slim (Node 26 LTS), pinned by digest; bump the tag and the digest together
+FROM node:26.13.0-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN corepack enable && corepack prepare pnpm@10 --activate
+# Node 25+ no longer ships Corepack: install the pnpm the root package.json names.
+RUN npm install -g pnpm@10.32.1
 
 WORKDIR /app
 
@@ -36,12 +38,13 @@ RUN cd apps/server && npx prisma generate
 RUN npx tsc --project apps/server/tsconfig.json
 
 # ── Stage 2: Production ─────────────────────────────────────────────────────
-FROM node:20-slim AS production
+FROM node:26.13.0-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS production
 
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN corepack enable && corepack prepare pnpm@10 --activate
+# Node 25+ no longer ships Corepack: install the pnpm the root package.json names.
+RUN npm install -g pnpm@10.32.1
 
 RUN groupadd --gid 1001 voxium && useradd --uid 1001 --gid voxium --create-home voxium
 

@@ -6,7 +6,7 @@ Thanks for your interest in contributing! This guide covers everything you need 
 
 ### Prerequisites
 
-- **Node.js** >= 20.x
+- **Node.js** >= 24.x (26 LTS recommended)
 - **pnpm** >= 9.x
 - **PostgreSQL** >= 15.x (running locally)
 - **Docker** (for Redis)

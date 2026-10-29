@@ -44,16 +44,15 @@ jobs:
         shell: bash
         run: echo "version=$(sed -n 's/.*"packageManager".*"pnpm@\([^"]*\)".*/\1/p' package.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Node 24
+      - name: Setup Node 26
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          node-version: 24
+          node-version: 26
 
-      - name: Activate pnpm via Corepack
+      # Node 25+ no longer ships Corepack: install the pnpm package.json names.
+      - name: Install pnpm
         shell: bash
-        run: |
-          corepack enable
-          corepack prepare pnpm@${{ steps.pnpm-ver.outputs.version }} --activate
+        run: npm install -g pnpm@${{ steps.pnpm-ver.outputs.version }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
