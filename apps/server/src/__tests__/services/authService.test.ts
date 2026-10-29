@@ -170,6 +170,18 @@ describe('authService — registerUser', () => {
       .rejects.toThrow(/email/i);
   });
 
+  it.each(['victim@gmail.com(1)', 'victim(1)@gmail.com', 'a,victim@corp.com', `${'a,'.repeat(40_000)}a@b.co`])(
+    'refuses an address the mailer would read differently (%#) before any lookup or mail',
+    async (email) => {
+      const { sendVerificationEmail } = await import('../../utils/email');
+      await expect(registerUser('testuser', email, 'ValidPass123', undefined, undefined, CONSENT))
+        .rejects.toThrow('Invalid email address');
+      expect(prisma.user.findFirst).not.toHaveBeenCalled();
+      expect(prisma.user.create).not.toHaveBeenCalled();
+      expect(sendVerificationEmail).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects password exceeding 72 chars (bcrypt limit)', async () => {
     const longPassword = 'A'.repeat(73);
     await expect(registerUser('testuser', 'test@example.com', longPassword, undefined, undefined, CONSENT))
@@ -577,6 +589,13 @@ describe('authService — generateTokens', () => {
 });
 
 describe('authService — requestPasswordReset', () => {
+  it('refuses an address the mailer would read differently, before any lookup or mail', async () => {
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    await expect(requestPasswordReset('victim@gmail.com(1)')).rejects.toThrow('Invalid email address');
+    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+    expect(sendPasswordResetEmail).not.toHaveBeenCalled();
+  });
+
   it('silently returns for non-existent email (prevents enumeration)', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
 

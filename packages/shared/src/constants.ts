@@ -9,6 +9,9 @@ export const LIMITS = {
   USERNAME_MIN: 3,
   USERNAME_MAX: 32,
   DISPLAY_NAME_MAX: 64,
+  /** RFC 5321: a whole address, and its local part (validateEmail) */
+  EMAIL_MAX: 254,
+  EMAIL_LOCAL_MAX: 64,
   PASSWORD_MIN: 8,
   PASSWORD_MAX: 72,
   SERVER_NAME_MIN: 2,

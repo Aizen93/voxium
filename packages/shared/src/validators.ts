@@ -15,9 +15,27 @@ export function validateUsername(username: string): string | null {
   return null;
 }
 
+/**
+ * One mailbox, written the way the mailer will read it.
+ *
+ * Beyond `local@domain.tld`, an address must not contain whitespace, control
+ * characters or the RFC 5322 specials `( ) < > [ ] : ; , \ "`. Those let one
+ * string name something other than the mailbox it looks like: the mailer reads
+ * `name@host.com(1)` as `name@host.com` (a comment), `a,b@host.com` as a list,
+ * and `"x"@host.com` as a quoted local part. Every spelling would then be a
+ * distinct account, a distinct per-inbox counter and a distinct suppression
+ * digest for ONE real mailbox. Unicode letters stay allowed (internationalised
+ * addresses), and the lengths follow RFC 5321: 64 for the local part, 254 in all.
+ */
+// eslint-disable-next-line no-control-regex
+const EMAIL_FORBIDDEN_RE = /[\s\u0000-\u001f\u007f()<>[\]:;,\\"]/;
+const EMAIL_SHAPE_RE = /^[^@]+@[^@]+\.[^@]+$/;
+
 export function validateEmail(email: string): string | null {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) return 'Invalid email address';
+  if (email.length > LIMITS.EMAIL_MAX) return 'Invalid email address';
+  if (EMAIL_FORBIDDEN_RE.test(email) || !EMAIL_SHAPE_RE.test(email)) return 'Invalid email address';
+  const local = email.slice(0, email.lastIndexOf('@'));
+  if (local.length > LIMITS.EMAIL_LOCAL_MAX) return 'Invalid email address';
   return null;
 }
 
