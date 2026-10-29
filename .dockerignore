@@ -1,5 +1,9 @@
+# Patterns match from the context root: nested copies need **/ (a local checkout
+# has apps/*/node_modules, and copying them breaks the image build).
 node_modules
+**/node_modules
 dist
+**/dist
 build
 target
 .git
