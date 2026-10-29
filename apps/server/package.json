@@ -24,7 +24,7 @@
     "@socket.io/redis-adapter": "^8.3.0",
     "@voxium/shared": "workspace:*",
     "bcryptjs": "^3.0.3",
-    "compression": "^1.8.1",
+    "compression": "^1.8.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.3.1",
@@ -33,14 +33,14 @@
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "mediasoup": "^3.19.18",
-    "morgan": "^1.10.0",
+    "morgan": "^1.12.1",
     "nodemailer": "^9.0.3",
     "otpauth": "^9.5.0",
     "prisma": "^7.5.0",
     "qrcode": "^1.5.4",
     "rate-limiter-flexible": "^10.0.1",
     "redis": "^5.11.0",
-    "socket.io": "^4.8.0"
+    "socket.io": "^4.8.4"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
@@ -58,7 +58,7 @@
     "supertest": "^7.2.2",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.12"
   },
   "license": "SEE LICENSE IN LICENSE.md"
 }
