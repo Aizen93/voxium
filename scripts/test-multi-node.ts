@@ -552,7 +552,7 @@ class VoiceClient {
   /** Device + transports + consumer plumbing (mirrors the desktop client). */
   async setupMedia(): Promise<void> {
     const data = this.transportInfo!;
-    const device = new Device({ handlerFactory: Chrome111.createFactory() });
+    const device = new Device({ handlerFactory: Chrome111.createFactory({}) });
     await device.load({ routerRtpCapabilities: data.routerRtpCapabilities as RtpCapabilities });
     this.device = device;
 

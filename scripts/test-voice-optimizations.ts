@@ -171,7 +171,7 @@ function setupMedia(user: { socket: Socket; token: string; username: string }, c
     }) => {
       clearTimeout(timer);
       try {
-        const device = new Device({ handlerFactory: Chrome111.createFactory() });
+        const device = new Device({ handlerFactory: Chrome111.createFactory({}) });
         await device.load({ routerRtpCapabilities: data.routerRtpCapabilities as RtpCapabilities });
 
         const sendTransport = device.createSendTransport({

@@ -32,7 +32,7 @@
     "geoip-lite": "^2.0.3",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.2",
-    "mediasoup": "^3.19.18",
+    "mediasoup": "^3.32.0",
     "morgan": "^1.12.1",
     "nodemailer": "^10.2.1",
     "otpauth": "^9.5.2",
