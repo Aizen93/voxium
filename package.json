@@ -62,14 +62,14 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.58.2",
+    "@playwright/test": "^1.64.1",
     "@prisma/adapter-pg": "^7.10.1",
     "@roamhq/wrtc": "^0.10.0",
-    "eslint": "^10.0.3",
+    "eslint": "^10.13.0",
     "mediasoup-client": "^3.18.7",
-    "otpauth": "^9.5.0",
+    "otpauth": "^9.5.2",
     "redis": "^5.11.0",
-    "typescript-eslint": "^8.57.1"
+    "typescript-eslint": "^8.72.1"
   },
   "license": "SEE LICENSE IN LICENSE.md"
 }
