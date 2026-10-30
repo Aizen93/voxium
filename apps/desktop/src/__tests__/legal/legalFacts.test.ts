@@ -13,6 +13,7 @@ import {
   JOIN_REQUEST_DECLINE_COOLDOWN_DAYS,
   E2E_LIMITS,
   MINIMUM_AGE,
+  SIGNUP,
 } from '@voxium/shared';
 import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/legalLanguage';
 import { LEGAL_OPERATOR } from '../../components/legal/operator';
@@ -151,7 +152,8 @@ const LAST_UPDATED: PerLanguage = {
 /**
  * The change-notice promise (operator.ts), as the Terms and the Privacy Policy
  * state it: in the app, the only channel the Service has for it (announcements;
- * the only account e-mails are address verification and password reset).
+ * the account e-mails are the sign-up code, the legacy address verification,
+ * password reset and the existing-account notice, none of them a change notice).
  */
 const CHANGE_NOTICE: { source: string } & PerLanguage = {
   source: 'LEGAL_OPERATOR.changeNoticeDays (components/legal/operator.ts)',
@@ -207,6 +209,16 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
       en: `not intended for anyone under ${MINIMUM_AGE}, and we do not knowingly collect data from them.`,
       fr: `ne s’adresse pas aux personnes de moins de ${MINIMUM_AGE} ans et nous ne collectons pas sciemment de données auprès d’elles.`,
     },
+    {
+      source: 'SIGNUP.PENDING_TTL_MINUTES',
+      en: `that are not completed expire ${SIGNUP.PENDING_TTL_MINUTES} minutes after they start and are then deleted by a daily clean-up`,
+      fr: `non finalisées expirent ${SIGNUP.PENDING_TTL_MINUTES} minutes après leur début et sont ensuite supprimées par un nettoyage quotidien`,
+    },
+    {
+      source: 'SIGNUP.LEDGER_WINDOW_DAYS',
+      en: `kept for ${SIGNUP.LEDGER_WINDOW_DAYS} days from the first of them, then deleted by a daily clean-up`,
+      fr: `conservés pendant ${SIGNUP.LEDGER_WINDOW_DAYS} jours à compter du premier d’entre eux, puis supprimés par un nettoyage quotidien`,
+    },
     CHANGE_NOTICE,
   ],
   terms: [
@@ -256,6 +268,8 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     // change notices: the only account e-mails are address verification and password reset
     'by email to your account address',
     'notices of changes to these documents',
+    // verify-first sign-up: the account e-mails are no longer only these two
+    'account emails (address verification and password reset)',
   ],
   // The same statements, as a French translation would make them
   fr: [
@@ -274,6 +288,7 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'dans les espaces partagés',
     'par e-mail à l’adresse de votre compte',
     'avis de modification des présents documents',
+    'les e-mails liés au compte (vérification de l’adresse et réinitialisation du mot de passe)',
   ],
 };
 
@@ -384,6 +399,26 @@ describe('legal pages no longer make the statements the code contradicts', () =>
     expect(offending, 'a new account route: update the Terms (section 2) and the Privacy Policy (Your Rights)').toEqual([]);
     expect(pages.privacy[lang].text).toContain(NO_EXPORT[lang]);
     expect(pages.terms[lang].text).toContain(NO_ACCOUNT_CHANGE[lang]);
+  });
+});
+
+describe('the sign-up the Privacy Policy describes is the one the server runs', () => {
+  const signupService = readServer('services/signupService.ts');
+
+  it('reads the lifetimes the pins state from SIGNUP, and keys the mail ledger on a mailbox digest', () => {
+    // the pending row's life, and its purge by the daily hygiene sweep
+    expect(signupService).toContain('expiresAt: new Date(now + SIGNUP.PENDING_TTL_MINUTES * MINUTE)');
+    expect(signupService).toContain('prisma.pendingRegistration.deleteMany({ where: { expiresAt: { lt: new Date() } } })');
+    expect(signupService).toContain('SIGNUP.LEDGER_WINDOW_DAYS * 24 * 60 * MINUTE');
+    expect(registrationHygiene).toContain('await purgeExpiredSignupState()');
+    // the ledger holds a digest, never the address
+    expect(signupService).toContain('const mailbox = mailboxDigest(email);');
+    expect(signupService).toContain('claimSignupMailSlot(mailbox)');
+    // an existing verified account is sent the notice, never a code
+    expect(signupService).toContain('sendSignupExistingAccountEmail(email)');
+    for (const value of [SIGNUP.PENDING_TTL_MINUTES, SIGNUP.LEDGER_WINDOW_DAYS]) {
+      expect(Number.isInteger(value) && value > 0, String(value)).toBe(true);
+    }
   });
 });
 
@@ -581,6 +616,26 @@ describe('the positions the documents take are stated in every language', () => 
         what: 'consent is asked again, never inferred from continued use (section 7 lists consent as a basis)',
         en: 'where a change concerns processing based on your consent, we ask for your consent again rather than relying on your continued use.',
         fr: 'lorsqu’une modification porte sur un traitement fondé sur votre consentement, nous vous demandons à nouveau votre consentement au lieu de nous fonder sur la poursuite de votre utilisation.',
+      },
+      {
+        what: 'verify-first sign-up: no account before the mailed code (signupService.completeRegistration)',
+        en: 'no account is created until you enter the code we email to that address',
+        fr: 'aucun compte n’est créé tant que vous n’avez pas saisi le code que nous envoyons par e-mail à cette adresse',
+      },
+      {
+        what: 'what a sign-up attempt holds (the pending_registrations columns)',
+        en: 'the username, email address, display name and password (hashed) you enter, the time you accepted the terms of service and this privacy policy, and the ip address the sign-up came from',
+        fr: 'le nom d’utilisateur, l’adresse e-mail, le nom d’affichage et le mot de passe (haché) que vous saisissez, la date et l’heure auxquelles vous avez accepté les conditions d’utilisation et la présente politique de confidentialité, et l’adresse ip d’où provient l’inscription',
+      },
+      {
+        what: 'the sign-up mail ledger keys a digest of the mailbox, never the address (signup_mail_ledger.mailbox_hash)',
+        en: 'a hashed form of the mailbox (never the address itself) and the number of sign-up emails sent to it',
+        fr: 'une forme hachée de la boîte de réception (jamais l’adresse elle-même) et le nombre d’e-mails d’inscription qui lui ont été envoyés',
+      },
+      {
+        what: 'the existing-account notice (sendSignupExistingAccountEmail)',
+        en: 'a notice to the holder of an address that already has an account when someone tries to sign up with it',
+        fr: 'lorsque quelqu’un tente de s’inscrire avec une adresse qui a déjà un compte, un avis adressé au titulaire de cette adresse',
       },
       { what: 'the privacy contact', en: 'write to our privacy contact at', fr: 'écrivez à notre contact pour les questions de confidentialité' },
       {

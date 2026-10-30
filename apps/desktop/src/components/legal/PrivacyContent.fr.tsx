@@ -1,4 +1,4 @@
-import { MINIMUM_AGE } from '@voxium/shared';
+import { MINIMUM_AGE, SIGNUP } from '@voxium/shared';
 import { LEGAL_OPERATOR, publisherOf } from './operator';
 import { MailLink } from './MailLink';
 
@@ -32,6 +32,13 @@ export function PrivacyContentFr() {
               <strong className="text-vox-text-primary">Informations de compte</strong>, nom d’utilisateur, adresse
               e-mail (avec une copie normalisée de celle-ci, utilisée uniquement pour empêcher une même boîte de
               réception d’ouvrir plusieurs comptes) et votre mot de passe, stocké sous forme hachée
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Données d’inscription</strong>, pendant votre
+              inscription&nbsp;: le nom d’utilisateur, l’adresse e-mail, le nom d’affichage et le mot de passe (haché)
+              que vous saisissez, la date et l’heure auxquelles vous avez accepté les Conditions d’utilisation et la
+              présente Politique de confidentialité, et l’adresse IP d’où provient l’inscription. Aucun compte n’est
+              créé tant que vous n’avez pas saisi le code que nous envoyons par e-mail à cette adresse
             </li>
             <li>
               <strong className="text-vox-text-primary">Données de profil</strong>, nom d’affichage, avatar, bio et
@@ -214,6 +221,18 @@ export function PrivacyContentFr() {
               chaque requête, font l’objet d’une rotation automatique et ne sont conservés que pendant une courte
               période
             </li>
+            <li>
+              <strong className="text-vox-text-primary">Les inscriptions non finalisées</strong> expirent{' '}
+              {SIGNUP.PENDING_TTL_MINUTES}&nbsp;minutes après leur début et sont ensuite supprimées par un nettoyage
+              quotidien&nbsp;; une inscription finalisée devient votre compte
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Le décompte des e-mails d’inscription</strong> est conservé
+              pour éviter l’envoi répété d’e-mails d’inscription à une même boîte de réception&nbsp;: une forme hachée
+              de la boîte de réception (jamais l’adresse elle-même) et le nombre d’e-mails d’inscription qui lui ont été
+              envoyés, conservés pendant {SIGNUP.LEDGER_WINDOW_DAYS}&nbsp;jours à compter du premier d’entre eux, puis
+              supprimés par un nettoyage quotidien
+            </li>
             <li><strong className="text-vox-text-primary">Les comptes dont l’adresse e-mail n’est jamais vérifiée</strong> sont supprimés 7&nbsp;jours après l’inscription</li>
             <li>
               <strong className="text-vox-text-primary">Les demandes d’adhésion</strong> à un espace sont supprimées
@@ -272,8 +291,10 @@ export function PrivacyContentFr() {
           </p>
           <ul className="list-disc list-inside space-y-1.5 ml-2">
             <li>
-              <strong className="text-vox-text-primary">E-mail.</strong> Les e-mails liés au compte (vérification de
-              l’adresse et réinitialisation du mot de passe) sont envoyés par l’intermédiaire d’un prestataire d’envoi
+              <strong className="text-vox-text-primary">E-mail.</strong> Les e-mails liés au compte (code
+              d’inscription, vérification de l’adresse des comptes créés avant les codes d’inscription,
+              réinitialisation du mot de passe et, lorsque quelqu’un tente de s’inscrire avec une adresse qui a déjà
+              un compte, un avis adressé au titulaire de cette adresse) sont envoyés par l’intermédiaire d’un prestataire d’envoi
               d’e-mails, qui reçoit votre adresse e-mail et le message. Chacun de ces e-mails contient un lien qui
               permet à la personne qui le reçoit de bloquer tout nouvel e-mail de Voxium vers cette adresse&nbsp;; nous
               conservons alors une forme hachée de l’adresse, dont elle ne peut être retrouvée, tant que le blocage
