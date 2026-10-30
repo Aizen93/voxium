@@ -664,8 +664,7 @@ export const chargeRegistrationBudgets = async (req: Request, res: Response, nex
     // Everything taken, back out: the caller is not registering today, so it
     // must cost them nothing on either bucket.
     await Promise.all(charged.map((c) => refundRateLimit(c.name, c.key)));
-    res.set('Retry-After', String(Math.ceil(rejection.msBeforeNext / 1000)));
-    res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    answerTooManyRequests(res, rejection.msBeforeNext);
     return;
   }
 
