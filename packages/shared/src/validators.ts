@@ -19,12 +19,10 @@ export function validateUsername(username: string): string | null {
  * One mailbox, written the way the mailer will read it.
  *
  * Beyond `local@domain.tld`, an address must not contain whitespace, control
- * characters or the RFC 5322 specials `( ) < > [ ] : ; , \ "`. Those let one
- * string name something other than the mailbox it looks like: the mailer reads
- * `name@host.com(1)` as `name@host.com` (a comment), `a,b@host.com` as a list,
- * and `"x"@host.com` as a quoted local part. Every spelling would then be a
- * distinct account, a distinct per-inbox counter and a distinct suppression
- * digest for ONE real mailbox. Unicode letters stay allowed (internationalised
+ * characters or the RFC 5322 specials `( ) < > [ ] : ; , \ "` (comments,
+ * address lists, quoted local parts), so the string is the one mailbox the
+ * mailer delivers to, and the account, the per-inbox counters and the
+ * suppression digest all key on that mailbox. Unicode letters stay allowed (internationalised
  * addresses), and the lengths follow RFC 5321: 64 for the local part, 254 in all.
  * Every label of the domain is non-empty: no leading, trailing or doubled dot,
  * so `host.com.` (the same DNS name) is not a second spelling of `host.com`.
