@@ -240,6 +240,22 @@ export async function resendRegistrationCode(pendingId: string): Promise<SignupS
   return answer;
 }
 
+/**
+ * What a P2002 says it violated, as text to match a column or index name in.
+ * Prisma 7 behind a driver adapter (adapter-pg) never sets `meta.target`: the
+ * index is reported under `meta.driverAdapterError.cause.constraint`
+ * (`{ index }` or `{ fields }`). Both places are read.
+ */
+function uniqueViolationTarget(err: unknown): string {
+  const meta = (err as { meta?: { target?: unknown; driverAdapterError?: { cause?: { constraint?: unknown } } } }).meta;
+  try {
+    return JSON.stringify([meta?.target ?? null, meta?.driverAdapterError?.cause?.constraint ?? null]);
+  } catch (stringifyErr) {
+    console.warn('[Signup] Unreadable unique-violation details:', stringifyErr instanceof Error ? stringifyErr.message : stringifyErr);
+    return '';
+  }
+}
+
 const USER_RESULT_SELECT = {
   id: true,
   username: true,
@@ -354,9 +370,8 @@ export async function completeRegistration(
   } catch (err) {
     // The unique indexes are the real enforcement (two completions racing).
     if ((err as { code?: string })?.code === 'P2002') {
-      const target = String((err as { meta?: { target?: unknown } }).meta?.target ?? '');
       await refundAttempt();
-      if (/email/i.test(target)) throw new ConflictError(SIGNUP_EMAIL_REGISTERED_MESSAGE);
+      if (/email/i.test(uniqueViolationTarget(err))) throw new ConflictError(SIGNUP_EMAIL_REGISTERED_MESSAGE);
       throw new ConflictError(USERNAME_TAKEN_MESSAGE);
     }
     throw err;
