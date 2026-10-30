@@ -29,6 +29,7 @@ import jwt from 'jsonwebtoken';
 import {
   socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, loginAccountKey, loginEmailDigest, totpAccountKey, verifiedBearerUserId,
   rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookManage, rateLimitWebhookRead, rateLimitByKey,
+  GITHUB_HOOK_SOURCE_RANGES, isGitHubHookSource, ipInCidr, parseCidr,
 } from '../../middleware/rateLimiter';
 
 /**
@@ -200,11 +201,11 @@ describe('incoming-webhook limiters', () => {
   it('lists both unverified-delivery buckets in the admin table (rl:, tunable like every row)', () => {
     expect(byName('webhookSigFail')).toMatchObject({
       keyPrefix: 'rl:whsigfail', points: 10, duration: 60, blockDuration: 0, keyType: 'webhook',
-      label: 'Webhook Unverified Deliveries (per webhook and IP)', isCustom: false,
+      label: 'Webhook Unverified Deliveries (per webhook and network)', isCustom: false,
     });
     expect(byName('webhookSigFailIp')).toMatchObject({
-      keyPrefix: 'rl:whsigfailip', points: 300, duration: 60, blockDuration: 0, keyType: 'ip',
-      label: 'Webhook Unverified Deliveries (per IP)', isCustom: false,
+      keyPrefix: 'rl:whsigfailip', points: 300, duration: 60, blockDuration: 0, keyType: 'subnet',
+      label: 'Webhook Unverified Deliveries (per network)', isCustom: false,
     });
   });
 
@@ -348,18 +349,37 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
     expect(JSON.stringify(seen)).not.toContain(TOKEN);
   });
 
-  it('rateLimitWebhookSignature charges rl:whsigfail on the webhook id AND the normalised address, then rl:whsigfailip on the address: never the token', async () => {
+  it('rateLimitWebhookSignature charges rl:whsigfail on the webhook id AND the sender network, then rl:whsigfailip on the network: never the token', async () => {
     const mw = rl.rateLimitWebhookSignature(() => false);
     await charge(mw, executeRequest());
-    await charge(mw, executeRequest({ ip: '::FFFF:203.0.113.7' }));
+    await charge(mw, executeRequest({ ip: '::FFFF:203.0.113.99' }));
+    await charge(mw, executeRequest({ ip: '2001:db8:1:2:3:4:5:6' }));
+    await charge(mw, executeRequest({ ip: '2001:DB8:1:ffff::9' }));
 
     expect(seen).toEqual([
-      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.7' },
-      { prefix: 'rl:whsigfailip', key: '203.0.113.7' },
-      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.7' },
-      { prefix: 'rl:whsigfailip', key: '203.0.113.7' },
+      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.0/24' },
+      { prefix: 'rl:whsigfailip', key: '203.0.113.0/24' },
+      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.0/24' },
+      { prefix: 'rl:whsigfailip', key: '203.0.113.0/24' },
+      // one IPv6 sender rotating through its /48 is one key
+      { prefix: 'rl:whsigfail', key: 'wh-1|2001:db8:1::/48' },
+      { prefix: 'rl:whsigfailip', key: '2001:db8:1::/48' },
+      { prefix: 'rl:whsigfail', key: 'wh-1|2001:db8:1::/48' },
+      { prefix: 'rl:whsigfailip', key: '2001:db8:1::/48' },
     ]);
     expect(JSON.stringify(seen)).not.toContain(TOKEN);
+  });
+
+  it("rateLimitWebhookSignature charges nothing for a sender inside GitHub's published hook ranges (IPv4, mapped, IPv6)", async () => {
+    const mw = rl.rateLimitWebhookSignature(() => false);
+    for (const ip of ['140.82.115.10', '::ffff:192.30.252.1', '2606:50c0:8000::153']) {
+      const res = { set: vi.fn(), status: vi.fn(), on: vi.fn() } as any;
+      const next = vi.fn();
+      await mw(executeRequest({ ip }), res, next);
+      expect(next).toHaveBeenCalledWith();
+      expect(res.on).not.toHaveBeenCalled();
+    }
+    expect(seen).toEqual([]);
   });
 });
 
@@ -399,10 +419,13 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
     return { params: { webhookId, token: 'SECRET-TOKEN' }, ip, socket: {} } as any;
   }
 
-  /** A response that can finish: 'finish' listeners run on finish(status). */
+  /** A response that can finish and close: finish(status) runs the 'finish'
+   *  listeners then the 'close' ones (as Node does); close() alone is a
+   *  connection dropped before any response. */
   function fakeRes() {
     const json = vi.fn();
     const listeners: Array<() => void> = [];
+    const closeListeners: Array<() => void> = [];
     const res: any = {
       statusCode: 200,
       set: vi.fn(),
@@ -413,12 +436,18 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
       json,
       on: vi.fn((event: string, fn: () => void) => {
         if (event === 'finish') listeners.push(fn);
+        if (event === 'close') closeListeners.push(fn);
         return res;
       }),
       finish: async (status: number) => {
         res.statusCode = status;
         listeners.forEach((fn) => fn());
+        closeListeners.forEach((fn) => fn());
         // the refunds the listener started
+        await new Promise((r) => setImmediate(r));
+      },
+      close: async () => {
+        closeListeners.forEach((fn) => fn());
         await new Promise((r) => setImmediate(r));
       },
     };
@@ -446,7 +475,7 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
     expect(eleventh.res.status).toHaveBeenCalledWith(429);
     expect(eleventh.res.json).toHaveBeenCalledWith(TOO_MANY);
     // refused on the first bucket: the address bucket was never charged for it
-    expect(used('rl:whsigfailip', '203.0.113.7')).toBe(10);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(10);
   });
 
   it('a concurrent burst cannot walk through: 25 at once, exactly 10 reach the body', async () => {
@@ -471,16 +500,18 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
   it('gives BOTH points back once the signature matched, so a busy hook never runs out', async () => {
     verified = true;
     for (let i = 0; i < 40; i++) {
-      const d = await gate(deliveryFrom('140.82.115.10'));
+      const d = await gate(deliveryFrom('198.51.100.20'));
       expect(d.next).toHaveBeenCalledWith();
       await d.res.finish(204);
     }
 
-    expect(used('rl:whsigfail', 'wh-1|140.82.115.10')).toBe(0);
-    expect(used('rl:whsigfailip', '140.82.115.10')).toBe(0);
+    expect(used('rl:whsigfail', 'wh-1|198.51.100.0/24')).toBe(0);
+    expect(used('rl:whsigfailip', '198.51.100.0/24')).toBe(0);
+    // once per delivery, though both 'finish' and 'close' fired
+    expect(rewards).toHaveLength(80);
     expect(rewards.slice(0, 2)).toEqual([
-      { prefix: 'rl:whsigfail', key: 'wh-1|140.82.115.10' },
-      { prefix: 'rl:whsigfailip', key: '140.82.115.10' },
+      { prefix: 'rl:whsigfail', key: 'wh-1|198.51.100.0/24' },
+      { prefix: 'rl:whsigfailip', key: '198.51.100.0/24' },
     ]);
   });
 
@@ -488,8 +519,8 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
     const d = await gate(deliveryFrom('203.0.113.7'));
     await d.res.finish(429);
 
-    expect(used('rl:whsigfail', 'wh-1|203.0.113.7')).toBe(0);
-    expect(used('rl:whsigfailip', '203.0.113.7')).toBe(0);
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(0);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(0);
   });
 
   it('reads the predicate when the response FINISHES, not when the gate ran', async () => {
@@ -497,14 +528,71 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
     verified = true; // the verify hook matched while the body was read
     await d.res.finish(204);
 
-    expect(used('rl:whsigfail', 'wh-1|203.0.113.7')).toBe(0);
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(0);
   });
 
-  it('lets a delivery from ANOTHER address through while one is spent (GitHub keeps delivering)', async () => {
+  it('a connection that closes AFTER the signature matched gets its points back (no finish ever fires)', async () => {
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    verified = true;
+    await d.res.close();
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(0);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(0);
+  });
+
+  it('a connection that closes before the signature matched (an aborted body) keeps its points', async () => {
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    await d.res.close();
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(1);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(1);
+    expect(rewards).toEqual([]);
+  });
+
+  it('settles once: a close after the finish, or a second close, never refunds twice', async () => {
+    verified = true;
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    await d.res.finish(204);
+    await d.res.close();
+
+    expect(rewards).toEqual([
+      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.0/24' },
+      { prefix: 'rl:whsigfailip', key: '203.0.113.0/24' },
+    ]);
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(0);
+  });
+
+  it('one network is one sender: rotating addresses inside a /24 or a /48 does not buy more failures', async () => {
+    for (let i = 0; i < 10; i++) await (await gate(deliveryFrom(`203.0.113.${i + 1}`))).res.finish(401);
+    expect((await gate(deliveryFrom('203.0.113.200'))).next).not.toHaveBeenCalled();
+
+    for (let i = 0; i < 10; i++) await (await gate(deliveryFrom(`2001:db8:5:${i.toString(16)}::1`))).res.finish(401);
+    expect((await gate(deliveryFrom('2001:db8:5:ffff::abcd'))).next).not.toHaveBeenCalled();
+    // the neighbouring /48 is another sender
+    expect((await gate(deliveryFrom('2001:db8:6::1'))).next).toHaveBeenCalledWith();
+  });
+
+  it("never gates GitHub's published hook ranges, even when their network's buckets are spent", async () => {
+    store.set('rl:whsigfail wh-1|140.82.115.0/24', 1000);
+    store.set('rl:whsigfailip 140.82.115.0/24', 1000);
+    const consume = vi.mocked(RateLimiterRedis.prototype.consume);
+    consume.mockClear();
+
+    const d = await gate(deliveryFrom('140.82.115.10'));
+    await d.res.finish(401);
+
+    expect(d.next).toHaveBeenCalledWith();
+    expect(d.res.status).not.toHaveBeenCalled();
+    expect(d.res.on).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+    expect(rewards).toEqual([]);
+  });
+
+  it('lets a delivery from ANOTHER network through while one is spent', async () => {
     for (let i = 0; i < 10; i++) await (await gate(deliveryFrom('203.0.113.7'))).res.finish(401);
 
     const blocked = await gate(deliveryFrom('203.0.113.7'));
-    const other = await gate(deliveryFrom('140.82.115.10'));
+    const other = await gate(deliveryFrom('198.51.100.20'));
 
     expect(blocked.next).not.toHaveBeenCalled();
     expect(other.next).toHaveBeenCalledWith();
@@ -526,10 +614,10 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
     expect(fresh.res.status).toHaveBeenCalledWith(429);
     expect(fresh.res.json).toHaveBeenCalledWith(TOO_MANY);
     // its body is never read, so the per-webhook point it took is given back
-    expect(used('rl:whsigfail', 'wh-fresh|203.0.113.7')).toBe(0);
-    expect(rewards).toEqual([{ prefix: 'rl:whsigfail', key: 'wh-fresh|203.0.113.7' }]);
-    // ...while another address still delivers to that webhook
-    expect((await gate(deliveryFrom('140.82.115.10', 'wh-fresh'))).next).toHaveBeenCalledWith();
+    expect(used('rl:whsigfail', 'wh-fresh|203.0.113.0/24')).toBe(0);
+    expect(rewards).toEqual([{ prefix: 'rl:whsigfail', key: 'wh-fresh|203.0.113.0/24' }]);
+    // ...while another network still delivers to that webhook
+    expect((await gate(deliveryFrom('198.51.100.20', 'wh-fresh'))).next).toHaveBeenCalledWith();
   });
 
   it('honours an admin override of the budget', async () => {
@@ -573,7 +661,7 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
     expect(res.status).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail limiter error, allowing request:', 'ECONNREFUSED');
     // never a reward for the point that was never taken (it would go negative)
-    expect(rewards).toEqual([{ prefix: 'rl:whsigfailip', key: '203.0.113.7' }]);
+    expect(rewards).toEqual([{ prefix: 'rl:whsigfailip', key: '203.0.113.0/24' }]);
   });
 
   it('fails OPEN when no store can be reached at all, and gives back nothing', async () => {
@@ -1068,12 +1156,27 @@ describe('clearUserRateLimits — the admin tool reaches the account buckets too
     expect(del).toHaveBeenCalledWith('rl:regnet:203.0.113.0/24');
     expect(del).toHaveBeenCalledWith('rl:regattnet:203.0.113.0/24');
     expect(del).toHaveBeenCalledWith('rl:loginacct:x:203.0.113.7');
+    expect(del).toHaveBeenCalledWith('rl:whsigfailip:203.0.113.0/24');
 
     del.mockClear();
     await mod.clearUserRateLimits('2001:DB8:1:2:3:4:5:6');
     expect(del).toHaveBeenCalledWith('rl:loginnet:2001:db8:1::/48');
     expect(del).toHaveBeenCalledWith('rl:loginacct:x:2001:db8:1:2:3:4:5:6');
     expect(del).toHaveBeenCalledWith('rl:general:2001:db8:1:2:3:4:5:6');
+  });
+
+  it("an address clears its network's per-webhook unverified-delivery buckets (found by scan)", async () => {
+    const found = ['rl:whsigfail:wh-1|2001:db8:1::/48', 'rl:whsigfail:wh-2|2001:db8:1::/48'];
+    const del = vi.fn(async () => 1);
+    const scanIterator = vi.fn(async function* () { yield found; });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    await mod.clearUserRateLimits('2001:DB8:1:2:3:4:5:6');
+
+    expect(scanIterator).toHaveBeenCalledWith({ MATCH: 'rl:whsigfail:*|2001:db8:1::/48', COUNT: 100 });
+    for (const key of found) expect(del).toHaveBeenCalledWith(key);
+    expect(del).toHaveBeenCalledWith('rl:whsigfailip:2001:db8:1::/48');
   });
 
   it('the e-mail digest is an HMAC under a key DERIVED from the secret, never under the signing key itself', () => {
@@ -1278,4 +1381,74 @@ describe('rateLimitGeneral — per user once signed in, per address otherwise', 
     const support = readFileSync(resolve(routesDir, 'support.ts'), 'utf8');
     expect(support.split(/\r?\n/).find((l) => l.startsWith("supportRouter.post('/open'"))).toContain('rateLimitSupport');
   });
+});
+
+describe("GitHub's webhook source ranges — the static list and the CIDR match", () => {
+  it('pins the published list (GitHub API /meta "hooks", read 2026-10-30): change it only with GitHub', () => {
+    expect([...GITHUB_HOOK_SOURCE_RANGES].sort()).toEqual([
+      '140.82.112.0/20',
+      '143.55.64.0/20',
+      '185.199.108.0/22',
+      '192.30.252.0/22',
+      '2606:50c0::/32',
+      '2a0a:a440::/29',
+      '9.234.106.48/28',
+      '9.234.98.160/28',
+      '9.234.98.176/28',
+    ]);
+  });
+
+  it.each([
+    // [address, inside, why]
+    ['140.82.112.0', true, 'first address of 140.82.112.0/20'],
+    ['140.82.127.255', true, 'last address of 140.82.112.0/20'],
+    ['140.82.111.255', false, 'one below 140.82.112.0/20'],
+    ['140.82.128.0', false, 'one above 140.82.112.0/20'],
+    ['192.30.255.254', true, 'inside 192.30.252.0/22'],
+    ['192.30.251.1', false, 'below 192.30.252.0/22'],
+    ['185.199.111.153', true, 'inside 185.199.108.0/22'],
+    ['143.55.79.255', true, 'last address of 143.55.64.0/20'],
+    ['143.55.80.0', false, 'one above 143.55.64.0/20'],
+    ['9.234.106.48', true, 'first address of 9.234.106.48/28'],
+    ['9.234.106.63', true, 'last address of 9.234.106.48/28'],
+    ['9.234.106.47', false, 'one below 9.234.106.48/28'],
+    ['9.234.106.64', false, 'one above 9.234.106.48/28'],
+    ['9.234.98.160', true, 'first of 9.234.98.160/28'],
+    ['9.234.98.191', true, 'last of 9.234.98.176/28'],
+    ['9.234.98.192', false, 'one above 9.234.98.176/28'],
+    ['9.234.98.159', false, 'one below 9.234.98.160/28'],
+    ['::ffff:140.82.115.10', true, 'IPv4-mapped IPv6, matched as its IPv4 address'],
+    ['::FFFF:8c52:730a', true, 'IPv4-mapped in hex (140.82.115.10)'],
+    ['::ffff:140.82.128.1', false, 'IPv4-mapped outside every range'],
+    ['2a0a:a440::1', true, 'inside 2a0a:a440::/29'],
+    ['2a0a:a447:ffff:ffff:ffff:ffff:ffff:ffff', true, 'last address of 2a0a:a440::/29'],
+    ['2a0a:a448::', false, 'one above 2a0a:a440::/29'],
+    ['2a0a:a43f:ffff::1', false, 'below 2a0a:a440::/29'],
+    ['2606:50C0:8000::153', true, 'inside 2606:50c0::/32 (upper-case hex)'],
+    ['2606:50c1::1', false, 'one /32 above 2606:50c0::/32'],
+    ['203.0.113.7', false, 'documentation address'],
+    ['2001:db8::1', false, 'documentation IPv6'],
+    ['127.0.0.1', false, 'loopback'],
+    ['unknown', false, 'not an address'],
+    ['', false, 'empty'],
+  ])('isGitHubHookSource(%s) is %s (%s)', (ip, inside) => {
+    expect(isGitHubHookSource(ip)).toBe(inside);
+  });
+
+  it('matches a range only against its own family, and handles /0, /32 and /128', () => {
+    expect(ipInCidr('203.0.113.7', parseCidr('0.0.0.0/0'))).toBe(true);
+    expect(ipInCidr('2001:db8::1', parseCidr('0.0.0.0/0'))).toBe(false);
+    expect(ipInCidr('203.0.113.7', parseCidr('203.0.113.7/32'))).toBe(true);
+    expect(ipInCidr('203.0.113.8', parseCidr('203.0.113.7/32'))).toBe(false);
+    expect(ipInCidr('2001:db8::1', parseCidr('2001:db8::1/128'))).toBe(true);
+    expect(ipInCidr('2001:db8::2', parseCidr('2001:db8::1/128'))).toBe(false);
+    expect(ipInCidr('2001:db8::2', parseCidr('::/0'))).toBe(true);
+  });
+
+  it.each(['140.82.112.0', '140.82.112.0/33', '2606:50c0::/129', 'nope/8', '1.2.3.4/x', '1.2.3.4/8/8', '1.2.3.4/'])(
+    'parseCidr refuses %s (a typo in the static list fails at boot, never matches by accident)',
+    (cidr) => {
+      expect(() => parseCidr(cidr)).toThrow(`Invalid CIDR: ${cidr}`);
+    },
+  );
 });

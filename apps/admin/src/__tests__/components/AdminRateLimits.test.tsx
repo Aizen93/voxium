@@ -40,8 +40,8 @@ function rule(name: string, keyType: Rule['keyType'], label: string): Rule {
 const WEBHOOK_RULES: Rule[] = [
   rule('webhookExecute', 'webhook', 'Webhook Execute (per webhook)'),
   rule('webhookExecuteIp', 'ip', 'Webhook Execute (per IP)'),
-  rule('webhookSigFail', 'webhook', 'Webhook Unverified Deliveries (per webhook and IP)'),
-  rule('webhookSigFailIp', 'ip', 'Webhook Unverified Deliveries (per IP)'),
+  rule('webhookSigFail', 'webhook', 'Webhook Unverified Deliveries (per webhook and network)'),
+  rule('webhookSigFailIp', 'subnet', 'Webhook Unverified Deliveries (per network)'),
   rule('webhookManage', 'userId', 'Webhook Manage'),
   rule('webhookRead', 'userId', 'Webhook Read'),
 ];
@@ -49,8 +49,8 @@ const WEBHOOK_RULES: Rule[] = [
 const WEBHOOK_DESCRIPTIONS: Record<string, string> = {
   webhookExecute: 'Deliveries accepted per webhook per minute, charged only after the token matched.',
   webhookExecuteIp: "Webhook deliveries per client address per minute; generous because GitHub's deliveries share a few egress addresses.",
-  webhookSigFail: 'GitHub webhook deliveries in flight or never verified (wrong or missing signature), per webhook and client address; given back once the signature matches; once spent, that address is refused before its body is read.',
-  webhookSigFailIp: "The same count per client address across every webhook; generous because GitHub's deliveries share a few egress addresses.",
+  webhookSigFail: "GitHub webhook deliveries in flight or not verified, per webhook and client network (/24, /48); given back once the signature matches. GitHub's published hook ranges are not counted.",
+  webhookSigFailIp: 'The same count per client network across every webhook.',
   webhookManage: 'Webhook create, edit, rotate and delete per user per hour.',
   webhookRead: 'Webhook list reads per user per minute.',
 };
@@ -116,7 +116,7 @@ describe('AdminRateLimits — key-type badge', () => {
     expect(badgeOf('webhookExecute')).toBe('Webhook');
     expect(badgeOf('webhookExecuteIp')).toBe('IP');
     expect(badgeOf('webhookSigFail')).toBe('Webhook');
-    expect(badgeOf('webhookSigFailIp')).toBe('IP');
+    expect(badgeOf('webhookSigFailIp')).toBe('Subnet');
     expect(badgeOf('login')).toBe('IP');
     expect(badgeOf('loginSubnet')).toBe('Subnet');
     expect(badgeOf('loginAccount')).toBe('Account');
