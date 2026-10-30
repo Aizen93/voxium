@@ -1745,9 +1745,12 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
         continue; // attachments handled via DB below
       }
 
-      const lastDash = filename.lastIndexOf('-');
-      if (lastDash <= 0) continue;
-      const entityId = filename.slice(0, lastDash);
+      // `{id}-{ts}.webp` (an uploaded key) or `{id}-{ts}-{hex}.webp` (an
+      // adopted copy): the owner id is everything before the FIRST dash (a
+      // cuid holds none)
+      const firstDash = filename.indexOf('-');
+      if (firstDash <= 0) continue;
+      const entityId = filename.slice(0, firstDash);
 
       const existing = s3EntityMap.get(entityId);
       if (existing) {

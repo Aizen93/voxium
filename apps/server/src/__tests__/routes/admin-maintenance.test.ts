@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -156,6 +156,7 @@ vi.mock('../../utils/discoveryListing', () => ({
 
 import { adminRouter } from '../../routes/admin';
 import { errorHandler } from '../../middleware/errorHandler';
+import { listAllS3Objects } from '../../utils/s3';
 
 function createApp() {
   const app = express();
@@ -506,8 +507,8 @@ describe('GET /admin/top-servers — subquery aggregation (MED-12)', () => {
 });
 
 // NOTE: this route has a 60-second in-module cache (topUploadersCache) that
-// persists across tests in this file — keep it to a SINGLE test so the second
-// hit never silently asserts against a cached response.
+// persists across tests in this file — every test past the first moves the
+// clock beyond that TTL first, so no hit asserts against a cached response.
 describe('GET /admin/storage/top-uploaders — SQL aggregation + top-N name resolution (MED-12)', () => {
   let app: express.Express;
 
@@ -553,6 +554,63 @@ describe('GET /admin/storage/top-uploaders — SQL aggregation + top-N name reso
     ]);
     expect(typeof res.body.data[0].fileCount).toBe('number');
     expect(typeof res.body.data[0].totalSize).toBe('number');
+  });
+});
+
+describe('GET /admin/storage/top-uploaders — avatar and icon keys', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Past the cache the previous describe filled
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    app = createApp();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('attributes uploaded AND adopted avatar/icon keys to their owner, merged with the attachment totals', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' } });
+    vi.mocked(listAllS3Objects).mockResolvedValueOnce([
+      // An uploaded key: {id}-{ts}.webp
+      { key: 'avatars/cuser1-1700000000000.webp', size: 10, lastModified: new Date() },
+      // An adopted copy: {id}-{ts}-{12 hex}.webp
+      { key: 'avatars/cuser1-1700000000001-0123456789ab.webp', size: 20, lastModified: new Date() },
+      { key: 'server-icons/csrv1-1700000000002-abcdef012345.webp', size: 30, lastModified: new Date() },
+      // No owner id before a dash: skipped
+      { key: 'avatars/-1700000000003.webp', size: 999, lastModified: new Date() },
+      { key: 'avatars/nodash.webp', size: 999, lastModified: new Date() },
+      // Attachments come from the database, never from the listing
+      { key: 'attachments/ch-c1/1700000000004-a.pdf', size: 999, lastModified: new Date() },
+    ] as never);
+    prismaMock.$queryRawUnsafe.mockImplementation((sql: string) => {
+      if (sql.includes('m.author_id')) {
+        return Promise.resolve([{ entity_id: 'cuser1', file_count: 2n, total_size: 100n }]);
+      }
+      return Promise.resolve([{ entity_id: 'csrv1', file_count: 1n, total_size: 50n }]);
+    });
+    prismaMock.user.findMany.mockResolvedValue([{ id: 'cuser1', username: 'alice' }]);
+    prismaMock.server.findMany.mockResolvedValue([{ id: 'csrv1', name: 'My Space' }]);
+
+    const res = await request(app)
+      .get('/api/v1/admin/storage/top-uploaders')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.user.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: { in: ['cuser1'] } },
+    }));
+    expect(prismaMock.server.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: { in: ['csrv1'] } },
+    }));
+    // One entry per owner, nothing left over as a 'Deleted' entity
+    expect(res.body.data).toEqual([
+      { entityId: 'cuser1', type: 'user', fileCount: 4, totalSize: 130, entityName: 'alice' },
+      { entityId: 'csrv1', type: 'server', fileCount: 2, totalSize: 80, entityName: 'My Space' },
+    ]);
   });
 });
 
