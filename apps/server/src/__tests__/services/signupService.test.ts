@@ -183,6 +183,14 @@ describe('claimSignupMailSlot', () => {
     expect(values).toContain(SIGNUP.LEDGER_MAX_MAILS);
   });
 
+  it('takes the max the caller asks for (the existing-account notice asks one)', async () => {
+    await claimSignupMailSlot('d'.repeat(64), SIGNUP.LEDGER_MAX_NOTICES);
+    const [strings, ...values] = queryCalls()[0];
+    expect(strings.join('?')).toMatch(/OR signup_mail_ledger\.sent < \?/);
+    expect(values.at(-1)).toBe(SIGNUP.LEDGER_MAX_NOTICES);
+    expect(SIGNUP.LEDGER_MAX_NOTICES).toBe(1);
+  });
+
   it('answers false when the window is used up (the conditional update returned nothing)', async () => {
     h.prisma.$queryRaw.mockResolvedValueOnce([]);
     await expect(claimSignupMailSlot('d'.repeat(64))).resolves.toBe(false);
@@ -342,7 +350,11 @@ describe('startRegistration — the same answer after the same work on every bra
     expect(h.domainConsume).not.toHaveBeenCalled();
 
     expect(ledgerCalls()).toHaveLength(s.ledger ? 1 : 0);
-    if (s.ledger) expect(ledgerCalls()[0]).toContain(mailboxDigest(s.email));
+    if (s.ledger) {
+      expect(ledgerCalls()[0]).toContain(mailboxDigest(s.email));
+      // The notice claims under its own, tighter max; a code under the shared one
+      expect(ledgerCalls()[0].at(-1)).toBe(s.mail === 'existing' ? SIGNUP.LEDGER_MAX_NOTICES : SIGNUP.LEDGER_MAX_MAILS);
+    }
 
     if (s.mail === 'code') {
       expect(h.sendCode).toHaveBeenCalledTimes(1);
@@ -390,6 +402,21 @@ describe('startRegistration — the same answer after the same work on every bra
     users({ holder: { emailVerified: true } });
     await startRegistration('newuser', 'b@smallcorp.example', PASSWORD, undefined, undefined, CONSENT);
     expect(h.domainCount).not.toHaveBeenCalled();
+  });
+
+  it('a verified mailbox gets at most ONE existing-account notice per window: a second start mails nothing', async () => {
+    users({ holder: { emailVerified: true } });
+    await startRegistration('newuser', 'owner@smallcorp.example', PASSWORD, undefined, undefined, CONSENT);
+    // The window now holds the notice: the conditional upsert returns no row
+    h.prisma.$queryRaw.mockResolvedValueOnce([]);
+    const second = await startRegistration('newuser2', 'owner@smallcorp.example', PASSWORD, undefined, undefined, CONSENT);
+    await flush();
+
+    expect(h.sendExisting).toHaveBeenCalledTimes(1);
+    expect(h.sendCode).not.toHaveBeenCalled();
+    expect(second).toEqual({ pendingId: expect.any(String), resendAfterSeconds: SIGNUP.RESEND_AFTER_SECONDS });
+    expect(ledgerCalls()).toHaveLength(2);
+    for (const call of ledgerCalls()) expect(call.at(-1)).toBe(SIGNUP.LEDGER_MAX_NOTICES);
   });
 
   it('one mailbox, one ledger key: dotted and +tagged spellings claim the SAME slot', async () => {

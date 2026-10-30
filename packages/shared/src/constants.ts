@@ -556,6 +556,8 @@ export const SIGNUP = {
   MAX_RESENDS: 1,
   /** sign-up mails one mailbox can receive per window, whatever the number of attempts */
   LEDGER_MAX_MAILS: 2,
+  /** of those, the "you already have an account" notice goes out only on an otherwise empty window */
+  LEDGER_MAX_NOTICES: 1,
   LEDGER_WINDOW_DAYS: 30,
 } as const;
 

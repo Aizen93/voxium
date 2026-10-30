@@ -71,8 +71,12 @@ function sameHash(a: string, b: string): boolean {
  * BEFORE the send and never given back: parallel starts cannot mail one inbox
  * twice, and a failed send still counts (erring toward fewer mails). Fails
  * CLOSED (no mail) on a store error: the caller answers the same either way.
+ *
+ * `max` is the count the window may hold BEFORE this mail: the codes share
+ * LEDGER_MAX_MAILS, the existing-account notice asks LEDGER_MAX_NOTICES (one
+ * per window, and only while the window has sent nothing else).
  */
-export async function claimSignupMailSlot(mailboxHash: string): Promise<boolean> {
+export async function claimSignupMailSlot(mailboxHash: string, max: number = SIGNUP.LEDGER_MAX_MAILS): Promise<boolean> {
   try {
     const rows = await prisma.$queryRaw<Array<{ sent: number }>>`
       INSERT INTO signup_mail_ledger (mailbox_hash, window_start_at, sent)
@@ -85,7 +89,7 @@ export async function claimSignupMailSlot(mailboxHash: string): Promise<boolean>
           WHEN signup_mail_ledger.window_start_at < (now() AT TIME ZONE 'UTC') - make_interval(days => ${SIGNUP.LEDGER_WINDOW_DAYS})
           THEN 1 ELSE signup_mail_ledger.sent + 1 END
       WHERE signup_mail_ledger.window_start_at < (now() AT TIME ZONE 'UTC') - make_interval(days => ${SIGNUP.LEDGER_WINDOW_DAYS})
-         OR signup_mail_ledger.sent < ${SIGNUP.LEDGER_MAX_MAILS}
+         OR signup_mail_ledger.sent < ${max}
       RETURNING sent`;
     return rows.length > 0;
   } catch (err) {
@@ -156,7 +160,8 @@ export async function startRegistration(
       branch = 'silent';
     }
   }
-  if (branch !== 'silent' && !(await claimSignupMailSlot(mailbox))) branch = 'silent';
+  if (branch === 'code' && !(await claimSignupMailSlot(mailbox))) branch = 'silent';
+  if (branch === 'existing' && !(await claimSignupMailSlot(mailbox, SIGNUP.LEDGER_MAX_NOTICES))) branch = 'silent';
 
   const pendingId = newPendingId();
   const code = newCode();
