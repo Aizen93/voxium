@@ -335,6 +335,8 @@ describe('startRegistration — the same answer after the same work on every bra
     expect(row.passwordHash).toMatch(/^\$2[ab]\$/);
     expect(prisma.user.findFirst).toHaveBeenCalledTimes(2);
     expect(h.mailSuppressed).toHaveBeenCalledWith(s.email);
+    expect(h.domainCount).toHaveBeenCalledTimes(1);
+    expect(h.domainCount).toHaveBeenCalledWith(s.email.split('@')[1]);
 
     // The row: consent recorded at the start, the lifetimes, a stored code hash
     expect(row.termsAcceptedAt).toBeInstanceOf(Date);
@@ -389,7 +391,7 @@ describe('startRegistration — the same answer after the same work on every bra
     }
   });
 
-  it('checks the domain cap only on a branch that would mail a code, and never for a common provider', async () => {
+  it('reads the domain count for every non-common domain whatever the branch, never for a common provider', async () => {
     await startRegistration('newuser', 'human@gmail.com', PASSWORD, undefined, undefined, CONSENT);
     expect(h.domainCount).not.toHaveBeenCalled();
     expect(h.sendCode).toHaveBeenCalledTimes(1);
@@ -401,7 +403,22 @@ describe('startRegistration — the same answer after the same work on every bra
     vi.clearAllMocks();
     users({ holder: { emailVerified: true } });
     await startRegistration('newuser', 'b@smallcorp.example', PASSWORD, undefined, undefined, CONSENT);
-    expect(h.domainCount).not.toHaveBeenCalled();
+    expect(h.domainCount).toHaveBeenCalledWith('smallcorp.example');
+
+    vi.clearAllMocks();
+    users();
+    h.mailSuppressed.mockResolvedValue(true);
+    await startRegistration('newuser', 'c@smallcorp.example', PASSWORD, undefined, undefined, CONSENT);
+    expect(h.domainCount).toHaveBeenCalledWith('smallcorp.example');
+
+    // Only the code branch acts on it: a verified holder on a capped domain still gets its notice
+    vi.clearAllMocks();
+    users({ holder: { emailVerified: true } });
+    h.mailSuppressed.mockResolvedValue(false);
+    h.domainCount.mockResolvedValue(10);
+    await startRegistration('newuser', 'd@smallcorp.example', PASSWORD, undefined, undefined, CONSENT);
+    await flush();
+    expect(h.sendExisting).toHaveBeenCalledWith('d@smallcorp.example');
   });
 
   it('a verified mailbox gets at most ONE existing-account notice per window: a second start mails nothing', async () => {

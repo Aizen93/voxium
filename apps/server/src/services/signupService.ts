@@ -24,9 +24,12 @@ import { generateTokens, CONSENT_SELECT, withConsentFlag } from './authService';
  * startRegistration never creates an account and never says anything about the
  * address: a new address, one that already has an account, a blocked mailbox, a
  * capped domain and a mailbox that already got its sign-up mails all get the
- * same 202 after the same work (bcrypt, one pending row). Only the first kind
- * is mailed a code (or, for an existing verified account, a "you already have
- * an account" notice), and only while the mailbox's ledger allows it.
+ * same 202. The costly work is the same on every branch (bcrypt, the user and
+ * suppression lookups, the domain count of a non-common domain, one pending
+ * row); what still differs is the ledger write, skipped where nothing would be
+ * mailed, and the send, which runs after the answer. Only the first kind is
+ * mailed a code (or, for an existing verified account, a "you already have an
+ * account" notice), and only while the mailbox's ledger allows it.
  *
  * completeRegistration creates the account when the code comes back, which
  * proves the person reads the mailbox. A code, never a link: mail gateways open
@@ -135,17 +138,21 @@ export async function startRegistration(
   });
   if (nameTaken) throw new ConflictError(USERNAME_TAKEN_MESSAGE);
 
-  // Same work on every branch from here: bcrypt, the lookups, one row.
+  // From here every branch pays bcrypt, the lookups and one row.
   const passwordHash = await bcrypt.hash(password, 12);
   const emailCanonical = canonicalizeEmail(email);
   const mailbox = mailboxDigest(email);
 
-  // Every branch runs the same lookups, whatever it decides.
+  // Every branch runs the same lookups, whatever it decides (the domain count
+  // too, for every non-common domain, though only the code branch reads it).
   const holder = await prisma.user.findFirst({
     where: { OR: [{ email }, { emailCanonical }] },
     select: { emailVerified: true },
   });
   const suppressed = await isMailSuppressed(email);
+  const domain = emailDomain(email);
+  const domainCapped = !isCommonEmailProvider(domain)
+    && (await getDomainRegistrationCount(domain)) >= domainRegistrationCap();
 
   let branch: StartBranch = 'code';
   // A verified account is told someone tried; an unverified legacy row is
@@ -154,12 +161,7 @@ export async function startRegistration(
   // A disposable domain is refused the same way a blocked mailbox is: silently,
   // or the blocklist would become a list anyone can probe.
   if (isDisposableEmailDomain(email) || suppressed) branch = 'silent';
-  if (branch === 'code') {
-    const domain = emailDomain(email);
-    if (!isCommonEmailProvider(domain) && (await getDomainRegistrationCount(domain)) >= domainRegistrationCap()) {
-      branch = 'silent';
-    }
-  }
+  if (branch === 'code' && domainCapped) branch = 'silent';
   if (branch === 'code' && !(await claimSignupMailSlot(mailbox))) branch = 'silent';
   if (branch === 'existing' && !(await claimSignupMailSlot(mailbox, SIGNUP.LEDGER_MAX_NOTICES))) branch = 'silent';
 
