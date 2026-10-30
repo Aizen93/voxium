@@ -401,14 +401,11 @@ export function initSocketServer(httpServer: HttpServer) {
     // before every later step, the same way.
     if (socket.disconnected) return;
 
-    // Session check, once more, now that the socket is in `user:{id}`. The
-    // handshake read the account before its IP-ban lookup and before this
-    // join; a revocation (password reset or change, ban, account deletion)
-    // committed in between disconnected that room while this socket was not
-    // in it yet. Any revocation committed AFTER the join reaches the socket
-    // through the room (sessionRevocation.ts); one committed before it is
-    // seen by this read. A failing lookup keeps the socket: the handshake
-    // has just read the same row, and a database blip ends no session.
+    // Session check, once more, now that the socket is in `user:{id}`: the
+    // token version and ban state must still match what the handshake
+    // admitted (session revocation targets that room, sessionRevocation.ts).
+    // A failing lookup keeps the socket: the handshake has just read the same
+    // row, and a database blip ends no session.
     try {
       const current = await prisma.user.findUnique({
         where: { id: userId },

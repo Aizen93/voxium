@@ -22,8 +22,8 @@ export interface RevokeSessionOptions {
  *
  * A socket is authorized once, at the handshake. Every mutation that
  * invalidates a session (a password reset or change bumps `tokenVersion`, a
- * ban, an account deletion) calls this so no socket outlives the credential it
- * was opened with; the next handshake re-runs the checks.
+ * ban, an account deletion) calls this; the next handshake re-runs the
+ * checks.
  *
  * Room-filtered `disconnectSockets` is adapter-wide and needs no
  * `fetchSockets()` round trip (which waits for every node and throws after

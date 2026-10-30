@@ -235,10 +235,9 @@ describe('Admin Badge Routes', () => {
         userId: 'target-user',
         role: 'admin',
       });
-      // Every role change clears the staff rooms (harmless on a promotion:
-      // the handlers admit the new admin on their next subscription), and a
-      // promotion disconnects nobody
-      expect(roomOps.map(([scope, room]) => `${scope}:${room}`)).toEqual(['local:user:target-user', 'cluster:user:target-user']);
+      // A promotion leaves no room and disconnects nobody: the handlers
+      // admit the new admin on its next subscription
+      expect(roomOps).toEqual([]);
       expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
     });
 

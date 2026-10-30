@@ -794,18 +794,15 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
       data: { role },
     });
 
-    // The staff rooms carry other users' support messages and the report
-    // queue: a demoted account's open sockets leave them now (on every
-    // node), and the subscribe handlers read the role from the database, so
-    // they cannot rejoin. Harmless on a promotion.
-    leaveStaffRooms(targetId);
-    // A demoted account's sockets also sit in the `support:{ticketId}` room
-    // of every ticket it claimed or opened as staff. Those ids are not listed
-    // anywhere bounded (one ticket per user, a closed ticket reopens under
-    // the same id), so its sessions' sockets are ended instead: a reconnect
-    // joins only the account's own ticket room. Its tokens stay valid, so no
-    // force:logout.
-    if (role === 'user') revokeUserSessions(targetId);
+    // Staff rooms are for staff only. On a demotion to user the account's
+    // sockets leave them (on every node; the subscribe handlers read the role
+    // from the database) and are then ended, so a reconnect joins only the
+    // rooms a user joins. The tokens stay valid: no force:logout. An account
+    // that is still staff keeps its subscriptions.
+    if (role === 'user') {
+      leaveStaffRooms(targetId);
+      revokeUserSessions(targetId);
+    }
 
     logAuditEvent({
       actorId: req.user!.userId,

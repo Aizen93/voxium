@@ -211,7 +211,7 @@ authRouter.post('/reset-password', rateLimitResetPassword, async (req: Request, 
       return;
     }
     const { userId } = await resetPassword(token.toLowerCase(), password);
-    // The reset invalidated every token; no live socket may outlive them
+    // The reset bumps the token version: end the account's sockets
     revokeUserSessions(userId);
     res.json({ success: true, message: 'Password has been reset successfully.' });
   } catch (err) {
