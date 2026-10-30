@@ -1,6 +1,7 @@
 import net from 'node:net';
 import { createHash, createHmac } from 'node:crypto';
 import jwt from 'jsonwebtoken';
+import { OPAQUE_ID_RE } from '@voxium/shared';
 import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis, getRedisPubSub, getRedisConfigSub } from '../utils/redis';
@@ -380,7 +381,10 @@ export async function resetRateLimit(name: string): Promise<void> {
  * Delete all rate limit keys for a specific user id, address or e-mail (the
  * admin "clear rate limits" tool). A user id also clears the user's TOTP
  * account bucket (`t:<id>`); an e-mail clears the password account buckets
- * of that address on every network (`e:<digest>|*`, found by scan).
+ * of that address on every network (`e:<digest>|*`, found by scan); a webhook
+ * id clears its unverified-delivery buckets on every network (`<id>|*`, found
+ * by scan; only an id `OPAQUE_ID_RE` accepts, so no glob character from the
+ * admin's input reaches the SCAN pattern).
  */
 export async function clearUserRateLimits(key: string): Promise<number> {
   const redis = getRedis();
@@ -402,6 +406,8 @@ export async function clearUserRateLimits(key: string): Promise<number> {
   if (digest !== null) patterns.push(`${DEFAULTS.loginAccount.keyPrefix}:e:${digest}|*`);
   // An address also owns its network's per-webhook unverified-delivery buckets
   if (net.isIP(key)) patterns.push(`${DEFAULTS.webhookSigFail.keyPrefix}:*|${subnetOf(key)}`);
+  // A webhook id owns its per-network unverified-delivery buckets
+  if (OPAQUE_ID_RE.test(key)) patterns.push(`${DEFAULTS.webhookSigFail.keyPrefix}:${key}|*`);
   for (const pattern of patterns) {
     for await (const batch of redis.scanIterator({ MATCH: pattern, COUNT: 100 })) {
       for (const found of batch as unknown as string[]) exact.push(found);

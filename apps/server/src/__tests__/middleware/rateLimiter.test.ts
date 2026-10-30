@@ -1136,13 +1136,53 @@ describe('clearUserRateLimits — the admin tool reaches the account buckets too
 
     await mod.clearUserRateLimits('clx1user');
     expect(del).toHaveBeenCalledWith('rl:loginacct:t:clx1user');
-    expect(scanIterator).not.toHaveBeenCalled();
+    // An id may be a webhook's: only its unverified-delivery buckets are scanned
+    expect(scanIterator.mock.calls).toEqual([[{ MATCH: 'rl:whsigfail:clx1user|*', COUNT: 100 }]]);
+    scanIterator.mockClear();
 
     del.mockClear();
     const cleared = await mod.clearUserRateLimits('Alice@Example.com');
-    expect(scanIterator).toHaveBeenCalledWith({ MATCH: `rl:loginacct:e:${digest}|*`, COUNT: 100 });
+    expect(scanIterator.mock.calls).toEqual([[{ MATCH: `rl:loginacct:e:${digest}|*`, COUNT: 100 }]]);
     for (const key of scanned) expect(del).toHaveBeenCalledWith(key);
     expect(cleared).toBeGreaterThan(0);
+  });
+
+  it("a webhook id clears its execute bucket and its unverified-delivery buckets on every network (found by scan)", async () => {
+    const found = ['rl:whsigfail:wh-1|203.0.113.0/24', 'rl:whsigfail:wh-1|2001:db8:1::/48'];
+    const del = vi.fn(async () => 1);
+    const scanIterator = vi.fn(async function* () { yield found; });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    const cleared = await mod.clearUserRateLimits('wh-1');
+
+    expect(scanIterator.mock.calls).toEqual([[{ MATCH: 'rl:whsigfail:wh-1|*', COUNT: 100 }]]);
+    for (const key of found) expect(del).toHaveBeenCalledWith(key);
+    expect(del).toHaveBeenCalledWith('rl:whexec:wh-1');
+    expect(cleared).toBeGreaterThanOrEqual(found.length + 1);
+  });
+
+  it('a key carrying glob characters never reaches a webhook SCAN pattern', async () => {
+    const del = vi.fn(async () => 0);
+    const scanIterator = vi.fn(async function* () { /* none */ });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    for (const key of ['*', 'wh-1*', 'wh-[1]', 'wh?1', 'wh-1|*', '']) {
+      await mod.clearUserRateLimits(key);
+    }
+
+    expect(scanIterator).not.toHaveBeenCalled();
+  });
+
+  it('a SCAN failure while clearing a webhook id surfaces as an error (nothing is reported as cleared)', async () => {
+    const del = vi.fn(async () => 1);
+    const scanIterator = vi.fn(async function* () { throw new Error('redis down'); });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    await expect(mod.clearUserRateLimits('wh-1')).rejects.toThrow('redis down');
+    expect(del).not.toHaveBeenCalled();
   });
 
   it('an address clears its network\'s buckets and its "names no account" sender bucket too (an IPv6 address through its canonical form)', async () => {
