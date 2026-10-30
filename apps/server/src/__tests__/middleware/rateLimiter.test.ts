@@ -197,10 +197,14 @@ describe('incoming-webhook limiters', () => {
     });
   });
 
-  it('lists the signature-failure bucket in the admin table (rl:, tunable like every row)', () => {
+  it('lists both unverified-delivery buckets in the admin table (rl:, tunable like every row)', () => {
     expect(byName('webhookSigFail')).toMatchObject({
       keyPrefix: 'rl:whsigfail', points: 10, duration: 60, blockDuration: 0, keyType: 'webhook',
-      label: 'Webhook Signature Failures (per webhook and IP)', isCustom: false,
+      label: 'Webhook Unverified Deliveries (per webhook and IP)', isCustom: false,
+    });
+    expect(byName('webhookSigFailIp')).toMatchObject({
+      keyPrefix: 'rl:whsigfailip', points: 300, duration: 60, blockDuration: 0, keyType: 'ip',
+      label: 'Webhook Unverified Deliveries (per IP)', isCustom: false,
     });
   });
 
@@ -306,7 +310,7 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
   }
 
   async function charge(mw: (req: any, res: any, next: any) => Promise<void>, req: any) {
-    const res = { set: vi.fn(), status: vi.fn(() => ({ json: vi.fn() })) } as any;
+    const res = { set: vi.fn(), status: vi.fn(() => ({ json: vi.fn() })), on: vi.fn() } as any;
     const next = vi.fn();
     await mw(req, res, next);
     expect(next).toHaveBeenCalledWith();
@@ -344,67 +348,160 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
     expect(JSON.stringify(seen)).not.toContain(TOKEN);
   });
 
-  it('chargeWebhookSignatureFailure charges rl:whsigfail keyed on the webhook id AND the normalised address: never the token', async () => {
-    await rl.chargeWebhookSignatureFailure(executeRequest());
-    await rl.chargeWebhookSignatureFailure(executeRequest({ ip: '::FFFF:203.0.113.7' }));
+  it('rateLimitWebhookSignature charges rl:whsigfail on the webhook id AND the normalised address, then rl:whsigfailip on the address: never the token', async () => {
+    const mw = rl.rateLimitWebhookSignature(() => false);
+    await charge(mw, executeRequest());
+    await charge(mw, executeRequest({ ip: '::FFFF:203.0.113.7' }));
 
     expect(seen).toEqual([
       { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.7' },
+      { prefix: 'rl:whsigfailip', key: '203.0.113.7' },
       { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.7' },
+      { prefix: 'rl:whsigfailip', key: '203.0.113.7' },
     ]);
     expect(JSON.stringify(seen)).not.toContain(TOKEN);
   });
 });
 
-describe('webhook signature-failure bucket — refused before the body, per (webhook, address)', () => {
+describe('webhook unverified-delivery buckets — consumed before the body, given back on a verified signature', () => {
   let rl: RateLimiterModule;
-  /** The bucket state per key, as RateLimiterRedis.get would answer it. */
-  let state: Map<string, { consumedPoints: number; msBeforeNext: number }>;
-  let getKeys: Array<{ prefix: string; key: string }>;
+  /** An atomic store: points consumed per `prefix key`, as Redis would hold them. */
+  let store: Map<string, number>;
+  let rewards: Array<{ prefix: string; key: string }>;
+  /** What the route's predicate answers when a response finishes. */
+  let verified: boolean;
 
   beforeEach(async () => {
     rl = await freshRateLimiter();
     vi.mocked(getRedis).mockImplementation(() => ({}) as ReturnType<typeof getRedis>);
-    state = new Map();
-    getKeys = [];
-    vi.spyOn(RateLimiterRedis.prototype, 'get').mockImplementation(async function (this: RateLimiterRedis, key) {
-      getKeys.push({ prefix: this.keyPrefix, key: String(key) });
-      const s = state.get(String(key));
-      return (s ? new RateLimiterRes(0, s.msBeforeNext, s.consumedPoints) : null) as never;
+    store = new Map();
+    rewards = [];
+    verified = false;
+    vi.spyOn(RateLimiterRedis.prototype, 'consume').mockImplementation(async function (this: RateLimiterRedis, key) {
+      const slot = `${this.keyPrefix} ${String(key)}`;
+      const consumed = (store.get(slot) ?? 0) + 1;
+      store.set(slot, consumed);
+      // Like Redis: the point is counted, then the request refused over the cap
+      if (consumed > this.points) throw new RateLimiterRes(0, 41_200, consumed);
+      return new RateLimiterRes(this.points - consumed, 60_000, consumed) as never;
+    });
+    vi.spyOn(RateLimiterRedis.prototype, 'reward').mockImplementation(async function (this: RateLimiterRedis, key) {
+      const slot = `${this.keyPrefix} ${String(key)}`;
+      rewards.push({ prefix: this.keyPrefix, key: String(key) });
+      store.set(slot, (store.get(slot) ?? 0) - 1);
+      return new RateLimiterRes(0, 0, 0) as never;
     });
   });
 
-  function deliveryFrom(ip: string) {
-    return { params: { webhookId: 'wh-1', token: 'SECRET-TOKEN' }, ip, socket: {} } as any;
+  const used = (prefix: string, key: string) => store.get(`${prefix} ${key}`) ?? 0;
+
+  function deliveryFrom(ip: string, webhookId = 'wh-1') {
+    return { params: { webhookId, token: 'SECRET-TOKEN' }, ip, socket: {} } as any;
   }
 
+  /** A response that can finish: 'finish' listeners run on finish(status). */
   function fakeRes() {
     const json = vi.fn();
-    const res = { set: vi.fn(), status: vi.fn(() => ({ json })), json };
-    return res as any;
+    const listeners: Array<() => void> = [];
+    const res: any = {
+      statusCode: 200,
+      set: vi.fn(),
+      status: vi.fn((code: number) => {
+        res.statusCode = code;
+        return { json };
+      }),
+      json,
+      on: vi.fn((event: string, fn: () => void) => {
+        if (event === 'finish') listeners.push(fn);
+        return res;
+      }),
+      finish: async (status: number) => {
+        res.statusCode = status;
+        listeners.forEach((fn) => fn());
+        // the refunds the listener started
+        await new Promise((r) => setImmediate(r));
+      },
+    };
+    return res;
   }
 
+  /** Run the gate; the delivery is then IN FLIGHT until its res finishes. */
   async function gate(req: any) {
     const res = fakeRes();
     const next = vi.fn();
-    await rl.refuseWebhookSignatureFailures(req, res, next);
+    await rl.rateLimitWebhookSignature(() => verified)(req, res, next);
     return { res, next };
   }
 
-  it('refuses an address that spent its budget with the standard 429 and Retry-After, without calling next', async () => {
-    state.set('wh-1|203.0.113.7', { consumedPoints: 10, msBeforeNext: 41_200 });
+  const TOO_MANY = { success: false, error: 'Too many requests. Please try again later.' };
 
-    const { res, next } = await gate(deliveryFrom('203.0.113.7'));
+  it('holds a point for every delivery IN FLIGHT: with 10 bodies still being read, the 11th is a 429 before its body', async () => {
+    const inFlight = await Promise.all(Array.from({ length: 10 }, () => gate(deliveryFrom('203.0.113.7'))));
+    for (const d of inFlight) expect(d.next).toHaveBeenCalledWith();
 
-    expect(next).not.toHaveBeenCalled();
-    expect(res.set).toHaveBeenCalledWith('Retry-After', '42');
-    expect(res.status).toHaveBeenCalledWith(429);
-    expect(res.json).toHaveBeenCalledWith({ success: false, error: 'Too many requests. Please try again later.' });
-    expect(getKeys).toEqual([{ prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.7' }]);
+    const eleventh = await gate(deliveryFrom('203.0.113.7'));
+
+    expect(eleventh.next).not.toHaveBeenCalled();
+    expect(eleventh.res.set).toHaveBeenCalledWith('Retry-After', '42');
+    expect(eleventh.res.status).toHaveBeenCalledWith(429);
+    expect(eleventh.res.json).toHaveBeenCalledWith(TOO_MANY);
+    // refused on the first bucket: the address bucket was never charged for it
+    expect(used('rl:whsigfailip', '203.0.113.7')).toBe(10);
   });
 
-  it('lets a delivery from ANOTHER address through while that one is refused (GitHub keeps delivering)', async () => {
-    state.set('wh-1|203.0.113.7', { consumedPoints: 25, msBeforeNext: 30_000 });
+  it('a concurrent burst cannot walk through: 25 at once, exactly 10 reach the body', async () => {
+    const burst = await Promise.all(Array.from({ length: 25 }, () => gate(deliveryFrom('203.0.113.7'))));
+
+    expect(burst.filter((d) => d.next.mock.calls.length === 1)).toHaveLength(10);
+    expect(burst.filter((d) => d.res.status.mock.calls.length === 1)).toHaveLength(15);
+  });
+
+  it('keeps the points of deliveries whose signature never matched (wrong signature, oversized or aborted body)', async () => {
+    for (let i = 0; i < 10; i++) {
+      const d = await gate(deliveryFrom('203.0.113.7'));
+      await d.res.finish(i % 2 === 0 ? 401 : 413);
+    }
+
+    const next = await gate(deliveryFrom('203.0.113.7'));
+
+    expect(next.res.status).toHaveBeenCalledWith(429);
+    expect(rewards).toEqual([]);
+  });
+
+  it('gives BOTH points back once the signature matched, so a busy hook never runs out', async () => {
+    verified = true;
+    for (let i = 0; i < 40; i++) {
+      const d = await gate(deliveryFrom('140.82.115.10'));
+      expect(d.next).toHaveBeenCalledWith();
+      await d.res.finish(204);
+    }
+
+    expect(used('rl:whsigfail', 'wh-1|140.82.115.10')).toBe(0);
+    expect(used('rl:whsigfailip', '140.82.115.10')).toBe(0);
+    expect(rewards.slice(0, 2)).toEqual([
+      { prefix: 'rl:whsigfail', key: 'wh-1|140.82.115.10' },
+      { prefix: 'rl:whsigfailip', key: '140.82.115.10' },
+    ]);
+  });
+
+  it('gives the points back when a later bucket answered the 429 (the body was never processed further)', async () => {
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    await d.res.finish(429);
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.7')).toBe(0);
+    expect(used('rl:whsigfailip', '203.0.113.7')).toBe(0);
+  });
+
+  it('reads the predicate when the response FINISHES, not when the gate ran', async () => {
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    verified = true; // the verify hook matched while the body was read
+    await d.res.finish(204);
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.7')).toBe(0);
+  });
+
+  it('lets a delivery from ANOTHER address through while one is spent (GitHub keeps delivering)', async () => {
+    for (let i = 0; i < 10; i++) await (await gate(deliveryFrom('203.0.113.7'))).res.finish(401);
 
     const blocked = await gate(deliveryFrom('203.0.113.7'));
     const other = await gate(deliveryFrom('140.82.115.10'));
@@ -414,25 +511,25 @@ describe('webhook signature-failure bucket — refused before the body, per (web
     expect(other.res.status).not.toHaveBeenCalled();
   });
 
-  it('lets the same address through for ANOTHER webhook (the key is never the address alone)', async () => {
-    state.set('wh-1|203.0.113.7', { consumedPoints: 10, msBeforeNext: 30_000 });
-
-    const { res, next } = await gate({ ...deliveryFrom('203.0.113.7'), params: { webhookId: 'wh-2', token: 'x' } });
-
-    expect(next).toHaveBeenCalledWith();
-    expect(res.status).not.toHaveBeenCalled();
-  });
-
-  it('passes an untouched key and a key still under its budget, charging nothing', async () => {
-    const consume = vi.spyOn(RateLimiterRedis.prototype, 'consume');
-    state.set('wh-1|198.51.100.4', { consumedPoints: 9, msBeforeNext: 30_000 });
-
-    for (const ip of ['203.0.113.7', '198.51.100.4']) {
-      const { res, next } = await gate(deliveryFrom(ip));
-      expect(next).toHaveBeenCalledWith();
-      expect(res.status).not.toHaveBeenCalled();
+  it('the per-address bucket holds ACROSS webhooks: 300 failures spread over 30 webhooks, the 301st on a fresh one is a 429', async () => {
+    for (let w = 0; w < 30; w++) {
+      for (let i = 0; i < 10; i++) {
+        const d = await gate(deliveryFrom('203.0.113.7', `wh-${w}`));
+        expect(d.next).toHaveBeenCalledWith();
+        await d.res.finish(401);
+      }
     }
-    expect(consume).not.toHaveBeenCalled();
+
+    const fresh = await gate(deliveryFrom('203.0.113.7', 'wh-fresh'));
+
+    expect(fresh.next).not.toHaveBeenCalled();
+    expect(fresh.res.status).toHaveBeenCalledWith(429);
+    expect(fresh.res.json).toHaveBeenCalledWith(TOO_MANY);
+    // its body is never read, so the per-webhook point it took is given back
+    expect(used('rl:whsigfail', 'wh-fresh|203.0.113.7')).toBe(0);
+    expect(rewards).toEqual([{ prefix: 'rl:whsigfail', key: 'wh-fresh|203.0.113.7' }]);
+    // ...while another address still delivers to that webhook
+    expect((await gate(deliveryFrom('140.82.115.10', 'wh-fresh'))).next).toHaveBeenCalledWith();
   });
 
   it('honours an admin override of the budget', async () => {
@@ -441,19 +538,19 @@ describe('webhook signature-failure bucket — refused before the body, per (web
     const { getRedisPubSub } = await import('../../utils/redis');
     vi.mocked(getRedisPubSub).mockReturnValueOnce({ pub: { publish: vi.fn(async () => 1) } } as unknown as ReturnType<typeof getRedisPubSub>);
     await rl.updateRateLimit('webhookSigFail', { points: 3 });
-    state.set('wh-1|203.0.113.7', { consumedPoints: 3, msBeforeNext: 10_000 });
 
-    const { res, next } = await gate(deliveryFrom('203.0.113.7'));
+    for (let i = 0; i < 3; i++) expect((await gate(deliveryFrom('203.0.113.7'))).next).toHaveBeenCalledWith();
+    const fourth = await gate(deliveryFrom('203.0.113.7'));
 
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(429);
+    expect(fourth.next).not.toHaveBeenCalled();
+    expect(fourth.res.status).toHaveBeenCalledWith(429);
   });
 
   it('answers the 429 byte-for-byte like every other limiter (same header, status and body)', async () => {
-    state.set('wh-1|203.0.113.7', { consumedPoints: 10, msBeforeNext: 41_200 });
+    for (let i = 0; i < 10; i++) await gate(deliveryFrom('203.0.113.7'));
     const ours = await gate(deliveryFrom('203.0.113.7'));
 
-    vi.spyOn(RateLimiterRedis.prototype, 'consume').mockRejectedValue(new RateLimiterRes(0, 41_200, 31));
+    vi.mocked(RateLimiterRedis.prototype.consume).mockRejectedValueOnce(new RateLimiterRes(0, 41_200, 31));
     const theirs = fakeRes();
     const next = vi.fn();
     await rl.rateLimitWebhookExecute(deliveryFrom('203.0.113.7'), theirs, next);
@@ -464,42 +561,35 @@ describe('webhook signature-failure bucket — refused before the body, per (web
     expect(ours.res.json.mock.calls).toEqual(theirs.json.mock.calls);
   });
 
-  it('fails OPEN when the store errors: next(), a warning, no 429', async () => {
+  it('fails OPEN per bucket on a store error: next(), a warning, and only the bucket that charged is ever given back', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.mocked(RateLimiterRedis.prototype.get).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    vi.mocked(RateLimiterRedis.prototype.consume).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    verified = true;
 
     const { res, next } = await gate(deliveryFrom('203.0.113.7'));
+    await res.finish(204);
 
     expect(next).toHaveBeenCalledWith();
     expect(res.status).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail limiter error, allowing request:', 'ECONNREFUSED');
+    // never a reward for the point that was never taken (it would go negative)
+    expect(rewards).toEqual([{ prefix: 'rl:whsigfailip', key: '203.0.113.7' }]);
   });
 
-  it('fails OPEN when no store can be reached at all', async () => {
+  it('fails OPEN when no store can be reached at all, and gives back nothing', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const fresh = await freshRateLimiter();
     vi.mocked(getRedis).mockImplementation(redisMock.unavailable);
     const res = fakeRes();
     const next = vi.fn();
 
-    await fresh.refuseWebhookSignatureFailures(deliveryFrom('203.0.113.7'), res, next);
+    await fresh.rateLimitWebhookSignature(() => true)(deliveryFrom('203.0.113.7'), res, next);
 
     expect(next).toHaveBeenCalledWith();
     expect(res.status).not.toHaveBeenCalled();
+    expect(res.on).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail limiter error, allowing request:', 'Redis not available in unit tests');
-  });
-
-  it('the charge never throws: a spent budget is silent (the NEXT request is refused), a store error warns', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const consume = vi.spyOn(RateLimiterRedis.prototype, 'consume')
-      .mockRejectedValueOnce(new RateLimiterRes(0, 30_000, 11))
-      .mockRejectedValueOnce(new Error('ECONNREFUSED'));
-
-    await expect(rl.chargeWebhookSignatureFailure(deliveryFrom('203.0.113.7'))).resolves.toBeUndefined();
-    expect(warn).not.toHaveBeenCalled();
-    await expect(rl.chargeWebhookSignatureFailure(deliveryFrom('203.0.113.7'))).resolves.toBeUndefined();
-    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail charge failed:', 'ECONNREFUSED');
-    expect(consume).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFailIp limiter error, allowing request:', 'Redis not available in unit tests');
   });
 });
 

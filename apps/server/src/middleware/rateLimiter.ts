@@ -250,13 +250,19 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // it only bounds a single hostile address spraying the endpoint.
   webhookExecute:   { keyPrefix: 'rl:whexec',   points: 30,   duration: 60,   blockDuration: 0, keyType: 'webhook', label: 'Webhook Execute (per webhook)' },
   webhookExecuteIp: { keyPrefix: 'rl:whexecip', points: 1200, duration: 60,   blockDuration: 0, keyType: 'ip',      label: 'Webhook Execute (per IP)' },
-  // GitHub-type webhooks only: deliveries whose X-Hub-Signature-256 did NOT
-  // match, keyed on the (token-validated) webhook id AND the sender's address,
-  // never on the webhook alone — real deliveries cannot be told apart before
-  // their body is read, so a per-webhook failure bucket would let whoever
-  // holds the URL block them. Once spent, that address's next deliveries to
-  // that webhook answer 429 before a byte of the body is read or hashed.
-  webhookSigFail:   { keyPrefix: 'rl:whsigfail', points: 10,  duration: 60,   blockDuration: 0, keyType: 'webhook', label: 'Webhook Signature Failures (per webhook and IP)' },
+  // GitHub-type webhooks only, charged atomically BEFORE the body is read
+  // and given back once X-Hub-Signature-256 matched (rateLimitWebhookSignature):
+  // each counts the deliveries in flight plus those that never proved the
+  // secret (a wrong or missing signature, an oversized or aborted body).
+  // Per webhook AND address: the tight one, never keyed on the webhook alone
+  // (real deliveries cannot be told apart before their body is read, so a
+  // per-webhook bucket would let whoever holds the URL block them). Per
+  // address: bounds one address spreading its failures over many webhooks;
+  // generous, because GitHub's deliveries for every webhook share a few
+  // egress addresses, so a repository whose hook carries a wrong secret
+  // spends this budget for everyone behind that address.
+  webhookSigFail:   { keyPrefix: 'rl:whsigfail', points: 10,  duration: 60,   blockDuration: 0, keyType: 'webhook', label: 'Webhook Unverified Deliveries (per webhook and IP)' },
+  webhookSigFailIp: { keyPrefix: 'rl:whsigfailip', points: 300, duration: 60, blockDuration: 0, keyType: 'ip',      label: 'Webhook Unverified Deliveries (per IP)' },
   // Management (create, edit, rotate, delete) and the moderators' list reads.
   webhookManage:    { keyPrefix: 'rl:whmanage', points: 30,   duration: 3600, blockDuration: 0, keyType: 'userId',  label: 'Webhook Manage' },
   webhookRead:      { keyPrefix: 'rl:whread',   points: 60,   duration: 60,   blockDuration: 0, keyType: 'userId',  label: 'Webhook Read' },
@@ -912,41 +918,55 @@ export const rateLimitWebhookExecute = createMiddleware('webhookExecute', byWebh
  *  check, like rateLimitWebhookExecute) AND the normalised sender address. */
 const byWebhookAndIp = (req: Request) => `${byWebhookId(req)}|${byIp(req)}`;
 
-/**
- * GitHub-type webhooks, BEFORE the body parser: answers the standard 429
- * without reading the body when this address has spent its signature-failure
- * budget for this webhook. Reads the bucket, charges nothing (only a failed
- * signature is charged, by chargeWebhookSignatureFailure). Fails open; the
- * decision is made outside the try.
- */
-export async function refuseWebhookSignatureFailures(req: Request, res: Response, next: NextFunction): Promise<void> {
-  let refuseFor: number | null = null;
-  try {
-    const state = await getLimiter('webhookSigFail').get(byWebhookAndIp(req));
-    if (state !== null && state.consumedPoints >= getConfig('webhookSigFail').points) refuseFor = state.msBeforeNext;
-  } catch (err) {
-    console.warn('[RateLimit] webhookSigFail limiter error, allowing request:', err instanceof Error ? err.message : err);
-  }
-  if (refuseFor !== null) {
-    answerTooManyRequests(res, refuseFor);
-    return;
-  }
-  next();
-}
+/** The unverified-delivery buckets, tight one first. */
+const WEBHOOK_SIGNATURE_BUCKETS: ReadonlyArray<readonly [string, (req: Request) => string]> = [
+  ['webhookSigFail', byWebhookAndIp],
+  ['webhookSigFailIp', byIp],
+];
 
 /**
- * Charge one point of `webhookSigFail` for a delivery whose signature did not
- * match. Never throws: a rejected consume is the charge that spent the budget
- * (the NEXT request is refused, not this one), a store error is only warned
- * about.
+ * GitHub-type webhooks, BEFORE the body parser (and after the token check):
+ * consume one point of each unverified-delivery bucket atomically, so every
+ * delivery in flight holds a point before a byte of its body is read. A
+ * spent bucket answers the standard 429 (what this request charged in the
+ * other bucket is given back: its body is never read). A store error fails
+ * open for that bucket, charging nothing there; the decision is made outside
+ * the try. The points are given back when the response finishes with
+ * `isVerified(res)` true (the signature matched over the raw bytes) or with a
+ * 429 from a later bucket; every other outcome (a wrong or missing
+ * signature, an oversized or aborted body) keeps them, which charges only
+ * that sender's address.
  */
-export async function chargeWebhookSignatureFailure(req: Request): Promise<void> {
-  try {
-    await getLimiter('webhookSigFail').consume(byWebhookAndIp(req));
-  } catch (err) {
-    if (err instanceof RateLimiterRes) return;
-    console.warn('[RateLimit] webhookSigFail charge failed:', err instanceof Error ? err.message : err);
-  }
+export function rateLimitWebhookSignature(isVerified: (res: Response) => boolean) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const charged: Array<{ name: string; key: string }> = [];
+    let refuseFor: number | null = null;
+    for (const [name, keyFn] of WEBHOOK_SIGNATURE_BUCKETS) {
+      try {
+        const key = keyFn(req);
+        await getLimiter(name).consume(key);
+        charged.push({ name, key });
+      } catch (err) {
+        if (err instanceof RateLimiterRes) {
+          refuseFor = err.msBeforeNext;
+          break;
+        }
+        console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
+      }
+    }
+    const refundAll = () => Promise.all(charged.map((c) => refundRateLimit(c.name, c.key)));
+    if (refuseFor !== null) {
+      await refundAll();
+      answerTooManyRequests(res, refuseFor);
+      return;
+    }
+    if (charged.length > 0) {
+      res.on('finish', () => {
+        if (isVerified(res) || res.statusCode === 429) void refundAll();
+      });
+    }
+    next();
+  };
 }
 export const rateLimitWebhookManage = createMiddleware('webhookManage', byUserId);
 export const rateLimitWebhookRead = createMiddleware('webhookRead', byUserId);
