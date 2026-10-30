@@ -35,6 +35,13 @@ vi.mock('../../utils/email', () => ({
   describeEmailError: vi.fn((e: unknown) => String(e)),
 }));
 
+// The verify-first sign-up purge has its own suite (signupService.test.ts);
+// here it is a spy, so the sweep's handling of it is what is observed.
+const purgeExpiredSignupState = vi.hoisted(() => vi.fn());
+vi.mock('../../services/signupService', () => ({
+  purgeExpiredSignupState: (...a: unknown[]) => purgeExpiredSignupState(...a),
+}));
+
 import { prisma } from '../../utils/prisma';
 import { runRegistrationHygiene, runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS, IP_RETENTION_DAYS } from '../../utils/registrationHygiene';
 import { subnetOf } from '../../middleware/rateLimiter';
@@ -389,5 +396,71 @@ describe('registration hygiene sweep — locking and observability', () => {
 
     await expect(getHygieneHistory()).resolves.toEqual({ lastRun: null, history: [] });
     warn.mockRestore();
+  });
+});
+
+// ─── Verify-first sign-up state ─────────────────────────────────────────────
+
+describe('registration hygiene sweep — expired sign-up state', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    purgeExpiredSignupState.mockReset();
+    vi.mocked(prisma.user.findMany).mockResolvedValue([{ id: 'u-1', avatarUrl: null }] as never);
+    vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 1 } as never);
+    vi.mocked(prisma.ipRecord.deleteMany).mockResolvedValue({ count: 7 } as never);
+    vi.mocked(prisma.ipRecord.count).mockResolvedValue(7 as never);
+  });
+
+  it('purges expired pending registrations and spent ledger rows on a real run, and says so', async () => {
+    purgeExpiredSignupState.mockResolvedValueOnce({ pending: 2, ledger: 1 });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const result = await runRegistrationHygiene();
+
+    expect(purgeExpiredSignupState).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('[RegHygiene] Purged 2 expired pending registration(s) and 1 sign-up mail ledger row(s)');
+    // The sweep's own result does not carry the purge
+    expect(result).toEqual({ deletedUsers: 1, deletedIpRecords: 7, deletedAvatars: 0, dryRun: false });
+    log.mockRestore();
+  });
+
+  it('logs nothing when there was nothing to purge', async () => {
+    purgeExpiredSignupState.mockResolvedValueOnce({ pending: 0, ledger: 0 });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runRegistrationHygiene();
+
+    expect(purgeExpiredSignupState).toHaveBeenCalledTimes(1);
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('[RegHygiene] Purged'));
+    log.mockRestore();
+  });
+
+  it('a dry run purges nothing', async () => {
+    const result = await runRegistrationHygiene({ dryRun: true });
+
+    expect(purgeExpiredSignupState).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ dryRun: true });
+  });
+
+  it('a failed purge is logged and does not change the result of the sweep', async () => {
+    purgeExpiredSignupState.mockRejectedValueOnce(new Error('db gone'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await runRegistrationHygiene();
+
+    expect(error).toHaveBeenCalledWith('[RegHygiene] Sign-up state purge failed:', 'db gone');
+    expect(result).toEqual({ deletedUsers: 1, deletedIpRecords: 7, deletedAvatars: 0, dryRun: false });
+    error.mockRestore();
+  });
+
+  it('a failed purge does not fail the locked run either', async () => {
+    redisSet.mockResolvedValue('OK');
+    purgeExpiredSignupState.mockRejectedValueOnce(new Error('db gone'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const run = await runRegistrationHygieneLocked({ trigger: 'scheduled' });
+
+    expect(run).toMatchObject({ deletedUsers: 1, deletedIpRecords: 7, dryRun: false, trigger: 'scheduled' });
+    error.mockRestore();
   });
 });
