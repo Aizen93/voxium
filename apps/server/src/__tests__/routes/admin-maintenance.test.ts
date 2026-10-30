@@ -266,6 +266,53 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     mockDisconnectSockets.mockReset();
   });
 
+  it('signs the banned account out right after the ban commits, even when the fan-out after it fails', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => {
+      const results = await Promise.all(ops);
+      order.push('commit');
+      return results;
+    });
+    mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+    mockDisconnectSockets.mockImplementation(() => { order.push('disconnect'); });
+    prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's-1' }]);
+    mockBroadcastMemberLeft.mockRejectedValueOnce(new Error('adapter gone'));
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(500);
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('commit'));
+    expect(order.indexOf('disconnect')).toBeGreaterThan(order.indexOf('force:logout'));
+    consoleSpy.mockRestore();
+    mockEmit.mockReset();
+    mockDisconnectSockets.mockReset();
+  });
+
+  it('signs nobody out when the ban transaction fails', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(500);
+    expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+    expect(mockDisconnectSockets).not.toHaveBeenCalled();
+    expect(mockLocalDisconnectSockets).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
   it('banIps=true bans account + all known IPs in ONE transaction', async () => {
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
     prismaMock.ipRecord.findMany.mockResolvedValue([{ ip: '1.1.1.1' }, { ip: '2.2.2.2' }]);

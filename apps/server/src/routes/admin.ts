@@ -454,6 +454,11 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
     ]);
     ipsBanned = ipBanResult.count;
 
+    // The ban is committed: sign the account out everywhere NOW (force:logout,
+    // then a room-filtered disconnect on every node), before the fan-out
+    // below, whose awaits may throw into next(err).
+    forceLogoutUser(targetId, 'Your account has been banned');
+
     // A banned owner's servers leave the directory without anyone having to
     // think about it (owner.bannedAt is one of the listing column's inputs).
     await recomputeListedForOwner(targetId);
@@ -474,9 +479,6 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
     for (const { serverId } of memberships) {
       await broadcastMemberLeft(targetId, serverId);
     }
-
-    // Force logout then disconnect active socket (works across all nodes)
-    forceLogoutUser(targetId, 'Your account has been banned');
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -2647,6 +2649,10 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
       });
 
+      // Committed: sign the account out everywhere before the fan-out below,
+      // whose awaits may throw into next(err).
+      forceLogoutUser(banTarget.id, 'Your account has been banned');
+
       // Same as the canonical ban route: a banned owner's servers leave the
       // directory, their pending join requests are withdrawn, and the webhook
       // URLs they hold stop posting.
@@ -2670,9 +2676,6 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       for (const { serverId } of memberships) {
         await broadcastMemberLeft(banTarget.id, serverId);
       }
-
-      // Force logout then disconnect active sockets (works across all nodes)
-      forceLogoutUser(banTarget.id, 'Your account has been banned');
 
       logAuditEvent({
         actorId: req.user!.userId,

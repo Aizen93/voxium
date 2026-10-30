@@ -236,6 +236,33 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     expect(mockFetchSockets).not.toHaveBeenCalled();
   });
 
+  it('signs the banned account out right after the ban is written, even when the fan-out after it fails', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    mockPendingReport('target-1');
+    const order: string[] = [];
+    prismaMock.user.update.mockImplementation(async () => { order.push('ban'); return {}; });
+    mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+    mockDisconnectSockets.mockImplementation(() => { order.push('disconnect'); });
+    prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's1' }]);
+    mockBroadcastMemberLeft.mockRejectedValueOnce(new Error('adapter gone'));
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/api/v1/admin/reports/rep-1/resolve')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ resolution: 'Spam confirmed', action: 'ban' });
+
+    expect(res.status).toBe(500);
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('ban'));
+    expect(order.indexOf('disconnect')).toBeGreaterThan(order.indexOf('force:logout'));
+    consoleSpy.mockRestore();
+    mockEmit.mockReset();
+    mockDisconnectSockets.mockReset();
+  });
+
   it('resolving WITHOUT a ban leaves the directory alone', async () => {
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
     mockPendingReport('target-1');
