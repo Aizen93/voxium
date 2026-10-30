@@ -106,6 +106,9 @@ export function initSocketServer(httpServer: HttpServer) {
 
       socket.data.userId = payload.userId;
       socket.data.username = payload.username;
+      // The version this handshake was admitted with: the connection handler
+      // compares it once more after joining `user:{id}` (see below)
+      socket.data.tokenVersion = payload.tokenVersion;
       // No copy of the role: it would go stale on a role change. The staff
       // subscriptions read it from the database (adminSubscriptions.ts).
       next();
@@ -396,6 +399,29 @@ export function initSocketServer(httpServer: HttpServer) {
     // (socket.io turns its join() into a no-op once it is cleaned up, so the
     // queries and the replay below would only be wasted work). Checked again
     // before every later step, the same way.
+    if (socket.disconnected) return;
+
+    // Session check, once more, now that the socket is in `user:{id}`. The
+    // handshake read the account before its IP-ban lookup and before this
+    // join; a revocation (password reset or change, ban, account deletion)
+    // committed in between disconnected that room while this socket was not
+    // in it yet. Any revocation committed AFTER the join reaches the socket
+    // through the room (sessionRevocation.ts); one committed before it is
+    // seen by this read. A failing lookup keeps the socket: the handshake
+    // has just read the same row, and a database blip ends no session.
+    try {
+      const current = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { tokenVersion: true, bannedAt: true },
+      });
+      if (!current || current.bannedAt || current.tokenVersion !== socket.data.tokenVersion) {
+        console.warn(`[WS] Session of ${userId} (${socket.id}) was revoked during the handshake; disconnecting`);
+        socket.disconnect(true);
+        return;
+      }
+    } catch (err) {
+      console.error(`[WS] Session re-check failed for ${userId}:`, err instanceof Error ? err.message : err);
+    }
     if (socket.disconnected) return;
 
     // Upsert IP record

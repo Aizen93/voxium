@@ -799,6 +799,13 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
     // node), and the subscribe handlers read the role from the database, so
     // they cannot rejoin. Harmless on a promotion.
     leaveStaffRooms(targetId);
+    // A demoted account's sockets also sit in the `support:{ticketId}` room
+    // of every ticket it claimed or opened as staff. Those ids are not listed
+    // anywhere bounded (one ticket per user, a closed ticket reopens under
+    // the same id), so its sessions' sockets are ended instead: a reconnect
+    // joins only the account's own ticket room. Its tokens stay valid, so no
+    // force:logout.
+    if (role === 'user') revokeUserSessions(targetId);
 
     logAuditEvent({
       actorId: req.user!.userId,
