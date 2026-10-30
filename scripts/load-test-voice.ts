@@ -77,7 +77,7 @@ const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } })
 // every POST regardless of outcome and are never refunded, so a rerun after a
 // partial failure hits them before the others; registerAttemptSubnet (300/day
 // per /24) is the one a third default run of the day hits from one host.
-const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'admin', 'general'];
+const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'admin', 'general'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -304,7 +304,12 @@ async function run() {
             try {
               // Verify-first: start, known code set in the DB, complete
               await registerTestUser(API, { username, email, password: PASSWORD });
-            } catch { /* exists */ }
+            } catch (err) {
+              // 409 = the username is taken (an earlier run): log in below
+              if (!axios.isAxiosError(err) || err.response?.status !== 409) {
+                console.warn(`  register ${username} failed:`, axios.isAxiosError(err) ? err.response?.data ?? err.message : (err as Error).message);
+              }
+            }
             const { token } = await login(email);
             try {
               const { data: inv } = await axios.post(`${API}/invites/servers/${target.serverId}`, {}, h(seed.token));

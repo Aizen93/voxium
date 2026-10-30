@@ -90,7 +90,7 @@ function fail(desc: string, err: unknown) {
 
 const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
 
-const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general', 'roleManage', 'memberManage', 'categoryManage', 'upload', 'messageSend', 'search', 'markRead'];
+const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'powChallenge', 'admin', 'general', 'roleManage', 'memberManage', 'categoryManage', 'upload', 'messageSend', 'search', 'markRead'];
 
 async function login(email: string): Promise<{ token: string; userId: string }> {
   const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD });

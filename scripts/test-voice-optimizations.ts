@@ -116,7 +116,7 @@ async function login(email: string): Promise<{ token: string; userId: string }> 
 }
 
 async function raiseRateLimits(token: string): Promise<void> {
-  for (const name of ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general']) {
+  for (const name of ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'powChallenge', 'admin', 'general']) {
     try {
       await axios.put(`${API}/admin/rate-limits/${name}`, { points: 99999, duration: 60, blockDuration: 0 }, h(token));
     } catch { /* */ }
@@ -126,7 +126,7 @@ async function raiseRateLimits(token: string): Promise<void> {
 async function resetRateLimits(token: string): Promise<void> {
   // 'admin' last — once it is reset, the remaining reset calls are throttled
   // by the restored admin bucket and would be swallowed, leaving overrides up
-  const order = [...['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general'].filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
+  const order = [...['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'powChallenge', 'admin', 'general'].filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
   for (const name of order) {
     try {
       await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, h(token));
@@ -306,7 +306,12 @@ async function run() {
               // Proof-of-work + consent, the same path a browser takes, then
               // the known code set in the DB (verify-first registration)
               await registerTestUser(API, { username, email, password: PASSWORD });
-            } catch { /* exists */ }
+            } catch (err) {
+              // 409 = the username is taken (an earlier run): log in below
+              if (!axios.isAxiosError(err) || err.response?.status !== 409) {
+                console.warn(`  register ${username} failed:`, axios.isAxiosError(err) ? err.response?.data ?? err.message : (err as Error).message);
+              }
+            }
             const { token } = await login(email);
             try {
               const { data: inv } = await axios.post(`${API}/invites/servers/${target.serverId}`, {}, h(seed.token));
