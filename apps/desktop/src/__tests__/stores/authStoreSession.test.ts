@@ -224,11 +224,28 @@ describe('authStore — a sign-in discards the session it replaces FIRST', () =>
       expect(socket.disconnectSocket).toHaveBeenCalledTimes(1);
       return { data: { data: { challenge: 'c' } } };
     });
-    api.post.mockResolvedValueOnce({ data: { data: { user: me, accessToken: 'access-n', refreshToken: 'refresh-n' } } });
+    api.post.mockResolvedValueOnce({ data: { data: { pendingId: 'p-n', resendAfterSeconds: 600 } } });
 
     await useAuthStore.getState().register('newbie', 'n@example.com', 'password123', { acceptTerms: true, acceptPrivacy: true });
 
     expect(api.get).toHaveBeenCalledWith('/auth/register-challenge');
+    // Step one creates no account: nothing to store yet
+    expect(storage.setTokens).not.toHaveBeenCalled();
+  });
+
+  it('completing a registration clears them before the code goes out, then stores the new session', async () => {
+    useAuthStore.setState({
+      pendingRegistration: { pendingId: 'p-n', email: 'n@example.com', resendAfterSeconds: 600, issuedAt: Date.now(), resendUsed: false, usernameTaken: false },
+    });
+    api.post.mockImplementationOnce(async () => {
+      expect(storage.clearTokens).toHaveBeenCalledTimes(1);
+      expect(socket.disconnectSocket).toHaveBeenCalledTimes(1);
+      return { data: { data: { user: me, accessToken: 'access-n', refreshToken: 'refresh-n' } } };
+    });
+
+    await useAuthStore.getState().completeRegistration('123456');
+
+    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p-n', code: '123456' });
     expect(storage.setTokens).toHaveBeenCalledWith('access-n', 'refresh-n', true);
   });
 });

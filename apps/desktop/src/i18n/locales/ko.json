@@ -79,7 +79,25 @@
       "signIn": "로그인",
       "passwordWeak": "취약한 비밀번호",
       "passwordMedium": "보통 강도",
-      "passwordStrong": "강력한 비밀번호"
+      "passwordStrong": "강력한 비밀번호",
+      "code": {
+        "title": "받은편지함을 확인하세요",
+        "sentTo": "{{email}}(으)로 {{length}}자리 코드를 보냈습니다. {{minutes}}분 후에 만료됩니다.",
+        "codeLabel": "가입 코드",
+        "submit": "확인하고 계정 만들기",
+        "verifying": "확인 중…",
+        "resend": "새 코드 보내기",
+        "resendIn": "{{time}} 후에 새 코드를 요청할 수 있습니다.",
+        "resent": "새 코드를 요청했습니다. 도착하면 이전 코드 대신 사용하세요.",
+        "resendFailed": "새 코드를 요청하지 못했습니다. 잠시 후 다시 시도하세요.",
+        "usernameLabel": "새 사용자 이름",
+        "usernameTakenHint": "그 사이에 해당 사용자 이름이 사용되었습니다. 다른 이름을 선택하세요. 코드는 계속 유효합니다.",
+        "haveAccount": "이미 계정이 있다면 로그인하거나 비밀번호를 재설정하세요.",
+        "signIn": "로그인",
+        "resetPassword": "비밀번호 재설정",
+        "spamHint": "아직 오지 않았나요? 스팸 또는 정크 메일함을 확인하세요.",
+        "startOver": "처음부터 다시"
+      }
     },
     "totp": {
       "title": "2단계 인증",
@@ -125,7 +143,9 @@
       "goToLogin": "로그인으로 이동",
       "goBack": "뒤로 가기",
       "missingToken": "인증 토큰이 없습니다.",
-      "failed": "인증에 실패했습니다. 링크가 유효하지 않거나 만료되었을 수 있습니다."
+      "failed": "인증에 실패했습니다. 링크가 유효하지 않거나 만료되었을 수 있습니다.",
+      "prompt": "Voxium 계정의 이 이메일 주소를 확인하세요.",
+      "verifyButton": "내 이메일 확인"
     },
     "mailBlock": {
       "title": "이 주소로 오는 Voxium 이메일",
@@ -1332,7 +1352,6 @@
     "emailAlreadyVerified": "이메일 주소가 이미 인증되었습니다",
     "tooManyVerificationEmails": "인증 이메일 요청이 너무 많습니다 — 내일 다시 시도하세요",
     "mailBlocked": "이 주소로의 이메일이 차단되었습니다 — 다시 허용하려면 이전 Voxium 이메일의 링크를 사용하세요",
-    "tooManyDomainRegistrations": "오늘 이 이메일 도메인의 가입이 너무 많습니다 — 나중에 다시 시도하세요",
     "registrationChallengeInvalid": "가입 확인이 유효하지 않거나 만료되었습니다 — 새로고침 후 다시 시도하세요",
     "powExpired": "가입 확인에 시간이 너무 오래 걸렸습니다 — 다시 시도해 주세요",
     "powUnavailable": "이 브라우저에서는 가입 확인을 실행할 수 없습니다 (WebCrypto를 사용할 수 없음)",
@@ -1459,7 +1478,10 @@
     "screenShareTaken": "이 채널에서 이미 다른 사람이 공유 중입니다",
     "noPermissionSpeak": "이 채널에서 말할 권한이 없습니다",
     "searchQueryTooShort": "검색어는 {{min}}자 이상이어야 합니다",
-    "searchQueryTooLong": "검색어는 {{max}}자 이하여야 합니다"
+    "searchQueryTooLong": "검색어는 {{max}}자 이하여야 합니다",
+    "usernameTaken": "이미 사용 중인 사용자 이름입니다",
+    "signupCodeInvalid": "코드가 잘못되었거나 만료되었습니다",
+    "signupEmailRegistered": "이 이메일 주소에는 이미 계정이 있습니다. 대신 로그인하세요."
   },
   "e2e": {
     "badgeTitle": "종단간 암호화됨 — 안전 번호 보기",

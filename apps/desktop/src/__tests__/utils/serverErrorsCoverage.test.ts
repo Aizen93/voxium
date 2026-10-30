@@ -5,7 +5,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TFunction } from 'i18next';
-import { LIMITS } from '@voxium/shared';
+import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE } from '@voxium/shared';
 import { translateServerError, ALL_ERROR_KEYS } from '../../utils/serverErrors';
 
 /**
@@ -66,11 +66,14 @@ const EXACT: Row[] = [
   { msg: 'Email already verified', key: 'emailAlreadyVerified' },
   { msg: 'Too many verification emails requested — try again tomorrow', key: 'tooManyVerificationEmails' },
   { msg: 'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again', key: 'mailBlocked' },
-  { msg: 'Too many registrations from this email domain today — try again later', key: 'tooManyDomainRegistrations' },
   { msg: 'Registration challenge is invalid or expired — refresh and try again', key: 'registrationChallengeInvalid' },
   { msg: 'Registration challenge expired before it was solved', key: 'powExpired' },
   { msg: 'WebCrypto unavailable — cannot solve registration challenge', key: 'powUnavailable' },
   { msg: 'Proof-of-work worker failed', key: 'powWorkerFailed' },
+  // Verify-first registration (shared constants, read by the server and here)
+  { msg: USERNAME_TAKEN_MESSAGE, key: 'usernameTaken' },
+  { msg: SIGNUP_CODE_INVALID_MESSAGE, key: 'signupCodeInvalid' },
+  { msg: SIGNUP_EMAIL_REGISTERED_MESSAGE, key: 'signupEmailRegistered' },
   { msg: `Username must be at least ${LIMITS.USERNAME_MIN} characters`, key: 'usernameTooShort', vars: { min: LIMITS.USERNAME_MIN }, src: 'Username must be at least ${LIMITS.USERNAME_MIN} characters' },
   { msg: `Username must be at most ${LIMITS.USERNAME_MAX} characters`, key: 'usernameTooLong', vars: { max: LIMITS.USERNAME_MAX }, src: 'Username must be at most ${LIMITS.USERNAME_MAX} characters' },
   { msg: 'Username can only contain letters, numbers, underscores, dots, and hyphens', key: 'usernameInvalidChars' },

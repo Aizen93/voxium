@@ -79,7 +79,25 @@
       "signIn": "Anmelden",
       "passwordWeak": "Schwaches Passwort",
       "passwordMedium": "Mittlere Stärke",
-      "passwordStrong": "Starkes Passwort"
+      "passwordStrong": "Starkes Passwort",
+      "code": {
+        "title": "Sieh in deinem Posteingang nach",
+        "sentTo": "Wir haben einen {{length}}-stelligen Code an {{email}} gesendet. Er läuft in {{minutes}} Minuten ab.",
+        "codeLabel": "Registrierungscode",
+        "submit": "Bestätigen und Konto erstellen",
+        "verifying": "Wird geprüft…",
+        "resend": "Neuen Code senden",
+        "resendIn": "Du kannst in {{time}} einen neuen Code anfordern.",
+        "resent": "Wir haben einen neuen Code angefordert. Wenn er ankommt, verwende ihn statt des vorherigen.",
+        "resendFailed": "Es konnte kein neuer Code angefordert werden. Versuche es gleich noch einmal.",
+        "usernameLabel": "Neuer Benutzername",
+        "usernameTakenHint": "Dieser Benutzername wurde inzwischen vergeben. Wähle einen anderen: Dein Code gilt weiterhin.",
+        "haveAccount": "Wenn du bereits ein Konto hast, melde dich an oder setze dein Passwort zurück.",
+        "signIn": "Anmelden",
+        "resetPassword": "Passwort zurücksetzen",
+        "spamHint": "Noch nichts angekommen? Sieh in deinem Spam- oder Junk-Ordner nach.",
+        "startOver": "Neu beginnen"
+      }
     },
     "totp": {
       "title": "Zwei-Faktor-Authentifizierung",
@@ -125,7 +143,9 @@
       "goToLogin": "Zur Anmeldung",
       "goBack": "Zurück",
       "missingToken": "Bestätigungstoken fehlt.",
-      "failed": "Verifizierung fehlgeschlagen. Der Link ist möglicherweise ungültig oder abgelaufen."
+      "failed": "Verifizierung fehlgeschlagen. Der Link ist möglicherweise ungültig oder abgelaufen.",
+      "prompt": "Bestätige diese E-Mail-Adresse für dein Voxium-Konto.",
+      "verifyButton": "Meine E-Mail bestätigen"
     },
     "mailBlock": {
       "title": "Voxium-E-Mails an diese Adresse",
@@ -1333,7 +1353,6 @@
     "emailAlreadyVerified": "Deine E-Mail-Adresse ist bereits bestätigt",
     "tooManyVerificationEmails": "Zu viele Bestätigungs-E-Mails angefordert — versuche es morgen erneut",
     "mailBlocked": "E-Mails an diese Adresse sind blockiert — verwende den Link aus einer früheren Voxium-E-Mail, um sie wieder zu erlauben",
-    "tooManyDomainRegistrations": "Heute zu viele Registrierungen von dieser E-Mail-Domain — versuche es später erneut",
     "registrationChallengeInvalid": "Die Registrierungsprüfung ist ungültig oder abgelaufen — lade neu und versuche es erneut",
     "powExpired": "Die Registrierungsprüfung hat zu lange gedauert — bitte versuche es erneut",
     "powUnavailable": "Dieser Browser kann die Registrierungsprüfung nicht ausführen (WebCrypto nicht verfügbar)",
@@ -1460,7 +1479,10 @@
     "screenShareTaken": "Jemand anderes teilt in diesem Kanal bereits",
     "noPermissionSpeak": "Du hast keine Berechtigung, in diesem Kanal zu sprechen",
     "searchQueryTooShort": "Die Suchanfrage muss mindestens {{min}} Zeichen lang sein",
-    "searchQueryTooLong": "Die Suchanfrage darf höchstens {{max}} Zeichen lang sein"
+    "searchQueryTooLong": "Die Suchanfrage darf höchstens {{max}} Zeichen lang sein",
+    "usernameTaken": "Dieser Benutzername ist bereits vergeben",
+    "signupCodeInvalid": "Ungültiger oder abgelaufener Code",
+    "signupEmailRegistered": "Für diese E-Mail-Adresse gibt es bereits ein Konto. Melde dich stattdessen an."
   },
   "e2e": {
     "badgeTitle": "Ende-zu-Ende-verschlüsselt — Sicherheitsnummer anzeigen",

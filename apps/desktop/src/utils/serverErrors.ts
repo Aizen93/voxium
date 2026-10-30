@@ -1,6 +1,6 @@
 import type { TFunction } from 'i18next';
 import axios from 'axios';
-import { LIMITS } from '@voxium/shared';
+import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE } from '@voxium/shared';
 
 /**
  * Maps known server error strings → i18n keys under "serverErrors.*".
@@ -19,6 +19,11 @@ const ERROR_MAP: Record<string, string> = {
   'Invalid refresh token': 'invalidRefreshToken',
   'Refresh token is required': 'refreshTokenRequired',
   'Registration is currently disabled': 'registrationDisabled',
+  // Verify-first registration (services/signupService.ts): the start's only
+  // conflict, every refused code, and the mailbox that already has an account
+  [USERNAME_TAKEN_MESSAGE]: 'usernameTaken',
+  [SIGNUP_CODE_INVALID_MESSAGE]: 'signupCodeInvalid',
+  [SIGNUP_EMAIL_REGISTERED_MESSAGE]: 'signupEmailRegistered',
 
   // ─── Validation ────────────────────────────────────────────────────────
   'Username is required': 'usernameRequired',
@@ -205,7 +210,6 @@ const ERROR_MAP: Record<string, string> = {
   'Too many verification emails requested — try again tomorrow': 'tooManyVerificationEmails',
   // The mailbox blocked Voxium mail ("Not you? …" in an earlier e-mail); only a resend can hear it
   'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again': 'mailBlocked',
-  'Too many registrations from this email domain today — try again later': 'tooManyDomainRegistrations',
   'Registration challenge is invalid or expired — refresh and try again': 'registrationChallengeInvalid',
   // The registration proof of work fails on the CLIENT too (shared/pow.ts,
   // services/powSolver.ts) and reaches the form through the same helper

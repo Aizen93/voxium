@@ -79,7 +79,25 @@
       "signIn": "登录",
       "passwordWeak": "密码强度弱",
       "passwordMedium": "密码强度中等",
-      "passwordStrong": "密码强度强"
+      "passwordStrong": "密码强度强",
+      "code": {
+        "title": "请查看收件箱",
+        "sentTo": "我们已向 {{email}} 发送了一个 {{length}} 位数的验证码，{{minutes}} 分钟后过期。",
+        "codeLabel": "注册验证码",
+        "submit": "验证并创建账户",
+        "verifying": "正在验证…",
+        "resend": "发送新验证码",
+        "resendIn": "{{time}} 后可以请求新的验证码。",
+        "resent": "已请求新的验证码。收到后，请用它代替之前的验证码。",
+        "resendFailed": "无法请求新的验证码，请稍后再试。",
+        "usernameLabel": "新用户名",
+        "usernameTakenHint": "该用户名在此期间已被占用。请另选一个：你的验证码仍然有效。",
+        "haveAccount": "如果你已经有账户，请登录或重置密码。",
+        "signIn": "登录",
+        "resetPassword": "重置密码",
+        "spamHint": "还没收到？请检查垃圾邮件文件夹。",
+        "startOver": "重新开始"
+      }
     },
     "totp": {
       "title": "两步验证",
@@ -125,7 +143,9 @@
       "goToLogin": "前往登录",
       "goBack": "返回",
       "missingToken": "缺少验证令牌。",
-      "failed": "验证失败。链接可能无效或已过期。"
+      "failed": "验证失败。链接可能无效或已过期。",
+      "prompt": "请为你的 Voxium 账户确认此电子邮件地址。",
+      "verifyButton": "验证我的邮箱"
     },
     "mailBlock": {
       "title": "Voxium 发送至此地址的邮件",
@@ -1332,7 +1352,6 @@
     "emailAlreadyVerified": "你的邮箱地址已验证",
     "tooManyVerificationEmails": "请求的验证邮件过多 — 请明天再试",
     "mailBlocked": "发送至此地址的邮件已被屏蔽 — 请使用之前 Voxium 邮件中的链接重新允许",
-    "tooManyDomainRegistrations": "今天来自该邮箱域名的注册过多 — 请稍后再试",
     "registrationChallengeInvalid": "注册校验无效或已过期 — 请刷新后重试",
     "powExpired": "注册校验耗时过长 — 请重试",
     "powUnavailable": "此浏览器无法执行注册校验（WebCrypto 不可用）",
@@ -1459,7 +1478,10 @@
     "screenShareTaken": "已有其他人在此频道中共享",
     "noPermissionSpeak": "你没有在此频道发言的权限",
     "searchQueryTooShort": "搜索内容至少需要 {{min}} 个字符",
-    "searchQueryTooLong": "搜索内容最多 {{max}} 个字符"
+    "searchQueryTooLong": "搜索内容最多 {{max}} 个字符",
+    "usernameTaken": "该用户名已被占用",
+    "signupCodeInvalid": "验证码无效或已过期",
+    "signupEmailRegistered": "该电子邮件地址已有账户，请直接登录。"
   },
   "e2e": {
     "badgeTitle": "已端到端加密 — 查看安全码",

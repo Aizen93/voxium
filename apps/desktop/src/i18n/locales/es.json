@@ -79,7 +79,25 @@
       "signIn": "Iniciar sesión",
       "passwordWeak": "Contraseña débil",
       "passwordMedium": "Fuerza media",
-      "passwordStrong": "Contraseña fuerte"
+      "passwordStrong": "Contraseña fuerte",
+      "code": {
+        "title": "Revisa tu bandeja de entrada",
+        "sentTo": "Enviamos un código de {{length}} dígitos a {{email}}. Caduca en {{minutes}} minutos.",
+        "codeLabel": "Código de registro",
+        "submit": "Verificar y crear la cuenta",
+        "verifying": "Verificando…",
+        "resend": "Enviar un código nuevo",
+        "resendIn": "Podrás pedir un código nuevo en {{time}}.",
+        "resent": "Hemos pedido un código nuevo. Cuando llegue, úsalo en lugar del anterior.",
+        "resendFailed": "No se pudo pedir un código nuevo. Inténtalo de nuevo en un momento.",
+        "usernameLabel": "Nuevo nombre de usuario",
+        "usernameTakenHint": "Ese nombre de usuario se ocupó mientras tanto. Elige otro: tu código sigue siendo válido.",
+        "haveAccount": "Si ya tienes una cuenta, inicia sesión o restablece tu contraseña.",
+        "signIn": "Iniciar sesión",
+        "resetPassword": "Restablecer contraseña",
+        "spamHint": "¿Aún nada? Revisa tu carpeta de spam o correo no deseado.",
+        "startOver": "Empezar de nuevo"
+      }
     },
     "totp": {
       "title": "Autenticación de dos factores",
@@ -125,7 +143,9 @@
       "goToLogin": "Ir al inicio de sesión",
       "goBack": "Volver",
       "missingToken": "Token de verificación no encontrado.",
-      "failed": "La verificación falló. El enlace puede ser inválido o haber expirado."
+      "failed": "La verificación falló. El enlace puede ser inválido o haber expirado.",
+      "prompt": "Confirma esta dirección de correo para tu cuenta de Voxium.",
+      "verifyButton": "Verificar mi correo"
     },
     "mailBlock": {
       "title": "Correos de Voxium a esta dirección",
@@ -1333,7 +1353,6 @@
     "emailAlreadyVerified": "Tu dirección de correo ya está verificada",
     "tooManyVerificationEmails": "Se solicitaron demasiados correos de verificación: inténtalo mañana",
     "mailBlocked": "Los correos a esta dirección están bloqueados: usa el enlace de un correo anterior de Voxium para permitirlos de nuevo",
-    "tooManyDomainRegistrations": "Demasiados registros desde este dominio de correo hoy: inténtalo más tarde",
     "registrationChallengeInvalid": "La verificación de registro no es válida o caducó: actualiza e inténtalo de nuevo",
     "powExpired": "La verificación de registro tardó demasiado: inténtalo de nuevo",
     "powUnavailable": "Este navegador no puede realizar la verificación de registro (WebCrypto no está disponible)",
@@ -1460,7 +1479,10 @@
     "screenShareTaken": "Otra persona ya está compartiendo en este canal",
     "noPermissionSpeak": "No tienes permiso para hablar en este canal",
     "searchQueryTooShort": "La búsqueda debe tener al menos {{min}} caracteres",
-    "searchQueryTooLong": "La búsqueda debe tener como máximo {{max}} caracteres"
+    "searchQueryTooLong": "La búsqueda debe tener como máximo {{max}} caracteres",
+    "usernameTaken": "Este nombre de usuario ya está en uso",
+    "signupCodeInvalid": "Código no válido o caducado",
+    "signupEmailRegistered": "Esta dirección de correo ya tiene una cuenta. Inicia sesión en su lugar."
   },
   "e2e": {
     "badgeTitle": "Cifrado de extremo a extremo — ver número de seguridad",
