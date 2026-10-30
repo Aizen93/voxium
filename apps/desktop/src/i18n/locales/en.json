@@ -159,7 +159,7 @@
       "working": "Saving…",
       "blockedDone": "Done. This address will receive no more email from Voxium. You can allow it again from this page at any time.",
       "allowedDone": "Email from Voxium to this address is allowed again.",
-      "note": "This only concerns the account emails Voxium sends (address verification and password reset). It creates or deletes no account.",
+      "note": "This only concerns the account emails Voxium sends (sign-up codes, address verification, password reset and account notices). It creates or deletes no account.",
       "invalidLink": "This link is invalid or has expired. Use the link from a more recent Voxium email.",
       "failed": "Something went wrong. Please try again.",
       "retry": "Try again",

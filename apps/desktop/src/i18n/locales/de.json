@@ -159,7 +159,7 @@
       "working": "Wird gespeichert…",
       "blockedDone": "Erledigt. Diese Adresse erhält keine E-Mails von Voxium mehr. Du kannst sie auf dieser Seite jederzeit wieder erlauben.",
       "allowedDone": "E-Mails von Voxium an diese Adresse sind wieder erlaubt.",
-      "note": "Das betrifft nur die Konto-E-Mails, die Voxium sendet (Adressbestätigung und Zurücksetzen des Passworts). Es wird kein Konto erstellt oder gelöscht.",
+      "note": "Das betrifft nur die Konto-E-Mails, die Voxium sendet (Registrierungscodes, Adressbestätigung, Zurücksetzen des Passworts und Kontohinweise). Es wird kein Konto erstellt oder gelöscht.",
       "invalidLink": "Dieser Link ist ungültig oder abgelaufen. Verwende den Link aus einer neueren Voxium-E-Mail.",
       "failed": "Etwas ist schiefgelaufen. Bitte versuche es erneut.",
       "retry": "Erneut versuchen",

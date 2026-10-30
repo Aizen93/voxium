@@ -159,7 +159,7 @@
       "working": "Guardando…",
       "blockedDone": "Listo. Esta dirección no recibirá más correos de Voxium. Puedes permitirlos de nuevo desde esta página en cualquier momento.",
       "allowedDone": "Los correos de Voxium a esta dirección están permitidos de nuevo.",
-      "note": "Esto solo afecta a los correos de cuenta que envía Voxium (verificación de la dirección y restablecimiento de contraseña). No crea ni elimina ninguna cuenta.",
+      "note": "Esto solo afecta a los correos de cuenta que envía Voxium (códigos de registro, verificación de la dirección, restablecimiento de contraseña y avisos sobre la cuenta). No crea ni elimina ninguna cuenta.",
       "invalidLink": "Este enlace no es válido o ha caducado. Usa el enlace de un correo de Voxium más reciente.",
       "failed": "Algo salió mal. Inténtalo de nuevo.",
       "retry": "Intentar de nuevo",

@@ -159,7 +159,7 @@
       "working": "Enregistrement…",
       "blockedDone": "C'est fait. Cette adresse ne recevra plus aucun e-mail de Voxium. Vous pourrez les autoriser de nouveau depuis cette page à tout moment.",
       "allowedDone": "Les e-mails de Voxium à cette adresse sont de nouveau autorisés.",
-      "note": "Cela ne concerne que les e-mails de compte envoyés par Voxium (vérification de l'adresse et réinitialisation du mot de passe). Aucun compte n'est créé ni supprimé.",
+      "note": "Cela ne concerne que les e-mails de compte envoyés par Voxium (codes d’inscription, vérification de l’adresse, réinitialisation du mot de passe et avis concernant le compte). Aucun compte n’est créé ni supprimé.",
       "invalidLink": "Ce lien est invalide ou a expiré. Utilisez le lien d'un e-mail Voxium plus récent.",
       "failed": "Une erreur s'est produite. Veuillez réessayer.",
       "retry": "Réessayer",

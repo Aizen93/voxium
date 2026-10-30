@@ -159,7 +159,7 @@
       "working": "Salvando…",
       "blockedDone": "Pronto. Este endereço não receberá mais e-mails do Voxium. Você pode permiti-los novamente nesta página a qualquer momento.",
       "allowedDone": "Os e-mails do Voxium para este endereço estão permitidos novamente.",
-      "note": "Isto afeta apenas os e-mails de conta enviados pelo Voxium (verificação do endereço e redefinição de senha). Nenhuma conta é criada ou excluída.",
+      "note": "Isto afeta apenas os e-mails de conta enviados pelo Voxium (códigos de cadastro, verificação do endereço, redefinição de senha e avisos sobre a conta). Nenhuma conta é criada ou excluída.",
       "invalidLink": "Este link é inválido ou expirou. Use o link de um e-mail mais recente do Voxium.",
       "failed": "Algo deu errado. Tente novamente.",
       "retry": "Tentar novamente",
