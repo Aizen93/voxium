@@ -7,6 +7,7 @@ import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTAC
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
+import { verifyAttachmentUploads } from '../utils/uploadVerification';
 import { shapeMessageRow } from '../utils/messageAuthor';
 
 const attachmentSelect = {
@@ -312,7 +313,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
         }
         if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
         if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this conversation');
-        if (a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
+        if (!Number.isSafeInteger(a.fileSize) || a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
         if (a.mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be opaque');
       }
     }
@@ -330,6 +331,17 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
     if (replyToId) {
       const parent = await prisma.message.findUnique({ where: { id: replyToId }, select: { conversationId: true } });
       if (!parent || parent.conversationId !== conversationId) throw new BadRequestError('Invalid replyToId');
+    }
+
+    // Read the uploaded blobs back before the row points at them: the stored
+    // size is the real ciphertext size
+    if (attachments?.length) {
+      const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
+      await verifyAttachmentUploads(attachments.map((a) => ({
+        key: a.s3Key,
+        declaredSize: a.fileSize,
+        maxSize: maxCipherSize,
+      })));
     }
 
     const message = await prisma.$transaction(async (tx) => {

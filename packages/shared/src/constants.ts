@@ -43,6 +43,14 @@ export const LIMITS = {
   MAX_ATTACHMENTS_PER_MESSAGE: 5,
   MAX_ATTACHMENT_SIZE: 8 * 1024 * 1024, // 8 MB (default for non-video files)
   MAX_VIDEO_ATTACHMENT_SIZE: 12 * 1024 * 1024, // 12 MB (for video files)
+  // Avatars and space icons are 256x256 images the client encodes before the
+  // upload (WebP, or PNG on a webview without a WebP encoder): tens of KB, a
+  // PNG of noise stays under 300 KB. The presigned PUT is signed for the exact
+  // declared size, and the declared size may not exceed these.
+  MAX_AVATAR_SIZE: 512 * 1024, // 512 KiB
+  MAX_SERVER_ICON_SIZE: 512 * 1024, // 512 KiB
+  // Largest edge (px) the stored avatar/icon header may declare
+  MAX_IMAGE_ASSET_EDGE: 1024,
   ATTACHMENT_RETENTION_DAYS: 3,
   MAX_ROLES_PER_SERVER: 25,
   ROLE_NAME_MIN: 1,

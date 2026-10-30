@@ -42,6 +42,8 @@ vi.mock('../../stores/voiceStore', () => ({
 }));
 vi.mock('../../services/powSolver', () => ({ solveRegistrationPowOffThread: vi.fn() }));
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
+const imageProcessing = vi.hoisted(() => ({ processImage: vi.fn() }));
+vi.mock('../../utils/imageProcessing', () => imageProcessing);
 
 import {
   useAuthStore, SESSION_RESTORE_RETRY_DELAYS_MS, SESSION_RESTORE_TIMEOUT_MS, SESSION_RESTORE_RETRY_AFTER_MAX_MS,
@@ -665,5 +667,58 @@ describe('authStore.checkAuth — a 429 is retried when the server says, not soo
     expect(api.get).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(api.get).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('authStore.uploadAvatar — the presign is signed for the processed image', () => {
+  const KEY = 'avatars/u-1-1700000000.webp';
+  const processed = new Blob([new Uint8Array(12_345)], { type: 'image/webp' });
+  const original = new File([new Uint8Array(3_000_000)], 'me.jpg', { type: 'image/jpeg' });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('processes FIRST, presigns with the processed size, PUTs that blob, then saves the key', async () => {
+    const order: string[] = [];
+    imageProcessing.processImage.mockImplementation(async () => { order.push('process'); return processed; });
+    api.post.mockImplementation(async () => { order.push('presign'); return { data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } }; });
+    const fetchMock = vi.fn(async () => { order.push('put'); return { ok: true, status: 200 }; });
+    vi.stubGlobal('fetch', fetchMock);
+    api.patch.mockImplementation(async () => { order.push('save'); return { data: { data: {} } }; });
+    useAuthStore.setState({ user: { ...me, avatarUrl: null } as never });
+
+    await useAuthStore.getState().uploadAvatar(original);
+
+    expect(order).toEqual(['process', 'presign', 'put', 'save']);
+    expect(imageProcessing.processImage).toHaveBeenCalledWith(original);
+    expect(api.post).toHaveBeenCalledWith('/uploads/presign/avatar', { fileSize: 12_345 });
+    expect(fetchMock).toHaveBeenCalledWith('https://store.example/put', {
+      method: 'PUT',
+      body: processed,
+      headers: { 'Content-Type': 'image/webp' },
+    });
+    expect(api.patch).toHaveBeenCalledWith('/users/me/profile', { avatarUrl: KEY });
+    expect(useAuthStore.getState().user?.avatarUrl).toBe(KEY);
+  });
+
+  it('asks for no presign when the image cannot be processed', async () => {
+    imageProcessing.processImage.mockRejectedValue(new Error('decode failed'));
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(useAuthStore.getState().uploadAvatar(original)).rejects.toThrow('decode failed');
+    expect(api.post).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(api.patch).not.toHaveBeenCalled();
+  });
+
+  it('never saves the key when the store refuses the PUT', async () => {
+    imageProcessing.processImage.mockResolvedValue(processed);
+    api.post.mockResolvedValue({ data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 403 })));
+
+    await expect(useAuthStore.getState().uploadAvatar(original)).rejects.toThrow('S3 upload failed: 403');
+    expect(api.patch).not.toHaveBeenCalled();
   });
 });

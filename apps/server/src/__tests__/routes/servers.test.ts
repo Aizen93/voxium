@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { Permissions, MEMBER_LIST } from '@voxium/shared';
+import { Permissions, MEMBER_LIST, LIMITS } from '@voxium/shared';
+import { BadRequestError } from '../../utils/errors';
 import { encodeMemberCursor, decodeMemberCursor } from '../../utils/memberCursor';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -204,6 +205,12 @@ vi.mock('../../utils/moderatorAudience', () => ({
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,
   deleteFromS3: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Upload read-back (its own unit tests cover the S3 side)
+const mockVerifyImageAssetUpload = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../../utils/uploadVerification', () => ({
+  verifyImageAssetUpload: (...args: unknown[]) => mockVerifyImageAssetUpload(...args),
 }));
 
 // Feature flags
@@ -677,6 +684,82 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('Invalid icon key');
+      expect(mockVerifyImageAssetUpload).not.toHaveBeenCalled();
+    });
+
+    describe('a new icon object is read back before the space points at it', () => {
+      const NEW_ICON = 'server-icons/srv-1-1700000000.webp';
+      const OLD_ICON = 'server-icons/srv-1-1600000000.webp';
+
+      beforeEach(() => {
+        mockVerifyImageAssetUpload.mockReset();
+        mockVerifyImageAssetUpload.mockResolvedValue(undefined);
+      });
+
+      it('verifies the new key against the icon cap, then updates and deletes the old icon', async () => {
+        const { deleteFromS3 } = await import('../../utils/s3');
+        prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: OLD_ICON, ownerId: 'user-1' });
+        prismaMock.server.update.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: NEW_ICON, ownerId: 'user-1' });
+
+        const res = await request(app)
+          .patch('/api/v1/servers/srv-1')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ iconUrl: NEW_ICON });
+
+        expect(res.status).toBe(200);
+        expect(mockVerifyImageAssetUpload).toHaveBeenCalledWith(NEW_ICON, LIMITS.MAX_SERVER_ICON_SIZE, 'Invalid icon key');
+        expect(prismaMock.server.update).toHaveBeenCalled();
+        expect(deleteFromS3).toHaveBeenCalledWith(OLD_ICON);
+      });
+
+      it('refuses an icon the read-back rejects, keeping the current icon', async () => {
+        const { deleteFromS3 } = await import('../../utils/s3');
+        prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: OLD_ICON, ownerId: 'user-1' });
+        mockVerifyImageAssetUpload.mockRejectedValueOnce(new BadRequestError('Invalid icon key'));
+
+        const res = await request(app)
+          .patch('/api/v1/servers/srv-1')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ iconUrl: NEW_ICON });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Invalid icon key');
+        expect(prismaMock.server.update).not.toHaveBeenCalled();
+        expect(deleteFromS3).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('does not read the store before the permission check passes', async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: null, ownerId: 'user-1' });
+        mockHasServerPermission.mockResolvedValue(false);
+
+        const res = await request(app)
+          .patch('/api/v1/servers/srv-1')
+          .set('Authorization', `Bearer ${makeToken({ userId: 'user-2' })}`)
+          .send({ iconUrl: NEW_ICON });
+
+        expect(res.status).toBe(403);
+        expect(mockVerifyImageAssetUpload).not.toHaveBeenCalled();
+      });
+
+      it('does not re-read the icon the space already points at, nor a cleared icon', async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: NEW_ICON, ownerId: 'user-1' });
+        prismaMock.server.update.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: NEW_ICON, ownerId: 'user-1' });
+
+        let res = await request(app)
+          .patch('/api/v1/servers/srv-1')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ iconUrl: NEW_ICON });
+        expect(res.status).toBe(200);
+
+        res = await request(app)
+          .patch('/api/v1/servers/srv-1')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ iconUrl: null });
+        expect(res.status).toBe(200);
+
+        expect(mockVerifyImageAssetUpload).not.toHaveBeenCalled();
+      });
     });
   });
 

@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { LIMITS } from '@voxium/shared';
+import { BadRequestError } from '../../utils/errors';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -57,6 +59,12 @@ vi.mock('../../middleware/rateLimiter', () => {
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^(avatars|server-icons)\/[\w-]+\.webp$/,
   deleteFromS3: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Upload read-back (its own unit tests cover the S3 side)
+const mockVerifyImageAssetUpload = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../../utils/uploadVerification', () => ({
+  verifyImageAssetUpload: (...args: unknown[]) => mockVerifyImageAssetUpload(...args),
 }));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
@@ -358,6 +366,84 @@ describe('User Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data.avatarUrl).toBe('avatars/user-1-1234567890.webp');
+      // A new avatar object is read back (size cap + image header) first
+      expect(mockVerifyImageAssetUpload).toHaveBeenCalledWith(
+        'avatars/user-1-1234567890.webp', LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key',
+      );
+    });
+
+    function mockAuthAndCurrentAvatar(current: string | null) {
+      prismaMock.user.findUnique
+        .mockResolvedValueOnce({
+          id: 'user-1', bannedAt: null, tokenVersion: 0, role: 'user',
+          emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+        })
+        .mockResolvedValueOnce({ avatarUrl: current });
+    }
+
+    it('refuses an avatar object the read-back rejects, leaving the profile and the old avatar alone', async () => {
+      const { deleteFromS3 } = await import('../../utils/s3');
+      mockAuthAndCurrentAvatar('avatars/user-1-old.webp');
+      mockVerifyImageAssetUpload.mockRejectedValueOnce(new BadRequestError('Invalid avatar key'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Invalid avatar key');
+      expect(prismaMock.user.update).not.toHaveBeenCalled();
+      expect(deleteFromS3).not.toHaveBeenCalled();
+    });
+
+    it('fails closed (500) when the store cannot be read', async () => {
+      mockAuthAndCurrentAvatar(null);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockVerifyImageAssetUpload.mockRejectedValueOnce(new Error('store unavailable'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(500);
+      expect(prismaMock.user.update).not.toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
+    it('does not re-read (nor ever delete) the avatar the profile already points at', async () => {
+      mockAuthAndCurrentAvatar('avatars/user-1-1234567890.webp');
+      prismaMock.user.update.mockResolvedValue({
+        id: 'user-1', username: 'testuser', displayName: 'Test User', email: 'test@example.com',
+        avatarUrl: 'avatars/user-1-1234567890.webp', bio: null, status: 'online', createdAt: new Date('2024-01-01'),
+      });
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(200);
+      expect(mockVerifyImageAssetUpload).not.toHaveBeenCalled();
+    });
+
+    it('does not read the store for a cleared avatar or a profile edit without one', async () => {
+      mockAuthAndCurrentAvatar('avatars/user-1-old.webp');
+      prismaMock.user.update.mockResolvedValue({
+        id: 'user-1', username: 'testuser', displayName: 'Test User', email: 'test@example.com',
+        avatarUrl: null, bio: null, status: 'online', createdAt: new Date('2024-01-01'),
+      });
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: null });
+
+      expect(res.status).toBe(200);
+      expect(mockVerifyImageAssetUpload).not.toHaveBeenCalled();
     });
 
     it('clears avatar by setting null', async () => {

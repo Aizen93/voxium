@@ -471,14 +471,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   clearError: () => set({ error: null }),
 
   uploadAvatar: async (file: File) => {
-    // 1. Get presigned PUT URL
-    const { data: presignData } = await api.post('/uploads/presign/avatar');
-    const { uploadUrl, key } = presignData.data;
-
-    // 2. Client-side resize + WebP conversion
+    // 1. Client-side resize + WebP conversion, FIRST: the presigned URL is
+    // signed for the exact size of the bytes we will PUT
     const blob = await processImage(file);
 
-    // 3. Direct upload to S3
+    // 2. Get a presigned PUT URL for that size
+    const { data: presignData } = await api.post('/uploads/presign/avatar', { fileSize: blob.size });
+    const { uploadUrl, key } = presignData.data;
+
+    // 3. Direct upload to S3 (the browser sets Content-Length from the blob)
     const uploadRes = await fetch(uploadUrl, {
       method: 'PUT',
       body: blob,

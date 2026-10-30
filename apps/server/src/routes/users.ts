@@ -2,10 +2,11 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, NotFoundError } from '../utils/errors';
-import { validateDisplayName, validateBio, WS_EVENTS } from '@voxium/shared';
+import { validateDisplayName, validateBio, WS_EVENTS, LIMITS } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
+import { verifyImageAssetUpload } from '../utils/uploadVerification';
 import { rateLimitProfileUpdate } from '../middleware/rateLimiter';
 
 export const userRouter = Router();
@@ -79,6 +80,13 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
         select: { avatarUrl: true },
       });
       oldAvatarUrl = current?.avatarUrl ?? null;
+    }
+
+    // First reference of a new avatar object: read it back (size cap, image
+    // header) before the profile points at it. The current key was checked
+    // when it was set, and is never re-read nor deleted here.
+    if (typeof avatarUrl === 'string' && avatarUrl !== oldAvatarUrl) {
+      await verifyImageAssetUpload(avatarUrl, LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key');
     }
 
     const updated = await prisma.user.update({
