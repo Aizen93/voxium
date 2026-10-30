@@ -37,21 +37,16 @@ vi.mock('../../utils/redis', () => ({
   getRedis: () => ({ incr: redisIncr, expire: redisExpire, get: redisGet }),
 }));
 
-const { domainCount, domainConsume, mailCap } = vi.hoisted(() => ({
-  domainCount: vi.fn().mockResolvedValue(0),
-  domainConsume: vi.fn().mockResolvedValue(undefined),
+const { mailCap } = vi.hoisted(() => ({
   mailCap: vi.fn().mockResolvedValue(true),
 }));
 vi.mock('../../middleware/rateLimiter', async (importOriginal) => {
-  // normalizeIp / subnetOf are pure functions with no store behind them — the
-  // real ones are exactly what registerUser's key agreement must be tested
-  // against, so they are NOT stubbed.
+  // normalizeIp is a pure function with no store behind it — the real one is
+  // exactly what loginUser's key agreement must be tested against, so it is
+  // NOT stubbed. (Registration's own suite is signupService.test.ts.)
   const actual = await importOriginal<typeof import('../../middleware/rateLimiter')>();
   return {
     normalizeIp: actual.normalizeIp,
-    getDomainRegistrationCount: domainCount,
-    countDomainRegistration: domainConsume,
-    domainRegistrationCap: () => 10,
     consumeMailCap: mailCap,
   };
 });
@@ -62,7 +57,6 @@ vi.mock('../../utils/sanitize', () => ({
 
 import { prisma } from '../../utils/prisma';
 import {
-  registerUser,
   loginUser,
   generateTokens,
   verifyEmail,
@@ -93,174 +87,6 @@ afterEach(() => {
 });
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
-
-const CONSENT = { acceptTerms: true, acceptPrivacy: true };
-
-describe('authService — registerUser', () => {
-  // The route answers 400 for missing consent; this is the service's OWN
-  // guard, so no other caller (a script, a future admin tool) can mint an
-  // account without recorded consent.
-  it.each([
-    ['no consent', undefined],
-    ['terms only', { acceptTerms: true, acceptPrivacy: false }],
-    ['privacy only', { acceptTerms: false, acceptPrivacy: true }],
-  ])('refuses to create an account with %s', async (_label, consent) => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValue(null);
-    await expect(registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, undefined, consent as never))
-      .rejects.toThrow(/accept the Terms of Service and the Privacy Policy/);
-    expect(prisma.user.create).not.toHaveBeenCalled();
-  });
-
-  it('creates a user with hashed password', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    vi.mocked(prisma.user.create).mockResolvedValueOnce({
-      id: 'user-1',
-      username: 'testuser',
-      displayName: 'testuser',
-      email: 'test@example.com',
-      avatarUrl: null,
-      bio: null,
-      status: 'offline',
-      role: 'user',
-      totpEnabled: false,
-      emailVerified: false,
-      isSupporter: false,
-      supporterTier: null,
-      tokenVersion: 0,
-      createdAt: new Date(),
-    } as any);
-
-    const result = await registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, undefined, CONSENT);
-
-    expect(result.user).toBeDefined();
-    expect(result.accessToken).toBeDefined();
-    expect(result.refreshToken).toBeDefined();
-    expect(result.user.username).toBe('testuser');
-
-    // Password should NOT be in the returned user
-    expect((result.user as any).password).toBeUndefined();
-    expect((result.user as any).tokenVersion).toBeUndefined();
-
-    // Verify the create call used a hashed password (not plaintext)
-    const createCall = vi.mocked(prisma.user.create).mock.calls[0][0];
-    expect(createCall.data.password).not.toBe('ValidPass123');
-    expect(createCall.data.password).toMatch(/^\$2[ab]\$/); // bcrypt hash format
-  });
-
-  it('normalizes email to lowercase', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    vi.mocked(prisma.user.create).mockResolvedValueOnce({
-      id: 'user-1', username: 'testuser', displayName: 'testuser',
-      email: 'test@example.com', avatarUrl: null, bio: null, status: 'offline',
-      role: 'user', totpEnabled: false, emailVerified: false,
-      isSupporter: false, supporterTier: null, tokenVersion: 0, createdAt: new Date(),
-    } as any);
-
-    await registerUser('testuser', 'Test@EXAMPLE.COM', 'ValidPass123', undefined, undefined, CONSENT);
-
-    const createCall = vi.mocked(prisma.user.create).mock.calls[0][0];
-    expect(createCall.data.email).toBe('test@example.com');
-  });
-
-  it('rejects duplicate username or email', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce({ id: 'existing' } as any);
-
-    await expect(registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, undefined, CONSENT))
-      .rejects.toThrow('Username or email already in use');
-  });
-
-  it('rejects invalid username (too short)', async () => {
-    await expect(registerUser('ab', 'test@example.com', 'ValidPass123', undefined, undefined, CONSENT))
-      .rejects.toThrow(/Username/);
-  });
-
-  it('rejects invalid email', async () => {
-    await expect(registerUser('testuser', 'not-an-email', 'ValidPass123', undefined, undefined, CONSENT))
-      .rejects.toThrow(/email/i);
-  });
-
-  it.each(['victim@gmail.com(1)', 'victim(1)@gmail.com', 'a,victim@corp.com', `${'a,'.repeat(40_000)}a@b.co`])(
-    'refuses an address the mailer would read differently (%#) before any lookup or mail',
-    async (email) => {
-      const { sendVerificationEmail } = await import('../../utils/email');
-      await expect(registerUser('testuser', email, 'ValidPass123', undefined, undefined, CONSENT))
-        .rejects.toThrow('Invalid email address');
-      expect(prisma.user.findFirst).not.toHaveBeenCalled();
-      expect(prisma.user.create).not.toHaveBeenCalled();
-      expect(sendVerificationEmail).not.toHaveBeenCalled();
-    },
-  );
-
-  it('rejects password exceeding 72 chars (bcrypt limit)', async () => {
-    const longPassword = 'A'.repeat(73);
-    await expect(registerUser('testuser', 'test@example.com', longPassword, undefined, undefined, CONSENT))
-      .rejects.toThrow(/Password/);
-  });
-
-  it('rejects password below minimum length', async () => {
-    await expect(registerUser('testuser', 'test@example.com', 'short', undefined, undefined, CONSENT))
-      .rejects.toThrow(/Password/);
-  });
-});
-
-describe('authService — registration abuse defenses', () => {
-  const mockCreatedUser = () => vi.mocked(prisma.user.create).mockResolvedValueOnce({
-      id: 'user-1', username: 'testuser', displayName: 'testuser',
-      email: 'test@example.com', avatarUrl: null, bio: null, status: 'offline',
-      role: 'user', totpEnabled: false, emailVerified: false,
-      isSupporter: false, supporterTier: null, tokenVersion: 0, createdAt: new Date(),
-    } as any);
-
-  it('records the REGISTRATION IP with kind register (normalized from IPv4-mapped IPv6)', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    vi.mocked(prisma.ipBan.findUnique).mockResolvedValueOnce(null);
-    vi.mocked(prisma.ipRecord.create).mockResolvedValueOnce({} as any);
-    mockCreatedUser();
-
-    await registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, '::ffff:203.0.113.9', CONSENT);
-
-    expect(prisma.ipBan.findUnique).toHaveBeenCalledWith({ where: { ip: '203.0.113.9' } });
-    expect(prisma.ipRecord.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ userId: 'user-1', ip: '203.0.113.9', kind: 'register' }),
-    }));
-  });
-
-  it('REFUSES registration from a banned IP — the gap the bots walked through', async () => {
-    vi.mocked(prisma.ipBan.findUnique).mockResolvedValueOnce({ id: 'ban-1', ip: '203.0.113.9', reason: 'bot wave' } as any);
-
-    await expect(registerUser('testuser', 'test@example.com', 'ValidPass123', undefined, '203.0.113.9', CONSENT))
-      .rejects.toThrow('Account banned: bot wave');
-    expect(prisma.user.create).not.toHaveBeenCalled();
-  });
-
-  it('dedupes on the CANONICAL email — dotted-gmail aliases cannot mint accounts', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce({ id: 'existing' } as any);
-
-    await expect(registerUser('newuser', 'J.o.h.n.D.o.e+bot@GMAIL.com', 'ValidPass123', undefined, undefined, CONSENT))
-      .rejects.toThrow('Username or email already in use');
-
-    const where = vi.mocked(prisma.user.findFirst).mock.calls[0][0]!.where as any;
-    expect(where.OR).toContainEqual({ emailCanonical: 'johndoe@gmail.com' });
-  });
-
-  it('stores emailCanonical on the created user', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    mockCreatedUser();
-
-    await registerUser('testuser', 'John.Doe+x@gmail.com', 'ValidPass123', undefined, undefined, CONSENT);
-
-    const createCall = vi.mocked(prisma.user.create).mock.calls[0][0] as any;
-    expect(createCall.data.emailCanonical).toBe('johndoe@gmail.com');
-    expect(createCall.data.email).toBe('john.doe+x@gmail.com'); // as typed (lowercased)
-  });
-
-  it('rejects disposable-email domains with the SAME generic error (no oracle)', async () => {
-    await expect(registerUser('testuser', 'bot@mailinator.com', 'ValidPass123', undefined, undefined, CONSENT))
-      .rejects.toThrow('Username or email already in use');
-    expect(prisma.user.findFirst).not.toHaveBeenCalled();
-    expect(prisma.user.create).not.toHaveBeenCalled();
-  });
-});
 
 describe('authService — verification email hygiene', () => {
   it('verifyEmail stamps emailVerifiedAt', async () => {
@@ -352,29 +178,6 @@ describe('authService — a mailbox that blocked Voxium mail', () => {
     await expect(resendVerificationEmail('user-1')).rejects.toThrow('relay refused');
   });
 
-  it('registration goes through unchanged and logs the skipped mail at WARN, without the address', async () => {
-    const { sendVerificationEmail, MailSuppressedError } = await import('../../utils/email');
-    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new MailSuppressedError());
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    vi.mocked(prisma.user.create).mockResolvedValueOnce({
-      id: 'user-1', username: 'testuser', displayName: 'testuser',
-      email: 'victim@example.com', avatarUrl: null, bio: null, status: 'offline',
-      role: 'user', totpEnabled: false, emailVerified: false,
-      isSupporter: false, supporterTier: null, tokenVersion: 0, createdAt: new Date(),
-    } as any);
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const result = await registerUser('testuser', 'victim@example.com', 'ValidPass123', undefined, undefined, CONSENT);
-    await new Promise((r) => setImmediate(r)); // the fire-and-forget catch
-
-    expect(result.user.email).toBe('victim@example.com');
-    expect(warn).toHaveBeenCalledWith('[Auth] Verification mail skipped: the mailbox blocked Voxium mail');
-    expect(error).not.toHaveBeenCalledWith('[Auth] Failed to send verification email:', expect.anything());
-    expect(JSON.stringify(warn.mock.calls)).not.toContain('victim@example.com');
-    warn.mockRestore();
-    error.mockRestore();
-  });
 
   it('password reset answers as always and logs the skipped mail at WARN', async () => {
     const { sendPasswordResetEmail, MailSuppressedError } = await import('../../utils/email');
@@ -394,100 +197,6 @@ describe('authService — a mailbox that blocked Voxium mail', () => {
   });
 });
 
-describe('authService — registerUser conflict handling', () => {
-  const mockCreated = () => vi.mocked(prisma.user.create).mockResolvedValueOnce({
-    id: 'user-1', username: 'testuser', displayName: 'testuser',
-    email: 'x@gmail.com', avatarUrl: null, bio: null, status: 'offline',
-    role: 'user', totpEnabled: false, emailVerified: false,
-    isSupporter: false, supporterTier: null, tokenVersion: 0, createdAt: new Date(),
-  } as any);
-
-  it('normalizes an IPv4-mapped address for ban matching and attribution', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    mockCreated();
-    vi.mocked(prisma.ipRecord.create).mockResolvedValueOnce({} as any);
-
-    await registerUser('testuser', 'x@gmail.com', 'ValidPass123', undefined, '::ffff:203.0.113.5', CONSENT);
-
-    expect(prisma.ipBan.findUnique).toHaveBeenCalledWith({ where: { ip: '203.0.113.5' } });
-    const record = vi.mocked(prisma.ipRecord.create).mock.calls[0][0] as any;
-    expect(record.data.ip).toBe('203.0.113.5');
-  });
-
-  it('surfaces a unique-constraint race as the SAME generic conflict, never a 500', async () => {
-    // F11: the findFirst pre-check is friendly, not enforcement — two
-    // concurrent signups both see it empty. The DB index is what holds, and
-    // its P2002 must not escape as a raw Prisma error (a 500 plus the
-    // constraint name in the logs, and a response distinguishable from an
-    // ordinary duplicate).
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    const p2002 = Object.assign(new Error('Unique constraint failed'), {
-      code: 'P2002',
-      meta: { target: ['users_username_lower_key'] },
-    });
-    vi.mocked(prisma.user.create).mockRejectedValueOnce(p2002);
-
-    await expect(registerUser('Alice', 'alice@gmail.com', 'ValidPass123', undefined, undefined, CONSENT))
-      .rejects.toThrow('Username or email already in use');
-    expect(domainConsume).not.toHaveBeenCalled();
-  });
-
-  it('does not swallow non-constraint database errors', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    vi.mocked(prisma.user.create).mockRejectedValueOnce(new Error('connection reset'));
-
-    await expect(registerUser('testuser', 'x@gmail.com', 'ValidPass123', undefined, undefined, CONSENT))
-      .rejects.toThrow('connection reset');
-  });
-});
-
-describe('authService — novel-domain registration cap', () => {
-  const mockCreated = () => vi.mocked(prisma.user.create).mockResolvedValueOnce({
-    id: 'user-1', username: 'testuser', displayName: 'testuser',
-    email: 'x@newdomain.example', avatarUrl: null, bio: null, status: 'offline',
-    role: 'user', totpEnabled: false, emailVerified: false,
-    isSupporter: false, supporterTier: null, tokenVersion: 0, createdAt: new Date(),
-  } as any);
-
-  it('REFUSES the 11th registration from a non-provider domain in a day', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    domainCount.mockResolvedValueOnce(10);
-
-    await expect(registerUser('testuser', 'bot@catchall.example', 'ValidPass123', undefined, undefined, CONSENT))
-      .rejects.toThrow('Too many registrations from this email domain');
-    expect(domainCount).toHaveBeenCalledWith('catchall.example');
-    expect(prisma.user.create).not.toHaveBeenCalled();
-    expect(domainConsume).not.toHaveBeenCalled();
-  });
-
-  it('counts the budget only AFTER a successful create — garbage attempts cannot burn a legit domain', async () => {
-    // Duplicate username: fails BEFORE the domain budget is ever consumed
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce({ id: 'existing' } as any);
-    await expect(registerUser('taken', 'a@smallcorp.example', 'ValidPass123', undefined, undefined, CONSENT)).rejects.toThrow();
-    expect(domainConsume).not.toHaveBeenCalled();
-
-    // Successful create: counted
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    mockCreated();
-    await registerUser('testuser', 'b@smallcorp.example', 'ValidPass123', undefined, undefined, CONSENT);
-    expect(domainConsume).toHaveBeenCalledWith('smallcorp.example');
-  });
-
-  it('EXEMPTS major consumer providers — gmail signs up unbounded users/day', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    mockCreated();
-    await registerUser('testuser', 'human@gmail.com', 'ValidPass123', undefined, undefined, CONSENT);
-    expect(domainCount).not.toHaveBeenCalled();
-    expect(domainConsume).not.toHaveBeenCalled();
-  });
-
-  it('fails OPEN when the budget read fails — registration availability wins', async () => {
-    vi.mocked(prisma.user.findFirst).mockResolvedValueOnce(null);
-    domainCount.mockResolvedValueOnce(0); // the helper itself fails soft to 0
-    mockCreated();
-    await expect(registerUser('testuser', 'x@newdomain.example', 'ValidPass123', undefined, undefined, CONSENT)).resolves.toBeDefined();
-  });
-});
 
 describe('authService — password-reset mail cap', () => {
   it('SILENTLY stops sending once the inbox is capped (no enumeration signal)', async () => {
