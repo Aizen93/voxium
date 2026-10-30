@@ -102,6 +102,11 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // without a deploy.
   registerAttemptSubnet:
                   { keyPrefix: 'rl:regattnet', points: 300, duration: 86400, blockDuration: 0, keyType: 'subnet',    label: 'Register (daily attempts per subnet)' },
+  // Verify-first registration: code submissions and resends per address. The
+  // per-pending-registration attempt cap (SIGNUP.MAX_CODE_ATTEMPTS) lives in the
+  // database; these bound one source across many pending ids.
+  registerComplete: { keyPrefix: 'rl:regdone', points: 30, duration: 900, blockDuration: 0, keyType: 'ip',     label: 'Register: submit code (per IP)' },
+  registerResend:   { keyPrefix: 'rl:regrsnd', points: 10, duration: 900, blockDuration: 0, keyType: 'ip',     label: 'Register: resend code (per IP)' },
   // Challenge minting is stateless (HMAC) so it is cheap to serve, but a
   // limit keeps a hostile client from turning the endpoint into a hash-mint
   // treadmill. Generous: a legit flow needs exactly one per registration.
@@ -835,6 +840,8 @@ export const rateLimitDmOpen = createMiddleware('dmOpen', byUserId);
 export const rateLimitAttachmentRead = createMiddleware('attachmentRead', byIp);
 export const rateLimitRegisterAttempt = createMiddleware('registerAttempt', byIp);
 export const rateLimitRegisterAttemptSubnet = createMiddleware('registerAttemptSubnet', bySubnet);
+export const rateLimitRegisterComplete = createMiddleware('registerComplete', byIp);
+export const rateLimitRegisterResend = createMiddleware('registerResend', byIp);
 export const rateLimitPowChallenge = createMiddleware('powChallenge', byIp);
 export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
 export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);

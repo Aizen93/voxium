@@ -18,6 +18,7 @@ import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
 import { logAuditEvent } from './auditLog';
 import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
+import { purgeExpiredSignupState } from '../services/signupService';
 import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -176,6 +177,20 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
   const { count: deletedIpRecords } = dryRun
     ? { count: await prisma.ipRecord.count({ where: { lastSeenAt: { lt: ipCutoff } } }) }
     : await prisma.ipRecord.deleteMany({ where: { lastSeenAt: { lt: ipCutoff } } });
+
+  // Verify-first sign-up state past its life: inert already (every check reads
+  // the timestamps), purged so the tables stay small. Its own try: a failure
+  // here must not hide the sweep's result.
+  if (!dryRun) {
+    try {
+      const purged = await purgeExpiredSignupState();
+      if (purged.pending || purged.ledger) {
+        console.log(`[RegHygiene] Purged ${purged.pending} expired pending registration(s) and ${purged.ledger} sign-up mail ledger row(s)`);
+      }
+    } catch (err) {
+      console.error('[RegHygiene] Sign-up state purge failed:', err instanceof Error ? err.message : err);
+    }
+  }
 
   return { deletedUsers, deletedIpRecords, deletedAvatars, dryRun };
 }

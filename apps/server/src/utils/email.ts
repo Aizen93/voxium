@@ -169,6 +169,48 @@ function blockFooterHtml(blockUrl: string): string {
   return `<p style="font-size: 12px; color: #999; margin-top: 24px; border-top: 1px solid #eee; padding-top: 12px;">${MAIL_BLOCK_PROMPT}: <a href="${blockUrl}" style="color: #666;">block this address</a></p>`;
 }
 
+/**
+ * The 6-digit code that completes a sign-up (verify-first registration). A code,
+ * never a link: mail security gateways open every link in incoming mail to scan
+ * it, and a link that completed anything on load would complete it for them.
+ */
+export async function sendSignupCodeEmail(to: string, code: string, minutes: number): Promise<void> {
+  await sendUserMail(to, (blockUrl) => ({
+    subject: `${code} is your Voxium sign-up code`,
+    text: `Your Voxium sign-up code is ${code}\n\nType it in the Voxium window where you are creating your account. It expires in ${minutes} minutes.\n\nIf you did not try to create a Voxium account, ignore this email: no account exists for this address, and nothing happens without the code.\n\n${blockFooterText(blockUrl)}`,
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+        <h2 style="color: #5865f2;">Your Voxium sign-up code</h2>
+        <p style="font-size: 32px; font-weight: 700; letter-spacing: 8px; margin: 16px 0;">${code}</p>
+        <p>Type it in the Voxium window where you are creating your account. It expires in ${minutes} minutes.</p>
+        <p style="font-size: 13px; color: #666;">If you did not try to create a Voxium account, ignore this email: no account exists for this address, and nothing happens without the code.</p>
+        ${blockFooterHtml(blockUrl)}
+      </div>
+    `,
+  }));
+}
+
+/**
+ * Sent instead of a code when the address already has a verified account: the
+ * person may have forgotten it. The API answers the same either way.
+ */
+export async function sendSignupExistingAccountEmail(to: string): Promise<void> {
+  const clientUrl = process.env.CLIENT_URL || 'http://localhost:8080';
+  await sendUserMail(to, (blockUrl) => ({
+    subject: 'Someone tried to create a Voxium account with your address',
+    text: `Someone tried to create a new Voxium account with this address, which already has one.\n\nIf it was you, sign in instead (${clientUrl}/login), or reset your password from the sign-in page if you forgot it.\n\nIf it was not you, ignore this email: nothing changed on your account.\n\n${blockFooterText(blockUrl)}`,
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+        <h2 style="color: #5865f2;">You already have a Voxium account</h2>
+        <p>Someone tried to create a new Voxium account with this address, which already has one.</p>
+        <p>If it was you, <a href="${clientUrl}/login">sign in</a> instead, or reset your password from the sign-in page if you forgot it.</p>
+        <p style="font-size: 13px; color: #666;">If it was not you, ignore this email: nothing changed on your account.</p>
+        ${blockFooterHtml(blockUrl)}
+      </div>
+    `,
+  }));
+}
+
 export async function sendVerificationEmail(to: string, token: string): Promise<void> {
   const clientUrl = process.env.CLIENT_URL || 'http://localhost:8080';
   const verifyUrl = `${clientUrl}/verify-email/${token}`;

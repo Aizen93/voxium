@@ -5,13 +5,12 @@ import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
 import type { UserRole, RegistrationConsent } from '@voxium/shared';
-import { AppError, BadRequestError, ConflictError, ForbiddenError, TooManyRequestsError, UnauthorizedError } from '../utils/errors';
-import { validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain, emailDomain, isCommonEmailProvider, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
+import { AppError, BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
+import { validateEmail, validatePassword, canonicalizeEmail, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError, MailSuppressedError } from '../utils/email';
 import { isMailSuppressed } from '../utils/mailSuppression';
-import { sanitizeText } from '../utils/sanitize';
 import { isJwtVerifyError } from '../utils/jwtErrors';
-import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
+import { consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
 import { consentIsRequired } from '../middleware/auth';
 import { verifyTOTP } from './totpService';
 import { deleteUserAccount } from '../utils/accountDeletion';
@@ -52,179 +51,10 @@ async function getTimingEqualizerHash(): Promise<string> {
   return timingEqualizerHash;
 }
 
-export async function registerUser(
-  username: string,
-  email: string,
-  password: string,
-  displayName?: string,
-  rawIp?: string,
-  consent?: RegistrationConsent,
-) {
-  // The route validates the flags and answers 400; this is the service's own
-  // guard so no other caller can mint an account without recorded consent.
-  if (!consent || consent.acceptTerms !== true || consent.acceptPrivacy !== true) {
-    throw new BadRequestError('You must accept the Terms of Service and the Privacy Policy');
-  }
-  const consentedAt = new Date();
-
-  email = email.toLowerCase().trim();
-
-  // Same normalization the limiters use — ban matching, attribution and the
-  // daily/subnet budgets all have to agree on one spelling of the address, or
-  // the gate reads a key the consume never writes and silently stops applying.
-  const ip = rawIp ? normalizeIp(rawIp) : undefined;
-
-  const usernameErr = validateUsername(username);
-  if (usernameErr) throw new BadRequestError(usernameErr);
-
-  const emailErr = validateEmail(email);
-  if (emailErr) throw new BadRequestError(emailErr);
-
-  const passwordErr = validatePassword(password);
-  if (passwordErr) throw new BadRequestError(passwordErr);
-
-  // A banned IP must not mint fresh accounts — registration was the one auth
-  // surface IpBan did not cover (login checks it; sockets carry a JWT).
-  // Same message as the login path: an attacker learns nothing new here.
-  if (ip) {
-    const ipBan = await prisma.ipBan.findUnique({ where: { ip } });
-    if (ipBan) throw new ForbiddenError(ipBan.reason ? `Account banned: ${ipBan.reason}` : 'Your account has been banned');
-  }
-
-  // Disposable providers get the SAME generic conflict error as a duplicate:
-  // a distinct "domain blocked" message would hand bots an oracle for probing
-  // which domains pass.
-  if (isDisposableEmailDomain(email)) {
-    throw new ConflictError('Username or email already in use');
-  }
-
-  // Duplicate detection runs on the CANONICAL form: gmail ignores dots and
-  // +tags, so without this one inbox mints unlimited "unique" addresses
-  // (the dotted-gmail bot vector). The address of record stays as typed.
-  const emailCanonical = canonicalizeEmail(email);
-
-  // Username check is case-INSENSITIVE: lookups elsewhere (friend requests,
-  // member search) match insensitively, so allowing "Alice" alongside "alice"
-  // at signup would route the other account's requests to an impersonator.
-  const existing = await prisma.user.findFirst({
-    where: {
-      OR: [
-        { username: { equals: username, mode: 'insensitive' } },
-        { email },
-        { emailCanonical },
-      ],
-    },
-  });
-
-  if (existing) {
-    throw new ConflictError('Username or email already in use');
-  }
-
-  // NOVEL-DOMAIN daily cap: a $10 catch-all domain gives an attacker
-  // unlimited verifiable inboxes, which defeats both the disposable blocklist
-  // and the unverified-account TTL. Big consumer providers are exempt (gmail
-  // legitimately signs up unbounded users/day). Checked BEFORE create and
-  // counted only AFTER a successful create — a middleware-style blind consume
-  // would let an attacker burn a small company's domain budget with garbage
-  // attempts and lock its real employees out for the day.
-  const domain = emailDomain(email);
-  const domainCapped = !isCommonEmailProvider(domain);
-  if (domainCapped && (await getDomainRegistrationCount(domain)) >= domainRegistrationCap()) {
-    throw new TooManyRequestsError('Too many registrations from this email domain today — try again later');
-  }
-
-  const hashedPassword = await bcrypt.hash(password, 12);
-
-  // Generate email verification token
-  const rawVerifyToken = crypto.randomBytes(32).toString('hex');
-  const hashedVerifyToken = crypto.createHash('sha256').update(rawVerifyToken).digest('hex');
-
-  // The findFirst above is a FRIENDLY pre-check, not the enforcement — two
-  // concurrent signups both see it empty. The DB's unique indexes are what
-  // actually hold (username case-insensitively, email, emailCanonical), and
-  // their P2002 has to surface as the SAME generic conflict the pre-check
-  // raises: letting it escape turned an ordinary duplicate into a 500 and
-  // wrote the violated constraint's name into the logs.
-  let user;
-  try {
-    user = await prisma.user.create({
-      data: {
-        username,
-        email,
-        emailCanonical,
-        displayName: sanitizeText(displayName) || username,
-        password: hashedPassword,
-        emailVerificationToken: hashedVerifyToken,
-        emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-        termsAcceptedAt: consentedAt,
-        privacyAcceptedAt: consentedAt,
-      },
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        email: true,
-        avatarUrl: true,
-        bio: true,
-        status: true,
-        role: true,
-        totpEnabled: true,
-        emailVerified: true,
-        isSupporter: true, supporterTier: true,
-        tokenVersion: true,
-        createdAt: true,
-        ...CONSENT_SELECT,
-      },
-    });
-  } catch (err) {
-    if ((err as { code?: string })?.code === 'P2002') {
-      throw new ConflictError('Username or email already in use');
-    }
-    throw err;
-  }
-
-  // Count the successful create against the domain budget (see the check
-  // above for why this is post-create, not a blind pre-consume). The per-IP
-  // and per-subnet budgets are charged atomically in the route middleware and
-  // refunded on any non-2xx — see `chargeRegistrationBudgets`.
-  if (domainCapped) await countDomainRegistration(domain);
-
-  // The REGISTRATION IP is the forensic anchor for abuse attribution — the
-  // one sighting that was previously never recorded. kind is set at create
-  // and never overwritten by later logins from the same address.
-  if (ip) {
-    const geo = geoip.lookup(ip);
-    const countryNames = new Intl.DisplayNames(['en'], { type: 'region' });
-    const geoFields = geo ? {
-      countryCode: geo.country || null,
-      country: (geo.country && countryNames.of(geo.country)) || geo.country || null,
-    } : {};
-    await prisma.ipRecord.create({
-      data: { userId: user.id, ip, kind: 'register', ...geoFields },
-    }).catch((err) => console.warn('[Auth] Registration IP record failed:', err));
-  }
-
-  // Send verification email (fire-and-forget). A mailbox on the suppression
-  // list is not a failure: its owner asked for exactly this, and the response
-  // does not change (the account exists; a resend explains, see below).
-  sendVerificationEmail(user.email, rawVerifyToken).catch((err) => {
-    if (err instanceof MailSuppressedError) {
-      console.warn('[Auth] Verification mail skipped: the mailbox blocked Voxium mail');
-      return;
-    }
-    console.error('[Auth] Failed to send verification email:', describeEmailError(err));
-  });
-
-  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
-  const { tokenVersion: _, ...safeUser } = user;
-
-  return { user: withConsentFlag(safeUser), ...tokens };
-}
-
 export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string, trustedDeviceToken?: string) {
   email = email.toLowerCase().trim();
 
-  // The SAME normalization registerUser and every limiter use. This was the
+  // The SAME normalization startRegistration and every limiter use. This was the
   // last private copy of the `::ffff:` strip: case-sensitive, blind to zone ids
   // and to the hex IPv4-mapped form, so `::FFFF:1.2.3.4` reached ipBan as an
   // IPv6 string that no ban row is ever written as. Two keyed controls that
