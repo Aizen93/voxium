@@ -12,7 +12,7 @@
  */
 
 import axios from 'axios';
-import { solveRegistrationPow } from '../packages/shared/src/pow';
+import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { Chrome111 } from 'mediasoup-client/handlers/Chrome111';
@@ -303,10 +303,9 @@ async function run() {
         batch.push(
           (async () => {
             try {
-              // Proof-of-work + consent, the same path a browser takes
-              const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
-              const pow = await solveRegistrationPow(chal.data);
-              await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow, acceptTerms: true, acceptPrivacy: true });
+              // Proof-of-work + consent, the same path a browser takes, then
+              // the known code set in the DB (verify-first registration)
+              await registerTestUser(API, { username, email, password: PASSWORD });
             } catch { /* exists */ }
             const { token } = await login(email);
             try {
@@ -329,6 +328,7 @@ async function run() {
     }
   }
   console.log(`  ${created} users registered                `);
+  await closeRegisterTestUserDb();
 
   // Step 4: Connect sockets and join voice (batched to limit wrtc pressure)
   console.log(`\n[4/6] Joining voice channels with full media (batch size ${MEDIA_BATCH})...`);

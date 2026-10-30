@@ -12,7 +12,7 @@
  */
 
 import axios from 'axios';
-import { solveRegistrationPow } from '../packages/shared/src/pow';
+import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { Chrome111 } from 'mediasoup-client/handlers/Chrome111';
@@ -302,9 +302,8 @@ async function run() {
         batch.push(
           (async () => {
             try {
-              const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
-              const pow = await solveRegistrationPow(chal.data);
-              await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow, acceptTerms: true, acceptPrivacy: true });
+              // Verify-first: start, known code set in the DB, complete
+              await registerTestUser(API, { username, email, password: PASSWORD });
             } catch { /* exists */ }
             const { token } = await login(email);
             try {
@@ -322,6 +321,7 @@ async function run() {
     }
   }
   console.log(`  ${created} users ready                `);
+  await closeRegisterTestUserDb();
 
   // Step 5
   console.log(`\n[5/5] Joining voice channels with full media...`);
