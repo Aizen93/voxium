@@ -415,6 +415,61 @@ describe('User Routes', () => {
       errorSpy.mockRestore();
     });
 
+    it('deletes the adopted copy when the profile update fails, keeping the old avatar', async () => {
+      const { deleteFromS3 } = await import('../../utils/s3');
+      mockAuthAndCurrentAvatar('avatars/user-1-old.webp');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.user.update.mockRejectedValueOnce(new Error('db down'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(500);
+      expect(deleteFromS3).toHaveBeenCalledTimes(1);
+      expect(deleteFromS3).toHaveBeenCalledWith(ADOPTED_AVATAR);
+      expect(deleteFromS3).not.toHaveBeenCalledWith('avatars/user-1-old.webp');
+      errorSpy.mockRestore();
+    });
+
+    it('still answers the update failure when deleting the adopted copy fails (logged)', async () => {
+      const { deleteFromS3 } = await import('../../utils/s3');
+      mockAuthAndCurrentAvatar(null);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.user.update.mockRejectedValueOnce(new Error('db down'));
+      vi.mocked(deleteFromS3).mockRejectedValueOnce(new Error('denied'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(500);
+      await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to delete unreferenced avatar copy'), 'denied',
+      ));
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it('deletes nothing when an update without a new avatar fails', async () => {
+      const { deleteFromS3 } = await import('../../utils/s3');
+      mockAuthAndCurrentAvatar('avatars/user-1-1234567890.webp');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.user.update.mockRejectedValueOnce(new Error('db down'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(500);
+      expect(deleteFromS3).not.toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
     it('does not re-read (nor ever delete) the avatar the profile already points at', async () => {
       mockAuthAndCurrentAvatar('avatars/user-1-1234567890.webp');
       prismaMock.user.update.mockResolvedValue({

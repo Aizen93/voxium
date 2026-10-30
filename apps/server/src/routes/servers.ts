@@ -598,6 +598,7 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
       updateData.name = name;
     }
 
+    let adoptedIconKey: string | null = null;
     if (req.body.iconUrl !== undefined) {
       let { iconUrl } = req.body;
       if (iconUrl !== null) {
@@ -612,7 +613,7 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
         // which the client can still overwrite until its presigned URL
         // expires. The current key was adopted when it was set.
         if (iconUrl !== server.iconUrl) {
-          iconUrl = await adoptImageAssetUpload(iconUrl, `server-icons/${serverId}-`, LIMITS.MAX_SERVER_ICON_SIZE, 'Invalid icon key');
+          iconUrl = adoptedIconKey = await adoptImageAssetUpload(iconUrl, `server-icons/${serverId}-`, LIMITS.MAX_SERVER_ICON_SIZE, 'Invalid icon key');
         }
       }
       updateData.iconUrl = iconUrl;
@@ -624,11 +625,21 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
 
     const oldIconUrl = server.iconUrl;
 
-    const updated = await prisma.server.update({
-      where: { id: serverId },
-      select: serverSelect,
-      data: updateData,
-    });
+    let updated;
+    try {
+      updated = await prisma.server.update({
+        where: { id: serverId },
+        select: serverSelect,
+        data: updateData,
+      });
+    } catch (err) {
+      // The space never stored the adopted copy: nothing else will reference it
+      if (adoptedIconKey) {
+        const key = adoptedIconKey;
+        deleteFromS3(key).catch((delErr) => console.warn(`[S3] Failed to delete unreferenced icon copy ${key}:`, delErr instanceof Error ? delErr.message : delErr));
+      }
+      throw err;
+    }
 
     // Delete old icon from S3 after DB update confirmed
     if (updateData.iconUrl !== undefined && oldIconUrl && oldIconUrl !== updateData.iconUrl) {

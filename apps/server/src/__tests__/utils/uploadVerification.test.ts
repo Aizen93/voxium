@@ -333,6 +333,29 @@ describe('adoptImageAssetUpload', () => {
     expect(s3.deleteFromS3).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['the size read', () => s3.headS3Object.mockRejectedValue(new Error('timeout'))],
+    ['the header read', () => {
+      s3.headS3Object.mockResolvedValue({ size: 20_000, contentType: 'image/webp' });
+      s3.getS3ObjectRange.mockRejectedValue(new Error('timeout'));
+    }],
+  ])('deletes the copy and rethrows when the store fails during %s', async (_label, arrange) => {
+    arrange();
+
+    await expect(adopt()).rejects.toThrow('timeout');
+    // Fails closed: the store error, never a 400 nor an adopted key
+    expectBothDeleted();
+    expect(s3.deleteFromS3).toHaveBeenCalledTimes(2);
+  });
+
+  it('still rethrows the store error when deleting the interrupted copy fails too (logged)', async () => {
+    s3.headS3Object.mockRejectedValue(new Error('timeout'));
+    s3.deleteFromS3.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('denied'));
+
+    await expect(adopt()).rejects.toThrow('timeout');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to delete refused object'), 'denied');
+  });
+
   it('still adopts when deleting the original upload fails (logged)', async () => {
     s3.headS3Object.mockResolvedValue({ size: 20_000, contentType: 'image/webp' });
     s3.getS3ObjectRange.mockResolvedValue(webpHeader(256, 256));

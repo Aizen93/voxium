@@ -86,28 +86,40 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
     // server-side copy (size cap, image header), never the uploaded key, which
     // the client can still overwrite until its presigned URL expires. The
     // current key was adopted when it was set, and is never re-read here.
+    let adoptedAvatarKey: string | null = null;
     if (typeof avatarUrl === 'string' && avatarUrl !== oldAvatarUrl) {
-      avatarUrl = await adoptImageAssetUpload(avatarUrl, `avatars/${req.user!.userId}-`, LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key');
+      adoptedAvatarKey = await adoptImageAssetUpload(avatarUrl, `avatars/${req.user!.userId}-`, LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key');
+      avatarUrl = adoptedAvatarKey;
     }
 
-    const updated = await prisma.user.update({
-      where: { id: req.user!.userId },
-      data: {
-        ...(displayName !== undefined && { displayName }),
-        ...(bio !== undefined && { bio }),
-        ...(avatarUrl !== undefined && { avatarUrl }),
-      },
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        email: true,
-        avatarUrl: true,
-        bio: true,
-        status: true,
-        createdAt: true,
-      },
-    });
+    let updated;
+    try {
+      updated = await prisma.user.update({
+        where: { id: req.user!.userId },
+        data: {
+          ...(displayName !== undefined && { displayName }),
+          ...(bio !== undefined && { bio }),
+          ...(avatarUrl !== undefined && { avatarUrl }),
+        },
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+          email: true,
+          avatarUrl: true,
+          bio: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+    } catch (err) {
+      // The profile never stored the adopted copy: nothing else will reference it
+      if (adoptedAvatarKey) {
+        const key = adoptedAvatarKey;
+        deleteFromS3(key).catch((delErr) => console.warn(`[S3] Failed to delete unreferenced avatar copy ${key}:`, delErr instanceof Error ? delErr.message : delErr));
+      }
+      throw err;
+    }
 
     // Delete old avatar from S3 after DB update confirmed
     if (avatarUrl !== undefined && oldAvatarUrl && oldAvatarUrl !== avatarUrl) {

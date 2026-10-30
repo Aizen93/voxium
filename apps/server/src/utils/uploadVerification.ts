@@ -75,6 +75,28 @@ function isPng(buf: Buffer): boolean {
 }
 
 /**
+ * The size and header checks of an adopted copy: the reason it is refused, or
+ * null when it passes. S3 failures other than "no such object" are rethrown.
+ */
+async function checkAdoptedImage(key: string, maxSize: number): Promise<string | null> {
+  const head = await headS3Object(key);
+  if (!head || head.size <= 0 || head.size > maxSize) {
+    return `stored size ${head?.size ?? 'missing'}, cap ${maxSize}`;
+  }
+
+  const header = await getS3ObjectRange(key, 0, IMAGE_HEADER_PROBE_BYTES - 1);
+  const dims = header && (isWebp(header) || isPng(header)) ? imageDimensions(header) : null;
+  if (
+    !dims
+    || dims.width < 1 || dims.height < 1
+    || dims.width > LIMITS.MAX_IMAGE_ASSET_EDGE || dims.height > LIMITS.MAX_IMAGE_ASSET_EDGE
+  ) {
+    return dims ? `dimensions ${dims.width}x${dims.height}` : 'not a WebP/PNG image';
+  }
+  return null;
+}
+
+/**
  * Adopt an uploaded avatar or space icon before a profile/space row points at
  * it, and return the key the row must store.
  *
@@ -85,8 +107,10 @@ function isPng(buf: Buffer): boolean {
  * served. The copy must weigh at most `maxSize` bytes and start with a WebP
  * header (or a PNG one: a webview without a WebP encoder hands the client a PNG
  * for `image/webp`) whose dimensions are at most `LIMITS.MAX_IMAGE_ASSET_EDGE`.
- * The uploaded key is deleted either way; a refused copy too. Refuses with
- * `errorMessage` (400).
+ * The uploaded key is deleted either way; a refused copy too, and so is a copy
+ * whose check a store error interrupted (the error is rethrown). Refuses with
+ * `errorMessage` (400). A caller whose row write then fails deletes the
+ * returned key itself.
  */
 export async function adoptImageAssetUpload(
   uploadedKey: string,
@@ -102,20 +126,16 @@ export async function adoptImageAssetUpload(
     console.warn(`[Uploads] Failed to delete the uploaded original ${uploadedKey}:`, err instanceof Error ? err.message : err);
   });
 
-  const head = await headS3Object(adoptedKey);
-  if (!head || head.size <= 0 || head.size > maxSize) {
-    await discardUpload(adoptedKey, `stored size ${head?.size ?? 'missing'}, cap ${maxSize}`);
-    throw new BadRequestError(errorMessage);
+  let refusal: string | null;
+  try {
+    refusal = await checkAdoptedImage(adoptedKey, maxSize);
+  } catch (err) {
+    // A store error mid-check: nothing references the copy, so it goes before the error does
+    await discardUpload(adoptedKey, 'the check could not complete');
+    throw err;
   }
-
-  const header = await getS3ObjectRange(adoptedKey, 0, IMAGE_HEADER_PROBE_BYTES - 1);
-  const dims = header && (isWebp(header) || isPng(header)) ? imageDimensions(header) : null;
-  if (
-    !dims
-    || dims.width < 1 || dims.height < 1
-    || dims.width > LIMITS.MAX_IMAGE_ASSET_EDGE || dims.height > LIMITS.MAX_IMAGE_ASSET_EDGE
-  ) {
-    await discardUpload(adoptedKey, dims ? `dimensions ${dims.width}x${dims.height}` : 'not a WebP/PNG image');
+  if (refusal) {
+    await discardUpload(adoptedKey, refusal);
     throw new BadRequestError(errorMessage);
   }
   return adoptedKey;
