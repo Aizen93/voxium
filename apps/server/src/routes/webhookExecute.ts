@@ -37,12 +37,12 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
  *                  → GitHub only: open the sealed secret
  *                  → generic only: per-webhook limiter (the URL is the
  *                    whole credential)
- *                  → GitHub only: one point of each unverified-delivery
- *                    bucket (per webhook and address, per address),
- *                    consumed atomically; 429 when one is spent
+ *                  → GitHub only: unverified-delivery budget (per webhook
+ *                    and network, per network; not for GitHub's published
+ *                    hook ranges); 429 when spent
  *                  → body parser (GitHub only: the signature over the raw
  *                    bytes, checked BEFORE they are parsed; a match gives
- *                    those points back when the response finishes)
+ *                    the budget back)
  *                  → GitHub only: per-webhook limiter, once the signature
  *                    matched
  *                  → render + insert + broadcast
@@ -77,15 +77,10 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
  *   parser, those kept the point (a refund on the 401 alone could not reach
  *   them), and anyone holding the URL could hold the bucket full: GitHub's
  *   real deliveries would then get 429s, which GitHub does not redeliver.
- *   A sender without the secret is instead bounded by the unverified-delivery
- *   buckets: webhookSigFail, keyed on the webhook AND the sender's address,
- *   and webhookSigFailIp, on the address alone (one address spreading its
- *   failures over many webhooks). Both are consumed atomically before the
- *   body is read, so they count the deliveries in flight as well as the
- *   failed ones, and are given back only once the signature matched; once
- *   one is spent, that address's next deliveries answer 429 before their
- *   body is read or hashed, while every other address (GitHub's) keeps
- *   delivering. (A request without any body
+ *   Unverified deliveries are budgeted per sender network instead
+ *   (rateLimitWebhookSignature: webhookSigFail and webhookSigFailIp, taken
+ *   before the body is read, given back once the signature matched; GitHub's
+ *   published hook ranges are exempt). (A request without any body
  *   is a 415 before the token check; a body the parser does not read, being
  *   consumed upstream, never meets the hook, so the request fails closed
  *   with the same 401, uncharged.)
@@ -212,9 +207,8 @@ function openGitHubSecret(row: CredentialRow): string {
  * thrown error on as the same instance (http-errors keeps it and its 401
  * status), and the error handler answers it in the house shape. Nothing has
  * been charged to the per-webhook bucket yet (see the route), so there is
- * nothing to give back. A match is flagged on res.locals (signatureVerified):
- * the unverified-delivery points charged before the parser are given back
- * on it when the response finishes.
+ * nothing to give back. A match is flagged on res.locals (signatureVerified),
+ * which gives the unverified-delivery budget back.
  */
 function verifyRawBody(req: IncomingMessage, res: ServerResponse, buf: Buffer): void {
   const request = req as Request;
@@ -251,14 +245,10 @@ function signatureVerifiedOn(res: Response): boolean {
 }
 
 /**
- * GitHub rows only, BEFORE the body parser: one point of each
- * unverified-delivery bucket (per webhook AND address, then per address) is
- * consumed atomically, so every delivery in flight holds one before a byte
- * of its body is read; a spent bucket answers the standard 429 there. The
- * points come back once the signature matched; a wrong or missing
- * signature, an oversized or aborted body keep them, charged to that
- * sender's address only, so deliveries from any other address (GitHub's
- * own) still pass.
+ * GitHub rows only, BEFORE the body parser: the unverified-delivery budget
+ * (rateLimitWebhookSignature; per webhook and network, then per network,
+ * GitHub's published hook ranges exempt). A spent budget is the standard
+ * 429; the points come back once the signature matched.
  */
 function chargeUnverifiedDelivery(req: Request, res: Response, next: NextFunction): void | Promise<void> {
   if (localsOf(res).webhook?.type !== 'github') {
@@ -495,10 +485,8 @@ webhookExecuteRouter.post(
   // body is read (its URL is its whole credential, so whoever holds it may
   // spend its budget)
   chargeWebhookBeforeBody,
-  // A GitHub row holds one point of each unverified-delivery bucket (per
-  // webhook AND address, per address) from HERE, before its body is read,
-  // given back only once its signature matched: a spent bucket is a 429
-  // before the body (other senders' deliveries still pass)
+  // A GitHub row takes the unverified-delivery budget HERE, before its body
+  // is read, given back once its signature matched (a spent budget is a 429)
   chargeUnverifiedDelivery,
   // A body is read and parsed only for a valid token, and a GitHub body only
   // once its signature matched the raw bytes (the verify hook runs between
