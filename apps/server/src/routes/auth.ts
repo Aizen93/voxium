@@ -7,6 +7,7 @@ import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSu
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
+import { revokeUserSessions } from '../utils/sessionRevocation';
 
 export const authRouter = Router();
 
@@ -209,7 +210,9 @@ authRouter.post('/reset-password', rateLimitResetPassword, async (req: Request, 
       res.status(400).json({ success: false, error: 'Password is required' });
       return;
     }
-    await resetPassword(token.toLowerCase(), password);
+    const { userId } = await resetPassword(token.toLowerCase(), password);
+    // The reset invalidated every token; no live socket may outlive them
+    revokeUserSessions(userId);
     res.json({ success: true, message: 'Password has been reset successfully.' });
   } catch (err) {
     next(err);
@@ -228,6 +231,9 @@ authRouter.post('/change-password', authenticate, rateLimitChangePassword, async
       return;
     }
     const tokens = await changePassword(req.user!.userId, currentPassword, newPassword, rememberMe ?? true);
+    // Every socket opened with the old tokens goes, the caller's included:
+    // its client reopens with the fresh pair this response carries
+    revokeUserSessions(req.user!.userId);
     res.json({ success: true, message: 'Password changed successfully.', data: tokens });
   } catch (err) {
     next(err);

@@ -54,11 +54,16 @@ vi.mock('../../utils/prisma', () => ({
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) }));
+const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockDisconnectSockets = vi.fn();
+const mockLocalDisconnectSockets = vi.fn();
+const mockIn = vi.fn(() => ({ fetchSockets: mockFetchSockets, disconnectSockets: mockDisconnectSockets }));
+const mockLocalIn = vi.fn(() => ({ disconnectSockets: mockLocalDisconnectSockets }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
     in: mockIn,
+    local: { in: mockLocalIn },
   })),
 }));
 
@@ -220,6 +225,15 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     // ...and their pending join requests are withdrawn, the moderators told
     expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
     expect(mockEmitToModerators).toHaveBeenCalledWith('s3', 'server:join_request_resolved', { serverId: 's3', userId: 'target-1', outcome: 'cancelled' });
+    // ...and signed out everywhere through the shared revocation helper:
+    // room-filtered disconnects, never a per-socket walk
+    expect(mockTo).toHaveBeenCalledWith('user:target-1');
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(mockLocalIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockFetchSockets).not.toHaveBeenCalled();
   });
 
   it('resolving WITHOUT a ban leaves the directory alone', async () => {

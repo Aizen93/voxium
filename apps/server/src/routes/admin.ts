@@ -6,6 +6,7 @@ import { rateLimitAdmin, normalizeIp } from '../middleware/rateLimiter';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { prisma } from '../utils/prisma';
 import { deleteUserAccount } from '../utils/accountDeletion';
+import { revokeUserSessions, leaveStaffRooms } from '../utils/sessionRevocation';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
@@ -34,11 +35,8 @@ export const adminRouter = Router();
 adminRouter.use(authenticate, requireAdmin, rateLimitAdmin);
 
 /** Force-logout and disconnect a user across all nodes. */
-async function forceLogoutUser(userId: string, reason: string): Promise<void> {
-  const io = getIO();
-  io.to(`user:${userId}`).emit('force:logout', { reason });
-  const sockets = await io.in(`user:${userId}`).fetchSockets();
-  for (const s of sockets) s.disconnect(true);
+function forceLogoutUser(userId: string, reason: string): void {
+  revokeUserSessions(userId, { forceLogoutReason: reason });
 }
 
 /** Remove all sockets from a server room across all nodes. */
@@ -478,7 +476,7 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
     }
 
     // Force logout then disconnect active socket (works across all nodes)
-    await forceLogoutUser(targetId, 'Your account has been banned');
+    forceLogoutUser(targetId, 'Your account has been banned');
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -795,6 +793,12 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
       where: { id: targetId },
       data: { role },
     });
+
+    // The staff rooms carry other users' support messages and the report
+    // queue: a demoted account's open sockets leave them now (on every
+    // node), and the subscribe handlers read the role from the database, so
+    // they cannot rejoin. Harmless on a promotion.
+    leaveStaffRooms(targetId);
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -2664,7 +2668,7 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       }
 
       // Force logout then disconnect active sockets (works across all nodes)
-      await forceLogoutUser(banTarget.id, 'Your account has been banned');
+      forceLogoutUser(banTarget.id, 'Your account has been banned');
 
       logAuditEvent({
         actorId: req.user!.userId,

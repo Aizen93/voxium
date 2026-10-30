@@ -476,7 +476,8 @@ export async function requestPasswordReset(email: string) {
   })();
 }
 
-export async function resetPassword(token: string, newPassword: string) {
+/** Returns the id of the account whose password was reset. */
+export async function resetPassword(token: string, newPassword: string): Promise<{ userId: string }> {
   if (!token) throw new BadRequestError('Reset token is required');
 
   const passwordErr = validatePassword(newPassword);
@@ -510,6 +511,7 @@ export async function resetPassword(token: string, newPassword: string) {
       tokenVersion: { increment: 1 },
     },
   });
+  return { userId: user.id };
 }
 
 export async function changePassword(userId: string, currentPassword: string, newPassword: string, rememberMe = true) {

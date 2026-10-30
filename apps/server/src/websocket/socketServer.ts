@@ -9,6 +9,7 @@ import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, replayVoiceState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { handleAnnotationEvents } from './annotationHandler';
+import { registerAdminSubscriptionHandlers } from './adminSubscriptions';
 import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
 import { trustsProxy, forwardedClientAddress } from '../utils/trustProxy';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
@@ -83,10 +84,10 @@ export function initSocketServer(httpServer: HttpServer) {
       // Reject non-access tokens (e.g. trusted-device, totp-verify)
       if (payload.purpose) return next(new Error('Invalid token type'));
 
-      // Check account ban, token version, and current role
+      // Check account ban, token version, verification and consent
       const user = await prisma.user.findUnique({
         where: { id: payload.userId },
-        select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
+        select: { bannedAt: true, tokenVersion: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
       });
       if (!user) return next(new Error('User not found'));
       if (user.bannedAt) return next(new Error('Account banned'));
@@ -105,7 +106,8 @@ export function initSocketServer(httpServer: HttpServer) {
 
       socket.data.userId = payload.userId;
       socket.data.username = payload.username;
-      socket.data.role = user.role;
+      // No copy of the role: it would go stale on a role change. The staff
+      // subscriptions read it from the database (adminSubscriptions.ts).
       next();
     } catch (err) {
       if (err instanceof Error && err.message === 'Account banned') {
@@ -279,41 +281,10 @@ export function initSocketServer(httpServer: HttpServer) {
     // against the Redis screen-share mirror (see annotationHandler.ts).
     handleAnnotationEvents(io, socket);
 
-    // ─── Admin metrics subscription ──────────────────────────────────
-    socket.on('admin:subscribe_metrics', () => {
-      if (!socketRateLimit(socket, 'admin:subscribe_metrics', 10)) return;
-      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
-      socket.join('admin:metrics');
-    });
-
-    socket.on('admin:unsubscribe_metrics', () => {
-      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
-      socket.leave('admin:metrics');
-    });
-
-    // ─── Admin reports subscription ──────────────────────────────────
-    socket.on('admin:subscribe_reports', () => {
-      if (!socketRateLimit(socket, 'admin:subscribe_reports', 10)) return;
-      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
-      socket.join('admin:reports');
-    });
-
-    socket.on('admin:unsubscribe_reports', () => {
-      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
-      socket.leave('admin:reports');
-    });
-
-    // ─── Admin support subscription ──────────────────────────────────
-    socket.on('admin:subscribe_support', () => {
-      if (!socketRateLimit(socket, 'admin:subscribe_support', 10)) return;
-      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
-      socket.join('admin:support');
-    });
-
-    socket.on('admin:unsubscribe_support', () => {
-      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
-      socket.leave('admin:support');
-    });
+    // ─── Admin metrics / reports / support subscriptions ─────────────
+    // The role is read from the database on each subscription, never from
+    // the handshake's copy (see adminSubscriptions.ts).
+    registerAdminSubscriptionHandlers(socket);
 
     // ─── Disconnect ─────────────────────────────────────────────────
     socket.on('disconnecting', async () => {

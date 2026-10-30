@@ -60,11 +60,16 @@ vi.mock('../../utils/prisma', () => ({
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) }));
+const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockDisconnectSockets = vi.fn();
+const mockLocalDisconnectSockets = vi.fn();
+const mockIn = vi.fn(() => ({ fetchSockets: mockFetchSockets, disconnectSockets: mockDisconnectSockets }));
+const mockLocalIn = vi.fn(() => ({ disconnectSockets: mockLocalDisconnectSockets }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
     in: mockIn,
+    local: { in: mockLocalIn },
   })),
 }));
 
@@ -233,6 +238,32 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     expect(res.status).toBe(200);
     expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
     expect(mockEmit).not.toHaveBeenCalledWith('webhook:changed', expect.anything());
+  });
+
+  it('signs the banned account out everywhere: force:logout, then a room-filtered disconnect on this node and cluster-wide', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const order: string[] = [];
+    mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+    mockLocalDisconnectSockets.mockImplementation(() => { order.push('disconnect:local'); });
+    mockDisconnectSockets.mockImplementation(() => { order.push('disconnect'); });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(200);
+    expect(mockTo).toHaveBeenCalledWith('user:target-1');
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(mockLocalIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(order.filter((e) => e === 'force:logout' || e.startsWith('disconnect'))).toEqual(['force:logout', 'disconnect:local', 'disconnect']);
+    expect(mockFetchSockets).not.toHaveBeenCalled();
+    mockEmit.mockReset();
+    mockLocalDisconnectSockets.mockReset();
+    mockDisconnectSockets.mockReset();
   });
 
   it('banIps=true bans account + all known IPs in ONE transaction', async () => {

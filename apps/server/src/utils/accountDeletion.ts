@@ -3,7 +3,7 @@ import { purgeE2EMaterial } from './e2ePurge';
 import { purgeSecureChannelStateForAccount } from './secureChannelLifecycle';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { deleteFromS3 } from './s3';
-import { getIO } from '../websocket/socketServer';
+import { revokeUserSessions } from './sessionRevocation';
 import { emitToModerators } from './moderatorAudience';
 import { WS_EVENTS } from '@voxium/shared';
 
@@ -49,12 +49,9 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     await broadcastMemberLeft(userId, serverId);
   }
 
-  // End every live session across the cluster. A room-filtered
-  // disconnectSockets is adapter-wide and does not need a fetch; the
-  // dangerous form is the EMPTY filter (see index.ts shutdown).
-  const io = getIO();
-  io.to(`user:${userId}`).emit('force:logout', { reason: opts.reason });
-  io.in(`user:${userId}`).disconnectSockets(true);
+  // End every live session across the cluster (room-filtered, adapter-wide;
+  // see sessionRevocation.ts).
+  revokeUserSessions(userId, { forceLogoutReason: opts.reason });
 
   // Secure channels: the DB cascade would silently reap the rows, but the
   // members deserve events (created channels vanish from their sidebars,
