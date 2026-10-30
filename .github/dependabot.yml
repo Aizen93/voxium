@@ -9,6 +9,9 @@
 # by hand, all of it at once: the CLI refuses a crate and an @tauri-apps/api of
 # different minors, and CI builds no Rust, so a bot PR that moved one side would
 # pass here and break the release build. Patch updates still come through.
+#
+# Every entry waits three days after a release before proposing it, the same
+# window as minimumReleaseAge in pnpm-workspace.yaml.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -16,6 +19,8 @@ updates:
     target-branch: develop
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     open-pull-requests-limit: 5
     groups:
       production:
@@ -33,6 +38,8 @@ updates:
     target-branch: develop
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     open-pull-requests-limit: 3
     groups:
       desktop-shell:
@@ -46,6 +53,8 @@ updates:
     target-branch: develop
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     groups:
       actions:
         update-types: [minor, patch]

@@ -54,6 +54,19 @@ describe('dependency audit policy', () => {
     expect(targets.length).toBe(ecosystems.length);
   });
 
+  it('dependabot waits the same three days as the install guard before proposing a release', () => {
+    const bot = read('.github/dependabot.yml');
+    const minutes = /^minimumReleaseAge: (\d+)$/m.exec(read('pnpm-workspace.yaml'))?.[1];
+    expect(minutes, 'minimumReleaseAge').toBeDefined();
+    const days = Number(minutes) / (24 * 60);
+    expect(days).toBe(3);
+    for (const name of ['npm', 'cargo', 'github-actions']) {
+      expect(ecosystem(bot, name), name).toContain(`    cooldown:\n      default-days: ${days}\n`);
+    }
+    const ecosystems = bot.match(/package-ecosystem:/g) ?? [];
+    expect(bot.match(/^ {4}cooldown:$/gm) ?? []).toHaveLength(ecosystems.length);
+  });
+
   it('dependabot never proposes a Tauri minor on its own, for the crates or the packages', () => {
     const bot = read('.github/dependabot.yml');
     const ignoreMinor = (dep: string) =>
