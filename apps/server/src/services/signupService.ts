@@ -207,12 +207,21 @@ function logSendFailure(kind: string, err: unknown): void {
 /**
  * A second code for the same pending registration: once, no earlier than
  * RESEND_AFTER_SECONDS after the first, and only while the mailbox's ledger
- * allows it. Answers the same whatever happened.
+ * allows it. Answers the same whatever happened, and BEFORE any of it happens:
+ * the lookup, the claims and the send run after the answer (fire-and-forget,
+ * failures logged), so the answer never depends on the row.
  */
 export async function resendRegistrationCode(pendingId: string): Promise<SignupStartResult> {
   const answer: SignupStartResult = { pendingId, resendAfterSeconds: SIGNUP.RESEND_AFTER_SECONDS };
   if (typeof pendingId !== 'string' || pendingId.length > 64) return answer;
 
+  resendInBackground(pendingId).catch((err) => {
+    console.error('[Signup] Code resend failed:', err instanceof Error ? err.message : err);
+  });
+  return answer;
+}
+
+async function resendInBackground(pendingId: string): Promise<void> {
   const now = Date.now();
   const row = await prisma.pendingRegistration.findUnique({ where: { id: pendingId } });
   if (
@@ -223,9 +232,9 @@ export async function resendRegistrationCode(pendingId: string): Promise<SignupS
     || row.attempts >= SIGNUP.MAX_CODE_ATTEMPTS
     || now - row.lastSentAt.getTime() < SIGNUP.RESEND_AFTER_SECONDS * 1000
   ) {
-    return answer;
+    return;
   }
-  if (await isMailSuppressed(row.email)) return answer;
+  if (await isMailSuppressed(row.email)) return;
 
   // Claim the resend on the row first (conditional update), so two parallel
   // resends cannot both pass the checks above.
@@ -233,8 +242,8 @@ export async function resendRegistrationCode(pendingId: string): Promise<SignupS
     where: { id: pendingId, resends: row.resends, lastSentAt: row.lastSentAt },
     data: { resends: { increment: 1 }, lastSentAt: new Date(now) },
   });
-  if (claimed.count !== 1) return answer;
-  if (!(await claimSignupMailSlot(mailboxDigest(row.email)))) return answer;
+  if (claimed.count !== 1) return;
+  if (!(await claimSignupMailSlot(mailboxDigest(row.email)))) return;
 
   const code = newCode();
   await prisma.pendingRegistration.update({
@@ -242,7 +251,6 @@ export async function resendRegistrationCode(pendingId: string): Promise<SignupS
     data: { codeHash: signupCodeHash(pendingId, code), codeExpiresAt: new Date(now + SIGNUP.CODE_TTL_MINUTES * MINUTE) },
   });
   sendSignupCodeEmail(row.email, code, SIGNUP.CODE_TTL_MINUTES).catch((err) => logSendFailure('code', err));
-  return answer;
 }
 
 /**

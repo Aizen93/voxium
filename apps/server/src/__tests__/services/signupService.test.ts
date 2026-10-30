@@ -546,6 +546,7 @@ describe('resendRegistrationCode', () => {
   ])('answers the same and sends nothing for %s', async (_label, make) => {
     h.prisma.pendingRegistration.findUnique.mockResolvedValueOnce(make());
     await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    await flush();
     expect(prisma.pendingRegistration.findUnique).toHaveBeenCalledWith({ where: { id: ID } });
     nothingHappened();
   });
@@ -554,6 +555,7 @@ describe('resendRegistrationCode', () => {
     h.prisma.pendingRegistration.findUnique.mockResolvedValueOnce(row());
     h.mailSuppressed.mockResolvedValueOnce(true);
     await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    await flush();
     expect(h.mailSuppressed).toHaveBeenCalledWith('new@example.com');
     nothingHappened();
   });
@@ -564,6 +566,7 @@ describe('resendRegistrationCode', () => {
     h.prisma.pendingRegistration.updateMany.mockResolvedValueOnce({ count: 0 });
 
     await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    await flush();
 
     const claim = h.prisma.pendingRegistration.updateMany.mock.calls[0][0];
     expect(claim.where).toEqual({ id: ID, resends: 0, lastSentAt: r.lastSentAt });
@@ -579,6 +582,7 @@ describe('resendRegistrationCode', () => {
     h.prisma.$queryRaw.mockResolvedValueOnce([]);
 
     await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    await flush();
 
     expect(prisma.pendingRegistration.updateMany).toHaveBeenCalledTimes(1);
     expect(ledgerCalls()).toHaveLength(1);
@@ -592,6 +596,7 @@ describe('resendRegistrationCode', () => {
     const before = Date.now();
 
     await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    await flush();
 
     const callOrder = (fn: { mock: { invocationCallOrder: number[] } }) => fn.mock.invocationCallOrder[0];
     expect(callOrder(h.prisma.pendingRegistration.updateMany)).toBeLessThan(callOrder(h.prisma.$queryRaw));
@@ -618,6 +623,56 @@ describe('resendRegistrationCode', () => {
     await flush();
     expect(error).toHaveBeenCalledWith('[Signup] Failed to send the code mail:', 'relay refused');
     error.mockRestore();
+  });
+  it('answers before the lookup does: a lookup that never returns still gets the answer', async () => {
+    h.prisma.pendingRegistration.findUnique.mockReturnValueOnce(new Promise(() => {}));
+    await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    expect(prisma.pendingRegistration.findUnique).toHaveBeenCalledWith({ where: { id: ID } });
+    nothingHappened();
+  });
+
+  it('answers before the claim, the ledger and the code update: they run after it', async () => {
+    h.prisma.pendingRegistration.findUnique.mockResolvedValueOnce(row());
+    let releaseClaim: (v: { count: number }) => void = () => {};
+    h.prisma.pendingRegistration.updateMany.mockReturnValueOnce(new Promise((r) => { releaseClaim = r; }));
+    let releaseUpdate: (v: unknown) => void = () => {};
+    h.prisma.pendingRegistration.update.mockReturnValueOnce(new Promise((r) => { releaseUpdate = r; }));
+
+    await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    // Answered with the claim still pending: no ledger write, no code yet
+    await flush();
+    expect(prisma.pendingRegistration.updateMany).toHaveBeenCalledTimes(1);
+    expect(ledgerCalls()).toHaveLength(0);
+    expect(prisma.pendingRegistration.update).not.toHaveBeenCalled();
+
+    releaseClaim({ count: 1 });
+    await flush();
+    expect(ledgerCalls()).toHaveLength(1);
+    expect(prisma.pendingRegistration.update).toHaveBeenCalledTimes(1);
+    expect(h.sendCode).not.toHaveBeenCalled();
+
+    releaseUpdate({});
+    await flush();
+    expect(h.sendCode).toHaveBeenCalledTimes(1);
+  });
+
+  it('a store failure after the answer is logged without the address, and the answer does not change', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    h.prisma.pendingRegistration.findUnique.mockResolvedValueOnce(row());
+    h.prisma.pendingRegistration.updateMany.mockRejectedValueOnce(new Error('db gone'));
+    await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    await flush();
+    expect(error).toHaveBeenCalledWith('[Signup] Code resend failed:', 'db gone');
+    expect(JSON.stringify(error.mock.calls)).not.toContain('new@example.com');
+    expect(h.sendCode).not.toHaveBeenCalled();
+    error.mockRestore();
+
+    const error2 = vi.spyOn(console, 'error').mockImplementation(() => {});
+    h.prisma.pendingRegistration.findUnique.mockRejectedValueOnce(new Error('lookup failed'));
+    await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
+    await flush();
+    expect(error2).toHaveBeenCalledWith('[Signup] Code resend failed:', 'lookup failed');
+    error2.mockRestore();
   });
 });
 
