@@ -50,7 +50,8 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   }
 
   // End every live session across the cluster (room-filtered, adapter-wide;
-  // see sessionRevocation.ts).
+  // see sessionRevocation.ts). This first pass is for promptness; the one
+  // after the delete commits is the guarantee (below).
   revokeUserSessions(userId, { forceLogoutReason: opts.reason });
 
   // Secure channels: the DB cascade would silently reap the rows, but the
@@ -82,6 +83,11 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     timeout: 60_000,
     maxWait: 10_000,
   });
+
+  // Again, now that the row is gone: a socket whose handshake landed while
+  // the row still existed joined user:{id} after the first pass and passed
+  // the connection handler's re-check. Any later handshake finds no row.
+  revokeUserSessions(userId, { forceLogoutReason: opts.reason });
 
   for (const { serverId } of pendingRequests) {
     await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'cancelled' });
