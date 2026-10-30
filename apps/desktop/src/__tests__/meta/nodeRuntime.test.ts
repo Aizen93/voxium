@@ -53,6 +53,20 @@ describe('supported Node.js runtime', () => {
     expect(read('.github/workflows/ci.yml')).toContain(`node: [${MINIMUM_MAJOR}, ${RUNTIME_MAJOR}]`);
   });
 
+  it('workflows install pnpm through an env var checked to be an exact version, never interpolated into the script', () => {
+    for (const [file, count] of [['.github/workflows/ci.yml', 3], ['.github/workflows/release.yml', 1]] as const) {
+      const yml = read(file).replace(/\r\n/g, '\n');
+      expect(yml, file).not.toMatch(/run:.*\$\{\{\s*steps\.pnpm-ver/);
+      const steps = yml.split('\n      - name: ').filter((s) => s.startsWith('Install pnpm\n'));
+      expect(steps, file).toHaveLength(count);
+      for (const s of steps) {
+        expect(s, file).toContain('          PNPM_VERSION: ${{ steps.pnpm-ver.outputs.version }}\n');
+        expect(s, file).toContain('[[ $PNPM_VERSION =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || {');
+        expect(s, file).toContain('npm install -g "pnpm@$PNPM_VERSION"');
+      }
+    }
+  });
+
   it('the jsdom suites run with Node Web Storage off (vitest 4 keeps Node\'s storage globals otherwise)', () => {
     for (const file of ['apps/desktop/vitest.config.ts', 'apps/admin/vitest.config.ts']) {
       expect(read(file), file).toContain("execArgv: ['--no-experimental-webstorage']");
