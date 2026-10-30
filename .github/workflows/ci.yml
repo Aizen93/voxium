@@ -11,8 +11,14 @@ concurrency:
 
 jobs:
   lint-typecheck:
-    name: Lint & Typecheck
+    name: Lint & Typecheck (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # 26 is the supported runtime; 24 (maintenance until 2028-04) stays covered
+    # for self-hosters until it is dropped from engines.node.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
 
     steps:
       - name: Checkout
@@ -23,15 +29,19 @@ jobs:
         shell: bash
         run: echo "version=$(sed -n 's/.*"packageManager".*"pnpm@\([^"]*\)".*/\1/p' package.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Node 24
+      - name: Setup Node ${{ matrix.node }}
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
 
-      - name: Activate pnpm via Corepack
+      # Node 25+ no longer ships Corepack: install the pnpm package.json names,
+      # passed through env and checked to be an exact version before it is installed.
+      - name: Install pnpm
+        env:
+          PNPM_VERSION: ${{ steps.pnpm-ver.outputs.version }}
         run: |
-          corepack enable
-          corepack prepare pnpm@${{ steps.pnpm-ver.outputs.version }} --activate
+          [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
+          npm install -g "pnpm@$PNPM_VERSION"
 
       - name: Cache pnpm store
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -60,7 +70,17 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-      - name: Security audit (dependencies)
+      # What ships to users must have no high or critical advisory: this step fails
+      # the job. An advisory reviewed as not applicable goes into
+      # pnpm.auditConfig.ignoreGhsas in package.json, with the reason next to it.
+      # A registry error fails it too (re-run the job): no answer is not a pass.
+      - name: Security audit (production dependencies)
+        if: matrix.node == 26
+        run: pnpm audit --prod --audit-level=high
+
+      # Build and test tooling: reported, never blocking.
+      - name: Security audit (all dependencies, informational)
+        if: matrix.node == 26
         run: pnpm audit --audit-level=high
         continue-on-error: true
 
@@ -158,15 +178,19 @@ jobs:
         shell: bash
         run: echo "version=$(sed -n 's/.*"packageManager".*"pnpm@\([^"]*\)".*/\1/p' package.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Node 24
+      - name: Setup Node 26
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          node-version: 24
+          node-version: 26
 
-      - name: Activate pnpm via Corepack
+      # Node 25+ no longer ships Corepack: install the pnpm package.json names,
+      # passed through env and checked to be an exact version before it is installed.
+      - name: Install pnpm
+        env:
+          PNPM_VERSION: ${{ steps.pnpm-ver.outputs.version }}
         run: |
-          corepack enable
-          corepack prepare pnpm@${{ steps.pnpm-ver.outputs.version }} --activate
+          [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
+          npm install -g "pnpm@$PNPM_VERSION"
 
       - name: Cache pnpm store
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -321,15 +345,19 @@ jobs:
         shell: bash
         run: echo "version=$(sed -n 's/.*"packageManager".*"pnpm@\([^"]*\)".*/\1/p' package.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Node 24
+      - name: Setup Node 26
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          node-version: 24
+          node-version: 26
 
-      - name: Activate pnpm via Corepack
+      # Node 25+ no longer ships Corepack: install the pnpm package.json names,
+      # passed through env and checked to be an exact version before it is installed.
+      - name: Install pnpm
+        env:
+          PNPM_VERSION: ${{ steps.pnpm-ver.outputs.version }}
         run: |
-          corepack enable
-          corepack prepare pnpm@${{ steps.pnpm-ver.outputs.version }} --activate
+          [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
+          npm install -g "pnpm@$PNPM_VERSION"
 
       - name: Cache pnpm store
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4

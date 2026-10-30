@@ -163,7 +163,7 @@ function setupMedia(user: TestUser, channelId: string): Promise<void> {
       clearTimeout(timer);
       try {
         // 1. Create Device
-        const device = new Device({ handlerFactory: Chrome111.createFactory() });
+        const device = new Device({ handlerFactory: Chrome111.createFactory({}) });
         await device.load({ routerRtpCapabilities: data.routerRtpCapabilities as RtpCapabilities });
         user.device = device;
 
