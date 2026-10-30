@@ -30,10 +30,11 @@ function ecosystem(bot: string, name: string): string {
 describe('dependency audit policy', () => {
   const ci = read('.github/workflows/ci.yml');
 
-  it('the production audit blocks on high and critical advisories', () => {
+  it('the production audit blocks on high and critical advisories, and on a registry error', () => {
     const prod = step(ci, 'Security audit (production dependencies)');
     expect(prod).toContain('pnpm audit --prod --audit-level=high');
     expect(prod).not.toContain('continue-on-error');
+    expect(prod).not.toContain('--ignore-registry-errors');
   });
 
   it('the full audit (build and test tooling) is reported without blocking', () => {

@@ -68,9 +68,10 @@ jobs:
       # What ships to users must have no high or critical advisory: this step fails
       # the job. An advisory reviewed as not applicable goes into
       # pnpm.auditConfig.ignoreGhsas in package.json, with the reason next to it.
+      # A registry error fails it too (re-run the job): no answer is not a pass.
       - name: Security audit (production dependencies)
         if: matrix.node == 26
-        run: pnpm audit --prod --audit-level=high --ignore-registry-errors
+        run: pnpm audit --prod --audit-level=high
 
       # Build and test tooling: reported, never blocking.
       - name: Security audit (all dependencies, informational)
