@@ -362,7 +362,7 @@
     "limits": {
       "description": "Limites de recursos para este espaço. Configurados pelos administradores da plataforma.",
       "maxChannels": "Máx. de canais",
-      "maxChannelsDesc": "Máximo de canais de texto + voz neste espaço",
+      "maxChannelsDesc": "Máximo de canais de texto + voz neste espaço (os canais seguros são contados à parte)",
       "maxVoiceUsers": "Máx. de usuários de voz por canal",
       "maxVoiceUsersDesc": "Máximo de usuários que podem entrar em um canal de voz",
       "maxCategories": "Máx. de categorias",
@@ -371,6 +371,8 @@
       "maxMembersDesc": "Máximo de membros que podem entrar neste espaço",
       "maxWebhooks": "Máx. de webhooks",
       "maxWebhooksDesc": "Máximo de webhooks de entrada neste espaço (0 bloqueia a criação)",
+      "maxSecureChannels": "Máx. de canais seguros",
+      "maxSecureChannelsDesc": "Máximo de canais seguros (criptografados de ponta a ponta, só por convite) neste espaço (0 bloqueia a criação)",
       "unlimited": "Ilimitado",
       "failedToLoad": "Não foi possível carregar os limites do espaço"
     }
@@ -1366,6 +1368,7 @@
     "categoryNameTooLong": "O nome da categoria deve ter no máximo {{max}} caracteres",
     "reorderStale": "A lista mudou nesse meio-tempo — atualize e tente novamente",
     "channelCap": "Este espaço pode ter no máximo {{max}} canais",
+    "secureChannelCap": "Este espaço pode ter no máximo {{max}} canais seguros",
     "categoryCap": "Este espaço pode ter no máximo {{max}} categorias",
     "roleNameReserved": "O nome de cargo \"everyone\" é reservado",
     "cannotAssignEveryone": "O cargo @everyone não pode ser atribuído",

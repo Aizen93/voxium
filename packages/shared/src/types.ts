@@ -912,6 +912,8 @@ export interface ResourceLimits {
   maxCategoriesPerServer: number;
   maxMembersPerServer: number; // 0 = unlimited
   maxWebhooksPerServer: number;
+  /** secure channels per space; maxChannelsPerServer counts the other channels */
+  maxSecureChannelsPerServer: number;
 }
 
 export interface ServerResourceLimits {
@@ -920,6 +922,7 @@ export interface ServerResourceLimits {
   maxCategoriesPerServer: number | null;
   maxMembersPerServer: number | null;
   maxWebhooksPerServer: number | null;
+  maxSecureChannelsPerServer: number | null;
 }
 
 // ─── Storage ─────────────────────────────────────────────────────────────────

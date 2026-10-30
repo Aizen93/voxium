@@ -588,6 +588,7 @@ erDiagram
         int maxCategoriesPerServer
         int maxMembersPerServer
         int maxWebhooksPerServer
+        int maxSecureChannelsPerServer
         datetime updatedAt
     }
 
@@ -598,6 +599,7 @@ erDiagram
         int maxCategoriesPerServer
         int maxMembersPerServer
         int maxWebhooksPerServer
+        int maxSecureChannelsPerServer
         datetime updatedAt
     }
 
@@ -1080,8 +1082,8 @@ For multi-node deployment the channel's owner node runs every voice event (`voic
 
 Server resource limits are enforced dynamically via `utils/serverLimits.ts`:
 - **Resolution order:** per-server override (`ServerLimits` table) > global config (`GlobalConfig` singleton) > hardcoded `LIMITS` constants
-- **Defaults:** maxChannelsPerServer=20, maxVoiceUsersPerChannel=12, maxCategoriesPerServer=12, maxMembersPerServer=0 (unlimited), maxWebhooksPerServer=10 (0 stops creation)
-- **Enforcement points:** channel creation, category creation, voice:join, invite join, webhook creation (the create route in `routes/webhooks.ts`)
+- **Defaults:** maxChannelsPerServer=20, maxVoiceUsersPerChannel=12, maxCategoriesPerServer=12, maxMembersPerServer=0 (unlimited), maxWebhooksPerServer=10 (0 stops creation), maxSecureChannelsPerServer=5 (0 stops creation; secure channels are not counted in maxChannelsPerServer, which counts non-secure channels only)
+- **Enforcement points:** channel creation, secure-channel creation (the create route in `routes/secureChannels.ts`, counted inside its transaction under a row lock on the server), category creation, voice:join, invite join, webhook creation (the create route in `routes/webhooks.ts`)
 - **Admin API:** `GET/PUT /admin/limits/global`, `GET/PUT/DELETE /admin/limits/servers/:serverId`
 - **User API:** `GET /servers/:serverId/limits` (read-only, shown in ServerSettingsModal "Limits" tab)
 

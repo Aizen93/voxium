@@ -80,6 +80,7 @@ const LIMIT_LABELS: Record<string, string> = {
   maxCategoriesPerServer: 'Categories / server',
   maxMembersPerServer: 'Members / server',
   maxWebhooksPerServer: 'Webhooks / server',
+  maxSecureChannelsPerServer: 'Secure channels / server',
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

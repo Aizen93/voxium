@@ -1193,7 +1193,7 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
 });
 
 // ─── Resource Limits ────────────────────────────────────────────────────────
-// Every write is audited with the five limit fields before and after it, and
+// Every write is audited with the six limit fields before and after it, and
 // nothing else in the metadata: a limit is a platform-wide lever (0 webhooks
 // freezes creation, a low member cap closes every server's door), so who
 // moved it and from what must be on the record.
@@ -1204,9 +1204,10 @@ interface ServerLimitOverrides {
   maxCategoriesPerServer: number | null;
   maxMembersPerServer: number | null;
   maxWebhooksPerServer: number | null;
+  maxSecureChannelsPerServer: number | null;
 }
 
-/** The five override fields of a ServerLimits row; no row is all null (every
+/** The six override fields of a ServerLimits row; no row is all null (every
  *  limit falls back to the global value). */
 function serverLimitOverrides(row: ServerLimitOverrides | null): ServerLimitOverrides {
   return {
@@ -1215,6 +1216,7 @@ function serverLimitOverrides(row: ServerLimitOverrides | null): ServerLimitOver
     maxCategoriesPerServer: row ? row.maxCategoriesPerServer : null,
     maxMembersPerServer: row ? row.maxMembersPerServer : null,
     maxWebhooksPerServer: row ? row.maxWebhooksPerServer : null,
+    maxSecureChannelsPerServer: row ? row.maxSecureChannelsPerServer : null,
   };
 }
 
@@ -1229,7 +1231,7 @@ adminRouter.get('/limits/global', async (_req: Request, res: Response, next: Nex
 // Update global resource limits
 adminRouter.put('/limits/global', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer } = req.body;
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer, maxSecureChannelsPerServer } = req.body;
     const data: Record<string, number> = {};
     // Every field is a whole number or a 400. A bare Number() turned null, ''
     // or text into 0 or NaN: the floor of 1 masked it for four fields, and for
@@ -1248,6 +1250,8 @@ adminRouter.put('/limits/global', async (req: Request, res: Response, next: Next
     if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = limit('maxCategoriesPerServer', maxCategoriesPerServer, 1, 200);
     if (maxMembersPerServer !== undefined) data.maxMembersPerServer = limit('maxMembersPerServer', maxMembersPerServer, 0, 100000);
     if (maxWebhooksPerServer !== undefined) data.maxWebhooksPerServer = limit('maxWebhooksPerServer', maxWebhooksPerServer, 0, 100);
+    // 0 freezes secure-channel creation platform-wide (existing ones stay)
+    if (maxSecureChannelsPerServer !== undefined) data.maxSecureChannelsPerServer = limit('maxSecureChannelsPerServer', maxSecureChannelsPerServer, 0, 100);
 
     // The values in force before this write (a missing row is created with
     // the defaults, which is what was in force), read after the validation
@@ -1264,6 +1268,7 @@ adminRouter.put('/limits/global', async (req: Request, res: Response, next: Next
       maxCategoriesPerServer: config.maxCategoriesPerServer,
       maxMembersPerServer: config.maxMembersPerServer,
       maxWebhooksPerServer: config.maxWebhooksPerServer,
+      maxSecureChannelsPerServer: config.maxSecureChannelsPerServer,
     };
 
     logAuditEvent({
@@ -1288,12 +1293,14 @@ adminRouter.get('/limits/servers/:serverId', async (req: Request<{ serverId: str
       maxCategoriesPerServer: limits.maxCategoriesPerServer,
       maxMembersPerServer: limits.maxMembersPerServer,
       maxWebhooksPerServer: limits.maxWebhooksPerServer,
+      maxSecureChannelsPerServer: limits.maxSecureChannelsPerServer,
     } : {
       maxChannelsPerServer: null,
       maxVoiceUsersPerChannel: null,
       maxCategoriesPerServer: null,
       maxMembersPerServer: null,
       maxWebhooksPerServer: null,
+      maxSecureChannelsPerServer: null,
     }});
   } catch (err) { next(err); }
 });
@@ -1304,7 +1311,7 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
     const server = await prisma.server.findUnique({ where: { id: req.params.serverId }, select: { id: true } });
     if (!server) throw new NotFoundError('Server');
 
-    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer } = req.body;
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer, maxSecureChannelsPerServer } = req.body;
     // null, '' or text means "use the global value"; a fraction is refused
     // rather than handed to Prisma (a 500 with a stack)
     const toInt = (v: unknown): number | null => {
@@ -1322,6 +1329,8 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
       maxMembersPerServer: maxMembersPerServer !== undefined ? (toInt(maxMembersPerServer) !== null ? Math.max(0, Math.min(100000, toInt(maxMembersPerServer)!)) : null) : undefined,
       // 0 freezes webhook creation on this one server; null falls back to global
       maxWebhooksPerServer: maxWebhooksPerServer !== undefined ? (toInt(maxWebhooksPerServer) !== null ? Math.max(0, Math.min(100, toInt(maxWebhooksPerServer)!)) : null) : undefined,
+      // 0 freezes secure-channel creation on this one space; null falls back to global
+      maxSecureChannelsPerServer: maxSecureChannelsPerServer !== undefined ? (toInt(maxSecureChannelsPerServer) !== null ? Math.max(0, Math.min(100, toInt(maxSecureChannelsPerServer)!)) : null) : undefined,
     };
 
     // Remove undefined keys

@@ -410,6 +410,7 @@ const ERROR_VARS: Record<string, Record<string, unknown>> = {
 const ERROR_PATTERNS: ReadonlyArray<{ re: RegExp; key: string; param?: 'max' | 'min' }> = [
   { re: /^Server can have at most (\d+) webhooks$/, key: 'webhookCap' },
   { re: /^Server can have at most (\d+) channels$/, key: 'channelCap' },
+  { re: /^Server can have at most (\d+) secure channels$/, key: 'secureChannelCap' },
   { re: /^Server can have at most (\d+) categories$/, key: 'categoryCap' },
   { re: /^Server can have at most (\d+) roles$/, key: 'roleCap' },
   { re: /^You can only create up to (\d+) servers$/, key: 'serverCap' },

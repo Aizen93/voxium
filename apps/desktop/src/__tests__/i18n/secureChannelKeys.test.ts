@@ -114,3 +114,31 @@ describe('secure-channel translation keys', () => {
     expect(hint).toMatch(/member/i);
   });
 });
+
+describe('limit descriptions in Japanese and Chinese', () => {
+  // The limit rows sit next to each other in Space Settings > Limits; the
+  // house form in both languages is the full-width parenthesis, so a row in
+  // ASCII parentheses reads out of place beside its neighbours.
+  it('use full-width parentheses in every serverSettings.limits description', () => {
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const { name, bundle } of locales.filter((l) => l.name === 'ja' || l.name === 'zh')) {
+      const section = lookup(bundle, 'serverSettings.limits');
+      expect(section, `${name}.json → serverSettings.limits`).toBeTypeOf('object');
+      for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
+        if (!key.endsWith('Desc') || typeof value !== 'string') continue;
+        checked++;
+        if (/[()]/.test(value)) offenders.push(`${name}.json → serverSettings.limits.${key}`);
+      }
+    }
+    expect(checked).toBeGreaterThanOrEqual(4);
+    expect(offenders, `ASCII parentheses:\n${offenders.join('\n')}`).toEqual([]);
+  });
+
+  it('keep the secure-channel rows in that form', () => {
+    for (const { name, bundle } of locales.filter((l) => l.name === 'ja' || l.name === 'zh')) {
+      expect(String(lookup(bundle, 'serverSettings.limits.maxSecureChannelsDesc')), name).toMatch(/（.+）/);
+      expect(String(lookup(bundle, 'serverSettings.limits.maxChannelsDesc')), name).toMatch(/（.+）/);
+    }
+  });
+});

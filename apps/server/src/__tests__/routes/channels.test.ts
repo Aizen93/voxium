@@ -62,7 +62,7 @@ const prismaMock: Record<string, any> = {
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
-    count: vi.fn(),
+    groupBy: vi.fn(),
   },
   webhook: {
     count: vi.fn(),
@@ -136,6 +136,14 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
+/** The `groupBy({ by: ['secure'] })` rows the create route counts from. */
+function channelCounts(regular: number, secure = 0) {
+  const rows: { secure: boolean; _count: { _all: number } }[] = [];
+  if (regular > 0) rows.push({ secure: false, _count: { _all: regular } });
+  if (secure > 0) rows.push({ secure: true, _count: { _all: secure } });
+  return rows;
+}
+
 // ─── App setup ──────────────────────────────────────────────────────────────
 
 import { channelRouter } from '../../routes/channels';
@@ -175,6 +183,7 @@ describe('Channel Routes', () => {
     // Default: permission checks pass
     mockHasServerPermission.mockResolvedValue(true);
     mockHasChannelPermission.mockResolvedValue(true);
+    prismaMock.channel.groupBy.mockResolvedValue([]);
     mockGetHighestRolePosition.mockResolvedValue(Infinity);
     // VIEW_CHANNEL is a prerequisite for every channel-management op, so the
     // default caller has to carry it in their base permissions.
@@ -243,7 +252,7 @@ describe('Channel Routes', () => {
         serverId: 'srv-1',
         role: 'admin',
       });
-      prismaMock.channel.count.mockResolvedValue(2);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(2));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-new',
         name: 'new-channel',
@@ -272,7 +281,7 @@ describe('Channel Routes', () => {
         serverId: 'srv-1',
         role: 'owner',
       });
-      prismaMock.channel.count.mockResolvedValue(1);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(1));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-v',
         name: 'voice-room',
@@ -373,7 +382,7 @@ describe('Channel Routes', () => {
         serverId: 'srv-1',
         role: 'admin',
       });
-      prismaMock.channel.count.mockResolvedValue(20);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(20));
       // Default limit is 20
 
       const res = await request(app)
@@ -392,7 +401,7 @@ describe('Channel Routes', () => {
         serverId: 'srv-1',
         role: 'admin',
       });
-      prismaMock.channel.count.mockResolvedValue(5);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(5));
       (getEffectiveLimits as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         maxChannelsPerServer: 5,
         maxVoiceUsersPerChannel: 12,
@@ -407,6 +416,107 @@ describe('Channel Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('at most 5');
+    });
+
+    it('does not count secure channels against the channel limit', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        serverId: 'srv-1',
+        role: 'admin',
+      });
+      // 19 regular + 5 secure: the total is over 20, the regular count is not
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(19, 5));
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-new', name: 'fits', type: 'text', serverId: 'srv-1', position: 24, categoryId: null, secure: false,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'fits', type: 'text' });
+
+      // one grouped count serves both numbers
+      expect(prismaMock.channel.groupBy).toHaveBeenCalledTimes(1);
+      expect(prismaMock.channel.groupBy).toHaveBeenCalledWith(expect.objectContaining({
+        by: ['secure'],
+        where: { serverId: 'srv-1' },
+      }));
+      expect(res.body.error ?? '').not.toContain('at most');
+      expect(res.status).toBe(201);
+      // the position still follows every channel, secure ones included
+      expect(prismaMock.channel.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 24 }),
+      }));
+    });
+
+    it('refuses at the limit counted over regular channels, whatever secure channels exist', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(20, 3));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'overflow', type: 'text' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('at most 20');
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+    });
+
+    it('places the first channel of a space with only secure channels after them', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(0, 5));
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-new', name: 'first', type: 'text', serverId: 'srv-1', position: 5, categoryId: null, secure: false,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'first', type: 'text' });
+
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 5 }),
+      }));
+    });
+
+    it('places the first channel of an empty space at position 0', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+      prismaMock.channel.groupBy.mockResolvedValue([]);
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-new', name: 'first', type: 'text', serverId: 'srv-1', position: 0, categoryId: null, secure: false,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'first', type: 'text' });
+
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 0 }),
+      }));
+    });
+
+    it('answers 500 and creates nothing when the count fails', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+      prismaMock.channel.groupBy.mockRejectedValue(new Error('db down'));
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'first', type: 'text' });
+
+      expect(res.status).toBe(500);
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+      errSpy.mockRestore();
     });
 
     it('validates categoryId belongs to server', async () => {
@@ -434,7 +544,7 @@ describe('Channel Routes', () => {
         serverId: 'srv-1',
         role: 'admin',
       });
-      prismaMock.channel.count.mockResolvedValue(2);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(2));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-new',
         name: 'new-channel',
@@ -467,7 +577,7 @@ describe('Channel Routes', () => {
       // work Discord allows, to guard against a role nobody builds.
       const token = makeToken();
       mockComputeServerPermissions.mockResolvedValue(Permissions.MANAGE_CHANNELS); // no VIEW
-      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(0));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-new', name: 'general', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
       });
@@ -488,7 +598,7 @@ describe('Channel Routes', () => {
       // voice presence for a channel they cannot see, until they reconnected.
       const token = makeToken();
       prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
-      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(0));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-staff', name: 'staff', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
       });
@@ -528,7 +638,7 @@ describe('Channel Routes', () => {
       // events, or receiving events for a channel they never learned about.
       const token = makeToken();
       prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
-      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(0));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-staff', name: 'staff', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
       });
@@ -549,7 +659,7 @@ describe('Channel Routes', () => {
     it('treats ADMINISTRATOR as VIEW so admins are never locked out of the room', async () => {
       const token = makeToken();
       prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
-      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(0));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-staff', name: 'staff', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
       });
@@ -574,7 +684,7 @@ describe('Channel Routes', () => {
       // MED-15's cheap path must survive for the default configuration
       const token = makeToken();
       prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
-      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(0));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-open', name: 'general', type: 'text', serverId: 'srv-1', position: 0, categoryId: null,
       });
@@ -595,7 +705,7 @@ describe('Channel Routes', () => {
         serverId: 'srv-1',
         role: 'admin',
       });
-      prismaMock.channel.count.mockResolvedValue(0);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(0));
       const createdChannel = {
         id: 'ch-new',
         name: 'new-channel',
@@ -1013,7 +1123,7 @@ describe('Channel Routes', () => {
     it('POST (create): a smuggled `secure: true` body field is ignored', async () => {
       const token = makeToken();
       prismaMock.category.findFirst.mockResolvedValue(null);
-      prismaMock.channel.count.mockResolvedValue(1);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(1));
       prismaMock.channel.create.mockResolvedValue({
         id: 'ch-new', name: 'general2', type: 'text', serverId: 'srv-1',
       });

@@ -65,7 +65,7 @@ const member = (userId: string, role: ServerMember['role']): ServerMember =>
     user: { id: userId, username: userId, displayName: userId, avatarUrl: null } } as unknown as ServerMember);
 const request = { id: 'r-1', serverId: 'srv-1', userId: 'u-2', message: null, status: 'pending', createdAt: '2026-10-09T10:00:00.000Z', user: { id: 'u-2', username: 'bob', displayName: 'Bob', avatarUrl: null } };
 
-const LIMITS_ANSWER = { maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 0 };
+const LIMITS_ANSWER = { maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 0, maxSecureChannelsPerServer: 5 };
 
 /** The API as the modal sees it: effective permissions + the join-request list (+ the Limits tab's read). */
 function apiWith(permissions: bigint | Error, pending = 3) {
@@ -259,6 +259,10 @@ describe('ServerSettingsModal — the Integrations tab (MANAGE_WEBHOOKS)', () =>
     expect(webhookRow).toBeDefined();
     expect(webhookRow!.textContent).toContain('serverSettings.limits.maxWebhooksDesc');
     expect(webhookRow!.querySelector('span')!.textContent).toBe('0');
+    // secure channels have their own row, apart from the channel cap
+    const secureRow = rows.find((r) => r.textContent?.includes('serverSettings.limits.maxSecureChannels'));
+    expect(secureRow!.textContent).toContain('serverSettings.limits.maxSecureChannelsDesc');
+    expect(secureRow!.querySelector('span')!.textContent).toBe('5');
     // the members row keeps its "Unlimited" reading of 0
     const membersRow = rows.find((r) => r.textContent?.includes('serverSettings.limits.maxMembers'));
     expect(membersRow!.querySelector('span')!.textContent).toBe('serverSettings.limits.unlimited');

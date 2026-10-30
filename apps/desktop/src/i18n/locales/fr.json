@@ -362,7 +362,7 @@
     "limits": {
       "description": "Limites de ressources pour cet espace. Elles sont configurées par les administrateurs de la plateforme.",
       "maxChannels": "Nombre max de salons",
-      "maxChannelsDesc": "Nombre maximum de salons textuels et vocaux dans cet espace",
+      "maxChannelsDesc": "Nombre maximum de salons textuels et vocaux dans cet espace (les salons sécurisés sont comptés à part)",
       "maxVoiceUsers": "Max d'utilisateurs vocaux par salon",
       "maxVoiceUsersDesc": "Nombre maximum d'utilisateurs pouvant rejoindre un salon vocal",
       "maxCategories": "Nombre max de catégories",
@@ -371,6 +371,8 @@
       "maxMembersDesc": "Nombre maximum de membres pouvant rejoindre cet espace",
       "maxWebhooks": "Nombre max de webhooks",
       "maxWebhooksDesc": "Nombre maximum de webhooks entrants dans cet espace (0 bloque la création)",
+      "maxSecureChannels": "Nombre max de salons sécurisés",
+      "maxSecureChannelsDesc": "Nombre maximum de salons sécurisés (chiffrés de bout en bout, sur invitation) dans cet espace (0 bloque la création)",
       "unlimited": "Illimité",
       "failedToLoad": "Impossible de charger les limites de l’espace"
     }
@@ -1366,6 +1368,7 @@
     "categoryNameTooLong": "Le nom de la catégorie doit contenir au plus {{max}} caractères",
     "reorderStale": "La liste a changé entre-temps — actualisez et réessayez",
     "channelCap": "Cet espace peut avoir au plus {{max}} salons",
+    "secureChannelCap": "Cet espace peut avoir au plus {{max}} salons sécurisés",
     "categoryCap": "Cet espace peut avoir au plus {{max}} catégories",
     "roleNameReserved": "Le nom de rôle « everyone » est réservé",
     "cannotAssignEveryone": "Le rôle @everyone ne peut pas être attribué",

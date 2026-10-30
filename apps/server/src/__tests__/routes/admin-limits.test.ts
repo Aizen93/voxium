@@ -81,6 +81,7 @@ const GLOBAL_ROW = {
   maxCategoriesPerServer: 12,
   maxMembersPerServer: 0,
   maxWebhooksPerServer: 10,
+  maxSecureChannelsPerServer: 5,
 };
 
 const NULL_OVERRIDES = {
@@ -89,6 +90,7 @@ const NULL_OVERRIDES = {
   maxCategoriesPerServer: null,
   maxMembersPerServer: null,
   maxWebhooksPerServer: null,
+  maxSecureChannelsPerServer: null,
 };
 
 let app: express.Express;
@@ -128,6 +130,7 @@ describe('GET /admin/limits/global', () => {
       maxCategoriesPerServer: 12,
       maxMembersPerServer: 0,
       maxWebhooksPerServer: 7,
+      maxSecureChannelsPerServer: 5,
     });
   });
 });
@@ -149,6 +152,7 @@ describe('PUT /admin/limits/global', () => {
       maxCategoriesPerServer: 12,
       maxMembersPerServer: 0,
       maxWebhooksPerServer: 25,
+      maxSecureChannelsPerServer: 5,
     });
   });
 
@@ -424,5 +428,53 @@ describe('DELETE /admin/limits/servers/:serverId', () => {
     expect(res.status).toBe(500);
     expect(audit).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+describe('the secure-channel limit (maxSecureChannelsPerServer)', () => {
+  const putGlobal = (body: object) => request(app).put('/api/v1/admin/limits/global').set(auth()).send(body);
+  const putServer = (body: object) => request(app).put('/api/v1/admin/limits/servers/srv-1').set(auth()).send(body);
+
+  it.each([
+    [-5, 0],
+    [500, 100],
+    [0, 0],
+    ['7', 7],
+  ])('global: clamps %s to %s (0 is kept: it freezes creation)', async (input, expected) => {
+    const res = await putGlobal({ maxSecureChannelsPerServer: input });
+    expect(res.status).toBe(200);
+    expect(globalWrite().update).toEqual({ maxSecureChannelsPerServer: expected });
+    expect(res.body.data.maxSecureChannelsPerServer).toBe(expected);
+  });
+
+  it.each([[null], ['abc'], [2.5]])('global: refuses %s with a 400, never a silent 0', async (input) => {
+    const res = await putGlobal({ maxSecureChannelsPerServer: input });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'maxSecureChannelsPerServer must be an integer' });
+    expect(prismaMock.globalConfig.upsert).not.toHaveBeenCalled();
+  });
+
+  it('global: the change is audited before and after', async () => {
+    await putGlobal({ maxSecureChannelsPerServer: 2 });
+    const { before, after } = audit.mock.calls[0][0].metadata as Record<string, Record<string, number>>;
+    expect(before.maxSecureChannelsPerServer).toBe(5);
+    expect(after.maxSecureChannelsPerServer).toBe(2);
+  });
+
+  it.each([
+    [-1, 0],
+    [500, 100],
+    [3, 3],
+    [null, null],
+  ])('per space: maps %s to %s (null falls back to the global value)', async (input, expected) => {
+    const res = await putServer({ maxSecureChannelsPerServer: input });
+    expect(prismaMock.serverLimits.upsert.mock.calls[0][0].update).toEqual({ maxSecureChannelsPerServer: expected });
+    expect(res.body.data.maxSecureChannelsPerServer).toBe(expected);
+  });
+
+  it('per space: GET returns the stored override, 0 included', async () => {
+    prismaMock.serverLimits.findUnique.mockResolvedValue({ serverId: 'srv-1', ...NULL_OVERRIDES, maxSecureChannelsPerServer: 0 });
+    const res = await request(app).get('/api/v1/admin/limits/servers/srv-1').set(auth());
+    expect(res.body.data).toEqual({ ...NULL_OVERRIDES, maxSecureChannelsPerServer: 0 });
   });
 });

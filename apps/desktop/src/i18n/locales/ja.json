@@ -362,7 +362,7 @@
     "limits": {
       "description": "このスペースのリソース制限です。プラットフォーム管理者によって設定されています。",
       "maxChannels": "最大チャンネル数",
-      "maxChannelsDesc": "このスペースのテキスト + ボイスチャンネルの最大数",
+      "maxChannelsDesc": "このスペースのテキスト + ボイスチャンネルの最大数（セキュアチャンネルは別に数えます）",
       "maxVoiceUsers": "チャンネルあたりの最大ボイスユーザー数",
       "maxVoiceUsersDesc": "1つのボイスチャンネルに参加できる最大ユーザー数",
       "maxCategories": "最大カテゴリ数",
@@ -371,6 +371,8 @@
       "maxMembersDesc": "このスペースに参加できる最大メンバー数",
       "maxWebhooks": "最大ウェブフック数",
       "maxWebhooksDesc": "このスペースの受信ウェブフックの最大数（0の場合は作成できません）",
+      "maxSecureChannels": "最大セキュアチャンネル数",
+      "maxSecureChannelsDesc": "このスペースのセキュアチャンネル（エンドツーエンド暗号化、招待制）の最大数（0 で作成を停止）",
       "unlimited": "無制限",
       "failedToLoad": "スペースの制限の読み込みに失敗しました"
     }
@@ -1365,6 +1367,7 @@
     "categoryNameTooLong": "カテゴリ名は {{max}} 文字以内にしてください",
     "reorderStale": "その間にリストが変更されました — 再読み込みしてもう一度お試しください",
     "channelCap": "このスペースのチャンネルは最大 {{max}} 個です",
+    "secureChannelCap": "このスペースのセキュアチャンネルは最大 {{max}} 個です",
     "categoryCap": "このスペースのカテゴリは最大 {{max}} 個です",
     "roleNameReserved": "ロール名「everyone」は予約されています",
     "cannotAssignEveryone": "@everyone ロールは割り当てられません",

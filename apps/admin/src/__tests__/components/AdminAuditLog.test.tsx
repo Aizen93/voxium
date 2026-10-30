@@ -80,8 +80,8 @@ describe('AdminAuditLog — webhook moderation rows', () => {
 });
 
 describe('AdminAuditLog — resource limit rows', () => {
-  const GLOBAL_BEFORE = { maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 10 };
-  const NO_OVERRIDES = { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null };
+  const GLOBAL_BEFORE = { maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 10, maxSecureChannelsPerServer: 5 };
+  const NO_OVERRIDES = { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null, maxSecureChannelsPerServer: null };
   const details = (row: HTMLElement) => row.querySelectorAll('td')[3].textContent;
 
   async function renderRows(...logs: AuditLogEntry[]) {
@@ -114,6 +114,14 @@ describe('AdminAuditLog — resource limit rows', () => {
       metadata: { before: GLOBAL_BEFORE, after: { ...GLOBAL_BEFORE, maxWebhooksPerServer: 0, maxMembersPerServer: 500 } },
     }));
     expect(details(row)).toBe('Members / server: 0 → 500, Webhooks / server: 10 → 0');
+  });
+
+  it('names the secure-channel limit in a global update', async () => {
+    const [row] = await renderRows(entry({
+      action: 'limits.update_global', targetType: 'global_config', targetId: 'global',
+      metadata: { before: GLOBAL_BEFORE, after: { ...GLOBAL_BEFORE, maxSecureChannelsPerServer: 3 } },
+    }));
+    expect(details(row)).toBe('Secure channels / server: 5 → 3');
   });
 
   it('a server update says "global" for a field that uses the global default', async () => {

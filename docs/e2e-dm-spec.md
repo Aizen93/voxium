@@ -1196,11 +1196,17 @@ DMs only.
 
 - Metadata: the server sees membership, message timing/sizes and the channel
   NAME (needed for the members' own UI) — same class of leak as §11.8.
-- Secure channels count against the server-wide channel cap (they consume real
-  resources, so exempting them would let the cap be bypassed invisibly). A
-  MANAGE_CHANNELS holder who hits the cap can therefore infer how MANY secure
-  channels exist — the same number MANAGE_SERVER already reads from the count
-  endpoint, never which or whose.
+- Secure channels have their own per-space cap,
+  `maxSecureChannelsPerServer` (default 5; 0 freezes creation), resolved like
+  every other limit and counted inside the create transaction under a row lock
+  on the space, so concurrent creations cannot overshoot it. They consume real
+  resources, so they are capped, but they do NOT count against
+  `maxChannelsPerServer`: the plain channel cap counts non-secure channels
+  only, and its refusal says nothing about secure ones. Accepted consequence:
+  a CREATE_SECURE_CHANNELS holder who reaches the secure cap learns that the
+  space holds that many secure channels (the refusal names the cap) — the
+  same number MANAGE_SERVER already reads from the count endpoint, never
+  which ones or whose.
 - The client's `message:new`/`message:update` handlers decrypt asynchronously
   before touching the store — the same shape the DM handlers have always had.
   The known consequences are inherited unchanged: two near-simultaneous

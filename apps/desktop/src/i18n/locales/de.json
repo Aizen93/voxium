@@ -362,7 +362,7 @@
     "limits": {
       "description": "Ressourcenlimits für diesen Space. Diese werden von Plattform-Administratoren konfiguriert.",
       "maxChannels": "Max. Kanäle",
-      "maxChannelsDesc": "Maximale Anzahl an Text- und Sprachkanälen in diesem Space",
+      "maxChannelsDesc": "Maximale Anzahl an Text- und Sprachkanälen in diesem Space (sichere Kanäle zählen separat)",
       "maxVoiceUsers": "Max. Sprachnutzer pro Kanal",
       "maxVoiceUsersDesc": "Maximale Anzahl an Nutzern, die einem Sprachkanal beitreten können",
       "maxCategories": "Max. Kategorien",
@@ -371,6 +371,8 @@
       "maxMembersDesc": "Maximale Anzahl an Mitgliedern, die diesem Space beitreten können",
       "maxWebhooks": "Max. Webhooks",
       "maxWebhooksDesc": "Maximale Anzahl eingehender Webhooks in diesem Space (0 sperrt das Erstellen)",
+      "maxSecureChannels": "Max. sichere Kanäle",
+      "maxSecureChannelsDesc": "Maximale Anzahl sicherer Kanäle (Ende-zu-Ende-verschlüsselt, nur auf Einladung) in diesem Space (0 sperrt das Erstellen)",
       "unlimited": "Unbegrenzt",
       "failedToLoad": "Space-Limits konnten nicht geladen werden"
     }
@@ -1366,6 +1368,7 @@
     "categoryNameTooLong": "Der Kategoriename darf höchstens {{max}} Zeichen lang sein",
     "reorderStale": "Die Liste hat sich inzwischen geändert — lade neu und versuche es erneut",
     "channelCap": "Dieser Space kann höchstens {{max}} Kanäle haben",
+    "secureChannelCap": "Dieser Space kann höchstens {{max}} sichere Kanäle haben",
     "categoryCap": "Dieser Space kann höchstens {{max}} Kategorien haben",
     "roleNameReserved": "Der Rollenname „everyone“ ist reserviert",
     "cannotAssignEveryone": "Die Rolle @everyone kann nicht zugewiesen werden",

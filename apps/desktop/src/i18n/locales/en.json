@@ -362,7 +362,7 @@
     "limits": {
       "description": "Resource limits for this space. These are configured by platform administrators.",
       "maxChannels": "Max Channels",
-      "maxChannelsDesc": "Maximum text + voice channels in this space",
+      "maxChannelsDesc": "Maximum text + voice channels in this space (secure channels are counted separately)",
       "maxVoiceUsers": "Max Voice Users per Channel",
       "maxVoiceUsersDesc": "Maximum users that can join a single voice channel",
       "maxCategories": "Max Categories",
@@ -371,6 +371,8 @@
       "maxMembersDesc": "Maximum members that can join this space",
       "maxWebhooks": "Max Webhooks",
       "maxWebhooksDesc": "Maximum incoming webhooks in this space (0 freezes creation)",
+      "maxSecureChannels": "Max Secure Channels",
+      "maxSecureChannelsDesc": "Maximum secure (end-to-end encrypted, invite-only) channels in this space (0 freezes creation)",
       "unlimited": "Unlimited",
       "failedToLoad": "Failed to load space limits"
     }
@@ -1366,6 +1368,7 @@
     "categoryNameTooLong": "Category name must be at most {{max}} characters",
     "reorderStale": "The list changed in the meantime — refresh and try again",
     "channelCap": "This space can have at most {{max}} channels",
+    "secureChannelCap": "This space can have at most {{max}} secure channels",
     "categoryCap": "This space can have at most {{max}} categories",
     "roleNameReserved": "The role name \"everyone\" is reserved",
     "cannotAssignEveryone": "The @everyone role cannot be assigned",
