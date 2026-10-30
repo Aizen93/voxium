@@ -8,11 +8,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }));
 vi.mock('../../services/api', () => ({ api }));
 
-const socket = vi.hoisted(() => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn(), reconnectSocketAfterCredentialChange: vi.fn() }));
+const socket = vi.hoisted(() => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn(), reconnectSocketAfterCredentialChange: vi.fn(), endCredentialChange: vi.fn(), beginCredentialChange: vi.fn() }));
 vi.mock('../../services/socket', () => ({
   connectSocket: socket.connectSocket,
   disconnectSocket: socket.disconnectSocket,
   reconnectSocketAfterCredentialChange: socket.reconnectSocketAfterCredentialChange,
+  beginCredentialChange: socket.beginCredentialChange,
   getSocket: vi.fn(() => null),
   getSocketGeneration: vi.fn(() => 0),
   onSocketReady: vi.fn(() => () => {}),
@@ -401,21 +402,29 @@ describe('authStore.checkAuth — the stored session, the deadline and the retry
 describe('authStore.changePassword — the live socket follows the new tokens', () => {
   beforeEach(() => {
     useAuthStore.setState({ user: me as never, isAuthenticated: true, isLoading: false });
+    socket.beginCredentialChange.mockImplementation(() => socket.endCredentialChange);
   });
 
   it('stores the fresh pair, THEN reopens the socket with the new access token — no sign-out, no new socket', async () => {
     const order: string[] = [];
+    socket.beginCredentialChange.mockImplementationOnce(() => { order.push('begin'); return socket.endCredentialChange; });
+    socket.endCredentialChange.mockImplementationOnce(() => { order.push('end'); });
+    api.post.mockImplementationOnce(async () => {
+      order.push('post');
+      return { data: { message: 'Password changed successfully.', data: { accessToken: 'access-new', refreshToken: 'refresh-new' } } };
+    });
     storage.setTokens.mockImplementationOnce(() => { order.push('setTokens'); });
     socket.reconnectSocketAfterCredentialChange.mockImplementationOnce(() => { order.push('reconnect'); });
-    api.post.mockResolvedValueOnce({ data: { message: 'Password changed successfully.', data: { accessToken: 'access-new', refreshToken: 'refresh-new' } } });
 
     const message = await useAuthStore.getState().changePassword('old-pw', 'new-pw-123');
 
     expect(message).toBe('Password changed successfully.');
+    // The change is marked in flight BEFORE the request (its server
+    // disconnect may beat the answer), and ended after the reopen
+    expect(order).toEqual(['begin', 'post', 'setTokens', 'reconnect', 'end']);
     expect(api.post).toHaveBeenCalledWith('/auth/change-password', { currentPassword: 'old-pw', newPassword: 'new-pw-123', rememberMe: true });
     expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
     expect(socket.reconnectSocketAfterCredentialChange).toHaveBeenCalledWith('access-new');
-    expect(order).toEqual(['setTokens', 'reconnect']);
     // The session is the same one: nothing torn down, still signed in
     expect(socket.disconnectSocket).not.toHaveBeenCalled();
     expect(storage.clearTokens).not.toHaveBeenCalled();
@@ -430,6 +439,8 @@ describe('authStore.changePassword — the live socket follows the new tokens', 
 
     expect(storage.setTokens).not.toHaveBeenCalled();
     expect(socket.reconnectSocketAfterCredentialChange).not.toHaveBeenCalled();
+    // The in-flight mark is lifted on a refusal too
+    expect(socket.endCredentialChange).toHaveBeenCalledTimes(1);
   });
 
   it('reopens nothing when the answer carries no token pair (an older server)', async () => {
