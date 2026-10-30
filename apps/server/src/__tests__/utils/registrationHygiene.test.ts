@@ -453,6 +453,29 @@ describe('registration hygiene sweep — expired sign-up state', () => {
     error.mockRestore();
   });
 
+  it('runs BEFORE the account and IP steps: a failing step of the sweep cannot skip it', async () => {
+    purgeExpiredSignupState.mockResolvedValueOnce({ pending: 3, ledger: 0 });
+    vi.mocked(prisma.user.deleteMany).mockRejectedValueOnce(new Error('users table locked'));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    // The sweep's own failure still surfaces to its caller
+    await expect(runRegistrationHygiene()).rejects.toThrow('users table locked');
+
+    expect(purgeExpiredSignupState).toHaveBeenCalledTimes(1);
+    expect(purgeExpiredSignupState.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(prisma.user.findMany).mock.invocationCallOrder[0]);
+    expect(log).toHaveBeenCalledWith('[RegHygiene] Purged 3 expired pending registration(s) and 0 sign-up mail ledger row(s)');
+    log.mockRestore();
+  });
+
+  it('runs even when the IP record step fails', async () => {
+    purgeExpiredSignupState.mockResolvedValueOnce({ pending: 0, ledger: 0 });
+    vi.mocked(prisma.ipRecord.deleteMany).mockRejectedValueOnce(new Error('db gone'));
+
+    await expect(runRegistrationHygiene()).rejects.toThrow('db gone');
+    expect(purgeExpiredSignupState).toHaveBeenCalledTimes(1);
+  });
+
   it('a failed purge does not fail the locked run either', async () => {
     redisSet.mockResolvedValue('OK');
     purgeExpiredSignupState.mockRejectedValueOnce(new Error('db gone'));

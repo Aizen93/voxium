@@ -110,6 +110,21 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
   const userCutoff = new Date(Date.now() - UNVERIFIED_ACCOUNT_TTL_DAYS * 24 * 60 * 60 * 1000);
   const ipCutoff = new Date(Date.now() - IP_RETENTION_DAYS * 24 * 60 * 60 * 1000);
 
+  // Verify-first sign-up state past its life: inert already (every check reads
+  // the timestamps), purged so the tables stay small. FIRST, in its own try:
+  // a failing step of the sweep below cannot skip it, and its failure cannot
+  // hide the sweep's result.
+  if (!dryRun) {
+    try {
+      const purged = await purgeExpiredSignupState();
+      if (purged.pending || purged.ledger) {
+        console.log(`[RegHygiene] Purged ${purged.pending} expired pending registration(s) and ${purged.ledger} sign-up mail ledger row(s)`);
+      }
+    } catch (err) {
+      console.error('[RegHygiene] Sign-up state purge failed:', err instanceof Error ? err.message : err);
+    }
+  }
+
   // Defense-in-depth guards on the delete, not just the flag:
   //  - role 'user' only — an unverified admin should be impossible, but a
   //    sweep must never be the thing that deletes one if it happens
@@ -177,20 +192,6 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
   const { count: deletedIpRecords } = dryRun
     ? { count: await prisma.ipRecord.count({ where: { lastSeenAt: { lt: ipCutoff } } }) }
     : await prisma.ipRecord.deleteMany({ where: { lastSeenAt: { lt: ipCutoff } } });
-
-  // Verify-first sign-up state past its life: inert already (every check reads
-  // the timestamps), purged so the tables stay small. Its own try: a failure
-  // here must not hide the sweep's result.
-  if (!dryRun) {
-    try {
-      const purged = await purgeExpiredSignupState();
-      if (purged.pending || purged.ledger) {
-        console.log(`[RegHygiene] Purged ${purged.pending} expired pending registration(s) and ${purged.ledger} sign-up mail ledger row(s)`);
-      }
-    } catch (err) {
-      console.error('[RegHygiene] Sign-up state purge failed:', err instanceof Error ? err.message : err);
-    }
-  }
 
   return { deletedUsers, deletedIpRecords, deletedAvatars, dryRun };
 }
