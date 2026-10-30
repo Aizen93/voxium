@@ -409,6 +409,34 @@ describe('Channel Routes', () => {
       expect(res.body.error).toContain('at most 5');
     });
 
+    it('does not count secure channels against the channel limit', async () => {
+      const token = makeToken();
+      prismaMock.serverMember.findUnique.mockResolvedValue({
+        userId: 'user-1',
+        serverId: 'srv-1',
+        role: 'admin',
+      });
+      // 19 regular + 5 secure: the total is over 20, the regular count is not
+      prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) =>
+        (where.secure === false ? 19 : 24));
+      prismaMock.channel.create.mockResolvedValue({
+        id: 'ch-new', name: 'fits', type: 'text', serverId: 'srv-1', position: 24, categoryId: null, secure: false,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'fits', type: 'text' });
+
+      expect(prismaMock.channel.count).toHaveBeenCalledWith({ where: { serverId: 'srv-1', secure: false } });
+      expect(res.body.error ?? '').not.toContain('at most');
+      expect(res.status).toBe(201);
+      // the position still follows every channel, secure ones included
+      expect(prismaMock.channel.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 24 }),
+      }));
+    });
+
     it('validates categoryId belongs to server', async () => {
       const token = makeToken();
       prismaMock.serverMember.findUnique.mockResolvedValue({

@@ -225,6 +225,7 @@ const EXACT: Row[] = [
 /** Sentences carrying a number the server picks: [sample message, key, the variable it lands in, the source template]. */
 const PATTERNS: Array<{ msg: string; key: string; vars: Record<string, number>; src: string }> = [
   { msg: 'Server can have at most 20 channels', key: 'channelCap', vars: { max: 20 }, src: 'Server can have at most ${limits.maxChannelsPerServer} channels' },
+  { msg: 'Server can have at most 5 secure channels', key: 'secureChannelCap', vars: { max: 5 }, src: 'Server can have at most ${limits.maxSecureChannelsPerServer} secure channels' },
   { msg: 'Server can have at most 7 categories', key: 'categoryCap', vars: { max: 7 }, src: 'Server can have at most ${limits.maxCategoriesPerServer} categories' },
   { msg: 'Server can have at most 25 roles', key: 'roleCap', vars: { max: 25 }, src: 'Server can have at most ${LIMITS.MAX_ROLES_PER_SERVER} roles' },
   { msg: 'Server can have at most 3 webhooks', key: 'webhookCap', vars: { max: 3 }, src: 'Server can have at most ${limits.maxWebhooksPerServer} webhooks' },

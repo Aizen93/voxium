@@ -224,6 +224,8 @@ model GlobalConfig {
   maxCategoriesPerServer  Int      @default(12) @map("max_categories_per_server")
   maxMembersPerServer     Int      @default(0) @map("max_members_per_server") // 0 = unlimited
   maxWebhooksPerServer    Int      @default(10) @map("max_webhooks_per_server")
+  /// secure channels per space, counted apart from maxChannelsPerServer
+  maxSecureChannelsPerServer Int   @default(5) @map("max_secure_channels_per_server")
   updatedAt               DateTime @updatedAt @map("updated_at")
 
   @@map("global_config")
@@ -236,6 +238,7 @@ model ServerLimits {
   maxCategoriesPerServer  Int?     @map("max_categories_per_server")
   maxMembersPerServer     Int?     @map("max_members_per_server")
   maxWebhooksPerServer    Int?     @map("max_webhooks_per_server")
+  maxSecureChannelsPerServer Int?  @map("max_secure_channels_per_server")
   updatedAt               DateTime @updatedAt @map("updated_at")
 
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)

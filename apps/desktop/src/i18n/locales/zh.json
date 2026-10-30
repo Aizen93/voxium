@@ -362,7 +362,7 @@
     "limits": {
       "description": "此空间的资源限制。由平台管理员配置。",
       "maxChannels": "最大频道数",
-      "maxChannelsDesc": "此空间中文字 + 语音频道的最大数量",
+      "maxChannelsDesc": "此空间中文字 + 语音频道的最大数量(安全频道单独计数)",
       "maxVoiceUsers": "每个频道最大语音用户数",
       "maxVoiceUsersDesc": "单个语音频道中可加入的最大用户数",
       "maxCategories": "最大分类数",
@@ -371,6 +371,8 @@
       "maxMembersDesc": "可加入此空间的最大成员数",
       "maxWebhooks": "最大 Webhook 数",
       "maxWebhooksDesc": "此空间中传入 Webhook 的最大数量（为 0 时禁止创建）",
+      "maxSecureChannels": "最大安全频道数",
+      "maxSecureChannelsDesc": "此空间中安全频道(端到端加密、仅限邀请)的最大数量(0 表示禁止创建)",
       "unlimited": "无限制",
       "failedToLoad": "空间限制加载失败"
     }
@@ -1365,6 +1367,7 @@
     "categoryNameTooLong": "分类名称最多 {{max}} 个字符",
     "reorderStale": "列表已发生变化 — 请刷新后重试",
     "channelCap": "此空间最多可以有 {{max}} 个频道",
+    "secureChannelCap": "此空间最多可以有 {{max}} 个安全频道",
     "categoryCap": "此空间最多可以有 {{max}} 个分类",
     "roleNameReserved": "角色名称“everyone”为保留名称",
     "cannotAssignEveryone": "无法分配 @everyone 角色",

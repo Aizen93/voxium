@@ -112,17 +112,23 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
       }
     }
 
+    // Secure channels have their own limit (maxSecureChannelsPerServer), apart
+    // from maxChannelsPerServer. The total only places the new channel last.
     const [channelCount, limits] = await Promise.all([
       prisma.channel.count({ where: { serverId } }),
       getEffectiveLimits(serverId),
     ]);
-    if (channelCount >= limits.maxChannelsPerServer) {
-      throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
-    }
 
     const now = new Date();
     const allMemberIds = [userId, ...memberIds];
     const channel = await prisma.$transaction(async (tx) => {
+      // Count and insert under the space row lock, so two concurrent creations
+      // cannot both pass the limit
+      await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      const secureCount = await tx.channel.count({ where: { serverId, secure: true } });
+      if (secureCount >= limits.maxSecureChannelsPerServer) {
+        throw new BadRequestError(`Server can have at most ${limits.maxSecureChannelsPerServer} secure channels`);
+      }
       const ch = await tx.channel.create({
         data: {
           name,

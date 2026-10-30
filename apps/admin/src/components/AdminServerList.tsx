@@ -10,11 +10,12 @@ import { apiErrorMessage, logMessage } from '../utils/apiError';
 import type { AdminServer, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
 
 const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; description: string; min: number; max: number }> = [
-  { key: 'maxChannelsPerServer', label: 'Max Channels / Server', description: 'Maximum text + voice channels per server', min: 1, max: 500 },
+  { key: 'maxChannelsPerServer', label: 'Max Channels / Server', description: 'Maximum text + voice channels per server (secure channels are counted separately)', min: 1, max: 500 },
   { key: 'maxVoiceUsersPerChannel', label: 'Max Voice Users / Channel', description: 'Maximum users in a single voice channel', min: 1, max: 500 },
   { key: 'maxCategoriesPerServer', label: 'Max Categories / Server', description: 'Maximum channel categories per server', min: 1, max: 200 },
   { key: 'maxMembersPerServer', label: 'Max Members / Server', description: 'Maximum members per server (0 = unlimited)', min: 0, max: 100000 },
   { key: 'maxWebhooksPerServer', label: 'Max Webhooks / Server', description: 'Maximum incoming webhooks per server (0 freezes creation)', min: 0, max: 100 },
+  { key: 'maxSecureChannelsPerServer', label: 'Max Secure Channels / Server', description: 'Maximum secure (end-to-end encrypted, invite-only) channels per server, apart from the channel limit (0 freezes creation)', min: 0, max: 100 },
 ];
 
 type LimitKey = keyof ResourceLimits;

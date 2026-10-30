@@ -37,6 +37,7 @@ describe('serverLimits — getEffectiveLimits', () => {
       maxCategoriesPerServer: 12,
       maxMembersPerServer: 0,
       maxWebhooksPerServer: 10,
+      maxSecureChannelsPerServer: 5,
     });
     // toEqual ignores undefined properties: pin the webhook default explicitly
     expect(limits.maxWebhooksPerServer).toBe(LIMITS.MAX_WEBHOOKS_PER_SERVER);
@@ -141,6 +142,7 @@ describe('serverLimits — getEffectiveLimits', () => {
       maxCategoriesPerServer: 12, // hardcoded default
       maxMembersPerServer: 0, // hardcoded default (unlimited)
       maxWebhooksPerServer: 10, // hardcoded default (LIMITS.MAX_WEBHOOKS_PER_SERVER)
+      maxSecureChannelsPerServer: 5, // hardcoded default (LIMITS.MAX_SECURE_CHANNELS_PER_SERVER)
     });
   });
 
@@ -200,5 +202,53 @@ describe('serverLimits — getGlobalLimits', () => {
     });
     expect(limits.maxChannelsPerServer).toBe(20);
     expect(limits.maxWebhooksPerServer).toBe(10);
+  });
+});
+
+describe('serverLimits — maxSecureChannelsPerServer', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const GLOBAL = {
+    id: 'global',
+    maxChannelsPerServer: 20,
+    maxVoiceUsersPerChannel: 12,
+    maxCategoriesPerServer: 12,
+    maxMembersPerServer: 0,
+    maxWebhooksPerServer: 10,
+    maxSecureChannelsPerServer: 8,
+  };
+  const NO_OVERRIDE = {
+    serverId: 'server-1',
+    maxChannelsPerServer: null,
+    maxVoiceUsersPerChannel: null,
+    maxCategoriesPerServer: null,
+    maxMembersPerServer: null,
+    maxWebhooksPerServer: null,
+    maxSecureChannelsPerServer: null,
+  };
+
+  it('defaults to LIMITS.MAX_SECURE_CHANNELS_PER_SERVER (5)', async () => {
+    vi.mocked(prisma.globalConfig.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.serverLimits.findUnique).mockResolvedValueOnce(null);
+    const limits = await getEffectiveLimits('server-1');
+    expect(LIMITS.MAX_SECURE_CHANNELS_PER_SERVER).toBe(5);
+    expect(limits.maxSecureChannelsPerServer).toBe(5);
+  });
+
+  it('a null override falls through to the global value', async () => {
+    vi.mocked(prisma.globalConfig.findUnique).mockResolvedValueOnce(GLOBAL as any);
+    vi.mocked(prisma.serverLimits.findUnique).mockResolvedValueOnce(NO_OVERRIDE as any);
+    const limits = await getEffectiveLimits('server-1');
+    expect(limits.maxSecureChannelsPerServer).toBe(8);
+  });
+
+  it('an override of 0 is kept (creation frozen), apart from the channel limit', async () => {
+    vi.mocked(prisma.globalConfig.findUnique).mockResolvedValueOnce(GLOBAL as any);
+    vi.mocked(prisma.serverLimits.findUnique).mockResolvedValueOnce({ ...NO_OVERRIDE, maxSecureChannelsPerServer: 0 } as any);
+    const limits = await getEffectiveLimits('server-1');
+    expect(limits.maxSecureChannelsPerServer).toBe(0);
+    expect(limits.maxChannelsPerServer).toBe(20);
   });
 });

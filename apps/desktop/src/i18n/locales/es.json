@@ -362,7 +362,7 @@
     "limits": {
       "description": "Límites de recursos para este espacio. Están configurados por los administradores de la plataforma.",
       "maxChannels": "Máx. de canales",
-      "maxChannelsDesc": "Máximo de canales de texto + voz en este espacio",
+      "maxChannelsDesc": "Máximo de canales de texto + voz en este espacio (los canales seguros se cuentan aparte)",
       "maxVoiceUsers": "Máx. de usuarios de voz por canal",
       "maxVoiceUsersDesc": "Máximo de usuarios que pueden unirse a un canal de voz",
       "maxCategories": "Máx. de categorías",
@@ -371,6 +371,8 @@
       "maxMembersDesc": "Máximo de miembros que pueden unirse a este espacio",
       "maxWebhooks": "Máx. de webhooks",
       "maxWebhooksDesc": "Máximo de webhooks entrantes en este espacio (0 bloquea la creación)",
+      "maxSecureChannels": "Máx. de canales seguros",
+      "maxSecureChannelsDesc": "Máximo de canales seguros (cifrados de extremo a extremo, solo por invitación) en este espacio (0 bloquea la creación)",
       "unlimited": "Ilimitado",
       "failedToLoad": "No se pudieron cargar los límites del espacio"
     }
@@ -1366,6 +1368,7 @@
     "categoryNameTooLong": "El nombre de la categoría debe tener como máximo {{max}} caracteres",
     "reorderStale": "La lista cambió mientras tanto: actualiza e inténtalo de nuevo",
     "channelCap": "Este espacio puede tener como máximo {{max}} canales",
+    "secureChannelCap": "Este espacio puede tener como máximo {{max}} canales seguros",
     "categoryCap": "Este espacio puede tener como máximo {{max}} categorías",
     "roleNameReserved": "El nombre de rol \"everyone\" está reservado",
     "cannotAssignEveryone": "El rol @everyone no se puede asignar",

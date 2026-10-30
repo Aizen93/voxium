@@ -107,6 +107,8 @@ vi.mock('../../utils/serverLimits', () => ({
     maxVoiceUsersPerChannel: 12,
     maxCategoriesPerServer: 12,
     maxMembersPerServer: 0,
+    maxWebhooksPerServer: 10,
+    maxSecureChannelsPerServer: 5,
   }),
 }));
 
@@ -114,6 +116,7 @@ vi.mock('../../utils/serverLimits', () => ({
 
 import { secureChannelRouter } from '../../routes/secureChannels';
 import { errorHandler } from '../../middleware/errorHandler';
+import { getEffectiveLimits } from '../../utils/serverLimits';
 
 function createApp() {
   const app = express();
@@ -285,14 +288,77 @@ describe('Secure Channel Routes', () => {
       expect(res.body.error).toContain('members of this server');
     });
 
-    it('400 when the server channel limit is reached (secure channels count too)', async () => {
-      prismaMock.channel.count.mockResolvedValue(20);
+    /** `total` answers the all-channels count, `secure` the secure-only one. */
+    function counts(total: number, secure: number): void {
+      prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) =>
+        (where.secure === true ? secure : total));
+    }
+
+    it('400 at the secure-channel limit (5 by default), creating nothing', async () => {
+      counts(8, 5);
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels')
         .send({ name: 'covert-ops' });
 
       expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Server can have at most 5 secure channels');
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+    });
+
+    it('counts secure channels apart: a space at its regular channel limit still gets one', async () => {
+      counts(24, 4);  // 20 regular channels (the channel limit) + 4 secure
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops' });
+
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.count).toHaveBeenCalledWith({ where: { serverId: 'srv-1', secure: true } });
+      // the total still places the new channel last
+      expect(prismaMock.channel.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 24, secure: true }),
+      }));
+    });
+
+    it('counts under the space row lock, inside the transaction', async () => {
+      const order: string[] = [];
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+        order.push(strings.join('?').includes('FROM servers') ? 'lock-server' : 'lock-other');
+        return [{ id: 'srv-1' }];
+      });
+      prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) => {
+        if (where.secure === true) order.push('count-secure');
+        return where.secure === true ? 1 : 3;
+      });
+      prismaMock.channel.create.mockImplementation(async () => { order.push('create'); return { ...CH, type: 'text', position: 3 }; });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops' });
+
+      expect(res.status).toBe(201);
+      expect(order.slice(0, 3)).toEqual(['lock-server', 'count-secure', 'create']);
+    });
+
+    it('a limit of 0 freezes secure-channel creation', async () => {
+      counts(0, 0);
+      (getEffectiveLimits as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        maxChannelsPerServer: 20,
+        maxVoiceUsersPerChannel: 12,
+        maxCategoriesPerServer: 12,
+        maxMembersPerServer: 0,
+        maxWebhooksPerServer: 10,
+        maxSecureChannelsPerServer: 0,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Server can have at most 0 secure channels');
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
     });
 
     it('400 when memberIds is not a string array', async () => {

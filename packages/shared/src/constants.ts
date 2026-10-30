@@ -63,6 +63,8 @@ export const LIMITS = {
   JOIN_REQUEST_MESSAGE_MAX: 300,
   // Incoming webhooks (docs/local/webhooks-plan.html)
   MAX_WEBHOOKS_PER_SERVER: 10,
+  /** secure (invite-only E2E) channels per space, counted apart from MAX_CHANNELS_PER_SERVER */
+  MAX_SECURE_CHANNELS_PER_SERVER: 5,
   WEBHOOK_NAME_MAX: 64,
   WEBHOOK_BODY_MAX_BYTES: 1_048_576, // 1 MiB, the execute route's own body parser
   WEBHOOK_EMBEDS_MAX: 10,

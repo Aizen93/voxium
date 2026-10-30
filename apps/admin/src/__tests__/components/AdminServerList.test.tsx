@@ -215,10 +215,10 @@ describe('AdminServerList — directory column and curation', () => {
 });
 
 const GLOBAL: ResourceLimits = {
-  maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 10,
+  maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0, maxWebhooksPerServer: 10, maxSecureChannelsPerServer: 5,
 };
 const NO_OVERRIDES: ServerResourceLimits = {
-  maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null,
+  maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null, maxSecureChannelsPerServer: null,
 };
 const inputUnder = (labelText: string) => {
   const label = qa('label').find((l) => l.textContent?.startsWith(labelText))!;
@@ -273,6 +273,23 @@ describe('AdminServerList — webhooks and the webhook limit', () => {
 
     await act(async () => { buttonByText('Save').click(); });
     expect(store.updateServerLimits).toHaveBeenCalledWith('listed', expect.objectContaining({ maxWebhooksPerServer: 0, maxChannelsPerServer: null }));
+  });
+
+  it('the per-server limits modal offers the secure-channel override apart from the channel limit, and sends it', async () => {
+    store.globalLimits = GLOBAL;
+    store.serverLimits = { ...NO_OVERRIDES, maxSecureChannelsPerServer: 2 };
+    store.serverLimitsServerId = 'listed';
+    store.updateServerLimits.mockResolvedValue(undefined);
+    await render();
+    await act(async () => { (rowOf('listed').querySelector('[title="Configure limits"]') as HTMLButtonElement).click(); });
+    const input = inputUnder('Max Secure Channels / Server');
+    expect(input.min).toBe('0');
+    expect(input.max).toBe('100');
+    expect(input.value).toBe('2');
+    expect(input.placeholder).toBe('5');
+
+    await act(async () => { buttonByText('Save').click(); });
+    expect(store.updateServerLimits).toHaveBeenCalledWith('listed', expect.objectContaining({ maxSecureChannelsPerServer: 2, maxChannelsPerServer: null }));
   });
 });
 

@@ -9,6 +9,7 @@ const DEFAULTS: ResourceLimits = {
   maxCategoriesPerServer: LIMITS.MAX_CATEGORIES_PER_SERVER,
   maxMembersPerServer: 0, // unlimited
   maxWebhooksPerServer: LIMITS.MAX_WEBHOOKS_PER_SERVER,
+  maxSecureChannelsPerServer: LIMITS.MAX_SECURE_CHANNELS_PER_SERVER,
 };
 
 /**
@@ -26,6 +27,7 @@ export async function getGlobalLimits(): Promise<ResourceLimits> {
     maxCategoriesPerServer: config.maxCategoriesPerServer,
     maxMembersPerServer: config.maxMembersPerServer,
     maxWebhooksPerServer: config.maxWebhooksPerServer,
+    maxSecureChannelsPerServer: config.maxSecureChannelsPerServer,
   };
 }
 
@@ -46,6 +48,7 @@ export async function getEffectiveLimits(serverId: string): Promise<ResourceLimi
         maxCategoriesPerServer: globalConfig.maxCategoriesPerServer,
         maxMembersPerServer: globalConfig.maxMembersPerServer,
         maxWebhooksPerServer: globalConfig.maxWebhooksPerServer,
+        maxSecureChannelsPerServer: globalConfig.maxSecureChannelsPerServer,
       }
     : DEFAULTS;
 
@@ -57,5 +60,6 @@ export async function getEffectiveLimits(serverId: string): Promise<ResourceLimi
     maxCategoriesPerServer: serverLimits.maxCategoriesPerServer ?? global.maxCategoriesPerServer,
     maxMembersPerServer: serverLimits.maxMembersPerServer ?? global.maxMembersPerServer,
     maxWebhooksPerServer: serverLimits.maxWebhooksPerServer ?? global.maxWebhooksPerServer,
+    maxSecureChannelsPerServer: serverLimits.maxSecureChannelsPerServer ?? global.maxSecureChannelsPerServer,
   };
 }

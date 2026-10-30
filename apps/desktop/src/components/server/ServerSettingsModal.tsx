@@ -525,6 +525,8 @@ function LimitsTab({ serverId }: { serverId: string }) {
 
   const items = [
     { label: t('serverSettings.limits.maxChannels'), value: limits.maxChannelsPerServer, description: t('serverSettings.limits.maxChannelsDesc') },
+    // Counted apart from the channel cap; no formatZero: 0 freezes creation
+    { label: t('serverSettings.limits.maxSecureChannels'), value: limits.maxSecureChannelsPerServer, description: t('serverSettings.limits.maxSecureChannelsDesc') },
     { label: t('serverSettings.limits.maxVoiceUsers'), value: limits.maxVoiceUsersPerChannel, description: t('serverSettings.limits.maxVoiceUsersDesc') },
     { label: t('serverSettings.limits.maxCategories'), value: limits.maxCategoriesPerServer, description: t('serverSettings.limits.maxCategoriesDesc') },
     { label: t('serverSettings.limits.maxMembers'), value: limits.maxMembersPerServer, description: t('serverSettings.limits.maxMembersDesc'), formatZero: t('serverSettings.limits.unlimited') },

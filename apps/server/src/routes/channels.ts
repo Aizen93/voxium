@@ -217,11 +217,14 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
       if (!category) throw new BadRequestError('Category not found in this server');
     }
 
-    const [channelCount, limits] = await Promise.all([
+    // Secure channels count against their own limit (secureChannels.ts); the
+    // total only places the new channel last
+    const [channelCount, regularCount, limits] = await Promise.all([
       prisma.channel.count({ where: { serverId } }),
+      prisma.channel.count({ where: { serverId, secure: false } }),
       getEffectiveLimits(serverId),
     ]);
-    if (channelCount >= limits.maxChannelsPerServer) {
+    if (regularCount >= limits.maxChannelsPerServer) {
       throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
     }
 

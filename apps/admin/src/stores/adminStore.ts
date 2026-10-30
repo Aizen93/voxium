@@ -963,7 +963,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
   resetServerLimits: async (serverId) => {
     await api.delete(`/admin/limits/servers/${serverId}`);
-    set({ serverLimits: { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null } });
+    set({ serverLimits: { maxChannelsPerServer: null, maxVoiceUsersPerChannel: null, maxCategoriesPerServer: null, maxMembersPerServer: null, maxWebhooksPerServer: null, maxSecureChannelsPerServer: null } });
     toast.success('Server limits reset to global defaults');
   },
 
