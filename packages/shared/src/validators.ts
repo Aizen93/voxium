@@ -26,10 +26,12 @@ export function validateUsername(username: string): string | null {
  * distinct account, a distinct per-inbox counter and a distinct suppression
  * digest for ONE real mailbox. Unicode letters stay allowed (internationalised
  * addresses), and the lengths follow RFC 5321: 64 for the local part, 254 in all.
+ * Every label of the domain is non-empty: no leading, trailing or doubled dot,
+ * so `host.com.` (the same DNS name) is not a second spelling of `host.com`.
  */
 // eslint-disable-next-line no-control-regex
 const EMAIL_FORBIDDEN_RE = /[\s\u0000-\u001f\u007f()<>[\]:;,\\"]/;
-const EMAIL_SHAPE_RE = /^[^@]+@[^@]+\.[^@]+$/;
+const EMAIL_SHAPE_RE = /^[^@]+@[^@.]+(?:\.[^@.]+)+$/;
 
 export function validateEmail(email: string): string | null {
   if (email.length > LIMITS.EMAIL_MAX) return 'Invalid email address';

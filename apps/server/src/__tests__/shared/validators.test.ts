@@ -89,6 +89,7 @@ describe('Shared validators — validateEmail (one mailbox, as the mailer reads 
     'user-name_1@sub.domain.example',
     'jürgen@müller.de',
     'a@b.co',
+    'x@mail-1.a-b.example.co.uk',
   ])('accepts %s', (email) => {
     expect(validateEmail(email)).toBeNull();
   });
@@ -112,6 +113,12 @@ describe('Shared validators — validateEmail (one mailbox, as the mailer reads 
     ['no @', 'victim.corp.com'],
     ['no dot in the domain', 'victim@localhost'],
     ['an empty local part', '@corp.com'],
+    ['a trailing dot after the domain', 'a@gmail.com.'],
+    ['a trailing dot after a listed domain', 'a@mailinator.com.'],
+    ['two trailing dots', 'a@gmail.com..'],
+    ['a leading dot in the domain', 'a@.gmail.com'],
+    ['two dots in a row in the domain', 'a@gmail..com'],
+    ['a domain that is only dots', 'a@..'],
   ])('refuses %s', (_label, email) => {
     expect(validateEmail(email)).toBe('Invalid email address');
   });
