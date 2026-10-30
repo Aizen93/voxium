@@ -313,7 +313,7 @@ export async function completeRegistration(
   // row is alive and under its cap.
   const rows = await prisma.$queryRaw<Array<{
     id: string; username: string; email: string; email_canonical: string; display_name: string;
-    password_hash: string; code_hash: string; terms_accepted_at: Date; privacy_accepted_at: Date;
+    password_hash: string; code_hash: string; terms_accepted_at: Date; privacy_accepted_at: Date; ip: string | null;
   }>>`
     UPDATE pending_registrations SET attempts = attempts + 1
     WHERE id = ${pendingId}
@@ -321,7 +321,7 @@ export async function completeRegistration(
       AND expires_at > (now() AT TIME ZONE 'UTC')
       AND code_expires_at > (now() AT TIME ZONE 'UTC')
     RETURNING id, username, email, email_canonical, display_name, password_hash, code_hash,
-              terms_accepted_at, privacy_accepted_at`;
+              terms_accepted_at, privacy_accepted_at, ip`;
   const row = rows[0];
   if (!row || !sameHash(signupCodeHash(row.id, code), row.code_hash)) {
     throw new BadRequestError(SIGNUP_CODE_INVALID_MESSAGE);
@@ -408,7 +408,10 @@ export async function completeRegistration(
   const domain = emailDomain(row.email);
   if (!isCommonEmailProvider(domain)) await countDomainRegistration(domain);
 
-  const ip = rawIp ? normalizeIp(rawIp) : undefined;
+  // The registration address is the one the start came from (the request
+  // that solved the proof-of-work); the completing one only when the start's
+  // is unknown. The stored value is already normalized.
+  const ip = row.ip ?? (rawIp ? normalizeIp(rawIp) : undefined);
   if (ip) {
     const geo = geoip.lookup(ip);
     const countryNames = new Intl.DisplayNames(['en'], { type: 'region' });

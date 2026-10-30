@@ -682,7 +682,8 @@ model PendingRegistration {
   lastSentAt        DateTime? @map("last_sent_at")
   termsAcceptedAt   DateTime @map("terms_accepted_at")
   privacyAcceptedAt DateTime @map("privacy_accepted_at")
-  /// normalized address the start came from (registration IP record at completion)
+  /// normalized address the start came from: the register IP record of the
+  /// account created at completion (the completing address only when this is null)
   ip                String?
   createdAt         DateTime @default(now()) @map("created_at")
   expiresAt         DateTime @map("expires_at")

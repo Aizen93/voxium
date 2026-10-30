@@ -878,7 +878,28 @@ describe('completeRegistration', () => {
       expect(h.domainConsume).not.toHaveBeenCalled();
     });
 
-    it('records the registration address (normalized) with its country', async () => {
+    it('records the address the START came from, not the completing one, and reads it from the guess update', async () => {
+      h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ ip: '198.51.100.7' })]);
+      h.geoLookup.mockReturnValueOnce({ country: 'DE' });
+      await completeRegistration(ID, CODE, undefined, '203.0.113.5');
+      expect(queryCalls()[0][0].join('?')).toMatch(/RETURNING[\s\S]*\bip\b/);
+      expect(h.geoLookup).toHaveBeenCalledWith('198.51.100.7');
+      expect(prisma.ipRecord.create).toHaveBeenCalledTimes(1);
+      expect(prisma.ipRecord.create).toHaveBeenCalledWith({
+        data: { userId: 'user-1', ip: '198.51.100.7', kind: 'register', countryCode: 'DE', country: 'Germany' },
+      });
+    });
+
+    it('a start address is recorded even when the completing one is unknown', async () => {
+      h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ ip: '198.51.100.7' })]);
+      await completeRegistration(ID, CODE, undefined, undefined);
+      expect(prisma.ipRecord.create).toHaveBeenCalledWith({
+        data: { userId: 'user-1', ip: '198.51.100.7', kind: 'register' },
+      });
+    });
+
+    it('falls back to the completing address (normalized) with its country when the start had none', async () => {
+      h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ ip: null })]);
       h.geoLookup.mockReturnValueOnce({ country: 'FR' });
       await completeRegistration(ID, CODE, undefined, '::ffff:203.0.113.5');
       expect(h.geoLookup).toHaveBeenCalledWith('203.0.113.5');
