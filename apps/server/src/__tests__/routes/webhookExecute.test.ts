@@ -30,11 +30,22 @@ const limiters = vi.hoisted(() => ({
   // Kept in the mock so a refund that creeps back in fails a test, not a
   // module lookup
   refund: vi.fn(async (_name: string, _key: string) => {}),
+  // The signature-failure bucket (GitHub rows only): the pre-parser gate and
+  // the charge a failed signature makes. Its KEY is pinned in rateLimiter.test.ts
+  sigFailGate: vi.fn(async (req: any, _res: any, next: any) => {
+    order.push(`sigFailGate:${req.params.webhookId}`);
+    next();
+  }),
+  sigFailCharge: vi.fn(async (req: any) => {
+    order.push(`sigFailCharge:${req.params.webhookId}`);
+  }),
 }));
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitWebhookExecuteIp: (...a: any[]) => limiters.ip(...a),
   rateLimitWebhookExecute: (...a: any[]) => limiters.perWebhook(...a),
   refundRateLimit: (...a: [string, string]) => limiters.refund(...a),
+  refuseWebhookSignatureFailures: (...a: any[]) => limiters.sigFailGate(...a),
+  chargeWebhookSignatureFailure: (...a: any[]) => limiters.sigFailCharge(...a),
 }));
 
 // requireFeature stays REAL; only the flag lookup is mocked (and recorded)
@@ -978,6 +989,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.body).toEqual({ success: false, error: 'Malformed JSON body' });
     // the parse fails after the hook but before the post-parser charge
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -1009,16 +1021,118 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(limiters.perWebhook).not.toHaveBeenCalled();
     expect(order).not.toContain(`webhookLimiter:${WEBHOOK_ID}`);
     expect(limiters.refund).not.toHaveBeenCalled();
+    // ...but it is a signature failure: one point of the (webhook, address) bucket
+    expect(limiters.sigFailCharge).toHaveBeenCalledTimes(1);
   });
 
-  it('a wrong signature is a 401, not charged, not refunded', async () => {
+  it('a wrong signature is a 401 that charges the signature-failure bucket once, never the per-webhook one, nothing refunded', async () => {
     const res = await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
 
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
     expect(limiters.refund).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).toHaveBeenCalledTimes(1);
+    // the gate ran before the body was read, the charge after the hook refused it
+    expect(order).toEqual([
+      'flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup',
+      `sigFailGate:${WEBHOOK_ID}`, `sigFailCharge:${WEBHOOK_ID}`,
+    ]);
     expectNothingPosted();
+  });
+
+  it('the 401 is answered only AFTER the signature-failure charge has settled', async () => {
+    let settle: () => void = () => {};
+    const charged = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    let answeredBeforeSettled = false;
+    let responded = false;
+    limiters.sigFailCharge.mockImplementationOnce(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      answeredBeforeSettled = responded;
+      settle();
+    });
+
+    const res = await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
+    responded = true;
+    await charged;
+
+    expect(res.status).toBe(401);
+    expect(answeredBeforeSettled).toBe(false);
+  });
+
+  it('a charge that throws never replaces the 401 (logged, the original error goes on)', async () => {
+    limiters.sigFailCharge.mockImplementationOnce(async () => {
+      throw new Error('store exploded');
+    });
+
+    const res = await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
+    expect(console.warn).toHaveBeenCalledWith('[Webhooks] Could not charge a signature failure', {
+      webhookId: WEBHOOK_ID,
+      error: 'store exploded',
+    });
+  });
+
+  it('an address over its signature-failure budget gets the 429 BEFORE the body is read: a 2 MB body gets 429, not 413', async () => {
+    limiters.sigFailGate.mockImplementationOnce(async (req: any, res: any) => {
+      order.push(`sigFailGate:${req.params.webhookId}`);
+      res.set('Retry-After', '42');
+      res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    });
+    const body = JSON.stringify({ pad: 'p'.repeat(2 * 1024 * 1024) });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(LIMITS.WEBHOOK_BODY_MAX_BYTES);
+
+    const res = await rawJsonPost(URL_OK, body);
+
+    expect(res.status).toBe(429);
+    expect(JSON.parse(res.body)).toEqual({ success: false, error: 'Too many requests. Please try again later.' });
+    expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `sigFailGate:${WEBHOOK_ID}`]);
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
+    expectNothingPosted();
+  });
+
+  it('a refused address never has its body read or hashed, even a validly signed one', async () => {
+    let captured: Request | undefined;
+    const capturingApp = createApp((req) => {
+      captured = req;
+    });
+    limiters.sigFailGate.mockImplementationOnce(async (_req: any, res: any) => {
+      res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    });
+    const hmac = vi.spyOn(crypto, 'createHmac');
+
+    const res = await request(capturingApp)
+      .post(URL_OK)
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-Hub-Signature-256', sign(PUSH_RAW))
+      .send(PUSH_RAW);
+
+    expect(res.status).toBe(429);
+    expect(captured?.body).toBeUndefined();
+    // the one HMAC is the test's own sign() above; the route computed none
+    expect(hmac).toHaveBeenCalledTimes(1);
+    expect(captured?.res?.locals.signatureFailed).toBeUndefined();
+    expect(captured?.res?.locals.signatureVerified).toBeUndefined();
+    expectNothingPosted();
+  });
+
+  it('a validly signed delivery passes the gate and charges no signature failure', async () => {
+    const hmac = vi.spyOn(crypto, 'createHmac');
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(204);
+    // the test's sign() and the route's check: the spy sees the route's HMAC
+    // (the control for the "never hashed" test above)
+    expect(hmac).toHaveBeenCalledTimes(2);
+    expect(limiters.sigFailGate).toHaveBeenCalledTimes(1);
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
   });
 
   it('a body-parser 415 before the hook runs (Content-Type charset=latin1) is never charged', async () => {
@@ -1027,6 +1141,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(415);
     expect(res.body).toEqual({ success: false, error: 'Unsupported request encoding' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -1041,6 +1156,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(415);
     expect(res.body).toEqual({ success: false, error: 'Unsupported request encoding' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
     expectNothingPosted();
   });
 
@@ -1053,6 +1169,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(413);
     expect(JSON.parse(res.body)).toEqual({ success: false, error: 'Request body too large' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -1070,7 +1187,9 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(204);
     expect(limiters.perWebhook).toHaveBeenCalledTimes(1);
     expect(stateWhenCharged).toEqual([{ parsed: true, verified: true }]);
-    expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `webhookLimiter:${WEBHOOK_ID}`, 'create']);
+    expect(order).toEqual([
+      'flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `sigFailGate:${WEBHOOK_ID}`, `webhookLimiter:${WEBHOOK_ID}`, 'create',
+    ]);
     expect(limiters.refund).not.toHaveBeenCalled();
   });
 
@@ -1106,6 +1225,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -1161,6 +1281,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(503);
     expect(JSON.parse(res.body)).toEqual({ success: false, error: 'Webhook secret is not configured' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
     expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup']);
     expectNothingPosted();
   });
@@ -1172,6 +1293,7 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
 
     expect(res.status).toBe(503);
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
     expect(limiters.refund).not.toHaveBeenCalled();
   });
 
@@ -1183,6 +1305,9 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(204);
     expect(prismaMock.message.create).toHaveBeenCalledTimes(1);
     expect(limiters.refund).not.toHaveBeenCalled();
+    // the signature-failure bucket is a GitHub-row control: neither gate nor charge
+    expect(limiters.sigFailGate).not.toHaveBeenCalled();
+    expect(limiters.sigFailCharge).not.toHaveBeenCalled();
   });
 
   it('a missing X-GitHub-Event answers 400 that says so (a plain Discord-shaped body, even signed)', async () => {

@@ -35,11 +35,12 @@ function rule(name: string, keyType: Rule['keyType'], label: string): Rule {
   return { name, label, keyType, keyPrefix: `rl:${name}`, points: 30, duration: 60, blockDuration: 0, isCustom: false };
 }
 
-// The four webhook rules exactly as the server registers them
-// (middleware/rateLimiter.ts): the per-webhook one is keyed on the webhook id
+// The five webhook rules exactly as the server registers them
+// (middleware/rateLimiter.ts): the per-webhook ones are keyed on the webhook id
 const WEBHOOK_RULES: Rule[] = [
   rule('webhookExecute', 'webhook', 'Webhook Execute (per webhook)'),
   rule('webhookExecuteIp', 'ip', 'Webhook Execute (per IP)'),
+  rule('webhookSigFail', 'webhook', 'Webhook Signature Failures (per webhook and IP)'),
   rule('webhookManage', 'userId', 'Webhook Manage'),
   rule('webhookRead', 'userId', 'Webhook Read'),
 ];
@@ -47,6 +48,7 @@ const WEBHOOK_RULES: Rule[] = [
 const WEBHOOK_DESCRIPTIONS: Record<string, string> = {
   webhookExecute: 'Deliveries accepted per webhook per minute, charged only after the token matched.',
   webhookExecuteIp: "Webhook deliveries per client address per minute; generous because GitHub's deliveries share a few egress addresses.",
+  webhookSigFail: 'GitHub webhook deliveries with a missing or wrong signature, per webhook and client address; once spent, that address is refused before its body is read.',
   webhookManage: 'Webhook create, edit, rotate and delete per user per hour.',
   webhookRead: 'Webhook list reads per user per minute.',
 };
@@ -111,6 +113,7 @@ describe('AdminRateLimits — key-type badge', () => {
     expect(store.fetchRateLimits).toHaveBeenCalledTimes(1);
     expect(badgeOf('webhookExecute')).toBe('Webhook');
     expect(badgeOf('webhookExecuteIp')).toBe('IP');
+    expect(badgeOf('webhookSigFail')).toBe('Webhook');
     expect(badgeOf('login')).toBe('IP');
     expect(badgeOf('loginSubnet')).toBe('Subnet');
     expect(badgeOf('loginAccount')).toBe('Account');

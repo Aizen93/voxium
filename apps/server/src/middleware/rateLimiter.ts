@@ -250,6 +250,13 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // it only bounds a single hostile address spraying the endpoint.
   webhookExecute:   { keyPrefix: 'rl:whexec',   points: 30,   duration: 60,   blockDuration: 0, keyType: 'webhook', label: 'Webhook Execute (per webhook)' },
   webhookExecuteIp: { keyPrefix: 'rl:whexecip', points: 1200, duration: 60,   blockDuration: 0, keyType: 'ip',      label: 'Webhook Execute (per IP)' },
+  // GitHub-type webhooks only: deliveries whose X-Hub-Signature-256 did NOT
+  // match, keyed on the (token-validated) webhook id AND the sender's address,
+  // never on the webhook alone — real deliveries cannot be told apart before
+  // their body is read, so a per-webhook failure bucket would let whoever
+  // holds the URL block them. Once spent, that address's next deliveries to
+  // that webhook answer 429 before a byte of the body is read or hashed.
+  webhookSigFail:   { keyPrefix: 'rl:whsigfail', points: 10,  duration: 60,   blockDuration: 0, keyType: 'webhook', label: 'Webhook Signature Failures (per webhook and IP)' },
   // Management (create, edit, rotate, delete) and the moderators' list reads.
   webhookManage:    { keyPrefix: 'rl:whmanage', points: 30,   duration: 3600, blockDuration: 0, keyType: 'userId',  label: 'Webhook Manage' },
   webhookRead:      { keyPrefix: 'rl:whread',   points: 60,   duration: 60,   blockDuration: 0, keyType: 'userId',  label: 'Webhook Read' },
@@ -410,6 +417,13 @@ interface MiddlewareOptions {
   refundOnSuccess?: boolean;
 }
 
+/** The one 429 every limiter answers: `Retry-After` in whole seconds and the
+ *  same body, so a client cannot tell one bucket from another. */
+function answerTooManyRequests(res: Response, msBeforeNext: number): void {
+  res.set('Retry-After', String(Math.ceil(msBeforeNext / 1000)));
+  res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+}
+
 function createMiddleware(
   name: string,
   keyFn: (req: Request) => string,
@@ -422,9 +436,7 @@ function createMiddleware(
       await getLimiter(name).consume(key);
     } catch (err) {
       if (err instanceof RateLimiterRes) {
-        const retryAfter = Math.ceil(err.msBeforeNext / 1000);
-        res.set('Retry-After', String(retryAfter));
-        res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+        answerTooManyRequests(res, err.msBeforeNext);
         return;
       }
       // Redis error or unexpected — fail open but log for visibility
@@ -895,6 +907,47 @@ export const rateLimitE2EApprove = createMiddleware('e2eApprove', byUserId);
 // req.params.webhookId, which is attacker-controlled until then.
 export const rateLimitWebhookExecuteIp = createMiddleware('webhookExecuteIp', byIp);
 export const rateLimitWebhookExecute = createMiddleware('webhookExecute', byWebhookId);
+
+/** The `webhookSigFail` key: the webhook id (mount only AFTER the token
+ *  check, like rateLimitWebhookExecute) AND the normalised sender address. */
+const byWebhookAndIp = (req: Request) => `${byWebhookId(req)}|${byIp(req)}`;
+
+/**
+ * GitHub-type webhooks, BEFORE the body parser: answers the standard 429
+ * without reading the body when this address has spent its signature-failure
+ * budget for this webhook. Reads the bucket, charges nothing (only a failed
+ * signature is charged, by chargeWebhookSignatureFailure). Fails open; the
+ * decision is made outside the try.
+ */
+export async function refuseWebhookSignatureFailures(req: Request, res: Response, next: NextFunction): Promise<void> {
+  let refuseFor: number | null = null;
+  try {
+    const state = await getLimiter('webhookSigFail').get(byWebhookAndIp(req));
+    if (state !== null && state.consumedPoints >= getConfig('webhookSigFail').points) refuseFor = state.msBeforeNext;
+  } catch (err) {
+    console.warn('[RateLimit] webhookSigFail limiter error, allowing request:', err instanceof Error ? err.message : err);
+  }
+  if (refuseFor !== null) {
+    answerTooManyRequests(res, refuseFor);
+    return;
+  }
+  next();
+}
+
+/**
+ * Charge one point of `webhookSigFail` for a delivery whose signature did not
+ * match. Never throws: a rejected consume is the charge that spent the budget
+ * (the NEXT request is refused, not this one), a store error is only warned
+ * about.
+ */
+export async function chargeWebhookSignatureFailure(req: Request): Promise<void> {
+  try {
+    await getLimiter('webhookSigFail').consume(byWebhookAndIp(req));
+  } catch (err) {
+    if (err instanceof RateLimiterRes) return;
+    console.warn('[RateLimit] webhookSigFail charge failed:', err instanceof Error ? err.message : err);
+  }
+}
 export const rateLimitWebhookManage = createMiddleware('webhookManage', byUserId);
 export const rateLimitWebhookRead = createMiddleware('webhookRead', byUserId);
 

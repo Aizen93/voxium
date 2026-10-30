@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHmac } from 'node:crypto';
-import { RateLimiterRedis } from 'rate-limiter-flexible';
+import { RateLimiterRedis, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis } from '../../utils/redis';
 
 // Minimal Redis mock — getAllRateLimits and socketRateLimit never touch Redis,
@@ -197,6 +197,13 @@ describe('incoming-webhook limiters', () => {
     });
   });
 
+  it('lists the signature-failure bucket in the admin table (rl:, tunable like every row)', () => {
+    expect(byName('webhookSigFail')).toMatchObject({
+      keyPrefix: 'rl:whsigfail', points: 10, duration: 60, blockDuration: 0, keyType: 'webhook',
+      label: 'Webhook Signature Failures (per webhook and IP)', isCustom: false,
+    });
+  });
+
   it('keeps every key prefix distinct (two rows on one prefix would share a bucket)', () => {
     const prefixes = getAllRateLimits().map((l) => l.keyPrefix);
     expect(new Set(prefixes).size).toBe(prefixes.length);
@@ -335,6 +342,164 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
       { prefix: 'rl:whread', key: 'user-9' },
     ]);
     expect(JSON.stringify(seen)).not.toContain(TOKEN);
+  });
+
+  it('chargeWebhookSignatureFailure charges rl:whsigfail keyed on the webhook id AND the normalised address: never the token', async () => {
+    await rl.chargeWebhookSignatureFailure(executeRequest());
+    await rl.chargeWebhookSignatureFailure(executeRequest({ ip: '::FFFF:203.0.113.7' }));
+
+    expect(seen).toEqual([
+      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.7' },
+      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.7' },
+    ]);
+    expect(JSON.stringify(seen)).not.toContain(TOKEN);
+  });
+});
+
+describe('webhook signature-failure bucket — refused before the body, per (webhook, address)', () => {
+  let rl: RateLimiterModule;
+  /** The bucket state per key, as RateLimiterRedis.get would answer it. */
+  let state: Map<string, { consumedPoints: number; msBeforeNext: number }>;
+  let getKeys: Array<{ prefix: string; key: string }>;
+
+  beforeEach(async () => {
+    rl = await freshRateLimiter();
+    vi.mocked(getRedis).mockImplementation(() => ({}) as ReturnType<typeof getRedis>);
+    state = new Map();
+    getKeys = [];
+    vi.spyOn(RateLimiterRedis.prototype, 'get').mockImplementation(async function (this: RateLimiterRedis, key) {
+      getKeys.push({ prefix: this.keyPrefix, key: String(key) });
+      const s = state.get(String(key));
+      return (s ? new RateLimiterRes(0, s.msBeforeNext, s.consumedPoints) : null) as never;
+    });
+  });
+
+  function deliveryFrom(ip: string) {
+    return { params: { webhookId: 'wh-1', token: 'SECRET-TOKEN' }, ip, socket: {} } as any;
+  }
+
+  function fakeRes() {
+    const json = vi.fn();
+    const res = { set: vi.fn(), status: vi.fn(() => ({ json })), json };
+    return res as any;
+  }
+
+  async function gate(req: any) {
+    const res = fakeRes();
+    const next = vi.fn();
+    await rl.refuseWebhookSignatureFailures(req, res, next);
+    return { res, next };
+  }
+
+  it('refuses an address that spent its budget with the standard 429 and Retry-After, without calling next', async () => {
+    state.set('wh-1|203.0.113.7', { consumedPoints: 10, msBeforeNext: 41_200 });
+
+    const { res, next } = await gate(deliveryFrom('203.0.113.7'));
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.set).toHaveBeenCalledWith('Retry-After', '42');
+    expect(res.status).toHaveBeenCalledWith(429);
+    expect(res.json).toHaveBeenCalledWith({ success: false, error: 'Too many requests. Please try again later.' });
+    expect(getKeys).toEqual([{ prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.7' }]);
+  });
+
+  it('lets a delivery from ANOTHER address through while that one is refused (GitHub keeps delivering)', async () => {
+    state.set('wh-1|203.0.113.7', { consumedPoints: 25, msBeforeNext: 30_000 });
+
+    const blocked = await gate(deliveryFrom('203.0.113.7'));
+    const other = await gate(deliveryFrom('140.82.115.10'));
+
+    expect(blocked.next).not.toHaveBeenCalled();
+    expect(other.next).toHaveBeenCalledWith();
+    expect(other.res.status).not.toHaveBeenCalled();
+  });
+
+  it('lets the same address through for ANOTHER webhook (the key is never the address alone)', async () => {
+    state.set('wh-1|203.0.113.7', { consumedPoints: 10, msBeforeNext: 30_000 });
+
+    const { res, next } = await gate({ ...deliveryFrom('203.0.113.7'), params: { webhookId: 'wh-2', token: 'x' } });
+
+    expect(next).toHaveBeenCalledWith();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('passes an untouched key and a key still under its budget, charging nothing', async () => {
+    const consume = vi.spyOn(RateLimiterRedis.prototype, 'consume');
+    state.set('wh-1|198.51.100.4', { consumedPoints: 9, msBeforeNext: 30_000 });
+
+    for (const ip of ['203.0.113.7', '198.51.100.4']) {
+      const { res, next } = await gate(deliveryFrom(ip));
+      expect(next).toHaveBeenCalledWith();
+      expect(res.status).not.toHaveBeenCalled();
+    }
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it('honours an admin override of the budget', async () => {
+    // A store the override path can write to (hSet) and publish on
+    vi.mocked(getRedis).mockImplementation(() => ({ hSet: vi.fn(async () => 1) }) as unknown as ReturnType<typeof getRedis>);
+    const { getRedisPubSub } = await import('../../utils/redis');
+    vi.mocked(getRedisPubSub).mockReturnValueOnce({ pub: { publish: vi.fn(async () => 1) } } as unknown as ReturnType<typeof getRedisPubSub>);
+    await rl.updateRateLimit('webhookSigFail', { points: 3 });
+    state.set('wh-1|203.0.113.7', { consumedPoints: 3, msBeforeNext: 10_000 });
+
+    const { res, next } = await gate(deliveryFrom('203.0.113.7'));
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(429);
+  });
+
+  it('answers the 429 byte-for-byte like every other limiter (same header, status and body)', async () => {
+    state.set('wh-1|203.0.113.7', { consumedPoints: 10, msBeforeNext: 41_200 });
+    const ours = await gate(deliveryFrom('203.0.113.7'));
+
+    vi.spyOn(RateLimiterRedis.prototype, 'consume').mockRejectedValue(new RateLimiterRes(0, 41_200, 31));
+    const theirs = fakeRes();
+    const next = vi.fn();
+    await rl.rateLimitWebhookExecute(deliveryFrom('203.0.113.7'), theirs, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(ours.res.set.mock.calls).toEqual(theirs.set.mock.calls);
+    expect(ours.res.status.mock.calls).toEqual(theirs.status.mock.calls);
+    expect(ours.res.json.mock.calls).toEqual(theirs.json.mock.calls);
+  });
+
+  it('fails OPEN when the store errors: next(), a warning, no 429', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.mocked(RateLimiterRedis.prototype.get).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const { res, next } = await gate(deliveryFrom('203.0.113.7'));
+
+    expect(next).toHaveBeenCalledWith();
+    expect(res.status).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail limiter error, allowing request:', 'ECONNREFUSED');
+  });
+
+  it('fails OPEN when no store can be reached at all', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fresh = await freshRateLimiter();
+    vi.mocked(getRedis).mockImplementation(redisMock.unavailable);
+    const res = fakeRes();
+    const next = vi.fn();
+
+    await fresh.refuseWebhookSignatureFailures(deliveryFrom('203.0.113.7'), res, next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(res.status).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail limiter error, allowing request:', 'Redis not available in unit tests');
+  });
+
+  it('the charge never throws: a spent budget is silent (the NEXT request is refused), a store error warns', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const consume = vi.spyOn(RateLimiterRedis.prototype, 'consume')
+      .mockRejectedValueOnce(new RateLimiterRes(0, 30_000, 11))
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    await expect(rl.chargeWebhookSignatureFailure(deliveryFrom('203.0.113.7'))).resolves.toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    await expect(rl.chargeWebhookSignatureFailure(deliveryFrom('203.0.113.7'))).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail charge failed:', 'ECONNREFUSED');
+    expect(consume).toHaveBeenCalledTimes(2);
   });
 });
 

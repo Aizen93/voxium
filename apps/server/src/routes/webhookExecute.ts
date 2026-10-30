@@ -6,7 +6,12 @@ import type { Prisma } from '../generated/prisma/client';
 import { prisma } from '../utils/prisma';
 import { getIO } from '../websocket/socketServer';
 import { requireFeature } from '../middleware/requireFeature';
-import { rateLimitWebhookExecute, rateLimitWebhookExecuteIp } from '../middleware/rateLimiter';
+import {
+  chargeWebhookSignatureFailure,
+  rateLimitWebhookExecute,
+  rateLimitWebhookExecuteIp,
+  refuseWebhookSignatureFailures,
+} from '../middleware/rateLimiter';
 import {
   BadRequestError,
   ForbiddenError,
@@ -37,8 +42,11 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
  *                  → GitHub only: open the sealed secret
  *                  → generic only: per-webhook limiter (the URL is the
  *                    whole credential)
+ *                  → GitHub only: refused while this address has spent
+ *                    its signature-failure budget for this webhook
  *                  → body parser (GitHub only: the signature over the raw
- *                    bytes, checked BEFORE they are parsed)
+ *                    bytes, checked BEFORE they are parsed; a mismatch
+ *                    charges that budget)
  *                  → GitHub only: per-webhook limiter, once the signature
  *                    matched
  *                  → render + insert + broadcast
@@ -73,8 +81,11 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
  *   parser, those kept the point (a refund on the 401 alone could not reach
  *   them), and anyone holding the URL could hold the bucket full: GitHub's
  *   real deliveries would then get 429s, which GitHub does not redeliver.
- *   The price: a sender without the secret can make the server read and
- *   HMAC a body, bounded by the per-IP bucket. (A request without any body
+ *   A sender without the secret is instead bounded by the signature-failure
+ *   bucket (webhookSigFail), keyed on the webhook AND the sender's address:
+ *   each failed signature charges it, and once spent that address's next
+ *   deliveries to that webhook answer 429 before the body is read or
+ *   hashed, while every other address (GitHub's) keeps delivering. (A request without any body
  *   is a 415 before the token check; a body the parser does not read, being
  *   consumed upstream, never meets the hook, so the request fails closed
  *   with the same 401, uncharged.)
@@ -124,6 +135,8 @@ interface ExecuteLocals {
   webhookSecret?: string;
   /** Set by the verify hook once X-Hub-Signature-256 matched the raw bytes. */
   signatureVerified?: boolean;
+  /** Set by the verify hook when X-Hub-Signature-256 is missing or did not match. */
+  signatureFailed?: boolean;
 }
 
 function localsOf(res: Response | ServerResponse): ExecuteLocals {
@@ -201,7 +214,10 @@ function openGitHubSecret(row: CredentialRow): string {
  * thrown error on as the same instance (http-errors keeps it and its 401
  * status), and the error handler answers it in the house shape. Nothing has
  * been charged to the per-webhook bucket yet (see the route), so there is
- * nothing to give back.
+ * nothing to give back. A mismatch is flagged on res.locals: the hook is
+ * synchronous (body-parser's contract), so the signature-failure bucket is
+ * charged by chargeSignatureFailure, the error middleware right after the
+ * parser.
  */
 function verifyRawBody(req: IncomingMessage, res: ServerResponse, buf: Buffer): void {
   const request = req as Request;
@@ -212,6 +228,7 @@ function verifyRawBody(req: IncomingMessage, res: ServerResponse, buf: Buffer): 
   // Needed for this check alone: not kept for the rest of the request
   delete locals.webhookSecret;
   if (secret === undefined || !verifyGitHubSignature(buf, request.get('x-hub-signature-256'), secret)) {
+    locals.signatureFailed = true;
     throw new UnauthorizedError(INVALID_SIGNATURE);
   }
   locals.signatureVerified = true;
@@ -230,6 +247,42 @@ function chargeWebhookBeforeBody(req: Request, res: Response, next: NextFunction
     return;
   }
   return rateLimitWebhookExecute(req, res, next);
+}
+
+/**
+ * GitHub rows only, BEFORE the body parser: an address that has spent its
+ * signature-failure budget for this webhook gets the standard 429 without a
+ * byte of its body being read or hashed. Keyed on the webhook AND the
+ * address, so deliveries from any other address (GitHub's own) still pass.
+ * Charges nothing: only a failed signature is charged, after the parser.
+ */
+function refuseAfterSignatureFailures(req: Request, res: Response, next: NextFunction): void | Promise<void> {
+  if (localsOf(res).webhook?.type !== 'github') {
+    next();
+    return;
+  }
+  return refuseWebhookSignatureFailures(req, res, next);
+}
+
+/**
+ * Error middleware right after the body parser: when the verify hook refused
+ * the signature, charge one point of the (webhook, address) signature-failure
+ * bucket, then hand the SAME error on (the 401 stays this request's answer;
+ * the budget refuses the next ones). Every other parser error passes through
+ * uncharged. Never replaces that error: the charge fails open.
+ */
+async function chargeSignatureFailure(err: unknown, req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (localsOf(res).signatureFailed === true) {
+    try {
+      await chargeWebhookSignatureFailure(req);
+    } catch (chargeErr) {
+      console.warn('[Webhooks] Could not charge a signature failure', {
+        webhookId: localsOf(res).webhook?.id,
+        error: chargeErr instanceof Error ? chargeErr.message : String(chargeErr),
+      });
+    }
+  }
+  next(err);
 }
 
 /**
@@ -459,10 +512,17 @@ webhookExecuteRouter.post(
   // body is read (its URL is its whole credential, so whoever holds it may
   // spend its budget)
   chargeWebhookBeforeBody,
+  // A GitHub row: an address that spent its signature-failure budget for
+  // this webhook is refused HERE, before its body is read (keyed on the
+  // webhook AND the address, so other senders' deliveries still pass)
+  refuseAfterSignatureFailures,
   // A body is read and parsed only for a valid token, and a GitHub body only
   // once its signature matched the raw bytes (the verify hook runs between
   // the read and the parse)
   express.json({ limit: LIMITS.WEBHOOK_BODY_MAX_BYTES, verify: verifyRawBody }),
+  // Error path only: the hook's signature 401 charges the signature-failure
+  // bucket, then goes on unchanged; every other parser error passes uncharged
+  chargeSignatureFailure,
   // A GitHub row is charged HERE, only once its signature matched: whatever
   // a sender without the secret sends fails before it (in the parser, or as
   // the hook's 401) and never touches the webhook's budget
