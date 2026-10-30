@@ -50,6 +50,14 @@ let handshakeRetryDelay = HANDSHAKE_RETRY_MIN_MS;
 let handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
+ * After a credential change this client made, how long a server disconnect
+ * is taken as the session revocation that change caused (and repaired with
+ * the stored token) rather than a kick. See reconnectSocketAfterCredentialChange.
+ */
+export const REVOCATION_REOPEN_WINDOW_MS = 15_000;
+let revocationReopenUntil = 0;
+
+/**
  * Monotonically increasing ID to track socket instance changes.
  * Consumers can compare this to know if the socket was replaced.
  */
@@ -253,6 +261,21 @@ export function connectSocket(token: string): VoxSocket {
     // For transient disconnects (transport close, ping timeout), keep voice
     // state intact so the onSocketReconnect handler can re-join seamlessly.
     if (reason === 'io server disconnect') {
+      // The server ending every session of this account after a password
+      // change this client made: the disconnect may land AFTER the reopen
+      // with the fresh token (the HTTP answer and the socket frame travel on
+      // different connections, and another node's copy of the disconnect
+      // arrives through Redis), and would then strand the new socket. Repair
+      // it once, within the window, with the token stored meanwhile.
+      // After the client has finished closing the manager: never re-open it
+      // from inside its own close.
+      if (Date.now() < revocationReopenUntil) {
+        revocationReopenUntil = 0;
+        setTimeout(() => {
+          const token = getAccessToken();
+          if (token && socket === s && !explicitlyDisconnected && !s.connected) reopen(s, token);
+        }, 0);
+      }
       import('../stores/voiceStore').then(({ useVoiceStore }) => {
         const voiceState = useVoiceStore.getState();
         if (voiceState.activeChannelId) {
@@ -383,6 +406,27 @@ export async function ensureSocketConnected(): Promise<void> {
   reopen(s, token);
 }
 
+/**
+ * Reopen the socket with `token` after a credential change this client made
+ * (a password change). The server disconnects every socket of the account
+ * when the change commits, this one included, and a server-side disconnect
+ * closes the manager for good: nothing would reconnect it. The answer
+ * carrying the fresh tokens and the disconnect frame race, so the socket is
+ * reopened now whatever its state (a connected socket is closed by us first,
+ * which the server treats like any other leave), and a server disconnect that
+ * lands within `REVOCATION_REOPEN_WINDOW_MS` is repaired once more (see the
+ * `disconnect` handler). Never `force:logout`: the session is still valid.
+ * No-op without a socket or after a logout.
+ */
+export function reconnectSocketAfterCredentialChange(token: string): void {
+  const s = socket;
+  if (!s || explicitlyDisconnected) return;
+  revocationReopenUntil = Date.now() + REVOCATION_REOPEN_WINDOW_MS;
+  reopen(s, token);
+  // A connected socket's own disconnect() above reported 'disconnected'
+  setStatus('connecting');
+}
+
 export function getSocket(): VoxSocket | null {
   return socket;
 }
@@ -431,6 +475,7 @@ export function disconnectSocket() {
   handshakeInFlight = false;
   hasConnectedOnce = false;
   explicitlyDisconnected = true;
+  revocationReopenUntil = 0;
   clearHandshakeRetry();
   handshakeRetryDelay = HANDSHAKE_RETRY_MIN_MS;
   readyCallbacks.length = 0;
@@ -446,4 +491,5 @@ export function disconnectSocket() {
 /** @internal tests: the handshake refresh rate guard */
 export function _resetSocketModuleForTests(): void {
   lastHandshakeRefreshAt = 0;
+  revocationReopenUntil = 0;
 }

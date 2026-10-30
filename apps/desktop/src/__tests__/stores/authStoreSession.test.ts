@@ -8,10 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }));
 vi.mock('../../services/api', () => ({ api }));
 
-const socket = vi.hoisted(() => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn() }));
+const socket = vi.hoisted(() => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn(), reconnectSocketAfterCredentialChange: vi.fn() }));
 vi.mock('../../services/socket', () => ({
   connectSocket: socket.connectSocket,
   disconnectSocket: socket.disconnectSocket,
+  reconnectSocketAfterCredentialChange: socket.reconnectSocketAfterCredentialChange,
   getSocket: vi.fn(() => null),
   getSocketGeneration: vi.fn(() => 0),
   onSocketReady: vi.fn(() => () => {}),
@@ -394,6 +395,50 @@ describe('authStore.checkAuth — the stored session, the deadline and the retry
 
     expect(storage.hydrateTokens).toHaveBeenCalledTimes(1);
     expect(api.get).not.toHaveBeenCalled();
+  });
+});
+
+describe('authStore.changePassword — the live socket follows the new tokens', () => {
+  beforeEach(() => {
+    useAuthStore.setState({ user: me as never, isAuthenticated: true, isLoading: false });
+  });
+
+  it('stores the fresh pair, THEN reopens the socket with the new access token — no sign-out, no new socket', async () => {
+    const order: string[] = [];
+    storage.setTokens.mockImplementationOnce(() => { order.push('setTokens'); });
+    socket.reconnectSocketAfterCredentialChange.mockImplementationOnce(() => { order.push('reconnect'); });
+    api.post.mockResolvedValueOnce({ data: { message: 'Password changed successfully.', data: { accessToken: 'access-new', refreshToken: 'refresh-new' } } });
+
+    const message = await useAuthStore.getState().changePassword('old-pw', 'new-pw-123');
+
+    expect(message).toBe('Password changed successfully.');
+    expect(api.post).toHaveBeenCalledWith('/auth/change-password', { currentPassword: 'old-pw', newPassword: 'new-pw-123', rememberMe: true });
+    expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
+    expect(socket.reconnectSocketAfterCredentialChange).toHaveBeenCalledWith('access-new');
+    expect(order).toEqual(['setTokens', 'reconnect']);
+    // The session is the same one: nothing torn down, still signed in
+    expect(socket.disconnectSocket).not.toHaveBeenCalled();
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(useAuthStore.getState().user).toEqual(me);
+  });
+
+  it('touches neither the tokens nor the socket when the change is refused', async () => {
+    api.post.mockRejectedValueOnce(status(400));
+
+    await expect(useAuthStore.getState().changePassword('wrong', 'new-pw-123')).rejects.toThrow('400');
+
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(socket.reconnectSocketAfterCredentialChange).not.toHaveBeenCalled();
+  });
+
+  it('reopens nothing when the answer carries no token pair (an older server)', async () => {
+    api.post.mockResolvedValueOnce({ data: { message: 'ok' } });
+
+    await useAuthStore.getState().changePassword('old-pw', 'new-pw-123');
+
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(socket.reconnectSocketAfterCredentialChange).not.toHaveBeenCalled();
   });
 });
 

@@ -93,6 +93,9 @@ const storage = vi.hoisted(() => ({
   flushTokenStorage: vi.fn(async () => {}),
 }));
 vi.mock('../../services/tokenStorage', () => storage);
+// A server disconnect leaves any voice call (the 'disconnect' handler)
+const voice = vi.hoisted(() => ({ activeChannelId: null as string | null, dmCallConversationId: null as string | null, leaveChannel: vi.fn(), leaveDMCall: vi.fn() }));
+vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: { getState: () => voice } }));
 
 type SocketModule = typeof import('../../services/socket');
 
@@ -681,6 +684,164 @@ describe('services/socket — ensureSocketConnected (the window comes back)', ()
 
     expect(socket.disconnect).not.toHaveBeenCalled();
     expect(socket.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe('services/socket — reconnectSocketAfterCredentialChange (the server revoked every session after a password change)', () => {
+  // What a server-side disconnect(true) does on the real client: the socket
+  // and the manager close for good ('io server disconnect'), nothing retries
+  function serverDisconnect(socket: FakeSocket): void {
+    socket.connected = false;
+    socket.active = false;
+    socket.fire('disconnect', 'io server disconnect');
+  }
+  const macrotask = () => new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useRealTimers();
+    createdSockets.length = 0;
+    storage.getAccessToken.mockReset().mockReturnValue('access-new');
+    voice.activeChannelId = null;
+    voice.dmCallConversationId = null;
+  });
+
+  it('the disconnect landed FIRST (manager closed): reopens the same socket with the new token at once', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    serverDisconnect(socket);
+    await macrotask();
+    expect(socket.connect).not.toHaveBeenCalled(); // nothing reconnects on its own
+
+    mod.reconnectSocketAfterCredentialChange('access-new');
+
+    expect(socket.auth).toEqual({ token: 'access-new' });
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    expect(mod.getConnectionStatus()).toBe('connecting');
+    expect(createdSockets).toHaveLength(1);
+  });
+
+  it('the answer landed FIRST (still connected): reopens now — connectSocket alone would be a no-op on a connected socket', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+
+    mod.connectSocket('access-new');
+    expect(socket.connect).not.toHaveBeenCalled();
+
+    mod.reconnectSocketAfterCredentialChange('access-new');
+
+    expect(socket.auth).toEqual({ token: 'access-new' });
+    expect(socket.disconnect).toHaveBeenCalledTimes(1);
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    expect(mod.getConnectionStatus()).toBe('connecting');
+  });
+
+  it('a server disconnect landing AFTER the reopen (another node\'s copy) is repaired once, with the stored token', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    socket.connected = true;
+    socket.fire('connect');
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+
+    serverDisconnect(socket);
+    await macrotask();
+
+    expect(socket.connect).toHaveBeenCalledTimes(2);
+    expect(socket.auth).toEqual({ token: 'access-new' });
+
+    // Only once: a later kick is a kick
+    socket.connected = true;
+    socket.fire('connect');
+    serverDisconnect(socket);
+    await macrotask();
+    expect(socket.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('a server disconnect after the window is not repaired', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    socket.connected = true;
+    socket.fire('connect');
+
+    clock.mockReturnValue(now + mod.REVOCATION_REOPEN_WINDOW_MS + 1);
+    serverDisconnect(socket);
+    await macrotask();
+    clock.mockRestore();
+
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('a server disconnect without a credential change is left alone (a ban, a deletion: force:logout signs out)', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+
+    serverDisconnect(socket);
+    await macrotask();
+
+    expect(socket.connect).not.toHaveBeenCalled();
+  });
+
+  it('the repair is skipped when the session ended meanwhile (no token, or logged out)', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    storage.getAccessToken.mockReturnValue(null);
+
+    serverDisconnect(socket);
+    await macrotask();
+
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('still leaves the voice call the server tore down', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    voice.activeChannelId = 'vc-1';
+    mod.reconnectSocketAfterCredentialChange('access-new');
+
+    serverDisconnect(socket);
+    await macrotask();
+
+    expect(voice.leaveChannel).toHaveBeenCalled();
+  });
+
+  it('is a no-op without a socket and after a logout', async () => {
+    const mod = await freshSocketModule();
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    expect(createdSockets).toHaveLength(0);
+
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    mod.disconnectSocket();
+    socket.connect.mockClear();
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    expect(socket.connect).not.toHaveBeenCalled();
+    expect(createdSockets).toHaveLength(1);
   });
 });
 

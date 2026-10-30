@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api, type SessionRequestConfig } from '../services/api';
-import { connectSocket, disconnectSocket } from '../services/socket';
+import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange } from '../services/socket';
 import {
   getAccessToken, setTokens, clearTokens, isRemembered, hydrateTokens,
   getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken,
@@ -522,6 +522,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // Store fresh tokens so the current session survives the tokenVersion bump
     if (data.data?.accessToken && data.data?.refreshToken) {
       setTokens(data.data.accessToken, data.data.refreshToken);
+      // The server disconnects every socket opened with the old tokens, this
+      // one included: reopen it with the new one (never force:logout — the
+      // session is still valid)
+      reconnectSocketAfterCredentialChange(data.data.accessToken);
     }
     return data.message;
   },
