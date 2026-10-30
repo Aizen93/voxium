@@ -345,7 +345,7 @@ export async function completeRegistration(
 
   const holders = await prisma.user.findMany({
     where: { OR: [{ email: row.email }, { emailCanonical: row.email_canonical }] },
-    select: { id: true, emailVerified: true },
+    select: { id: true, emailVerified: true, role: true, ownedServers: { select: { id: true }, take: 1 } },
   });
   if (holders.some((h) => h.emailVerified)) {
     // Someone completed or verified this address meanwhile. The caller proved
@@ -357,9 +357,22 @@ export async function completeRegistration(
   }
   // An unverified legacy account on this mailbox (an abandoned sign-up, or a
   // row someone else created with the address): the code proves the mailbox,
-  // that row never did. It goes the way every account goes.
+  // that row never did. It goes the way every account goes, under the guards
+  // the hygiene sweep applies (role 'user', no owned server). One that fails
+  // them is never deleted from here: the address stays taken (409, and the
+  // guess is given back, the code was right).
+  if (holders.some((h) => h.role !== 'user' || h.ownedServers.length > 0)) {
+    await refundAttempt();
+    throw new ConflictError(SIGNUP_EMAIL_REGISTERED_MESSAGE);
+  }
   for (const legacy of holders) {
-    await deleteUserAccount(legacy.id, { reason: 'superseded by a verified sign-up', logPrefix: '[Signup]' });
+    try {
+      await deleteUserAccount(legacy.id, { reason: 'superseded by a verified sign-up', logPrefix: '[Signup]' });
+    } catch (err) {
+      // A parallel completion with the same code deleted it first: already gone.
+      if ((err as { code?: string })?.code !== 'P2025') throw err;
+      console.warn('[Signup] Legacy account already deleted by a parallel completion');
+    }
   }
 
   let user;

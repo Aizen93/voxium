@@ -864,7 +864,7 @@ describe('completeRegistration', () => {
       });
       expect(prisma.user.findMany).toHaveBeenCalledWith({
         where: { OR: [{ email: 'new@smallcorp.example' }, { emailCanonical: 'new@smallcorp.example' }] },
-        select: { id: true, emailVerified: true },
+        select: { id: true, emailVerified: true, role: true, ownedServers: { select: { id: true }, take: 1 } },
       });
     });
 
@@ -937,6 +937,10 @@ describe('completeRegistration', () => {
   });
 
   describe('the address', () => {
+    const legacy = (id: string, over: Record<string, unknown> = {}) => ({
+      id, emailVerified: false, role: 'user', ownedServers: [] as Array<{ id: string }>, ...over,
+    });
+
     it('a verified holder (completed meanwhile) is a 409 that says sign in, and the pending row goes', async () => {
       h.prisma.user.findMany.mockResolvedValueOnce([{ id: 'u-verified', emailVerified: true }]);
       await expect(completeRegistration(ID, CODE, undefined, undefined))
@@ -957,8 +961,8 @@ describe('completeRegistration', () => {
 
     it('a verified holder wins even next to an unverified one: nothing is deleted', async () => {
       h.prisma.user.findMany.mockResolvedValueOnce([
-        { id: 'u-legacy', emailVerified: false },
-        { id: 'u-verified', emailVerified: true },
+        { id: 'u-legacy', emailVerified: false, role: 'user', ownedServers: [] },
+        { id: 'u-verified', emailVerified: true, role: 'user', ownedServers: [] },
       ]);
       await expect(completeRegistration(ID, CODE, undefined, undefined))
         .rejects.toMatchObject({ statusCode: 409, message: SIGNUP_EMAIL_REGISTERED_MESSAGE });
@@ -967,8 +971,8 @@ describe('completeRegistration', () => {
 
     it('unverified legacy holders are deleted the way every account is, BEFORE the new account is created', async () => {
       h.prisma.user.findMany.mockResolvedValueOnce([
-        { id: 'u-legacy-1', emailVerified: false },
-        { id: 'u-legacy-2', emailVerified: false },
+        { id: 'u-legacy-1', emailVerified: false, role: 'user', ownedServers: [] },
+        { id: 'u-legacy-2', emailVerified: false, role: 'user', ownedServers: [] },
       ]);
       await completeRegistration(ID, CODE, undefined, undefined);
       expect(h.deleteUserAccount).toHaveBeenCalledTimes(2);
@@ -979,10 +983,57 @@ describe('completeRegistration', () => {
     });
 
     it('a failing legacy deletion stops the registration (no account next to the old row)', async () => {
-      h.prisma.user.findMany.mockResolvedValueOnce([{ id: 'u-legacy-1', emailVerified: false }]);
+      h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
       h.deleteUserAccount.mockRejectedValueOnce(new Error('db gone'));
       await expect(completeRegistration(ID, CODE, undefined, undefined)).rejects.toThrow('db gone');
       expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['owns a space', legacy('u-owner', { ownedServers: [{ id: 'srv-1' }] })],
+      ['is an admin', legacy('u-admin', { role: 'admin' })],
+      ['is a superadmin', legacy('u-super', { role: 'superadmin' })],
+    ])('an unverified holder that %s is never deleted from here: 409, attempt refunded, nothing created', async (_label, holder) => {
+      h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-plain'), holder]);
+      await expect(completeRegistration(ID, CODE, undefined, undefined))
+        .rejects.toMatchObject({ statusCode: 409, message: SIGNUP_EMAIL_REGISTERED_MESSAGE });
+      refund();
+      expect(h.deleteUserAccount).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      // The pending row stays: the same code may complete once the address is free
+      expect(prisma.pendingRegistration.delete).not.toHaveBeenCalled();
+    });
+
+    it('a legacy holder another completion already deleted (P2025) counts as gone', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
+      h.deleteUserAccount.mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+      const result = await completeRegistration(ID, CODE, undefined, undefined);
+      expect(result.user.id).toBe('user-1');
+      expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');
+    });
+
+    it('two parallel completions over one legacy holder: one account, the other a 409, no 500', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      h.prisma.user.findMany.mockResolvedValue([legacy('u-legacy-1')]);
+      // The first delete wins; the second finds the row gone
+      h.deleteUserAccount
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+      // The unique index on the address lets one create through
+      h.tx.user.create.mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), {
+        code: 'P2002', meta: { target: ['email'] },
+      }));
+      const results = await Promise.allSettled([
+        completeRegistration(ID, CODE, undefined, undefined),
+        completeRegistration(ID, CODE, undefined, undefined),
+      ]);
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toMatchObject({ statusCode: 409, message: SIGNUP_EMAIL_REGISTERED_MESSAGE });
+      expect(h.deleteUserAccount).toHaveBeenCalledTimes(2);
     });
   });
 
