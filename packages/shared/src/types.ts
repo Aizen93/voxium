@@ -591,7 +591,6 @@ export interface ServerToClientEvents {
   'support:message:new': (message: SupportMessageData) => void;
   'support:status_change': (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => void;
   'support:ticket:new': (data: { total: number }) => void;
-  // Community Themes
 }
 
 export interface ClientToServerEvents {
