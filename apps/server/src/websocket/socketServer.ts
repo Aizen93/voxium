@@ -404,8 +404,13 @@ export function initSocketServer(httpServer: HttpServer) {
     // Session check, once more, now that the socket is in `user:{id}`: the
     // token version and ban state must still match what the handshake
     // admitted (session revocation targets that room, sessionRevocation.ts).
-    // A failing lookup keeps the socket: the handshake has just read the same
-    // row, and a database blip ends no session.
+    // A deleted or banned account is signed out (force:logout, with the
+    // reason the revocation itself sends, before the disconnect: the client
+    // must not reopen into a refusal it treats as final). A token-version
+    // mismatch only disconnects: the client renews, and a refused renewal
+    // ends the session there. A failing lookup keeps the socket: the
+    // handshake has just read the same row, and a database blip ends no
+    // session.
     try {
       const current = await prisma.user.findUnique({
         where: { id: userId },
@@ -413,6 +418,9 @@ export function initSocketServer(httpServer: HttpServer) {
       });
       if (!current || current.bannedAt || current.tokenVersion !== socket.data.tokenVersion) {
         console.warn(`[WS] Session of ${userId} (${socket.id}) was revoked during the handshake; disconnecting`);
+        if (!current || current.bannedAt) {
+          socket.emit('force:logout', { reason: current ? 'Your account has been banned' : 'Your account has been deleted' });
+        }
         socket.disconnect(true);
         return;
       }

@@ -1157,6 +1157,9 @@ describe('socketServer — session re-check after joining the user room', () => 
     expect(socket.join.mock.invocationCallOrder[0]).toBeLessThan(recheck);
     expect(mockPrisma.user.findUnique).toHaveBeenLastCalledWith({ where: { id: 'user-1' }, select: { tokenVersion: true, bannedAt: true } });
     expect(socket.disconnect).toHaveBeenCalledWith(true);
+    // The session may be renewed (a password change on another device is
+    // judged at the refresh): no force:logout
+    expect(socket.emit).not.toHaveBeenCalledWith('force:logout', expect.anything());
     // Nothing else is set up for it: no channel rooms, no online announcement
     expect(mockPrisma.serverMember.findMany).not.toHaveBeenCalled();
     expect(toFn).not.toHaveBeenCalled();
@@ -1164,7 +1167,7 @@ describe('socketServer — session re-check after joining the user room', () => 
     warn.mockRestore();
   });
 
-  it('disconnects a socket whose account was banned between the handshake and the join', async () => {
+  it('signs out a socket whose account was banned between the handshake and the join: force:logout, then the disconnect', async () => {
     const { socket } = createMockSocket('user-1');
     socket.disconnected = false;
     socket.data = {};
@@ -1175,12 +1178,15 @@ describe('socketServer — session re-check after joining the user room', () => 
 
     await handshakeThenConnect(socket);
 
+    expect(socket.emit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
     expect(socket.disconnect).toHaveBeenCalledWith(true);
+    const logout = socket.emit.mock.calls.findIndex((c: unknown[]) => c[0] === 'force:logout');
+    expect(socket.emit.mock.invocationCallOrder[logout]).toBeLessThan(socket.disconnect.mock.invocationCallOrder[0]);
     expect(mockPrisma.serverMember.findMany).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 
-  it('disconnects a socket whose account was deleted between the handshake and the join', async () => {
+  it('signs out a socket whose account was deleted between the handshake and the join: force:logout, then the disconnect', async () => {
     const { socket } = createMockSocket('user-1');
     socket.disconnected = false;
     socket.data = {};
@@ -1191,7 +1197,10 @@ describe('socketServer — session re-check after joining the user room', () => 
 
     await handshakeThenConnect(socket);
 
+    expect(socket.emit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been deleted' });
     expect(socket.disconnect).toHaveBeenCalledWith(true);
+    const logout = socket.emit.mock.calls.findIndex((c: unknown[]) => c[0] === 'force:logout');
+    expect(socket.emit.mock.invocationCallOrder[logout]).toBeLessThan(socket.disconnect.mock.invocationCallOrder[0]);
     warn.mockRestore();
   });
 
@@ -1220,6 +1229,7 @@ describe('socketServer — session re-check after joining the user room', () => 
 
     expect(mockPrisma.user.findUnique).toHaveBeenCalledTimes(2);
     expect(socket.disconnect).not.toHaveBeenCalled();
+    expect(socket.emit).not.toHaveBeenCalledWith('force:logout', expect.anything());
     expect(mockPrisma.serverMember.findMany).toHaveBeenCalled();
   });
 

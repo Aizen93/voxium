@@ -1096,6 +1096,34 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     }
   });
 
+  it('a session the server ends right after admitting it (banned or deleted during the handshake) signs out with the reason and never reopens', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    session.getFreshAccessToken.mockResolvedValue('access-old');
+    authStoreMock.logout.mockClear();
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      // The connection handler's re-check: force:logout, then disconnect(true)
+      socket.connected = true;
+      socket.fire('connect');
+      socket.fire('force:logout', { reason: 'Your account has been deleted' });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(authStoreMock.logout).toHaveBeenCalledTimes(1);
+      expect(window.location.href).toBe('/login?reason=Your%20account%20has%20been%20deleted');
+      expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+      expect(socket.connect).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+    }
+  });
+
   it('the resume reopen is skipped when the user logged out before it ran', async () => {
     const mod = await freshSocketModule();
     mod.connectSocket('access-old');
