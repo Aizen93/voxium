@@ -96,7 +96,9 @@
         "signIn": "Iniciar sesión",
         "resetPassword": "Restablecer contraseña",
         "spamHint": "¿Aún nada? Revisa tu carpeta de spam o correo no deseado.",
-        "startOver": "Empezar de nuevo"
+        "startOver": "Empezar de nuevo",
+        "startOverWarning": "Empezar de nuevo envía un código nuevo. Una dirección recibe como máximo {{mails}} correos de registro en {{days}} días, así que normalmente conviene usar el código ya enviado.",
+        "startOverConfirm": "Empezar de nuevo igualmente"
       }
     },
     "totp": {

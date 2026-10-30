@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, Link } from 'react-router-dom';
 import { AxiosError } from 'axios';
 import {
   SIGNUP, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE,
@@ -45,6 +45,7 @@ vi.mock('../../components/auth/PeekingThief', () => ({ PeekingThief: () => null 
 import i18n from '../../i18n';
 import { useAuthStore, type PendingRegistration } from '../../stores/authStore';
 import { RegisterPage } from '../../pages/RegisterPage';
+import { LoginPage } from '../../pages/LoginPage';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -64,7 +65,7 @@ function axiosError(status: number, message: string) {
   } as never);
 }
 
-function mount(pending: PendingRegistration | null = pendingState()) {
+function mount(pending: PendingRegistration | null = pendingState(), loginPage = <div data-testid="login-page" />) {
   useAuthStore.setState({ pendingRegistration: pending });
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -74,11 +75,19 @@ function mount(pending: PendingRegistration | null = pendingState()) {
       <MemoryRouter initialEntries={['/register']}>
         <Routes>
           <Route path="/register" element={<RegisterPage />} />
-          <Route path="/login" element={<div data-testid="login-page" />} />
+          <Route path="/login" element={<>{loginPage}<Link to="/register">back to register</Link></>} />
+          <Route path="/forgot-password" element={<Link to="/register">back to register</Link>} />
         </Routes>
       </MemoryRouter>,
     );
   });
+}
+
+/** Follow an in-app link, as a click on it does. */
+function follow(href: string) {
+  const link = container.querySelector(`a[href="${href}"]`) as HTMLAnchorElement | null;
+  expect(link).toBeTruthy();
+  act(() => { link!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })); });
 }
 
 const flush = async () => {
@@ -258,11 +267,103 @@ describe('RegisterPage — the code step', () => {
     warn.mockRestore();
   });
 
-  it('"Start over" brings the form back', () => {
+  it('"Start over" warns about the limited sign-up mails before it brings the form back', () => {
     mount();
     act(() => { button('Start over')!.click(); });
+    // Nothing dropped yet: the code step stays, with the warning
+    expect(codeInput()).toBeTruthy();
+    expect(useAuthStore.getState().pendingRegistration).not.toBeNull();
+    expect(text()).toContain(
+      `An address receives at most ${SIGNUP.LEDGER_MAX_MAILS} sign-up emails in ${SIGNUP.LEDGER_WINDOW_DAYS} days`,
+    );
+
+    act(() => { button('Start over anyway')!.click(); });
     expect(codeInput()).toBeNull();
     expect(container.querySelector('#register-email')).toBeTruthy();
     expect(useAuthStore.getState().pendingRegistration).toBeNull();
+  });
+
+  it('"Start over" can be taken back, and the code step stays as it was', () => {
+    mount();
+    act(() => { button('Start over')!.click(); });
+    act(() => { button('Cancel')!.click(); });
+    expect(button('Start over anyway')).toBeUndefined();
+    expect(button('Start over')).toBeTruthy();
+    expect(codeInput()).toBeTruthy();
+    expect(useAuthStore.getState().pendingRegistration?.pendingId).toBe('p1');
+  });
+
+  it('"Start over" clears the code step\'s error', () => {
+    mount();
+    act(() => { useAuthStore.setState({ error: 'Invalid or expired code' }); });
+    act(() => { button('Start over')!.click(); });
+    act(() => { button('Start over anyway')!.click(); });
+    expect(useAuthStore.getState().error).toBeNull();
+    expect(text()).not.toContain('Invalid or expired code');
+  });
+
+  it.each(['/login', '/forgot-password'])('the code step survives a trip to %s and back', (href) => {
+    mount();
+    follow(href);
+    expect(codeInput()).toBeNull();
+    expect(useAuthStore.getState().pendingRegistration?.pendingId).toBe('p1');
+
+    follow('/register');
+    expect(codeInput()).toBeTruthy();
+    expect(text()).toContain('alice@example.com');
+  });
+
+  it('a refused code does not follow the user onto the sign-in page', async () => {
+    api.post.mockRejectedValue(axiosError(400, SIGNUP_CODE_INVALID_MESSAGE));
+    mount(pendingState(), <LoginPage />);
+    setInput(codeInput()!, '000000');
+    await submit();
+    const refusal = useAuthStore.getState().error;
+    expect(refusal).toBeTruthy();
+
+    follow('/login');
+    expect(useAuthStore.getState().error).toBeNull();
+    expect(text()).not.toContain(refusal!);
+  });
+});
+
+describe('LoginPage — the shared error', () => {
+  it('opens without an error another page left in the store', () => {
+    useAuthStore.setState({ error: 'Invalid or expired code' });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <MemoryRouter initialEntries={['/login']}>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+    expect(useAuthStore.getState().error).toBeNull();
+    expect(text()).not.toContain('Invalid or expired code');
+  });
+
+  it('still shows a sign-in refusal while it stays open', async () => {
+    api.post.mockRejectedValue(axiosError(401, 'Invalid email or password'));
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <MemoryRouter initialEntries={['/login']}>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+    await act(async () => {
+      await useAuthStore.getState().login('a@example.com', 'wrong-password').catch(() => {});
+    });
+    expect(useAuthStore.getState().error).toBeTruthy();
+    expect(text()).toContain(useAuthStore.getState().error!);
   });
 });

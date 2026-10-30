@@ -193,16 +193,17 @@ describe('authStore.register — proof-of-work flow', () => {
   });
 
   // The solve is abortable; the POST that follows it is not. Walking away
-  // while it is in flight used to leak its outcome onto whatever page the
-  // user went to: `error` is shared with LoginPage.
-  describe('cancel while the POST is in flight', () => {
+  // while it is in flight must not leak a refusal onto whatever page the user
+  // went to (`error` is shared with LoginPage) — but an accepted start is
+  // kept: its code is already in the mailbox, bound to this pending id.
+  describe('leaving the view while the POST is in flight', () => {
     it('does not surface a 409 from the abandoned registration as an error on the next page', async () => {
       solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
       const post = hangingPost();
 
       const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
       await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
-      useAuthStore.getState().cancelRegistration(); // RegisterPage unmounted → LoginPage mounted, clearError ran
+      useAuthStore.getState().leaveRegistration(); // RegisterPage unmounted → LoginPage mounted, clearError ran
       post().reject(axiosError(409, USERNAME_TAKEN_MESSAGE));
 
       await expect(pending).rejects.toBeInstanceOf(PowAbortedError);
@@ -210,19 +211,64 @@ describe('authStore.register — proof-of-work flow', () => {
       expect(useAuthStore.getState().isRegistering).toBe(false);
     });
 
-    it('a 202 for an abandoned view leaves no code step behind', async () => {
+    it('a 202 that lands after the view was left still stores the code step', async () => {
       solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
       const post = hangingPost();
 
       const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
       await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
-      useAuthStore.getState().cancelRegistration();
+      useAuthStore.getState().leaveRegistration();
+      post().resolve({ data: { data: { pendingId: 'p1', resendAfterSeconds: 600 } } });
+
+      await pending;
+      expect(useAuthStore.getState().pendingRegistration).toMatchObject({ pendingId: 'p1', email: 'a@example.com' });
+      expect(useAuthStore.getState().isRegistering).toBe(false);
+      expect(useAuthStore.getState().error).toBeNull();
+    });
+
+    it('a 202 that lands after someone signed in is dropped', async () => {
+      solver.solveRegistrationPowOffThread.mockResolvedValue({ ...CHALLENGE, nonce: '3' });
+      const post = hangingPost();
+
+      const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
+      await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
+      useAuthStore.getState().leaveRegistration();
+      useAuthStore.setState({ user: { id: 'u-existing' } as never, isAuthenticated: true });
       post().resolve({ data: { data: { pendingId: 'p1', resendAfterSeconds: 600 } } });
 
       await expect(pending).rejects.toBeInstanceOf(PowAbortedError);
       expect(useAuthStore.getState().pendingRegistration).toBeNull();
-      expect(useAuthStore.getState().error).toBeNull();
     });
+
+    it('a 202 for an attempt a newer one replaced is dropped', async () => {
+      solver.solveRegistrationPowOffThread.mockResolvedValueOnce({ ...CHALLENGE, nonce: '3' });
+      const post = hangingPost();
+      const first = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
+      await vi.waitFor(() => expect(api.post).toHaveBeenCalledTimes(1));
+      const firstPost = post();
+
+      hangingSolve();
+      const second = useAuthStore.getState().register('alice', 'b@example.com', 'password123', CONSENT);
+      firstPost.resolve({ data: { data: { pendingId: 'old', resendAfterSeconds: 600 } } });
+
+      await expect(first).rejects.toBeInstanceOf(PowAbortedError);
+      expect(useAuthStore.getState().pendingRegistration).toBeNull();
+      expect(useAuthStore.getState().isRegistering).toBe(true);
+      useAuthStore.getState().cancelRegistration();
+      await expect(second).rejects.toBeInstanceOf(PowAbortedError);
+    });
+  });
+
+  it('leaving the view mid-solve stops the solve and never posts', async () => {
+    hangingSolve();
+    const pending = useAuthStore.getState().register('alice', 'a@example.com', 'password123', CONSENT);
+    await vi.waitFor(() => expect(solver.solveRegistrationPowOffThread).toHaveBeenCalled());
+    useAuthStore.getState().leaveRegistration();
+    await expect(pending).rejects.toBeInstanceOf(PowAbortedError);
+    expect(api.post).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().isRegistering).toBe(false);
+    expect(useAuthStore.getState().pendingRegistration).toBeNull();
+    expect(useAuthStore.getState().error).toBeNull();
   });
 
   it('a new registration replaces an older pending one', async () => {
@@ -311,28 +357,31 @@ describe('authStore.completeRegistration — the code creates the account', () =
     const post = hangingPost();
     const pending = useAuthStore.getState().completeRegistration('000000');
     await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
-    useAuthStore.getState().cancelRegistration();
+    useAuthStore.getState().leaveRegistration();
     post().reject(axiosError(400, SIGNUP_CODE_INVALID_MESSAGE));
     await expect(pending).rejects.toBeTruthy();
     expect(useAuthStore.getState().error).toBeNull();
+    // ... and the code step is still there to come back to
+    expect(useAuthStore.getState().pendingRegistration?.pendingId).toBe('p1');
   });
 
   it('still finishes the sign-in when the view was left — the account exists now', async () => {
     const post = hangingPost();
     const pending = useAuthStore.getState().completeRegistration('123456');
     await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
-    useAuthStore.getState().cancelRegistration();
+    useAuthStore.getState().leaveRegistration();
     post().resolve({ data: { data: { user, accessToken: 'at', refreshToken: 'rt' } } });
     await pending;
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
     expect(useAuthStore.getState().user?.id).toBe('u-new');
+    expect(useAuthStore.getState().pendingRegistration).toBeNull();
   });
 
   it('does NOT replace a session the user established as someone else meanwhile', async () => {
     const post = hangingPost();
     const pending = useAuthStore.getState().completeRegistration('123456');
     await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
-    useAuthStore.getState().cancelRegistration();
+    useAuthStore.getState().leaveRegistration();
     useAuthStore.setState({ user: { id: 'u-existing' } as never, isAuthenticated: true });
     post().resolve({ data: { data: { user, accessToken: 'at', refreshToken: 'rt' } } });
     await pending;
@@ -374,12 +423,78 @@ describe('authStore.resendRegistrationCode — one more code', () => {
     await useAuthStore.getState().resendRegistrationCode();
     expect(api.post).not.toHaveBeenCalled();
   });
+
+  it('a resend refused after the view was left reports nothing on the next page', async () => {
+    const post = hangingPost();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const pending = useAuthStore.getState().resendRegistrationCode();
+    await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
+    useAuthStore.getState().leaveRegistration();
+    post().reject(axiosError(429, 'Too many requests. Please try again later.'));
+    await expect(pending).rejects.toBeTruthy();
+    expect(useAuthStore.getState().error).toBeNull();
+    expect(useAuthStore.getState().pendingRegistration?.pendingId).toBe('p1');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('a resend accepted after the view was left still marks the resend as spent', async () => {
+    const post = hangingPost();
+    const pending = useAuthStore.getState().resendRegistrationCode();
+    await vi.waitFor(() => expect(api.post).toHaveBeenCalled());
+    useAuthStore.getState().leaveRegistration();
+    post().resolve({ data: { data: { pendingId: 'p1', resendAfterSeconds: 600 } } });
+    await pending;
+    expect(useAuthStore.getState().pendingRegistration?.resendUsed).toBe(true);
+  });
 });
 
 describe('authStore — leaving the registration', () => {
-  it('cancelRegistration drops the code step', () => {
-    useAuthStore.setState({ pendingRegistration: pendingState() });
+  it('cancelRegistration ("Start over") drops the code step and its error', () => {
+    useAuthStore.setState({ pendingRegistration: pendingState(), error: 'serverErrors.signupCodeInvalid' });
     useAuthStore.getState().cancelRegistration();
+    expect(useAuthStore.getState().pendingRegistration).toBeNull();
+    expect(useAuthStore.getState().error).toBeNull();
+  });
+
+  it('leaveRegistration keeps the code step and clears its error', () => {
+    useAuthStore.setState({ pendingRegistration: pendingState(), error: 'serverErrors.signupCodeInvalid', isRegistering: true });
+    useAuthStore.getState().leaveRegistration();
+    expect(useAuthStore.getState().pendingRegistration?.pendingId).toBe('p1');
+    expect(useAuthStore.getState().error).toBeNull();
+    expect(useAuthStore.getState().isRegistering).toBe(false);
+  });
+
+  it('a sign-in clears a sign-up left pending on this machine', async () => {
+    useAuthStore.setState({ pendingRegistration: pendingState() });
+    api.post.mockResolvedValue({ data: { data: { user: { id: 'u1', emailVerified: true }, accessToken: 'at', refreshToken: 'rt' } } });
+    await useAuthStore.getState().login('b@example.com', 'password123');
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(useAuthStore.getState().pendingRegistration).toBeNull();
+  });
+
+  it('a sign-in paused for TOTP keeps the pending sign-up until the code is accepted', async () => {
+    useAuthStore.setState({ pendingRegistration: pendingState() });
+    api.post.mockResolvedValueOnce({ data: { data: { totpRequired: true, totpToken: 'tt' } } });
+    await useAuthStore.getState().login('b@example.com', 'password123');
+    expect(useAuthStore.getState().pendingRegistration?.pendingId).toBe('p1');
+
+    api.post.mockResolvedValueOnce({ data: { data: { user: { id: 'u1', emailVerified: true }, accessToken: 'at', refreshToken: 'rt' } } });
+    await useAuthStore.getState().verifyTOTP('123456');
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(useAuthStore.getState().pendingRegistration).toBeNull();
+  });
+
+  it('a failed sign-in keeps the pending sign-up', async () => {
+    useAuthStore.setState({ pendingRegistration: pendingState() });
+    api.post.mockRejectedValue(axiosError(401, 'Invalid email or password'));
+    await expect(useAuthStore.getState().login('b@example.com', 'wrong-password')).rejects.toBeTruthy();
+    expect(useAuthStore.getState().pendingRegistration?.pendingId).toBe('p1');
+  });
+
+  it('logout clears a pending sign-up', () => {
+    useAuthStore.setState({ pendingRegistration: pendingState(), user: { id: 'u1' } as never, isAuthenticated: true });
+    useAuthStore.getState().logout();
     expect(useAuthStore.getState().pendingRegistration).toBeNull();
   });
 });

@@ -96,7 +96,9 @@
         "signIn": "Anmelden",
         "resetPassword": "Passwort zurücksetzen",
         "spamHint": "Noch nichts angekommen? Sieh in deinem Spam- oder Junk-Ordner nach.",
-        "startOver": "Neu beginnen"
+        "startOver": "Neu beginnen",
+        "startOverWarning": "Ein Neubeginn sendet einen neuen Code. Eine Adresse erhält höchstens {{mails}} Registrierungs-E-Mails in {{days}} Tagen, daher ist meist der bereits gesendete Code der richtige.",
+        "startOverConfirm": "Trotzdem neu beginnen"
       }
     },
     "totp": {

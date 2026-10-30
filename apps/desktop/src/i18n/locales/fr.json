@@ -96,7 +96,9 @@
         "signIn": "Se connecter",
         "resetPassword": "Réinitialiser le mot de passe",
         "spamHint": "Toujours rien ? Vérifiez votre dossier de spam ou de courrier indésirable.",
-        "startOver": "Recommencer"
+        "startOver": "Recommencer",
+        "startOverWarning": "Recommencer envoie un nouveau code. Une adresse reçoit au plus {{mails}} e-mails d’inscription en {{days}} jours : le code déjà envoyé est en général celui à utiliser.",
+        "startOverConfirm": "Recommencer quand même"
       }
     },
     "totp": {

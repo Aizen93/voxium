@@ -96,7 +96,9 @@
         "signIn": "登录",
         "resetPassword": "重置密码",
         "spamHint": "还没收到？请检查垃圾邮件文件夹。",
-        "startOver": "重新开始"
+        "startOver": "重新开始",
+        "startOverWarning": "重新开始会发送新的验证码。每个地址在 {{days}} 天内最多只能收到 {{mails}} 封注册邮件，因此通常应使用已发送的验证码。",
+        "startOverConfirm": "仍然重新开始"
       }
     },
     "totp": {

@@ -96,7 +96,9 @@
         "signIn": "Sign in",
         "resetPassword": "Reset password",
         "spamHint": "Nothing yet? Check your spam or junk folder.",
-        "startOver": "Start over"
+        "startOver": "Start over",
+        "startOverWarning": "Starting over sends a new code. An address receives at most {{mails}} sign-up emails in {{days}} days, so the code already sent is usually the one to use.",
+        "startOverConfirm": "Start over anyway"
       }
     },
     "totp": {

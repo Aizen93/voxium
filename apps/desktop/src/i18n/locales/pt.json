@@ -96,7 +96,9 @@
         "signIn": "Entrar",
         "resetPassword": "Redefinir senha",
         "spamHint": "Nada ainda? Verifique sua pasta de spam ou lixo eletrônico.",
-        "startOver": "Recomeçar"
+        "startOver": "Recomeçar",
+        "startOverWarning": "Recomeçar envia um novo código. Um endereço recebe no máximo {{mails}} e-mails de cadastro em {{days}} dias, então normalmente o código já enviado é o que deve ser usado.",
+        "startOverConfirm": "Recomeçar mesmo assim"
       }
     },
     "totp": {

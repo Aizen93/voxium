@@ -74,10 +74,15 @@ interface AuthState {
   completeRegistration: (code: string, username?: string) => Promise<void>;
   /** The one second code a pending registration may ask for. */
   resendRegistrationCode: () => Promise<void>;
-  /** Abandon an in-flight registration: stop the solve and clear its state,
-   *  the pending code step included. Without it the abandoned solve
-   *  finishes, POSTs, and leaves a code step nobody is looking at. */
+  /** "Start over": abandon the registration for good — stop an in-flight
+   *  step and drop the pending code step, so the form comes back. */
   cancelRegistration: () => void;
+  /** The registration view was left: stop an in-flight solve (and quiet a
+   *  request already sent), but KEEP a pending code step. The server already
+   *  mailed its code and spent one of the address's few sign-up mails, and the
+   *  code works only with this pending id: coming back to /register shows the
+   *  code step again. Memory only — a reload starts over. */
+  leaveRegistration: () => void;
   logout: () => void;
   /** The session restore at launch: loads the stored session, verifies it
    *  with `/auth/me`, connects. Single-flight. A transport failure keeps the
@@ -313,7 +318,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (canConnect(user)) {
         connectSocket(accessToken);
       }
-      set({ user, isAuthenticated: true, isSubmitting: false });
+      // A sign-in ends any sign-up left pending on this machine: its typed
+      // address must not wait on the register page for the next person
+      set({ user, isAuthenticated: true, isSubmitting: false, pendingRegistration: null });
     } catch (err) {
       set({
         error: getTranslatedError(err, i18n.t, 'auth.login.loginFailed'),
@@ -337,7 +344,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (canConnect(user)) {
         connectSocket(accessToken);
       }
-      set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
+      set({
+        user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true,
+        pendingRegistration: null,
+      });
     } catch (err) {
       set({
         error: getTranslatedError(err, i18n.t, 'settings.security.invalidCode'),
@@ -366,9 +376,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (controller.signal.aborted) throw new PowAbortedError();
 
       const { data } = await api.post('/auth/register', { username, email, password, pow, ...consent });
-      // No account exists yet, so a view left while this POST was in flight
-      // has nothing to finish: the code step would show on a page nobody is on
-      if (controller.signal.aborted) throw new PowAbortedError();
+      // Once sent, the start is kept even when the view was left meanwhile:
+      // the server mailed a code that works only with this pending id, so
+      // coming back to /register finds the code step. Unless someone signed
+      // in since — their session never carries another person's sign-up — or
+      // a newer attempt replaced this one.
+      if (controller.signal.aborted && (get().isAuthenticated || registrationAbort !== null)) {
+        throw new PowAbortedError();
+      }
       const answer = (data?.data ?? {}) as { pendingId?: unknown; resendAfterSeconds?: unknown };
       if (typeof answer.pendingId !== 'string' || answer.pendingId.length === 0) {
         throw new RegistrationAnswerError('Registration answer carried no pending id');
@@ -391,7 +406,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       });
     } catch (err) {
       // An abandoned solve is not a failure to report — the view is gone and
-      // `cancelRegistration` already cleared the flags. The same goes for a
+      // `leaveRegistration` already cleared the flags. The same goes for a
       // POST that was already in flight when the view was left: the store's
       // `error` is shared with LoginPage, which would render a 409 from this
       // abandoned registration as a failed login the user never attempted.
@@ -469,6 +484,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   resendRegistrationCode: async () => {
     const pending = get().pendingRegistration;
     if (!pending || pending.resendUsed) return;
+    registrationAbort?.abort();
+    const controller = new AbortController();
+    registrationAbort = controller;
     set({ error: null });
     try {
       await api.post('/auth/register/resend', { pendingId: pending.pendingId });
@@ -480,17 +498,29 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Only a limiter or the network refuses it (the route always answers
       // 202): the button stays, and the reason shows
       console.warn('[Auth] Sign-up code resend failed:', err instanceof Error ? err.message : err);
-      if (get().pendingRegistration?.pendingId === pending.pendingId) {
+      // A view left meanwhile: `error` is shared with LoginPage
+      if (!controller.signal.aborted && get().pendingRegistration?.pendingId === pending.pendingId) {
         set({ error: getTranslatedError(err, i18n.t, 'auth.register.code.resendFailed') });
       }
       throw err;
+    } finally {
+      if (registrationAbort === controller) registrationAbort = null;
     }
   },
 
   cancelRegistration: () => {
     registrationAbort?.abort();
     registrationAbort = null;
-    set({ isRegistering: false, powProgress: null, pendingRegistration: null });
+    // The code step's refusal must not follow the user anywhere
+    set({ isRegistering: false, powProgress: null, pendingRegistration: null, error: null });
+  },
+
+  leaveRegistration: () => {
+    registrationAbort?.abort();
+    registrationAbort = null;
+    // `error` is shared with LoginPage, where the code step's last refusal
+    // ("Invalid or expired code") would read as a failed sign-in
+    set({ isRegistering: false, powProgress: null, error: null });
   },
 
   logout: () => {

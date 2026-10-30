@@ -26,7 +26,7 @@ const register = vi.fn();
 vi.mock('../../stores/authStore', () => {
   const state = () => ({
     register,
-    cancelRegistration: vi.fn(),
+    leaveRegistration: vi.fn(),
     error: null,
     clearError: vi.fn(),
     isRegistering: false,

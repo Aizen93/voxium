@@ -25,9 +25,10 @@ function getPasswordStrength(pw: string): { level: 'weak' | 'medium' | 'strong';
 
 export function RegisterPage() {
   const { t } = useTranslation();
-  const { register, cancelRegistration, error, clearError, isRegistering, powProgress, pendingRegistration } = useAuthStore();
+  const { register, leaveRegistration, error, clearError, isRegistering, powProgress, pendingRegistration } = useAuthStore();
   // The server accepted the registration and mailed a code: the code step
-  // replaces the form (which keeps its typed values behind it for "Start over")
+  // replaces the form (which keeps its typed values behind it for "Start over").
+  // A pending code step outlives this page, so coming back shows it again.
   const codeStep = !!pendingRegistration;
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
@@ -58,12 +59,12 @@ export function RegisterPage() {
     return () => clearTimeout(typingTimeoutRef.current);
   }, []);
 
-  // Leaving this view abandons the registration. The proof-of-work solve runs
-  // for tens of seconds under subnet pressure, and since it moved off the main
-  // thread the user can navigate away mid-solve — without this it finishes in
-  // the background, POSTs, and signs them into the account they walked away
-  // from, on top of a worker still burning a core.
-  useEffect(() => cancelRegistration, [cancelRegistration]);
+  // Leaving this view stops an in-flight solve. It runs for tens of seconds
+  // under subnet pressure, and since it moved off the main thread the user can
+  // navigate away mid-solve — without this it finishes in the background and
+  // POSTs a sign-up they walked away from, on top of a worker still burning a
+  // core. A pending code step is KEPT: its code is already in the mailbox.
+  useEffect(() => leaveRegistration, [leaveRegistration]);
 
   const isWatching = isPasswordFocused && isTypingPassword;
 

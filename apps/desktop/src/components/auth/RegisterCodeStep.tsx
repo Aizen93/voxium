@@ -31,6 +31,9 @@ export function RegisterCodeStep() {
   const [code, setCode] = useState('');
   const [username, setUsername] = useState('');
   const [resending, setResending] = useState(false);
+  // "Start over" asks first: a new start mails a new code, and an address
+  // receives only a few sign-up mails per window
+  const [confirmingStartOver, setConfirmingStartOver] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   const readyAt = pending ? pending.issuedAt + pending.resendAfterSeconds * 1000 : 0;
@@ -158,11 +161,27 @@ export function RegisterCodeStep() {
         </p>
       </div>
 
-      <p className="text-center text-sm">
-        <button type="button" onClick={cancelRegistration} className="text-vox-text-muted hover:text-vox-text-secondary hover:underline">
-          {t('auth.register.code.startOver')}
-        </button>
-      </p>
+      {confirmingStartOver ? (
+        <div className="rounded-lg border border-vox-accent-warning/30 bg-vox-accent-warning/10 px-4 py-3 text-center text-sm" role="alert">
+          <p className="text-vox-text-secondary">
+            {t('auth.register.code.startOverWarning', { mails: SIGNUP.LEDGER_MAX_MAILS, days: SIGNUP.LEDGER_WINDOW_DAYS })}
+          </p>
+          <p className="mt-2 flex justify-center gap-4">
+            <button type="button" onClick={cancelRegistration} className="text-vox-text-link hover:underline">
+              {t('auth.register.code.startOverConfirm')}
+            </button>
+            <button type="button" onClick={() => setConfirmingStartOver(false)} className="text-vox-text-muted hover:text-vox-text-secondary hover:underline">
+              {t('common.cancel')}
+            </button>
+          </p>
+        </div>
+      ) : (
+        <p className="text-center text-sm">
+          <button type="button" onClick={() => setConfirmingStartOver(true)} className="text-vox-text-muted hover:text-vox-text-secondary hover:underline">
+            {t('auth.register.code.startOver')}
+          </button>
+        </p>
+      )}
     </div>
   );
 }
