@@ -12,9 +12,11 @@ const read = (p: string) => readFileSync(REPO + p, 'utf8');
 
 describe('Vite dev server exposure', () => {
   for (const file of ['apps/desktop/vite.config.ts', 'apps/admin/vite.config.ts']) {
-    it(`${file} binds to localhost unless VOXIUM_DEV_LAN=1`, () => {
+    it(`${file} binds to IPv4 loopback unless VOXIUM_DEV_LAN=1`, () => {
       const config = read(file);
-      expect(config).toContain("host: process.env.VOXIUM_DEV_LAN === '1' ? true : 'localhost',");
+      expect(config).toContain("host: process.env.VOXIUM_DEV_LAN === '1' ? true : '127.0.0.1',");
+      // 'localhost' can bind ::1 alone, which broke Firefox voice (DTLS) in dev and CI
+      expect(config).not.toMatch(/host:[^\n]*'localhost'/);
       expect(config).not.toMatch(/host:\s*(true|'0\.0\.0\.0'|"0\.0\.0\.0")\s*,/);
     });
   }
