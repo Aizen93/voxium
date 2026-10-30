@@ -42,12 +42,16 @@ const limiters = vi.hoisted(() => ({
 }));
 /** The route's "signature verified" predicate, read when each gated response finished. */
 const sigVerifiedAtFinish = vi.hoisted(() => [] as boolean[]);
+/** How many times the route built its unverified-delivery gate. */
+const sigGateBuilds = vi.hoisted(() => ({ count: 0 }));
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitWebhookExecuteIp: (...a: any[]) => limiters.ip(...a),
   rateLimitWebhookExecute: (...a: any[]) => limiters.perWebhook(...a),
   refundRateLimit: (...a: [string, string]) => limiters.refund(...a),
-  rateLimitWebhookSignature: (isVerified: (res: any) => boolean) =>
-    (req: any, res: any, next: any) => limiters.sigGate(isVerified, req, res, next),
+  rateLimitWebhookSignature: (isVerified: (res: any) => boolean) => {
+    sigGateBuilds.count += 1;
+    return (req: any, res: any, next: any) => limiters.sigGate(isVerified, req, res, next);
+  },
 }));
 
 /** Let the 'finish' listeners of the response just received run. */
@@ -1061,6 +1065,16 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     await responseFinished();
     expect(sigVerifiedAtFinish).toEqual([true]);
     expectNothingPosted();
+  });
+
+  it('builds the unverified-delivery gate once, at module load, never per delivery', async () => {
+    const before = sigGateBuilds.count;
+    await deliver(PUSH_RAW);
+    await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
+
+    expect(limiters.sigGate).toHaveBeenCalledTimes(2);
+    expect(before).toBe(1);
+    expect(sigGateBuilds.count).toBe(1);
   });
 
   it('the predicate reads each response on its own: a signed and an unsigned delivery finish true and false', async () => {

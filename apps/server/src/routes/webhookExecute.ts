@@ -244,6 +244,9 @@ function signatureVerifiedOn(res: Response): boolean {
   return localsOf(res).signatureVerified === true;
 }
 
+/** The unverified-delivery gate, built once (its predicate never changes). */
+const gateUnverifiedDelivery = rateLimitWebhookSignature(signatureVerifiedOn);
+
 /**
  * GitHub rows only, BEFORE the body parser: the unverified-delivery budget
  * (rateLimitWebhookSignature; per webhook and network, then per network,
@@ -255,7 +258,7 @@ function chargeUnverifiedDelivery(req: Request, res: Response, next: NextFunctio
     next();
     return;
   }
-  return rateLimitWebhookSignature(signatureVerifiedOn)(req, res, next);
+  return gateUnverifiedDelivery(req, res, next);
 }
 
 /**
