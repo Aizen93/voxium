@@ -4,6 +4,11 @@
 #
 # packages/crypto-engine is deliberately absent: vodozemac is pinned exactly and
 # watched by crypto-deps-watch.yml, and every change there needs a WASM rebuild.
+#
+# The Tauri family (the tauri* crates and the @tauri-apps/* packages) moves only
+# by hand, all of it at once: the CLI refuses a crate and an @tauri-apps/api of
+# different minors, and CI builds no Rust, so a bot PR that moved one side would
+# pass here and break the release build. Patch updates still come through.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -19,6 +24,9 @@ updates:
       development:
         dependency-type: development
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "@tauri-apps/*"
+        update-types: ["version-update:semver-minor"]
 
   - package-ecosystem: cargo
     directory: /apps/desktop/src-tauri
@@ -29,6 +37,9 @@ updates:
     groups:
       desktop-shell:
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "tauri*"
+        update-types: ["version-update:semver-minor"]
 
   - package-ecosystem: github-actions
     directory: /

@@ -221,7 +221,7 @@ importers:
         specifier: ^4.3.3
         version: 4.3.3(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.15))
       '@tauri-apps/cli':
-        specifier: ^2.12.4
+        specifier: ~2.12.4
         version: 2.12.4
       '@types/node':
         specifier: ^26.6.5
