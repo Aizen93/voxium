@@ -515,12 +515,20 @@ describe('webhook unverified-delivery buckets — consumed before the body, give
     ]);
   });
 
-  it('gives the points back when a later bucket answered the 429 (the body was never processed further)', async () => {
-    const d = await gate(deliveryFrom('203.0.113.7'));
-    await d.res.finish(429);
+  it('a 429 answered after the gate keeps the points unless the signature matched: the refund rests on the signature alone', async () => {
+    const unverified = await gate(deliveryFrom('203.0.113.7'));
+    await unverified.res.finish(429);
 
-    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(0);
-    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(0);
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(1);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(1);
+    expect(rewards).toEqual([]);
+
+    const matched = await gate(deliveryFrom('203.0.113.7'));
+    verified = true; // the per-webhook bucket answered after the signature matched
+    await matched.res.finish(429);
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(1);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(1);
   });
 
   it('reads the predicate when the response FINISHES, not when the gate ran', async () => {

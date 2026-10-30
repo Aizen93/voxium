@@ -1013,8 +1013,8 @@ const WEBHOOK_SIGNATURE_BUCKETS: ReadonlyArray<readonly [string, (req: Request) 
  * other bucket is given back). A store error fails open for that bucket,
  * charging nothing there; the decision is made outside the try. The points
  * are given back once, when the response finishes or the connection closes,
- * if `isVerified(res)` is true (the signature matched over the raw bytes) or
- * a later bucket answered 429; every other outcome keeps them.
+ * if `isVerified(res)` is true (the signature matched over the raw bytes);
+ * every other outcome keeps them.
  *
  * A sender inside GitHub's published hook ranges is not gated here at all
  * (isGitHubHookSource): its deliveries keep webhookExecuteIp and the
@@ -1053,7 +1053,7 @@ export function rateLimitWebhookSignature(isVerified: (res: Response) => boolean
       const settle = () => {
         if (settled) return;
         settled = true;
-        if (isVerified(res) || res.statusCode === 429) void refundAll();
+        if (isVerified(res)) void refundAll();
       };
       res.on('finish', settle);
       res.on('close', settle);
