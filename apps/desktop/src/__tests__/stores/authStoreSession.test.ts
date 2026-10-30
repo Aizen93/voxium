@@ -49,6 +49,7 @@ import {
   useAuthStore, SESSION_RESTORE_RETRY_DELAYS_MS, SESSION_RESTORE_TIMEOUT_MS, SESSION_RESTORE_RETRY_AFTER_MAX_MS,
   _resetSessionRestoreForTests,
 } from '../../stores/authStore';
+import { useServerStore } from '../../stores/serverStore';
 
 const me = { id: 'u-1', username: 'alice', emailVerified: true, consentRequired: false };
 
@@ -685,7 +686,7 @@ describe('authStore.uploadAvatar — the presign is signed for the processed ima
     api.post.mockImplementation(async () => { order.push('presign'); return { data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } }; });
     const fetchMock = vi.fn(async () => { order.push('put'); return { ok: true, status: 200 }; });
     vi.stubGlobal('fetch', fetchMock);
-    api.patch.mockImplementation(async () => { order.push('save'); return { data: { data: {} } }; });
+    api.patch.mockImplementation(async () => { order.push('save'); return { data: { data: { avatarUrl: KEY } } }; });
     useAuthStore.setState({ user: { ...me, avatarUrl: null } as never });
 
     await useAuthStore.getState().uploadAvatar(original);
@@ -714,6 +715,27 @@ describe('authStore.uploadAvatar — the presign is signed for the processed ima
 
     expect(api.patch).toHaveBeenCalledWith('/users/me/profile', { avatarUrl: KEY });
     expect(useAuthStore.getState().user?.avatarUrl).toBe(ADOPTED);
+  });
+
+  it.each([
+    ['no avatarUrl', {}],
+    ['a null avatarUrl', { avatarUrl: null }],
+    ['an empty avatarUrl', { avatarUrl: '' }],
+    ['a non-string avatarUrl', { avatarUrl: 42 }],
+  ])('never shows the uploaded key when the answer carries %s (fails instead)', async (_label, answer) => {
+    imageProcessing.processImage.mockResolvedValue(processed);
+    api.post.mockResolvedValue({ data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200 })));
+    api.patch.mockResolvedValue({ data: { data: answer } });
+    const OLD = 'avatars/u-1-1600000000000-0123456789ab.webp';
+    useAuthStore.setState({ user: { ...me, avatarUrl: OLD } as never });
+    const memberSpy = vi.spyOn(useServerStore.getState(), 'updateMemberAvatar');
+
+    await expect(useAuthStore.getState().uploadAvatar(original)).rejects.toThrow('without the stored avatar key');
+    // The deleted upload is never shown; the current avatar stays until a real answer
+    expect(useAuthStore.getState().user?.avatarUrl).toBe(OLD);
+    expect(memberSpy).not.toHaveBeenCalled();
+    memberSpy.mockRestore();
   });
 
   it('asks for no presign when the image cannot be processed', async () => {

@@ -491,9 +491,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     // 4. Confirm in DB (triggers old avatar cleanup + socket broadcast). The
     // server stores a verified copy under its own key and deletes the uploaded
-    // one, so the key to show is the one it answers with.
+    // one, so the key to show is the one it answers with: never the uploaded
+    // key, which no longer exists. An answer without one changes nothing here.
     const { data: profileRes } = await api.patch('/users/me/profile', { avatarUrl: key });
-    const storedKey: string = profileRes?.data?.avatarUrl ?? key;
+    const storedKey: unknown = profileRes?.data?.avatarUrl;
+    if (typeof storedKey !== 'string' || storedKey.length === 0) {
+      throw new Error('The profile update answered without the stored avatar key');
+    }
 
     // 5. Local state update + cross-store propagation
     const userId = get().user?.id;
