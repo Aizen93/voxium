@@ -702,6 +702,20 @@ describe('authStore.uploadAvatar — the presign is signed for the processed ima
     expect(useAuthStore.getState().user?.avatarUrl).toBe(KEY);
   });
 
+  it('shows the key the server stored (its verified copy), not the uploaded one', async () => {
+    const ADOPTED = 'avatars/u-1-1700000000500-0123456789ab.webp';
+    imageProcessing.processImage.mockResolvedValue(processed);
+    api.post.mockResolvedValue({ data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200 })));
+    api.patch.mockResolvedValue({ data: { data: { avatarUrl: ADOPTED } } });
+    useAuthStore.setState({ user: { ...me, avatarUrl: null } as never });
+
+    await useAuthStore.getState().uploadAvatar(original);
+
+    expect(api.patch).toHaveBeenCalledWith('/users/me/profile', { avatarUrl: KEY });
+    expect(useAuthStore.getState().user?.avatarUrl).toBe(ADOPTED);
+  });
+
   it('asks for no presign when the image cannot be processed', async () => {
     imageProcessing.processImage.mockRejectedValue(new Error('decode failed'));
     const fetchMock = vi.fn();

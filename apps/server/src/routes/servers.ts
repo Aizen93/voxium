@@ -15,7 +15,7 @@ import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitMemberRead, rateLimitMemberLookup, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
-import { verifyImageAssetUpload } from '../utils/uploadVerification';
+import { adoptImageAssetUpload } from '../utils/uploadVerification';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
 import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
@@ -599,7 +599,7 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
     }
 
     if (req.body.iconUrl !== undefined) {
-      const { iconUrl } = req.body;
+      let { iconUrl } = req.body;
       if (iconUrl !== null) {
         if (typeof iconUrl !== 'string' || !VALID_S3_KEY_RE.test(iconUrl)) {
           throw new BadRequestError('Invalid icon key');
@@ -607,11 +607,12 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
         if (!iconUrl.startsWith(`server-icons/${serverId}-`)) {
           throw new BadRequestError('Invalid icon key');
         }
-        // First reference of a new icon object: read it back (size cap,
-        // image header) before the space points at it. The current key was
-        // checked when it was set, and is never re-read nor deleted here.
+        // First reference of a new icon object: the space stores a verified
+        // server-side copy (size cap, image header), never the uploaded key,
+        // which the client can still overwrite until its presigned URL
+        // expires. The current key was adopted when it was set.
         if (iconUrl !== server.iconUrl) {
-          await verifyImageAssetUpload(iconUrl, LIMITS.MAX_SERVER_ICON_SIZE, 'Invalid icon key');
+          iconUrl = await adoptImageAssetUpload(iconUrl, `server-icons/${serverId}-`, LIMITS.MAX_SERVER_ICON_SIZE, 'Invalid icon key');
         }
       }
       updateData.iconUrl = iconUrl;

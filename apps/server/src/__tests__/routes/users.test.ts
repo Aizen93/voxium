@@ -62,9 +62,11 @@ vi.mock('../../utils/s3', () => ({
 }));
 
 // Upload read-back (its own unit tests cover the S3 side)
-const mockVerifyImageAssetUpload = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+/** The route stores the key adoptImageAssetUpload returns (the verified server-side copy) */
+const ADOPTED_AVATAR = 'avatars/user-1-1700000000000-0123456789ab.webp';
+const mockAdoptImageAssetUpload = vi.hoisted(() => vi.fn().mockResolvedValue('avatars/user-1-1700000000000-0123456789ab.webp'));
 vi.mock('../../utils/uploadVerification', () => ({
-  verifyImageAssetUpload: (...args: unknown[]) => mockVerifyImageAssetUpload(...args),
+  adoptImageAssetUpload: (...args: unknown[]) => mockAdoptImageAssetUpload(...args),
 }));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
@@ -366,10 +368,11 @@ describe('User Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data.avatarUrl).toBe('avatars/user-1-1234567890.webp');
-      // A new avatar object is read back (size cap + image header) first
-      expect(mockVerifyImageAssetUpload).toHaveBeenCalledWith(
-        'avatars/user-1-1234567890.webp', LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key',
+      // A new avatar object is adopted (copied, checked) and the COPY is stored
+      expect(mockAdoptImageAssetUpload).toHaveBeenCalledWith(
+        'avatars/user-1-1234567890.webp', 'avatars/user-1-', LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key',
       );
+      expect(prismaMock.user.update.mock.calls[0][0].data.avatarUrl).toBe(ADOPTED_AVATAR);
     });
 
     function mockAuthAndCurrentAvatar(current: string | null) {
@@ -384,7 +387,7 @@ describe('User Routes', () => {
     it('refuses an avatar object the read-back rejects, leaving the profile and the old avatar alone', async () => {
       const { deleteFromS3 } = await import('../../utils/s3');
       mockAuthAndCurrentAvatar('avatars/user-1-old.webp');
-      mockVerifyImageAssetUpload.mockRejectedValueOnce(new BadRequestError('Invalid avatar key'));
+      mockAdoptImageAssetUpload.mockRejectedValueOnce(new BadRequestError('Invalid avatar key'));
 
       const res = await request(app)
         .patch('/api/v1/users/me/profile')
@@ -400,7 +403,7 @@ describe('User Routes', () => {
     it('fails closed (500) when the store cannot be read', async () => {
       mockAuthAndCurrentAvatar(null);
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      mockVerifyImageAssetUpload.mockRejectedValueOnce(new Error('store unavailable'));
+      mockAdoptImageAssetUpload.mockRejectedValueOnce(new Error('store unavailable'));
 
       const res = await request(app)
         .patch('/api/v1/users/me/profile')
@@ -426,7 +429,7 @@ describe('User Routes', () => {
         .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
 
       expect(res.status).toBe(200);
-      expect(mockVerifyImageAssetUpload).not.toHaveBeenCalled();
+      expect(mockAdoptImageAssetUpload).not.toHaveBeenCalled();
     });
 
     it('does not read the store for a cleared avatar or a profile edit without one', async () => {
@@ -443,7 +446,7 @@ describe('User Routes', () => {
         .send({ avatarUrl: null });
 
       expect(res.status).toBe(200);
-      expect(mockVerifyImageAssetUpload).not.toHaveBeenCalled();
+      expect(mockAdoptImageAssetUpload).not.toHaveBeenCalled();
     });
 
     it('clears avatar by setting null', async () => {

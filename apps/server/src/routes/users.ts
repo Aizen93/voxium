@@ -6,7 +6,7 @@ import { validateDisplayName, validateBio, WS_EVENTS, LIMITS } from '@voxium/sha
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
-import { verifyImageAssetUpload } from '../utils/uploadVerification';
+import { adoptImageAssetUpload } from '../utils/uploadVerification';
 import { rateLimitProfileUpdate } from '../middleware/rateLimiter';
 
 export const userRouter = Router();
@@ -44,7 +44,7 @@ userRouter.get('/:userId', async (req: Request<{ userId: string }>, res: Respons
 // Per user: every edit fans `user:updated` out to every server room the user is in
 userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { avatarUrl } = req.body;
+    let { avatarUrl } = req.body;
     let { displayName, bio } = req.body;
 
     // avatarUrl must be null (to clear) or a valid S3 key
@@ -82,11 +82,12 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
       oldAvatarUrl = current?.avatarUrl ?? null;
     }
 
-    // First reference of a new avatar object: read it back (size cap, image
-    // header) before the profile points at it. The current key was checked
-    // when it was set, and is never re-read nor deleted here.
+    // First reference of a new avatar object: the profile stores a verified
+    // server-side copy (size cap, image header), never the uploaded key, which
+    // the client can still overwrite until its presigned URL expires. The
+    // current key was adopted when it was set, and is never re-read here.
     if (typeof avatarUrl === 'string' && avatarUrl !== oldAvatarUrl) {
-      await verifyImageAssetUpload(avatarUrl, LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key');
+      avatarUrl = await adoptImageAssetUpload(avatarUrl, `avatars/${req.user!.userId}-`, LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key');
     }
 
     const updated = await prisma.user.update({

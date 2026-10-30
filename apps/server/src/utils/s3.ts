@@ -3,6 +3,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  CopyObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   ListObjectsV2Command,
@@ -180,6 +181,27 @@ export async function getS3ObjectRange(key: string, start: number, end: number):
     return Buffer.from(bytes.subarray(0, end - start + 1));
   } catch (err) {
     if (isMissingObjectError(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Server-side copy of an object to a new key (metadata, type and cache headers
+ * kept). Resolves `false` when the source does not exist; every other failure
+ * is rethrown. The destination is a key no client was ever given an upload URL
+ * for, which is what makes a check on the copy final.
+ */
+export async function copyS3Object(sourceKey: string, destKey: string): Promise<boolean> {
+  try {
+    await getS3Client().send(new CopyObjectCommand({
+      Bucket: getBucket(),
+      Key: destKey,
+      CopySource: `${getBucket()}/${sourceKey.split('/').map(encodeURIComponent).join('/')}`,
+      MetadataDirective: 'COPY',
+    }));
+    return true;
+  } catch (err) {
+    if (isMissingObjectError(err)) return false;
     throw err;
   }
 }

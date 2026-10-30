@@ -9,6 +9,7 @@ vi.mock('@aws-sdk/client-s3', () => ({
   PutObjectCommand: vi.fn(),
   GetObjectCommand: vi.fn(),
   HeadObjectCommand: vi.fn(),
+  CopyObjectCommand: vi.fn(),
   DeleteObjectCommand: vi.fn(),
   DeleteObjectsCommand: vi.fn(),
   ListObjectsV2Command: vi.fn(),
@@ -386,5 +387,43 @@ describe('utils/s3 — VALID_ATTACHMENT_KEY_RE', () => {
   it('rejects empty or malformed keys', () => {
     expect(VALID_ATTACHMENT_KEY_RE.test('')).toBe(false);
     expect(VALID_ATTACHMENT_KEY_RE.test('attachments/')).toBe(false);
+  });
+});
+
+describe('utils/s3 — copyS3Object', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+    process.env.S3_ASSETS_BUCKET = 'test-bucket';
+  });
+
+  it('copies within the bucket, keeping the metadata, with each path segment encoded', async () => {
+    const { CopyObjectCommand } = await import('@aws-sdk/client-s3');
+    vi.mocked(CopyObjectCommand).mockClear();
+    mockSend.mockResolvedValue({});
+    const { copyS3Object } = await import('../../utils/s3');
+
+    await expect(copyS3Object('avatars/u 1-1.webp', 'avatars/u1-2-abc.webp')).resolves.toBe(true);
+    expect(CopyObjectCommand).toHaveBeenCalledWith({
+      Bucket: 'test-bucket',
+      Key: 'avatars/u1-2-abc.webp',
+      // The slash stays a slash (some S3-compatible stores refuse %2F); the rest is encoded
+      CopySource: 'test-bucket/avatars/u%201-1.webp',
+      MetadataDirective: 'COPY',
+    });
+  });
+
+  it('resolves false when the source does not exist', async () => {
+    mockSend.mockRejectedValue(Object.assign(new Error('missing'), { name: 'NoSuchKey' }));
+    const { copyS3Object } = await import('../../utils/s3');
+
+    await expect(copyS3Object('avatars/u1-1.webp', 'avatars/u1-2.webp')).resolves.toBe(false);
+  });
+
+  it('rethrows any other store failure', async () => {
+    mockSend.mockRejectedValue(new Error('AccessDenied'));
+    const { copyS3Object } = await import('../../utils/s3');
+
+    await expect(copyS3Object('avatars/u1-1.webp', 'avatars/u1-2.webp')).rejects.toThrow('AccessDenied');
   });
 });

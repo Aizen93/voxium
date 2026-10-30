@@ -5,6 +5,7 @@ const s3 = vi.hoisted(() => ({
   headS3Object: vi.fn(),
   getS3ObjectRange: vi.fn(),
   deleteFromS3: vi.fn(),
+  copyS3Object: vi.fn(),
 }));
 vi.mock('../../utils/s3', () => s3);
 
@@ -13,7 +14,7 @@ const prismaMock = vi.hoisted(() => ({
 }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
 
-import { verifyAttachmentUploads, verifyImageAssetUpload, IMAGE_HEADER_PROBE_BYTES } from '../../utils/uploadVerification';
+import { verifyAttachmentUploads, adoptImageAssetUpload, IMAGE_HEADER_PROBE_BYTES } from '../../utils/uploadVerification';
 import { BadRequestError } from '../../utils/errors';
 
 /** A VP8X WebP header (30 bytes) declaring width x height. */
@@ -192,43 +193,85 @@ describe('verifyAttachmentUploads', () => {
   });
 });
 
-describe('verifyImageAssetUpload', () => {
+describe('adoptImageAssetUpload', () => {
   const KEY = 'avatars/user-1-1700000000.webp';
+  const PREFIX = 'avatars/user-1-';
   const MAX = LIMITS.MAX_AVATAR_SIZE;
+  /** The server-chosen key: owner prefix, timestamp, random suffix, still VALID_S3_KEY_RE */
+  const ADOPTED = /^avatars\/user-1-\d+-[0-9a-f]{12}\.webp$/;
 
-  it('accepts a small WebP and reads only the header range', async () => {
+  beforeEach(() => {
+    s3.copyS3Object.mockResolvedValue(true);
+  });
+
+  function adopt(key = KEY, msg = 'Invalid avatar key') {
+    return adoptImageAssetUpload(key, PREFIX, MAX, msg);
+  }
+
+  /** A refused adoption removes BOTH the upload and the copy. */
+  function expectBothDeleted(): void {
+    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
+    expect(s3.deleteFromS3).toHaveBeenCalledWith(expect.stringMatching(ADOPTED));
+  }
+
+  it('copies the upload to a server-chosen key, checks the COPY, deletes the upload, returns the copy', async () => {
     s3.headS3Object.mockResolvedValue({ size: 20_000, contentType: 'image/webp' });
     s3.getS3ObjectRange.mockResolvedValue(webpHeader(256, 256));
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).resolves.toBeUndefined();
-    expect(s3.getS3ObjectRange).toHaveBeenCalledWith(KEY, 0, IMAGE_HEADER_PROBE_BYTES - 1);
-    expect(s3.deleteFromS3).not.toHaveBeenCalled();
+    const adopted = await adopt();
+    expect(adopted).toMatch(ADOPTED);
+    expect(adopted).not.toBe(KEY);
+    expect(s3.copyS3Object).toHaveBeenCalledWith(KEY, adopted);
+    // Every check reads the copy, which no client holds an upload URL for
+    expect(s3.headS3Object).toHaveBeenCalledWith(adopted);
+    expect(s3.getS3ObjectRange).toHaveBeenCalledWith(adopted, 0, IMAGE_HEADER_PROBE_BYTES - 1);
+    expect(s3.headS3Object).not.toHaveBeenCalledWith(KEY);
+    expect(s3.deleteFromS3).toHaveBeenCalledTimes(1);
+    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
+  });
+
+  it('copies BEFORE reading anything, so bytes swapped into the upload later change nothing', async () => {
+    const order: string[] = [];
+    s3.copyS3Object.mockImplementation(async () => { order.push('copy'); return true; });
+    s3.headS3Object.mockImplementation(async () => { order.push('head'); return { size: 20_000, contentType: 'image/webp' }; });
+    s3.getS3ObjectRange.mockImplementation(async () => { order.push('range'); return webpHeader(256, 256); });
+
+    await adopt();
+    expect(order).toEqual(['copy', 'head', 'range']);
+  });
+
+  it('gives each adoption its own key', async () => {
+    s3.headS3Object.mockResolvedValue({ size: 20_000, contentType: 'image/webp' });
+    s3.getS3ObjectRange.mockResolvedValue(webpHeader(256, 256));
+    const a = await adopt();
+    const b = await adopt();
+    expect(a).not.toBe(b);
   });
 
   it.each([
     ['a simple lossy WebP (VP8, the opaque-canvas encoding)', webpLossyHeader(256, 256)],
     ['a lossless WebP (VP8L)', webpLosslessHeader(256, 256)],
     ['an extended WebP (VP8X)', webpHeader(256, 256)],
-    ['a PNG', pngHeader(256, 256)],
+    ['a PNG (the canvas fallback on a webview without a WebP encoder)', pngHeader(256, 256)],
+    ['a VP8 WebP at exactly the largest edge', webpLossyHeader(LIMITS.MAX_IMAGE_ASSET_EDGE, LIMITS.MAX_IMAGE_ASSET_EDGE)],
+    ['a VP8L WebP at exactly the largest edge', webpLosslessHeader(LIMITS.MAX_IMAGE_ASSET_EDGE, LIMITS.MAX_IMAGE_ASSET_EDGE)],
   ])('accepts %s read through the real probe range', async (_label, header) => {
     serveObject(header);
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).resolves.toBeUndefined();
-    expect(s3.getS3ObjectRange).toHaveBeenCalledWith(KEY, 0, IMAGE_HEADER_PROBE_BYTES - 1);
-    expect(s3.deleteFromS3).not.toHaveBeenCalled();
+    await expect(adopt()).resolves.toMatch(ADOPTED);
+    expect(s3.deleteFromS3).toHaveBeenCalledTimes(1);
+    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
   });
 
   it('probes at least the 30 bytes a lossy WebP header needs', () => {
     expect(IMAGE_HEADER_PROBE_BYTES).toBeGreaterThanOrEqual(30);
   });
 
-  it.each([
-    ['VP8', webpLossyHeader(LIMITS.MAX_IMAGE_ASSET_EDGE, LIMITS.MAX_IMAGE_ASSET_EDGE)],
-    ['VP8L', webpLosslessHeader(LIMITS.MAX_IMAGE_ASSET_EDGE, LIMITS.MAX_IMAGE_ASSET_EDGE)],
-  ])('accepts a %s WebP at exactly the largest edge', async (_label, header) => {
-    serveObject(header);
+  it('accepts exactly the cap and the largest edge', async () => {
+    s3.headS3Object.mockResolvedValue({ size: MAX, contentType: 'image/webp' });
+    s3.getS3ObjectRange.mockResolvedValue(webpHeader(LIMITS.MAX_IMAGE_ASSET_EDGE, LIMITS.MAX_IMAGE_ASSET_EDGE));
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).resolves.toBeUndefined();
+    await expect(adopt()).resolves.toMatch(ADOPTED);
   });
 
   it.each([
@@ -237,93 +280,65 @@ describe('verifyImageAssetUpload', () => {
     ['a VP8 WebP without the keyframe start code', webpLossyHeader(256, 256, [0x00, 0x00, 0x00])],
     ['a VP8L WebP without its signature byte', webpLosslessHeader(256, 256, 0x00)],
     ['a VP8 WebP truncated before its dimensions', webpLossyHeader(256, 256).subarray(0, 28)],
-  ])('refuses and deletes %s', async (_label, header) => {
+    ['bytes that are not an image', Buffer.from('<html><script>alert(1)</script></html>'.padEnd(64, ' '))],
+    ['a JPEG', jpegHeader()],
+    ['a truncated WebP header', webpHeader(256, 256).subarray(0, 20)],
+    ['an empty range', Buffer.alloc(0)],
+    ['a WebP declaring dimensions over the edge cap', webpHeader(LIMITS.MAX_IMAGE_ASSET_EDGE + 1, 256)],
+    ['a PNG declaring dimensions over the edge cap', pngHeader(256, 100_000)],
+    ['a PNG declaring a zero dimension', pngHeader(0, 256)],
+  ])('refuses and deletes %s (upload and copy)', async (_label, header) => {
     s3.headS3Object.mockResolvedValue({ size: 1000, contentType: 'image/webp' });
     s3.getS3ObjectRange.mockResolvedValue(header);
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow('Invalid avatar key');
-    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
-  });
-
-  it('accepts a PNG (the canvas fallback on a webview without a WebP encoder)', async () => {
-    s3.headS3Object.mockResolvedValue({ size: 200_000, contentType: 'image/webp' });
-    s3.getS3ObjectRange.mockResolvedValue(pngHeader(256, 256));
-
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).resolves.toBeUndefined();
-  });
-
-  it('accepts exactly the cap and the largest edge', async () => {
-    s3.headS3Object.mockResolvedValue({ size: MAX, contentType: 'image/webp' });
-    s3.getS3ObjectRange.mockResolvedValue(webpHeader(LIMITS.MAX_IMAGE_ASSET_EDGE, LIMITS.MAX_IMAGE_ASSET_EDGE));
-
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).resolves.toBeUndefined();
+    await expect(adopt()).rejects.toThrow('Invalid avatar key');
+    expectBothDeleted();
   });
 
   it('refuses and deletes an object over the cap without reading its bytes', async () => {
     s3.headS3Object.mockResolvedValue({ size: MAX + 1, contentType: 'image/webp' });
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow(new BadRequestError('Invalid avatar key'));
+    await expect(adopt()).rejects.toThrow(new BadRequestError('Invalid avatar key'));
     expect(s3.getS3ObjectRange).not.toHaveBeenCalled();
-    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
+    expectBothDeleted();
   });
 
   it('refuses and deletes an empty object', async () => {
     s3.headS3Object.mockResolvedValue({ size: 0, contentType: 'image/webp' });
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow('Invalid avatar key');
-    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
+    await expect(adopt()).rejects.toThrow('Invalid avatar key');
+    expectBothDeleted();
   });
 
-  it('refuses a key with no stored object, deleting nothing', async () => {
-    s3.headS3Object.mockResolvedValue(null);
+  it('refuses a key with no stored object, copying and deleting nothing', async () => {
+    s3.copyS3Object.mockResolvedValue(false);
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid icon key')).rejects.toThrow('Invalid icon key');
+    await expect(adopt(KEY, 'Invalid icon key')).rejects.toThrow('Invalid icon key');
+    expect(s3.headS3Object).not.toHaveBeenCalled();
     expect(s3.deleteFromS3).not.toHaveBeenCalled();
   });
 
-  it('refuses when the object vanishes between the head and the range read', async () => {
+  it('refuses when the copy cannot be read back', async () => {
     s3.headS3Object.mockResolvedValue({ size: 100, contentType: 'image/webp' });
     s3.getS3ObjectRange.mockResolvedValue(null);
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow('Invalid avatar key');
+    await expect(adopt()).rejects.toThrow('Invalid avatar key');
+    expectBothDeleted();
+  });
+
+  it('rethrows a store failure on the copy (fail closed), deleting nothing', async () => {
+    s3.copyS3Object.mockRejectedValue(new Error('timeout'));
+
+    await expect(adopt()).rejects.toThrow('timeout');
     expect(s3.deleteFromS3).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['bytes that are not an image', Buffer.from('<html><script>alert(1)</script></html>'.padEnd(64, ' '))],
-    ['a JPEG', jpegHeader()],
-    ['a truncated WebP header', webpHeader(256, 256).subarray(0, 20)],
-    ['an empty range', Buffer.alloc(0)],
-  ])('refuses and deletes %s', async (_label, header) => {
-    s3.headS3Object.mockResolvedValue({ size: 1000, contentType: 'image/webp' });
-    s3.getS3ObjectRange.mockResolvedValue(header);
+  it('still adopts when deleting the original upload fails (logged)', async () => {
+    s3.headS3Object.mockResolvedValue({ size: 20_000, contentType: 'image/webp' });
+    s3.getS3ObjectRange.mockResolvedValue(webpHeader(256, 256));
+    s3.deleteFromS3.mockRejectedValueOnce(new Error('denied'));
 
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow('Invalid avatar key');
-    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
-  });
-
-  it.each([
-    ['WebP', webpHeader(LIMITS.MAX_IMAGE_ASSET_EDGE + 1, 256)],
-    ['PNG', pngHeader(256, 100_000)],
-  ])('refuses and deletes a %s declaring dimensions over the edge cap', async (_label, header) => {
-    s3.headS3Object.mockResolvedValue({ size: 1000, contentType: 'image/webp' });
-    s3.getS3ObjectRange.mockResolvedValue(header);
-
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow('Invalid avatar key');
-    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
-  });
-
-  it('refuses a PNG declaring a zero dimension', async () => {
-    s3.headS3Object.mockResolvedValue({ size: 1000, contentType: 'image/webp' });
-    s3.getS3ObjectRange.mockResolvedValue(pngHeader(0, 256));
-
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow('Invalid avatar key');
-  });
-
-  it('rethrows a store failure (fail closed), deleting nothing', async () => {
-    s3.headS3Object.mockRejectedValue(new Error('timeout'));
-
-    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow('timeout');
-    expect(s3.deleteFromS3).not.toHaveBeenCalled();
+    await expect(adopt()).resolves.toMatch(ADOPTED);
+    expect(console.warn).toHaveBeenCalled();
   });
 });

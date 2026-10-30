@@ -12,7 +12,8 @@
  */
 import { LIMITS } from '@voxium/shared';
 import { prisma } from './prisma';
-import { headS3Object, getS3ObjectRange, deleteFromS3 } from './s3';
+import crypto from 'crypto';
+import { headS3Object, getS3ObjectRange, deleteFromS3, copyS3Object } from './s3';
 import { imageDimensions } from './imageHeader';
 import { BadRequestError } from './errors';
 
@@ -74,30 +75,48 @@ function isPng(buf: Buffer): boolean {
 }
 
 /**
- * Verify an uploaded avatar or space icon before a profile/space row points
- * at it: the object must exist, weigh at most `maxSize` bytes and start with
- * a WebP header (or a PNG one: a webview without a WebP encoder hands the
- * client a PNG for `image/webp`) whose dimensions are at most
- * `LIMITS.MAX_IMAGE_ASSET_EDGE`. Refuses with `errorMessage` (400); deletes
- * an object that exists but fails.
+ * Adopt an uploaded avatar or space icon before a profile/space row points at
+ * it, and return the key the row must store.
+ *
+ * The client still holds a presigned PUT for the uploaded key until it expires,
+ * and could replace the bytes after any check on that key. So the object is
+ * first COPIED to a key derived from `keyPrefix` that no client was ever given
+ * an upload URL for, and the check runs on the copy: what passes is what is
+ * served. The copy must weigh at most `maxSize` bytes and start with a WebP
+ * header (or a PNG one: a webview without a WebP encoder hands the client a PNG
+ * for `image/webp`) whose dimensions are at most `LIMITS.MAX_IMAGE_ASSET_EDGE`.
+ * The uploaded key is deleted either way; a refused copy too. Refuses with
+ * `errorMessage` (400).
  */
-export async function verifyImageAssetUpload(key: string, maxSize: number, errorMessage: string): Promise<void> {
-  const head = await headS3Object(key);
-  if (!head) throw new BadRequestError(errorMessage);
-  if (head.size <= 0 || head.size > maxSize) {
-    await discardUpload(key, `stored size ${head.size}, cap ${maxSize}`);
+export async function adoptImageAssetUpload(
+  uploadedKey: string,
+  keyPrefix: string,
+  maxSize: number,
+  errorMessage: string,
+): Promise<string> {
+  // Same shape as the presign keys (VALID_S3_KEY_RE, the owner prefix check)
+  const adoptedKey = `${keyPrefix}${Date.now()}-${crypto.randomBytes(6).toString('hex')}.webp`;
+  if (!(await copyS3Object(uploadedKey, adoptedKey))) throw new BadRequestError(errorMessage);
+  // From here the uploaded object is never referenced: remove it whatever the verdict
+  await deleteFromS3(uploadedKey).catch((err) => {
+    console.warn(`[Uploads] Failed to delete the uploaded original ${uploadedKey}:`, err instanceof Error ? err.message : err);
+  });
+
+  const head = await headS3Object(adoptedKey);
+  if (!head || head.size <= 0 || head.size > maxSize) {
+    await discardUpload(adoptedKey, `stored size ${head?.size ?? 'missing'}, cap ${maxSize}`);
     throw new BadRequestError(errorMessage);
   }
 
-  const header = await getS3ObjectRange(key, 0, IMAGE_HEADER_PROBE_BYTES - 1);
-  if (!header) throw new BadRequestError(errorMessage);
-  const dims = isWebp(header) || isPng(header) ? imageDimensions(header) : null;
+  const header = await getS3ObjectRange(adoptedKey, 0, IMAGE_HEADER_PROBE_BYTES - 1);
+  const dims = header && (isWebp(header) || isPng(header)) ? imageDimensions(header) : null;
   if (
     !dims
     || dims.width < 1 || dims.height < 1
     || dims.width > LIMITS.MAX_IMAGE_ASSET_EDGE || dims.height > LIMITS.MAX_IMAGE_ASSET_EDGE
   ) {
-    await discardUpload(key, dims ? `dimensions ${dims.width}x${dims.height}` : 'not a WebP/PNG image');
+    await discardUpload(adoptedKey, dims ? `dimensions ${dims.width}x${dims.height}` : 'not a WebP/PNG image');
     throw new BadRequestError(errorMessage);
   }
+  return adoptedKey;
 }

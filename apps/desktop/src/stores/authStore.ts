@@ -489,17 +489,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       throw new Error(`S3 upload failed: ${uploadRes.status}`);
     }
 
-    // 4. Confirm in DB (triggers old avatar cleanup + socket broadcast)
-    await api.patch('/users/me/profile', { avatarUrl: key });
+    // 4. Confirm in DB (triggers old avatar cleanup + socket broadcast). The
+    // server stores a verified copy under its own key and deletes the uploaded
+    // one, so the key to show is the one it answers with.
+    const { data: profileRes } = await api.patch('/users/me/profile', { avatarUrl: key });
+    const storedKey: string = profileRes?.data?.avatarUrl ?? key;
 
-    // 5. Optimistic local state update + cross-store propagation
+    // 5. Local state update + cross-store propagation
     const userId = get().user?.id;
     set((state) => ({
-      user: state.user ? { ...state.user, avatarUrl: key } : null,
+      user: state.user ? { ...state.user, avatarUrl: storedKey } : null,
     }));
     if (userId) {
-      useServerStore.getState().updateMemberAvatar(userId, key);
-      useChatStore.getState().updateAuthorAvatar(userId, key);
+      useServerStore.getState().updateMemberAvatar(userId, storedKey);
+      useChatStore.getState().updateAuthorAvatar(userId, storedKey);
     }
   },
 
