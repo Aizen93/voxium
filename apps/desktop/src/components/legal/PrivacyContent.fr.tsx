@@ -21,7 +21,7 @@ export function PrivacyContentFr() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Politique de confidentialité</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 25 octobre 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 30 octobre 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>

@@ -144,9 +144,20 @@ const pages = Object.fromEntries(pageNames.map((name) => [
 /** Every (document, language) pair, for it.each. */
 const cases = pageNames.flatMap((name) => LEGAL_LANGUAGES.map((lang) => [name, lang] as const));
 
-const LAST_UPDATED: PerLanguage = {
-  en: 'Last updated: October 25, 2026',
-  fr: 'Dernière mise à jour : 25 octobre 2026',
+/** Each document's own revision date: a document changes alone. */
+const LAST_UPDATED: Record<PageName, PerLanguage> = {
+  privacy: {
+    en: 'Last updated: October 30, 2026',
+    fr: 'Dernière mise à jour : 30 octobre 2026',
+  },
+  terms: {
+    en: 'Last updated: October 25, 2026',
+    fr: 'Dernière mise à jour : 25 octobre 2026',
+  },
+  cookies: {
+    en: 'Last updated: October 25, 2026',
+    fr: 'Dernière mise à jour : 25 octobre 2026',
+  },
 };
 
 /**
@@ -307,7 +318,7 @@ const INFRASTRUCTURE_WORDS = [
 
 describe('legal pages: dates and structure', () => {
   it.each(cases)('%s (%s) shows the date of the last revision', (name, lang) => {
-    expect(pages[name][lang].text).toContain(LAST_UPDATED[lang]);
+    expect(pages[name][lang].text).toContain(LAST_UPDATED[name][lang]);
   });
 
   it.each(cases)('%s (%s) numbers its sections 1..n in order', (name, lang) => {
@@ -332,7 +343,7 @@ describe('legal pages state the numbers the code implements', () => {
 
   it.each(cases)('%s (%s) states no number that is not pinned here', (name, lang) => {
     const page = pages[name][lang];
-    let rest = page.text.replace(LAST_UPDATED[lang], ' ');
+    let rest = page.text.replace(LAST_UPDATED[name][lang], ' ');
     for (const heading of page.headings) {
       rest = rest.replace(heading, heading.replace(/^\d+\. /, ''));
     }

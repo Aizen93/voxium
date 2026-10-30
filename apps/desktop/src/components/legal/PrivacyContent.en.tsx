@@ -30,7 +30,7 @@ export function PrivacyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Privacy Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 25, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 30, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
