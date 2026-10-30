@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHmac } from 'node:crypto';
-import { RateLimiterRedis } from 'rate-limiter-flexible';
+import { RateLimiterRedis, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis } from '../../utils/redis';
 
 // Minimal Redis mock — getAllRateLimits and socketRateLimit never touch Redis,
@@ -29,6 +29,7 @@ import jwt from 'jsonwebtoken';
 import {
   socketRateLimit, getAllRateLimits, subnetOf, normalizeIp, loginAccountKey, loginEmailDigest, totpAccountKey, verifiedBearerUserId,
   rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookManage, rateLimitWebhookRead, rateLimitByKey,
+  GITHUB_HOOK_SOURCE_RANGES, isGitHubHookSource, ipInCidr, parseCidr,
 } from '../../middleware/rateLimiter';
 
 /**
@@ -197,6 +198,17 @@ describe('incoming-webhook limiters', () => {
     });
   });
 
+  it('lists both unverified-delivery buckets in the admin table (rl:, tunable like every row)', () => {
+    expect(byName('webhookSigFail')).toMatchObject({
+      keyPrefix: 'rl:whsigfail', points: 10, duration: 60, blockDuration: 0, keyType: 'webhook',
+      label: 'Webhook Unverified Deliveries (per webhook and network)', isCustom: false,
+    });
+    expect(byName('webhookSigFailIp')).toMatchObject({
+      keyPrefix: 'rl:whsigfailip', points: 300, duration: 60, blockDuration: 0, keyType: 'subnet',
+      label: 'Webhook Unverified Deliveries (per network)', isCustom: false,
+    });
+  });
+
   it('keeps every key prefix distinct (two rows on one prefix would share a bucket)', () => {
     const prefixes = getAllRateLimits().map((l) => l.keyPrefix);
     expect(new Set(prefixes).size).toBe(prefixes.length);
@@ -299,7 +311,7 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
   }
 
   async function charge(mw: (req: any, res: any, next: any) => Promise<void>, req: any) {
-    const res = { set: vi.fn(), status: vi.fn(() => ({ json: vi.fn() })) } as any;
+    const res = { set: vi.fn(), status: vi.fn(() => ({ json: vi.fn() })), on: vi.fn() } as any;
     const next = vi.fn();
     await mw(req, res, next);
     expect(next).toHaveBeenCalledWith();
@@ -335,6 +347,345 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
       { prefix: 'rl:whread', key: 'user-9' },
     ]);
     expect(JSON.stringify(seen)).not.toContain(TOKEN);
+  });
+
+  it('rateLimitWebhookSignature charges rl:whsigfail on the webhook id AND the sender network, then rl:whsigfailip on the network: never the token', async () => {
+    const mw = rl.rateLimitWebhookSignature(() => false);
+    await charge(mw, executeRequest());
+    await charge(mw, executeRequest({ ip: '::FFFF:203.0.113.99' }));
+    await charge(mw, executeRequest({ ip: '2001:db8:1:2:3:4:5:6' }));
+    await charge(mw, executeRequest({ ip: '2001:DB8:1:ffff::9' }));
+
+    expect(seen).toEqual([
+      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.0/24' },
+      { prefix: 'rl:whsigfailip', key: '203.0.113.0/24' },
+      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.0/24' },
+      { prefix: 'rl:whsigfailip', key: '203.0.113.0/24' },
+      // one IPv6 sender rotating through its /48 is one key
+      { prefix: 'rl:whsigfail', key: 'wh-1|2001:db8:1::/48' },
+      { prefix: 'rl:whsigfailip', key: '2001:db8:1::/48' },
+      { prefix: 'rl:whsigfail', key: 'wh-1|2001:db8:1::/48' },
+      { prefix: 'rl:whsigfailip', key: '2001:db8:1::/48' },
+    ]);
+    expect(JSON.stringify(seen)).not.toContain(TOKEN);
+  });
+
+  it("rateLimitWebhookSignature charges nothing for a sender inside GitHub's published hook ranges (IPv4, mapped, IPv6)", async () => {
+    const mw = rl.rateLimitWebhookSignature(() => false);
+    for (const ip of ['140.82.115.10', '::ffff:192.30.252.1', '2606:50c0:8000::153']) {
+      const res = { set: vi.fn(), status: vi.fn(), on: vi.fn() } as any;
+      const next = vi.fn();
+      await mw(executeRequest({ ip }), res, next);
+      expect(next).toHaveBeenCalledWith();
+      expect(res.on).not.toHaveBeenCalled();
+    }
+    expect(seen).toEqual([]);
+  });
+});
+
+describe('webhook unverified-delivery buckets — consumed before the body, given back on a verified signature', () => {
+  let rl: RateLimiterModule;
+  /** An atomic store: points consumed per `prefix key`, as Redis would hold them. */
+  let store: Map<string, number>;
+  let rewards: Array<{ prefix: string; key: string }>;
+  /** What the route's predicate answers when a response finishes. */
+  let verified: boolean;
+
+  beforeEach(async () => {
+    rl = await freshRateLimiter();
+    vi.mocked(getRedis).mockImplementation(() => ({}) as ReturnType<typeof getRedis>);
+    store = new Map();
+    rewards = [];
+    verified = false;
+    vi.spyOn(RateLimiterRedis.prototype, 'consume').mockImplementation(async function (this: RateLimiterRedis, key) {
+      const slot = `${this.keyPrefix} ${String(key)}`;
+      const consumed = (store.get(slot) ?? 0) + 1;
+      store.set(slot, consumed);
+      // Like Redis: the point is counted, then the request refused over the cap
+      if (consumed > this.points) throw new RateLimiterRes(0, 41_200, consumed);
+      return new RateLimiterRes(this.points - consumed, 60_000, consumed) as never;
+    });
+    vi.spyOn(RateLimiterRedis.prototype, 'reward').mockImplementation(async function (this: RateLimiterRedis, key) {
+      const slot = `${this.keyPrefix} ${String(key)}`;
+      rewards.push({ prefix: this.keyPrefix, key: String(key) });
+      store.set(slot, (store.get(slot) ?? 0) - 1);
+      return new RateLimiterRes(0, 0, 0) as never;
+    });
+  });
+
+  const used = (prefix: string, key: string) => store.get(`${prefix} ${key}`) ?? 0;
+
+  function deliveryFrom(ip: string, webhookId = 'wh-1') {
+    return { params: { webhookId, token: 'SECRET-TOKEN' }, ip, socket: {} } as any;
+  }
+
+  /** A response that can finish and close: finish(status) runs the 'finish'
+   *  listeners then the 'close' ones (as Node does); close() alone is a
+   *  connection dropped before any response. */
+  function fakeRes() {
+    const json = vi.fn();
+    const listeners: Array<() => void> = [];
+    const closeListeners: Array<() => void> = [];
+    const res: any = {
+      statusCode: 200,
+      set: vi.fn(),
+      status: vi.fn((code: number) => {
+        res.statusCode = code;
+        return { json };
+      }),
+      json,
+      on: vi.fn((event: string, fn: () => void) => {
+        if (event === 'finish') listeners.push(fn);
+        if (event === 'close') closeListeners.push(fn);
+        return res;
+      }),
+      finish: async (status: number) => {
+        res.statusCode = status;
+        listeners.forEach((fn) => fn());
+        closeListeners.forEach((fn) => fn());
+        // the refunds the listener started
+        await new Promise((r) => setImmediate(r));
+      },
+      close: async () => {
+        closeListeners.forEach((fn) => fn());
+        await new Promise((r) => setImmediate(r));
+      },
+    };
+    return res;
+  }
+
+  /** Run the gate; the delivery is then IN FLIGHT until its res finishes. */
+  async function gate(req: any) {
+    const res = fakeRes();
+    const next = vi.fn();
+    await rl.rateLimitWebhookSignature(() => verified)(req, res, next);
+    return { res, next };
+  }
+
+  const TOO_MANY = { success: false, error: 'Too many requests. Please try again later.' };
+
+  it('holds a point for every delivery IN FLIGHT: with 10 bodies still being read, the 11th is a 429 before its body', async () => {
+    const inFlight = await Promise.all(Array.from({ length: 10 }, () => gate(deliveryFrom('203.0.113.7'))));
+    for (const d of inFlight) expect(d.next).toHaveBeenCalledWith();
+
+    const eleventh = await gate(deliveryFrom('203.0.113.7'));
+
+    expect(eleventh.next).not.toHaveBeenCalled();
+    expect(eleventh.res.set).toHaveBeenCalledWith('Retry-After', '42');
+    expect(eleventh.res.status).toHaveBeenCalledWith(429);
+    expect(eleventh.res.json).toHaveBeenCalledWith(TOO_MANY);
+    // refused on the first bucket: the address bucket was never charged for it
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(10);
+  });
+
+  it('a concurrent burst cannot walk through: 25 at once, exactly 10 reach the body', async () => {
+    const burst = await Promise.all(Array.from({ length: 25 }, () => gate(deliveryFrom('203.0.113.7'))));
+
+    expect(burst.filter((d) => d.next.mock.calls.length === 1)).toHaveLength(10);
+    expect(burst.filter((d) => d.res.status.mock.calls.length === 1)).toHaveLength(15);
+  });
+
+  it('keeps the points of deliveries whose signature never matched (wrong signature, oversized or aborted body)', async () => {
+    for (let i = 0; i < 10; i++) {
+      const d = await gate(deliveryFrom('203.0.113.7'));
+      await d.res.finish(i % 2 === 0 ? 401 : 413);
+    }
+
+    const next = await gate(deliveryFrom('203.0.113.7'));
+
+    expect(next.res.status).toHaveBeenCalledWith(429);
+    expect(rewards).toEqual([]);
+  });
+
+  it('gives BOTH points back once the signature matched, so a busy hook never runs out', async () => {
+    verified = true;
+    for (let i = 0; i < 40; i++) {
+      const d = await gate(deliveryFrom('198.51.100.20'));
+      expect(d.next).toHaveBeenCalledWith();
+      await d.res.finish(204);
+    }
+
+    expect(used('rl:whsigfail', 'wh-1|198.51.100.0/24')).toBe(0);
+    expect(used('rl:whsigfailip', '198.51.100.0/24')).toBe(0);
+    // once per delivery, though both 'finish' and 'close' fired
+    expect(rewards).toHaveLength(80);
+    expect(rewards.slice(0, 2)).toEqual([
+      { prefix: 'rl:whsigfail', key: 'wh-1|198.51.100.0/24' },
+      { prefix: 'rl:whsigfailip', key: '198.51.100.0/24' },
+    ]);
+  });
+
+  it('a 429 answered after the gate keeps the points unless the signature matched: the refund rests on the signature alone', async () => {
+    const unverified = await gate(deliveryFrom('203.0.113.7'));
+    await unverified.res.finish(429);
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(1);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(1);
+    expect(rewards).toEqual([]);
+
+    const matched = await gate(deliveryFrom('203.0.113.7'));
+    verified = true; // the per-webhook bucket answered after the signature matched
+    await matched.res.finish(429);
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(1);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(1);
+  });
+
+  it('reads the predicate when the response FINISHES, not when the gate ran', async () => {
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    verified = true; // the verify hook matched while the body was read
+    await d.res.finish(204);
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(0);
+  });
+
+  it('a connection that closes AFTER the signature matched gets its points back (no finish ever fires)', async () => {
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    verified = true;
+    await d.res.close();
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(0);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(0);
+  });
+
+  it('a connection that closes before the signature matched (an aborted body) keeps its points', async () => {
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    await d.res.close();
+
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(1);
+    expect(used('rl:whsigfailip', '203.0.113.0/24')).toBe(1);
+    expect(rewards).toEqual([]);
+  });
+
+  it('settles once: a close after the finish, or a second close, never refunds twice', async () => {
+    verified = true;
+    const d = await gate(deliveryFrom('203.0.113.7'));
+    await d.res.finish(204);
+    await d.res.close();
+
+    expect(rewards).toEqual([
+      { prefix: 'rl:whsigfail', key: 'wh-1|203.0.113.0/24' },
+      { prefix: 'rl:whsigfailip', key: '203.0.113.0/24' },
+    ]);
+    expect(used('rl:whsigfail', 'wh-1|203.0.113.0/24')).toBe(0);
+  });
+
+  it('one network is one sender: rotating addresses inside a /24 or a /48 does not buy more failures', async () => {
+    for (let i = 0; i < 10; i++) await (await gate(deliveryFrom(`203.0.113.${i + 1}`))).res.finish(401);
+    expect((await gate(deliveryFrom('203.0.113.200'))).next).not.toHaveBeenCalled();
+
+    for (let i = 0; i < 10; i++) await (await gate(deliveryFrom(`2001:db8:5:${i.toString(16)}::1`))).res.finish(401);
+    expect((await gate(deliveryFrom('2001:db8:5:ffff::abcd'))).next).not.toHaveBeenCalled();
+    // the neighbouring /48 is another sender
+    expect((await gate(deliveryFrom('2001:db8:6::1'))).next).toHaveBeenCalledWith();
+  });
+
+  it("never gates GitHub's published hook ranges, even when their network's buckets are spent", async () => {
+    store.set('rl:whsigfail wh-1|140.82.115.0/24', 1000);
+    store.set('rl:whsigfailip 140.82.115.0/24', 1000);
+    const consume = vi.mocked(RateLimiterRedis.prototype.consume);
+    consume.mockClear();
+
+    const d = await gate(deliveryFrom('140.82.115.10'));
+    await d.res.finish(401);
+
+    expect(d.next).toHaveBeenCalledWith();
+    expect(d.res.status).not.toHaveBeenCalled();
+    expect(d.res.on).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+    expect(rewards).toEqual([]);
+  });
+
+  it('lets a delivery from ANOTHER network through while one is spent', async () => {
+    for (let i = 0; i < 10; i++) await (await gate(deliveryFrom('203.0.113.7'))).res.finish(401);
+
+    const blocked = await gate(deliveryFrom('203.0.113.7'));
+    const other = await gate(deliveryFrom('198.51.100.20'));
+
+    expect(blocked.next).not.toHaveBeenCalled();
+    expect(other.next).toHaveBeenCalledWith();
+    expect(other.res.status).not.toHaveBeenCalled();
+  });
+
+  it('the per-address bucket holds ACROSS webhooks: 300 failures spread over 30 webhooks, the 301st on a fresh one is a 429', async () => {
+    for (let w = 0; w < 30; w++) {
+      for (let i = 0; i < 10; i++) {
+        const d = await gate(deliveryFrom('203.0.113.7', `wh-${w}`));
+        expect(d.next).toHaveBeenCalledWith();
+        await d.res.finish(401);
+      }
+    }
+
+    const fresh = await gate(deliveryFrom('203.0.113.7', 'wh-fresh'));
+
+    expect(fresh.next).not.toHaveBeenCalled();
+    expect(fresh.res.status).toHaveBeenCalledWith(429);
+    expect(fresh.res.json).toHaveBeenCalledWith(TOO_MANY);
+    // its body is never read, so the per-webhook point it took is given back
+    expect(used('rl:whsigfail', 'wh-fresh|203.0.113.0/24')).toBe(0);
+    expect(rewards).toEqual([{ prefix: 'rl:whsigfail', key: 'wh-fresh|203.0.113.0/24' }]);
+    // ...while another network still delivers to that webhook
+    expect((await gate(deliveryFrom('198.51.100.20', 'wh-fresh'))).next).toHaveBeenCalledWith();
+  });
+
+  it('honours an admin override of the budget', async () => {
+    // A store the override path can write to (hSet) and publish on
+    vi.mocked(getRedis).mockImplementation(() => ({ hSet: vi.fn(async () => 1) }) as unknown as ReturnType<typeof getRedis>);
+    const { getRedisPubSub } = await import('../../utils/redis');
+    vi.mocked(getRedisPubSub).mockReturnValueOnce({ pub: { publish: vi.fn(async () => 1) } } as unknown as ReturnType<typeof getRedisPubSub>);
+    await rl.updateRateLimit('webhookSigFail', { points: 3 });
+
+    for (let i = 0; i < 3; i++) expect((await gate(deliveryFrom('203.0.113.7'))).next).toHaveBeenCalledWith();
+    const fourth = await gate(deliveryFrom('203.0.113.7'));
+
+    expect(fourth.next).not.toHaveBeenCalled();
+    expect(fourth.res.status).toHaveBeenCalledWith(429);
+  });
+
+  it('answers the 429 byte-for-byte like every other limiter (same header, status and body)', async () => {
+    for (let i = 0; i < 10; i++) await gate(deliveryFrom('203.0.113.7'));
+    const ours = await gate(deliveryFrom('203.0.113.7'));
+
+    vi.mocked(RateLimiterRedis.prototype.consume).mockRejectedValueOnce(new RateLimiterRes(0, 41_200, 31));
+    const theirs = fakeRes();
+    const next = vi.fn();
+    await rl.rateLimitWebhookExecute(deliveryFrom('203.0.113.7'), theirs, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(ours.res.set.mock.calls).toEqual(theirs.set.mock.calls);
+    expect(ours.res.status.mock.calls).toEqual(theirs.status.mock.calls);
+    expect(ours.res.json.mock.calls).toEqual(theirs.json.mock.calls);
+  });
+
+  it('fails OPEN per bucket on a store error: next(), a warning, and only the bucket that charged is ever given back', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.mocked(RateLimiterRedis.prototype.consume).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    verified = true;
+
+    const { res, next } = await gate(deliveryFrom('203.0.113.7'));
+    await res.finish(204);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(res.status).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail limiter error, allowing request:', 'ECONNREFUSED');
+    // never a reward for the point that was never taken (it would go negative)
+    expect(rewards).toEqual([{ prefix: 'rl:whsigfailip', key: '203.0.113.0/24' }]);
+  });
+
+  it('fails OPEN when no store can be reached at all, and gives back nothing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fresh = await freshRateLimiter();
+    vi.mocked(getRedis).mockImplementation(redisMock.unavailable);
+    const res = fakeRes();
+    const next = vi.fn();
+
+    await fresh.rateLimitWebhookSignature(() => true)(deliveryFrom('203.0.113.7'), res, next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.on).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFail limiter error, allowing request:', 'Redis not available in unit tests');
+    expect(warn).toHaveBeenCalledWith('[RateLimit] webhookSigFailIp limiter error, allowing request:', 'Redis not available in unit tests');
   });
 });
 
@@ -793,13 +1144,53 @@ describe('clearUserRateLimits — the admin tool reaches the account buckets too
 
     await mod.clearUserRateLimits('clx1user');
     expect(del).toHaveBeenCalledWith('rl:loginacct:t:clx1user');
-    expect(scanIterator).not.toHaveBeenCalled();
+    // An id may be a webhook's: only its unverified-delivery buckets are scanned
+    expect(scanIterator.mock.calls).toEqual([[{ MATCH: 'rl:whsigfail:clx1user|*', COUNT: 100 }]]);
+    scanIterator.mockClear();
 
     del.mockClear();
     const cleared = await mod.clearUserRateLimits('Alice@Example.com');
-    expect(scanIterator).toHaveBeenCalledWith({ MATCH: `rl:loginacct:e:${digest}|*`, COUNT: 100 });
+    expect(scanIterator.mock.calls).toEqual([[{ MATCH: `rl:loginacct:e:${digest}|*`, COUNT: 100 }]]);
     for (const key of scanned) expect(del).toHaveBeenCalledWith(key);
     expect(cleared).toBeGreaterThan(0);
+  });
+
+  it("a webhook id clears its execute bucket and its unverified-delivery buckets on every network (found by scan)", async () => {
+    const found = ['rl:whsigfail:wh-1|203.0.113.0/24', 'rl:whsigfail:wh-1|2001:db8:1::/48'];
+    const del = vi.fn(async () => 1);
+    const scanIterator = vi.fn(async function* () { yield found; });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    const cleared = await mod.clearUserRateLimits('wh-1');
+
+    expect(scanIterator.mock.calls).toEqual([[{ MATCH: 'rl:whsigfail:wh-1|*', COUNT: 100 }]]);
+    for (const key of found) expect(del).toHaveBeenCalledWith(key);
+    expect(del).toHaveBeenCalledWith('rl:whexec:wh-1');
+    expect(cleared).toBeGreaterThanOrEqual(found.length + 1);
+  });
+
+  it('a key carrying glob characters never reaches a webhook SCAN pattern', async () => {
+    const del = vi.fn(async () => 0);
+    const scanIterator = vi.fn(async function* () { /* none */ });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    for (const key of ['*', 'wh-1*', 'wh-[1]', 'wh?1', 'wh-1|*', '']) {
+      await mod.clearUserRateLimits(key);
+    }
+
+    expect(scanIterator).not.toHaveBeenCalled();
+  });
+
+  it('a SCAN failure while clearing a webhook id surfaces as an error (nothing is reported as cleared)', async () => {
+    const del = vi.fn(async () => 1);
+    const scanIterator = vi.fn(async function* () { throw new Error('redis down'); });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    await expect(mod.clearUserRateLimits('wh-1')).rejects.toThrow('redis down');
+    expect(del).not.toHaveBeenCalled();
   });
 
   it('an address clears its network\'s buckets and its "names no account" sender bucket too (an IPv6 address through its canonical form)', async () => {
@@ -813,12 +1204,27 @@ describe('clearUserRateLimits — the admin tool reaches the account buckets too
     expect(del).toHaveBeenCalledWith('rl:regnet:203.0.113.0/24');
     expect(del).toHaveBeenCalledWith('rl:regattnet:203.0.113.0/24');
     expect(del).toHaveBeenCalledWith('rl:loginacct:x:203.0.113.7');
+    expect(del).toHaveBeenCalledWith('rl:whsigfailip:203.0.113.0/24');
 
     del.mockClear();
     await mod.clearUserRateLimits('2001:DB8:1:2:3:4:5:6');
     expect(del).toHaveBeenCalledWith('rl:loginnet:2001:db8:1::/48');
     expect(del).toHaveBeenCalledWith('rl:loginacct:x:2001:db8:1:2:3:4:5:6');
     expect(del).toHaveBeenCalledWith('rl:general:2001:db8:1:2:3:4:5:6');
+  });
+
+  it("an address clears its network's per-webhook unverified-delivery buckets (found by scan)", async () => {
+    const found = ['rl:whsigfail:wh-1|2001:db8:1::/48', 'rl:whsigfail:wh-2|2001:db8:1::/48'];
+    const del = vi.fn(async () => 1);
+    const scanIterator = vi.fn(async function* () { yield found; });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    await mod.clearUserRateLimits('2001:DB8:1:2:3:4:5:6');
+
+    expect(scanIterator).toHaveBeenCalledWith({ MATCH: 'rl:whsigfail:*|2001:db8:1::/48', COUNT: 100 });
+    for (const key of found) expect(del).toHaveBeenCalledWith(key);
+    expect(del).toHaveBeenCalledWith('rl:whsigfailip:2001:db8:1::/48');
   });
 
   it('the e-mail digest is an HMAC under a key DERIVED from the secret, never under the signing key itself', () => {
@@ -1023,4 +1429,74 @@ describe('rateLimitGeneral — per user once signed in, per address otherwise', 
     const support = readFileSync(resolve(routesDir, 'support.ts'), 'utf8');
     expect(support.split(/\r?\n/).find((l) => l.startsWith("supportRouter.post('/open'"))).toContain('rateLimitSupport');
   });
+});
+
+describe("GitHub's webhook source ranges — the static list and the CIDR match", () => {
+  it('pins the published list (GitHub API /meta "hooks", read 2026-10-30): change it only with GitHub', () => {
+    expect([...GITHUB_HOOK_SOURCE_RANGES].sort()).toEqual([
+      '140.82.112.0/20',
+      '143.55.64.0/20',
+      '185.199.108.0/22',
+      '192.30.252.0/22',
+      '2606:50c0::/32',
+      '2a0a:a440::/29',
+      '9.234.106.48/28',
+      '9.234.98.160/28',
+      '9.234.98.176/28',
+    ]);
+  });
+
+  it.each([
+    // [address, inside, why]
+    ['140.82.112.0', true, 'first address of 140.82.112.0/20'],
+    ['140.82.127.255', true, 'last address of 140.82.112.0/20'],
+    ['140.82.111.255', false, 'one below 140.82.112.0/20'],
+    ['140.82.128.0', false, 'one above 140.82.112.0/20'],
+    ['192.30.255.254', true, 'inside 192.30.252.0/22'],
+    ['192.30.251.1', false, 'below 192.30.252.0/22'],
+    ['185.199.111.153', true, 'inside 185.199.108.0/22'],
+    ['143.55.79.255', true, 'last address of 143.55.64.0/20'],
+    ['143.55.80.0', false, 'one above 143.55.64.0/20'],
+    ['9.234.106.48', true, 'first address of 9.234.106.48/28'],
+    ['9.234.106.63', true, 'last address of 9.234.106.48/28'],
+    ['9.234.106.47', false, 'one below 9.234.106.48/28'],
+    ['9.234.106.64', false, 'one above 9.234.106.48/28'],
+    ['9.234.98.160', true, 'first of 9.234.98.160/28'],
+    ['9.234.98.191', true, 'last of 9.234.98.176/28'],
+    ['9.234.98.192', false, 'one above 9.234.98.176/28'],
+    ['9.234.98.159', false, 'one below 9.234.98.160/28'],
+    ['::ffff:140.82.115.10', true, 'IPv4-mapped IPv6, matched as its IPv4 address'],
+    ['::FFFF:8c52:730a', true, 'IPv4-mapped in hex (140.82.115.10)'],
+    ['::ffff:140.82.128.1', false, 'IPv4-mapped outside every range'],
+    ['2a0a:a440::1', true, 'inside 2a0a:a440::/29'],
+    ['2a0a:a447:ffff:ffff:ffff:ffff:ffff:ffff', true, 'last address of 2a0a:a440::/29'],
+    ['2a0a:a448::', false, 'one above 2a0a:a440::/29'],
+    ['2a0a:a43f:ffff::1', false, 'below 2a0a:a440::/29'],
+    ['2606:50C0:8000::153', true, 'inside 2606:50c0::/32 (upper-case hex)'],
+    ['2606:50c1::1', false, 'one /32 above 2606:50c0::/32'],
+    ['203.0.113.7', false, 'documentation address'],
+    ['2001:db8::1', false, 'documentation IPv6'],
+    ['127.0.0.1', false, 'loopback'],
+    ['unknown', false, 'not an address'],
+    ['', false, 'empty'],
+  ])('isGitHubHookSource(%s) is %s (%s)', (ip, inside) => {
+    expect(isGitHubHookSource(ip)).toBe(inside);
+  });
+
+  it('matches a range only against its own family, and handles /0, /32 and /128', () => {
+    expect(ipInCidr('203.0.113.7', parseCidr('0.0.0.0/0'))).toBe(true);
+    expect(ipInCidr('2001:db8::1', parseCidr('0.0.0.0/0'))).toBe(false);
+    expect(ipInCidr('203.0.113.7', parseCidr('203.0.113.7/32'))).toBe(true);
+    expect(ipInCidr('203.0.113.8', parseCidr('203.0.113.7/32'))).toBe(false);
+    expect(ipInCidr('2001:db8::1', parseCidr('2001:db8::1/128'))).toBe(true);
+    expect(ipInCidr('2001:db8::2', parseCidr('2001:db8::1/128'))).toBe(false);
+    expect(ipInCidr('2001:db8::2', parseCidr('::/0'))).toBe(true);
+  });
+
+  it.each(['140.82.112.0', '140.82.112.0/33', '2606:50c0::/129', 'nope/8', '1.2.3.4/x', '1.2.3.4/8/8', '1.2.3.4/'])(
+    'parseCidr refuses %s (a typo in the static list fails at boot, never matches by accident)',
+    (cidr) => {
+      expect(() => parseCidr(cidr)).toThrow(`Invalid CIDR: ${cidr}`);
+    },
+  );
 });

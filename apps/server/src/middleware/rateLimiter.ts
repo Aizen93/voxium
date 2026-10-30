@@ -1,6 +1,7 @@
 import net from 'node:net';
 import { createHash, createHmac } from 'node:crypto';
 import jwt from 'jsonwebtoken';
+import { OPAQUE_ID_RE } from '@voxium/shared';
 import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis, getRedisPubSub, getRedisConfigSub } from '../utils/redis';
@@ -250,6 +251,19 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // it only bounds a single hostile address spraying the endpoint.
   webhookExecute:   { keyPrefix: 'rl:whexec',   points: 30,   duration: 60,   blockDuration: 0, keyType: 'webhook', label: 'Webhook Execute (per webhook)' },
   webhookExecuteIp: { keyPrefix: 'rl:whexecip', points: 1200, duration: 60,   blockDuration: 0, keyType: 'ip',      label: 'Webhook Execute (per IP)' },
+  // GitHub-type webhooks only (rateLimitWebhookSignature): unverified
+  // deliveries, consumed BEFORE the body is read and given back once
+  // X-Hub-Signature-256 matched, so each counts the deliveries in flight
+  // plus those that never verified. Keyed on the sender's NETWORK
+  // (subnetOf: /24 for IPv4, /48 for IPv6, like the registration subnet
+  // buckets), never the webhook alone; the first per webhook and network,
+  // the second per network across webhooks. Senders inside GitHub's
+  // published hook ranges (GITHUB_HOOK_SOURCE_RANGES) are not counted here.
+  // 10 in flight per webhook and network is ample for a self-hosted forge:
+  // a verified delivery holds its point only while it is processed, and
+  // webhookExecute (30/min) bounds the same webhook after verification.
+  webhookSigFail:   { keyPrefix: 'rl:whsigfail', points: 10,  duration: 60,   blockDuration: 0, keyType: 'webhook', label: 'Webhook Unverified Deliveries (per webhook and network)' },
+  webhookSigFailIp: { keyPrefix: 'rl:whsigfailip', points: 300, duration: 60, blockDuration: 0, keyType: 'subnet',  label: 'Webhook Unverified Deliveries (per network)' },
   // Management (create, edit, rotate, delete) and the moderators' list reads.
   webhookManage:    { keyPrefix: 'rl:whmanage', points: 30,   duration: 3600, blockDuration: 0, keyType: 'userId',  label: 'Webhook Manage' },
   webhookRead:      { keyPrefix: 'rl:whread',   points: 60,   duration: 60,   blockDuration: 0, keyType: 'userId',  label: 'Webhook Read' },
@@ -367,7 +381,10 @@ export async function resetRateLimit(name: string): Promise<void> {
  * Delete all rate limit keys for a specific user id, address or e-mail (the
  * admin "clear rate limits" tool). A user id also clears the user's TOTP
  * account bucket (`t:<id>`); an e-mail clears the password account buckets
- * of that address on every network (`e:<digest>|*`, found by scan).
+ * of that address on every network (`e:<digest>|*`, found by scan); a webhook
+ * id clears its unverified-delivery buckets on every network (`<id>|*`, found
+ * by scan; only an id `OPAQUE_ID_RE` accepts, so no glob character from the
+ * admin's input reaches the SCAN pattern).
  */
 export async function clearUserRateLimits(key: string): Promise<number> {
   const redis = getRedis();
@@ -385,8 +402,14 @@ export async function clearUserRateLimits(key: string): Promise<number> {
     if (ip !== key) exact.push(...prefixes.map((prefix) => `${prefix}:${ip}`));
   }
   const digest = key.includes('@') ? loginEmailDigest(key) : null;
-  if (digest !== null) {
-    for await (const batch of redis.scanIterator({ MATCH: `${DEFAULTS.loginAccount.keyPrefix}:e:${digest}|*`, COUNT: 100 })) {
+  const patterns: string[] = [];
+  if (digest !== null) patterns.push(`${DEFAULTS.loginAccount.keyPrefix}:e:${digest}|*`);
+  // An address also owns its network's per-webhook unverified-delivery buckets
+  if (net.isIP(key)) patterns.push(`${DEFAULTS.webhookSigFail.keyPrefix}:*|${subnetOf(key)}`);
+  // A webhook id owns its per-network unverified-delivery buckets
+  if (OPAQUE_ID_RE.test(key)) patterns.push(`${DEFAULTS.webhookSigFail.keyPrefix}:${key}|*`);
+  for (const pattern of patterns) {
+    for await (const batch of redis.scanIterator({ MATCH: pattern, COUNT: 100 })) {
       for (const found of batch as unknown as string[]) exact.push(found);
     }
   }
@@ -410,6 +433,13 @@ interface MiddlewareOptions {
   refundOnSuccess?: boolean;
 }
 
+/** The one 429 every limiter answers: `Retry-After` in whole seconds and the
+ *  same body, so a client cannot tell one bucket from another. */
+function answerTooManyRequests(res: Response, msBeforeNext: number): void {
+  res.set('Retry-After', String(Math.ceil(msBeforeNext / 1000)));
+  res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+}
+
 function createMiddleware(
   name: string,
   keyFn: (req: Request) => string,
@@ -422,9 +452,7 @@ function createMiddleware(
       await getLimiter(name).consume(key);
     } catch (err) {
       if (err instanceof RateLimiterRes) {
-        const retryAfter = Math.ceil(err.msBeforeNext / 1000);
-        res.set('Retry-After', String(retryAfter));
-        res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+        answerTooManyRequests(res, err.msBeforeNext);
         return;
       }
       // Redis error or unexpected — fail open but log for visibility
@@ -636,8 +664,7 @@ export const chargeRegistrationBudgets = async (req: Request, res: Response, nex
     // Everything taken, back out: the caller is not registering today, so it
     // must cost them nothing on either bucket.
     await Promise.all(charged.map((c) => refundRateLimit(c.name, c.key)));
-    res.set('Retry-After', String(Math.ceil(rejection.msBeforeNext / 1000)));
-    res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    answerTooManyRequests(res, rejection.msBeforeNext);
     return;
   }
 
@@ -732,6 +759,77 @@ export function subnetOf(rawIp: string): string {
 }
 
 const bySubnet = (req: Request) => subnetOf(req.ip || req.socket.remoteAddress || 'unknown');
+
+/**
+ * GitHub's published webhook source ranges: the `hooks` list of the GitHub
+ * API `GET https://api.github.com/meta`, as read on 2026-10-30. Static on
+ * purpose (the server never calls a third party at runtime): an operator
+ * updates this list when GitHub changes it, and the test pinning it with it.
+ *
+ * Deliveries from these ranges are not gated by the unverified-delivery
+ * buckets (rateLimitWebhookSignature). The match is on `req.ip`, so behind a
+ * reverse proxy it needs TRUST_PROXY / TRUST_PROXY_HOPS set for the topology;
+ * otherwise every sender is the proxy's address and nobody matches.
+ */
+export const GITHUB_HOOK_SOURCE_RANGES: readonly string[] = [
+  '192.30.252.0/22',
+  '185.199.108.0/22',
+  '140.82.112.0/20',
+  '143.55.64.0/20',
+  '9.234.106.48/28',
+  '9.234.98.160/28',
+  '9.234.98.176/28',
+  '2a0a:a440::/29',
+  '2606:50c0::/32',
+];
+
+interface ParsedCidr {
+  v4: boolean;
+  /** 4 octets (IPv4) or 8 hextets (IPv6) of the network address. */
+  parts: number[];
+  bits: number;
+}
+
+/** The parts of a normalised address: 4 octets, 8 hextets, or null. */
+function addressParts(ip: string): { v4: boolean; parts: number[] } | null {
+  if (net.isIPv4(ip)) return { v4: true, parts: ip.split('.').map(Number) };
+  const hextets = ipv6Hextets(ip);
+  return hextets ? { v4: false, parts: hextets } : null;
+}
+
+/** Parse `address/bits`; throws on a malformed entry (a typo in a static list). */
+export function parseCidr(cidr: string): ParsedCidr {
+  const [address, bitsText, extra] = cidr.split('/');
+  const parsed = extra === undefined && bitsText !== undefined && /^\d{1,3}$/.test(bitsText)
+    ? addressParts(address)
+    : null;
+  const bits = Number(bitsText);
+  if (!parsed || bits > (parsed.v4 ? 32 : 128)) throw new Error(`Invalid CIDR: ${cidr}`);
+  return { ...parsed, bits };
+}
+
+/** True when `rawIp` (any spelling normalizeIp accepts) lies in `range`. An
+ *  IPv4-mapped IPv6 address is matched as the IPv4 address it carries. */
+export function ipInCidr(rawIp: string, range: ParsedCidr): boolean {
+  const addr = addressParts(normalizeIp(rawIp));
+  if (!addr || addr.v4 !== range.v4) return false;
+  const width = range.v4 ? 8 : 16;
+  let left = range.bits;
+  for (let i = 0; i < addr.parts.length && left > 0; i++) {
+    const take = Math.min(width, left);
+    const shift = width - take;
+    if ((addr.parts[i] >> shift) !== (range.parts[i] >> shift)) return false;
+    left -= take;
+  }
+  return true;
+}
+
+const GITHUB_HOOK_CIDRS = GITHUB_HOOK_SOURCE_RANGES.map(parseCidr);
+
+/** Whether a request address lies in GitHub's published webhook source ranges. */
+export function isGitHubHookSource(rawIp: string): boolean {
+  return GITHUB_HOOK_CIDRS.some((range) => ipInCidr(rawIp, range));
+}
 
 /**
  * How many SUCCESSFUL registrations this caller's subnet has already made in
@@ -895,6 +993,73 @@ export const rateLimitE2EApprove = createMiddleware('e2eApprove', byUserId);
 // req.params.webhookId, which is attacker-controlled until then.
 export const rateLimitWebhookExecuteIp = createMiddleware('webhookExecuteIp', byIp);
 export const rateLimitWebhookExecute = createMiddleware('webhookExecute', byWebhookId);
+
+/** The `webhookSigFail` key: the webhook id (mount only AFTER the token
+ *  check, like rateLimitWebhookExecute) AND the sender's network. */
+const byWebhookAndSubnet = (req: Request) => `${byWebhookId(req)}|${bySubnet(req)}`;
+
+/** The unverified-delivery buckets, tight one first. */
+const WEBHOOK_SIGNATURE_BUCKETS: ReadonlyArray<readonly [string, (req: Request) => string]> = [
+  ['webhookSigFail', byWebhookAndSubnet],
+  ['webhookSigFailIp', bySubnet],
+];
+
+/**
+ * GitHub-type webhooks, BEFORE the body parser (and after the token check):
+ * consume one point of each unverified-delivery bucket atomically, so every
+ * delivery in flight holds a point before a byte of its body is read. A
+ * spent bucket answers the standard 429 (what this request charged in the
+ * other bucket is given back). A store error fails open for that bucket,
+ * charging nothing there; the decision is made outside the try. The points
+ * are given back once, when the response finishes or the connection closes,
+ * if `isVerified(res)` is true (the signature matched over the raw bytes);
+ * every other outcome keeps them.
+ *
+ * A sender inside GitHub's published hook ranges is not gated here at all
+ * (isGitHubHookSource): its deliveries keep webhookExecuteIp and the
+ * per-webhook charge after verification.
+ */
+export function rateLimitWebhookSignature(isVerified: (res: Response) => boolean) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    if (isGitHubHookSource(req.ip || req.socket.remoteAddress || '')) {
+      next();
+      return;
+    }
+    const charged: Array<{ name: string; key: string }> = [];
+    let refuseFor: number | null = null;
+    for (const [name, keyFn] of WEBHOOK_SIGNATURE_BUCKETS) {
+      try {
+        const key = keyFn(req);
+        await getLimiter(name).consume(key);
+        charged.push({ name, key });
+      } catch (err) {
+        if (err instanceof RateLimiterRes) {
+          refuseFor = err.msBeforeNext;
+          break;
+        }
+        console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
+      }
+    }
+    const refundAll = () => Promise.all(charged.map((c) => refundRateLimit(c.name, c.key)));
+    if (refuseFor !== null) {
+      await refundAll();
+      answerTooManyRequests(res, refuseFor);
+      return;
+    }
+    if (charged.length > 0) {
+      // 'close' also fires after 'finish' on a normal response: settle once
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        if (isVerified(res)) void refundAll();
+      };
+      res.on('finish', settle);
+      res.on('close', settle);
+    }
+    next();
+  };
+}
 export const rateLimitWebhookManage = createMiddleware('webhookManage', byUserId);
 export const rateLimitWebhookRead = createMiddleware('webhookRead', byUserId);
 

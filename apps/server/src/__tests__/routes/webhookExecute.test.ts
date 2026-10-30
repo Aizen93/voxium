@@ -30,12 +30,32 @@ const limiters = vi.hoisted(() => ({
   // Kept in the mock so a refund that creeps back in fails a test, not a
   // module lookup
   refund: vi.fn(async (_name: string, _key: string) => {}),
+  // The unverified-delivery buckets (GitHub rows only), consumed before the
+  // parser. The real middleware (rateLimiter.test.ts pins its keys, its 429
+  // and its refunds) gives the points back when the response finishes with
+  // the route's predicate true: the mock records that predicate's value then
+  sigGate: vi.fn(async (isVerified: (res: any) => boolean, req: any, res: any, next: any) => {
+    order.push(`sigGate:${req.params.webhookId}`);
+    res.on('finish', () => sigVerifiedAtFinish.push(isVerified(res)));
+    next();
+  }),
 }));
+/** The route's "signature verified" predicate, read when each gated response finished. */
+const sigVerifiedAtFinish = vi.hoisted(() => [] as boolean[]);
+/** How many times the route built its unverified-delivery gate. */
+const sigGateBuilds = vi.hoisted(() => ({ count: 0 }));
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitWebhookExecuteIp: (...a: any[]) => limiters.ip(...a),
   rateLimitWebhookExecute: (...a: any[]) => limiters.perWebhook(...a),
   refundRateLimit: (...a: [string, string]) => limiters.refund(...a),
+  rateLimitWebhookSignature: (isVerified: (res: any) => boolean) => {
+    sigGateBuilds.count += 1;
+    return (req: any, res: any, next: any) => limiters.sigGate(isVerified, req, res, next);
+  },
 }));
+
+/** Let the 'finish' listeners of the response just received run. */
+const responseFinished = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 // requireFeature stays REAL; only the flag lookup is mocked (and recorded)
 const flags = vi.hoisted(() => ({ webhooks: true }));
@@ -230,6 +250,7 @@ let consoleSpies: Array<ReturnType<typeof vi.spyOn>> = [];
 beforeEach(() => {
   vi.clearAllMocks();
   order.length = 0;
+  sigVerifiedAtFinish.length = 0;
   flags.webhooks = true;
   prismaMock.webhook.findUnique.mockImplementation(async () => {
     order.push('findUnique');
@@ -978,6 +999,9 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.body).toEqual({ success: false, error: 'Malformed JSON body' });
     // the parse fails after the hook but before the post-parser charge
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    // the signature DID match: the unverified-delivery points are given back
+    await responseFinished();
+    expect(sigVerifiedAtFinish).toEqual([true]);
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -1009,16 +1033,114 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(limiters.perWebhook).not.toHaveBeenCalled();
     expect(order).not.toContain(`webhookLimiter:${WEBHOOK_ID}`);
     expect(limiters.refund).not.toHaveBeenCalled();
+    // ...but it held the unverified-delivery points, and keeps them
+    expect(limiters.sigGate).toHaveBeenCalledTimes(1);
+    await responseFinished();
+    expect(sigVerifiedAtFinish).toEqual([false]);
   });
 
-  it('a wrong signature is a 401, not charged, not refunded', async () => {
+  it('a wrong signature is a 401 that keeps its unverified-delivery points, never charges the per-webhook bucket, nothing refunded', async () => {
     const res = await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
 
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
     expect(limiters.refund).not.toHaveBeenCalled();
+    // the points were taken before the body was read...
+    expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `sigGate:${WEBHOOK_ID}`]);
+    // ...and the signature never matched, so they are not given back
+    await responseFinished();
+    expect(sigVerifiedAtFinish).toEqual([false]);
     expectNothingPosted();
+  });
+
+  it('a validly signed delivery refused by the per-webhook bucket still gets its unverified-delivery points back', async () => {
+    limiters.perWebhook.mockImplementationOnce((_req: any, res: any) => {
+      res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    });
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(429);
+    await responseFinished();
+    expect(sigVerifiedAtFinish).toEqual([true]);
+    expectNothingPosted();
+  });
+
+  it('builds the unverified-delivery gate once, at module load, never per delivery', async () => {
+    const before = sigGateBuilds.count;
+    await deliver(PUSH_RAW);
+    await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
+
+    expect(limiters.sigGate).toHaveBeenCalledTimes(2);
+    expect(before).toBe(1);
+    expect(sigGateBuilds.count).toBe(1);
+  });
+
+  it('the predicate reads each response on its own: a signed and an unsigned delivery finish true and false', async () => {
+    await deliver(PUSH_RAW);
+    await responseFinished();
+    await deliver(PUSH_RAW, { signature: sign(PUSH_RAW, 'some-other-secret') });
+    await responseFinished();
+
+    expect(sigVerifiedAtFinish).toEqual([true, false]);
+  });
+
+  it('an address over an unverified-delivery budget gets the 429 BEFORE the body is read: a 2 MB body gets 429, not 413', async () => {
+    limiters.sigGate.mockImplementationOnce(async (_isVerified: any, req: any, res: any) => {
+      order.push(`sigGate:${req.params.webhookId}`);
+      res.set('Retry-After', '42');
+      res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    });
+    const body = JSON.stringify({ pad: 'p'.repeat(2 * 1024 * 1024) });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(LIMITS.WEBHOOK_BODY_MAX_BYTES);
+
+    const res = await rawJsonPost(URL_OK, body);
+
+    expect(res.status).toBe(429);
+    expect(JSON.parse(res.body)).toEqual({ success: false, error: 'Too many requests. Please try again later.' });
+    expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `sigGate:${WEBHOOK_ID}`]);
+    expect(limiters.perWebhook).not.toHaveBeenCalled();
+    expectNothingPosted();
+  });
+
+  it('a refused address never has its body read or hashed, even a validly signed one', async () => {
+    let captured: Request | undefined;
+    const capturingApp = createApp((req) => {
+      captured = req;
+    });
+    limiters.sigGate.mockImplementationOnce(async (_isVerified: any, _req: any, res: any) => {
+      res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    });
+    const hmac = vi.spyOn(crypto, 'createHmac');
+
+    const res = await request(capturingApp)
+      .post(URL_OK)
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-Hub-Signature-256', sign(PUSH_RAW))
+      .send(PUSH_RAW);
+
+    expect(res.status).toBe(429);
+    expect(captured?.body).toBeUndefined();
+    // the one HMAC is the test's own sign() above; the route computed none
+    expect(hmac).toHaveBeenCalledTimes(1);
+    expect(captured?.res?.locals.signatureVerified).toBeUndefined();
+    expectNothingPosted();
+  });
+
+  it('a validly signed delivery passes the gate and gets its unverified-delivery points back', async () => {
+    const hmac = vi.spyOn(crypto, 'createHmac');
+
+    const res = await deliver(PUSH_RAW);
+
+    expect(res.status).toBe(204);
+    // the test's sign() and the route's check: the spy sees the route's HMAC
+    // (the control for the "never hashed" test above)
+    expect(hmac).toHaveBeenCalledTimes(2);
+    expect(limiters.sigGate).toHaveBeenCalledTimes(1);
+    await responseFinished();
+    expect(sigVerifiedAtFinish).toEqual([true]);
   });
 
   it('a body-parser 415 before the hook runs (Content-Type charset=latin1) is never charged', async () => {
@@ -1027,6 +1149,8 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(415);
     expect(res.body).toEqual({ success: false, error: 'Unsupported request encoding' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    await responseFinished();
+    expect(sigVerifiedAtFinish).not.toContain(true);
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -1041,6 +1165,8 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(415);
     expect(res.body).toEqual({ success: false, error: 'Unsupported request encoding' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    await responseFinished();
+    expect(sigVerifiedAtFinish).not.toContain(true);
     expectNothingPosted();
   });
 
@@ -1053,6 +1179,8 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(413);
     expect(JSON.parse(res.body)).toEqual({ success: false, error: 'Request body too large' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    await responseFinished();
+    expect(sigVerifiedAtFinish).not.toContain(true);
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -1070,7 +1198,9 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(204);
     expect(limiters.perWebhook).toHaveBeenCalledTimes(1);
     expect(stateWhenCharged).toEqual([{ parsed: true, verified: true }]);
-    expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `webhookLimiter:${WEBHOOK_ID}`, 'create']);
+    expect(order).toEqual([
+      'flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup', `sigGate:${WEBHOOK_ID}`, `webhookLimiter:${WEBHOOK_ID}`, 'create',
+    ]);
     expect(limiters.refund).not.toHaveBeenCalled();
   });
 
@@ -1106,6 +1236,8 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ success: false, error: 'Invalid signature' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    await responseFinished();
+    expect(sigVerifiedAtFinish).not.toContain(true);
     expect(limiters.refund).not.toHaveBeenCalled();
     expectNothingPosted();
   });
@@ -1161,6 +1293,8 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(503);
     expect(JSON.parse(res.body)).toEqual({ success: false, error: 'Webhook secret is not configured' });
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    await responseFinished();
+    expect(sigVerifiedAtFinish).not.toContain(true);
     expect(order).toEqual(['flag:webhooks', 'ipLimiter', 'findUnique', 'channelLookup']);
     expectNothingPosted();
   });
@@ -1172,6 +1306,8 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
 
     expect(res.status).toBe(503);
     expect(limiters.perWebhook).not.toHaveBeenCalled();
+    await responseFinished();
+    expect(sigVerifiedAtFinish).not.toContain(true);
     expect(limiters.refund).not.toHaveBeenCalled();
   });
 
@@ -1183,6 +1319,10 @@ describe('POST /webhooks/:id/:token — GitHub deliveries', () => {
     expect(res.status).toBe(204);
     expect(prismaMock.message.create).toHaveBeenCalledTimes(1);
     expect(limiters.refund).not.toHaveBeenCalled();
+    // the signature-failure bucket is a GitHub-row control: neither gate nor charge
+    expect(limiters.sigGate).not.toHaveBeenCalled();
+    await responseFinished();
+    expect(sigVerifiedAtFinish).not.toContain(true);
   });
 
   it('a missing X-GitHub-Event answers 400 that says so (a plain Discord-shaped body, even signed)', async () => {

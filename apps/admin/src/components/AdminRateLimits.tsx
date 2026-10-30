@@ -42,6 +42,8 @@ const RULE_DESCRIPTIONS: Record<string, string> = {
   support: 'Limits opening support tickets and sending ticket messages.',
   webhookExecute: 'Deliveries accepted per webhook per minute, charged only after the token matched.',
   webhookExecuteIp: "Webhook deliveries per client address per minute; generous because GitHub's deliveries share a few egress addresses.",
+  webhookSigFail: "GitHub webhook deliveries in flight or not verified, per webhook and client network (/24, /48); given back once the signature matches. GitHub's published hook ranges are not counted.",
+  webhookSigFailIp: 'The same count per client network across every webhook.',
   webhookManage: 'Webhook create, edit, rotate and delete per user per hour.',
   webhookRead: 'Webhook list reads per user per minute.',
   general: 'Per-IP budget for requests without a valid sign-in, charged on every route under /api/v1 except webhook deliveries (mounted outside it), on top of any route-specific limit.',

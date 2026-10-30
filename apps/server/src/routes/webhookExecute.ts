@@ -6,7 +6,7 @@ import type { Prisma } from '../generated/prisma/client';
 import { prisma } from '../utils/prisma';
 import { getIO } from '../websocket/socketServer';
 import { requireFeature } from '../middleware/requireFeature';
-import { rateLimitWebhookExecute, rateLimitWebhookExecuteIp } from '../middleware/rateLimiter';
+import { rateLimitWebhookExecute, rateLimitWebhookExecuteIp, rateLimitWebhookSignature } from '../middleware/rateLimiter';
 import {
   BadRequestError,
   ForbiddenError,
@@ -37,8 +37,12 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
  *                  → GitHub only: open the sealed secret
  *                  → generic only: per-webhook limiter (the URL is the
  *                    whole credential)
+ *                  → GitHub only: unverified-delivery budget (per webhook
+ *                    and network, per network; not for GitHub's published
+ *                    hook ranges); 429 when spent
  *                  → body parser (GitHub only: the signature over the raw
- *                    bytes, checked BEFORE they are parsed)
+ *                    bytes, checked BEFORE they are parsed; a match gives
+ *                    the budget back)
  *                  → GitHub only: per-webhook limiter, once the signature
  *                    matched
  *                  → render + insert + broadcast
@@ -73,8 +77,10 @@ import { renderGitHubEvent, verifyGitHubSignature } from '../utils/webhooks/gith
  *   parser, those kept the point (a refund on the 401 alone could not reach
  *   them), and anyone holding the URL could hold the bucket full: GitHub's
  *   real deliveries would then get 429s, which GitHub does not redeliver.
- *   The price: a sender without the secret can make the server read and
- *   HMAC a body, bounded by the per-IP bucket. (A request without any body
+ *   Unverified deliveries are budgeted per sender network instead
+ *   (rateLimitWebhookSignature: webhookSigFail and webhookSigFailIp, taken
+ *   before the body is read, given back once the signature matched; GitHub's
+ *   published hook ranges are exempt). (A request without any body
  *   is a 415 before the token check; a body the parser does not read, being
  *   consumed upstream, never meets the hook, so the request fails closed
  *   with the same 401, uncharged.)
@@ -201,7 +207,8 @@ function openGitHubSecret(row: CredentialRow): string {
  * thrown error on as the same instance (http-errors keeps it and its 401
  * status), and the error handler answers it in the house shape. Nothing has
  * been charged to the per-webhook bucket yet (see the route), so there is
- * nothing to give back.
+ * nothing to give back. A match is flagged on res.locals (signatureVerified),
+ * which gives the unverified-delivery budget back.
  */
 function verifyRawBody(req: IncomingMessage, res: ServerResponse, buf: Buffer): void {
   const request = req as Request;
@@ -230,6 +237,28 @@ function chargeWebhookBeforeBody(req: Request, res: Response, next: NextFunction
     return;
   }
   return rateLimitWebhookExecute(req, res, next);
+}
+
+/** True once the verify hook matched X-Hub-Signature-256 over the raw bytes. */
+function signatureVerifiedOn(res: Response): boolean {
+  return localsOf(res).signatureVerified === true;
+}
+
+/** The unverified-delivery gate, built once (its predicate never changes). */
+const gateUnverifiedDelivery = rateLimitWebhookSignature(signatureVerifiedOn);
+
+/**
+ * GitHub rows only, BEFORE the body parser: the unverified-delivery budget
+ * (rateLimitWebhookSignature; per webhook and network, then per network,
+ * GitHub's published hook ranges exempt). A spent budget is the standard
+ * 429; the points come back once the signature matched.
+ */
+function chargeUnverifiedDelivery(req: Request, res: Response, next: NextFunction): void | Promise<void> {
+  if (localsOf(res).webhook?.type !== 'github') {
+    next();
+    return;
+  }
+  return gateUnverifiedDelivery(req, res, next);
 }
 
 /**
@@ -459,6 +488,9 @@ webhookExecuteRouter.post(
   // body is read (its URL is its whole credential, so whoever holds it may
   // spend its budget)
   chargeWebhookBeforeBody,
+  // A GitHub row takes the unverified-delivery budget HERE, before its body
+  // is read, given back once its signature matched (a spent budget is a 429)
+  chargeUnverifiedDelivery,
   // A body is read and parsed only for a valid token, and a GitHub body only
   // once its signature matched the raw bytes (the verify hook runs between
   // the read and the parse)
