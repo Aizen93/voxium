@@ -3,6 +3,10 @@ import { testUser } from './helpers/auth';
 import { API_URL, registerUser, registerUserUnverified, loginUser } from './helpers/api';
 import { createVerificationToken, expireVerificationToken, verifyUserEmail } from './helpers/db';
 
+// Registration now creates verified accounts only (the mailed code proves the
+// mailbox). These tests cover the accounts created BEFORE that change, which
+// may still be unverified and still use the link: `registerUserUnverified`
+// creates such a legacy account in the database.
 test.describe('Email Verification', () => {
   test('unverified user sees verification pending page', async ({ page, request }) => {
     const user = testUser('unv');
@@ -66,8 +70,17 @@ test.describe('Email Verification', () => {
     // Get a verification token from the DB
     const rawToken = await createVerificationToken(data.user.id);
 
-    // Visit the verification link
+    // Visit the verification link: opening it verifies nothing (mail
+    // security scanners open links), the button does
+    let posted = false;
+    page.on('request', (req) => {
+      if (req.method() === 'POST' && req.url().endsWith('/auth/verify-email')) posted = true;
+    });
     await page.goto(`/verify-email/${rawToken}`);
+    const verifyButton = page.getByRole('button', { name: 'Verify my email' });
+    await expect(verifyButton).toBeVisible({ timeout: 10_000 });
+    expect(posted).toBe(false);
+    await verifyButton.click();
 
     // Should show success
     await expect(page.getByText('Your email has been verified successfully!')).toBeVisible({ timeout: 10_000 });
@@ -99,6 +112,7 @@ test.describe('Email Verification', () => {
 
   test('invalid verification token shows error', async ({ page }) => {
     await page.goto('/verify-email/invalidtoken1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef');
+    await page.getByRole('button', { name: 'Verify my email' }).click();
 
     await expect(page.getByText('Invalid or expired verification link')).toBeVisible({ timeout: 10_000 });
   });
@@ -112,6 +126,7 @@ test.describe('Email Verification', () => {
     await expireVerificationToken(data.user.id);
 
     await page.goto(`/verify-email/${rawToken}`);
+    await page.getByRole('button', { name: 'Verify my email' }).click();
 
     await expect(page.getByText('Invalid or expired verification link')).toBeVisible({ timeout: 10_000 });
   });
