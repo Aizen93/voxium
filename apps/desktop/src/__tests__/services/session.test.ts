@@ -226,6 +226,112 @@ describe('session — refreshAccessToken', () => {
     expect(http.post).toHaveBeenLastCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-next-session' }, { timeout: REFRESH_TIMEOUT_MS });
   });
 
+  it('a refusal while the refused refresh token is STILL the stored one signs out exactly once, however many callers shared it', async () => {
+    let fail!: (e: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((_r, j) => { fail = j; }));
+    const a = refreshAccessToken();
+    const b = refreshAccessToken();
+    fail(axios401());
+
+    await expect(a).rejects.toBeInstanceOf(SessionLostError);
+    await expect(b).rejects.toBeInstanceOf(SessionLostError);
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(storage.clearTokens).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+  });
+
+  it('a refusal while a NEWER pair was stored meanwhile (another tab, a password change) does not sign out: its fresh access token is answered', async () => {
+    // Tab B sent the old refresh token; tab A stored the pair of the new
+    // password while it was out. Clearing would remove A's pair from the
+    // shared storage and A would follow the removal
+    const freshAccess = jwtWithExp(Math.floor(Date.now() / 1000) + 15 * 60);
+    let fail!: (e: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((_r, j) => { fail = j; }));
+    const pending = refreshAccessToken();
+    storage.access = freshAccess;
+    storage.refresh = 'refresh-from-other-tab';
+    fail(axios401());
+
+    await expect(pending).resolves.toBe(freshAccess);
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(storage.refresh).toBe('refresh-from-other-tab');
+  });
+
+  it('a refusal while a newer pair with an EXPIRED access token was stored: ONE more refresh with the newer refresh token', async () => {
+    let fail!: (e: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((_r, j) => { fail = j; }));
+    const pending = refreshAccessToken();
+    storage.access = jwtWithExp(Math.floor(Date.now() / 1000) - 60);
+    storage.refresh = 'refresh-from-other-tab';
+    http.post.mockResolvedValueOnce({ data: { data: { accessToken: 'access-2', refreshToken: 'refresh-2' } } });
+    fail(axios401());
+
+    await expect(pending).resolves.toBe('access-2');
+    expect(http.post).toHaveBeenCalledTimes(2);
+    expect(http.post).toHaveBeenLastCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-from-other-tab' }, { timeout: REFRESH_TIMEOUT_MS });
+    expect(storage.setTokens).toHaveBeenCalledWith('access-2', 'refresh-2');
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('the retry with the newer pair refused too, that pair still stored: the session ends, once', async () => {
+    let fail!: (e: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((_r, j) => { fail = j; }));
+    const pending = refreshAccessToken();
+    storage.access = null;
+    storage.refresh = 'refresh-from-other-tab';
+    http.post.mockRejectedValueOnce(axios401());
+    fail(axios401());
+
+    await expect(pending).rejects.toBeInstanceOf(SessionLostError);
+    expect(http.post).toHaveBeenCalledTimes(2);
+    expect(storage.clearTokens).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+  });
+
+  it('the pair replaced AGAIN while the retry was out: no third request, no sign-out, a transient failure', async () => {
+    let fail1!: (e: unknown) => void;
+    let fail2!: (e: unknown) => void;
+    http.post
+      .mockReturnValueOnce(new Promise((_r, j) => { fail1 = j; }))
+      .mockReturnValueOnce(new Promise((_r, j) => { fail2 = j; }));
+    const pending = refreshAccessToken();
+    storage.access = null;
+    storage.refresh = 'refresh-2';
+    fail1(axios401());
+    await vi.waitFor(() => expect(http.post).toHaveBeenCalledTimes(2));
+    storage.refresh = 'refresh-3';
+    fail2(axios401());
+
+    await expect(pending).rejects.not.toBeInstanceOf(SessionLostError);
+    expect(http.post).toHaveBeenCalledTimes(2);
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(storage.refresh).toBe('refresh-3');
+  });
+
+  it('a logout while the retry with the newer pair is out stores nothing and does not navigate', async () => {
+    let fail!: (e: unknown) => void;
+    let finish!: (v: unknown) => void;
+    http.post
+      .mockReturnValueOnce(new Promise((_r, j) => { fail = j; }))
+      .mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    const pending = refreshAccessToken();
+    storage.access = null;
+    storage.refresh = 'refresh-2';
+    fail(axios401());
+    await vi.waitFor(() => expect(http.post).toHaveBeenCalledTimes(2));
+    endSessionRenewals();
+    finish({ data: { data: { accessToken: 'access-x', refreshToken: 'refresh-x' } } });
+
+    await expect(pending).rejects.toBeInstanceOf(SessionLostError);
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it('isDefinitiveRefreshFailure: 401 and 403 answers only', () => {
     expect(isDefinitiveRefreshFailure(axios401())).toBe(true);
     expect(isDefinitiveRefreshFailure(Object.assign(new Error('x'), { isAxiosError: true, response: { status: 403 } }))).toBe(true);
