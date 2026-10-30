@@ -557,7 +557,7 @@ export interface ServerToClientEvents {
   'role:updated': (data: { serverId: string; role: Role }) => void;
   'role:deleted': (data: { serverId: string; roleId: string }) => void;
   'role:reordered': (data: { serverId: string; roles: { id: string; position: number }[] }) => void;
-  'channel:permissions_updated': (data: { serverId: string; channelId: string; overrides: ChannelPermissionOverride[] }) => void;
+  'channel:permissions_updated': (data: { serverId: string }) => void;
   'member:nickname_updated': (data: { serverId: string; userId: string; nickname: string | null }) => void;
   'member:kicked': (data: { serverId: string; userId: string }) => void;
   'server:deleted': (data: { serverId: string }) => void;
