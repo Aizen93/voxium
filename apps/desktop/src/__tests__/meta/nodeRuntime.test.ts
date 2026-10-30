@@ -42,6 +42,11 @@ describe('supported Node.js runtime', () => {
     }
   });
 
+  it('the Dockerfile sketch in Architecture.md names the same image family (slim, not alpine)', () => {
+    const froms = read('Architecture.md').split(/\r?\n/).filter((l) => l.startsWith('FROM node:'));
+    expect(froms).toEqual([`FROM node:${RUNTIME_MAJOR}-slim`]);
+  });
+
   it('the Dockerfile installs exactly the pnpm that package.json names, without Corepack', () => {
     const dockerfile = read('Dockerfile');
     expect(dockerfile).not.toMatch(/corepack (enable|prepare)/i);

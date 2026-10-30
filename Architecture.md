@@ -1799,7 +1799,7 @@ pnpm dev                 # Backend + admin + Tauri app (pnpm dev:web: backend + 
 
 ```dockerfile
 # Dockerfile (repo root, multi-stage: build -> production; published to GHCR by docker.yml on v* tags). Simplified sketch:
-FROM node:26-alpine
+FROM node:26-slim
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prod
