@@ -7,7 +7,6 @@ const io = vi.hoisted(() => {
   const scoped = (scope: string) => ({
     in: vi.fn((room: string) => ({
       disconnectSockets: vi.fn((close: boolean) => { calls.push([`${scope}.disconnectSockets`, room, close]); }),
-      socketsLeave: vi.fn((rooms: string[]) => { calls.push([`${scope}.socketsLeave`, room, rooms]); }),
     })),
   });
   const cluster = scoped('cluster');
@@ -21,7 +20,7 @@ const io = vi.hoisted(() => {
 const getIO = vi.hoisted(() => vi.fn(() => io));
 vi.mock('../../websocket/socketServer', () => ({ getIO: () => getIO() }));
 
-import { revokeUserSessions, leaveStaffRooms, STAFF_ROOMS } from '../../utils/sessionRevocation';
+import { revokeUserSessions } from '../../utils/sessionRevocation';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -76,38 +75,6 @@ describe('revokeUserSessions', () => {
 
     expect(() => revokeUserSessions('u-4')).not.toThrow();
     expect(err).toHaveBeenCalledWith(expect.stringContaining('u-4'), 'adapter gone');
-    err.mockRestore();
-  });
-});
-
-describe('leaveStaffRooms', () => {
-  it('names exactly the three staff rooms', () => {
-    expect([...STAFF_ROOMS].sort()).toEqual(['admin:metrics', 'admin:reports', 'admin:support']);
-  });
-
-  it('removes the user\'s sockets from every staff room, this node first, then cluster-wide', () => {
-    leaveStaffRooms('u-5');
-
-    expect(calls).toEqual([
-      ['local.socketsLeave', 'user:u-5', ['admin:metrics', 'admin:reports', 'admin:support']],
-      ['cluster.socketsLeave', 'user:u-5', ['admin:metrics', 'admin:reports', 'admin:support']],
-    ]);
-    expect(io.fetchSockets).not.toHaveBeenCalled();
-  });
-
-  it('disconnects nothing and sends nothing', () => {
-    leaveStaffRooms('u-5');
-
-    expect(calls.some(([name]) => name.endsWith('disconnectSockets'))).toBe(false);
-    expect(io.to).not.toHaveBeenCalled();
-  });
-
-  it('logs and does not throw on failure', () => {
-    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-    getIO.mockImplementation(() => { throw new Error('Socket.IO not initialized'); });
-
-    expect(() => leaveStaffRooms('u-6')).not.toThrow();
-    expect(err).toHaveBeenCalledWith(expect.stringContaining('u-6'), 'Socket.IO not initialized');
     err.mockRestore();
   });
 });

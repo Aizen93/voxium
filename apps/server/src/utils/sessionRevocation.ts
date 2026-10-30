@@ -1,12 +1,5 @@
 import { getIO } from '../websocket/socketServer';
 
-/**
- * The rooms only platform staff may sit in. Membership is checked when a
- * socket subscribes (websocket/adminSubscriptions.ts); a demotion to user takes
- * the target's sockets out of them (`leaveStaffRooms`).
- */
-export const STAFF_ROOMS: readonly string[] = ['admin:metrics', 'admin:reports', 'admin:support'];
-
 export interface RevokeSessionOptions {
   /**
    * Sent as `force:logout { reason }` before the disconnect: the client signs
@@ -47,22 +40,5 @@ export function revokeUserSessions(userId: string, opts: RevokeSessionOptions = 
     io.in(room).disconnectSockets(true);
   } catch (err) {
     console.error(`[Sessions] Could not disconnect the sockets of user ${userId}:`, err instanceof Error ? err.message : err);
-  }
-}
-
-/**
- * Take every socket of `userId` out of the staff rooms, on every node (same
- * local-then-cluster pair as above). Called only on a demotion to user (the
- * admin role route); a change between staff roles leaves the subscriptions
- * alone, and the subscribe handlers read the role from the database.
- */
-export function leaveStaffRooms(userId: string): void {
-  const room = `user:${userId}`;
-  try {
-    const io = getIO();
-    io.local.in(room).socketsLeave([...STAFF_ROOMS]);
-    io.in(room).socketsLeave([...STAFF_ROOMS]);
-  } catch (err) {
-    console.error(`[Sessions] Could not remove user ${userId} from the staff rooms:`, err instanceof Error ? err.message : err);
   }
 }

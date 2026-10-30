@@ -6,7 +6,7 @@ import { rateLimitAdmin, normalizeIp } from '../middleware/rateLimiter';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { prisma } from '../utils/prisma';
 import { deleteUserAccount } from '../utils/accountDeletion';
-import { revokeUserSessions, leaveStaffRooms } from '../utils/sessionRevocation';
+import { revokeUserSessions } from '../utils/sessionRevocation';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
@@ -797,12 +797,12 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
     });
 
     // Staff rooms are for staff only. On a demotion to user the account's
-    // sockets leave them (on every node; the subscribe handlers read the role
-    // from the database) and are then ended, so a reconnect joins only the
-    // rooms a user joins. The tokens stay valid: no force:logout. An account
+    // sockets are ended on every node (a disconnect leaves every room, the
+    // staff rooms and the support ticket rooms included), so a reconnect
+    // joins only the rooms a user joins: the subscribe handlers read the role
+    // from the database. The tokens stay valid: no force:logout. An account
     // that is still staff keeps its subscriptions.
     if (role === 'user') {
-      leaveStaffRooms(targetId);
       revokeUserSessions(targetId);
     }
 

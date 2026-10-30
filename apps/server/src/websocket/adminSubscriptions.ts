@@ -29,9 +29,9 @@ export async function isPlatformStaff(userId: unknown): Promise<boolean> {
  * connection handler (the DB read happens inside each callback).
  *
  * The role is read again AFTER the join: a demotion that commits while the
- * first read is in flight takes the socket out of the room before the join
- * lands (sessionRevocation.ts `leaveStaffRooms`), and the join would then put
- * it back. The second read sees the new role and leaves.
+ * first read is in flight must not leave the socket in the room it was
+ * joining (the demotion also ends the account's sockets, routes/admin.ts).
+ * The second read sees the new role and leaves.
  */
 export function registerAdminSubscriptionHandlers(socket: AdminSocket): void {
   for (const { subscribe, unsubscribe, room } of SUBSCRIPTIONS) {
