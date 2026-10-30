@@ -301,8 +301,9 @@ export function connectSocket(token: string): VoxSocket {
       // arrives through Redis), and would then strand the new socket. Repair
       // it once, within the window, with the token stored meanwhile.
       // After the client has finished closing the manager: never re-open it
-      // from inside its own close.
-      if (Date.now() < revocationReopenUntil) {
+      // from inside its own close. Never after a force:logout: a ban or a
+      // deletion inside the window ends the session like anywhere else.
+      if (!forceLoggedOut && Date.now() < revocationReopenUntil) {
         revocationReopenUntil = 0;
         setTimeout(() => {
           const token = getAccessToken();

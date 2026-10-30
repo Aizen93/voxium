@@ -873,6 +873,7 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     session.isAccessTokenFresh.mockReset().mockReturnValue(true);
     voice.activeChannelId = null;
     voice.dmCallConversationId = null;
+    authStoreMock.logout.mockClear();
   });
 
   it('the disconnect landed FIRST (manager closed): nothing reopens with the old token; the answer reopens with the new one', async () => {
@@ -991,6 +992,37 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     expect(socket.connect).toHaveBeenCalledTimes(3);
   });
 
+  it('a force:logout inside the window (a ban right after the password change) is never repaired: the session ends', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    socket.connected = true;
+    socket.fire('connect');
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    session.getFreshAccessToken.mockResolvedValue('access-new');
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      socket.fire('force:logout', { reason: 'banned' });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(authStoreMock.logout).toHaveBeenCalledTimes(1);
+      // Neither the window's repair nor the resume path reopened it
+      expect(socket.connect).toHaveBeenCalledTimes(1);
+      expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+      expect(window.location.href).toBe('/login?reason=banned');
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+    }
+  });
+
   it('a server disconnect after the window is not repaired by the window: it goes through the resume path', async () => {
     const mod = await freshSocketModule();
     mod.connectSocket('access-old');
@@ -1101,7 +1133,6 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     mod.connectSocket('access-old');
     const socket = createdSockets[0];
     session.getFreshAccessToken.mockResolvedValue('access-old');
-    authStoreMock.logout.mockClear();
     const originalLocation = window.location;
     Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
 
