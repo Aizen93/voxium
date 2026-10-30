@@ -100,11 +100,9 @@ async function checkAdoptedImage(key: string, maxSize: number): Promise<string |
  * Adopt an uploaded avatar or space icon before a profile/space row points at
  * it, and return the key the row must store.
  *
- * The client still holds a presigned PUT for the uploaded key until it expires,
- * and could replace the bytes after any check on that key. So the object is
- * first COPIED to a key derived from `keyPrefix` that no client was ever given
- * an upload URL for, and the check runs on the copy: what passes is what is
- * served. The copy must weigh at most `maxSize` bytes and start with a WebP
+ * The object is first COPIED to a key derived from `keyPrefix` that no upload
+ * URL was ever issued for, and every check runs on that copy: what passes is
+ * exactly what is served, whatever happens to the uploaded key afterwards. The copy must weigh at most `maxSize` bytes and start with a WebP
  * header (or a PNG one: a webview without a WebP encoder hands the client a PNG
  * for `image/webp`) whose dimensions are at most `LIMITS.MAX_IMAGE_ASSET_EDGE`.
  * The uploaded key is deleted either way; a refused copy too, and so is a copy

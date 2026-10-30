@@ -83,9 +83,9 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
     }
 
     // First reference of a new avatar object: the profile stores a verified
-    // server-side copy (size cap, image header), never the uploaded key, which
-    // the client can still overwrite until its presigned URL expires. The
-    // current key was adopted when it was set, and is never re-read here.
+    // server-side copy (size cap, image header) under a key no upload URL was
+    // issued for, never the uploaded key. The current key was adopted when it
+    // was set, and is never re-read here.
     let adoptedAvatarKey: string | null = null;
     if (typeof avatarUrl === 'string' && avatarUrl !== oldAvatarUrl) {
       adoptedAvatarKey = await adoptImageAssetUpload(avatarUrl, `avatars/${req.user!.userId}-`, LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key');

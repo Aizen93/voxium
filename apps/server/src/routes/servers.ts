@@ -609,9 +609,9 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
           throw new BadRequestError('Invalid icon key');
         }
         // First reference of a new icon object: the space stores a verified
-        // server-side copy (size cap, image header), never the uploaded key,
-        // which the client can still overwrite until its presigned URL
-        // expires. The current key was adopted when it was set.
+        // server-side copy (size cap, image header) under a key no upload URL
+        // was issued for, never the uploaded key. The current key was adopted
+        // when it was set.
         if (iconUrl !== server.iconUrl) {
           iconUrl = adoptedIconKey = await adoptImageAssetUpload(iconUrl, `server-icons/${serverId}-`, LIMITS.MAX_SERVER_ICON_SIZE, 'Invalid icon key');
         }
