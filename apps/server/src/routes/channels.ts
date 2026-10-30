@@ -218,12 +218,17 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
     }
 
     // Secure channels count against their own limit (secureChannels.ts); the
-    // total only places the new channel last
-    const [channelCount, regularCount, limits] = await Promise.all([
-      prisma.channel.count({ where: { serverId } }),
-      prisma.channel.count({ where: { serverId, secure: false } }),
+    // total only places the new channel last. One grouped count gives both.
+    const [countsBySecure, limits] = await Promise.all([
+      prisma.channel.groupBy({ by: ['secure'], where: { serverId }, _count: { _all: true } }),
       getEffectiveLimits(serverId),
     ]);
+    let channelCount = 0;
+    let regularCount = 0;
+    for (const row of countsBySecure) {
+      channelCount += row._count._all;
+      if (!row.secure) regularCount += row._count._all;
+    }
     if (regularCount >= limits.maxChannelsPerServer) {
       throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
     }
