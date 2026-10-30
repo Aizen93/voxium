@@ -29,6 +29,49 @@ function webpHeader(width: number, height: number): Buffer {
   return buf;
 }
 
+/**
+ * A simple lossy WebP ('VP8 ' chunk, 30 bytes): what a canvas encoder writes
+ * for an opaque image. Frame tag (keyframe), start code 9D 01 2A at 23..25,
+ * then 14-bit width/height at 26/28 whose top two bits are the scale.
+ */
+function webpLossyHeader(width: number, height: number, startCode = [0x9d, 0x01, 0x2a]): Buffer {
+  const buf = Buffer.alloc(30);
+  buf.write('RIFF', 0, 'latin1');
+  buf.writeUInt32LE(1000, 4);
+  buf.write('WEBP', 8, 'latin1');
+  buf.write('VP8 ', 12, 'latin1');
+  buf.writeUInt32LE(980, 16);
+  Buffer.from([0x50, 0x2d, 0x00]).copy(buf, 20);
+  Buffer.from(startCode).copy(buf, 23);
+  buf.writeUInt16LE((width & 0x3fff) | 0x4000, 26); // scale bits set: must be masked off
+  buf.writeUInt16LE(height & 0x3fff, 28);
+  return buf;
+}
+
+/** A lossless WebP ('VP8L' chunk, 25 bytes): signature 0x2F, then 14-bit width-1 and height-1. */
+function webpLosslessHeader(width: number, height: number, signature = 0x2f): Buffer {
+  const buf = Buffer.alloc(30);
+  buf.write('RIFF', 0, 'latin1');
+  buf.writeUInt32LE(1000, 4);
+  buf.write('WEBP', 8, 'latin1');
+  buf.write('VP8L', 12, 'latin1');
+  buf.writeUInt32LE(980, 16);
+  buf[20] = signature;
+  const bits = ((width - 1) & 0x3fff) | (((height - 1) & 0x3fff) << 14);
+  buf.writeUInt32LE(bits >>> 0, 21);
+  return buf;
+}
+
+/**
+ * Serve `header` as the start of a 20 KB object, honouring the byte range the
+ * code asks for — so a probe smaller than the header a format needs fails.
+ */
+function serveObject(header: Buffer): void {
+  const object = Buffer.concat([header, Buffer.alloc(20_000 - header.length, 0xaa)]);
+  s3.headS3Object.mockResolvedValue({ size: object.length, contentType: 'image/webp' });
+  s3.getS3ObjectRange.mockImplementation(async (_key: string, start: number, end: number) => object.subarray(start, end + 1));
+}
+
 /** A PNG signature + IHDR (24 bytes) declaring width x height. */
 function pngHeader(width: number, height: number): Buffer {
   const buf = Buffer.alloc(24);
@@ -160,6 +203,46 @@ describe('verifyImageAssetUpload', () => {
     await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).resolves.toBeUndefined();
     expect(s3.getS3ObjectRange).toHaveBeenCalledWith(KEY, 0, IMAGE_HEADER_PROBE_BYTES - 1);
     expect(s3.deleteFromS3).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a simple lossy WebP (VP8, the opaque-canvas encoding)', webpLossyHeader(256, 256)],
+    ['a lossless WebP (VP8L)', webpLosslessHeader(256, 256)],
+    ['an extended WebP (VP8X)', webpHeader(256, 256)],
+    ['a PNG', pngHeader(256, 256)],
+  ])('accepts %s read through the real probe range', async (_label, header) => {
+    serveObject(header);
+
+    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).resolves.toBeUndefined();
+    expect(s3.getS3ObjectRange).toHaveBeenCalledWith(KEY, 0, IMAGE_HEADER_PROBE_BYTES - 1);
+    expect(s3.deleteFromS3).not.toHaveBeenCalled();
+  });
+
+  it('probes at least the 30 bytes a lossy WebP header needs', () => {
+    expect(IMAGE_HEADER_PROBE_BYTES).toBeGreaterThanOrEqual(30);
+  });
+
+  it.each([
+    ['VP8', webpLossyHeader(LIMITS.MAX_IMAGE_ASSET_EDGE, LIMITS.MAX_IMAGE_ASSET_EDGE)],
+    ['VP8L', webpLosslessHeader(LIMITS.MAX_IMAGE_ASSET_EDGE, LIMITS.MAX_IMAGE_ASSET_EDGE)],
+  ])('accepts a %s WebP at exactly the largest edge', async (_label, header) => {
+    serveObject(header);
+
+    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ['a VP8 WebP over the edge cap', webpLossyHeader(LIMITS.MAX_IMAGE_ASSET_EDGE + 1, 256)],
+    ['a VP8L WebP over the edge cap', webpLosslessHeader(256, LIMITS.MAX_IMAGE_ASSET_EDGE + 1)],
+    ['a VP8 WebP without the keyframe start code', webpLossyHeader(256, 256, [0x00, 0x00, 0x00])],
+    ['a VP8L WebP without its signature byte', webpLosslessHeader(256, 256, 0x00)],
+    ['a VP8 WebP truncated before its dimensions', webpLossyHeader(256, 256).subarray(0, 28)],
+  ])('refuses and deletes %s', async (_label, header) => {
+    s3.headS3Object.mockResolvedValue({ size: 1000, contentType: 'image/webp' });
+    s3.getS3ObjectRange.mockResolvedValue(header);
+
+    await expect(verifyImageAssetUpload(KEY, MAX, 'Invalid avatar key')).rejects.toThrow('Invalid avatar key');
+    expect(s3.deleteFromS3).toHaveBeenCalledWith(KEY);
   });
 
   it('accepts a PNG (the canvas fallback on a webview without a WebP encoder)', async () => {
