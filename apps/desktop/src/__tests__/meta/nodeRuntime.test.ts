@@ -12,16 +12,26 @@ const read = (p: string) => readFileSync(REPO + p, 'utf8');
 
 const RUNTIME_MAJOR = 26;
 const MINIMUM_MAJOR = 24;
+const MINIMUM_PNPM = '10.16';
 
 const rootPkg = JSON.parse(read('package.json')) as {
   packageManager: string;
-  engines: { node: string };
+  engines: { node: string; pnpm: string };
 };
 const pnpmVersion = rootPkg.packageManager.replace(/^pnpm@/, '');
 
 describe('supported Node.js runtime', () => {
   it('engines.node names the minimum major', () => {
     expect(rootPkg.engines.node).toBe(`>=${MINIMUM_MAJOR}.0.0`);
+  });
+
+  it('engines.pnpm and CONTRIBUTING.md ask for the first pnpm that reads minimumReleaseAge from pnpm-workspace.yaml', () => {
+    expect(rootPkg.engines.pnpm).toBe(`>=${MINIMUM_PNPM}.0`);
+    expect(read('pnpm-workspace.yaml')).toMatch(/^minimumReleaseAge: \d+\r?$/m);
+    expect(read('CONTRIBUTING.md')).toContain(`- **pnpm** >= ${MINIMUM_PNPM} (`);
+    const [major, minor] = pnpmVersion.split('.').map(Number);
+    const [minMajor, minMinor] = MINIMUM_PNPM.split('.').map(Number);
+    expect(major > minMajor || (major === minMajor && minor >= minMinor), pnpmVersion).toBe(true);
   });
 
   it('both Dockerfile stages run the runtime major, pinned by digest', () => {
