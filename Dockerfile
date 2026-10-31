@@ -4,7 +4,7 @@
 # injected at runtime via environment variables or a mounted .env file.
 
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM node:20-slim AS build
+FROM node:24-slim AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -36,7 +36,7 @@ RUN cd apps/server && npx prisma generate
 RUN npx tsc --project apps/server/tsconfig.json
 
 # ── Stage 2: Production ─────────────────────────────────────────────────────
-FROM node:20-slim AS production
+FROM node:24-slim AS production
 
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*

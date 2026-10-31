@@ -167,8 +167,8 @@ Production runs multiple nodes behind nginx: Socket.IO Redis adapter for cross-n
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| **Node.js** | >= 20.x | JavaScript runtime |
-| **pnpm** | >= 9.x | Package manager |
+| **Node.js** | >= 24.x | JavaScript runtime |
+| **pnpm** | >= 10.x | Package manager |
 | **PostgreSQL** | >= 15.x | Database (local installation) |
 | **Docker** & **Docker Compose** | Latest | Redis container |
 | **Rust** | Latest stable | Required by Tauri for desktop builds |

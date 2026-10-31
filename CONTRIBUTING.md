@@ -6,8 +6,8 @@ Thanks for your interest in contributing! This guide covers everything you need 
 
 ### Prerequisites
 
-- **Node.js** >= 20.x
-- **pnpm** >= 9.x
+- **Node.js** >= 24.x
+- **pnpm** >= 10.x
 - **PostgreSQL** >= 15.x (running locally)
 - **Docker** (for Redis)
 - **Rust** stable (only needed for Tauri desktop builds)
