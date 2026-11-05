@@ -562,12 +562,51 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
   }
 });
 
+type OwnedServerAction =
+  | { serverId: string; action: 'transfer'; newOwnerId: string }
+  | { serverId: string; action: 'delete' };
+
+/**
+ * The `serverActions` of DELETE /users/:userId, checked whole BEFORE anything
+ * runs: absent means none; otherwise an array with one entry per space, each
+ * `{ serverId, action: 'transfer' | 'delete' }`, a transfer naming an heir who
+ * is not the account being deleted. TypeScript is erased: any action but
+ * 'transfer' used to take the branch that deletes the space, and a bad
+ * transfer was refused only after the entries before it had run.
+ */
+function parseOwnedServerActions(raw: unknown, targetId: string): OwnedServerAction[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new BadRequestError('serverActions must be an array');
+  const seen = new Set<string>();
+  return raw.map((entry: unknown): OwnedServerAction => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new BadRequestError('Each serverAction must be an object');
+    }
+    const { serverId, action, newOwnerId } = entry as Record<string, unknown>;
+    if (typeof serverId !== 'string' || serverId.length === 0) {
+      throw new BadRequestError('Each serverAction needs a serverId');
+    }
+    if (seen.has(serverId)) throw new BadRequestError(`Duplicate serverAction for server "${serverId}"`);
+    seen.add(serverId);
+    if (action === 'delete') return { serverId, action };
+    if (action !== 'transfer') {
+      throw new BadRequestError(`serverAction for server "${serverId}" must be "transfer" or "delete"`);
+    }
+    if (typeof newOwnerId !== 'string' || newOwnerId.length === 0) {
+      throw new BadRequestError(`newOwnerId required for transfer of server "${serverId}"`);
+    }
+    if (newOwnerId === targetId) throw new BadRequestError('Cannot transfer to the user being deleted');
+    return { serverId, action, newOwnerId };
+  });
+}
+
 adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
   try {
     const { userId: targetId } = req.params;
-    const { serverActions } = req.body as {
-      serverActions?: Array<{ serverId: string; action: 'transfer' | 'delete'; newOwnerId?: string }>;
-    };
+    // Express 5 leaves req.body undefined for a request without a body, and the
+    // dashboard sends none when the account owns no space.
+    const serverActions = parseOwnedServerActions(
+      ((req.body ?? {}) as { serverActions?: unknown }).serverActions, targetId);
 
     if (targetId === req.user!.userId) throw new ForbiddenError('Cannot delete yourself');
 
@@ -606,21 +645,24 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
         }
       }
 
+      // Every heir, before the loop's first action: a `delete` action has already
+      // removed its space when a later heir fails, and the account survives that
+      // answer. Bounded by the servers one account can own.
+      for (const action of serverActions) {
+        if (action.action !== 'transfer') continue;
+        const newOwner = await prisma.user.findUnique({
+          where: { id: action.newOwnerId },
+          select: { id: true, bannedAt: true },
+        });
+        if (!newOwner) throw new NotFoundError('Transfer target user');
+        if (newOwner.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
+      }
+
       const io = getIO();
 
       // Process each server action
       for (const action of serverActions) {
         if (action.action === 'transfer') {
-          if (!action.newOwnerId) throw new BadRequestError(`newOwnerId required for transfer of server "${action.serverId}"`);
-          if (action.newOwnerId === targetId) throw new BadRequestError('Cannot transfer to the user being deleted');
-
-          // Validate new owner exists and is not banned
-          const newOwner = await prisma.user.findUnique({
-            where: { id: action.newOwnerId },
-            select: { id: true, bannedAt: true },
-          });
-          if (!newOwner) throw new NotFoundError('Transfer target user');
-          if (newOwner.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
 
           // Check if new owner is already a member
           const existingMembership = await prisma.serverMember.findUnique({
