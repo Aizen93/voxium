@@ -264,8 +264,15 @@ export function MessageList() {
               ? !hasMore
               : isNewDay(messages[dataIndex - 1]?.createdAt, message.createdAt);
 
+            // flow-root keeps MessageItem's top margin (mt-4 between author
+            // groups) INSIDE this row. Virtuoso sizes a row by its box: a margin
+            // that collapses out of it takes room on screen the size tree never
+            // counts, and every follow-to-bottom stopped short by the sum of
+            // those margins, the newest message below the fold. Vertical space
+            // at the edge of a row, the Header or the Footer is padding (or
+            // contained like this), never a bare margin.
             return (
-              <div key={message.id} className="w-full px-6">
+              <div key={message.id} className="flow-root w-full px-6">
                 {startsDay && <DaySeparatorRow iso={message.createdAt} />}
                 <MessageItem
                   message={message}
@@ -281,7 +288,8 @@ export function MessageList() {
           components={{
             Header: () =>
               !hasMore && messages.length > 0 ? (
-                <div className="mb-2 w-full px-6 pb-2 pt-5">
+                // padding, not margin: see the row wrapper in itemContent
+                <div className="w-full px-6 pb-4 pt-5">
                   <h4 className="text-xl font-semibold tracking-[-0.01em] text-vox-text-primary">{t('chat.welcomeTitle')}</h4>
                   <p className="mt-0.5 text-[13px] text-vox-text-secondary">{t('chat.welcomeSubtitle')}</p>
                 </div>
