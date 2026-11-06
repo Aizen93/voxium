@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { groupPeopleByPresence, headerOnlineCount, presentCount, voicePresenceKind, withOwnPresence } from '../../utils/peopleGroups';
+import { groupPeopleByPresence, headerOnlineCount, presentCount, voicePresenceKind, voicePresenceOf, withOwnPresence } from '../../utils/peopleGroups';
 import type { Channel, ServerMember, VoiceUser } from '@voxium/shared';
 
 const member = (id: string, name: string, status: string, nickname: string | null = null): ServerMember =>
@@ -140,8 +140,9 @@ describe('headerOnlineCount', () => {
 });
 
 describe('voicePresenceKind', () => {
-  it('speaking wins over muted', () => {
-    expect(voicePresenceKind(vu('u', { speaking: true, selfMute: true }))).toBe('speaking');
+  it('speaking is not presence: a speaking participant reads in voice, or muted', () => {
+    expect(voicePresenceKind(vu('u', { speaking: true }))).toBe('in-voice');
+    expect(voicePresenceKind(vu('u', { speaking: true, selfMute: true }))).toBe('muted');
   });
   it('any mute/deafen flag reads as muted', () => {
     expect(voicePresenceKind(vu('u', { selfMute: true }))).toBe('muted');
@@ -151,5 +152,48 @@ describe('voicePresenceKind', () => {
   });
   it('defaults to in-voice', () => {
     expect(voicePresenceKind(vu('u'))).toBe('in-voice');
+  });
+});
+
+describe('voicePresenceOf: what the People panel reads of the voice store', () => {
+  // Every speaking change replaces the store's channelUsers map. The panel's
+  // selector must hand back the SAME presence map for it, or every word said
+  // in any voice channel of a big space re-renders and regroups the member list.
+  const store = (entries: [string, VoiceUser[]][]) => new Map(entries);
+
+  it('carries who is in voice and the mute and deafen flags, never speaking', () => {
+    const presence = voicePresenceOf(store([['vc1', [vu('a', { speaking: true, selfMute: true, screenSharing: true })]]]));
+    expect(presence.get('vc1')).toEqual([{ id: 'a', selfMute: true, selfDeaf: false, serverMuted: false, serverDeafened: false }]);
+    expect(presence.get('vc1')![0]).not.toHaveProperty('speaking');
+  });
+
+  it('a change of speaking alone hands back the same map', () => {
+    const before = voicePresenceOf(store([['vc1', [vu('a'), vu('b')]]]));
+    const after = voicePresenceOf(store([['vc1', [vu('a', { speaking: true }), vu('b')]]]));
+    expect(after).toBe(before);
+    const quiet = voicePresenceOf(store([['vc1', [vu('a'), vu('b')]]]));
+    expect(quiet).toBe(before);
+  });
+
+  it('the same store map asked twice is the same answer', () => {
+    const channelUsers = store([['vc1', [vu('a')]]]);
+    expect(voicePresenceOf(channelUsers)).toBe(voicePresenceOf(channelUsers));
+  });
+
+  it('a join, a leave, a move or a mute flag builds a new map', () => {
+    const base = voicePresenceOf(store([['vc1', [vu('a')]]]));
+    const joined = voicePresenceOf(store([['vc1', [vu('a'), vu('b')]]]));
+    expect(joined).not.toBe(base);
+    const left = voicePresenceOf(store([['vc1', [vu('b')]]]));
+    expect(left).not.toBe(joined);
+    const moved = voicePresenceOf(store([['vc2', [vu('b')]]]));
+    expect(moved).not.toBe(left);
+    const muted = voicePresenceOf(store([['vc2', [vu('b', { serverMuted: true })]]]));
+    expect(muted).not.toBe(moved);
+    expect(muted.get('vc2')![0].serverMuted).toBe(true);
+    const deafened = voicePresenceOf(store([['vc2', [vu('b', { serverMuted: true, selfDeaf: true })]]]));
+    expect(deafened).not.toBe(muted);
+    const empty = voicePresenceOf(store([]));
+    expect(empty.size).toBe(0);
   });
 });

@@ -244,7 +244,8 @@ export function AppShellMock({
                 <div className="flex items-center gap-1.5 rounded px-1 py-0.5">
                   <div className="mock-speak-ring h-3.5 w-3.5 shrink-0 rounded-full bg-vox-accent-success" />
                   <span className="flex-1 truncate text-[9px] text-vox-text-primary">Alice</span>
-                  <AudioLines className="h-2 w-2 shrink-0 text-vox-voice-connected" />
+                  {/* the channel list shows who is talking (the People panel does not): the speaking token, as in ChannelSidebar */}
+                  <AudioLines data-testid="app-mock-speaking" className="h-2 w-2 shrink-0 text-vox-voice-speaking" />
                 </div>
                 <div className="flex items-center gap-1.5 rounded px-1 py-0.5">
                   <div className="h-3.5 w-3.5 shrink-0 rounded-full bg-vox-accent-primary" />
@@ -378,7 +379,8 @@ export function AppShellMock({
             </div>
             <div className="flex-1 space-y-2 px-1.5 py-2">
               <MockPeopleSection label={`${t('people.inVoice')} · ${t('appMock.lounge')}`}>
-                <MockPerson name="Alice" avatar="bg-vox-voice-speaking" note={t('people.speaking')} accent />
+                {/* presence only, like the real panel: in voice or muted, never who is talking */}
+                <MockPerson name="Alice" avatar="bg-vox-accent-success" note={t('people.inVoiceStatus')} />
                 <MockPerson name="Bob" avatar="bg-vox-accent-primary" note={t('people.mutedStatus')} />
               </MockPeopleSection>
               <MockPeopleSection label={`${t('people.active')} · 1`}>
@@ -408,13 +410,11 @@ function MockPerson({
   name,
   avatar,
   note,
-  accent,
   dimmed,
 }: {
   name: string;
   avatar: string;
   note: string;
-  accent?: boolean;
   dimmed?: boolean;
 }) {
   return (
@@ -422,9 +422,7 @@ function MockPerson({
       <div className={`h-4 w-4 shrink-0 rounded-full ${avatar}`} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-[8.5px] font-semibold leading-tight text-vox-text-primary">{name}</p>
-        <p className={`truncate text-[7px] leading-tight ${accent ? 'text-vox-accent-primary' : 'text-vox-text-muted'}`}>
-          {note}
-        </p>
+        <p className="truncate text-[7px] leading-tight text-vox-text-muted">{note}</p>
       </div>
     </div>
   );

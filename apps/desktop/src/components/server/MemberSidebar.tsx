@@ -10,10 +10,12 @@ import { UserHoverTarget } from '../common/UserHoverTarget';
 import { MemberContextMenu } from './MemberContextMenu';
 import { MembersDialog } from './MembersDialog';
 import { clsx } from 'clsx';
-import type { ServerMember, VoiceUser } from '@voxium/shared';
+import type { ServerMember } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
-import { groupPeopleByPresence, presentCount, voicePresenceKind, withOwnPresence } from '../../utils/peopleGroups';
+import {
+  groupPeopleByPresence, presentCount, voicePresenceKind, voicePresenceOf, withOwnPresence, type VoicePresence,
+} from '../../utils/peopleGroups';
 
 interface ContextMenuState {
   member: ServerMember;
@@ -37,7 +39,9 @@ interface ContextMenuState {
 export function MemberSidebar() {
   const { t } = useTranslation();
   const { members: knownMembers, roles, channels, people, activeServerId } = useServerStore();
-  const channelUsers = useVoiceStore((s) => s.channelUsers);
+  // Who is in voice and whether they are muted, never who is speaking: a
+  // speaking change hands back the same map, so it does not re-render the panel.
+  const voicePresence = useVoiceStore((s) => voicePresenceOf(s.channelUsers));
   const selfId = useAuthStore((s) => s.user?.id);
   const connected = useConnectionStatus() === 'connected';
   // Our own row reads online while the socket is up (nobody echoes our presence to us)
@@ -52,10 +56,10 @@ export function MemberSidebar() {
     const known = new Set(members.map((m) => m.userId));
     for (const ch of channels) {
       if (ch.type !== 'voice') continue;
-      for (const vu of channelUsers.get(ch.id) || []) if (!known.has(vu.id)) missing.push(vu.id);
+      for (const vu of voicePresence.get(ch.id) || []) if (!known.has(vu.id)) missing.push(vu.id);
     }
     if (missing.length) useServerStore.getState().ensureMembers(missing);
-  }, [members, channels, channelUsers]);
+  }, [members, channels, voicePresence]);
 
   // Top-role color per member (unchanged from the role-grouped panel).
   const topRoleColorMap = useMemo(() => {
@@ -80,8 +84,8 @@ export function MemberSidebar() {
   }, [members, roles]);
 
   const groups = useMemo(
-    () => groupPeopleByPresence(members, channels, channelUsers, { includeOffline: people.full }),
-    [members, channels, channelUsers, people.full],
+    () => groupPeopleByPresence(members, channels, voicePresence, { includeOffline: people.full }),
+    [members, channels, voicePresence, people.full],
   );
 
   function handleContextMenu(e: React.MouseEvent, member: ServerMember) {
@@ -213,7 +217,7 @@ function PersonRow({
 }: {
   member: ServerMember;
   roleColor?: string;
-  voice?: VoiceUser;
+  voice?: VoicePresence;
   dimmed?: boolean;
   onContextMenu: (e: React.MouseEvent, member: ServerMember) => void;
 }) {
@@ -221,13 +225,10 @@ function PersonRow({
   const name = member.nickname || member.user.displayName;
   const status = member.user.status || 'offline';
 
-  // Rich presence line: voice state when in voice, otherwise status.
+  // Presence line: in voice (muted or not) when in voice, otherwise status.
   let secondLine: string;
-  let secondLineAccent = false;
   if (voice) {
-    const kind = voicePresenceKind(voice);
-    secondLine = kind === 'speaking' ? t('people.speaking') : kind === 'muted' ? t('people.mutedStatus') : t('people.inVoiceStatus');
-    secondLineAccent = kind === 'speaking';
+    secondLine = voicePresenceKind(voice) === 'muted' ? t('people.mutedStatus') : t('people.inVoiceStatus');
   } else if (status === 'dnd') {
     secondLine = t('people.dnd');
   } else if (status === 'idle') {
@@ -252,7 +253,6 @@ function PersonRow({
           displayName={member.user.displayName}
           size="sm"
           status={voice ? undefined : status}
-          speaking={voice?.speaking}
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
@@ -265,12 +265,7 @@ function PersonRow({
             {(member.user.role === 'admin' || member.user.role === 'superadmin') && <StaffBadge />}
             {member.user.isSupporter && <SupporterBadge tier={member.user.supporterTier} />}
           </div>
-          <div
-            className={clsx(
-              'truncate text-[11.5px] leading-tight',
-              secondLineAccent ? 'text-vox-accent-primary' : 'text-vox-text-muted',
-            )}
-          >
+          <div className="truncate text-[11.5px] leading-tight text-vox-text-muted">
             {secondLine}
           </div>
         </div>

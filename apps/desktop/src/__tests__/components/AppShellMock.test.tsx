@@ -113,6 +113,20 @@ describe('AppShellMock — the shell both consumers draw', () => {
     expect(find('[data-testid="app-mock-channels"]')!.className).toContain('bg-vox-channel');
   });
 
+  it('pictures the People panel as the app has it: presence in voice, never who is talking', () => {
+    render(<AppShellMock variant="full" />);
+
+    const people = find('[data-testid="app-mock-people"]')!;
+    expect(people.textContent).toContain('In voice');
+    expect(people.textContent).toContain('Muted');
+    expect(people.textContent).not.toContain('Speaking');
+    expect(people.querySelector('[class*="voice-speaking"]')).toBeNull();
+    // Who is talking shows in the channel list, which still previews the speaking colour.
+    const speaking = find('[data-testid="app-mock-voice-card"] [data-testid="app-mock-speaking"]');
+    expect(speaking).toBeTruthy();
+    expect(speaking!.getAttribute('class')).toContain('text-vox-voice-speaking');
+  });
+
   it('re-scopes the subtree when given a palette', () => {
     render(<AppShellMock variant="full" colors={palette({ chat: '#abcdef', 'accent-primary': '#ff0000' })} />);
 
