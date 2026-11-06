@@ -896,7 +896,7 @@
       "title": "准备共享",
       "subtitle": "遮盖隐私内容并添加注释或图片 — 开播前不会共享任何内容",
       "monitorNudge": "你正在共享整个屏幕 — 通知和其他所有窗口都将可见。请遮盖隐私内容。",
-      "maskCount": "{{count}} 个遮罩",
+      "maskCount_other": "{{count}} 个遮罩",
       "skipNextTime": "不再显示（全屏警告仍会保留）",
       "cancel": "取消",
       "goLive": "开始直播"
