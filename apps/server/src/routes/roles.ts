@@ -12,7 +12,7 @@ import {
   permissionsToString,
   ALL_PERMISSIONS,
 } from '@voxium/shared';
-import type { Role, ChannelPermissionOverride, MemberRole } from '@voxium/shared';
+import type { Role, MemberRole } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitRoleManage } from '../middleware/rateLimiter';
@@ -541,17 +541,16 @@ roleRouter.put(
         });
       }
 
-      // Fetch all overrides for the channel to broadcast
+      // The caller (who holds MANAGE_ROLES) gets the channel's overrides back
       const allOverrides = await prisma.channelPermissionOverride.findMany({
         where: { channelId },
         include: { role: true },
       });
 
-      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, {
-        serverId,
-        channelId,
-        overrides: allOverrides as unknown as ChannelPermissionOverride[],
-      });
+      // { serverId } only: members of the space refetch what they may see. The
+      // channel id and its overrides must not travel on the space-wide room, which
+      // reaches members without VIEW_CHANNEL on this channel too.
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId });
 
       // Override may have granted/revoked VIEW_CHANNEL for this channel
       void syncChannelVisibilityRooms(serverId, { channelId });
@@ -590,16 +589,10 @@ roleRouter.delete(
         where: { channelId, roleId },
       });
 
-      const allOverrides = await prisma.channelPermissionOverride.findMany({
-        where: { channelId },
-        include: { role: true },
-      });
-
-      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, {
-        serverId,
-        channelId,
-        overrides: allOverrides as unknown as ChannelPermissionOverride[],
-      });
+      // { serverId } only: members of the space refetch what they may see. The
+      // channel id and its overrides must not travel on the space-wide room, which
+      // reaches members without VIEW_CHANNEL on this channel too.
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId });
 
       // Removing an override may restore/revoke VIEW_CHANNEL for this channel
       void syncChannelVisibilityRooms(serverId, { channelId });

@@ -1042,13 +1042,9 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockEmit).toHaveBeenCalledWith(
-        WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED,
-        expect.objectContaining({
-          serverId: 'srv1',
-          channelId: 'ch1',
-        }),
-      );
+      // The space-wide room gets { serverId } only: no channel id, no overrides
+      expect(mockTo).toHaveBeenCalledWith('server:srv1');
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId: 'srv1' });
       // Override may grant/revoke VIEW_CHANNEL — this channel's room re-syncs
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { channelId: 'ch1' });
     });
@@ -1385,13 +1381,9 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockEmit).toHaveBeenCalledWith(
-        WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED,
-        expect.objectContaining({
-          serverId: 'srv1',
-          channelId: 'ch1',
-        }),
-      );
+      // The space-wide room gets { serverId } only: no channel id, no overrides
+      expect(mockTo).toHaveBeenCalledWith('server:srv1');
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId: 'srv1' });
       // Removing an override can restore/revoke VIEW_CHANNEL — room re-sync
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { channelId: 'ch1' });
     });

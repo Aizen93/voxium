@@ -1006,7 +1006,6 @@ sequenceDiagram
 - `voice:annotation:state` / `voice:annotation:ops` / `voice:annotation:live`
 - `channel:members_updated` (secure channel membership)
 - `role:created` / `role:updated` / `role:deleted` / `role:reordered` / `member:roles_updated` / `member:nickname_updated` / `channel:permissions_updated`
-- `theme:published` / `theme:updated` / `theme:removed`
 - `dm:voice:state_update` / `dm:voice:speaking` / `dm:voice:signal`
 - `dm:conversation:deleted`
 - `friend:request_received` / `friend:request_accepted` / `friend:removed`

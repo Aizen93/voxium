@@ -9,6 +9,9 @@ export const LIMITS = {
   USERNAME_MIN: 3,
   USERNAME_MAX: 32,
   DISPLAY_NAME_MAX: 64,
+  /** RFC 5321: a whole address, and its local part (validateEmail) */
+  EMAIL_MAX: 254,
+  EMAIL_LOCAL_MAX: 64,
   PASSWORD_MIN: 8,
   PASSWORD_MAX: 72,
   SERVER_NAME_MIN: 2,
@@ -486,10 +489,6 @@ export const WS_EVENTS = {
   MEMBER_ROLES_UPDATED: 'member:roles_updated',
   CHANNEL_PERMISSIONS_UPDATED: 'channel:permissions_updated',
   MEMBER_NICKNAME_UPDATED: 'member:nickname_updated',
-  // Community Themes
-  THEME_PUBLISHED: 'theme:published',
-  THEME_UPDATED: 'theme:updated',
-  THEME_REMOVED: 'theme:removed',
   // Incoming webhooks: the server's webhook list changed (moderators refetch);
   // a webhook's messages were purged from one channel in one statement.
   WEBHOOK_CHANGED: 'webhook:changed',

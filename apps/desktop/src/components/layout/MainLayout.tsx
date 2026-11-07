@@ -621,7 +621,7 @@ export function MainLayout() {
       memberNicknameUpdated: ({ serverId, userId, nickname }: { serverId: string; userId: string; nickname: string | null }) => {
         useServerStore.getState().handleNicknameUpdated(serverId, userId, nickname);
       },
-      channelPermissionsUpdated: ({ serverId }: { serverId: string; channelId: string }) => {
+      channelPermissionsUpdated: ({ serverId }: { serverId: string }) => {
         // Re-fetch server detail to get updated channel visibility
         const state = useServerStore.getState();
         if (state.activeServerId === serverId) {
