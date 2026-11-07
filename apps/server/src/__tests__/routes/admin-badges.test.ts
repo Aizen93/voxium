@@ -44,11 +44,23 @@ vi.mock('../../utils/prisma', () => ({
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) }));
+// Room operations, in call order, with the scope they ran on
+const roomOps: Array<[string, string, string[]]> = [];
+const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockIn = vi.fn((room: string) => ({
+  fetchSockets: mockFetchSockets,
+  socketsLeave: (rooms: string[]) => { roomOps.push(['cluster', room, rooms]); },
+  disconnectSockets: () => { roomOps.push(['cluster-disconnect', room, []]); },
+}));
+const mockLocalIn = vi.fn((room: string) => ({
+  socketsLeave: (rooms: string[]) => { roomOps.push(['local', room, rooms]); },
+  disconnectSockets: () => { roomOps.push(['local-disconnect', room, []]); },
+}));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
     in: mockIn,
+    local: { in: mockLocalIn },
   })),
 }));
 
@@ -180,6 +192,7 @@ describe('Admin Badge Routes', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    roomOps.length = 0;
     app = createApp();
   });
 
@@ -222,6 +235,10 @@ describe('Admin Badge Routes', () => {
         userId: 'target-user',
         role: 'admin',
       });
+      // A promotion leaves no room and disconnects nobody: the handlers
+      // admit the new admin on its next subscription
+      expect(roomOps).toEqual([]);
+      expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
     });
 
     it('emits user:updated to DM conversation rooms', async () => {
@@ -313,6 +330,7 @@ describe('Admin Badge Routes', () => {
 
       expect(res.status).toBe(403);
       expect(res.body.error).toContain('Cannot modify a super admin');
+      expect(roomOps).toEqual([]);
     });
 
     it('rejects when user already has the same role', async () => {
@@ -332,6 +350,85 @@ describe('Admin Badge Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('User already has role "admin"');
+      expect(roomOps).toEqual([]);
+    });
+
+    it('ends a demoted admin\'s sockets (staff and support ticket rooms go with them), this node first, then cluster-wide', async () => {
+      const order: string[] = [];
+      prismaMock.user.findUnique
+        .mockResolvedValueOnce({
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+        })
+        .mockResolvedValueOnce({ id: 'target-admin', role: 'admin', username: 'formeradmin' });
+      prismaMock.user.update.mockImplementation(async () => { order.push('update'); return {}; });
+      mockLocalIn.mockImplementationOnce((room: string) => ({
+        socketsLeave: (rooms: string[]) => { roomOps.push(['local', room, rooms]); },
+        disconnectSockets: () => { order.push('disconnect'); roomOps.push(['local-disconnect', room, []]); },
+      }));
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      prismaMock.conversation.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .patch('/api/v1/admin/users/target-admin/role')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ role: 'user' });
+
+      expect(res.status).toBe(200);
+      // A disconnect leaves every room: the staff rooms, and the
+      // support:{ticketId} rooms it joined as staff, which are not listed
+      // anywhere bounded. A reconnect joins only the rooms a user joins.
+      expect(roomOps).toEqual([
+        ['local-disconnect', 'user:target-admin', []],
+        ['cluster-disconnect', 'user:target-admin', []],
+      ]);
+      // After the new role is committed: a subscription racing the change
+      // reads the new role (adminSubscriptions.ts)
+      expect(order).toEqual(['update', 'disconnect']);
+      // Room operations, never a per-socket walk; the account's tokens stay
+      // valid, so no force:logout
+      expect(mockFetchSockets).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+    });
+
+    it('does not take a demoted admin\'s sockets out of anything when the update fails', async () => {
+      prismaMock.user.findUnique
+        .mockResolvedValueOnce({
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+        })
+        .mockResolvedValueOnce({ id: 'target-admin', role: 'admin', username: 'formeradmin' });
+      prismaMock.user.update.mockRejectedValueOnce(new Error('db gone'));
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await request(app)
+        .patch('/api/v1/admin/users/target-admin/role')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ role: 'user' });
+
+      expect(res.status).toBe(500);
+      expect(roomOps).toEqual([]);
+      consoleSpy.mockRestore();
+    });
+
+    it('still answers 200 and logs when ending a demoted admin\'s sockets fails', async () => {
+      prismaMock.user.findUnique
+        .mockResolvedValueOnce({
+          id: 'superadmin-1', bannedAt: null, tokenVersion: 0, role: 'superadmin', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+        })
+        .mockResolvedValueOnce({ id: 'target-admin', role: 'admin', username: 'formeradmin' });
+      prismaMock.user.update.mockResolvedValue({});
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+      prismaMock.conversation.findMany.mockResolvedValue([]);
+      mockLocalIn.mockImplementationOnce(() => { throw new Error('adapter gone'); });
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await request(app)
+        .patch('/api/v1/admin/users/target-admin/role')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ role: 'user' });
+
+      expect(res.status).toBe(200);
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('target-admin'), 'adapter gone');
+      consoleSpy.mockRestore();
     });
 
     it('returns 404 for non-existent user', async () => {

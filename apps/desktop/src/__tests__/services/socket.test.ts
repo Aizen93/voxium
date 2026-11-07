@@ -93,12 +93,31 @@ const storage = vi.hoisted(() => ({
   flushTokenStorage: vi.fn(async () => {}),
 }));
 vi.mock('../../services/tokenStorage', () => storage);
+// A server disconnect leaves any voice call (the 'disconnect' handler)
+const voice = vi.hoisted(() => ({ activeChannelId: null as string | null, dmCallConversationId: null as string | null, leaveChannel: vi.fn(), leaveDMCall: vi.fn() }));
+vi.mock('../../stores/voiceStore', () => ({ useVoiceStore: { getState: () => voice } }));
+// force:logout signs out through the auth store
+const authStoreMock = vi.hoisted(() => ({ logout: vi.fn() }));
+vi.mock('../../stores/authStore', () => ({ useAuthStore: { getState: () => authStoreMock } }));
 
 type SocketModule = typeof import('../../services/socket');
 
+let lastModule: SocketModule | null = null;
+
+/** The socket module, fresh after vi.resetModules(), with no random spread
+ *  (every wait at its base) unless a test sets one. */
 async function freshSocketModule(): Promise<SocketModule> {
-  return import('../../services/socket');
+  const mod = await import('../../services/socket');
+  mod._setSocketRandomForTests(() => 0);
+  lastModule = mod;
+  return mod;
 }
+
+// A retry a test left scheduled must not fire into the next test's mocks
+afterEach(() => {
+  lastModule?.disconnectSocket();
+  lastModule = null;
+});
 
 describe('services/socket', () => {
   beforeEach(() => {
@@ -316,12 +335,44 @@ describe('services/socket — handshake refused for an expired token', () => {
     expect(socket.auth).toEqual({ token: 'token-new' });
   });
 
-  it('every other refusal (banned, unverified, consent, revoked) renews nothing and reopens nothing', async () => {
+  it("'Session invalidated' (a token of an older version) renews: the stored token of the current version is used when another path stored one", async () => {
+    // Another tab or the caller's own password change stored the new pair
+    const mod = await freshSocketModule();
+    mod.connectSocket('token-old-version');
+    const socket = createdSockets[0];
+    storage.getAccessToken.mockReturnValue('token-current-version');
+
+    refuseHandshake(socket, 'Session invalidated');
+    await tick();
+
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(socket.auth).toEqual({ token: 'token-current-version' });
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("'Session invalidated' with nothing newer stored: ONE refresh, and a refused one reopens nothing (the session module signs out)", async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('token-old-version');
+    const socket = createdSockets[0];
+    storage.getAccessToken.mockReturnValue('token-old-version');
+    session.refreshAccessToken.mockRejectedValueOnce(new session.SessionLostError('refused'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    refuseHandshake(socket, 'Session invalidated');
+    await tick();
+
+    expect(session.refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.connect).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('every other refusal (banned, unverified, consent) renews nothing and reopens nothing', async () => {
     const mod = await freshSocketModule();
     mod.connectSocket('token-1');
     const socket = createdSockets[0];
 
-    for (const message of ['Account banned', 'Email not verified', 'Consent required', 'Session invalidated']) {
+    for (const message of ['Account banned', 'Email not verified', 'Consent required', 'User not found']) {
       refuseHandshake(socket, message);
     }
     await tick();
@@ -365,26 +416,100 @@ describe('services/socket — handshake refused for an expired token', () => {
     expect(session.refreshAccessToken).toHaveBeenCalledTimes(2);
   });
 
-  it('a renewal refused for good is left to the session module (it has ended the session); a transient one is logged, nothing reopened', async () => {
-    const mod = await freshSocketModule();
-    mod.connectSocket('token-expired');
-    const socket = createdSockets[0];
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('a renewal refused for good is left to the session module (it has ended the session): nothing reopens, nothing is scheduled', async () => {
+    vi.useFakeTimers();
+    try {
+      const mod = await freshSocketModule();
+      mod.connectSocket('token-expired');
+      const socket = createdSockets[0];
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    session.refreshAccessToken.mockRejectedValueOnce(new session.SessionLostError('lost'));
-    refuseHandshake(socket, 'Token expired');
-    await tick();
-    expect(warn).not.toHaveBeenCalled();
-    expect(socket.auth).toEqual({ token: 'token-expired' });
-    expect(socket.connect).not.toHaveBeenCalled();
+      session.refreshAccessToken.mockRejectedValueOnce(new session.SessionLostError('lost'));
+      refuseHandshake(socket, 'Token expired');
+      await tick();
+      await vi.advanceTimersByTimeAsync(mod.HANDSHAKE_RETRY_MAX_MS * 2);
+      expect(warn).not.toHaveBeenCalled();
+      expect(socket.auth).toEqual({ token: 'token-expired' });
+      expect(socket.connect).not.toHaveBeenCalled();
+      expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+      warn.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-    mod._resetSocketModuleForTests();
-    session.refreshAccessToken.mockRejectedValueOnce(new Error('Network Error'));
-    refuseHandshake(socket, 'Token expired');
-    await tick();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('renew'), 'Network Error');
-    expect(socket.connect).not.toHaveBeenCalled();
-    warn.mockRestore();
+  it('a TRANSIENT renewal failure (the server restarting) is logged and the handshake is tried again after a wait — never a closed manager left closed', async () => {
+    vi.useFakeTimers();
+    try {
+      const mod = await freshSocketModule();
+      mod.connectSocket('token-expired');
+      const socket = createdSockets[0];
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      session.refreshAccessToken.mockRejectedValueOnce(new Error('Network Error'));
+      session.getFreshAccessToken.mockResolvedValueOnce('token-new');
+
+      refuseHandshake(socket, 'Token expired');
+      await tick();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('renew'), 'Network Error');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('The token could not be renewed; trying again in 2 s'));
+      expect(socket.connect).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(mod.HANDSHAKE_RETRY_MIN_MS);
+      await tick();
+      expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+      expect(socket.auth).toEqual({ token: 'token-new' });
+      expect(socket.connect).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an EXPIRED token refused again within the refresh window is retried after a growing wait (renewed by the resume path); a FRESH one refused again is not', async () => {
+    vi.useFakeTimers();
+    try {
+      const mod = await freshSocketModule();
+      mod.connectSocket('token-expired');
+      const socket = createdSockets[0];
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      session.refreshAccessToken.mockRejectedValue(new Error('Network Error'));
+      session.getFreshAccessToken.mockRejectedValue(new Error('Network Error'));
+      session.isAccessTokenFresh.mockReturnValue(false);
+
+      // Renewal fails: retry in 2 s, through the resume path, whose renewal
+      // fails too: it opens with the stored (expired) token
+      refuseHandshake(socket, 'Token expired');
+      await tick();
+      await vi.advanceTimersByTimeAsync(mod.HANDSHAKE_RETRY_MIN_MS);
+      await tick();
+      expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+      expect(socket.connect).toHaveBeenCalledTimes(1);
+      expect(socket.auth).toEqual({ token: 'token-expired' });
+
+      // Refused again inside the window: no second handshake renewal, but a retry in 4 s
+      refuseHandshake(socket, 'Token expired');
+      await tick();
+      expect(session.refreshAccessToken).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(mod.HANDSHAKE_RETRY_MIN_MS);
+      await tick();
+      expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(mod.HANDSHAKE_RETRY_MIN_MS);
+      await tick();
+      expect(session.getFreshAccessToken).toHaveBeenCalledTimes(2);
+      expect(socket.connect).toHaveBeenCalledTimes(2);
+
+      // A token refused while it still reads fresh, inside the window: nothing scheduled
+      session.isAccessTokenFresh.mockReturnValue(true);
+      refuseHandshake(socket, 'Token expired');
+      await tick();
+      await vi.advanceTimersByTimeAsync(mod.HANDSHAKE_RETRY_MAX_MS * 2);
+      await tick();
+      expect(session.getFreshAccessToken).toHaveBeenCalledTimes(2);
+      expect(socket.connect).toHaveBeenCalledTimes(2);
+      warn.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not reopen a socket that was logged out, replaced or connected while the renewal was out', async () => {
@@ -537,6 +662,32 @@ describe("services/socket — 'Authentication unavailable' (the server could not
     expect(socket.connect).not.toHaveBeenCalled();
     warn.mockRestore();
   });
+
+  it('the wait is spread down to half of it, so the clients of one outage do not come back in step', async () => {
+    const mod = await freshSocketModule();
+    mod._setSocketRandomForTests(() => 0.5); // three quarters of the base wait
+    mod.connectSocket('token-1');
+    const socket = createdSockets[0];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    refuseHandshake(socket, mod.HANDSHAKE_UNAVAILABLE_ERROR);
+    await vi.advanceTimersByTimeAsync(mod.HANDSHAKE_RETRY_MIN_MS * 0.75 - 1);
+    await flush();
+    expect(socket.connect).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+
+    // The base still doubles: 4 s spread to 3 s
+    refuseHandshake(socket, mod.HANDSHAKE_UNAVAILABLE_ERROR);
+    await vi.advanceTimersByTimeAsync(2_999);
+    await flush();
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(socket.connect).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
 });
 
 describe('services/socket — ensureSocketConnected (the window comes back)', () => {
@@ -649,7 +800,7 @@ describe('services/socket — ensureSocketConnected (the window comes back)', ()
     expect(session.getFreshAccessToken).toHaveBeenCalledTimes(2); // not asked after the logout
   });
 
-  it('a transient renewal failure is logged and leaves the manager to its own retries', async () => {
+  it('a transient renewal failure is logged and the socket opens with the STORED token: a closed manager would otherwise never retry', async () => {
     const mod = await freshSocketModule();
     mod.connectSocket('token-1');
     const socket = createdSockets[0];
@@ -660,8 +811,26 @@ describe('services/socket — ensureSocketConnected (the window comes back)', ()
 
     await mod.ensureSocketConnected();
 
-    expect(socket.connect).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('resume'), 'Network Error');
+    expect(socket.auth).toEqual({ token: 'stored-token' });
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    expect(mod.getConnectionStatus()).toBe('connecting');
+    warn.mockRestore();
+  });
+
+  it('a transient renewal failure with no stored token (signed out meanwhile) opens nothing', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('token-1');
+    const socket = createdSockets[0];
+    socket.fire('connect');
+    socket.fire('disconnect', 'ping timeout');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    session.getFreshAccessToken.mockRejectedValueOnce(new Error('Network Error'));
+    storage.getAccessToken.mockReturnValue(null);
+
+    await mod.ensureSocketConnected();
+
+    expect(socket.connect).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 
@@ -681,6 +850,499 @@ describe('services/socket — ensureSocketConnected (the window comes back)', ()
 
     expect(socket.disconnect).not.toHaveBeenCalled();
     expect(socket.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe('services/socket — reconnectSocketAfterCredentialChange (the server revoked every session after a password change)', () => {
+  // What a server-side disconnect(true) does on the real client: the socket
+  // and the manager close for good ('io server disconnect'), nothing retries
+  function serverDisconnect(socket: FakeSocket): void {
+    socket.connected = false;
+    socket.active = false;
+    socket.fire('disconnect', 'io server disconnect');
+  }
+  const macrotask = () => new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useRealTimers();
+    createdSockets.length = 0;
+    storage.getAccessToken.mockReset().mockReturnValue('access-new');
+    session.refreshAccessToken.mockReset();
+    session.getFreshAccessToken.mockReset();
+    session.isAccessTokenFresh.mockReset().mockReturnValue(true);
+    voice.activeChannelId = null;
+    voice.dmCallConversationId = null;
+    authStoreMock.logout.mockClear();
+  });
+
+  it('the disconnect landed FIRST (manager closed): nothing reopens with the old token; the answer reopens with the new one', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    // What the resume path would send: the old token has not expired
+    storage.getAccessToken.mockReturnValue('access-old');
+    session.getFreshAccessToken.mockResolvedValue('access-old');
+    const end = mod.beginCredentialChange();
+    serverDisconnect(socket);
+    await macrotask();
+    await tick();
+    expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+    expect(socket.connect).not.toHaveBeenCalled();
+
+    storage.getAccessToken.mockReturnValue('access-new');
+    session.getFreshAccessToken.mockResolvedValue('access-new');
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    end();
+    await tick();
+
+    expect(socket.auth).toEqual({ token: 'access-new' });
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    expect(session.getFreshAccessToken).not.toHaveBeenCalled(); // the answer's reopen replaced the held one
+    expect(mod.getConnectionStatus()).toBe('connecting');
+    expect(createdSockets).toHaveLength(1);
+  });
+
+  it('a held disconnect with no reopen from the answer (lost, or no token pair) is reopened through the resume path when the change ends', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    session.getFreshAccessToken.mockResolvedValue('access-old');
+    const end = mod.beginCredentialChange();
+    serverDisconnect(socket);
+    await macrotask();
+    expect(socket.connect).not.toHaveBeenCalled();
+
+    end();
+    end(); // idempotent
+    await tick();
+
+    expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('a change that ends without a server disconnect (a wrong current password) holds nothing: a later server disconnect reopens as usual', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    session.getFreshAccessToken.mockResolvedValue('access-old');
+
+    mod.beginCredentialChange()();
+    await tick();
+    expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+
+    serverDisconnect(socket);
+    await macrotask();
+    await tick();
+    expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('the answer landed FIRST (still connected): reopens now — connectSocket alone would be a no-op on a connected socket', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+
+    mod.connectSocket('access-new');
+    expect(socket.connect).not.toHaveBeenCalled();
+
+    mod.reconnectSocketAfterCredentialChange('access-new');
+
+    expect(socket.auth).toEqual({ token: 'access-new' });
+    expect(socket.disconnect).toHaveBeenCalledTimes(1);
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    expect(mod.getConnectionStatus()).toBe('connecting');
+  });
+
+  it('a server disconnect landing AFTER the reopen (another node\'s copy) is repaired once, with the stored token', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    socket.connected = true;
+    socket.fire('connect');
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+
+    serverDisconnect(socket);
+    await macrotask();
+
+    expect(socket.connect).toHaveBeenCalledTimes(2);
+    expect(socket.auth).toEqual({ token: 'access-new' });
+    expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+
+    // The window's direct repair runs once: a later server disconnect goes
+    // through the resume path
+    session.getFreshAccessToken.mockResolvedValueOnce('access-new');
+    socket.connected = true;
+    socket.fire('connect');
+    serverDisconnect(socket);
+    await macrotask();
+    await tick();
+    expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.connect).toHaveBeenCalledTimes(3);
+  });
+
+  it('a force:logout inside the window (a ban right after the password change) is never repaired: the session ends', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    socket.connected = true;
+    socket.fire('connect');
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    session.getFreshAccessToken.mockResolvedValue('access-new');
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      socket.fire('force:logout', { reason: 'banned' });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(authStoreMock.logout).toHaveBeenCalledTimes(1);
+      // Neither the window's repair nor the resume path reopened it
+      expect(socket.connect).toHaveBeenCalledTimes(1);
+      expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+      expect(window.location.href).toBe('/login?reason=banned');
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+    }
+  });
+
+  it('a server disconnect after the window is not repaired by the window: it goes through the resume path', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    socket.connected = true;
+    socket.fire('connect');
+
+    clock.mockReturnValue(now + mod.REVOCATION_REOPEN_WINDOW_MS + 1);
+    session.getFreshAccessToken.mockResolvedValueOnce(null); // e.g. signed out meanwhile
+    serverDisconnect(socket);
+    await macrotask();
+    await tick();
+    clock.mockRestore();
+
+    // Not the window's reopen with the stored token: the resume path was asked
+    expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('a server disconnect without force:logout (a demotion) reopens through the resume path with the stored token', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    voice.activeChannelId = 'vc-1';
+    session.getFreshAccessToken.mockResolvedValueOnce('access-old');
+
+    serverDisconnect(socket);
+    // Never from inside the manager's own close
+    expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+    await macrotask();
+    await tick();
+
+    expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(socket.auth).toEqual({ token: 'access-old' });
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    expect(mod.getConnectionStatus()).toBe('connecting');
+    expect(createdSockets).toHaveLength(1);
+    // The call the server tore down is still left
+    expect(voice.leaveChannel).toHaveBeenCalled();
+  });
+
+  it('a revoked session (password changed on another device): the reopen is refused, ONE refresh is refused, nothing reopens again', async () => {
+    const mod = await freshSocketModule();
+    storage.getAccessToken.mockReturnValue('access-old');
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    // The old-version token has not expired: the resume path sends it as is
+    session.getFreshAccessToken.mockResolvedValue('access-old');
+    session.refreshAccessToken.mockRejectedValue(new session.SessionLostError('refused'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    serverDisconnect(socket);
+    await macrotask();
+    await tick();
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+
+    refuseHandshake(socket, 'Session invalidated');
+    await tick();
+    await macrotask();
+
+    // services/session.ts ends the session on that refusal (handleSessionLost)
+    expect(session.refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
+  it('no reconnect after force:logout (a ban, an account deletion)', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    session.getFreshAccessToken.mockResolvedValue('access-old');
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      socket.fire('force:logout', { reason: 'banned' });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(authStoreMock.logout).toHaveBeenCalledTimes(1);
+      expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+      expect(socket.connect).not.toHaveBeenCalled();
+      expect(window.location.href).toBe('/login?reason=banned');
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+    }
+  });
+
+  it('a session the server ends right after admitting it (banned or deleted during the handshake) signs out with the reason and never reopens', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    session.getFreshAccessToken.mockResolvedValue('access-old');
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      // The connection handler's re-check: force:logout, then disconnect(true)
+      socket.connected = true;
+      socket.fire('connect');
+      socket.fire('force:logout', { reason: 'Your account has been deleted' });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(authStoreMock.logout).toHaveBeenCalledTimes(1);
+      expect(window.location.href).toBe('/login?reason=Your%20account%20has%20been%20deleted');
+      expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+      expect(socket.connect).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+    }
+  });
+
+  it('the resume reopen is skipped when the user logged out before it ran', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    session.getFreshAccessToken.mockResolvedValue('access-old');
+
+    serverDisconnect(socket);
+    mod.disconnectSocket();
+    socket.connect.mockClear();
+    await macrotask();
+    await tick();
+
+    expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+    expect(socket.connect).not.toHaveBeenCalled();
+  });
+
+  it('the repair is skipped when the session ended meanwhile (no token, or logged out)', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    storage.getAccessToken.mockReturnValue(null);
+
+    serverDisconnect(socket);
+    await macrotask();
+
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('still leaves the voice call the server tore down', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    voice.activeChannelId = 'vc-1';
+    mod.reconnectSocketAfterCredentialChange('access-new');
+
+    serverDisconnect(socket);
+    await macrotask();
+
+    expect(voice.leaveChannel).toHaveBeenCalled();
+  });
+
+  it('is a no-op without a socket and after a logout', async () => {
+    const mod = await freshSocketModule();
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    expect(createdSockets).toHaveLength(0);
+
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    mod.disconnectSocket();
+    socket.connect.mockClear();
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    expect(socket.connect).not.toHaveBeenCalled();
+    expect(createdSockets).toHaveLength(1);
+  });
+});
+
+describe('services/socket — a node going away (deploy, shutdown): spread reopen, expired tokens, a server still down', () => {
+  function serverDisconnect(socket: FakeSocket): void {
+    socket.connected = false;
+    socket.active = false;
+    socket.fire('disconnect', 'io server disconnect');
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    createdSockets.length = 0;
+    vi.useFakeTimers();
+    storage.getAccessToken.mockReset().mockReturnValue('access-expired');
+    session.refreshAccessToken.mockReset();
+    session.getFreshAccessToken.mockReset();
+    session.isAccessTokenFresh.mockReset().mockReturnValue(false);
+    voice.activeChannelId = null;
+    voice.dmCallConversationId = null;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function connected(mod: SocketModule): Promise<FakeSocket> {
+    mod.connectSocket('access-expired');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    return socket;
+  }
+
+  it('the generic reopen waits a random share of SERVER_DISCONNECT_REOPEN_MAX_DELAY_MS, not 0 for everyone at once', async () => {
+    const mod = await freshSocketModule();
+    mod._setSocketRandomForTests(() => 0.6);
+    const socket = await connected(mod);
+    session.getFreshAccessToken.mockResolvedValue('access-live');
+
+    serverDisconnect(socket);
+    await vi.advanceTimersByTimeAsync(mod.SERVER_DISCONNECT_REOPEN_MAX_DELAY_MS * 0.6 - 1);
+    expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+    expect(socket.connect).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.auth).toEqual({ token: 'access-live' });
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('the repair after this client\'s own credential change stays IMMEDIATE, whatever the spread', async () => {
+    const mod = await freshSocketModule();
+    mod._setSocketRandomForTests(() => 0.99);
+    const socket = await connected(mod);
+    storage.getAccessToken.mockReturnValue('access-new');
+    mod.reconnectSocketAfterCredentialChange('access-new');
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+
+    socket.connected = true;
+    socket.fire('connect');
+    serverDisconnect(socket); // another node's copy of the revocation
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(socket.connect).toHaveBeenCalledTimes(2);
+    expect(socket.auth).toEqual({ token: 'access-new' });
+    expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('the token expired and the server is still down: the renewal fails, the socket opens with the stored token anyway, and recovers on the \'Token expired\' refusal once the server is back', async () => {
+    const mod = await freshSocketModule();
+    const socket = await connected(mod);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    session.getFreshAccessToken.mockRejectedValueOnce(Object.assign(new Error('Request failed with status code 502'), { isAxiosError: true }));
+
+    serverDisconnect(socket);
+    await vi.advanceTimersByTimeAsync(0);
+    await tick();
+
+    // Opened with the stored token: the manager's own back-off runs while the server is away
+    expect(socket.auth).toEqual({ token: 'access-expired' });
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    socket.fire('connect_error', new Error('xhr poll error')); // transport: the manager retries alone
+    await tick();
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+
+    // Back: the expired token is refused, ONE renewal, reopened with its answer
+    session.refreshAccessToken.mockResolvedValueOnce('access-renewed');
+    refuseHandshake(socket, 'Token expired');
+    await tick();
+    expect(session.refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.auth).toEqual({ token: 'access-renewed' });
+    expect(socket.connect).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
+  it('a refused renewal after the disconnect opens nothing (the session module has signed out once)', async () => {
+    const mod = await freshSocketModule();
+    const socket = await connected(mod);
+    session.getFreshAccessToken.mockRejectedValueOnce(new session.SessionLostError('refused'));
+
+    serverDisconnect(socket);
+    await vi.advanceTimersByTimeAsync(mod.HANDSHAKE_RETRY_MAX_MS * 2);
+    await tick();
+
+    expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.connect).not.toHaveBeenCalled();
+  });
+
+  it('no reconnect after force:logout, whatever the spread', async () => {
+    const mod = await freshSocketModule();
+    mod._setSocketRandomForTests(() => 0.5);
+    const socket = await connected(mod);
+    session.getFreshAccessToken.mockResolvedValue('access-live');
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+    try {
+      socket.fire('force:logout', { reason: 'banned' });
+      serverDisconnect(socket);
+      await vi.advanceTimersByTimeAsync(mod.SERVER_DISCONNECT_REOPEN_MAX_DELAY_MS);
+      await tick();
+
+      expect(session.getFreshAccessToken).not.toHaveBeenCalled();
+      expect(socket.connect).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+    }
   });
 });
 

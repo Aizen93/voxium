@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api, type SessionRequestConfig } from '../services/api';
-import { connectSocket, disconnectSocket } from '../services/socket';
+import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange, beginCredentialChange } from '../services/socket';
 import {
   getAccessToken, setTokens, clearTokens, isRemembered, hydrateTokens,
   getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken,
@@ -662,12 +662,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   changePassword: async (currentPassword, newPassword) => {
-    const { data } = await api.post('/auth/change-password', { currentPassword, newPassword, rememberMe: isRemembered() });
-    // Store fresh tokens so the current session survives the tokenVersion bump
-    if (data.data?.accessToken && data.data?.refreshToken) {
-      setTokens(data.data.accessToken, data.data.refreshToken);
+    // The server disconnects this socket when the change commits, possibly
+    // before the answer arrives: no reopen with the old token meanwhile
+    const endCredentialChange = beginCredentialChange();
+    try {
+      const { data } = await api.post('/auth/change-password', { currentPassword, newPassword, rememberMe: isRemembered() });
+      // Store fresh tokens so the current session survives the tokenVersion bump
+      if (data.data?.accessToken && data.data?.refreshToken) {
+        setTokens(data.data.accessToken, data.data.refreshToken);
+        // The server disconnects every socket opened with the old tokens, this
+        // one included: reopen it with the new one (never force:logout — the
+        // session is still valid)
+        reconnectSocketAfterCredentialChange(data.data.accessToken);
+      }
+      return data.message;
+    } finally {
+      endCredentialChange();
     }
-    return data.message;
   },
 
   deleteAccount: async (password, totpCode) => {

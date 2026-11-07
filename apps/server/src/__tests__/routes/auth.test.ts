@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { Router } from 'express';
 
 // ─── Environment variables (must be set before any app import) ───────────────
@@ -134,6 +135,8 @@ vi.mock('../../services/totpService', async (importOriginal) => {
   return { ...actual, verifyTOTP: (...a: unknown[]) => verifyTOTPMock(...a) };
 });
 vi.mock('../../utils/auditLog', () => ({ logAuditEvent: (...a: unknown[]) => logAuditEventMock(...a) }));
+const revokeUserSessionsMock = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/sessionRevocation', () => ({ revokeUserSessions: (...a: unknown[]) => revokeUserSessionsMock(...a) }));
 vi.mock('../../routes/admin', () => ({ adminRouter: Router() }));
 vi.mock('../../routes/support', () => ({ supportRouter: Router() }));
 vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
@@ -1092,6 +1095,47 @@ describe('POST /api/v1/auth/change-password', () => {
     expect(res.body.data).toHaveProperty('accessToken');
     expect(res.body.data).toHaveProperty('refreshToken');
     expect(res.body.message).toMatch(/password changed/i);
+    // Every socket opened with the old tokens is disconnected, without a
+    // force:logout (the caller keeps its session with the fresh pair)
+    expect(revokeUserSessionsMock).toHaveBeenCalledTimes(1);
+    expect(revokeUserSessionsMock).toHaveBeenCalledWith(MOCK_USER.id);
+  });
+
+  it('revokes the sessions only AFTER the new password and token version are written', async () => {
+    const hashedCurrent = await bcrypt.hash('currentpassword', 4);
+    const token = generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username, tokenVersion: 0 });
+    const order: string[] = [];
+    mockPrismaUser.findUnique
+      .mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false })
+      .mockResolvedValueOnce({ ...MOCK_USER, password: hashedCurrent });
+    mockPrismaUser.update.mockImplementation(async () => {
+      order.push('update');
+      return { id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 1 };
+    });
+    revokeUserSessionsMock.mockImplementationOnce(() => { order.push('revoke'); });
+
+    const res = await request(app)
+      .post('/api/v1/auth/change-password')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ currentPassword: 'currentpassword', newPassword: 'newpassword123' });
+
+    expect(res.status).toBe(200);
+    expect(order).toEqual(['update', 'revoke']);
+  });
+
+  it('revokes nothing when the password change is refused', async () => {
+    const token = generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username, tokenVersion: 0 });
+    mockPrismaUser.findUnique
+      .mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false })
+      .mockResolvedValueOnce({ ...MOCK_USER, password: await bcrypt.hash('correctpassword', 4) });
+
+    const res = await request(app)
+      .post('/api/v1/auth/change-password')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ currentPassword: 'wrongpassword', newPassword: 'newpassword123' });
+
+    expect(res.status).toBe(400);
+    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
   });
 
   it('rejects when current password is incorrect', async () => {
@@ -1194,6 +1238,101 @@ describe('POST /api/v1/auth/change-password', () => {
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
     expect(res.body.error).toMatch(/new password/i);
+  });
+});
+
+describe('POST /api/v1/auth/reset-password', () => {
+  const RAW_TOKEN = 'a'.repeat(64);
+  const HASHED = crypto.createHash('sha256').update(RAW_TOKEN).digest('hex');
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('resets the password, bumps the token version and disconnects every live socket of the account', async () => {
+    const order: string[] = [];
+    mockPrismaUser.findUnique.mockResolvedValueOnce({ ...MOCK_USER, resetToken: HASHED, resetTokenExpiresAt: new Date(Date.now() + 60_000) });
+    mockPrismaUser.update.mockImplementationOnce(async () => { order.push('update'); return {}; });
+    revokeUserSessionsMock.mockImplementationOnce(() => { order.push('revoke'); });
+
+    const res = await request(app)
+      .post('/api/v1/auth/reset-password')
+      .send({ token: RAW_TOKEN.toUpperCase(), password: 'brandnewpassword1' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(mockPrismaUser.findUnique).toHaveBeenCalledWith({ where: { resetToken: HASHED } });
+    expect(mockPrismaUser.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: MOCK_USER.id },
+      data: expect.objectContaining({ resetToken: null, resetTokenExpiresAt: null, tokenVersion: { increment: 1 } }),
+    }));
+    // The account's sockets go once the new token version is committed, with
+    // no force:logout reason: the holder of the reset link signs in afresh
+    expect(revokeUserSessionsMock).toHaveBeenCalledWith(MOCK_USER.id);
+    expect(revokeUserSessionsMock.mock.calls[0]).toHaveLength(1);
+    expect(order).toEqual(['update', 'revoke']);
+  });
+
+  it('answers 400 for an unknown token and revokes nothing', async () => {
+    mockPrismaUser.findUnique.mockResolvedValueOnce(null);
+
+    const res = await request(app)
+      .post('/api/v1/auth/reset-password')
+      .send({ token: RAW_TOKEN, password: 'brandnewpassword1' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid or expired reset token/i);
+    expect(mockPrismaUser.update).not.toHaveBeenCalled();
+    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
+  });
+
+  it('answers 400 for an expired token, clears it, and revokes nothing', async () => {
+    mockPrismaUser.findUnique.mockResolvedValueOnce({ ...MOCK_USER, resetToken: HASHED, resetTokenExpiresAt: new Date(Date.now() - 1000) });
+    mockPrismaUser.update.mockResolvedValueOnce({});
+
+    const res = await request(app)
+      .post('/api/v1/auth/reset-password')
+      .send({ token: RAW_TOKEN, password: 'brandnewpassword1' });
+
+    expect(res.status).toBe(400);
+    expect(mockPrismaUser.update).toHaveBeenCalledWith({ where: { id: MOCK_USER.id }, data: { resetToken: null, resetTokenExpiresAt: null } });
+    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
+  });
+
+  it('answers 400 for a password the policy refuses, before any lookup', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/reset-password')
+      .send({ token: RAW_TOKEN, password: 'short' });
+
+    expect(res.status).toBe(400);
+    expect(mockPrismaUser.findUnique).not.toHaveBeenCalled();
+    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ password: 'brandnewpassword1' }, /reset token is required/i],
+    [{ token: 42, password: 'brandnewpassword1' }, /reset token is required/i],
+    [{ token: RAW_TOKEN }, /password is required/i],
+  ])('answers 400 for a missing field (%o)', async (body, error) => {
+    const res = await request(app).post('/api/v1/auth/reset-password').send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(error);
+    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a failed write as an error, with no revocation', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPrismaUser.findUnique.mockResolvedValueOnce({ ...MOCK_USER, resetToken: HASHED, resetTokenExpiresAt: new Date(Date.now() + 60_000) });
+    mockPrismaUser.update.mockRejectedValueOnce(new Error('db gone'));
+
+    const res = await request(app)
+      .post('/api/v1/auth/reset-password')
+      .send({ token: RAW_TOKEN, password: 'brandnewpassword1' });
+
+    expect(res.status).toBe(500);
+    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
+    err.mockRestore();
   });
 });
 

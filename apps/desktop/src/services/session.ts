@@ -33,6 +33,10 @@ export const TOKEN_EXPIRY_SKEW_MS = 30_000;
  *  connection after a wake used to hold them all until the browser gave up. */
 export const REFRESH_TIMEOUT_MS = 15_000;
 
+/** Refresh requests one renewal may send: the first, and one more with a
+ *  newer pair stored while the first was out (see refreshAccessToken). */
+const MAX_REFRESH_ATTEMPTS = 2;
+
 /** The refresh token was refused for good (revoked, expired, banned), there
  *  was none to send, or the session was ended (logout) while a renewal was
  *  in flight: nothing to retry with. */
@@ -167,6 +171,11 @@ export function handleSessionLost(): void {
  * 401 retry queue and the socket's expired handshake typically arrive
  * together on resume). Resolves the new access token, already stored.
  *
+ * A refusal ends the session only while the refused refresh token is still
+ * the stored one. When a newer pair was stored meanwhile (another tab, or a
+ * password change of this client), its access token is answered if fresh,
+ * else ONE more refresh goes out with its refresh token.
+ *
  * Throws `SessionLostError` after a definitive refusal — and has already
  * ended the session (tokens cleared, login page) — or when the session was
  * ended (logout) while the request was out: nothing is stored then. Throws
@@ -177,24 +186,41 @@ export function refreshAccessToken(): Promise<string> {
   if (refreshInFlight) return refreshInFlight;
   const epoch = sessionEpoch;
   const run = (async () => {
-    const refreshToken = getRefreshToken();
+    let refreshToken = getRefreshToken();
     if (!refreshToken) {
       handleSessionLost();
       throw new SessionLostError('No refresh token');
     }
-    let answer: { accessToken: string; refreshToken: string };
-    try {
-      // Plain axios on purpose: the api instance's interceptors would try to
-      // refresh a refused refresh
-      const { data } = await axios.post(`${API_BASE}/auth/refresh`, { refreshToken }, { timeout: REFRESH_TIMEOUT_MS });
-      answer = data.data as { accessToken: string; refreshToken: string };
-    } catch (err) {
-      if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
-      if (isDefinitiveRefreshFailure(err)) {
+    let answer: { accessToken: string; refreshToken: string } | null = null;
+    for (let attempt = 1; answer === null; attempt++) {
+      try {
+        // Plain axios on purpose: the api instance's interceptors would try to
+        // refresh a refused refresh
+        const { data } = await axios.post(`${API_BASE}/auth/refresh`, { refreshToken }, { timeout: REFRESH_TIMEOUT_MS });
+        answer = data.data as { accessToken: string; refreshToken: string };
+      } catch (err) {
+        if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
+        if (!isDefinitiveRefreshFailure(err)) throw err;
+        // The refused token is no longer the stored one: another tab (they
+        // share the page storage in the browser build) or this client's own
+        // password change stored a newer pair while the request was out.
+        // Ending the session now would clear THAT pair — every tab follows
+        // the removal — and sign out a session that is still valid.
+        const stored = getRefreshToken();
+        if (stored && stored !== refreshToken) {
+          const storedAccess = getAccessToken();
+          if (storedAccess && isAccessTokenFresh(storedAccess)) return storedAccess;
+          if (attempt < MAX_REFRESH_ATTEMPTS) {
+            refreshToken = stored;
+            continue;
+          }
+          // Replaced once more while the retry was out: still not ours to
+          // clear; this renewal fails, the tokens stay, the next one decides
+          throw new Error('The refresh token was replaced during the renewal', { cause: err });
+        }
         handleSessionLost();
         throw new SessionLostError(err instanceof Error ? err.message : 'Refresh refused');
       }
-      throw err;
     }
     // Logged out while the request was out: this answer belongs to nobody
     if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');

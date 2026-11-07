@@ -152,7 +152,8 @@ function createMockSocket(userId = 'user-1') {
 
   const socket: any = {
     id: `socket-${userId}`,
-    data: { userId, username: 'alice', role: 'user' },
+    data: { userId, username: 'alice', tokenVersion: 0 },
+    disconnect: vi.fn(() => { socket.disconnected = true; }),
     handshake: {
       auth: { token: 'valid-token' },
       address: '127.0.0.1',
@@ -1081,6 +1082,174 @@ describe('socketServer — unread:init / dm:unread:init count authorless rows', 
 });
 
 // ─── Which address the socket surface believes it is talking to ─────────────
+
+describe('socketServer — session re-check after joining the user room', () => {
+  const savedJwtSecret = process.env.JWT_SECRET;
+  const okRow = { bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0) };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-secret';
+    mockPrisma.user.findUnique.mockReset();
+    mockPrisma.user.findUnique.mockResolvedValue(okRow);
+    mockPrisma.serverMember.findMany.mockResolvedValue([]);
+    mockPrisma.channel.findMany.mockResolvedValue([]);
+    mockPrisma.conversation.findMany.mockResolvedValue([]);
+    mockPrisma.ipBan.findUnique.mockResolvedValue(null);
+    mockPrisma.ipRecord.upsert.mockResolvedValue({});
+    mockPrisma.supportTicket.findUnique.mockResolvedValue(null);
+    mockPrisma.announcement.findMany.mockResolvedValue([]);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
+    mockSetUserOnline.mockResolvedValue(undefined);
+    mockSetUserOffline.mockResolvedValue(null);
+    mockIsUserOnline.mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    if (savedJwtSecret !== undefined) process.env.JWT_SECRET = savedJwtSecret;
+    else delete process.env.JWT_SECRET;
+  });
+
+  /** The handshake (middleware) then the connection handler, as socket.io runs them. */
+  async function handshakeThenConnect(socket: any) {
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const next = vi.fn();
+    await getAuthMiddleware()(socket, next);
+    expect(next).toHaveBeenCalledWith();
+    await getConnectionHandler()(socket);
+    httpServer.close();
+  }
+
+  it('the handshake stores the token version it admitted', async () => {
+    const { socket } = createMockSocket('user-1');
+    socket.data = {};
+    vi.mocked(jwt.verify).mockReturnValueOnce({ userId: 'user-1', username: 'alice', tokenVersion: 3 } as any);
+    mockPrisma.user.findUnique.mockResolvedValue({ ...okRow, tokenVersion: 3 });
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    const next = vi.fn();
+
+    await getAuthMiddleware()(socket, next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(socket.data.tokenVersion).toBe(3);
+    httpServer.close();
+  });
+
+  it('disconnects a socket whose token version changed between the handshake read and the room join', async () => {
+    // The handshake reads version 0; a password reset commits (version 1)
+    // and disconnects `user:user-1` before this socket has joined it
+    const { socket, toFn } = createMockSocket('user-1');
+    socket.disconnected = false;
+    socket.data = {};
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockPrisma.user.findUnique
+      .mockResolvedValueOnce(okRow)
+      .mockResolvedValueOnce({ tokenVersion: 1, bannedAt: null });
+
+    await handshakeThenConnect(socket);
+
+    expect(socket.join).toHaveBeenCalledWith('user:user-1');
+    // Read AFTER the join: a revocation committed later reaches the room
+    const recheck = mockPrisma.user.findUnique.mock.invocationCallOrder[1];
+    expect(socket.join.mock.invocationCallOrder[0]).toBeLessThan(recheck);
+    expect(mockPrisma.user.findUnique).toHaveBeenLastCalledWith({ where: { id: 'user-1' }, select: { tokenVersion: true, bannedAt: true } });
+    expect(socket.disconnect).toHaveBeenCalledWith(true);
+    // The session may be renewed (a password change on another device is
+    // judged at the refresh): no force:logout
+    expect(socket.emit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+    // Nothing else is set up for it: no channel rooms, no online announcement
+    expect(mockPrisma.serverMember.findMany).not.toHaveBeenCalled();
+    expect(toFn).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('revoked'));
+    warn.mockRestore();
+  });
+
+  it('signs out a socket whose account was banned between the handshake and the join: force:logout, then the disconnect', async () => {
+    const { socket } = createMockSocket('user-1');
+    socket.disconnected = false;
+    socket.data = {};
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockPrisma.user.findUnique
+      .mockResolvedValueOnce(okRow)
+      .mockResolvedValueOnce({ tokenVersion: 0, bannedAt: new Date() });
+
+    await handshakeThenConnect(socket);
+
+    expect(socket.emit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(socket.disconnect).toHaveBeenCalledWith(true);
+    const logout = socket.emit.mock.calls.findIndex((c: unknown[]) => c[0] === 'force:logout');
+    expect(socket.emit.mock.invocationCallOrder[logout]).toBeLessThan(socket.disconnect.mock.invocationCallOrder[0]);
+    expect(mockPrisma.serverMember.findMany).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('signs out a socket whose account was deleted between the handshake and the join: force:logout, then the disconnect', async () => {
+    const { socket } = createMockSocket('user-1');
+    socket.disconnected = false;
+    socket.data = {};
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockPrisma.user.findUnique
+      .mockResolvedValueOnce(okRow)
+      .mockResolvedValueOnce(null);
+
+    await handshakeThenConnect(socket);
+
+    expect(socket.emit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been deleted' });
+    expect(socket.disconnect).toHaveBeenCalledWith(true);
+    const logout = socket.emit.mock.calls.findIndex((c: unknown[]) => c[0] === 'force:logout');
+    expect(socket.emit.mock.invocationCallOrder[logout]).toBeLessThan(socket.disconnect.mock.invocationCallOrder[0]);
+    warn.mockRestore();
+  });
+
+  it('the disconnect handler still unwinds a socket the re-check ended (never a hang)', async () => {
+    const { socket, handlers } = createMockSocket('user-1');
+    socket.disconnected = false;
+    socket.data = {};
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockPrisma.user.findUnique
+      .mockResolvedValueOnce(okRow)
+      .mockResolvedValueOnce({ tokenVersion: 1, bannedAt: null });
+
+    await handshakeThenConnect(socket);
+    await expect(handlers.get('disconnecting')!()).resolves.toBeUndefined();
+
+    expect(mockSetUserOffline).toHaveBeenCalledWith('socket-user-1');
+    warn.mockRestore();
+  });
+
+  it('keeps a socket whose session is unchanged and sets it up', async () => {
+    const { socket } = createMockSocket('user-1');
+    socket.disconnected = false;
+    socket.data = {};
+
+    await handshakeThenConnect(socket);
+
+    expect(mockPrisma.user.findUnique).toHaveBeenCalledTimes(2);
+    expect(socket.disconnect).not.toHaveBeenCalled();
+    expect(socket.emit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+    expect(mockPrisma.serverMember.findMany).toHaveBeenCalled();
+  });
+
+  it('keeps the socket and logs when the re-check lookup fails (a database blip ends no session)', async () => {
+    const { socket } = createMockSocket('user-1');
+    socket.disconnected = false;
+    socket.data = {};
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPrisma.user.findUnique
+      .mockResolvedValueOnce(okRow)
+      .mockRejectedValueOnce(new Error('pool timeout'));
+
+    await handshakeThenConnect(socket);
+
+    expect(socket.disconnect).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Session re-check failed'), 'pool timeout');
+    expect(mockPrisma.serverMember.findMany).toHaveBeenCalled();
+    error.mockRestore();
+  });
+});
 
 describe('getSocketIp', () => {
   const handshake = (address: string, xff?: string | string[]) => ({

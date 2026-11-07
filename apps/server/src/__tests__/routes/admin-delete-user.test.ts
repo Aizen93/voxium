@@ -121,11 +121,15 @@ vi.mock('../../utils/e2ePurge', () => ({
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
 const mockDisconnectSockets = vi.fn();
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]), disconnectSockets: mockDisconnectSockets }));
+const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockIn = vi.fn(() => ({ fetchSockets: mockFetchSockets, disconnectSockets: mockDisconnectSockets }));
+const mockLocalDisconnectSockets = vi.fn();
+const mockLocalIn = vi.fn(() => ({ disconnectSockets: mockLocalDisconnectSockets }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
     in: mockIn,
+    local: { in: mockLocalIn },
   })),
 }));
 
@@ -335,6 +339,27 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expectAtomicPurgeAndDelete('target-1');
+  });
+
+  it('ends the deleted account\'s live sessions on this node and cluster-wide, with force:logout', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+    const res = await request(app)
+      .delete('/api/v1/admin/users/target-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockTo).toHaveBeenCalledWith('user:target-1');
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', expect.objectContaining({ reason: expect.any(String) }));
+    expect(mockLocalIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockFetchSockets).not.toHaveBeenCalled();
+    // The acting admin's sessions are untouched
+    expect(mockIn).not.toHaveBeenCalledWith('user:admin-1');
   });
 
   it('gives the deletion a budget it can actually finish in', async () => {

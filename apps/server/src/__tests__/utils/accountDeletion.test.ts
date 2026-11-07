@@ -23,11 +23,14 @@ vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: unkno
 const io = vi.hoisted(() => {
   const emit = vi.fn();
   const disconnectSockets = vi.fn();
+  const localDisconnectSockets = vi.fn();
   return {
     emit,
     disconnectSockets,
+    localDisconnectSockets,
     to: vi.fn(() => ({ emit })),
     in: vi.fn(() => ({ disconnectSockets })),
+    local: { in: vi.fn(() => ({ disconnectSockets: localDisconnectSockets })) },
   };
 });
 vi.mock('../../websocket/socketServer', () => ({ getIO: () => io }));
@@ -43,7 +46,9 @@ beforeEach(() => {
   prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's-1' }, { serverId: 's-2' }]);
   prismaMock.serverJoinRequest.findMany.mockResolvedValue([]);
   memberLeft.mockImplementation(async (_u: string, s: string) => { order.push(`left:${s}`); });
+  io.localDisconnectSockets.mockImplementation(() => { order.push('disconnect:local'); });
   io.disconnectSockets.mockImplementation(() => { order.push('disconnect'); });
+  io.emit.mockImplementation(() => { order.push('force:logout'); });
   purgeSecure.mockImplementation(async () => { order.push('secure'); });
   purgeE2E.mockImplementation(async () => { order.push('e2e'); });
   prismaMock.user.delete.mockImplementation(async () => { order.push('delete'); return {}; });
@@ -64,7 +69,11 @@ describe('deleteUserAccount', () => {
     // purge and the row delete share one transaction; the avatar blob goes
     // only AFTER the row (a failed delete must not strand a live account
     // without its avatar)
-    expect(order).toEqual(['left:s-1', 'left:s-2', 'disconnect', 'secure', 'txn:start', 'e2e', 'counts', 'delete', 'txn:end', 's3']);
+    expect(order).toEqual([
+      'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect', 'secure',
+      'txn:start', 'e2e', 'counts', 'delete', 'txn:end',
+      'force:logout', 'disconnect:local', 'disconnect', 's3',
+    ]);
     expect(purgeE2E).toHaveBeenCalledWith('u-1', expect.objectContaining({ user: prismaMock.user }));
     expect(prismaMock.user.delete).toHaveBeenCalledWith({ where: { id: 'u-1' } });
     expect(deleteFromS3).toHaveBeenCalledWith('avatars/u-1.webp');
@@ -86,11 +95,36 @@ describe('deleteUserAccount', () => {
     // The empty room filter fans out to every node's entire namespace (see
     // index.ts shutdown) — restarting one node once hung up the cluster.
     return deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' }).then(() => {
+      expect(io.local.in).toHaveBeenCalledWith('user:u-1');
+      expect(io.localDisconnectSockets).toHaveBeenCalledWith(true);
       expect(io.in).toHaveBeenCalledWith('user:u-1');
       expect(io.disconnectSockets).toHaveBeenCalledWith(true);
       expect(io.to).toHaveBeenCalledWith('user:u-1');
       expect(io.emit).toHaveBeenCalledWith('force:logout', { reason: 'bye' });
     });
+  });
+
+  it('ends again, after the delete committed, a session that connected while the row still existed', async () => {
+    // A second device's handshake lands between the first revocation and the
+    // delete: it joins user:{id} after the first disconnect went out.
+    const lateSockets = new Set<string>();
+    purgeSecure.mockImplementation(async () => { order.push('secure'); lateSockets.add('late-socket'); });
+    io.disconnectSockets.mockImplementation(() => { order.push('disconnect'); lateSockets.clear(); });
+
+    await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+    expect(lateSockets.size).toBe(0);
+    const lastDisconnect = order.lastIndexOf('disconnect');
+    expect(lastDisconnect).toBeGreaterThan(order.indexOf('txn:end'));
+    expect(io.emit).toHaveBeenCalledTimes(2);
+    expect(io.emit).toHaveBeenLastCalledWith('force:logout', { reason: 'bye' });
+  });
+
+  it('does not run the second revocation when the delete fails (the account survives)', async () => {
+    prismaMock.$transaction.mockRejectedValue(new Error('db gone'));
+
+    await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toThrow('db gone');
+    expect(io.disconnectSockets).toHaveBeenCalledTimes(1);
   });
 
   it('refuses an account that still owns servers — Server.owner is onDelete: Restrict and the choice is the owner\'s', async () => {
@@ -99,6 +133,7 @@ describe('deleteUserAccount', () => {
     await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toThrow(/still owns servers/);
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
     expect(io.disconnectSockets).not.toHaveBeenCalled();
+    expect(io.localDisconnectSockets).not.toHaveBeenCalled();
   });
 
   it('keeps the avatar when the delete fails, and surfaces the error', async () => {

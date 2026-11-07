@@ -33,9 +33,12 @@ const reconnectCallbacks: Array<() => void> = [];
  * take but which a refresh can replace. 'Token expired' is what the server
  * says since the resume fix; 'Invalid token' is what an older server says for
  * the same expiry (and for a malformed token, where a refresh costs one
- * request and changes nothing).
+ * request and changes nothing). 'Session invalidated' is an access token of
+ * an older token version (the password was reset or changed): the refresh
+ * either returns tokens of the current version (another tab or the caller
+ * stored them) or is refused, which ends the session (services/session.ts).
  */
-const REFRESHABLE_HANDSHAKE_ERRORS = new Set(['Token expired', 'Invalid token']);
+const REFRESHABLE_HANDSHAKE_ERRORS = new Set(['Token expired', 'Invalid token', 'Session invalidated']);
 /** The server could not verify the handshake (its database was unreachable):
  *  nothing wrong with the token, tried again after a growing wait. */
 export const HANDSHAKE_UNAVAILABLE_ERROR = 'Authentication unavailable';
@@ -48,6 +51,39 @@ export const HANDSHAKE_RETRY_MIN_MS = 2_000;
 export const HANDSHAKE_RETRY_MAX_MS = 30_000;
 let handshakeRetryDelay = HANDSHAKE_RETRY_MIN_MS;
 let handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * The longest wait before the socket reopens after a server disconnect that
+ * is not a credential change of this client. A departing node (a deploy, a
+ * shutdown) disconnects every client it holds in the same instant: without a
+ * spread they all renew and handshake at once, and clients behind one NAT
+ * share the per-address refresh budget.
+ */
+export const SERVER_DISCONNECT_REOPEN_MAX_DELAY_MS = 5_000;
+// [0, 1): the spread of the waits above; replaceable for tests
+let random: () => number = Math.random;
+
+/** @internal tests: a deterministic spread */
+export function _setSocketRandomForTests(fn: () => number): void {
+  random = fn;
+}
+
+/**
+ * After a credential change this client made, how long a server disconnect
+ * is taken as the session revocation that change caused (and repaired with
+ * the stored token) rather than a kick. See reconnectSocketAfterCredentialChange.
+ */
+export const REVOCATION_REOPEN_WINDOW_MS = 15_000;
+let revocationReopenUntil = 0;
+/**
+ * A credential change of this client is on the wire (see
+ * beginCredentialChange). The server disconnect it causes may land before
+ * the answer carrying the new tokens: reopening then would send the old
+ * token, and its refused renewal would end a session that is still valid.
+ */
+let credentialChangesInFlight = 0;
+/** A server disconnect arrived while a credential change was in flight and nothing has reopened the socket since. */
+let serverDisconnectHeld = false;
 
 /**
  * Monotonically increasing ID to track socket instance changes.
@@ -222,7 +258,12 @@ export function connectSocket(token: string): VoxSocket {
     if (!NOISY_EVENTS.has(event)) bumpRequestGeneration();
   });
 
+  // The server ended this session for good (ban, account deletion): the
+  // disconnect that follows is never reopened
+  let forceLoggedOut = false;
+
   s.on('force:logout', (data) => {
+    forceLoggedOut = true;
     if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);
     const reason = data?.reason;
     const toLogin = () => {
@@ -253,6 +294,39 @@ export function connectSocket(token: string): VoxSocket {
     // For transient disconnects (transport close, ping timeout), keep voice
     // state intact so the onSocketReconnect handler can re-join seamlessly.
     if (reason === 'io server disconnect') {
+      // The server ending every session of this account after a password
+      // change this client made: the disconnect may land AFTER the reopen
+      // with the fresh token (the HTTP answer and the socket frame travel on
+      // different connections, and another node's copy of the disconnect
+      // arrives through Redis), and would then strand the new socket. Repair
+      // it once, within the window, with the token stored meanwhile.
+      // After the client has finished closing the manager: never re-open it
+      // from inside its own close. Never after a force:logout: a ban or a
+      // deletion inside the window ends the session like anywhere else.
+      if (!forceLoggedOut && Date.now() < revocationReopenUntil) {
+        revocationReopenUntil = 0;
+        setTimeout(() => {
+          const token = getAccessToken();
+          if (token && socket === s && !explicitlyDisconnected && !s.connected) reopen(s, token);
+        }, 0);
+      } else if (!forceLoggedOut && credentialChangesInFlight > 0) {
+        // Ours, landing before the answer: reconnectSocketAfterCredentialChange
+        // reopens with the new token, or the change's end() does
+        serverDisconnectHeld = true;
+      } else if (!forceLoggedOut) {
+        // Any other server disconnect without a force:logout (a role change,
+        // the password changed on another device, a node shutting down)
+        // closed the manager as well: reopen through the resume path, which
+        // renews an expired token. A session that is no longer valid is
+        // refused at the handshake ('Session invalidated'), its refresh is
+        // refused, and services/session.ts signs it out. A refusal never
+        // fires 'disconnect', so this cannot loop on one. After a random
+        // wait: a node going away disconnects all its clients at once.
+        setTimeout(() => {
+          if (forceLoggedOut || socket !== s || explicitlyDisconnected || s.connected) return;
+          void ensureSocketConnected();
+        }, Math.floor(random() * SERVER_DISCONNECT_REOPEN_MAX_DELAY_MS));
+      }
       import('../stores/voiceStore').then(({ useVoiceStore }) => {
         const voiceState = useVoiceStore.getState();
         if (voiceState.activeChannelId) {
@@ -292,8 +366,8 @@ export function connectSocket(token: string): VoxSocket {
     // server closed the manager (see managerIsClosed), so what follows is
     // ours: an ACCESS token it will not take is replaced and the socket
     // reopened; a server that could not verify anything is tried again
-    // later; every other refusal (banned, unverified, consent, revoked) is
-    // final until the user acts.
+    // later; every other refusal (banned, unverified, consent) is final
+    // until the user acts.
     if (REFRESHABLE_HANDSHAKE_ERRORS.has(err.message)) {
       void refreshForHandshake(s);
     } else if (err.message === HANDSHAKE_UNAVAILABLE_ERROR) {
@@ -318,32 +392,48 @@ async function refreshForHandshake(s: VoxSocket): Promise<void> {
     let token = stored && stored !== refused && isAccessTokenFresh(stored) ? stored : null;
     if (token === null) {
       const now = Date.now();
-      if (now - lastHandshakeRefreshAt < HANDSHAKE_REFRESH_MIN_INTERVAL_MS) return;
+      if (now - lastHandshakeRefreshAt < HANDSHAKE_REFRESH_MIN_INTERVAL_MS) {
+        // An EXPIRED token refused again within the window (the last renewal
+        // failed for a transient reason): only a renewal can help, so try
+        // again after the growing wait, whose retry renews through the resume
+        // path. A token refused while it still reads fresh is left alone: a
+        // server refusing even fresh tokens must not be asked again and again.
+        if (refused !== null && !isAccessTokenFresh(refused)) {
+          scheduleHandshakeRetry(s, 'The token could not be renewed');
+        }
+        return;
+      }
       lastHandshakeRefreshAt = now;
       token = await refreshAccessToken();
     }
     if (socket !== s || explicitlyDisconnected || s.connected) return;
     reopen(s, token);
   } catch (err) {
-    // A refused refresh has ended the session already (services/session.ts);
-    // a transient failure leaves the socket to the next resume or 401 retry
+    // A refused refresh has ended the session already (services/session.ts).
+    // A transient failure (the server restarting, the network gone) would
+    // otherwise leave a closed manager closed: try again after a wait
     if (!(err instanceof SessionLostError)) {
       console.warn('[WS] Could not renew the token for the handshake:', err instanceof Error ? err.message : err);
+      scheduleHandshakeRetry(s, 'The token could not be renewed');
     }
   }
 }
 
 /**
- * The server could not verify the handshake (its database was unreachable).
- * Try again after a growing wait: the manager closed on the refusal, so
- * nothing else would, and a database blip during a reconnect storm must not
- * strand every client until its window is minimized and restored.
+ * The server could not verify the handshake (its database was unreachable),
+ * or the token it refused could not be renewed for a transient reason. Try
+ * again after a growing wait: the manager closed on the refusal, so nothing
+ * else would, and a database blip during a reconnect storm must not strand
+ * every client until its window is minimized and restored. The wait is
+ * spread over its upper half (down to half of it) so the clients of one
+ * outage do not come back in step.
  */
-function scheduleHandshakeRetry(s: VoxSocket): void {
+function scheduleHandshakeRetry(s: VoxSocket, why = 'The server could not verify the session'): void {
   clearHandshakeRetry();
-  const delay = handshakeRetryDelay;
+  const base = handshakeRetryDelay;
   handshakeRetryDelay = Math.min(handshakeRetryDelay * 2, HANDSHAKE_RETRY_MAX_MS);
-  console.warn(`[WS] The server could not verify the session; trying again in ${Math.round(delay / 1000)} s`);
+  const delay = Math.round(base * (1 - random() / 2));
+  console.warn(`[WS] ${why}; trying again in ${Math.round(delay / 1000)} s`);
   handshakeRetryTimer = setTimeout(() => {
     handshakeRetryTimer = null;
     if (socket !== s || explicitlyDisconnected || s.connected) return;
@@ -359,7 +449,8 @@ function scheduleHandshakeRetry(s: VoxSocket): void {
  * server closed is revived, one sitting in a back-off wait does not wait it
  * out. A handshake already on the wire is left to land (it gets the live
  * token for the attempt after it, should it fail). A missing session (no
- * token) is a no-op; a refused renewal has ended the session already.
+ * token) is a no-op; a refused renewal has ended the session already; a
+ * renewal that failed for a transient reason opens with the stored token.
  */
 export async function ensureSocketConnected(): Promise<void> {
   const s = socket;
@@ -368,10 +459,14 @@ export async function ensureSocketConnected(): Promise<void> {
   try {
     token = await getFreshAccessToken();
   } catch (err) {
-    if (!(err instanceof SessionLostError)) {
-      console.warn('[WS] Could not renew the token on resume:', err instanceof Error ? err.message : err);
-    }
-    return;
+    if (err instanceof SessionLostError) return;
+    console.warn('[WS] Could not renew the token on resume:', err instanceof Error ? err.message : err);
+    // A transient failure (the server restarting after a deploy, the network
+    // still down): open with the stored token anyway. A manager the server
+    // closed would otherwise stay closed for good; reopened, it retries with
+    // its own back-off while the server is unreachable, and once it answers,
+    // its 'Token expired' refusal renews through refreshForHandshake.
+    token = getAccessToken();
   }
   if (!token) return;
   // The socket may have connected on its own while the token was renewed
@@ -381,6 +476,51 @@ export async function ensureSocketConnected(): Promise<void> {
     return;
   }
   reopen(s, token);
+}
+
+/**
+ * Mark a credential change of this client (a password change) as in flight,
+ * BEFORE its request goes out; call the returned function when it settles
+ * (idempotent). Meanwhile a server disconnect does not reopen through the
+ * resume path (it would send the old token). If one arrived and nothing has
+ * reopened the socket since (the answer was lost, or carried no tokens), the
+ * end reopens it through the resume path: with tokens that are no longer
+ * valid that ends in a refused renewal and a sign-out, as it should.
+ */
+export function beginCredentialChange(): () => void {
+  credentialChangesInFlight++;
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    credentialChangesInFlight = Math.max(0, credentialChangesInFlight - 1);
+    if (credentialChangesInFlight > 0 || !serverDisconnectHeld) return;
+    serverDisconnectHeld = false;
+    void ensureSocketConnected();
+  };
+}
+
+/**
+ * Reopen the socket with `token` after a credential change this client made
+ * (a password change). The server disconnects every socket of the account
+ * when the change commits, this one included; while the change is in flight
+ * the general reopen after a server disconnect is held back (see
+ * beginCredentialChange), and this is the reopen that replaces it. The
+ * answer carrying the fresh tokens and the disconnect frame race, so the socket is
+ * reopened now whatever its state (a connected socket is closed by us first,
+ * which the server treats like any other leave), and a server disconnect that
+ * lands within `REVOCATION_REOPEN_WINDOW_MS` is repaired once more (see the
+ * `disconnect` handler). Never `force:logout`: the session is still valid.
+ * No-op without a socket or after a logout.
+ */
+export function reconnectSocketAfterCredentialChange(token: string): void {
+  const s = socket;
+  if (!s || explicitlyDisconnected) return;
+  revocationReopenUntil = Date.now() + REVOCATION_REOPEN_WINDOW_MS;
+  serverDisconnectHeld = false;
+  reopen(s, token);
+  // A connected socket's own disconnect() above reported 'disconnected'
+  setStatus('connecting');
 }
 
 export function getSocket(): VoxSocket | null {
@@ -431,6 +571,8 @@ export function disconnectSocket() {
   handshakeInFlight = false;
   hasConnectedOnce = false;
   explicitlyDisconnected = true;
+  revocationReopenUntil = 0;
+  serverDisconnectHeld = false;
   clearHandshakeRetry();
   handshakeRetryDelay = HANDSHAKE_RETRY_MIN_MS;
   readyCallbacks.length = 0;
@@ -446,4 +588,5 @@ export function disconnectSocket() {
 /** @internal tests: the handshake refresh rate guard */
 export function _resetSocketModuleForTests(): void {
   lastHandshakeRefreshAt = 0;
+  revocationReopenUntil = 0;
 }

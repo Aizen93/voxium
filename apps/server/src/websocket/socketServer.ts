@@ -9,6 +9,7 @@ import { prisma } from '../utils/prisma';
 import { handleVoiceEvents, replayVoiceState } from './voiceHandler';
 import { handleDMVoiceEvents } from './dmVoiceHandler';
 import { handleAnnotationEvents } from './annotationHandler';
+import { registerAdminSubscriptionHandlers } from './adminSubscriptions';
 import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
 import { trustsProxy, forwardedClientAddress } from '../utils/trustProxy';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
@@ -83,10 +84,10 @@ export function initSocketServer(httpServer: HttpServer) {
       // Reject non-access tokens (e.g. trusted-device, totp-verify)
       if (payload.purpose) return next(new Error('Invalid token type'));
 
-      // Check account ban, token version, and current role
+      // Check account ban, token version, verification and consent
       const user = await prisma.user.findUnique({
         where: { id: payload.userId },
-        select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
+        select: { bannedAt: true, tokenVersion: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
       });
       if (!user) return next(new Error('User not found'));
       if (user.bannedAt) return next(new Error('Account banned'));
@@ -105,7 +106,11 @@ export function initSocketServer(httpServer: HttpServer) {
 
       socket.data.userId = payload.userId;
       socket.data.username = payload.username;
-      socket.data.role = user.role;
+      // The version this handshake was admitted with: the connection handler
+      // compares it once more after joining `user:{id}` (see below)
+      socket.data.tokenVersion = payload.tokenVersion;
+      // No copy of the role: it would go stale on a role change. The staff
+      // subscriptions read it from the database (adminSubscriptions.ts).
       next();
     } catch (err) {
       if (err instanceof Error && err.message === 'Account banned') {
@@ -279,41 +284,10 @@ export function initSocketServer(httpServer: HttpServer) {
     // against the Redis screen-share mirror (see annotationHandler.ts).
     handleAnnotationEvents(io, socket);
 
-    // ─── Admin metrics subscription ──────────────────────────────────
-    socket.on('admin:subscribe_metrics', () => {
-      if (!socketRateLimit(socket, 'admin:subscribe_metrics', 10)) return;
-      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
-      socket.join('admin:metrics');
-    });
-
-    socket.on('admin:unsubscribe_metrics', () => {
-      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
-      socket.leave('admin:metrics');
-    });
-
-    // ─── Admin reports subscription ──────────────────────────────────
-    socket.on('admin:subscribe_reports', () => {
-      if (!socketRateLimit(socket, 'admin:subscribe_reports', 10)) return;
-      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
-      socket.join('admin:reports');
-    });
-
-    socket.on('admin:unsubscribe_reports', () => {
-      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
-      socket.leave('admin:reports');
-    });
-
-    // ─── Admin support subscription ──────────────────────────────────
-    socket.on('admin:subscribe_support', () => {
-      if (!socketRateLimit(socket, 'admin:subscribe_support', 10)) return;
-      if (socket.data.role !== 'superadmin' && socket.data.role !== 'admin') return;
-      socket.join('admin:support');
-    });
-
-    socket.on('admin:unsubscribe_support', () => {
-      if (!socketRateLimit(socket, 'admin:unsubscribe', 30)) return;
-      socket.leave('admin:support');
-    });
+    // ─── Admin metrics / reports / support subscriptions ─────────────
+    // The role is read from the database on each subscription, never from
+    // the handshake's copy (see adminSubscriptions.ts).
+    registerAdminSubscriptionHandlers(socket);
 
     // ─── Disconnect ─────────────────────────────────────────────────
     socket.on('disconnecting', async () => {
@@ -425,6 +399,34 @@ export function initSocketServer(httpServer: HttpServer) {
     // (socket.io turns its join() into a no-op once it is cleaned up, so the
     // queries and the replay below would only be wasted work). Checked again
     // before every later step, the same way.
+    if (socket.disconnected) return;
+
+    // Session check, once more, now that the socket is in `user:{id}`: the
+    // token version and ban state must still match what the handshake
+    // admitted (session revocation targets that room, sessionRevocation.ts).
+    // A deleted or banned account is signed out (force:logout, with the
+    // reason the revocation itself sends, before the disconnect: the client
+    // must not reopen into a refusal it treats as final). A token-version
+    // mismatch only disconnects: the client renews, and a refused renewal
+    // ends the session there. A failing lookup keeps the socket: the
+    // handshake has just read the same row, and a database blip ends no
+    // session.
+    try {
+      const current = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { tokenVersion: true, bannedAt: true },
+      });
+      if (!current || current.bannedAt || current.tokenVersion !== socket.data.tokenVersion) {
+        console.warn(`[WS] Session of ${userId} (${socket.id}) was revoked during the handshake; disconnecting`);
+        if (!current || current.bannedAt) {
+          socket.emit('force:logout', { reason: current ? 'Your account has been banned' : 'Your account has been deleted' });
+        }
+        socket.disconnect(true);
+        return;
+      }
+    } catch (err) {
+      console.error(`[WS] Session re-check failed for ${userId}:`, err instanceof Error ? err.message : err);
+    }
     if (socket.disconnected) return;
 
     // Upsert IP record
