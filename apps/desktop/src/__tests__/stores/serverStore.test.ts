@@ -13,6 +13,9 @@ vi.mock('../../services/api', () => ({
   },
 }));
 
+const imageProcessing = vi.hoisted(() => ({ processImage: vi.fn() }));
+vi.mock('../../utils/imageProcessing', () => imageProcessing);
+
 import { useServerStore, EMPTY_PEOPLE, EMPTY_DIRECTORY, resetMemberLookupState, retireDirectory, MEMBER_LOOKUP_DEBOUNCE_MS } from '../../stores/serverStore';
 import { api } from '../../services/api';
 import { LIMITS, MEMBER_LIST } from '@voxium/shared';
@@ -1130,5 +1133,59 @@ describe('serverStore — discovery, join requests and bans', () => {
     await expect(useServerStore.getState().kickMember('srv-1', 'u-3')).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe('serverStore.uploadServerIcon — the presign is signed for the processed image', () => {
+  const KEY = 'server-icons/srv-1-1700000000.webp';
+  const processed = new Blob([new Uint8Array(7_777)], { type: 'image/webp' });
+  const original = new File([new Uint8Array(2_000_000)], 'logo.png', { type: 'image/png' });
+  const mockPatch = api.patch as unknown as Mock;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('processes FIRST, presigns with the processed size, PUTs that blob, then saves the key', async () => {
+    const order: string[] = [];
+    imageProcessing.processImage.mockImplementation(async () => { order.push('process'); return processed; });
+    mockPost.mockImplementation(async () => { order.push('presign'); return { data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } }; });
+    const fetchMock = vi.fn(async () => { order.push('put'); return { ok: true, status: 200 }; });
+    vi.stubGlobal('fetch', fetchMock);
+    mockPatch.mockImplementation(async () => { order.push('save'); return { data: { data: {} } }; });
+
+    await useServerStore.getState().uploadServerIcon('srv-1', original);
+
+    expect(order).toEqual(['process', 'presign', 'put', 'save']);
+    expect(mockPost).toHaveBeenCalledWith('/uploads/presign/server-icon/srv-1', { fileSize: 7_777 });
+    expect(fetchMock).toHaveBeenCalledWith('https://store.example/put', {
+      method: 'PUT',
+      body: processed,
+      headers: { 'Content-Type': 'image/webp' },
+    });
+    expect(mockPatch).toHaveBeenCalledWith('/servers/srv-1', { iconUrl: KEY });
+  });
+
+  it('asks for no presign when the image cannot be processed', async () => {
+    imageProcessing.processImage.mockRejectedValue(new Error('decode failed'));
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(useServerStore.getState().uploadServerIcon('srv-1', original)).rejects.toThrow('decode failed');
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('never saves the key when the store refuses the PUT', async () => {
+    imageProcessing.processImage.mockResolvedValue(processed);
+    mockPost.mockResolvedValue({ data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 403 })));
+
+    await expect(useServerStore.getState().uploadServerIcon('srv-1', original)).rejects.toThrow('S3 upload failed: 403');
+    expect(mockPatch).not.toHaveBeenCalled();
   });
 });

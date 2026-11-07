@@ -15,6 +15,7 @@ import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitMemberRead, rateLimitMemberLookup, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
+import { adoptImageAssetUpload } from '../utils/uploadVerification';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
 import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
@@ -597,14 +598,22 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
       updateData.name = name;
     }
 
+    let adoptedIconKey: string | null = null;
     if (req.body.iconUrl !== undefined) {
-      const { iconUrl } = req.body;
+      let { iconUrl } = req.body;
       if (iconUrl !== null) {
         if (typeof iconUrl !== 'string' || !VALID_S3_KEY_RE.test(iconUrl)) {
           throw new BadRequestError('Invalid icon key');
         }
         if (!iconUrl.startsWith(`server-icons/${serverId}-`)) {
           throw new BadRequestError('Invalid icon key');
+        }
+        // First reference of a new icon object: the space stores a verified
+        // server-side copy (size cap, image header) under a key no upload URL
+        // was issued for, never the uploaded key. The current key was adopted
+        // when it was set.
+        if (iconUrl !== server.iconUrl) {
+          iconUrl = adoptedIconKey = await adoptImageAssetUpload(iconUrl, `server-icons/${serverId}-`, LIMITS.MAX_SERVER_ICON_SIZE, 'Invalid icon key');
         }
       }
       updateData.iconUrl = iconUrl;
@@ -616,11 +625,21 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
 
     const oldIconUrl = server.iconUrl;
 
-    const updated = await prisma.server.update({
-      where: { id: serverId },
-      select: serverSelect,
-      data: updateData,
-    });
+    let updated;
+    try {
+      updated = await prisma.server.update({
+        where: { id: serverId },
+        select: serverSelect,
+        data: updateData,
+      });
+    } catch (err) {
+      // The space never stored the adopted copy: nothing else will reference it
+      if (adoptedIconKey) {
+        const key = adoptedIconKey;
+        deleteFromS3(key).catch((delErr) => console.warn(`[S3] Failed to delete unreferenced icon copy ${key}:`, delErr instanceof Error ? delErr.message : delErr));
+      }
+      throw err;
+    }
 
     // Delete old icon from S3 after DB update confirmed
     if (updateData.iconUrl !== undefined && oldIconUrl && oldIconUrl !== updateData.iconUrl) {

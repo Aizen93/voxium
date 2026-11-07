@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, Permissions } from '@voxium/shared';
+import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, LIMITS, Permissions } from '@voxium/shared';
+import { BadRequestError } from '../../utils/errors';
 import { extractMentionIds, batchResolveMentions, attachMentions, resolveMentionsForServer } from '../../utils/mentions';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -107,6 +108,12 @@ vi.mock('../../utils/s3', () => ({
   deleteMultipleFromS3: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Upload read-back (its own unit tests cover the S3 side)
+const mockVerifyAttachmentUploads = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/uploadVerification', () => ({
+  verifyAttachmentUploads: (...args: unknown[]) => mockVerifyAttachmentUploads(...args),
+}));
+
 // Mentions
 vi.mock('../../utils/mentions', () => ({
   extractMentionIds: vi.fn().mockReturnValue([]),
@@ -184,6 +191,7 @@ describe('Message Routes', () => {
     mockHasServerPermission.mockResolvedValue(true);
     mockHasChannelPermission.mockResolvedValue(true);
     mockGetHighestRolePosition.mockResolvedValue(Infinity);
+    mockVerifyAttachmentUploads.mockResolvedValue(undefined);
   });
 
   // ── GET /api/v1/channels/:channelId/messages ───────────────────────────
@@ -337,6 +345,111 @@ describe('Message Routes', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
+    });
+
+    describe('attachments are read back before the row is created', () => {
+      function mockPlainChannel() {
+        prismaMock.channel.findUnique.mockResolvedValue({
+          id: 'ch-1', serverId: 'srv-1', type: 'text', name: 'general', secure: false, server: { name: 'Test Server' },
+        });
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+        const createMany = vi.fn().mockResolvedValue({ count: 2 });
+        prismaMock.$transaction.mockImplementation(async (cb: Function) => cb({
+          message: {
+            create: vi.fn().mockResolvedValue({ id: 'msg-1' }),
+            findUniqueOrThrow: vi.fn().mockResolvedValue(makeMockMessage()),
+          },
+          messageAttachment: { createMany },
+        }));
+        return { createMany };
+      }
+
+      const pdf = { s3Key: 'attachments/ch-ch-1/a1-report.pdf', fileName: 'report.pdf', fileSize: 2048, mimeType: 'application/pdf' };
+      const clip = { s3Key: 'attachments/ch-ch-1/a2-clip.mp4', fileName: 'clip.mp4', fileSize: 9_000_000, mimeType: 'video/mp4' };
+
+      it('verifies every attachment against its per-type maximum, then stores the verified size', async () => {
+        const { createMany } = mockPlainChannel();
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: '', attachments: [pdf, clip] });
+
+        expect(res.status).toBe(201);
+        expect(mockVerifyAttachmentUploads).toHaveBeenCalledWith([
+          { key: pdf.s3Key, declaredSize: 2048, maxSize: LIMITS.MAX_ATTACHMENT_SIZE },
+          { key: clip.s3Key, declaredSize: 9_000_000, maxSize: LIMITS.MAX_VIDEO_ATTACHMENT_SIZE },
+        ]);
+        expect(createMany).toHaveBeenCalledWith({
+          data: [
+            expect.objectContaining({ s3Key: pdf.s3Key, fileSize: 2048 }),
+            expect.objectContaining({ s3Key: clip.s3Key, fileSize: 9_000_000 }),
+          ],
+        });
+      });
+
+      it('answers the verifier refusal and creates nothing', async () => {
+        mockPlainChannel();
+        mockVerifyAttachmentUploads.mockRejectedValueOnce(new BadRequestError('Invalid attachment size'));
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [pdf] });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Invalid attachment size');
+        expect(prismaMock.$transaction).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('fails closed when the store cannot be read', async () => {
+        mockPlainChannel();
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        mockVerifyAttachmentUploads.mockRejectedValueOnce(new Error('store unavailable'));
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [pdf] });
+
+        expect(res.status).toBe(500);
+        expect(prismaMock.$transaction).not.toHaveBeenCalled();
+        errorSpy.mockRestore();
+      });
+
+      it('does not read the store when ATTACH_FILES is missing or the size is fractional', async () => {
+        mockPlainChannel();
+        mockHasChannelPermission.mockImplementation(async (_u: string, _c: string, _s: string, perm: bigint) => perm !== Permissions.ATTACH_FILES);
+
+        let res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [pdf] });
+        expect(res.status).toBe(403);
+
+        mockHasChannelPermission.mockResolvedValue(true);
+        res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [{ ...pdf, fileSize: 2048.5 }] });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Invalid attachment size');
+
+        expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
+      });
+
+      it('does not call the verifier for a message without attachments', async () => {
+        mockPlainChannel();
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'hello' });
+
+        expect(res.status).toBe(201);
+        expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
+      });
     });
 
     it('returns 400 with empty message content', async () => {
@@ -1053,6 +1166,51 @@ describe('Message Routes', () => {
       expect(createManyAttachments).toHaveBeenCalledWith({
         data: [expect.objectContaining({ fileName: E2E_ATTACHMENT_NAME })],
       });
+      // The blob is read back against its ciphertext cap before the row exists
+      expect(mockVerifyAttachmentUploads).toHaveBeenCalledWith([{
+        key: 'attachments/ch-sec-1/aaaa-encrypted.bin',
+        declaredSize: 1024,
+        maxSize: LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES,
+      }]);
+    });
+
+    it('refuses an encrypted blob whose stored size does not match, creating nothing', async () => {
+      const token = makeToken();
+      mockSecureChannel();
+      const { create } = mockTxCapture();
+      mockVerifyAttachmentUploads.mockRejectedValueOnce(new BadRequestError('Invalid attachment size'));
+
+      const res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          content: ENVELOPE,
+          encrypted: true,
+          attachments: [{ s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin', fileSize: 1024, mimeType: E2E_ATTACHMENT_MIME }],
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Invalid attachment size');
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('refuses a fractional encrypted size before reading the store', async () => {
+      const token = makeToken();
+      mockSecureChannel();
+
+      const res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          content: ENVELOPE,
+          encrypted: true,
+          attachments: [{ s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin', fileSize: 1024.5, mimeType: E2E_ATTACHMENT_MIME }],
+        });
+
+      expect(res.status).toBe(400);
+      expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
     });
 
     it('secure edits must be fresh ciphertexts (plaintext edit → 400, envelope edit stored verbatim)', async () => {

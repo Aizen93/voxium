@@ -11,7 +11,19 @@ import { hasServerPermission, hasChannelPermission } from '../utils/permissionCa
 
 export const uploadRouter = Router();
 
+/**
+ * The declared size of an avatar/icon presign: a positive integer at most
+ * `max`. The URL is signed for exactly this many bytes.
+ */
+function readImageAssetSize(fileSize: unknown, max: number): number {
+  if (typeof fileSize !== 'number' || !Number.isSafeInteger(fileSize) || fileSize <= 0 || fileSize > max) {
+    throw new BadRequestError(`Invalid file size (max ${max / 1024 / 1024}MB)`);
+  }
+  return fileSize;
+}
+
 // POST /uploads/presign/avatar — get a presigned PUT URL for avatar upload
+// Body: { fileSize } — the size of the processed image the client will PUT
 uploadRouter.post(
   '/presign/avatar',
   authenticate,
@@ -20,8 +32,9 @@ uploadRouter.post(
   rateLimitUpload,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      const fileSize = readImageAssetSize(req.body?.fileSize, LIMITS.MAX_AVATAR_SIZE);
       const key = `avatars/${req.user!.userId}-${Date.now()}.webp`;
-      const uploadUrl = await generatePresignedPutUrl(key, 'image/webp');
+      const uploadUrl = await generatePresignedPutUrl(key, 'image/webp', fileSize);
 
       res.json({ success: true, data: { uploadUrl, key } });
     } catch (err) {
@@ -31,6 +44,7 @@ uploadRouter.post(
 );
 
 // POST /uploads/presign/server-icon/:serverId — get a presigned PUT URL for server icon upload (owner only)
+// Body: { fileSize } — the size of the processed image the client will PUT
 uploadRouter.post(
   '/presign/server-icon/:serverId',
   authenticate,
@@ -40,13 +54,14 @@ uploadRouter.post(
   async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
     try {
       const { serverId } = req.params;
+      const fileSize = readImageAssetSize(req.body?.fileSize, LIMITS.MAX_SERVER_ICON_SIZE);
       const server = await prisma.server.findUnique({ where: { id: serverId } });
       if (!server) throw new NotFoundError('Server');
       const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_SERVER);
       if (!canManage) throw new ForbiddenError('You do not have permission to change the server icon');
 
       const key = `server-icons/${serverId}-${Date.now()}.webp`;
-      const uploadUrl = await generatePresignedPutUrl(key, 'image/webp');
+      const uploadUrl = await generatePresignedPutUrl(key, 'image/webp', fileSize);
 
       res.json({ success: true, data: { uploadUrl, key } });
     } catch (err) {
@@ -85,7 +100,7 @@ uploadRouter.post(
         // the authorization block below, where the channel row is available.
         if (mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be uploaded as application/octet-stream');
         const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
-        if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxCipherSize) {
+        if (typeof fileSize !== 'number' || !Number.isSafeInteger(fileSize) || fileSize <= 0 || fileSize > maxCipherSize) {
           throw new BadRequestError(`Invalid file size (max ${LIMITS.MAX_VIDEO_ATTACHMENT_SIZE / 1024 / 1024}MB)`);
         }
       } else {
@@ -93,7 +108,7 @@ uploadRouter.post(
           throw new BadRequestError('File type not allowed');
         }
         const maxSize = getMaxAttachmentSize(mimeType);
-        if (!fileSize || typeof fileSize !== 'number' || fileSize <= 0 || fileSize > maxSize) {
+        if (typeof fileSize !== 'number' || !Number.isSafeInteger(fileSize) || fileSize <= 0 || fileSize > maxSize) {
           throw new BadRequestError(`Invalid file size (max ${maxSize / 1024 / 1024}MB)`);
         }
       }
@@ -141,7 +156,8 @@ uploadRouter.post(
         : fileName.replace(/[^\w.-]/g, '_').slice(0, 100);
       const attachmentId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
       const key = `attachments/${contextPrefix}/${attachmentId}-${sanitizedName}`;
-      const uploadUrl = await generatePresignedPutUrl(key, mimeType);
+      // Signed for exactly the declared size: the store refuses any other body
+      const uploadUrl = await generatePresignedPutUrl(key, mimeType, fileSize);
 
       res.json({ success: true, data: { uploadUrl, key } });
     } catch (err) {

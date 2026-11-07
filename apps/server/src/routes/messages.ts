@@ -8,6 +8,7 @@ import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
+import { verifyAttachmentUploads } from '../utils/uploadVerification';
 import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, attachMentions } from '../utils/mentions';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 import { shapeMessageRow, isWebhookRow } from '../utils/messageAuthor';
@@ -211,7 +212,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
           }
           if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
           if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this channel');
-          if (a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
+          if (!Number.isSafeInteger(a.fileSize) || a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
           if (a.mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be opaque');
         }
         attachments = rawAttachments;
@@ -235,7 +236,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
           }
           if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
           if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this channel');
-          if (a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
+          if (!Number.isSafeInteger(a.fileSize) || a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
           if (!ALLOWED_ATTACHMENT_TYPES.includes(a.mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) throw new BadRequestError('Invalid file type');
         }
       }
@@ -272,6 +273,17 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
     // list either)
     const pingsEveryone = !channel.secure && contentMentionsEveryone(content)
       && await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.MENTION_EVERYONE);
+
+    // Read the uploaded objects back before the row points at them: the
+    // stored size is the real one (an encrypted blob's is its ciphertext's)
+    if (attachments?.length) {
+      const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
+      await verifyAttachmentUploads(attachments.map((a) => ({
+        key: a.s3Key,
+        declaredSize: a.fileSize,
+        maxSize: channel.secure ? maxCipherSize : getMaxAttachmentSize(a.mimeType),
+      })));
+    }
 
     const created = await prisma.$transaction(async (tx) => {
       const msg = await tx.message.create({

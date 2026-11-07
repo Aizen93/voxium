@@ -615,14 +615,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   clearError: () => set({ error: null }),
 
   uploadAvatar: async (file: File) => {
-    // 1. Get presigned PUT URL
-    const { data: presignData } = await api.post('/uploads/presign/avatar');
-    const { uploadUrl, key } = presignData.data;
-
-    // 2. Client-side resize + WebP conversion
+    // 1. Client-side resize + WebP conversion, FIRST: the presigned URL is
+    // signed for the exact size of the bytes we will PUT
     const blob = await processImage(file);
 
-    // 3. Direct upload to S3
+    // 2. Get a presigned PUT URL for that size
+    const { data: presignData } = await api.post('/uploads/presign/avatar', { fileSize: blob.size });
+    const { uploadUrl, key } = presignData.data;
+
+    // 3. Direct upload to S3 (the browser sets Content-Length from the blob)
     const uploadRes = await fetch(uploadUrl, {
       method: 'PUT',
       body: blob,
@@ -632,17 +633,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       throw new Error(`S3 upload failed: ${uploadRes.status}`);
     }
 
-    // 4. Confirm in DB (triggers old avatar cleanup + socket broadcast)
-    await api.patch('/users/me/profile', { avatarUrl: key });
+    // 4. Confirm in DB (triggers old avatar cleanup + socket broadcast). The
+    // server stores a verified copy under its own key and deletes the uploaded
+    // one, so the key to show is the one it answers with: never the uploaded
+    // key, which no longer exists. An answer without one changes nothing here.
+    const { data: profileRes } = await api.patch('/users/me/profile', { avatarUrl: key });
+    const storedKey: unknown = profileRes?.data?.avatarUrl;
+    if (typeof storedKey !== 'string' || storedKey.length === 0) {
+      throw new Error('The profile update answered without the stored avatar key');
+    }
 
-    // 5. Optimistic local state update + cross-store propagation
+    // 5. Local state update + cross-store propagation
     const userId = get().user?.id;
     set((state) => ({
-      user: state.user ? { ...state.user, avatarUrl: key } : null,
+      user: state.user ? { ...state.user, avatarUrl: storedKey } : null,
     }));
     if (userId) {
-      useServerStore.getState().updateMemberAvatar(userId, key);
-      useChatStore.getState().updateAuthorAvatar(userId, key);
+      useServerStore.getState().updateMemberAvatar(userId, storedKey);
+      useChatStore.getState().updateAuthorAvatar(userId, storedKey);
     }
   },
 

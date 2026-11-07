@@ -53,6 +53,12 @@ vi.mock('../../utils/s3', () => ({
   deleteMultipleFromS3: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Upload read-back (its own unit tests cover the S3 side)
+const mockVerifyAttachmentUploads = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../../utils/uploadVerification', () => ({
+  verifyAttachmentUploads: (...args: unknown[]) => mockVerifyAttachmentUploads(...args),
+}));
+
 // Mock prisma
 const mockConversation = {
   id: 'conv-1',
@@ -144,6 +150,7 @@ vi.mock('../../utils/prisma', () => ({
 import { prisma } from '../../utils/prisma';
 import { dmRouter } from '../../routes/dm';
 import { errorHandler } from '../../middleware/errorHandler';
+import { BadRequestError } from '../../utils/errors';
 
 // ─── App setup ──────────────────────────────────────────────────────────────
 
@@ -929,6 +936,47 @@ describe('DM routes — encrypted conversation message enforcement', () => {
     expect(res.status).toBe(201);
     expect(attachmentRows[0].fileName).toBe('encrypted.bin');
     expect(attachmentRows[0].mimeType).toBe('application/octet-stream');
+    // The stored blob was read back against the declared ciphertext size
+    expect(mockVerifyAttachmentUploads).toHaveBeenCalledWith([{
+      key: 'attachments/dm-conv-1/abc123-encrypted.bin',
+      declaredSize: 1024,
+      maxSize: 12 * 1024 * 1024 + 16,
+    }]);
+  });
+
+  it('refuses a blob the read-back rejects, creating nothing', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    mockVerifyAttachmentUploads.mockRejectedValueOnce(new BadRequestError('Invalid attachment size'));
+
+    const res = await request(createApp())
+      .post('/api/v1/dm/conv-1/messages')
+      .send({
+        content: validEnvelope,
+        encrypted: true,
+        attachments: [{ s3Key: 'attachments/dm-conv-1/abc123-encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream' }],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid attachment size');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (500) when the store cannot be read', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockVerifyAttachmentUploads.mockRejectedValueOnce(new Error('store unavailable'));
+
+    const res = await request(createApp())
+      .post('/api/v1/dm/conv-1/messages')
+      .send({
+        content: validEnvelope,
+        encrypted: true,
+        attachments: [{ s3Key: 'attachments/dm-conv-1/abc123-encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream' }],
+      });
+
+    expect(res.status).toBe(500);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it('rejects non-opaque or invalid encrypted attachments', async () => {
@@ -953,7 +1001,14 @@ describe('DM routes — encrypted conversation message enforcement', () => {
       .send({ ...base, attachments: [{ ...valid, s3Key: 'attachments/dm-other/abc123-encrypted.bin' }] });
     expect(res.status).toBe(400);
 
+    // a fractional size can be neither signed nor stored
+    res = await request(app).post('/api/v1/dm/conv-1/messages')
+      .send({ ...base, attachments: [{ ...valid, fileSize: 1024.5 }] });
+    expect(res.status).toBe(400);
+
     expect(prisma.$transaction).not.toHaveBeenCalled();
+    // none of these reached the store
+    expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
   });
 
   it('rejects a plaintext edit of an encrypted message (no downgrade)', async () => {
