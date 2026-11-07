@@ -2,10 +2,12 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, NotFoundError } from '../utils/errors';
-import { validateDisplayName, validateBio, WS_EVENTS } from '@voxium/shared';
+import { validateDisplayName, validateBio, WS_EVENTS, LIMITS } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
+import { adoptImageAssetUpload } from '../utils/uploadVerification';
+import { rateLimitProfileUpdate } from '../middleware/rateLimiter';
 
 export const userRouter = Router();
 
@@ -39,9 +41,10 @@ userRouter.get('/:userId', async (req: Request<{ userId: string }>, res: Respons
 });
 
 // Update own profile
-userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFunction) => {
+// Per user: every edit fans `user:updated` out to every server room the user is in
+userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { avatarUrl } = req.body;
+    let { avatarUrl } = req.body;
     let { displayName, bio } = req.body;
 
     // avatarUrl must be null (to clear) or a valid S3 key
@@ -79,24 +82,44 @@ userRouter.patch('/me/profile', async (req: Request, res: Response, next: NextFu
       oldAvatarUrl = current?.avatarUrl ?? null;
     }
 
-    const updated = await prisma.user.update({
-      where: { id: req.user!.userId },
-      data: {
-        ...(displayName !== undefined && { displayName }),
-        ...(bio !== undefined && { bio }),
-        ...(avatarUrl !== undefined && { avatarUrl }),
-      },
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        email: true,
-        avatarUrl: true,
-        bio: true,
-        status: true,
-        createdAt: true,
-      },
-    });
+    // First reference of a new avatar object: the profile stores a verified
+    // server-side copy (size cap, image header) under a key no upload URL was
+    // issued for, never the uploaded key. The current key was adopted when it
+    // was set, and is never re-read here.
+    let adoptedAvatarKey: string | null = null;
+    if (typeof avatarUrl === 'string' && avatarUrl !== oldAvatarUrl) {
+      adoptedAvatarKey = await adoptImageAssetUpload(avatarUrl, `avatars/${req.user!.userId}-`, LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key');
+      avatarUrl = adoptedAvatarKey;
+    }
+
+    let updated;
+    try {
+      updated = await prisma.user.update({
+        where: { id: req.user!.userId },
+        data: {
+          ...(displayName !== undefined && { displayName }),
+          ...(bio !== undefined && { bio }),
+          ...(avatarUrl !== undefined && { avatarUrl }),
+        },
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+          email: true,
+          avatarUrl: true,
+          bio: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+    } catch (err) {
+      // The profile never stored the adopted copy: nothing else will reference it
+      if (adoptedAvatarKey) {
+        const key = adoptedAvatarKey;
+        deleteFromS3(key).catch((delErr) => console.warn(`[S3] Failed to delete unreferenced avatar copy ${key}:`, delErr instanceof Error ? delErr.message : delErr));
+      }
+      throw err;
+    }
 
     // Delete old avatar from S3 after DB update confirmed
     if (avatarUrl !== undefined && oldAvatarUrl && oldAvatarUrl !== avatarUrl) {

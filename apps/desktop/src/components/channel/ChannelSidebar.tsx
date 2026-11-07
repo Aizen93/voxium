@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { useServerStore } from '../../stores/serverStore';
+import { useConnectionStatus } from '../../hooks/useConnectionStatus';
+import { headerOnlineCount } from '../../utils/peopleGroups';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useChatStore } from '../../stores/chatStore';
@@ -38,6 +40,8 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { Permissions, hasPermission, permissionsFromString } from '@voxium/shared';
+import { canOpenServerSettings } from '../../utils/serverSettingsAccess';
+import { permissionsFingerprint } from '../../hooks/useServerPermissions';
 import type { Channel, Category } from '@voxium/shared';
 import { isSecureVoiceSupported } from '../../services/e2e/voiceFrameTransform';
 
@@ -247,6 +251,12 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
 }) {
   const { t } = useTranslation();
   const members = useServerStore((s) => s.members);
+  // A participant with no row (outside a big server's slice): fetched, batched
+  useEffect(() => {
+    const known = new Set(members.map((m) => m.userId));
+    const missing = voiceUsers.filter((vu) => !known.has(vu.id)).map((vu) => vu.id);
+    if (missing.length) useServerStore.getState().ensureMembers(missing);
+  }, [voiceUsers, members]);
 
   return (
     <div className="space-y-0.5 px-1.5">
@@ -349,10 +359,11 @@ function SortableCategoryHeader({
         )}
         <button
           onClick={onToggle}
-          className="section-label flex min-w-0 flex-1 items-center gap-1 hover:text-vox-text-secondary transition-colors"
+          className="category-label flex min-w-0 flex-1 items-center gap-1 hover:text-vox-text-secondary transition-colors"
+          data-testid="category-header"
         >
           <ChevronRight
-            size={12}
+            size={13}
             className={clsx('shrink-0 transition-transform', !isCollapsed && 'rotate-90')}
           />
           <span className="truncate">{category.name}</span>
@@ -379,7 +390,13 @@ function SortableCategoryHeader({
         )}
       </div>
 
-      {!isCollapsed && children}
+      {/* The rail: a line down the left of the category's channels, so each
+          channel reads as belonging to the heading above it. */}
+      {!isCollapsed && (
+        <div className="ml-[18px] border-l-2 border-vox-border pl-1" data-testid="category-rail">
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -411,12 +428,13 @@ function CategoryOverlay({ category }: { category: Category }) {
 
 export function ChannelSidebar() {
   const { t } = useTranslation();
-  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, unreadCounts, reorderCategories, reorderChannels, fetchEffectivePermissions, leaveSecureChannel } = useServerStore();
+  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, people, unreadCounts, reorderCategories, reorderChannels, fetchEffectivePermissions, leaveSecureChannel } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showServerSettings, setShowServerSettings] = useState(false);
+  const connectionStatus = useConnectionStatus();
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [createChannelCategoryId, setCreateChannelCategoryId] = useState<string | null>(null);
   const [newChannelName, setNewChannelName] = useState('');
@@ -431,6 +449,11 @@ export function ChannelSidebar() {
   const [showSecureCreate, setShowSecureCreate] = useState(false);
   const [secureMembersChannel, setSecureMembersChannel] = useState<{ id: string; name: string } | null>(null);
   const [canCreateSecure, setCanCreateSecure] = useState(false);
+  // Server settings opens for anyone with something to do inside: owner and
+  // legacy admin at once, and a role-only moderator (KICK_MEMBERS: join
+  // requests + bans; MANAGE_SERVER: discovery; MANAGE_ROLES) once the
+  // effective permissions are known.
+  const [roleOpensSettings, setRoleOpensSettings] = useState(false);
   const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeServer = servers.find((s) => s.id === activeServerId);
@@ -446,26 +469,21 @@ export function ChannelSidebar() {
   // — without it, a freshly granted CREATE_SECURE_CHANNELS would not show the
   // create control until the next server switch.
   const roles = useServerStore((s) => s.roles);
-  const myPermsKey = useMemo(() => {
-    const assigned = new Set((currentMember?.roles ?? []).map((r) => r.id));
-    const bits = roles
-      .filter((r) => r.isDefault || assigned.has(r.id))
-      .map((r) => `${r.id}:${r.permissions}`)
-      .sort()
-      .join('|');
-    return `${currentMember?.role ?? ''}|${bits}`;
-  }, [currentMember, roles]);
+  const myPermsKey = useMemo(() => permissionsFingerprint(currentMember, roles), [currentMember, roles]);
 
   // Secure-channel creation is gated on the PERMISSION BIT, not the legacy
   // member.role field — a custom role can carry CREATE_SECURE_CHANNELS.
   useEffect(() => {
     setCanCreateSecure(false);
+    setRoleOpensSettings(false);
     if (!activeServerId) return;
     let cancelled = false;
     fetchEffectivePermissions(activeServerId)
       .then((bits) => {
         if (!cancelled) {
-          setCanCreateSecure(hasPermission(permissionsFromString(bits), Permissions.CREATE_SECURE_CHANNELS));
+          const perms = permissionsFromString(bits);
+          setCanCreateSecure(hasPermission(perms, Permissions.CREATE_SECURE_CHANNELS));
+          setRoleOpensSettings(canOpenServerSettings(perms));
         }
       })
       .catch((err) => console.warn('[SecureChannel] Failed to fetch effective permissions:', err));
@@ -800,7 +818,11 @@ export function ChannelSidebar() {
 
   // ─── Render ───────────────────────────────────────────────────────────
 
-  const onlineCount = members.filter((m) => m.user.status && m.user.status !== 'offline').length;
+  // The People panel's rule: the rows when everyone is loaded, the server's
+  // figure for a big server's slice, never below the rows that read online
+  // (our own reads online while the socket is up — nobody echoes our
+  // presence to us)
+  const onlineCount = headerOnlineCount(members, people, user?.id, connectionStatus === 'connected');
 
   return (
     <div className="flex h-full w-full flex-col bg-vox-channel">
@@ -821,7 +843,7 @@ export function ChannelSidebar() {
           >
             <UserPlus size={15} />
           </button>
-          {isAdmin && (
+          {(isAdmin || roleOpensSettings) && (
             <button
               onClick={() => setShowServerSettings(true)}
               className="flex h-[26px] w-[26px] items-center justify-center rounded-md text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
@@ -919,23 +941,26 @@ export function ChannelSidebar() {
             categorizable, no permission overrides. */}
         {(secureChannels.length > 0 || canCreateSecure) && (
           <div className="mt-2" data-testid="secure-channels-section">
-            <div className="group mb-0.5 flex items-center gap-1 px-1.5">
-              <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-vox-text-muted">
-                <Lock size={10} />
-                {t('secureChannel.sectionTitle')}
+            <div className="mb-1 flex items-center gap-1 px-1">
+              <span className="category-label flex min-w-0 items-center gap-1">
+                <Lock size={12} className="shrink-0" />
+                <span className="truncate">{t('secureChannel.sectionTitle')}</span>
               </span>
+              {/* Always visible: a control that only appears on hover is one
+                  nobody finds (the owner, 2026-10-25). */}
               {canCreateSecure && (
                 <button
                   onClick={() => setShowSecureCreate(true)}
-                  className="ml-auto flex h-5 w-5 items-center justify-center rounded text-vox-text-muted opacity-0 transition-opacity hover:text-vox-text-primary group-hover:opacity-100"
+                  className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-vox-border text-vox-accent-primary transition-colors hover:border-vox-accent-primary hover:bg-vox-accent-tint"
                   title={t('secureChannel.createTitle')}
                   aria-label={t('secureChannel.createTitle')}
                   data-testid="secure-channel-create-open"
                 >
-                  <Plus size={13} />
+                  <Plus size={14} />
                 </button>
               )}
             </div>
+            <div className="ml-[13px] border-l-2 border-vox-border pl-1" data-testid="secure-rail">
             {secureChannels.map((ch) => {
               // Secure VOICE channel: joins E2E voice instead of opening chat.
               // Hard-gated on encoded-transform support — no plaintext fallback.
@@ -996,6 +1021,7 @@ export function ChannelSidebar() {
                 </button>
               );
             })}
+            </div>
           </div>
         )}
 
@@ -1063,9 +1089,10 @@ export function ChannelSidebar() {
         {isAdmin && !showCreateCategory && (
           <button
             onClick={() => setShowCreateCategory(true)}
-            className="mt-2 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-vox-text-muted hover:text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
+            className="mt-3 flex w-full items-center gap-2 rounded-md border border-dashed border-vox-border px-2 py-1.5 text-[13px] font-medium text-vox-accent-primary transition-colors hover:border-vox-accent-primary hover:bg-vox-accent-tint"
+            data-testid="create-category-open"
           >
-            <FolderPlus size={14} />
+            <FolderPlus size={15} />
             <span>{t('channel.createCategory')}</span>
           </button>
         )}

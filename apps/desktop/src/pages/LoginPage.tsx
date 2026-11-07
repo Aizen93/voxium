@@ -31,6 +31,13 @@ export function LoginPage() {
     return () => clearTimeout(typingTimeoutRef.current);
   }, []);
 
+  // `error` is shared with the registration: an answer the register page
+  // showed (a refused sign-up code) must not greet the user here as a failed
+  // sign-in they never attempted
+  useEffect(() => {
+    clearError();
+  }, [clearError]);
+
   const isWatching = isPasswordFocused && isTypingPassword;
 
   // TOTP state

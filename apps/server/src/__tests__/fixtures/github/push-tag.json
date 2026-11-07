@@ -1,0 +1,103 @@
+{
+  "ref": "refs/tags/v1.2.0",
+  "before": "0000000000000000000000000000000000000000",
+  "after": "853c5d6b22d14d791e11cc0761c648ce700e820f",
+  "repository": {
+    "id": 712345678,
+    "node_id": "R_kgDOKnF1Tg",
+    "name": "rocket",
+    "full_name": "acme/rocket",
+    "private": false,
+    "owner": {
+      "name": "acme",
+      "email": null,
+      "login": "acme",
+      "id": 98765432,
+      "node_id": "O_kgDOBeIq2A",
+      "avatar_url": "https://avatars.githubusercontent.com/u/98765432?v=4",
+      "url": "https://api.github.com/users/acme",
+      "html_url": "https://github.com/acme",
+      "type": "Organization",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/acme/rocket",
+    "description": "Launch toolkit for very fast birds",
+    "fork": false,
+    "url": "https://github.com/acme/rocket",
+    "created_at": 1741944413,
+    "updated_at": "2026-10-17T18:02:11Z",
+    "pushed_at": 1792395669,
+    "homepage": null,
+    "size": 1840,
+    "stargazers_count": 128,
+    "watchers_count": 128,
+    "language": "TypeScript",
+    "forks_count": 9,
+    "open_issues_count": 4,
+    "visibility": "public",
+    "default_branch": "main",
+    "stargazers": 128,
+    "master_branch": "main",
+    "organization": "acme"
+  },
+  "pusher": {
+    "name": "marvin",
+    "email": "marvin@acme.example"
+  },
+  "organization": {
+    "login": "acme",
+    "id": 98765432,
+    "node_id": "O_kgDOBeIq2A",
+    "url": "https://api.github.com/orgs/acme",
+    "repos_url": "https://api.github.com/orgs/acme/repos",
+    "events_url": "https://api.github.com/orgs/acme/events",
+    "hooks_url": "https://api.github.com/orgs/acme/hooks",
+    "issues_url": "https://api.github.com/orgs/acme/issues",
+    "members_url": "https://api.github.com/orgs/acme/members{/member}",
+    "public_members_url": "https://api.github.com/orgs/acme/public_members{/member}",
+    "avatar_url": "https://avatars.githubusercontent.com/u/98765432?v=4",
+    "description": "Fictional makers of very fast rockets"
+  },
+  "sender": {
+    "login": "marvin",
+    "id": 5550042,
+    "node_id": "U_kgDOAFSqmg",
+    "avatar_url": "https://avatars.githubusercontent.com/u/5550042?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/marvin",
+    "html_url": "https://github.com/marvin",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "created": true,
+  "deleted": false,
+  "forced": false,
+  "base_ref": "refs/heads/main",
+  "compare": "https://github.com/acme/rocket/compare/v1.2.0",
+  "commits": [],
+  "head_commit": {
+    "id": "4a35f9f0701ed8182c988f6302f176ce03a92757",
+    "tree_id": "452c1a354cd826dcbf7958559ac082701fc01420",
+    "distinct": true,
+    "message": "Fix `npm test` on CI",
+    "timestamp": "2026-10-18T09:38:51+02:00",
+    "url": "https://github.com/acme/rocket/commit/4a35f9f0701ed8182c988f6302f176ce03a92757",
+    "author": {
+      "name": "Road Runner",
+      "email": "beep@acme.example",
+      "username": "roadrunner"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "username": "web-flow"
+    },
+    "added": [],
+    "removed": [],
+    "modified": [
+      "src/launch.ts"
+    ]
+  }
+}

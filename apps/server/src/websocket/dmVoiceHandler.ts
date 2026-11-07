@@ -1,11 +1,12 @@
 import type { Server as SocketServer, Socket } from 'socket.io';
-import { DM_SIGNAL_MAX, E2E_DEVICE_ID_RE } from '@voxium/shared';
-import type { ServerToClientEvents, ClientToServerEvents, Message } from '@voxium/shared';
+import { DM_SIGNAL_MAX, E2E_DEVICE_ID_RE, DM_NOTICE_CALL_STARTED, DM_NOTICE_CALL_ENDED } from '@voxium/shared';
+import type { ServerToClientEvents, ClientToServerEvents, Message, DMSystemNotice } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup, type SweepOptions } from '../utils/redis';
+import { shapeMessageAuthor } from '../utils/messageAuthor';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -15,7 +16,8 @@ async function createSystemMessage(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   conversationId: string,
   authorId: string,
-  content: string
+  // Only a listed notice: clients accept no other plaintext in a DM
+  content: DMSystemNotice
 ) {
   try {
     const message = await prisma.message.create({
@@ -39,7 +41,8 @@ async function createSystemMessage(
       type: message.type,
       channelId: message.channelId,
       conversationId: message.conversationId,
-      author: message.author,
+      // always the participant here; shaped for the nullable column's type
+      author: shapeMessageAuthor(message),
       createdAt: message.createdAt.toISOString(),
       editedAt: message.editedAt?.toISOString() ?? null,
       reactions: [],
@@ -308,7 +311,7 @@ function armCallTimeout(
         }
         io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: ringingUserId });
         io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
-        createSystemMessage(io, conversationId, ringingUserId, 'Voice call ended');
+        createSystemMessage(io, conversationId, ringingUserId, DM_NOTICE_CALL_ENDED);
       }
     } catch (err) {
       console.error(`[DMVoice] Redis error during call timeout cleanup:`, err);
@@ -380,7 +383,7 @@ export async function leaveCurrentDMVoiceChannel(
   io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
 
   // Persist "call ended" system message
-  createSystemMessage(io, conversationId, userId, 'Voice call ended');
+  createSystemMessage(io, conversationId, userId, DM_NOTICE_CALL_ENDED);
 }
 
 /** Returns count of active DM calls (cross-node via Redis) */
@@ -527,7 +530,7 @@ export function handleDMVoiceEvents(
       socket.emit('dm:voice:joined', { conversationId, user: voiceUser });
 
       // Persist "call started" system message
-      createSystemMessage(io, conversationId, userId, 'Voice call started');
+      createSystemMessage(io, conversationId, userId, DM_NOTICE_CALL_STARTED);
 
       // Start call timeout — auto-cancel if no one answers within 30s
       armCallTimeout(io, conversationId, userId);
@@ -590,7 +593,7 @@ export function handleDMVoiceEvents(
 
     io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: callerIdForMsg });
     io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
-    createSystemMessage(io, conversationId, callerIdForMsg, 'Voice call ended');
+    createSystemMessage(io, conversationId, callerIdForMsg, DM_NOTICE_CALL_ENDED);
   });
 
   socket.on('dm:voice:mute', async (muted: boolean) => {

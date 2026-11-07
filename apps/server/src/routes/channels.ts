@@ -9,6 +9,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission, hasChannelPermission, filterVisibleChannels, computeServerPermissions } from '../utils/permissionCalculator';
 import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
+import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 
 export const channelRouter = Router({ mergeParams: true });
@@ -182,7 +183,8 @@ channelRouter.get('/', async (req: Request<{ serverId: string }>, res: Response,
 });
 
 // Create a channel
-channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+// The structure bucket the PATCH and the reorder already use
+channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId } = req.params;
     const { type = 'text', categoryId } = req.body;
@@ -215,11 +217,19 @@ channelRouter.post('/', async (req: Request<{ serverId: string }>, res: Response
       if (!category) throw new BadRequestError('Category not found in this server');
     }
 
-    const [channelCount, limits] = await Promise.all([
-      prisma.channel.count({ where: { serverId } }),
+    // Secure channels count against their own limit (secureChannels.ts); the
+    // total only places the new channel last. One grouped count gives both.
+    const [countsBySecure, limits] = await Promise.all([
+      prisma.channel.groupBy({ by: ['secure'], where: { serverId }, _count: { _all: true } }),
       getEffectiveLimits(serverId),
     ]);
-    if (channelCount >= limits.maxChannelsPerServer) {
+    let channelCount = 0;
+    let regularCount = 0;
+    for (const row of countsBySecure) {
+      channelCount += row._count._all;
+      if (!row.secure) regularCount += row._count._all;
+    }
+    if (regularCount >= limits.maxChannelsPerServer) {
       throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
     }
 
@@ -340,7 +350,7 @@ channelRouter.patch('/:channelId', rateLimitCategoryManage, async (req: Request<
 });
 
 // Delete a channel
-channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
+channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request<{ serverId: string; channelId: string }>, res: Response, next: NextFunction) => {
   try {
     const { serverId, channelId } = req.params;
     const userId = req.user!.userId;
@@ -391,11 +401,18 @@ channelRouter.delete('/:channelId', async (req: Request<{ serverId: string; chan
       throw new NotFoundError('Channel');
     }
 
+    // The channel's webhooks go with it (FK cascade) and leave the server's
+    // webhook count, but channel:deleted reaches only the channel's own room: a
+    // webhook manager who could not see the channel would keep a stale "N of M"
+    // in the Integrations tab. webhook:changed carries the server id alone.
+    const webhooks = await prisma.webhook.count({ where: { channelId } });
+
     await prisma.channel.delete({ where: { id: channelId } });
 
     // Same audience as every other lifecycle event for this channel: the people
     // who could see it. Nobody else has it in their sidebar to remove.
     getIO().to(`channel:${channelId}`).emit('channel:deleted', { channelId, serverId });
+    if (webhooks > 0) emitWebhookChanged(serverId);
 
     // Live voice must die with the channel on every node — participants used
     // to keep their transports (and the Redis mirror entry) until they left

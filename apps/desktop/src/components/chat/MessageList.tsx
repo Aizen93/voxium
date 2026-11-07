@@ -6,6 +6,9 @@ import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from './MessageItem';
 import { isNewDay, daySeparatorFor } from '../../utils/dateSeparator';
+import { startsMessageGroup } from '../../utils/messageGrouping';
+import { useServerPermissions } from '../../hooks/useServerPermissions';
+import { Permissions, hasPermission } from '@voxium/shared';
 import { ArrowDown } from 'lucide-react';
 
 /** Virtual index of the oldest loadable message; leaves room to page upward. */
@@ -29,7 +32,7 @@ function DaySeparatorRow({ iso }: { iso: string }) {
 export function MessageList() {
   const { t } = useTranslation();
   const { messages, hasMore, hasMoreAfter, isLoading, fetchMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
-  const { activeChannelId, members, channels } = useServerStore();
+  const { activeChannelId, activeServerId, members, channels } = useServerStore();
   const { user } = useAuthStore();
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fetchingRef = useRef(false);
@@ -37,6 +40,11 @@ export function MessageList() {
 
   const currentMember = members.find((m) => m.userId === user?.id);
   const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
+  // A custom role can carry MANAGE_MESSAGES: the legacy role field alone
+  // would hide Delete from a moderator the server lets delete (a webhook's
+  // posts included — they are deleted only this way)
+  const serverPerms = useServerPermissions(activeServerId, user?.id);
+  const canManageMessages = serverPerms !== null && hasPermission(serverPerms, Permissions.MANAGE_MESSAGES);
   // SECURE channels: moderation is membership-derived, never role-derived —
   // the channel CREATOR moderates (MANAGE_MESSAGES in the fixed creator set),
   // and a server admin/owner who is a plain member (or no member at all) does
@@ -44,7 +52,7 @@ export function MessageList() {
   const activeChannel = channels.find((c) => c.id === activeChannelId);
   const canModerate = activeChannel?.secure
     ? activeChannel.createdById === user?.id
-    : isAdmin;
+    : isAdmin || canManageMessages;
 
   // Scroll to bottom on channel change
   useEffect(() => {
@@ -181,16 +189,10 @@ export function MessageList() {
     setShowScrollButton(!bottom);
   }, []);
 
-  // Group messages by author for compact display
-  const shouldShowHeader = (index: number) => {
-    if (index === 0) return true;
-    const prev = messages[index - 1];
-    const curr = messages[index];
-    if (curr.replyToId) return true;
-    if (prev.author.id !== curr.author.id) return true;
-    const timeDiff = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
-    return timeDiff > 5 * 60 * 1000;
-  };
+  // Group messages by author for compact display (a webhook author's name is
+  // part of the key: utils/messageGrouping.ts)
+  const shouldShowHeader = (index: number) =>
+    index === 0 || startsMessageGroup(messages[index - 1], messages[index]);
 
   const typingText = (() => {
     const names = Array.from(typingUsers.values());
@@ -262,8 +264,15 @@ export function MessageList() {
               ? !hasMore
               : isNewDay(messages[dataIndex - 1]?.createdAt, message.createdAt);
 
+            // flow-root keeps MessageItem's top margin (mt-4 between author
+            // groups) INSIDE this row. Virtuoso sizes a row by its box: a margin
+            // that collapses out of it takes room on screen the size tree never
+            // counts, and every follow-to-bottom stopped short by the sum of
+            // those margins, the newest message below the fold. Vertical space
+            // at the edge of a row, the Header or the Footer is padding (or
+            // contained like this), never a bare margin.
             return (
-              <div key={message.id} className="w-full px-6">
+              <div key={message.id} className="flow-root w-full px-6">
                 {startsDay && <DaySeparatorRow iso={message.createdAt} />}
                 <MessageItem
                   message={message}
@@ -279,9 +288,10 @@ export function MessageList() {
           components={{
             Header: () =>
               !hasMore && messages.length > 0 ? (
-                <div className="mb-2 w-full px-6 pb-2 pt-5">
-                  <h4 className="text-xl font-semibold tracking-[-0.01em] text-vox-text-primary">Welcome to the channel!</h4>
-                  <p className="mt-0.5 text-[13px] text-vox-text-secondary">This is the beginning of the conversation.</p>
+                // padding, not margin: see the row wrapper in itemContent
+                <div className="w-full px-6 pb-4 pt-5">
+                  <h4 className="text-xl font-semibold tracking-[-0.01em] text-vox-text-primary">{t('chat.welcomeTitle')}</h4>
+                  <p className="mt-0.5 text-[13px] text-vox-text-secondary">{t('chat.welcomeSubtitle')}</p>
                 </div>
               ) : null,
             Footer: () => (
@@ -303,7 +313,7 @@ export function MessageList() {
       {showScrollButton && (
         <button
           onClick={scrollToBottom}
-          aria-label="Scroll to bottom"
+          aria-label={t('chat.jumpToBottom')}
           className="absolute bottom-4 left-1/2 -translate-x-1/2 flex h-8 w-8 items-center justify-center rounded-full bg-vox-bg-tertiary text-vox-text-secondary shadow-lg hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
         >
           <ArrowDown size={16} />

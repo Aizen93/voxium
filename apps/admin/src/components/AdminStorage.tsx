@@ -5,6 +5,7 @@ import { AdminStatCard } from './AdminStatCard';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { toast } from '../stores/toastStore';
+import { ORPHAN_GRACE_DAYS } from '@voxium/shared';
 import type { StorageTopUploader } from '@voxium/shared';
 
 function formatBytes(bytes: number): string {
@@ -14,6 +15,15 @@ function formatBytes(bytes: number): string {
   const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
+
+// What the sweep behind "Clean up" actually does (apps/server/src/utils/orphanCleanup.ts):
+// it only deletes unreferenced objects older than ORPHAN_GRACE_DAYS (shared
+// with the server) whose key has a shape this app writes, and refuses the whole
+// run when the candidates look implausibly many. The orphan COUNT is every
+// unreferenced object, so it is the most a run can delete, not what it will.
+
+/** The only dry run there is: the API's (this panel has no dry-run control). */
+const ORPHAN_DRY_RUN_PATH = 'POST /api/v1/admin/storage/cleanup-orphans?dryRun=1';
 
 type FilterTab = 'all' | 'avatars' | 'server-icons' | 'attachments' | 'orphaned';
 
@@ -74,10 +84,11 @@ export function AdminStorage() {
       // implausible number of candidates means a broken reference query, not
       // a dirty bucket. Reporting that as "Cleaned up 0 of N" sent operators
       // looking at S3 permissions instead of at the refusal.
+      // This panel has no dry-run control: the dry run lives on the API only
       if (result.skipped === 'over-cap') {
-        toast.error(`Sweep refused: ${result.found} candidates exceed the per-run ceiling. Nothing was deleted — inspect with a dry run first.`);
+        toast.error(`Sweep refused: ${result.found} candidates exceed the per-run ceiling. Nothing was deleted — inspect them with the API's dry run (${ORPHAN_DRY_RUN_PATH}) first.`);
       } else if (result.skipped === 'over-fraction') {
-        toast.error(`Sweep refused: ${result.found} of ${result.scanned ?? '?'} objects look orphaned, which usually means a broken reference query. Nothing was deleted — inspect with a dry run first.`);
+        toast.error(`Sweep refused: ${result.found} of ${result.scanned ?? '?'} objects look orphaned, which usually means a broken reference query. Nothing was deleted — inspect them with the API's dry run (${ORPHAN_DRY_RUN_PATH}) first.`);
       } else {
         toast.success(`Cleaned up ${result.deleted} of ${result.found} orphaned files`);
       }
@@ -166,7 +177,7 @@ export function AdminStorage() {
               className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-md bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30 transition-colors"
             >
               <AlertTriangle size={14} />
-              Cleanup {storageStats.orphanCount} Orphan{storageStats.orphanCount !== 1 ? 's' : ''}
+              Clean Up Orphans ({storageStats.orphanCount})
             </button>
           )}
         </div>
@@ -255,9 +266,9 @@ export function AdminStorage() {
       {/* Cleanup Modal */}
       {showCleanup && storageStats && (
         <AdminConfirmModal
-          title="Cleanup Orphaned Files"
-          message={`This will permanently delete ${storageStats.orphanCount} orphaned file${storageStats.orphanCount !== 1 ? 's' : ''} (${formatBytes(storageStats.orphanSize)}). These files are not referenced by any user avatar, server icon, or message attachment. This action is irreversible.`}
-          confirmLabel="Delete All Orphans"
+          title="Clean Up Orphans"
+          message={`${storageStats.orphanCount} file${storageStats.orphanCount !== 1 ? 's' : ''} (${formatBytes(storageStats.orphanSize)}) ${storageStats.orphanCount !== 1 ? 'are' : 'is'} not referenced by any user avatar, server icon, or message attachment. The sweep permanently deletes only those older than ${ORPHAN_GRACE_DAYS} days whose names match the files Voxium stores, so recent uploads stay; it deletes nothing if the candidates look implausibly many. The result shows how many were removed. This action is irreversible.`}
+          confirmLabel="Delete Orphans"
           danger
           onConfirm={handleCleanup}
           onCancel={() => setShowCleanup(false)}

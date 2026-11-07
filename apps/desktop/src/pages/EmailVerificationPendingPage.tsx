@@ -3,6 +3,7 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useAuthStore } from '../stores/authStore';
 import { Mail, RotateCw, LogOut } from 'lucide-react';
 import axios from 'axios';
+import { translateServerError } from '../utils/serverErrors';
 
 export function EmailVerificationPendingPage() {
   const { t } = useTranslation();
@@ -47,7 +48,11 @@ export function EmailVerificationPendingPage() {
       if (retryAfter > 0) {
         startCooldown(retryAfter);
       }
-      setError(axios.isAxiosError(err) ? err.response?.data?.error || t('auth.emailPending.failedToSend') : t('auth.emailPending.failedToSend'));
+      // The server's sentence in the user's language (the daily cap, a mailbox
+      // that blocked Voxium mail); an unmapped one shows as sent
+      setError(axios.isAxiosError(err)
+        ? translateServerError(err.response?.data?.error, t, 'auth.emailPending.failedToSend')
+        : t('auth.emailPending.failedToSend'));
     } finally {
       setIsSending(false);
     }

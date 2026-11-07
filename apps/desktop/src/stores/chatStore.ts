@@ -8,20 +8,22 @@ import { useDMStore } from './dmStore';
 import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
+import { ownSentRow } from '../services/e2e/displayGate';
+import { isSecureChannelId } from '../utils/secureChannelGate';
 import {
   decryptChannelMessagesForDisplay,
   prepareOutgoingChannelMessage,
   cacheSentChannelPlaintext,
 } from '../services/e2e/channelCrypto';
-import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
+import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, WEBHOOK_AUTHOR_ID_PREFIX } from '@voxium/shared';
 import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMeta } from '@voxium/shared';
 
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** Secure channels are decided by the channel list the server already gave us. */
+/** Secure channels: the loaded channel list OR this device's pin (utils/secureChannelGate.ts) — never the server's flag alone. */
 function isSecureChannel(channelId: string): boolean {
-  return useServerStore.getState().channels.some((c) => c.id === channelId && c.secure === true);
+  return isSecureChannelId(channelId, useServerStore.getState().channels);
 }
 
 // Track current fetch to prevent duplicate requests
@@ -57,6 +59,8 @@ interface ChatState {
   updateMessage: (message: Message) => void;
   updateMessageReactions: (messageId: string, reactions: ReactionGroup[]) => void;
   deleteMessage: (messageId: string) => void;
+  /** Drops every loaded row a webhook posted in a channel (`message:bulk_deleted`, a webhook deleted with purge). */
+  removeWebhookMessages: (channelId: string, webhookId: string) => void;
   clearMessages: () => void;
   clearTargetMessage: () => void;
   setTypingUser: (userId: string, username: string) => void;
@@ -124,7 +128,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       if (axios.isCancel(err)) return;
       console.error('Failed to fetch messages:', err);
-      toast.error('Failed to load messages');
+      toast.error(i18n.t('chat.failedToLoadMessages'));
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -163,7 +167,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       if (axios.isCancel(err)) return;
       console.error('Failed to fetch messages around:', err);
-      toast.error('Failed to load messages');
+      toast.error(i18n.t('chat.failedToLoadMessages'));
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -186,9 +190,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // the client; real attachment metadata travels inside the ciphertext.
         const prepared = await prepareOutgoingChannelMessage(channelId, content, e2eAttachments);
         if (prepared.notReadyUserIds.length > 0) {
-          const members = useServerStore.getState().members;
+          // The channel's own member list names everyone in it; the server's
+          // known rows are only a slice of a big server
+          const { members, secureChannelMembers } = useServerStore.getState();
+          const channelMembers = secureChannelMembers[channelId] ?? [];
           const names = prepared.notReadyUserIds
-            .map((id) => members.find((m) => m.userId === id)?.user.displayName ?? id)
+            .map((id) => channelMembers.find((m) => m.userId === id)?.user.displayName
+              ?? members.find((m) => m.userId === id)?.user.displayName ?? id)
             .join(', ');
           toast.error(i18n.t('secureChannel.membersNotReady', { names }));
         }
@@ -206,12 +214,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const { data } = await api.post(`/channels/${channelId}/messages`, body);
         const raw: Message = data.data;
-        await cacheSentChannelPlaintext(raw.id, channelId, prepared.plaintext, null, raw.createdAt);
-        const sent: Message = {
-          ...raw,
-          content,
-          ...(e2eAttachments?.length && { e2eAttachments }),
-        };
+        await cacheSentChannelPlaintext(raw.id, channelId, prepared.plaintext, null, raw.createdAt, prepared.position);
+        // Built from what this client knows, not from the server's reply:
+        // whichever of this row and the gated socket echo lands first owns
+        // the id (the other is dropped by the dedupe here or in addMessage),
+        // so nothing the server put in the POST response may ride on it
+        const sent = ownSentRow(raw, { content, replyingTo, e2eAttachments });
         const exists = get().messages.some((m) => m.id === sent.id);
         if (!exists) {
           set((state) => ({ messages: [...state.messages, sent] }));
@@ -251,7 +259,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       // cache under the new editedAt version BEFORE the socket echo decrypts it
       await cacheSentChannelPlaintext(
-        messageId, channelId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt,
+        messageId, channelId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt, prepared.position,
       );
       return;
     }
@@ -312,7 +320,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       if (axios.isCancel(err)) return;
       console.error('Failed to fetch DM messages:', err);
-      toast.error('Failed to load messages');
+      toast.error(i18n.t('chat.failedToLoadMessages'));
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -349,7 +357,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       if (axios.isCancel(err)) return;
       console.error('Failed to fetch DM messages around:', err);
-      toast.error('Failed to load messages');
+      toast.error(i18n.t('chat.failedToLoadMessages'));
       set({ isLoading: false });
     } finally {
       if (activeFetchController === controller) {
@@ -382,12 +390,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const raw: Message = data.data;
       // Cache the exact raw plaintext that was encrypted (Olm can't
       // decrypt-to-self); display fields come from the parsed payload
-      await cacheSentPlaintext(raw.id, conversationId, prepared.plaintext, null, raw.createdAt);
-      const sent: Message = {
-        ...raw,
-        content,
-        ...(e2eAttachments?.length && { e2eAttachments }),
-      };
+      await cacheSentPlaintext(raw.id, conversationId, prepared.plaintext, null, raw.createdAt, prepared.position);
+      // Built from what this client knows, not from the server's reply (same
+      // rule as the secure-channel branch of sendMessage)
+      const sent = ownSentRow(raw, { content, replyingTo, e2eAttachments });
       const exists = get().messages.some((m) => m.id === sent.id);
       if (!exists) {
         set((state) => ({ messages: [...state.messages, sent] }));
@@ -425,7 +431,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       encrypted: true,
     });
     // cache under the new editedAt version BEFORE the socket echo decrypts it
-    await cacheSentPlaintext(messageId, conversationId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt);
+    await cacheSentPlaintext(
+      messageId, conversationId, prepared.plaintext, data.data.editedAt ?? null, data.data.createdAt, prepared.position,
+    );
   },
 
   requestDeleteDMMessage: async (conversationId: string, messageId: string) => {
@@ -465,6 +473,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   deleteMessage: (messageId: string) => {
     set((state) => ({
       messages: state.messages.filter((m) => m.id !== messageId),
+    }));
+  },
+
+  removeWebhookMessages: (channelId: string, webhookId: string) => {
+    // BOTH ids must match: chatStore is shared with DMs, and another
+    // webhook's rows (or a human's) in the same channel stay
+    const quotedAuthorId = WEBHOOK_AUTHOR_ID_PREFIX + webhookId;
+    set((state) => ({
+      messages: state.messages
+        .filter((m) => !(m.channelId === channelId && m.webhookId === webhookId))
+        // A reply quoting one of the purged rows loses its quote, as the
+        // server's SetNull leaves it (a reply lives in its parent's channel).
+        // Untouched rows keep their identity.
+        .map((m) => (m.channelId === channelId && m.replyTo?.author.id === quotedAuthorId
+          ? { ...m, replyTo: null, replyToId: null }
+          : m)),
     }));
   },
 

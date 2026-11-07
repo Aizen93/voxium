@@ -12,7 +12,7 @@
  */
 
 import axios from 'axios';
-import { solveRegistrationPow } from '../packages/shared/src/pow';
+import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { Chrome111 } from 'mediasoup-client/handlers/Chrome111';
@@ -116,7 +116,7 @@ async function login(email: string): Promise<{ token: string; userId: string }> 
 }
 
 async function raiseRateLimits(token: string): Promise<void> {
-  for (const name of ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general']) {
+  for (const name of ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'powChallenge', 'admin', 'general']) {
     try {
       await axios.put(`${API}/admin/rate-limits/${name}`, { points: 99999, duration: 60, blockDuration: 0 }, h(token));
     } catch { /* */ }
@@ -126,7 +126,7 @@ async function raiseRateLimits(token: string): Promise<void> {
 async function resetRateLimits(token: string): Promise<void> {
   // 'admin' last — once it is reset, the remaining reset calls are throttled
   // by the restored admin bucket and would be swallowed, leaving overrides up
-  const order = [...['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general'].filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
+  const order = [...['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'powChallenge', 'admin', 'general'].filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
   for (const name of order) {
     try {
       await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, h(token));
@@ -171,7 +171,7 @@ function setupMedia(user: { socket: Socket; token: string; username: string }, c
     }) => {
       clearTimeout(timer);
       try {
-        const device = new Device({ handlerFactory: Chrome111.createFactory() });
+        const device = new Device({ handlerFactory: Chrome111.createFactory({}) });
         await device.load({ routerRtpCapabilities: data.routerRtpCapabilities as RtpCapabilities });
 
         const sendTransport = device.createSendTransport({
@@ -303,11 +303,15 @@ async function run() {
         batch.push(
           (async () => {
             try {
-              // Proof-of-work + consent, the same path a browser takes
-              const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
-              const pow = await solveRegistrationPow(chal.data);
-              await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow, acceptTerms: true, acceptPrivacy: true });
-            } catch { /* exists */ }
+              // Proof-of-work + consent, the same path a browser takes, then
+              // the known code set in the DB (verify-first registration)
+              await registerTestUser(API, { username, email, password: PASSWORD });
+            } catch (err) {
+              // 409 = the username is taken (an earlier run): log in below
+              if (!axios.isAxiosError(err) || err.response?.status !== 409) {
+                console.warn(`  register ${username} failed:`, axios.isAxiosError(err) ? err.response?.data ?? err.message : (err as Error).message);
+              }
+            }
             const { token } = await login(email);
             try {
               const { data: inv } = await axios.post(`${API}/invites/servers/${target.serverId}`, {}, h(seed.token));
@@ -329,6 +333,7 @@ async function run() {
     }
   }
   console.log(`  ${created} users registered                `);
+  await closeRegisterTestUserDb();
 
   // Step 4: Connect sockets and join voice (batched to limit wrtc pressure)
   console.log(`\n[4/6] Joining voice channels with full media (batch size ${MEDIA_BATCH})...`);

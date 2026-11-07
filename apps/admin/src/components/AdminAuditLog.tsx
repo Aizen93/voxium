@@ -10,6 +10,10 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'user.delete': 'User Deleted',
   'user.role_change': 'Role Changed',
   'server.delete': 'Server Deleted',
+  'server.discovery_feature': 'Server Featured',
+  'server.discovery_unfeature': 'Server Unfeatured',
+  'server.discovery_block': 'Server Blocked from Directory',
+  'server.discovery_unblock': 'Server Unblocked from Directory',
   'ip_ban.create': 'IP Banned',
   'ip_ban.delete': 'IP Ban Removed',
   'storage.file_delete': 'File Deleted',
@@ -27,6 +31,12 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'ratelimit.clear_user': 'User Rate Limits Cleared',
   'feature_flag.update': 'Feature Flag Updated',
   'feature_flag.reset': 'Feature Flag Reset',
+  'webhook.disable': 'Webhook Disabled',
+  'webhook.enable': 'Webhook Enabled',
+  'webhook.delete': 'Webhook Deleted',
+  'limits.update_global': 'Global Limits Updated',
+  'limits.update_server': 'Server Limits Updated',
+  'limits.reset_server': 'Server Limits Reset',
 };
 
 const ACTION_COLORS: Record<string, string> = {
@@ -35,6 +45,10 @@ const ACTION_COLORS: Record<string, string> = {
   'user.delete': 'bg-red-500/20 text-red-400',
   'user.role_change': 'bg-blue-500/20 text-blue-400',
   'server.delete': 'bg-red-500/20 text-red-400',
+  'server.discovery_feature': 'bg-purple-500/20 text-purple-400',
+  'server.discovery_unfeature': 'bg-blue-500/20 text-blue-400',
+  'server.discovery_block': 'bg-orange-500/20 text-orange-400',
+  'server.discovery_unblock': 'bg-green-500/20 text-green-400',
   'ip_ban.create': 'bg-orange-500/20 text-orange-400',
   'ip_ban.delete': 'bg-green-500/20 text-green-400',
   'storage.file_delete': 'bg-yellow-500/20 text-yellow-400',
@@ -52,7 +66,54 @@ const ACTION_COLORS: Record<string, string> = {
   'ratelimit.clear_user': 'bg-cyan-500/20 text-cyan-400',
   'feature_flag.update': 'bg-purple-500/20 text-purple-400',
   'feature_flag.reset': 'bg-yellow-500/20 text-yellow-400',
+  'webhook.disable': 'bg-orange-500/20 text-orange-400',
+  'webhook.enable': 'bg-green-500/20 text-green-400',
+  'webhook.delete': 'bg-red-500/20 text-red-400',
+  'limits.update_global': 'bg-orange-500/20 text-orange-400',
+  'limits.update_server': 'bg-blue-500/20 text-blue-400',
+  'limits.reset_server': 'bg-yellow-500/20 text-yellow-400',
 };
+
+const LIMIT_LABELS: Record<string, string> = {
+  maxChannelsPerServer: 'Channels / server',
+  maxVoiceUsersPerChannel: 'Voice users / channel',
+  maxCategoriesPerServer: 'Categories / server',
+  maxMembersPerServer: 'Members / server',
+  maxWebhooksPerServer: 'Webhooks / server',
+  maxSecureChannelsPerServer: 'Secure channels / server',
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * "field: before → after" for the fields that changed, and only those: the
+ * row stores both whole snapshots, and five unchanged numbers would bury the
+ * one an admin actually moved. A reset carries `before` alone (every override
+ * goes back to the global default). `unset` names a missing or null value: on a
+ * server row null IS "use the global default". A field this client has no label
+ * for still shows under its raw name when it holds a number (a limit added
+ * later); anything else in a snapshot (an id, a timestamp) is not a limit.
+ */
+function formatLimitsChange(metadata: Record<string, unknown>, unset: string): string {
+  const before = isRecord(metadata.before) ? metadata.before : {};
+  const isReset = !('after' in metadata);
+  const after = isRecord(metadata.after) ? metadata.after : {};
+  const isLimitValue = (value: unknown) => value === null || value === undefined || typeof value === 'number';
+  const show = (value: unknown) => (typeof value === 'number' ? String(value) : unset);
+  const keys = [...new Set([...Object.keys(LIMIT_LABELS), ...Object.keys(before), ...Object.keys(after)])];
+  const changes: string[] = [];
+  for (const key of keys) {
+    if (!(key in LIMIT_LABELS) && !(isLimitValue(before[key]) && isLimitValue(after[key]))) continue;
+    const from = before[key] ?? null;
+    const to = isReset ? null : after[key] ?? null;
+    if (from === to) continue;
+    changes.push(`${LIMIT_LABELS[key] ?? key}: ${show(from)} → ${show(to)}`);
+  }
+  if (changes.length > 0) return changes.join(', ');
+  return isReset ? 'No overrides were set' : 'No change';
+}
 
 function formatMetadata(action: AuditAction, metadata: Record<string, unknown> | null): string {
   if (!metadata) return '';
@@ -88,6 +149,20 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
         + `in ${metadata.durationMs}ms`;
     case 'feature_flag.update':
       return `${metadata.enabled ? 'Enabled' : 'Disabled'}`;
+    case 'webhook.disable':
+    case 'webhook.enable':
+      return metadata.name ? `"${metadata.name}" (server ${metadata.serverId})` : '';
+    case 'webhook.delete': {
+      const parts: string[] = [];
+      if (metadata.name) parts.push(`"${metadata.name}" (server ${metadata.serverId})`);
+      parts.push(metadata.purge ? `${metadata.deletedMessages ?? 0} message(s) deleted` : 'messages kept');
+      return parts.join(' | ');
+    }
+    case 'limits.update_global':
+      return formatLimitsChange(metadata, '-');
+    case 'limits.update_server':
+    case 'limits.reset_server':
+      return formatLimitsChange(metadata, 'global');
     default:
       return '';
   }
@@ -114,6 +189,7 @@ function isSystemActor(log: { action: AuditAction; metadata: Record<string, unkn
 const ALL_ACTIONS: AuditAction[] = [
   'user.ban', 'user.unban', 'user.delete', 'user.role_change',
   'server.delete',
+  'server.discovery_feature', 'server.discovery_unfeature', 'server.discovery_block', 'server.discovery_unblock',
   'ip_ban.create', 'ip_ban.delete',
   'storage.file_delete', 'storage.cleanup_orphans',
   'announcement.create', 'announcement.publish', 'announcement.delete',
@@ -122,6 +198,8 @@ const ALL_ACTIONS: AuditAction[] = [
   'ratelimit.update', 'ratelimit.reset', 'ratelimit.clear_user',
   'feature_flag.update', 'feature_flag.reset',
   'registration.hygiene_sweep',
+  'webhook.disable', 'webhook.enable', 'webhook.delete',
+  'limits.update_global', 'limits.update_server', 'limits.reset_server',
 ];
 
 export function AdminAuditLog() {

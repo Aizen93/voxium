@@ -3,17 +3,16 @@ import { authenticate, requireVerifiedEmail, requireConsent } from '../middlewar
 import { rateLimitMessageSend, rateLimitInteract } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
-import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
+import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, mentionsEveryone as contentMentionsEveryone, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
+import { verifyAttachmentUploads } from '../utils/uploadVerification';
 import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, attachMentions } from '../utils/mentions';
 import { hasChannelPermission } from '../utils/permissionCalculator';
-
-const attachmentSelect = {
-  select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
-} as const;
+import { shapeMessageRow, isWebhookRow } from '../utils/messageAuthor';
+import { authorSelect, attachmentSelect, replyToSelect } from '../utils/messageSelect';
 
 export const messageRouter = Router({ mergeParams: true });
 
@@ -49,16 +48,8 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
     if (!canView) throw secureDenied() ?? new ForbiddenError('You do not have permission to view this channel');
 
     const messageInclude = {
-      author: {
-        select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
-      },
-      replyTo: {
-        select: {
-          id: true,
-          content: true,
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
-        },
-      },
+      author: authorSelect,
+      replyTo: replyToSelect,
       reactions: reactionInclude,
       attachments: attachmentSelect,
     };
@@ -105,7 +96,7 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
 
       const mentionMap = await batchResolveMentions(unique, channel.serverId);
       const data = unique.map((m) => ({
-        ...m,
+        ...shapeMessageRow(m),
         reactions: aggregateReactions(m.reactions),
         mentions: attachMentions(m, mentionMap),
       }));
@@ -133,7 +124,7 @@ messageRouter.get('/', async (req: Request<{ channelId: string }>, res: Response
     const reversed = messages.reverse();
     const mentionMap = await batchResolveMentions(reversed, channel.serverId);
     const data = reversed.map((m) => ({
-      ...m,
+      ...shapeMessageRow(m),
       reactions: aggregateReactions(m.reactions),
       mentions: attachMentions(m, mentionMap),
     }));
@@ -221,7 +212,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
           }
           if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
           if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this channel');
-          if (a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
+          if (!Number.isSafeInteger(a.fileSize) || a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
           if (a.mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be opaque');
         }
         attachments = rawAttachments;
@@ -245,7 +236,7 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
           }
           if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
           if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this channel');
-          if (a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
+          if (!Number.isSafeInteger(a.fileSize) || a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
           if (!ALLOWED_ATTACHMENT_TYPES.includes(a.mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) throw new BadRequestError('Invalid file type');
         }
       }
@@ -276,11 +267,30 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       if (!parent || parent.channelId !== channelId) throw new BadRequestError('Invalid replyToId');
     }
 
-    const message = await prisma.$transaction(async (tx) => {
+    // @everyone pings the channel only when the author holds MENTION_EVERYONE
+    // there — decided NOW and stored on the row, never re-derived from the text
+    // (ciphertext is never read; a secure channel's member list is not a ping
+    // list either)
+    const pingsEveryone = !channel.secure && contentMentionsEveryone(content)
+      && await hasChannelPermission(req.user!.userId, channelId, channel.serverId, Permissions.MENTION_EVERYONE);
+
+    // Read the uploaded objects back before the row points at them: the
+    // stored size is the real one (an encrypted blob's is its ciphertext's)
+    if (attachments?.length) {
+      const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
+      await verifyAttachmentUploads(attachments.map((a) => ({
+        key: a.s3Key,
+        declaredSize: a.fileSize,
+        maxSize: channel.secure ? maxCipherSize : getMaxAttachmentSize(a.mimeType),
+      })));
+    }
+
+    const created = await prisma.$transaction(async (tx) => {
       const msg = await tx.message.create({
         data: {
           content,
           encrypted: channel.secure,
+          mentionsEveryone: pingsEveryone,
           channelId,
           authorId: req.user!.userId,
           ...(replyToId && { replyToId }),
@@ -302,21 +312,18 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
       return tx.message.findUniqueOrThrow({
         where: { id: msg.id },
         include: {
-          author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
-          replyTo: {
-            select: {
-              id: true, content: true,
-              author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
-            },
-          },
+          author: authorSelect,
+          replyTo: replyToSelect,
           attachments: attachmentSelect,
         },
       });
     });
+    const message = shapeMessageRow(created);
 
     // Resolve mentions from content — never for ciphertext (nothing to parse,
     // and the server must not pretend to know what an encrypted message says)
-    const mentionIds = channel.secure ? [] : extractMentionIds(content);
+    // and never for a webhook row (an unauthenticated URL must not ping anyone)
+    const mentionIds = channel.secure || isWebhookRow(created) ? [] : extractMentionIds(content);
     const mentions = await resolveMentionsForServer(mentionIds, channel.serverId);
 
     // Broadcast to all users subscribed to this channel
@@ -393,24 +400,22 @@ messageRouter.patch('/:messageId', rateLimitInteract, async (req: Request<{ chan
       if (contentErr) throw new BadRequestError(contentErr);
     }
 
-    const updated = await prisma.message.update({
+    // Re-decided on every edit with the editor's CURRENT permission: an
+    // @everyone edited in by someone who may not ping the channel stays text,
+    // and one edited out stops pinging
+    const pingsEveryone = !message.channel!.secure && contentMentionsEveryone(content)
+      && await hasChannelPermission(req.user!.userId, channelId, message.channel!.serverId, Permissions.MENTION_EVERYONE);
+
+    const updated = shapeMessageRow(await prisma.message.update({
       where: { id: messageId },
-      data: { content, editedAt: new Date() },
+      data: { content, editedAt: new Date(), mentionsEveryone: pingsEveryone },
       include: {
-        author: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true },
-        },
-        replyTo: {
-          select: {
-            id: true,
-            content: true,
-            author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
-          },
-        },
+        author: authorSelect,
+        replyTo: replyToSelect,
         reactions: reactionInclude,
         attachments: attachmentSelect,
       },
-    });
+    }));
 
     const editMentionIds = message.channel!.secure ? [] : extractMentionIds(content);
     const editMentions = await resolveMentionsForServer(editMentionIds, message.channel!.serverId);

@@ -44,34 +44,15 @@ function createApp() {
   return app;
 }
 
-describe('Search routes — DM search excludes E2E messages', () => {
+describe('Search routes — there is no server-side DM search', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('always filters encrypted messages out of DM search', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
-      id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2',
-    } as any);
-    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([]);
-
+  it('answers 404 for the removed DM route and touches no table (every DM is ciphertext; search is local)', async () => {
     const res = await request(createApp()).get('/api/v1/search/dm/conv-1/messages?q=secret');
-
-    expect(res.status).toBe(200);
-    expect(prisma.message.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ encrypted: false, conversationId: 'conv-1' }),
-      })
-    );
-  });
-
-  it('still denies non-participants', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
-      id: 'conv-1', user1Id: 'other-1', user2Id: 'other-2',
-    } as any);
-
-    const res = await request(createApp()).get('/api/v1/search/dm/conv-1/messages?q=secret');
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
+    expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
     expect(prisma.message.findMany).not.toHaveBeenCalled();
   });
 });
@@ -136,6 +117,46 @@ describe('Search routes — server search respects visibility and encryption', (
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Invalid channel');
     expect(prisma.message.findMany).not.toHaveBeenCalled();
+  });
+
+  it('returns a webhook-posted match with its synthesised author (never a null author), a human match unchanged', async () => {
+    vi.mocked(prisma.channel.findMany).mockResolvedValueOnce([{ id: 'ch-1', secure: false }] as any);
+    mockFilterVisibleChannels.mockResolvedValueOnce([{ id: 'ch-1', secure: false }]);
+    const human = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null };
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([
+      {
+        id: 'msg-hook', content: 'deploy hello', type: 'user', channelId: 'ch-1', authorId: null,
+        webhookId: 'wh-1', webhookName: 'CI', author: null, channel: { name: 'general' },
+        createdAt: new Date('2026-10-18T12:00:00Z'), editedAt: null,
+      },
+      {
+        id: 'msg-gone', content: 'old hello', type: 'user', channelId: 'ch-1', authorId: null,
+        webhookId: null, webhookName: 'Old bot', author: null, channel: { name: 'general' },
+        createdAt: new Date('2026-10-17T12:00:00Z'), editedAt: null,
+      },
+      {
+        id: 'msg-human', content: 'hello @everyone', type: 'user', channelId: 'ch-1', authorId: 'user-2',
+        webhookId: null, webhookName: null, author: human, channel: { name: 'general' },
+        mentionsEveryone: true,
+        createdAt: new Date('2026-10-16T12:00:00Z'), editedAt: null,
+      },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/search/servers/srv-1/messages?q=hello');
+
+    expect(res.status).toBe(200);
+    const [hook, gone, person] = res.body.data;
+    expect(hook.author).toEqual({ id: 'webhook:wh-1', username: 'CI', displayName: 'CI', avatarUrl: null, isWebhook: true });
+    expect(hook.webhookId).toBe('wh-1');
+    expect(hook.channelName).toBe('general');
+    expect(gone.author).toEqual({ id: 'webhook:deleted', username: 'Old bot', displayName: 'Old bot', avatarUrl: null, isWebhook: true });
+    expect(gone.webhookId).toBeNull();
+    expect(person.author).toEqual(human);
+    expect(person.webhookId).toBeNull();
+    // The server's @everyone decision travels with a result, so it renders as
+    // a mention there exactly as it does in the channel
+    expect(person.mentionsEveryone).toBe(true);
+    expect(hook.mentionsEveryone).toBeUndefined();
   });
 
   it('rejects a channelId the member cannot VIEW with the same generic error', async () => {

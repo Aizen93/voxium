@@ -120,14 +120,15 @@ describe('DeleteAccountSection', () => {
     expect(confirmBtn().disabled).toBe(false);
   });
 
-  it('surfaces any other failure and stays open', async () => {
+  it('surfaces any other failure, translated, and stays open', async () => {
     deleteAccount.mockRejectedValueOnce(new Error('Password is incorrect'));
     render();
     open();
     setInput(byId('delete-account-password'), 'wrong');
     setInput(byId('delete-account-confirm'), 'settings.deleteAccount.confirmWord');
     await submit();
-    expect(container.textContent).toContain('Password is incorrect');
+    // the server's sentence is mapped (serverErrors.passwordIncorrect), never shown raw
+    expect(container.textContent).toContain('serverErrors.passwordIncorrect');
     expect(container.querySelector('form')).toBeTruthy();
   });
 });

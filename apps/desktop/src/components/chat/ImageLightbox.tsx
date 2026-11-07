@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { X, Download } from 'lucide-react';
 import { toast } from '../../stores/toastStore';
 
@@ -11,6 +12,7 @@ interface Props {
 }
 
 export function ImageLightbox({ src, alt, fileName, onClose }: Props) {
+  const { t } = useTranslation();
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -29,9 +31,9 @@ export function ImageLightbox({ src, alt, fileName, onClose }: Props) {
       a.href = src;
       a.download = fileName || alt || 'image';
       a.click();
-      toast.success(`Downloaded "${fileName || alt || 'image'}"`);
+      toast.success(t('attachment.downloadedName', { name: fileName || alt || t('attachment.image') }));
     } catch {
-      toast.error('Failed to download file');
+      toast.error(t('attachment.failedToDownload'));
     }
   };
 
@@ -47,16 +49,16 @@ export function ImageLightbox({ src, alt, fileName, onClose }: Props) {
         <button
           onClick={(e) => { e.stopPropagation(); handleDownload(); }}
           className="rounded-full bg-vox-bg-tertiary/80 p-2 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-tertiary transition-colors"
-          title="Download"
-          aria-label="Download"
+          title={t('common.download')}
+          aria-label={t('common.download')}
         >
           <Download size={20} />
         </button>
         <button
           onClick={onClose}
           className="rounded-full bg-vox-bg-tertiary/80 p-2 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-tertiary transition-colors"
-          title="Close"
-          aria-label="Close"
+          title={t('common.close')}
+          aria-label={t('common.close')}
         >
           <X size={20} />
         </button>

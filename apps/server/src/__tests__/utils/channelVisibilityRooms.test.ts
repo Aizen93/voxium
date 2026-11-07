@@ -2,14 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { mockIn, mockFetchSockets, mockPrisma, mockFilterForUsers, mockGetIO } = vi.hoisted(() => {
+const { mockIn, mockTo, mockFetchSockets, mockPrisma, mockFilterForUsers, mockGetIO, mockVoiceStates, mockReplay } = vi.hoisted(() => {
   const mockFetchSockets = vi.fn();
   const mockIn = vi.fn();
   return {
     mockIn,
+    mockTo: vi.fn(),
     mockFetchSockets,
     mockFilterForUsers: vi.fn(),
     mockGetIO: vi.fn(),
+    mockVoiceStates: vi.fn(),
+    mockReplay: vi.fn(),
     mockPrisma: {
       channel: { findMany: vi.fn() },
       serverMember: { findUnique: vi.fn() },
@@ -19,6 +22,11 @@ const { mockIn, mockFetchSockets, mockPrisma, mockFilterForUsers, mockGetIO } = 
 
 vi.mock('../../websocket/socketServer', () => ({
   getIO: mockGetIO,
+}));
+
+vi.mock('../../websocket/voiceHandler', () => ({
+  getVoiceStateForServers: mockVoiceStates,
+  replayVoiceState: mockReplay,
 }));
 
 vi.mock('../../utils/prisma', () => ({
@@ -46,9 +54,13 @@ function createMockSocket(userId: string, opts?: { voiceChannelId?: string; room
 
 function resetMocks() {
   vi.clearAllMocks();
-  mockGetIO.mockReturnValue({ in: mockIn });
+  mockGetIO.mockReturnValue({ in: mockIn, to: mockTo });
   mockIn.mockReturnValue({ fetchSockets: mockFetchSockets });
+  mockTo.mockImplementation((room: string) => ({ room, emit: vi.fn() }));
   mockFetchSockets.mockResolvedValue([]);
+  // Default: nobody is in voice anywhere on the server
+  mockVoiceStates.mockResolvedValue([]);
+  mockReplay.mockResolvedValue(undefined);
   mockPrisma.channel.findMany.mockResolvedValue([]);
   mockPrisma.serverMember.findUnique.mockResolvedValue({ userId: 'any' });
   // Default: everyone sees every channel
@@ -225,5 +237,94 @@ describe('syncChannelVisibilityRooms', () => {
     await expect(syncChannelVisibilityRooms('server-1')).resolves.toBeUndefined();
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
+  });
+
+  // ── Voice occupancy replay on a gained room ──────────────────────────────
+  //
+  // A socket that ENTERS a channel room here missed every voice event in it,
+  // like one that just connected: the occupants are replayed as a snapshot.
+
+  const occupied = (channelId: string) => [{ channelId, serverId: 'server-1', userIds: ['u-9'], userStates: new Map() }];
+
+  it('replays the occupants of an OCCUPIED channel a socket just gained, as a connect-style snapshot to the user room', async () => {
+    const socket = createMockSocket('user-1');
+    mockFetchSockets.mockResolvedValueOnce([socket]);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-voice' }, { id: 'ch-text' }]);
+    mockVoiceStates.mockResolvedValueOnce(occupied('ch-voice'));
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(mockVoiceStates).toHaveBeenCalledWith(['server-1']);
+    expect(socket.join).toHaveBeenCalledWith('channel:ch-voice');
+    expect(mockTo).toHaveBeenCalledWith('user:user-1');
+    expect(mockReplay).toHaveBeenCalledTimes(1);
+    expect(mockReplay).toHaveBeenCalledWith(expect.objectContaining({ room: 'user:user-1' }), ['server-1'], new Set(['ch-voice']), { source: 'connect' });
+  });
+
+  it('does not replay to a socket ALREADY in the room, nor for an affected channel nobody is in', async () => {
+    const already = createMockSocket('user-1', { rooms: ['user:user-1', 'channel:ch-voice'] });
+    const fresh = createMockSocket('user-2');
+    mockFetchSockets.mockResolvedValueOnce([already, fresh]);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-voice' }, { id: 'ch-empty' }]);
+    mockVoiceStates.mockResolvedValueOnce(occupied('ch-voice'));
+
+    await syncChannelVisibilityRooms('server-1');
+
+    // Both are (re)joined; only the socket that ENTERED the occupied room is replayed
+    expect(already.join).toHaveBeenCalledWith('channel:ch-voice');
+    expect(fresh.join).toHaveBeenCalledWith('channel:ch-voice');
+    expect(mockReplay).toHaveBeenCalledTimes(1);
+    expect(mockReplay).toHaveBeenCalledWith(expect.objectContaining({ room: 'user:user-2' }), ['server-1'], new Set(['ch-voice']), { source: 'connect' });
+  });
+
+  it('a socket that only LOST visibility is never replayed', async () => {
+    const socket = createMockSocket('user-1', { rooms: ['user:user-1', 'channel:ch-voice'] });
+    mockFetchSockets.mockResolvedValueOnce([socket]);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-voice' }]);
+    mockVoiceStates.mockResolvedValueOnce(occupied('ch-voice'));
+    mockFilterForUsers.mockResolvedValueOnce(visibility({ 'user-1': [] }));
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(socket.leave).toHaveBeenCalledWith('channel:ch-voice');
+    expect(mockReplay).not.toHaveBeenCalled();
+  });
+
+  it('with nobody in voice: ONE occupancy read and no replay at all — a role edit on a big server stays one round trip', async () => {
+    const sockets = Array.from({ length: 40 }, (_, i) => createMockSocket(`user-${i}`));
+    mockFetchSockets.mockResolvedValueOnce(sockets);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }, { id: 'ch-2' }]);
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(mockVoiceStates).toHaveBeenCalledTimes(1);
+    expect(mockReplay).not.toHaveBeenCalled();
+    for (const s of sockets) expect(s.join).toHaveBeenCalledWith('channel:ch-1');
+  });
+
+  it('a failing occupancy read or replay is logged; the rooms are still synced', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const socket = createMockSocket('user-1');
+    mockFetchSockets.mockResolvedValueOnce([socket]);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-voice' }]);
+    mockVoiceStates.mockRejectedValueOnce(new Error('redis away'));
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(socket.join).toHaveBeenCalledWith('channel:ch-voice');
+    expect(mockReplay).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('[Visibility] Could not read voice occupancy for the replay:', 'redis away');
+
+    const socket2 = createMockSocket('user-2');
+    mockFetchSockets.mockResolvedValueOnce([socket2]);
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-voice' }]);
+    mockVoiceStates.mockResolvedValueOnce(occupied('ch-voice'));
+    mockReplay.mockRejectedValueOnce(new Error('emit failed'));
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(socket2.join).toHaveBeenCalledWith('channel:ch-voice');
+    expect(warn).toHaveBeenCalledWith('[Visibility] Could not replay voice occupancy to', 'user-2', '(the rooms are joined):', 'emit failed');
+    warn.mockRestore();
   });
 });

@@ -1,22 +1,107 @@
-import { useEffect, useState, useCallback } from 'react';
-import { Search, Trash2, Settings2, RotateCcw, Save, X } from 'lucide-react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { Search, Trash2, Settings2, RotateCcw, Save, X, Star, StarOff, Ban, ShieldOff, Webhook } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
+import { DirectoryChips } from './DirectoryChips';
+import { AdminServerWebhooksModal } from './AdminServerWebhooksModal';
 import { toast } from '../stores/toastStore';
-import type { ResourceLimits, ServerResourceLimits } from '@voxium/shared';
+import { apiErrorMessage, logMessage } from '../utils/apiError';
+import type { AdminServer, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
 
 const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; description: string; min: number; max: number }> = [
-  { key: 'maxChannelsPerServer', label: 'Max Channels / Server', description: 'Maximum text + voice channels per server', min: 1, max: 500 },
+  { key: 'maxChannelsPerServer', label: 'Max Channels / Server', description: 'Maximum text + voice channels per server (secure channels are counted separately)', min: 1, max: 500 },
   { key: 'maxVoiceUsersPerChannel', label: 'Max Voice Users / Channel', description: 'Maximum users in a single voice channel', min: 1, max: 500 },
   { key: 'maxCategoriesPerServer', label: 'Max Categories / Server', description: 'Maximum channel categories per server', min: 1, max: 200 },
   { key: 'maxMembersPerServer', label: 'Max Members / Server', description: 'Maximum members per server (0 = unlimited)', min: 0, max: 100000 },
+  { key: 'maxWebhooksPerServer', label: 'Max Webhooks / Server', description: 'Maximum incoming webhooks per server (0 freezes creation)', min: 0, max: 100 },
+  { key: 'maxSecureChannelsPerServer', label: 'Max Secure Channels / Server', description: 'Maximum secure (end-to-end encrypted, invite-only) channels per server, apart from the channel limit (0 freezes creation)', min: 0, max: 100 },
 ];
+
+type LimitKey = keyof ResourceLimits;
+
+const WHOLE_NUMBER_RE = /^[0-9]+$/;
+const NOT_A_WHOLE_NUMBER = 'Every limit needs a whole number';
+
+/** The typed text as a limit, or null when it is not a whole number (empty included). */
+function parseLimit(text: string): number | null {
+  const trimmed = text.trim();
+  if (!WHOLE_NUMBER_RE.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * The draft of one limits form. Each field keeps the TEXT the admin typed: a
+ * cleared field is '' (never coerced to 0, which freezes webhook creation and
+ * makes members unlimited out of a slip of the backspace key).
+ *
+ * Text a number input cannot parse (Firefox lets letters in) reads as '', and
+ * typing it into an already empty field fires no change at all, so the draft
+ * alone cannot tell "cleared" from "unreadable". The element's own
+ * `validity.badInput` can, and Save asks it.
+ */
+function useLimitsDraft(initial: () => Record<LimitKey, string>) {
+  const [draft, setDraft] = useState<Record<LimitKey, string>>(initial);
+  const inputs = useRef<Partial<Record<LimitKey, HTMLInputElement | null>>>({});
+
+  const bindInput = (key: LimitKey) => ({
+    ref: (el: HTMLInputElement | null) => { inputs.current[key] = el; },
+    value: draft[key],
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+      const { value } = e.target;
+      setDraft((d) => ({ ...d, [key]: value }));
+    },
+  });
+
+  const isUnreadable = (key: LimitKey) => inputs.current[key]?.validity?.badInput === true;
+
+  return { draft, setDraft, bindInput, isUnreadable };
+}
+
+function limitsToText(limits: ResourceLimits): Record<LimitKey, string> {
+  const text = {} as Record<LimitKey, string>;
+  for (const f of LIMIT_FIELDS) text[f.key] = String(limits[f.key]);
+  return text;
+}
+
+// Directory curation (server discovery). Featured is a hand-picked row on the
+// first page of Explore and never changes the ranked list; Block hides the
+// server and the owner cannot relist until an admin unblocks (hiding alone
+// invites a relist war). Unblock does not relist: the owner switches it back
+// on. Every action is audited server-side.
+type CurationAction = 'feature' | 'unfeature' | 'block' | 'unblock';
+const CURATION: Record<CurationAction, {
+  title: string; confirmLabel: string; variant: 'danger' | 'primary';
+  patch: { featured?: boolean; blocked?: boolean }; done: string; message: (server: AdminServer) => string;
+}> = {
+  feature: {
+    title: 'Feature in Explore', confirmLabel: 'Feature', variant: 'primary', patch: { featured: true }, done: 'Server featured',
+    message: (s) => `Show "${s.name}" in the Featured row on the first page of Explore? Featured is hand-picked and never changes the ranked list.`,
+  },
+  unfeature: {
+    title: 'Remove from Featured', confirmLabel: 'Unfeature', variant: 'primary', patch: { featured: false }, done: 'Server unfeatured',
+    // Only this action clears the stamp: a hidden featured server would come
+    // back to the Featured row the moment its owner relists it.
+    message: (s) => s.discoveryListed
+      ? `Take "${s.name}" out of the Featured row? It stays listed.`
+      : `Take "${s.name}" out of the Featured row? It is hidden right now; without this it returns to the Featured row the moment it is listed again.`,
+  },
+  block: {
+    title: 'Block from directory', confirmLabel: 'Block', variant: 'danger', patch: { blocked: true }, done: 'Server blocked from the directory',
+    message: (s) => `Hide "${s.name}" from Explore and stop its owner from relisting it until an admin unblocks it? Members, invites and the server itself are not affected.`
+      + (s.featuredAt ? ' It also loses its Featured spot, which Unblock does not restore.' : ''),
+  },
+  unblock: {
+    title: 'Unblock from directory', confirmLabel: 'Unblock', variant: 'primary', patch: { blocked: false }, done: 'Server unblocked. Its owner can relist it from Server settings.',
+    message: (s) => `Lift the directory block on "${s.name}"? It does not relist by itself: the owner switches it back on from Server settings, Discovery tab.`,
+  },
+};
 
 export function AdminServerList() {
   const {
-    servers, serversTotal, serversPage, serversSearch, loading,
-    fetchServers, setServersSearch, deleteServer,
+    servers, serversTotal, serversPage, serversSearch, serversListedOnly, loading,
+    fetchServers, setServersSearch, setServersListedOnly, setServerDiscovery, deleteServer,
     globalLimits, serverLimits, serverLimitsServerId,
     fetchGlobalLimits, updateGlobalLimits,
     fetchServerLimits, updateServerLimits, resetServerLimits,
@@ -25,6 +110,8 @@ export function AdminServerList() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [editingServer, setEditingServer] = useState<{ id: string; name: string } | null>(null);
   const [showGlobalLimits, setShowGlobalLimits] = useState(false);
+  const [curation, setCuration] = useState<{ server: AdminServer; action: CurationAction } | null>(null);
+  const [webhooksServer, setWebhooksServer] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     fetchServers(1);
@@ -44,28 +131,77 @@ export function AdminServerList() {
   const columns = [
     { key: 'name', label: 'Name' },
     { key: 'owner', label: 'Owner' },
+    { key: 'directory', label: 'Directory', width: '180px' },
     { key: 'members', label: 'Members', width: '80px' },
     { key: 'channels', label: 'Channels', width: '80px' },
     { key: 'messages', label: 'Messages', width: '100px' },
     { key: 'created', label: 'Created', width: '120px' },
-    { key: 'actions', label: '', width: '90px' },
+    { key: 'actions', label: '', width: '180px' },
   ];
 
   const rows = servers.map((server) => ({
     name: <span className="text-vox-text-primary font-medium">{server.name}</span>,
     owner: server.ownerUsername,
+    directory: <DirectoryChips server={server} />,
     members: server.memberCount,
     channels: server.channelCount,
     messages: server.messageCount.toLocaleString(),
     created: new Date(server.createdAt).toLocaleDateString(),
     actions: (
       <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+        {server.featuredAt ? (
+          <button
+            onClick={() => setCuration({ server, action: 'unfeature' })}
+            className="p-1 rounded text-purple-400 hover:text-vox-text-primary"
+            title="Remove from Featured"
+            data-testid="server-unfeature"
+          >
+            <StarOff size={14} />
+          </button>
+        ) : (
+          <button
+            onClick={() => setCuration({ server, action: 'feature' })}
+            disabled={!server.discoveryListed}
+            className="p-1 rounded text-vox-text-muted hover:text-purple-400 disabled:opacity-30 disabled:cursor-not-allowed"
+            title={server.discoveryListed ? 'Feature in Explore' : 'Only listed servers can be featured'}
+            data-testid="server-feature"
+          >
+            <Star size={14} />
+          </button>
+        )}
+        {server.discoveryBlockedAt ? (
+          <button
+            onClick={() => setCuration({ server, action: 'unblock' })}
+            className="p-1 rounded text-orange-400 hover:text-vox-text-primary"
+            title="Unblock from directory"
+            data-testid="server-unblock"
+          >
+            <ShieldOff size={14} />
+          </button>
+        ) : (
+          <button
+            onClick={() => setCuration({ server, action: 'block' })}
+            className="p-1 rounded text-vox-text-muted hover:text-orange-400"
+            title="Block from directory"
+            data-testid="server-block"
+          >
+            <Ban size={14} />
+          </button>
+        )}
         <button
           onClick={() => openServerLimits({ id: server.id, name: server.name })}
           className="p-1 rounded text-vox-text-muted hover:text-vox-accent-info"
           title="Configure limits"
         >
           <Settings2 size={14} />
+        </button>
+        <button
+          onClick={() => setWebhooksServer({ id: server.id, name: server.name })}
+          className="p-1 rounded text-vox-text-muted hover:text-vox-accent-info"
+          title="Webhooks"
+          data-testid="server-webhooks"
+        >
+          <Webhook size={14} />
         </button>
         <button
           onClick={() => setDeleteTarget({ id: server.id, name: server.name })}
@@ -117,6 +253,16 @@ export function AdminServerList() {
             className="w-full rounded-md bg-vox-bg-hover border border-vox-border text-sm text-vox-text-primary pl-9 pr-3 py-2 placeholder:text-vox-text-muted focus:outline-none focus:border-vox-accent-primary"
           />
         </div>
+        <label className="flex items-center gap-2 px-3 text-xs text-vox-text-secondary whitespace-nowrap select-none" title="Only servers currently in Explore">
+          <input
+            type="checkbox"
+            checked={serversListedOnly}
+            onChange={(e) => { setServersListedOnly(e.target.checked); fetchServers(1); }}
+            className="rounded"
+            data-testid="servers-listed-only"
+          />
+          Listed only
+        </label>
         <button onClick={handleSearch} className="px-4 py-2 text-sm rounded-md bg-vox-accent-primary text-white hover:bg-vox-accent-hover transition-colors">
           Search
         </button>
@@ -145,6 +291,37 @@ export function AdminServerList() {
         />
       )}
 
+      {webhooksServer && (
+        <AdminServerWebhooksModal
+          serverId={webhooksServer.id}
+          serverName={webhooksServer.name}
+          onClose={() => setWebhooksServer(null)}
+        />
+      )}
+
+      {curation && (
+        <AdminConfirmModal
+          title={CURATION[curation.action].title}
+          message={CURATION[curation.action].message(curation.server)}
+          confirmLabel={CURATION[curation.action].confirmLabel}
+          variant={CURATION[curation.action].variant}
+          onConfirm={async () => {
+            const spec = CURATION[curation.action];
+            try {
+              await setServerDiscovery(curation.server.id, spec.patch);
+              toast.success(spec.done);
+              // "Listed only": a blocked server no longer belongs on the page
+              if (serversListedOnly) await fetchServers();
+            } catch (err) {
+              // the server says why (e.g. "Only listed servers can be featured")
+              toast.error(apiErrorMessage(err, 'Failed to update the directory state'));
+            }
+            setCuration(null);
+          }}
+          onCancel={() => setCuration(null)}
+        />
+      )}
+
       {deleteTarget && (
         <AdminConfirmModal
           title="Delete Server"
@@ -167,16 +344,33 @@ export function AdminServerList() {
 // ─── Global Limits Editor ──────────────────────────────────────────────────
 
 function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave: (l: Partial<ResourceLimits>) => Promise<void> }) {
-  const [draft, setDraft] = useState<ResourceLimits>({ ...limits });
+  const { draft, setDraft, bindInput, isUnreadable } = useLimitsDraft(() => limitsToText(limits));
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => { setDraft({ ...limits }); }, [limits]);
+  useEffect(() => { setDraft(limitsToText(limits)); }, [limits, setDraft]);
 
-  const hasChanges = LIMIT_FIELDS.some((f) => draft[f.key] !== limits[f.key]);
+  // A cleared field parses to null, so it counts as a change: Save shows up
+  // and says why it refuses instead of the form silently looking untouched
+  const hasChanges = LIMIT_FIELDS.some((f) => parseLimit(draft[f.key]) !== limits[f.key]);
 
   const handleSave = async () => {
+    const values = {} as ResourceLimits;
+    for (const f of LIMIT_FIELDS) {
+      const value = isUnreadable(f.key) ? null : parseLimit(draft[f.key]);
+      // Every global limit is required: there is no lower layer to fall back to
+      if (value === null) {
+        toast.error(NOT_A_WHOLE_NUMBER);
+        return;
+      }
+      values[f.key] = value;
+    }
     setSaving(true);
-    try { await onSave(draft); } catch { toast.error('Failed to save limits'); }
+    try {
+      await onSave(values);
+    } catch (err) {
+      console.error('Failed to save global limits:', logMessage(err));
+      toast.error(apiErrorMessage(err, 'Failed to save limits'));
+    }
     setSaving(false);
   };
 
@@ -190,8 +384,8 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
               type="number"
               min={field.min}
               max={field.max}
-              value={draft[field.key]}
-              onChange={(e) => setDraft({ ...draft, [field.key]: Number(e.target.value) })}
+              step={1}
+              {...bindInput(field.key)}
               className="w-full rounded-md bg-vox-bg-hover border border-vox-border text-sm text-vox-text-primary px-3 py-1.5 focus:outline-none focus:border-vox-accent-primary"
             />
             <p className="text-[10px] text-vox-text-muted mt-0.5">{field.description}</p>
@@ -200,7 +394,7 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
       </div>
       {hasChanges && (
         <div className="flex justify-end gap-2 pt-1">
-          <button onClick={() => setDraft({ ...limits })} className="px-3 py-1.5 text-xs rounded-md text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors">
+          <button onClick={() => setDraft(limitsToText(limits))} className="px-3 py-1.5 text-xs rounded-md text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors">
             Cancel
           </button>
           <button
@@ -219,6 +413,12 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
 
 // ─── Server Limits Modal ───────────────────────────────────────────────────
 
+function emptyOverrides(): Record<LimitKey, string> {
+  const text = {} as Record<LimitKey, string>;
+  for (const f of LIMIT_FIELDS) text[f.key] = '';
+  return text;
+}
+
 function ServerLimitsModal({
   serverName,
   serverId: _serverId,
@@ -236,30 +436,43 @@ function ServerLimitsModal({
   onReset: () => Promise<void>;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  const { draft, setDraft, bindInput, isUnreadable } = useLimitsDraft(emptyOverrides);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (serverLimits) {
-      const d: Record<string, string> = {};
+      const d = emptyOverrides();
       for (const f of LIMIT_FIELDS) {
-        const v = serverLimits[f.key as keyof ServerResourceLimits];
+        const v = serverLimits[f.key];
         d[f.key] = v !== null && v !== undefined ? String(v) : '';
       }
       setDraft(d);
     }
-  }, [serverLimits]);
+  }, [serverLimits, setDraft]);
 
   const handleSave = async () => {
+    const updates = {} as ServerResourceLimits;
+    for (const f of LIMIT_FIELDS) {
+      const text = draft[f.key].trim();
+      // '' is "use the global default" here, unless the input holds text it could not parse
+      if (text === '' && !isUnreadable(f.key)) {
+        updates[f.key] = null;
+        continue;
+      }
+      const value = parseLimit(text);
+      if (value === null) {
+        toast.error(NOT_A_WHOLE_NUMBER);
+        return;
+      }
+      updates[f.key] = value;
+    }
     setSaving(true);
     try {
-      const updates: Record<string, number | null> = {};
-      for (const f of LIMIT_FIELDS) {
-        const val = draft[f.key];
-        updates[f.key] = val === '' ? null : Number(val);
-      }
       await onSave(updates);
-    } catch { toast.error('Failed to save server limits'); }
+    } catch (err) {
+      console.error('Failed to save server limits:', logMessage(err));
+      toast.error(apiErrorMessage(err, 'Failed to save server limits'));
+    }
     setSaving(false);
   };
 
@@ -267,10 +480,11 @@ function ServerLimitsModal({
     setSaving(true);
     try {
       await onReset();
-      const d: Record<string, string> = {};
-      for (const f of LIMIT_FIELDS) d[f.key] = '';
-      setDraft(d);
-    } catch { toast.error('Failed to reset limits'); }
+      setDraft(emptyOverrides());
+    } catch (err) {
+      console.error('Failed to reset server limits:', logMessage(err));
+      toast.error(apiErrorMessage(err, 'Failed to reset limits'));
+    }
     setSaving(false);
   };
 
@@ -307,8 +521,8 @@ function ServerLimitsModal({
                     type="number"
                     min={field.min}
                     max={field.max}
-                    value={draft[field.key] ?? ''}
-                    onChange={(e) => setDraft({ ...draft, [field.key]: e.target.value })}
+                    step={1}
+                    {...bindInput(field.key)}
                     placeholder={String(globalVal)}
                     className="w-full rounded-md bg-vox-bg-hover border border-vox-border text-sm text-vox-text-primary px-3 py-1.5 placeholder:text-vox-text-muted/50 focus:outline-none focus:border-vox-accent-primary"
                   />

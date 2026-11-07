@@ -1,7 +1,7 @@
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser } from './helpers/api';
-import { dmHeading } from './helpers/selectors';
+import { dmHeading, logoutButton } from './helpers/selectors';
 
 test.describe('Auth edge cases', () => {
   test('expired/invalid token redirects to login', async ({ page }) => {
@@ -34,7 +34,7 @@ test.describe('Auth edge cases', () => {
 
     await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
 
-    await page.locator('button[title="Logout"]').click();
+    await logoutButton(page).click();
 
     // In browser mode, logout redirects to / which shows the landing page
     await expect(dmHeading(page)).not.toBeVisible({ timeout: 10_000 });

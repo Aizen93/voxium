@@ -15,9 +15,12 @@ const SOURCES = [
   fileURLToPath(new URL('../../components/channel/ChannelSidebar.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/ServerSettingsModal.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/SecureChannelCreateModal.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/server/MemberDirectoryFooter.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/server/SecureChannelMembersModal.tsx', import.meta.url)),
   // membersNotReady toast lives in the store's send path, reached via i18n.t()
   fileURLToPath(new URL('../../stores/chatStore.ts', import.meta.url)),
+  // pinnedDowngrade toast: the store's channel normalisation (utils/securePins.ts)
+  fileURLToPath(new URL('../../stores/serverStore.ts', import.meta.url)),
 ];
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 
@@ -65,6 +68,7 @@ describe('secure-channel translation keys', () => {
     expect(keys).toContain('secureChannel.createTitle');     // create modal
     expect(keys).toContain('secureChannel.members');         // members modal (and menu)
     expect(keys).toContain('secureChannel.membersNotReady'); // store toast
+    expect(keys).toContain('secureChannel.pinnedDowngrade'); // serverStore pin toast
     expect(locales.length).toBeGreaterThan(1);
   });
 
@@ -108,5 +112,33 @@ describe('secure-channel translation keys', () => {
     // ...and says where the id actually comes from
     expect(hint).toMatch(/copy/i);
     expect(hint).toMatch(/member/i);
+  });
+});
+
+describe('limit descriptions in Japanese and Chinese', () => {
+  // The limit rows sit next to each other in Space Settings > Limits; the
+  // house form in both languages is the full-width parenthesis, so a row in
+  // ASCII parentheses reads out of place beside its neighbours.
+  it('use full-width parentheses in every serverSettings.limits description', () => {
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const { name, bundle } of locales.filter((l) => l.name === 'ja' || l.name === 'zh')) {
+      const section = lookup(bundle, 'serverSettings.limits');
+      expect(section, `${name}.json → serverSettings.limits`).toBeTypeOf('object');
+      for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
+        if (!key.endsWith('Desc') || typeof value !== 'string') continue;
+        checked++;
+        if (/[()]/.test(value)) offenders.push(`${name}.json → serverSettings.limits.${key}`);
+      }
+    }
+    expect(checked).toBeGreaterThanOrEqual(4);
+    expect(offenders, `ASCII parentheses:\n${offenders.join('\n')}`).toEqual([]);
+  });
+
+  it('keep the secure-channel rows in that form', () => {
+    for (const { name, bundle } of locales.filter((l) => l.name === 'ja' || l.name === 'zh')) {
+      expect(String(lookup(bundle, 'serverSettings.limits.maxSecureChannelsDesc')), name).toMatch(/（.+）/);
+      expect(String(lookup(bundle, 'serverSettings.limits.maxChannelsDesc')), name).toMatch(/（.+）/);
+    }
   });
 });

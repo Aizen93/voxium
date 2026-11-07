@@ -54,7 +54,7 @@ test.describe('Secure channels — invite-only E2E-encrypted', () => {
     await openServer(pageC, 'Covert Ops HQ');
 
     // Three contexts share one IP: registration + E2E init already burned most
-    // of the 100/min global bucket (a harness property, not a product one —
+    // of the anonymous per-IP bucket (a harness property, not a product one —
     // see helpers/rateLimits.ts)
     await clearRateLimits();
 
@@ -145,7 +145,7 @@ test.describe('Secure channels — invite-only E2E-encrypted', () => {
     await expect(pageC.getByText(whileRemoved)).toHaveCount(0);
 
     // ── 8. Opaque moderation: the owner's settings show a COUNT, nothing more ──
-    await page.getByRole('button', { name: /server settings/i }).first().click();
+    await page.getByRole('button', { name: /space settings/i }).first().click();
     await expect(page.getByTestId('secure-moderation-delete-id')).toBeVisible({ timeout: 10_000 });
 
     await contextB.close();

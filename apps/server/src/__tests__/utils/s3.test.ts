@@ -8,6 +8,8 @@ vi.mock('@aws-sdk/client-s3', () => ({
   S3Client: vi.fn(function () { return { send: mockSend }; }),
   PutObjectCommand: vi.fn(),
   GetObjectCommand: vi.fn(),
+  HeadObjectCommand: vi.fn(),
+  CopyObjectCommand: vi.fn(),
   DeleteObjectCommand: vi.fn(),
   DeleteObjectsCommand: vi.fn(),
   ListObjectsV2Command: vi.fn(),
@@ -84,7 +86,7 @@ describe('utils/s3 — S3_SSE bucket-default encryption', () => {
     vi.mocked(PutObjectCommand).mockClear();
     const { generatePresignedPutUrl } = await import('../../utils/s3');
 
-    await generatePresignedPutUrl('avatars/user1-123.webp', 'image/webp');
+    await generatePresignedPutUrl('avatars/user1-123.webp', 'image/webp', 2048);
 
     const input = vi.mocked(PutObjectCommand).mock.calls[0][0] as Record<string, unknown>;
     expect('ServerSideEncryption' in input).toBe(false);
@@ -167,6 +169,150 @@ describe('utils/s3 — S3_SSE bucket-default encryption', () => {
   });
 });
 
+describe('utils/s3 — presigned PUT is bound to the declared size', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+  });
+
+  it('signs an exact ContentLength with only content-type and content-length as signable headers', async () => {
+    const { PutObjectCommand } = await import('@aws-sdk/client-s3');
+    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+    vi.mocked(PutObjectCommand).mockClear();
+    vi.mocked(getSignedUrl).mockClear();
+    const { generatePresignedPutUrl } = await import('../../utils/s3');
+
+    const url = await generatePresignedPutUrl('attachments/ch-c1/abc-file.pdf', 'application/pdf', 12345);
+
+    expect(url).toBe('https://signed-url.example.com');
+    const input = vi.mocked(PutObjectCommand).mock.calls[0][0] as Record<string, unknown>;
+    expect(input).toMatchObject({
+      Key: 'attachments/ch-c1/abc-file.pdf',
+      ContentType: 'application/pdf',
+      ContentLength: 12345,
+    });
+    const options = vi.mocked(getSignedUrl).mock.calls[0][2] as { expiresIn: number; signableHeaders: Set<string> };
+    expect(options.expiresIn).toBe(300);
+    // Exactly the headers a browser sends on its own for a Blob PUT
+    expect([...options.signableHeaders].sort()).toEqual(['content-length', 'content-type']);
+  });
+
+  it('keeps a custom expiry as the fourth argument', async () => {
+    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+    vi.mocked(getSignedUrl).mockClear();
+    const { generatePresignedPutUrl } = await import('../../utils/s3');
+
+    await generatePresignedPutUrl('avatars/u1-1.webp', 'image/webp', 10, 60);
+
+    expect((vi.mocked(getSignedUrl).mock.calls[0][2] as { expiresIn: number }).expiresIn).toBe(60);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53])(
+    'refuses to sign a PUT for size %s',
+    async (size) => {
+      const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+      vi.mocked(getSignedUrl).mockClear();
+      const { generatePresignedPutUrl } = await import('../../utils/s3');
+
+      await expect(generatePresignedPutUrl('avatars/u1-1.webp', 'image/webp', size)).rejects.toThrow('Invalid upload size');
+      expect(getSignedUrl).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('utils/s3 — headS3Object', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+  });
+
+  it('returns the stored size and type', async () => {
+    const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+    vi.mocked(HeadObjectCommand).mockClear();
+    mockSend.mockResolvedValue({ ContentLength: 4096, ContentType: 'image/webp' });
+    const { headS3Object } = await import('../../utils/s3');
+
+    await expect(headS3Object('avatars/u1-1.webp')).resolves.toEqual({ size: 4096, contentType: 'image/webp' });
+    expect(vi.mocked(HeadObjectCommand).mock.calls[0][0]).toMatchObject({ Key: 'avatars/u1-1.webp' });
+  });
+
+  it('returns a null content type when the store has none', async () => {
+    mockSend.mockResolvedValue({ ContentLength: 0 });
+    const { headS3Object } = await import('../../utils/s3');
+
+    await expect(headS3Object('k')).resolves.toEqual({ size: 0, contentType: null });
+  });
+
+  it.each([
+    ['NotFound', { name: 'NotFound' }],
+    ['NoSuchKey', { name: 'NoSuchKey' }],
+    ['a bare 404', { name: 'Unknown', $metadata: { httpStatusCode: 404 } }],
+  ])('returns null for %s', async (_label, err) => {
+    mockSend.mockRejectedValue(Object.assign(new Error('missing'), err));
+    const { headS3Object } = await import('../../utils/s3');
+
+    await expect(headS3Object('k')).resolves.toBeNull();
+  });
+
+  it('rethrows every other failure (callers fail closed)', async () => {
+    mockSend.mockRejectedValue(Object.assign(new Error('denied'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }));
+    const { headS3Object } = await import('../../utils/s3');
+
+    await expect(headS3Object('k')).rejects.toThrow('denied');
+  });
+
+  it('throws when the store answers without a size', async () => {
+    mockSend.mockResolvedValue({ ContentType: 'image/webp' });
+    const { headS3Object } = await import('../../utils/s3');
+
+    await expect(headS3Object('k')).rejects.toThrow('no size');
+  });
+});
+
+describe('utils/s3 — getS3ObjectRange', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+  });
+
+  it('asks for the inclusive byte range and returns its bytes', async () => {
+    const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+    vi.mocked(GetObjectCommand).mockClear();
+    mockSend.mockResolvedValue({ Body: { transformToByteArray: async () => new Uint8Array([1, 2, 3]) } });
+    const { getS3ObjectRange } = await import('../../utils/s3');
+
+    const buf = await getS3ObjectRange('avatars/u1-1.webp', 0, 63);
+
+    expect(buf).toEqual(Buffer.from([1, 2, 3]));
+    expect(vi.mocked(GetObjectCommand).mock.calls[0][0]).toMatchObject({ Key: 'avatars/u1-1.webp', Range: 'bytes=0-63' });
+  });
+
+  it('keeps only the asked range when the store ignores Range', async () => {
+    mockSend.mockResolvedValue({ Body: { transformToByteArray: async () => new Uint8Array(1000).fill(7) } });
+    const { getS3ObjectRange } = await import('../../utils/s3');
+
+    const buf = await getS3ObjectRange('k', 0, 63);
+
+    expect(buf?.length).toBe(64);
+  });
+
+  it('returns an empty buffer for a body-less answer', async () => {
+    mockSend.mockResolvedValue({});
+    const { getS3ObjectRange } = await import('../../utils/s3');
+
+    await expect(getS3ObjectRange('k', 0, 63)).resolves.toEqual(Buffer.alloc(0));
+  });
+
+  it('returns null for a missing object and rethrows other failures', async () => {
+    const { getS3ObjectRange } = await import('../../utils/s3');
+    mockSend.mockRejectedValueOnce(Object.assign(new Error('missing'), { name: 'NoSuchKey' }));
+    await expect(getS3ObjectRange('k', 0, 63)).resolves.toBeNull();
+
+    mockSend.mockRejectedValueOnce(new Error('socket hang up'));
+    await expect(getS3ObjectRange('k', 0, 63)).rejects.toThrow('socket hang up');
+  });
+});
+
 describe('utils/s3 — VALID_S3_KEY_RE', () => {
   let VALID_S3_KEY_RE: RegExp;
 
@@ -241,5 +387,43 @@ describe('utils/s3 — VALID_ATTACHMENT_KEY_RE', () => {
   it('rejects empty or malformed keys', () => {
     expect(VALID_ATTACHMENT_KEY_RE.test('')).toBe(false);
     expect(VALID_ATTACHMENT_KEY_RE.test('attachments/')).toBe(false);
+  });
+});
+
+describe('utils/s3 — copyS3Object', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+    process.env.S3_ASSETS_BUCKET = 'test-bucket';
+  });
+
+  it('copies within the bucket, keeping the metadata, with each path segment encoded', async () => {
+    const { CopyObjectCommand } = await import('@aws-sdk/client-s3');
+    vi.mocked(CopyObjectCommand).mockClear();
+    mockSend.mockResolvedValue({});
+    const { copyS3Object } = await import('../../utils/s3');
+
+    await expect(copyS3Object('avatars/u 1-1.webp', 'avatars/u1-2-abc.webp')).resolves.toBe(true);
+    expect(CopyObjectCommand).toHaveBeenCalledWith({
+      Bucket: 'test-bucket',
+      Key: 'avatars/u1-2-abc.webp',
+      // The slash stays a slash (some S3-compatible stores refuse %2F); the rest is encoded
+      CopySource: 'test-bucket/avatars/u%201-1.webp',
+      MetadataDirective: 'COPY',
+    });
+  });
+
+  it('resolves false when the source does not exist', async () => {
+    mockSend.mockRejectedValue(Object.assign(new Error('missing'), { name: 'NoSuchKey' }));
+    const { copyS3Object } = await import('../../utils/s3');
+
+    await expect(copyS3Object('avatars/u1-1.webp', 'avatars/u1-2.webp')).resolves.toBe(false);
+  });
+
+  it('rethrows any other store failure', async () => {
+    mockSend.mockRejectedValue(new Error('AccessDenied'));
+    const { copyS3Object } = await import('../../utils/s3');
+
+    await expect(copyS3Object('avatars/u1-1.webp', 'avatars/u1-2.webp')).rejects.toThrow('AccessDenied');
   });
 });

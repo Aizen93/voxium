@@ -1,12 +1,14 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
-import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead } from '../middleware/rateLimiter';
+import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead, rateLimitDmOpen } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
 import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, type Message } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
+import { verifyAttachmentUploads } from '../utils/uploadVerification';
+import { shapeMessageRow } from '../utils/messageAuthor';
 
 const attachmentSelect = {
   select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
@@ -20,11 +22,16 @@ const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, status: true, role: true, isSupporter: true, supporterTier: true },
 };
 
+// webhookId/webhookName: a DM row always has a user author, but every message
+// reader goes through shapeMessageRow() (utils/messageAuthor.ts), which needs
+// both to keep the author non-null if it ever does not
 const replyToSelect = {
   select: {
     id: true,
     content: true,
     encrypted: true,
+    webhookId: true,
+    webhookName: true,
     author: { select: { id: true, username: true, displayName: true, avatarUrl: true, role: true, isSupporter: true, supporterTier: true } },
   },
 };
@@ -60,7 +67,7 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
         messages: {
           orderBy: { createdAt: 'desc' },
           take: 1,
-          select: { id: true, content: true, encrypted: true, createdAt: true, authorId: true },
+          select: { id: true, content: true, encrypted: true, type: true, createdAt: true, authorId: true },
         },
       },
       orderBy: { updatedAt: 'desc' },
@@ -79,6 +86,8 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
             id: c.messages[0].id,
             content: c.messages[0].content,
             encrypted: c.messages[0].encrypted,
+            // the client shows an unencrypted preview ONLY for a system notice
+            type: c.messages[0].type,
             createdAt: c.messages[0].createdAt.toISOString(),
             authorId: c.messages[0].authorId,
           }
@@ -96,7 +105,7 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
 
 // ─── Create or get conversation ──────────────────────────────────────────────
 
-dmRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
+dmRouter.post('/', rateLimitDmOpen, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const currentUserId = req.user!.userId;
     const { userId: targetUserId } = req.body;
@@ -231,7 +240,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
       });
 
       const data = unique.map((m) => ({
-        ...m,
+        ...shapeMessageRow(m),
         reactions: aggregateReactions(m.reactions),
       }));
 
@@ -256,7 +265,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
     if (hasMore) messages.pop();
 
     const data = messages.reverse().map((m) => ({
-      ...m,
+      ...shapeMessageRow(m),
       reactions: aggregateReactions(m.reactions),
     }));
 
@@ -304,7 +313,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
         }
         if (!VALID_ATTACHMENT_KEY_RE.test(a.s3Key)) throw new BadRequestError('Invalid attachment key');
         if (!a.s3Key.startsWith(expectedPrefix)) throw new BadRequestError('Attachment does not belong to this conversation');
-        if (a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
+        if (!Number.isSafeInteger(a.fileSize) || a.fileSize <= 0 || a.fileSize > maxCipherSize) throw new BadRequestError('Invalid attachment size');
         if (a.mimeType !== E2E_ATTACHMENT_MIME) throw new BadRequestError('Encrypted attachments must be opaque');
       }
     }
@@ -322,6 +331,17 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
     if (replyToId) {
       const parent = await prisma.message.findUnique({ where: { id: replyToId }, select: { conversationId: true } });
       if (!parent || parent.conversationId !== conversationId) throw new BadRequestError('Invalid replyToId');
+    }
+
+    // Read the uploaded blobs back before the row points at them: the stored
+    // size is the real ciphertext size
+    if (attachments?.length) {
+      const maxCipherSize = LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES;
+      await verifyAttachmentUploads(attachments.map((a) => ({
+        key: a.s3Key,
+        declaredSize: a.fileSize,
+        maxSize: maxCipherSize,
+      })));
     }
 
     const message = await prisma.$transaction(async (tx) => {
@@ -363,7 +383,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
       data: { updatedAt: new Date() },
     });
 
-    const payload = { ...message, reactions: [] };
+    const payload = { ...shapeMessageRow(message), reactions: [] };
     getIO().to(`dm:${conversationId}`).emit('dm:message:new', payload as unknown as Message);
 
     res.status(201).json({ success: true, data: payload });
@@ -420,7 +440,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
       },
     });
 
-    const payload = { ...updated, reactions: aggregateReactions(updated.reactions) };
+    const payload = { ...shapeMessageRow(updated), reactions: aggregateReactions(updated.reactions) };
     getIO().to(`dm:${conversationId}`).emit('dm:message:update', payload as unknown as Message);
 
     res.json({ success: true, data: payload });

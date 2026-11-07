@@ -6,8 +6,8 @@ Thanks for your interest in contributing! This guide covers everything you need 
 
 ### Prerequisites
 
-- **Node.js** >= 20.x
-- **pnpm** >= 9.x
+- **Node.js** >= 24.x (26 LTS recommended)
+- **pnpm** >= 10.16 (earlier versions skip settings in `pnpm-workspace.yaml`, `minimumReleaseAge` among them)
 - **PostgreSQL** >= 15.x (running locally)
 - **Docker** (for Redis)
 - **Rust** stable (only needed for Tauri desktop builds)
@@ -72,6 +72,7 @@ Voxium/
 3. Run `pnpm typecheck` — this also runs as a pre-commit hook and must pass
 4. Run `pnpm test:e2e` if your changes affect user-facing behavior
 5. Open a PR against `develop` — PRs to `main` are only accepted from `develop`
+6. Fill in the pull request template, including the box that confirms the [contribution terms](#license-and-contributions)
 
 ### Code Conventions
 
@@ -109,12 +110,12 @@ Keep them concise and descriptive. Use the imperative mood:
 
 A few things that are easy to get wrong:
 
-- **Never emit `channel:leave`** — sockets auto-subscribe to all text channels on connect for unread tracking
-- **Server membership must join socket rooms** — any code that makes a user a server member must also call `joinServerRoom()` or `broadcastMemberJoined()`
+- **Never emit `channel:leave`** — sockets auto-subscribe on connect to every channel room they can view (text and voice) for unread tracking
+- **Server membership must join socket rooms** — any code that makes a user a server member goes through `joinServerMember()` (`utils/serverJoin.ts`), which broadcasts the join and seeds the read state; `joinServerRoom()` is for server creation only
 - **`clearMessages()` ownership** — only `dmStore.setActiveConversation()` and `clearActiveConversation()` should call it, never UI components directly
 - **WebRTC uses Perfect Negotiation** — DM voice calls use polite/impolite roles for glare resolution
 
-See `CLAUDE.md` in the repo root for the full list of conventions and invariants.
+The end-to-end encryption invariants are specified in `docs/e2e-dm-spec.md`; the rest are pinned by the test suites next to the code, so read the tests of the area you change before changing it.
 
 ## Reporting Issues
 
@@ -122,6 +123,8 @@ Use the GitHub issue templates:
 
 - **Bug Report** — for something broken
 - **Feature Request** — for new ideas
+
+Security vulnerabilities never go in a public issue, pull request or discussion: report them privately, as described in [SECURITY.md](SECURITY.md).
 
 ## Questions?
 
@@ -143,4 +146,5 @@ By submitting a contribution, you agree that:
 
 This grant is what lets the project stay under a single license and remain
 sustainably funded. Your contribution is distributed to everyone else under
-the Voxium Community License like the rest of the codebase.
+the Voxium Community License like the rest of the codebase. The pull
+request template asks you to confirm these terms.

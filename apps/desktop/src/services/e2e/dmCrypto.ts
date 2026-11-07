@@ -1,34 +1,47 @@
-// Display-layer glue between DM stores/components and the E2E service.
-// Plaintext messages pass through untouched; encrypted ones are decrypted (or
-// resolved from the local cache) before they reach any store or the DOM.
+// Display-layer gate between DM stores/components and the E2E service.
+// Encrypted messages are decrypted (or resolved from the local cache) before
+// they reach any store or the DOM. An unencrypted row passes only when it is
+// one of the server's own call notices (DM_SYSTEM_NOTICES); every other one is
+// refused and shown as "unable to decrypt". Whatever the server attaches that
+// the crypto did not vouch for — `e2eAttachments`, plaintext `attachments` on
+// a refused row, an unencrypted reply quote — is dropped here; the shapes
+// (refusedRow, lockedQuote, withoutServerAssertions) live in displayGate.ts,
+// shared with channelCrypto and the send path.
 //
 // NOTE: stores are imported DYNAMICALLY inside functions. resetStores.ts
 // captures every account store's initial state at module-eval time, so a
 // static store import from a service pulled in by chatStore would create an
 // eval-order cycle that crashes at boot.
-import { buildE2EPlaintext, parseE2EPlaintext } from '@voxium/shared';
+import { buildE2EPlaintext, parseE2EPlaintext, isDMSystemNotice } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
-import { getE2EService, E2EIdentityChangedError } from './e2eService';
+import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
+import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 
-export { E2EIdentityChangedError };
-
-/** Split raw decrypted plaintext into display fields on a message. */
-function applyPlaintext(message: Message, raw: string): Message {
-  const { text, attachments } = parseE2EPlaintext(raw);
-  return { ...message, content: text, ...(attachments.length > 0 && { e2eAttachments: attachments }) };
-}
+export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
   return useAuthStore.getState().user?.id ?? null;
 }
 
-/** Marker the UI renders as "unable to decrypt" (never shown as user text). */
-export const DECRYPT_FAILED_CONTENT = '';
-
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
-  if (!message.replyTo?.encrypted) return message;
-  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id);
+  if (!message.replyTo) return message;
+  // a quote names its author; one without is malformed and is dropped whole
+  if (!message.replyTo.author) return { ...message, replyTo: null };
+  const scope = message.conversationId ?? '';
+  if (!message.replyTo.encrypted) {
+    // An unencrypted quote is trusted only when it is one of the server's call
+    // notices; anything else renders as the lock placeholder
+    return isDMSystemNotice(message.replyTo.content)
+      ? message
+      : { ...message, replyTo: lockedQuote(message.replyTo) };
+  }
+  // The quote answers only from an entry of THIS conversation written by the
+  // quoted author (the server names both the id and the author)
+  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id, {
+    scope,
+    authorId: message.replyTo.author?.id,
+  });
   // cached entries hold raw plaintext — structured payloads carry the text field
   const preview = cached ? parseE2EPlaintext(cached).text : '';
   return { ...message, replyTo: { ...message.replyTo, content: preview } };
@@ -40,7 +53,8 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * Own echoes can still race the send path's cache write, and legacy olm1 own
  * messages are cache-only, so own messages fall back to retrying the cache.
  */
-export async function decryptMessageForDisplay(message: Message): Promise<Message> {
+export async function decryptMessageForDisplay(input: Message): Promise<Message> {
+  const message = withoutServerAssertions(input);
   if (!message.encrypted) {
     // After the always-on cutover there is no plaintext DM path: conversations
     // are born encrypted, the enable route is gone, and the send side throws
@@ -56,28 +70,36 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
     // forgery, and it is strictly weaker than the "active key substitution is
     // detectable" property the spec claims. The flag is the server's word, so
     // it does not get to decide whether a message was end-to-end encrypted.
-    if (message.type === 'system') return message;
+    //
+    // The `type` field is the server's word too, so a "system" row is trusted
+    // only when its text is one of the notices the server actually writes.
+    if (message.type === 'system' && isDMSystemNotice(message.content)) {
+      return { ...message, attachments: [], replyTo: null };
+    }
     console.warn(
       `e2e: refusing an unencrypted DM message (${message.id}) — every DM is encrypted`
     );
-    return { ...message, content: DECRYPT_FAILED_CONTENT };
+    return refusedRow(message);
   }
+  // A DM row belongs to a conversation; one without is nothing the crypto can
+  // scope a decrypt, or a cache read, to
+  if (!message.conversationId) return refusedRow(message);
   const userId = await currentUserId();
-  if (!userId) return { ...message, content: DECRYPT_FAILED_CONTENT };
+  if (!userId) return refusedRow(message);
 
   const service = getE2EService(userId);
   const own = message.author?.id === userId;
 
   const result = await service.decryptMessage({
     id: message.id,
-    conversationId: message.conversationId ?? '',
+    conversationId: message.conversationId,
     authorId: message.author?.id ?? '',
     content: message.content,
     editedAt: message.editedAt ?? null,
     createdAt: message.createdAt,
   });
   if (!result.failed) {
-    return resolveReplyPreview(applyPlaintext(message, result.text), userId);
+    return resolveReplyPreview(decryptedRow(message, result.text), userId);
   }
 
   if (own) {
@@ -91,17 +113,24 @@ export async function decryptMessageForDisplay(message: Message): Promise<Messag
     const attempts = Number.isFinite(ageMs) && ageMs < 10_000 ? 4 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempts > 1) await new Promise((r) => setTimeout(r, 150));
-      // version-checked: an edit echo must not serve the pre-edit cache entry
-      const cached = await service.getCachedPlaintext(message.id, message.editedAt ?? null);
+      // version-checked: an edit echo must not serve the pre-edit cache entry;
+      // and only our OWN entry of this conversation answers for "own"
+      const cached = await service.getCachedPlaintext(message.id, {
+        scope: message.conversationId,
+        authorId: userId,
+        editedAt: message.editedAt ?? null,
+      });
       if (cached !== null) {
-        return resolveReplyPreview(applyPlaintext(message, cached), userId);
+        return resolveReplyPreview(decryptedRow(message, cached), userId);
       }
     }
   }
-  return resolveReplyPreview({ ...message, content: DECRYPT_FAILED_CONTENT }, userId);
+  // Nothing vouched for this row: the refused shape, its quote still resolvable
+  // from the local cache
+  return resolveReplyPreview(refusedRow(message), userId);
 }
 
-/** Decrypt a fetched page of messages (order preserved; plaintext untouched). */
+/** Decrypt a fetched page of messages (order preserved; only the server's call notices pass unencrypted). */
 export async function decryptMessagesForDisplay(messages: Message[]): Promise<Message[]> {
   // No `some(m => m.encrypted)` short-circuit: a page of forged plaintext rows
   // would satisfy it and bypass the per-message check entirely, which is
@@ -120,7 +149,7 @@ export async function decryptMessagesForDisplay(messages: Message[]): Promise<Me
       // whole page into a "Failed to load messages" toast. Show the one
       // failure, keep the conversation.
       console.error(`e2e: decrypt pipeline failed for message ${m.id}:`, err);
-      out.push({ ...m, content: DECRYPT_FAILED_CONTENT });
+      out.push(refusedRow(m));
     }
   }
   return out;
@@ -139,7 +168,7 @@ export async function prepareOutgoingDM(
   conversationId: string,
   text: string,
   attachments?: E2EAttachmentMeta[]
-): Promise<{ content: string; plaintext: string }> {
+): Promise<{ content: string; plaintext: string; position: E2EMessagePosition }> {
   const { useDMStore } = await import('../../stores/dmStore');
   const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
   // The peer id drives the session fanout, so a conversation the store has not
@@ -153,12 +182,12 @@ export async function prepareOutgoingDM(
   const plaintext = buildE2EPlaintext(text, attachments);
   try {
     // group session per conversation — the peer id drives the share fanout
-    const content = await getE2EService(userId).encryptMessage(
+    const { envelope, position } = await getE2EService(userId).encryptMessage(
       conversationId,
       conversation.participant.id,
       plaintext
     );
-    return { content, plaintext };
+    return { content: envelope, plaintext, position };
   } catch (err) {
     if (err instanceof E2EIdentityChangedError) {
       const { useE2EStore } = await import('../../stores/e2eStore');
@@ -168,19 +197,25 @@ export async function prepareOutgoingDM(
   }
 }
 
-/** Store the sent plaintext under the server-assigned message id + version. */
+/**
+ * Store the sent plaintext under the server-assigned message id + version, and
+ * bind the ratchet `position` it was encrypted at (prepareOutgoingDM) to them —
+ * the only place an own message's position is ever bound.
+ */
 export async function cacheSentPlaintext(
   messageId: string,
   conversationId: string,
   plaintext: string,
   editedAt?: string | null,
-  createdAt?: string
+  createdAt?: string,
+  position?: E2EMessagePosition
 ): Promise<void> {
   const userId = await currentUserId();
   if (!userId) return;
   await getE2EService(userId).cachePlaintext(messageId, conversationId, plaintext, editedAt, {
     authorId: userId,
     ...(createdAt && { createdAt }),
+    ...(position && { position }),
   });
 }
 
@@ -240,9 +275,13 @@ export async function searchEncryptedHistory(
  * searchDecrypted); this one did not, and nothing in the display layer is the
  * right place to notice.
  */
-export async function resolveEncryptedPreview(messageId: string): Promise<string | null> {
+export async function resolveEncryptedPreview(
+  messageId: string,
+  conversationId: string,
+  authorId?: string,
+): Promise<string | null> {
   const userId = await currentUserId();
   if (!userId) return null;
-  const raw = await getE2EService(userId).getCachedPlaintext(messageId);
+  const raw = await getE2EService(userId).getCachedPlaintext(messageId, { scope: conversationId, authorId });
   return raw === null ? null : parseE2EPlaintext(raw).text;
 }

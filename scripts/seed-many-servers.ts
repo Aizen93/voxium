@@ -36,7 +36,7 @@ async function main() {
 
   for (let i = 0; i < count; i++) {
     const name = `${NAMES[i % NAMES.length]}${i >= NAMES.length ? ' ' + Math.floor(i / NAMES.length) : ''}`;
-    const server = await prisma.server.create({ data: { name, ownerId: user.id } });
+    const server = await prisma.server.create({ data: { name, ownerId: user.id, memberCount: 1 } });
     await prisma.serverMember.create({ data: { serverId: server.id, userId: user.id } });
   }
   const total = await prisma.serverMember.count({ where: { userId: user.id } });

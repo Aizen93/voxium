@@ -167,6 +167,28 @@ export interface CachedPlaintext {
   authorId?: string;
   createdAt?: string;
   failed?: boolean;
+  /** Ratchet position of the latest version accepted for this id. The reverse
+   *  index of the `mi:` bindings: an unbound position of the SAME session at or
+   *  below it is an older ciphertext presented as a newer version (rollback). */
+  sessionId?: string;
+  messageIndex?: number;
+}
+
+/** One Megolm ratchet position: the session and the index within it. */
+export interface MessagePosition {
+  sessionId: string;
+  messageIndex: number;
+}
+
+/**
+ * What a ratchet position was shown as: one version of one message. A Megolm
+ * ciphertext stays decryptable forever, so without this the server could
+ * re-serve an authentic old ciphertext under a new id, or as an edit that
+ * never happened, and it would render as genuine.
+ */
+export interface MessagePositionBinding {
+  messageId: string;
+  editedAt: string | null;
 }
 
 function requestToPromise<T>(req: IDBRequest<T>): Promise<T> {
@@ -513,6 +535,14 @@ export class E2EVault {
   }
   putPlaintext(messageId: string, entry: CachedPlaintext): Promise<void> {
     return this.put(`pt:${messageId}`, entry);
+  }
+
+  // ── Ratchet-position bindings (replay / rollback firewall) ──
+  getMessagePosition(sessionId: string, messageIndex: number): Promise<MessagePositionBinding | undefined> {
+    return this.get(`mi:${sessionId}:${messageIndex}`);
+  }
+  putMessagePosition(sessionId: string, messageIndex: number, binding: MessagePositionBinding): Promise<void> {
+    return this.put(`mi:${sessionId}:${messageIndex}`, binding);
   }
 
   /**

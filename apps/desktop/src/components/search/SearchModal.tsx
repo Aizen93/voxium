@@ -6,9 +6,11 @@ import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
 import { Avatar } from '../common/Avatar';
+import { AppTag } from '../common/AppTag';
 import { Search, X, Hash, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 import type { SearchResult, Channel } from '@voxium/shared';
+import { withoutSecureChannelHits } from '../../utils/searchHits';
 
 interface SearchModalProps {
   onClose: () => void;
@@ -36,6 +38,11 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
   // search over this device's decrypted history — there is no encrypted/
   // plaintext conversation distinction left to test for.
   const isEncryptedDM = !!conversationId;
+  // A webhook-posted hit. Never one from a local (decrypted) search — a DM or
+  // a secure channel, where no webhook posts — whatever the row claims.
+  const isWebhookHit = (result: SearchResult) =>
+    result.author.isWebhook === true && !isEncryptedDM
+    && !channels?.some((c) => c.id === result.channelId && c.secure === true);
 
   // Auto-focus input + cleanup in-flight requests on unmount
   useEffect(() => {
@@ -126,10 +133,13 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
 
       if (controller.signal.aborted) return;
 
+      // The server excludes secure channels from this search; a hit from one
+      // the client knows is secure is not something it may show as plaintext
+      const hits = withoutSecureChannelHits(data.data as SearchResult[], channels);
       if (beforeCursor) {
-        setResults((prev) => [...prev, ...data.data]);
+        setResults((prev) => [...prev, ...hits]);
       } else {
-        setResults(data.data);
+        setResults(hits);
       }
       setHasMore(data.hasMore);
       setHasSearched(true);
@@ -198,8 +208,8 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
 
   const formatTime = (dateStr: string) => {
     const date = new Date(dateStr);
-    if (isToday(date)) return `${t('chat.search.today')} at ${format(date, 'h:mm a')}`;
-    if (isYesterday(date)) return `${t('chat.search.yesterday')} at ${format(date, 'h:mm a')}`;
+    if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
+    if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
     return format(date, 'MM/dd/yyyy h:mm a');
   };
 
@@ -302,6 +312,9 @@ export function SearchModal({ onClose, serverId, channels, conversationId, parti
                   <span className="text-sm font-semibold text-vox-text-primary">
                     {result.author.displayName}
                   </span>
+                  {/* A webhook names itself: the tag keeps "alice" from passing for
+                      the member */}
+                  {isWebhookHit(result) && <AppTag />}
                   {result.channelName && (
                     <span className="flex items-center gap-0.5 text-xs text-vox-text-muted">
                       <Hash size={10} />

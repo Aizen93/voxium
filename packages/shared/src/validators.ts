@@ -1,4 +1,8 @@
-import { LIMITS, THEME_COLOR_KEYS, TRANSLUCENT_THEME_COLOR_KEYS, THEME_PATTERN_TYPES, THEME_PATTERN_AREAS } from './constants.js';
+import {
+  LIMITS, THEME_COLOR_KEYS, TRANSLUCENT_THEME_COLOR_KEYS, THEME_PATTERN_TYPES, THEME_PATTERN_AREAS,
+  DISCOVERY_TAGS, DISCOVERY_SEARCH_MIN, DISCOVERY_SEARCH_MAX, DISCOVERY_TEXT_FORBIDDEN_RE,
+} from './constants.js';
+import type { DiscoveryTag } from './constants.js';
 import { ROLE_COLOR_REGEX } from './permissions.js';
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -11,9 +15,27 @@ export function validateUsername(username: string): string | null {
   return null;
 }
 
+/**
+ * One mailbox, written the way the mailer will read it.
+ *
+ * Beyond `local@domain.tld`, an address must not contain whitespace, control
+ * characters or the RFC 5322 specials `( ) < > [ ] : ; , \ "` (comments,
+ * address lists, quoted local parts), so the string is the one mailbox the
+ * mailer delivers to, and the account, the per-inbox counters and the
+ * suppression digest all key on that mailbox. Unicode letters stay allowed (internationalised
+ * addresses), and the lengths follow RFC 5321: 64 for the local part, 254 in all.
+ * Every label of the domain is non-empty: no leading, trailing or doubled dot,
+ * so `host.com.` (the same DNS name) is not a second spelling of `host.com`.
+ */
+// eslint-disable-next-line no-control-regex
+const EMAIL_FORBIDDEN_RE = /[\s\u0000-\u001f\u007f()<>[\]:;,\\"]/;
+const EMAIL_SHAPE_RE = /^[^@]+@[^@.]+(?:\.[^@.]+)+$/;
+
 export function validateEmail(email: string): string | null {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) return 'Invalid email address';
+  if (email.length > LIMITS.EMAIL_MAX) return 'Invalid email address';
+  if (EMAIL_FORBIDDEN_RE.test(email) || !EMAIL_SHAPE_RE.test(email)) return 'Invalid email address';
+  const local = email.slice(0, email.lastIndexOf('@'));
+  if (local.length > LIMITS.EMAIL_LOCAL_MAX) return 'Invalid email address';
   return null;
 }
 
@@ -32,6 +54,11 @@ export function validatePassword(password: string): string | null {
 export function validateServerName(name: string): string | null {
   if (name.length < LIMITS.SERVER_NAME_MIN) return `Server name must be at least ${LIMITS.SERVER_NAME_MIN} characters`;
   if (name.length > LIMITS.SERVER_NAME_MAX) return `Server name must be at most ${LIMITS.SERVER_NAME_MAX} characters`;
+  // The name is the most visible stranger-facing field of a directory card
+  // and the key of the name sort, the search and the cursor: the same bidi /
+  // zero-width rejection as the description (which may span lines; a name
+  // may not).
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(name) || /[\r\n]/.test(name)) return 'Server name contains unsupported characters';
   return null;
 }
 
@@ -58,6 +85,20 @@ export function validateEmoji(emoji: string): string | null {
 export function validateDisplayName(displayName: string): string | null {
   if (displayName.trim().length === 0) return 'Display name cannot be empty';
   if (displayName.length > LIMITS.DISPLAY_NAME_MAX) return `Display name must be at most ${LIMITS.DISPLAY_NAME_MAX} characters`;
+  return null;
+}
+
+/** An incoming webhook's name — also the author label its messages carry.
+ *  Judged trimmed (the route stores it trimmed). */
+export function validateWebhookName(name: string): string | null {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return 'Webhook name cannot be empty';
+  if (trimmed.length > LIMITS.WEBHOOK_NAME_MAX) return `Webhook name must be at most ${LIMITS.WEBHOOK_NAME_MAX} characters`;
+  // The author label of every message it posts, shown next to members' names:
+  // one line, and none of the bidi / zero-width characters that could make it
+  // read as another member's name (the same rule as a server name; the
+  // per-message username override collapses line breaks on its own path).
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(trimmed) || /[\r\n]/.test(trimmed)) return 'Webhook name contains unsupported characters';
   return null;
 }
 
@@ -110,6 +151,74 @@ export function validateThemeTag(tag: string): string | null {
   if (tag.trim().length === 0) return 'Tag cannot be empty';
   if (tag.length > LIMITS.THEME_TAG_MAX_LENGTH) return `Tag must be at most ${LIMITS.THEME_TAG_MAX_LENGTH} characters`;
   if (!/^[a-zA-Z0-9 _-]+$/.test(tag)) return 'Tag can only contain letters, numbers, spaces, underscores, and hyphens';
+  return null;
+}
+
+// ─── Server discovery ────────────────────────────────────────────────────────
+// Descriptions, join-request messages and ban reasons are shown to strangers
+// (or to the person they are about), so on top of the length caps they reject
+// the bidi-override and zero-width characters the annotation text validator
+// rejects. All of them are also sanitizeText'd server-side before storage.
+
+export function validateServerDescription(description: string): string | null {
+  if (description.length > LIMITS.SERVER_DESCRIPTION_MAX) return `Description must be at most ${LIMITS.SERVER_DESCRIPTION_MAX} characters`;
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(description)) return 'Description contains unsupported characters';
+  return null;
+}
+
+/** True when `value` is one of the fixed vocabulary (DISCOVERY_TAGS). */
+export function isDiscoveryTag(value: unknown): value is DiscoveryTag {
+  return typeof value === 'string' && (DISCOVERY_TAGS as readonly string[]).includes(value);
+}
+
+/**
+ * Validate a tag list: an array of vocabulary values, at most
+ * LIMITS.DISCOVERY_MAX_TAGS DISTINCT ones (duplicates are collapsed by
+ * `dedupeDiscoveryTags`, so they do not count against the cap). Unknown values
+ * are refused without being echoed back.
+ */
+export function validateDiscoveryTags(tags: unknown): string | null {
+  if (!Array.isArray(tags)) return 'Tags must be an array';
+  for (const tag of tags) {
+    if (!isDiscoveryTag(tag)) return 'Tags must be chosen from the supported list';
+  }
+  if (new Set(tags).size > LIMITS.DISCOVERY_MAX_TAGS) return `At most ${LIMITS.DISCOVERY_MAX_TAGS} tags are allowed`;
+  return null;
+}
+
+/** The stored form of a validated tag list: vocabulary order is NOT imposed —
+ *  first occurrence wins, duplicates dropped. Call after validateDiscoveryTags. */
+export function dedupeDiscoveryTags(tags: readonly string[]): DiscoveryTag[] {
+  const out: DiscoveryTag[] = [];
+  for (const tag of tags) {
+    if (isDiscoveryTag(tag) && !out.includes(tag)) out.push(tag);
+  }
+  return out;
+}
+
+export function validateBanReason(reason: string): string | null {
+  if (reason.length > LIMITS.SERVER_BAN_REASON_MAX) return `Reason must be at most ${LIMITS.SERVER_BAN_REASON_MAX} characters`;
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(reason)) return 'Reason contains unsupported characters';
+  return null;
+}
+
+export function validateJoinRequestMessage(message: string): string | null {
+  if (message.length > LIMITS.JOIN_REQUEST_MESSAGE_MAX) return `Message must be at most ${LIMITS.JOIN_REQUEST_MESSAGE_MAX} characters`;
+  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(message)) return 'Message contains unsupported characters';
+  return null;
+}
+
+/**
+ * The directory search box: trimmed, DISCOVERY_SEARCH_MIN..DISCOVERY_SEARCH_MAX
+ * characters. The minimum is what keeps the trigram index usable; the client
+ * never sends a shorter query (it shows a hint instead), so a 400 here is a
+ * client that is not ours. Mirrors validateSearchQuery, which has only length
+ * rules — wildcard escaping is the route's job.
+ */
+export function validateDiscoveryQuery(query: string): string | null {
+  const trimmed = query.trim();
+  if (trimmed.length < DISCOVERY_SEARCH_MIN) return `Search query must be at least ${DISCOVERY_SEARCH_MIN} characters`;
+  if (trimmed.length > DISCOVERY_SEARCH_MAX) return `Search query must be at most ${DISCOVERY_SEARCH_MAX} characters`;
   return null;
 }
 

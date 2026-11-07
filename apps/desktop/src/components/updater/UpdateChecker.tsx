@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Download, RotateCw, CheckCircle, AlertCircle } from 'lucide-react';
 
 const TAURI_AVAILABLE = '__TAURI_INTERNALS__' in window;
@@ -16,6 +17,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function UpdateChecker() {
+  const { t } = useTranslation();
   const [phase, setPhase] = useState<UpdatePhase | null>(null);
 
   useEffect(() => {
@@ -98,10 +100,10 @@ export function UpdateChecker() {
         {/* Header */}
         <div className="border-b border-vox-border px-5 py-4">
           <h2 className="text-lg font-semibold text-vox-text-primary">
-            {phase.step === 'available' && 'Update Required'}
-            {phase.step === 'downloading' && 'Downloading Update'}
-            {phase.step === 'ready' && 'Update Ready'}
-            {phase.step === 'error' && 'Update Failed'}
+            {phase.step === 'available' && t('updater.titleAvailable')}
+            {phase.step === 'downloading' && t('updater.titleDownloading')}
+            {phase.step === 'ready' && t('updater.titleReady')}
+            {phase.step === 'error' && t('updater.titleFailed')}
           </h2>
         </div>
 
@@ -115,10 +117,10 @@ export function UpdateChecker() {
                 </div>
                 <div>
                   <p className="text-sm text-vox-text-secondary">
-                    A new version of Voxium is required to continue.
+                    {t('updater.required')}
                   </p>
                   <p className="mt-0.5 text-sm font-medium text-vox-text-primary">
-                    Version {phase.version}
+                    {t('updater.version', { version: phase.version })}
                   </p>
                 </div>
               </div>
@@ -127,7 +129,7 @@ export function UpdateChecker() {
                   onClick={phase.doUpdate}
                   className="rounded bg-vox-accent-primary px-4 py-2 text-sm font-medium text-white hover:bg-vox-accent-primary-hover"
                 >
-                  Update Now
+                  {t('updater.updateNow')}
                 </button>
               </div>
             </>
@@ -136,7 +138,7 @@ export function UpdateChecker() {
           {phase.step === 'downloading' && (
             <>
               <p className="mb-3 text-sm text-vox-text-secondary">
-                Downloading update...
+                {t('updater.downloading')}
               </p>
               <div className="mb-2 h-2 overflow-hidden rounded-full bg-vox-bg-tertiary">
                 {phase.total > 0 ? (
@@ -152,8 +154,8 @@ export function UpdateChecker() {
               </div>
               <p className="text-xs text-vox-text-muted">
                 {phase.total > 0
-                  ? `${formatBytes(phase.progress)} / ${formatBytes(phase.total)}, ${Math.round((phase.progress / phase.total) * 100)}%`
-                  : `${formatBytes(phase.progress)} downloaded`}
+                  ? t('updater.progress', { done: formatBytes(phase.progress), total: formatBytes(phase.total), percent: Math.round((phase.progress / phase.total) * 100) })
+                  : t('updater.downloaded', { size: formatBytes(phase.progress) })}
               </p>
             </>
           )}
@@ -165,7 +167,7 @@ export function UpdateChecker() {
                   <CheckCircle size={20} className="text-green-400" />
                 </div>
                 <p className="text-sm text-vox-text-secondary">
-                  Update installed. Restart Voxium to apply.
+                  {t('updater.installed')}
                 </p>
               </div>
               <div className="flex justify-end">
@@ -174,7 +176,7 @@ export function UpdateChecker() {
                   className="flex items-center gap-2 rounded bg-vox-accent-primary px-4 py-2 text-sm font-medium text-white hover:bg-vox-accent-primary-hover"
                 >
                   <RotateCw size={14} />
-                  Restart Now
+                  {t('updater.restartNow')}
                 </button>
               </div>
             </>
@@ -187,7 +189,7 @@ export function UpdateChecker() {
                   <AlertCircle size={20} className="text-red-400" />
                 </div>
                 <p className="text-sm text-vox-text-secondary">
-                  {phase.message || 'Something went wrong during the update.'}
+                  {phase.message || t('updater.failed')}
                 </p>
               </div>
               <div className="flex justify-end">
@@ -195,7 +197,7 @@ export function UpdateChecker() {
                   onClick={phase.retry}
                   className="rounded bg-vox-accent-primary px-4 py-2 text-sm font-medium text-white hover:bg-vox-accent-primary-hover"
                 >
-                  Retry
+                  {t('updater.retry')}
                 </button>
               </div>
             </>

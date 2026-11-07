@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from 'react';
-import { useTranslation } from 'react-i18next';
+import { useTranslation, Trans } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
 import { Shield, Plus, Trash2, Check, X } from 'lucide-react';
@@ -419,7 +419,10 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
           ) : (
             <div className="flex items-center gap-2 rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/5 p-3">
               <p className="flex-1 text-xs text-vox-text-secondary">
-                Delete <span className="font-semibold text-vox-text-primary">{role.name}</span>? {t('roles.deleteRoleConfirm')}
+                <Trans i18nKey="roles.deleteRoleQuestion" values={{ name: role.name }}>
+                  Delete <span className="font-semibold text-vox-text-primary">{'{{name}}'}</span>?
+                </Trans>{' '}
+                {t('roles.deleteRoleConfirm')}
               </p>
               <button
                 onClick={handleDelete}

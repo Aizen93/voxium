@@ -20,7 +20,9 @@ target/
 coverage/
 .nyc_output/
 CLAUDE.md
+AGENTS.md
 .claude/
+.codex/
 DEPLOYMENT.md
 TODO-LIST.md
 CONTEXT_CHANGELOG.md

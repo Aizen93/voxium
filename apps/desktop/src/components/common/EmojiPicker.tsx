@@ -1,5 +1,6 @@
 import { useEffect, useRef, useLayoutEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import EmojiPickerReact, { Theme, EmojiStyle, type EmojiClickData } from 'emoji-picker-react';
 
 const PICKER_WIDTH = 350;
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export function EmojiPicker({ onEmojiSelect, onClose, anchorRef }: Props) {
+  const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
 
@@ -94,7 +96,7 @@ export function EmojiPicker({ onEmojiSelect, onClose, anchorRef }: Props) {
         height={PICKER_HEIGHT}
         lazyLoadEmojis
         onEmojiClick={handleClick}
-        searchPlaceholder="Search emoji..."
+        searchPlaceholder={t('chat.searchEmoji')}
       />
     </div>,
     document.body

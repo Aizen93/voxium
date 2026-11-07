@@ -231,6 +231,10 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('at most');
+      // The roles members created, not the @everyone row every server carries:
+      // counting it made the 25th custom role fail while the client, counting
+      // custom roles, still offered the button
+      expect(prismaMock.role.count).toHaveBeenCalledWith({ where: { serverId: 'srv1', isDefault: false } });
     });
 
     it('creates a role with permissions when actor is owner', async () => {
@@ -1038,13 +1042,9 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockEmit).toHaveBeenCalledWith(
-        WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED,
-        expect.objectContaining({
-          serverId: 'srv1',
-          channelId: 'ch1',
-        }),
-      );
+      // The space-wide room gets { serverId } only: no channel id, no overrides
+      expect(mockTo).toHaveBeenCalledWith('server:srv1');
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId: 'srv1' });
       // Override may grant/revoke VIEW_CHANNEL — this channel's room re-syncs
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { channelId: 'ch1' });
     });
@@ -1115,7 +1115,7 @@ describe('Role Routes', () => {
       expect(mockEmit).not.toHaveBeenCalled();
     });
 
-    it('strips CREATE_SECURE_CHANNELS (like ADMINISTRATOR) from override masks', async () => {
+    it('strips CREATE_SECURE_CHANNELS and MANAGE_WEBHOOKS (like ADMINISTRATOR) from override masks', async () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity);
       prismaMock.channel.findFirst.mockResolvedValue({
@@ -1136,7 +1136,7 @@ describe('Role Routes', () => {
         .put('/api/v1/servers/srv1/roles/channels/ch1/permissions/r2')
         .send({
           allow: permissionsToString(
-            Permissions.SEND_MESSAGES | Permissions.CREATE_SECURE_CHANNELS,
+            Permissions.SEND_MESSAGES | Permissions.CREATE_SECURE_CHANNELS | Permissions.MANAGE_WEBHOOKS,
           ),
           deny: '0',
         });
@@ -1147,6 +1147,41 @@ describe('Role Routes', () => {
           update: {
             allow: permissionsToString(Permissions.SEND_MESSAGES),
             deny: '0',
+          },
+        }),
+      );
+    });
+
+    it('strips MANAGE_WEBHOOKS from the DENY mask too (server-level only)', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      prismaMock.channel.findFirst.mockResolvedValue({
+        id: 'ch1',
+        serverId: 'srv1',
+        secure: false,
+      });
+      prismaMock.role.findFirst.mockResolvedValue({
+        id: 'r2',
+        serverId: 'srv1',
+        position: 2,
+        isDefault: false,
+      });
+      prismaMock.channelPermissionOverride.upsert.mockResolvedValue({});
+      prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .put('/api/v1/servers/srv1/roles/channels/ch1/permissions/r2')
+        .send({
+          allow: '0',
+          deny: permissionsToString(Permissions.ATTACH_FILES | Permissions.MANAGE_WEBHOOKS),
+        });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.channelPermissionOverride.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: {
+            allow: '0',
+            deny: permissionsToString(Permissions.ATTACH_FILES),
           },
         }),
       );
@@ -1346,13 +1381,9 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockEmit).toHaveBeenCalledWith(
-        WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED,
-        expect.objectContaining({
-          serverId: 'srv1',
-          channelId: 'ch1',
-        }),
-      );
+      // The space-wide room gets { serverId } only: no channel id, no overrides
+      expect(mockTo).toHaveBeenCalledWith('server:srv1');
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId: 'srv1' });
       // Removing an override can restore/revoke VIEW_CHANNEL — room re-sync
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { channelId: 'ch1' });
     });

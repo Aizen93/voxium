@@ -237,7 +237,11 @@ export function DMMessageList({ conversationId }: Props) {
 
               const isEncryptionNotice = message.content.toLowerCase().includes('encryption');
               return (
-                <div className="my-3 flex items-center justify-center gap-2 px-4">
+                // pt, not my: a row's own margin is outside the box Virtuoso
+                // measures (see the message row below). Top only: the row
+                // after a notice always starts a group, and its mt-4 is the
+                // space below (my-3 used to collapse into it).
+                <div className="flex items-center justify-center gap-2 px-4 pt-3">
                   <div className="flex items-center gap-2 rounded-full bg-vox-bg-secondary px-4 py-1.5">
                     {isEncryptionNotice ? (
                       <Lock size={14} className="text-vox-accent-success" />
@@ -254,8 +258,15 @@ export function DMMessageList({ conversationId }: Props) {
             const showHeader = shouldShowHeader(dataIndex);
             const isOwn = message.author.id === user?.id;
 
+            // flow-root keeps MessageItem's top margin (mt-4 between author
+            // groups) INSIDE this row. Virtuoso sizes a row by its box: a margin
+            // that collapses out of it takes room on screen the size tree never
+            // counts, and every follow-to-bottom stopped short by the sum of
+            // those margins, the newest message below the fold. Vertical space
+            // at the edge of a row, the Header or the Footer is padding (or
+            // contained like this), never a bare margin.
             return (
-              <div key={message.id} className="w-full px-4">
+              <div key={message.id} className="flow-root w-full px-4">
                 <MessageItem
                   message={message}
                   showHeader={showHeader}
@@ -271,9 +282,13 @@ export function DMMessageList({ conversationId }: Props) {
           components={{
             Header: () =>
               !hasMore && messages.length > 0 ? (
-                <div className="mx-4 mb-6 border-b border-vox-border pb-4 pt-4">
-                  <h4 className="text-2xl font-bold text-vox-text-primary">{t('dm.beginningOfConversation')}</h4>
-                  <p className="text-sm text-vox-text-secondary">{t('dm.conversationStart')}</p>
+                // the space under the rule is the outer padding, not a margin:
+                // see the message row in itemContent
+                <div className="pb-6">
+                  <div className="mx-4 border-b border-vox-border pb-4 pt-4">
+                    <h4 className="text-2xl font-bold text-vox-text-primary">{t('dm.beginningOfConversation')}</h4>
+                    <p className="text-sm text-vox-text-secondary">{t('dm.conversationStart')}</p>
+                  </div>
                 </div>
               ) : null,
             Footer: () => (
@@ -295,7 +310,7 @@ export function DMMessageList({ conversationId }: Props) {
       {showScrollButton && (
         <button
           onClick={scrollToBottom}
-          aria-label="Scroll to bottom"
+          aria-label={t('chat.jumpToBottom')}
           className="absolute bottom-4 left-1/2 -translate-x-1/2 flex h-8 w-8 items-center justify-center rounded-full bg-vox-bg-tertiary text-vox-text-secondary shadow-lg hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
         >
           <ArrowDown size={16} />

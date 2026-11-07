@@ -1,20 +1,35 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { api } from '../../services/api';
 import { Avatar } from '../common/Avatar';
+import { Users } from 'lucide-react';
 import type { ServerMember } from '@voxium/shared';
+
+/**
+ * A row of the dropdown: a member, or the `@everyone` token — offered only
+ * when the composer says the author may ping the channel (MENTION_EVERYONE;
+ * the server decides again on send, so this is a courtesy, not the check).
+ */
+export type MentionCandidate =
+  | { kind: 'member'; member: ServerMember }
+  | { kind: 'everyone' };
 
 interface Props {
   /** Current full text of the textarea */
   text: string;
   /** Cursor position in the textarea */
   cursorPos: number;
+  /** Whether to offer the `@everyone` row. */
+  canMentionEveryone?: boolean;
   /** Called when user selects a member from the dropdown */
   onSelect: (userId: string, displayName: string, mentionStart: number, mentionEnd: number) => void;
+  /** Called when the user selects the `@everyone` row. */
+  onSelectEveryone?: (mentionStart: number, mentionEnd: number) => void;
   /** Called when the autocomplete is dismissed */
   onClose: () => void;
   /** Callback to sync results with parent for keyboard handling */
-  onResultsChange: (results: ServerMember[]) => void;
+  onResultsChange: (results: MentionCandidate[]) => void;
 }
 
 /**
@@ -40,9 +55,15 @@ function getMentionQuery(text: string, cursorPos: number): { query: string; star
   return null;
 }
 
-export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResultsChange }: Props) {
+/** Whether the `@everyone` row belongs in the list for this query. */
+function everyoneMatches(query: string): boolean {
+  return 'everyone'.startsWith(query.toLowerCase());
+}
+
+export function MentionAutocomplete({ text, cursorPos, canMentionEveryone = false, onSelect, onSelectEveryone, onClose, onResultsChange }: Props) {
+  const { t } = useTranslation();
   const activeServerId = useServerStore((s) => s.activeServerId);
-  const [results, setResults] = useState<ServerMember[]>([]);
+  const [members, setMembers] = useState<ServerMember[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
@@ -52,6 +73,24 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
   onResultsChangeRef.current = onResultsChange;
 
   const mention = getMentionQuery(text, cursorPos);
+  const offerEveryone = !!mention && canMentionEveryone && everyoneMatches(mention.query);
+
+  /** The rows, in display order: the `@everyone` token first when offered, then the members. */
+  function buildCandidates(): MentionCandidate[] {
+    return [
+      ...(offerEveryone ? [{ kind: 'everyone' } as const] : []),
+      ...members.map((member) => ({ kind: 'member', member } as const)),
+    ];
+  }
+  const candidates = buildCandidates();
+
+  // The parent drives the keyboard from the same list the user sees
+  useEffect(() => {
+    onResultsChangeRef.current([
+      ...(offerEveryone ? [{ kind: 'everyone' } as const] : []),
+      ...members.map((member) => ({ kind: 'member', member } as const)),
+    ]);
+  }, [members, offerEveryone]);
 
   // Debounced server-side search
   useEffect(() => {
@@ -59,8 +98,7 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
       // Cancel any in-flight request when mention context is lost
       if (abortRef.current) abortRef.current.abort();
       if (debounceRef.current) clearTimeout(debounceRef.current);
-      setResults([]);
-      onResultsChangeRef.current([]);
+      setMembers([]);
       return;
     }
 
@@ -83,13 +121,13 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
           { signal: controller.signal },
         );
         if (!controller.signal.aborted) {
-          const newResults = data.data ?? [];
-          setResults(newResults);
+          setMembers(data.data ?? []);
           setSelectedIndex(0);
-          onResultsChangeRef.current(newResults);
         }
-      } catch {
-        // Ignore aborted requests
+      } catch (err) {
+        // An aborted request is the expected end of a superseded search; a
+        // failed one leaves the list as it was (the user keeps typing)
+        if (!controller.signal.aborted) console.warn('[Mentions] Member search failed:', err instanceof Error ? err.message : err);
       } finally {
         if (!controller.signal.aborted) setIsSearching(false);
       }
@@ -115,11 +153,12 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
     item?.scrollIntoView({ block: 'nearest' });
   }, [selectedIndex]);
 
-  const handleSelect = useCallback((member: ServerMember) => {
+  const handleSelect = useCallback((candidate: MentionCandidate) => {
     if (!mention) return;
     const mentionEnd = mention.start + 1 + mention.query.length;
-    onSelect(member.user.id, member.user.displayName, mention.start, mentionEnd);
-  }, [mention, onSelect]);
+    if (candidate.kind === 'everyone') onSelectEveryone?.(mention.start, mentionEnd);
+    else onSelect(candidate.member.user.id, candidate.member.user.displayName, mention.start, mentionEnd);
+  }, [mention, onSelect, onSelectEveryone]);
 
   // If no mention context, close
   useEffect(() => {
@@ -129,7 +168,7 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
   if (!mention) return null;
 
   // Show the dropdown even while loading (for perceived speed)
-  if (results.length === 0 && !isSearching) return null;
+  if (candidates.length === 0 && !isSearching) return null;
 
   return (
     <div
@@ -138,29 +177,44 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
       data-testid="mention-autocomplete"
     >
       <div className="px-2 py-1.5 text-[11px] font-semibold uppercase text-vox-text-muted">
-        Members matching @{mention.query}
+        {t('chat.mentionAutocomplete.header', { query: mention.query })}
       </div>
-      {results.length === 0 && isSearching && (
-        <div className="px-2 py-2 text-xs text-vox-text-muted">Searching...</div>
+      {members.length === 0 && isSearching && (
+        <div className="px-2 py-2 text-xs text-vox-text-muted">{t('chat.mentionAutocomplete.searching')}</div>
       )}
-      {results.map((member, i) => (
+      {candidates.map((candidate, i) => (
         <button
-          key={member.userId}
+          key={candidate.kind === 'everyone' ? 'everyone' : candidate.member.userId}
           data-mention-item
+          data-testid={candidate.kind === 'everyone' ? 'mention-everyone-option' : undefined}
           onMouseDown={(e) => {
             e.preventDefault(); // Prevent textarea blur
-            handleSelect(member);
+            handleSelect(candidate);
           }}
           onMouseEnter={() => setSelectedIndex(i)}
           className={`flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors ${
             i === selectedIndex ? 'bg-vox-accent-primary/20 text-vox-text-primary' : 'text-vox-text-secondary hover:bg-vox-bg-hover'
           }`}
         >
-          <Avatar avatarUrl={member.user.avatarUrl} displayName={member.user.displayName} size="sm" />
-          <div className="min-w-0 flex-1">
-            <span className="text-sm font-medium">{member.user.displayName}</span>
-            <span className="ml-1.5 text-xs text-vox-text-muted">@{member.user.username}</span>
-          </div>
+          {candidate.kind === 'everyone' ? (
+            <>
+              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-vox-accent-primary/20 text-vox-accent-primary">
+                <Users size={14} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <span className="text-sm font-medium">{t('chat.mentionEveryone.label')}</span>
+                <span className="ml-1.5 text-xs text-vox-text-muted">{t('chat.mentionEveryone.description')}</span>
+              </div>
+            </>
+          ) : (
+            <>
+              <Avatar avatarUrl={candidate.member.user.avatarUrl} displayName={candidate.member.user.displayName} size="sm" />
+              <div className="min-w-0 flex-1">
+                <span className="text-sm font-medium">{candidate.member.user.displayName}</span>
+                <span className="ml-1.5 text-xs text-vox-text-muted">@{candidate.member.user.username}</span>
+              </div>
+            </>
+          )}
         </button>
       ))}
     </div>
@@ -170,10 +224,10 @@ export function MentionAutocomplete({ text, cursorPos, onSelect, onClose, onResu
 /** Keyboard handler for mention autocomplete. Returns true if the key was consumed. */
 export function handleMentionKeyDown(
   e: React.KeyboardEvent,
-  results: ServerMember[],
+  results: MentionCandidate[],
   selectedIndex: number,
   setSelectedIndex: (i: number) => void,
-  onSelect: (member: ServerMember) => void,
+  onSelect: (candidate: MentionCandidate) => void,
 ): boolean {
   if (results.length === 0) return false;
 
@@ -199,4 +253,4 @@ export function handleMentionKeyDown(
   return false;
 }
 
-export { getMentionQuery };
+export { getMentionQuery, everyoneMatches };

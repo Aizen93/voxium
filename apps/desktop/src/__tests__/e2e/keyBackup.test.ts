@@ -47,9 +47,14 @@ describe('recovery keys', () => {
   it('rejects a mistyped key before anything else happens', () => {
     // Without the checksum the first sign of a typo would be "decryption
     // failed" after a network round trip, which reads like data loss.
-    const key = generateRecoveryKey();
+    // A FIXED key, not a fresh one: the checksum is one byte, so one typo in
+    // 256 slips through by design (the next test measures that), and a random
+    // key made this assertion fail about that often in CI. The first-character
+    // swap of this key is one the checksum catches.
+    const key = 'Z45M-6Z7V-FYBK-56M6-YJMI-ZLUY-DKRN-MORI-EJH2-O6K2-ZFQ3-FJDG-M3L6-S';
     const bare = key.replace(/-/g, '');
-    const swapped = bare[0] === 'A' ? `C${bare.slice(1)}` : `A${bare.slice(1)}`;
+    expect(isRecoveryKeyWellFormed(bare)).toBe(true);
+    const swapped = `A${bare.slice(1)}`;
     expect(isRecoveryKeyWellFormed(swapped)).toBe(false);
     expect(isRecoveryKeyWellFormed(bare.slice(0, -1))).toBe(false);
     expect(isRecoveryKeyWellFormed('')).toBe(false);

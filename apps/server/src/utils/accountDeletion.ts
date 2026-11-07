@@ -3,7 +3,9 @@ import { purgeE2EMaterial } from './e2ePurge';
 import { purgeSecureChannelStateForAccount } from './secureChannelLifecycle';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { deleteFromS3 } from './s3';
-import { getIO } from '../websocket/socketServer';
+import { revokeUserSessions } from './sessionRevocation';
+import { emitToModerators } from './moderatorAudience';
+import { WS_EVENTS } from '@voxium/shared';
 
 /**
  * Delete an account that owns NO servers, with everything that has to happen
@@ -40,16 +42,17 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // events). Re-read here rather than taken from the caller: a transfer that
   // just happened leaves the membership row in place until the cascade.
   const memberships = await prisma.serverMember.findMany({ where: { userId }, select: { serverId: true } });
+  // The cascade takes this account's join requests silently; the moderators
+  // who still list one deserve the same event every other settlement sends.
+  const pendingRequests = await prisma.serverJoinRequest.findMany({ where: { userId, status: 'pending' }, select: { serverId: true } });
   for (const { serverId } of memberships) {
     await broadcastMemberLeft(userId, serverId);
   }
 
-  // End every live session across the cluster. A room-filtered
-  // disconnectSockets is adapter-wide and does not need a fetch; the
-  // dangerous form is the EMPTY filter (see index.ts shutdown).
-  const io = getIO();
-  io.to(`user:${userId}`).emit('force:logout', { reason: opts.reason });
-  io.in(`user:${userId}`).disconnectSockets(true);
+  // End every live session across the cluster (room-filtered, adapter-wide;
+  // see sessionRevocation.ts). This first pass is for promptness; the one
+  // after the delete commits is the guarantee (below).
+  revokeUserSessions(userId, { forceLogoutReason: opts.reason });
 
   // Secure channels: the DB cascade would silently reap the rows, but the
   // members deserve events (created channels vanish from their sidebars,
@@ -61,6 +64,15 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // delete: purging a user who then survives strands every device they own.
   await prisma.$transaction(async (tx) => {
     await purgeE2EMaterial(userId, tx);
+    // The cascade takes this account's memberships with the row; the inline
+    // member counts (server discovery) follow in the same transaction so the
+    // directory never shows a departed member until the nightly recount.
+    if (memberships.length > 0) {
+      await tx.server.updateMany({
+        where: { id: { in: memberships.map((m) => m.serverId) }, memberCount: { gt: 0 } },
+        data: { memberCount: { decrement: 1 } },
+      });
+    }
     await tx.user.delete({ where: { id: userId } });
   }, {
     // Deleting a user cascades across ~36 relations (messages, reactions,
@@ -71,6 +83,15 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     timeout: 60_000,
     maxWait: 10_000,
   });
+
+  // Again, now that the row is gone: a socket whose handshake landed while
+  // the row still existed joined user:{id} after the first pass and passed
+  // the connection handler's re-check. Any later handshake finds no row.
+  revokeUserSessions(userId, { forceLogoutReason: opts.reason });
+
+  for (const { serverId } of pendingRequests) {
+    await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'cancelled' });
+  }
 
   if (target.avatarUrl) {
     await deleteFromS3(target.avatarUrl).catch((err) =>

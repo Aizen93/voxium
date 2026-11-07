@@ -3,45 +3,89 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
-import { Avatar } from '../common/Avatar';
 import { ImageUploadButton } from '../common/ImageUploadButton';
 import { X, Lock, Unlock } from 'lucide-react';
-import type { ServerMember, MemberRole, ResourceLimits } from '@voxium/shared';
-import { outranksRole } from '../../utils/roles';
-import { Permissions, permissionsFromString, hasPermission } from '@voxium/shared';
+import type { ResourceLimits } from '@voxium/shared';
+import { Permissions, hasPermission } from '@voxium/shared';
 import { RoleEditor } from './RoleEditor';
+import { DiscoveryTab } from './DiscoveryTab';
+import { IntegrationsTab } from './IntegrationsTab';
+import { JoinRequestsSection } from './JoinRequestsSection';
+import { BannedSection } from './BannedSection';
+import { MembersDirectory } from './MembersDirectory';
 import { api } from '../../services/api';
 import { getTranslatedError } from '../../utils/serverErrors';
+import { useServerPermissions } from '../../hooks/useServerPermissions';
 
 interface Props {
   serverId: string;
   onClose: () => void;
 }
 
-type Tab = 'general' | 'members' | 'roles' | 'limits';
+type Tab = 'general' | 'members' | 'roles' | 'limits' | 'discovery' | 'integrations';
 
 export function ServerSettingsModal({ serverId, onClose }: Props) {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<Tab>('general');
+  // No tab until the viewer picks one: the default is derived below from
+  // what they may do (General is a MANAGE_SERVER tab; a role-only moderator
+  // reaches the modal through the gear too and lands on Members; a member
+  // holding only MANAGE_WEBHOOKS lands on Integrations).
+  const [activeTab, setActiveTab] = useState<Tab | null>(null);
 
-  const { servers, roles, fetchEffectivePermissions } = useServerStore();
+  const { servers, roles, fetchJoinRequests } = useServerStore();
+  const pendingRequests = useServerStore((s) => s.joinRequestCounts[serverId] ?? 0);
   const currentUser = useAuthStore((s) => s.user);
   const server = servers.find((s) => s.id === serverId);
   const isOwner = server?.ownerId === currentUser?.id;
-  const [effectivePerms, setEffectivePerms] = useState<string | null>(null);
+  // The viewer's effective server permissions (hooks/useServerPermissions):
+  // null until known, never another server's bits after a switch, and cached
+  // per permission fingerprint, so a live role edit refetches and a revoked
+  // bit closes its tab (see `tab` below)
+  const perms = useServerPermissions(serverId, currentUser?.id);
+  const canManageRoles = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_ROLES));
+  // Discovery tab: MANAGE_SERVER. Join requests + Banned: KICK_MEMBERS ("Manage members").
+  const canManageServer = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_SERVER));
+  const canModerateMembers = isOwner || (perms !== null && hasPermission(perms, Permissions.KICK_MEMBERS));
+  // Integrations tab: MANAGE_WEBHOOKS (server-level only; ADMINISTRATOR implies it).
+  const canManageWebhooks = isOwner || (perms !== null && hasPermission(perms, Permissions.MANAGE_WEBHOOKS));
+  // Default tab: General for MANAGE_SERVER; Integrations when webhooks are the
+  // viewer's only surface beyond the read-only tabs (no moderation, no roles);
+  // otherwise Members. Members and Limits stay visible to everyone in here.
+  const defaultTab: Tab = canManageServer
+    ? 'general'
+    : canManageWebhooks && !canModerateMembers && !canManageRoles ? 'integrations' : 'members';
+  // A picked tab holds only while the viewer may still open it: a revoked
+  // bit (a live role edit) or another server falls back to the default
+  const permitted = (candidate: Tab): boolean => {
+    switch (candidate) {
+      case 'general':
+      case 'discovery':
+        return canManageServer;
+      case 'integrations':
+        return canManageWebhooks;
+      case 'roles':
+        return canManageRoles;
+      default:
+        return true;
+    }
+  };
+  const tab: Tab = activeTab !== null && permitted(activeTab) ? activeTab : defaultTab;
 
+  // The Members tab badge is fed by the socket events and by the list fetch;
+  // until step 4 wires the events, and on the first open of a session, the
+  // count is only known once the list has been fetched — do it as soon as
+  // we know the viewer may moderate, not when they reach the tab.
   useEffect(() => {
-    fetchEffectivePermissions(serverId).then(setEffectivePerms).catch((err) => { console.warn('[ServerSettings] Failed to fetch permissions:', err); });
-  }, [serverId, fetchEffectivePermissions]);
-
-  const canManageRoles = isOwner || (effectivePerms !== null && hasPermission(permissionsFromString(effectivePerms), Permissions.MANAGE_ROLES));
+    if (!canModerateMembers) return;
+    fetchJoinRequests(serverId).catch((err) => { console.warn('[ServerSettings] Failed to fetch join requests:', err); });
+  }, [serverId, canModerateMembers, fetchJoinRequests]);
 
   if (!server) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className={`relative flex w-full flex-col rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up ${activeTab === 'roles' ? 'max-w-4xl' : 'max-w-2xl'}`} style={{ maxHeight: '80vh' }}>
+      <div className={`relative flex w-full flex-col rounded-xl border border-vox-border bg-vox-bg-floating shadow-2xl animate-slide-up ${tab === 'roles' ? 'max-w-4xl' : 'max-w-2xl'}`} style={{ maxHeight: '80vh' }}>
         {/* Header */}
         <div className="flex items-center justify-between border-b border-vox-border px-6 py-4">
           <h2 className="text-lg font-bold text-vox-text-primary">{t('serverSettings.title')}</h2>
@@ -56,31 +100,68 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 
         {/* Tabs */}
         <div className="flex border-b border-vox-border px-6">
-          <button
-            onClick={() => setActiveTab('general')}
-            className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'general'
-                ? 'text-vox-text-primary border-vox-accent-primary'
-                : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
-            }`}
-          >
-            {t('serverSettings.tabs.general')}
-          </button>
+          {canManageServer && (
+            <button
+              onClick={() => setActiveTab('general')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                tab === 'general'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+            >
+              {t('serverSettings.tabs.general')}
+            </button>
+          )}
           <button
             onClick={() => setActiveTab('members')}
             className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'members'
+              tab === 'members'
                 ? 'text-vox-text-primary border-vox-accent-primary'
                 : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
             }`}
           >
             {t('serverSettings.tabs.members')}
+            {canModerateMembers && pendingRequests > 0 && (
+              <span
+                className="ml-1.5 rounded-full bg-vox-accent-primary px-1.5 text-[10px] font-semibold text-vox-on-accent"
+                aria-label={t('server.joinRequests.pending', { count: pendingRequests })}
+                data-testid="members-tab-badge"
+              >
+                {pendingRequests}
+              </span>
+            )}
           </button>
+          {canManageServer && (
+            <button
+              onClick={() => setActiveTab('discovery')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                tab === 'discovery'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+              data-testid="tab-discovery"
+            >
+              {t('serverSettings.tabs.discovery')}
+            </button>
+          )}
+          {canManageWebhooks && (
+            <button
+              onClick={() => setActiveTab('integrations')}
+              className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                tab === 'integrations'
+                  ? 'text-vox-text-primary border-vox-accent-primary'
+                  : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
+              }`}
+              data-testid="tab-integrations"
+            >
+              {t('serverSettings.tabs.integrations')}
+            </button>
+          )}
           {canManageRoles && (
             <button
               onClick={() => setActiveTab('roles')}
               className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-                activeTab === 'roles'
+                tab === 'roles'
                   ? 'text-vox-text-primary border-vox-accent-primary'
                   : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
               }`}
@@ -91,7 +172,7 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
           <button
             onClick={() => setActiveTab('limits')}
             className={`px-3 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'limits'
+              tab === 'limits'
                 ? 'text-vox-text-primary border-vox-accent-primary'
                 : 'text-vox-text-muted border-transparent hover:text-vox-text-secondary'
             }`}
@@ -102,11 +183,15 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
-          {activeTab === 'general' ? (
+          {tab === 'general' ? (
             <GeneralTab serverId={serverId} onClose={onClose} />
-          ) : activeTab === 'members' ? (
-            <MembersTab serverId={serverId} />
-          ) : activeTab === 'roles' ? (
+          ) : tab === 'members' ? (
+            <MembersTab serverId={serverId} canModerateMembers={canModerateMembers} />
+          ) : tab === 'discovery' ? (
+            <DiscoveryTab key={serverId} serverId={serverId} onGoToGeneral={() => setActiveTab('general')} />
+          ) : tab === 'integrations' ? (
+            <IntegrationsTab key={serverId} serverId={serverId} />
+          ) : tab === 'roles' ? (
             <RoleEditor serverId={serverId} roles={roles} canManageRoles={canManageRoles} />
           ) : (
             <LimitsTab serverId={serverId} />
@@ -391,369 +476,19 @@ function SecureChannelsSection({ serverId }: { serverId: string }) {
   );
 }
 
-function MembersTab({ serverId }: { serverId: string }) {
-  const { t } = useTranslation();
-  const { members, roles, assignMemberRoles } = useServerStore();
-  const currentUser = useAuthStore((s) => s.user);
-  const currentMember = members.find((m) => m.userId === currentUser?.id);
-  const [confirmAction, setConfirmAction] = useState<{ type: 'kick' | 'transfer'; userId: string } | null>(null);
-  const [expandedMember, setExpandedMember] = useState<string | null>(null);
-  const [savingRoles, setSavingRoles] = useState(false);
-  const [search, setSearch] = useState('');
-  const [roleFilter, setRoleFilter] = useState<string | null>(null);
-
-  const isOwner = currentMember?.role === 'owner';
-  const isAdmin = currentMember?.role === 'admin';
-  const canManageRoles = isOwner || isAdmin;
-  const assignableRoles = roles.filter((r) => !r.isDefault).sort((a, b) => b.position - a.position);
-
-  // Filter + sort members
-  const filteredMembers = members.filter((m) => {
-    if (search) {
-      const q = search.toLowerCase();
-      const nameMatch = (m.nickname || m.user.displayName).toLowerCase().includes(q);
-      const usernameMatch = m.user.username.toLowerCase().includes(q);
-      if (!nameMatch && !usernameMatch) return false;
-    }
-    if (roleFilter) {
-      if (roleFilter === '_owner') return m.role === 'owner';
-      if (roleFilter === '_admin') return m.role === 'admin';
-      if (roleFilter === '_none') return !m.roles || m.roles.length === 0;
-      return m.roles?.some((r) => r.id === roleFilter) ?? false;
-    }
-    return true;
-  });
-
-  // Sort: owner first, then by highest role position, then alphabetically
-  const sortedMembers = [...filteredMembers].sort((a, b) => {
-    const aLevel = a.role === 'owner' ? 999 : (a.roles?.reduce((max, r) => Math.max(max, r.position), 0) ?? 0);
-    const bLevel = b.role === 'owner' ? 999 : (b.roles?.reduce((max, r) => Math.max(max, r.position), 0) ?? 0);
-    if (aLevel !== bLevel) return bLevel - aLevel;
-    return (a.nickname || a.user.displayName).localeCompare(b.nickname || b.user.displayName);
-  });
-
-  async function handleRoleChange(memberId: string, newRole: MemberRole) {
-    try {
-      await useServerStore.getState().updateMemberRole(serverId, memberId, newRole);
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToUpdateRole'));
-    }
-  }
-
-  async function handleKick(memberId: string) {
-    try {
-      await useServerStore.getState().kickMember(serverId, memberId);
-      setConfirmAction(null);
-      setExpandedMember(null);
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToKick'));
-    }
-  }
-
-  async function handleTransfer(targetUserId: string) {
-    try {
-      await useServerStore.getState().transferOwnership(serverId, targetUserId);
-      setConfirmAction(null);
-      setExpandedMember(null);
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToTransfer'));
-    }
-  }
-
-  async function handleToggleRole(memberId: string, roleId: string) {
-    const member = members.find((m) => m.userId === memberId);
-    if (!member) return;
-    setSavingRoles(true);
-    try {
-      const currentRoleIds = new Set(member.roles?.map((r) => r.id) || []);
-      const newRoleIds = currentRoleIds.has(roleId)
-        ? [...currentRoleIds].filter((id) => id !== roleId)
-        : [...currentRoleIds, roleId];
-      await assignMemberRoles(serverId, memberId, newRoleIds);
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToUpdateRoles'));
-    } finally {
-      setSavingRoles(false);
-    }
-  }
-
-  function canKickMember(member: ServerMember): boolean {
-    if (!currentMember || member.userId === currentUser?.id) return false;
-    if (!isOwner && !isAdmin) return false;
-    return outranksRole(currentMember.role, member.role);
-  }
-
+function MembersTab({ serverId, canModerateMembers }: { serverId: string; canModerateMembers: boolean }) {
   return (
     <div className="space-y-3">
-      {/* Search + Filter bar */}
-      <div className="flex gap-2">
-        <div className="relative flex-1">
-          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-vox-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          <input
-            type="text"
-            placeholder={t('serverSettings.members.searchPlaceholder')}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full rounded-lg border border-vox-border bg-vox-bg-primary pl-8 pr-3 py-1.5 text-sm text-vox-text-primary placeholder:text-vox-text-muted focus:outline-none focus:border-vox-accent-primary"
-          />
-        </div>
-        <select
-          value={roleFilter ?? ''}
-          onChange={(e) => setRoleFilter(e.target.value || null)}
-          className="rounded-lg border border-vox-border bg-vox-bg-primary px-2 py-1.5 text-xs text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary"
-        >
-          <option value="">{t('serverSettings.members.allRoles')}</option>
-          <option value="_owner">{t('serverSettings.members.owners')}</option>
-          <option value="_admin">{t('serverSettings.members.admins')}</option>
-          {assignableRoles.map((r) => (
-            <option key={r.id} value={r.id}>{r.name}</option>
-          ))}
-          <option value="_none">{t('serverSettings.members.noRoles')}</option>
-        </select>
-      </div>
+      {/* Moderation: join requests to decide, bans to lift (KICK_MEMBERS) */}
+      {canModerateMembers && (
+        <>
+          <JoinRequestsSection serverId={serverId} />
+          <BannedSection serverId={serverId} />
+        </>
+      )}
 
-      {/* Member count */}
-      <p className="text-xs text-vox-text-muted">
-        {t(members.length !== 1 ? 'serverSettings.members.memberCountPlural' : 'serverSettings.members.memberCount', { filtered: filteredMembers.length, total: members.length })}
-      </p>
-
-      {/* Member list */}
-      <div className="space-y-0.5">
-        {sortedMembers.map((member) => {
-          const isSelf = member.userId === currentUser?.id;
-          const isExpanded = expandedMember === member.userId;
-          const showPromote = isOwner && member.role === 'member' && !isSelf;
-          const showDemote = isOwner && member.role === 'admin' && !isSelf;
-          const showKick = canKickMember(member);
-          const showTransfer = isOwner && !isSelf;
-          const showRoleEdit = canManageRoles && !isSelf && member.role !== 'owner' && assignableRoles.length > 0;
-          const hasActions = showPromote || showDemote || showKick || showTransfer || showRoleEdit;
-          const isConfirmingKick = confirmAction?.type === 'kick' && confirmAction.userId === member.userId;
-          const isConfirmingTransfer = confirmAction?.type === 'transfer' && confirmAction.userId === member.userId;
-
-          return (
-            <div key={member.userId} className="rounded-lg border border-transparent hover:border-vox-border transition-colors">
-              {/* Main row */}
-              <div
-                className={`flex items-center gap-3 px-3 py-2 cursor-pointer rounded-lg transition-colors ${
-                  isExpanded ? 'bg-vox-bg-hover' : 'hover:bg-vox-bg-hover/50'
-                }`}
-                onClick={() => {
-                  if (!hasActions && !isSelf) return;
-                  setExpandedMember(isExpanded ? null : member.userId);
-                  setConfirmAction(null);
-                }}
-              >
-                <Avatar avatarUrl={member.user.avatarUrl} displayName={member.user.displayName} size="sm" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="truncate text-sm font-medium text-vox-text-primary">
-                      {member.nickname || member.user.displayName}
-                    </span>
-                    {member.nickname && (
-                      <span className="text-xs text-vox-text-muted truncate">({member.user.displayName})</span>
-                    )}
-                    {isSelf && (
-                      <span className="text-[10px] font-medium text-vox-accent-primary bg-vox-accent-primary/10 rounded px-1">{t('serverSettings.members.you')}</span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="text-xs text-vox-text-muted">@{member.user.username}</span>
-                    <RoleBadge role={member.role} />
-                  </div>
-                </div>
-
-                {/* Role pills (always visible) */}
-                <div className="flex flex-wrap gap-1 shrink-0 max-w-[180px] justify-end">
-                  {member.roles?.map((role) => (
-                    <span
-                      key={role.id}
-                      className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
-                      style={{
-                        color: role.color || '#99aab5',
-                        backgroundColor: (role.color || '#99aab5') + '18',
-                        border: `1px solid ${(role.color || '#99aab5')}30`,
-                      }}
-                    >
-                      <div className="h-1.5 w-1.5 rounded-full bg-current" />
-                      {role.name}
-                    </span>
-                  ))}
-                </div>
-
-                {/* Expand indicator */}
-                {hasActions && (
-                  <svg
-                    className={`h-4 w-4 text-vox-text-muted shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                  </svg>
-                )}
-              </div>
-
-              {/* Expanded panel */}
-              {isExpanded && hasActions && (
-                <div className="px-3 pb-3 pt-1 space-y-3 border-t border-vox-border/50 mx-2">
-                  {/* Role assignment */}
-                  {showRoleEdit && (
-                    <div>
-                      <p className="text-[11px] font-semibold text-vox-text-muted uppercase tracking-wider mb-1.5">{t('serverSettings.members.assignRoles')}</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {assignableRoles.map((role) => {
-                          const hasRole = member.roles?.some((r) => r.id === role.id) ?? false;
-                          return (
-                            <button
-                              key={role.id}
-                              onClick={(e) => { e.stopPropagation(); handleToggleRole(member.userId, role.id); }}
-                              disabled={savingRoles}
-                              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium border transition-all disabled:opacity-50 ${
-                                hasRole
-                                  ? 'shadow-sm'
-                                  : 'border-dashed border-vox-border text-vox-text-muted hover:border-vox-text-secondary hover:text-vox-text-secondary'
-                              }`}
-                              style={hasRole ? {
-                                color: role.color || '#99aab5',
-                                borderColor: (role.color || '#99aab5') + '60',
-                                backgroundColor: (role.color || '#99aab5') + '18',
-                              } : undefined}
-                            >
-                              {hasRole ? (
-                                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                                </svg>
-                              ) : (
-                                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-                                </svg>
-                              )}
-                              {role.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Promote / Demote */}
-                  {(showPromote || showDemote) && (
-                    <div className="flex items-center gap-2">
-                      {showPromote && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleRoleChange(member.userId, 'admin'); }}
-                          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-vox-accent-primary hover:bg-vox-accent-primary/10 transition-colors"
-                        >
-                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                          </svg>
-                          {t('serverSettings.members.promoteToAdmin')}
-                        </button>
-                      )}
-                      {showDemote && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleRoleChange(member.userId, 'member'); }}
-                          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
-                        >
-                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-                          </svg>
-                          {t('serverSettings.members.demoteToMember')}
-                        </button>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Dangerous actions */}
-                  {(showKick || showTransfer) && (
-                    <div className="space-y-2 pt-1 border-t border-vox-border/30">
-                      {/* Confirmation dialog */}
-                      {isConfirmingKick && (
-                        <div className="rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/5 p-3">
-                          <p className="text-xs text-vox-text-primary font-medium mb-1">
-                            {t('serverSettings.members.kickConfirm', { name: member.nickname || member.user.displayName })}
-                          </p>
-                          <p className="text-[11px] text-vox-text-muted mb-2.5">
-                            {t('serverSettings.members.kickDescription')}
-                          </p>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleKick(member.userId); }}
-                              className="rounded-md bg-vox-accent-danger px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-danger/80 transition-colors"
-                            >
-                              {t('serverSettings.members.kick')}
-                            </button>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setConfirmAction(null); }}
-                              className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
-                            >
-                              {t('common.cancel')}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {isConfirmingTransfer && (
-                        <div className="rounded-lg border border-vox-accent-danger/30 bg-vox-accent-danger/5 p-3">
-                          <p className="text-xs text-vox-text-primary font-medium mb-1">
-                            {t('serverSettings.members.transferConfirm', { name: member.nickname || member.user.displayName })}
-                          </p>
-                          <p className="text-[11px] text-vox-text-muted mb-2.5">
-                            {t('serverSettings.members.transferDescription')}
-                          </p>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleTransfer(member.userId); }}
-                              className="rounded-md bg-vox-accent-danger px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-danger/80 transition-colors"
-                            >
-                              {t('serverSettings.members.transfer')}
-                            </button>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setConfirmAction(null); }}
-                              className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
-                            >
-                              {t('common.cancel')}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Action buttons (hidden when confirming) */}
-                      {!isConfirmingKick && !isConfirmingTransfer && (
-                        <div className="flex items-center gap-2">
-                          {showKick && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setConfirmAction({ type: 'kick', userId: member.userId }); }}
-                              className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
-                            >
-                              {t('serverSettings.members.kickMember')}
-                            </button>
-                          )}
-                          {showTransfer && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setConfirmAction({ type: 'transfer', userId: member.userId }); }}
-                              className="rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-muted hover:bg-vox-bg-hover transition-colors"
-                            >
-                              {t('serverSettings.members.transferOwnership')}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-
-        {sortedMembers.length === 0 && (
-          <p className="text-center text-sm text-vox-text-muted py-8">
-            {search || roleFilter ? t('serverSettings.members.noResults') : t('serverSettings.members.noMembers')}
-          </p>
-        )}
-      </div>
+      {/* Everyone: the server-paged directory */}
+      <MembersDirectory serverId={serverId} />
     </div>
   );
 }
@@ -790,9 +525,13 @@ function LimitsTab({ serverId }: { serverId: string }) {
 
   const items = [
     { label: t('serverSettings.limits.maxChannels'), value: limits.maxChannelsPerServer, description: t('serverSettings.limits.maxChannelsDesc') },
+    // Counted apart from the channel cap; no formatZero: 0 freezes creation
+    { label: t('serverSettings.limits.maxSecureChannels'), value: limits.maxSecureChannelsPerServer, description: t('serverSettings.limits.maxSecureChannelsDesc') },
     { label: t('serverSettings.limits.maxVoiceUsers'), value: limits.maxVoiceUsersPerChannel, description: t('serverSettings.limits.maxVoiceUsersDesc') },
     { label: t('serverSettings.limits.maxCategories'), value: limits.maxCategoriesPerServer, description: t('serverSettings.limits.maxCategoriesDesc') },
     { label: t('serverSettings.limits.maxMembers'), value: limits.maxMembersPerServer, description: t('serverSettings.limits.maxMembersDesc'), formatZero: t('serverSettings.limits.unlimited') },
+    // No formatZero: a webhook cap of 0 freezes creation, it is not "unlimited"
+    { label: t('serverSettings.limits.maxWebhooks'), value: limits.maxWebhooksPerServer, description: t('serverSettings.limits.maxWebhooksDesc') },
   ];
 
   return (
@@ -816,29 +555,3 @@ function LimitsTab({ serverId }: { serverId: string }) {
     </div>
   );
 }
-
-function RoleBadge({ role }: { role: MemberRole }) {
-  const { t } = useTranslation();
-  if (role === 'owner') {
-    return (
-      <span className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase bg-yellow-500/20 text-yellow-400" title={t('serverSettings.members.owner')}>
-        <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-        </svg>
-        {t('serverSettings.members.owner')}
-      </span>
-    );
-  }
-  if (role === 'admin') {
-    return (
-      <span className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase bg-vox-accent-primary/20 text-vox-accent-primary" title={t('serverSettings.members.admin')}>
-        <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-        </svg>
-        {t('serverSettings.members.admin')}
-      </span>
-    );
-  }
-  return null;
-}
-

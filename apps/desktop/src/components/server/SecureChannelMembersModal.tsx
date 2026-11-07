@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
+import { memberMatches } from '../../hooks/useMemberSearch';
+import { useMemberDirectory } from '../../hooks/useMemberDirectory';
+import { MemberDirectoryFooter } from './MemberDirectoryFooter';
 import { useTranslation } from 'react-i18next';
 import { useServerStore, NO_SECURE_MEMBERS } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
-import { X, Lock, UserPlus, UserMinus, Crown } from 'lucide-react';
+import { X, Lock, UserPlus, UserMinus, Crown, Search } from 'lucide-react';
 import { E2E_LIMITS } from '@voxium/shared';
 import { getTranslatedError } from '../../utils/serverErrors';
 
@@ -35,6 +38,7 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
   const [error, setError] = useState('');
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
   const [showInvitePicker, setShowInvitePicker] = useState(false);
+  const [inviteQuery, setInviteQuery] = useState('');
   const [name, setName] = useState(channelName);
   const [renaming, setRenaming] = useState(false);
 
@@ -65,9 +69,13 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
 
   const isCreator = channelMembers.some((m) => m.userId === user?.id && m.isCreator);
   const memberIds = useMemo(() => new Set(channelMembers.map((m) => m.userId)), [channelMembers]);
+  // The directory, paged: everyone in the space, filtered server-side by the
+  // search text; the rows the client holds (the People slice) show while the
+  // first page loads and if the directory fails.
+  const directory = useMemberDirectory(serverId, inviteQuery);
   const invitable = useMemo(
-    () => serverMembers.filter((m) => !memberIds.has(m.userId)),
-    [serverMembers, memberIds],
+    () => (directory.rows ?? serverMembers.filter((m) => memberMatches(m, inviteQuery))).filter((m) => !memberIds.has(m.userId)),
+    [directory.rows, serverMembers, memberIds, inviteQuery],
   );
   const atCap = channelMembers.length >= E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP;
 
@@ -192,7 +200,20 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
             )}
 
             {isCreator && showInvitePicker && (
-              <div className="max-h-48 overflow-y-auto rounded-lg border border-vox-border">
+              <div className="relative mb-2">
+                <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-vox-text-muted" />
+                <input
+                  type="text"
+                  className="input w-full pl-8 text-sm"
+                  placeholder={t('secureChannel.searchMembers')}
+                  value={inviteQuery}
+                  onChange={(e) => setInviteQuery(e.target.value)}
+                  data-testid="secure-invite-search"
+                />
+              </div>
+            )}
+            {isCreator && showInvitePicker && (
+              <div className="max-h-72 overflow-y-auto rounded-lg border border-vox-border" data-testid="secure-invite-candidates">
                 {invitable.length === 0 && (
                   <p className="px-3 py-4 text-center text-sm text-vox-text-muted">{t('secureChannel.noMembersFound')}</p>
                 )}
@@ -212,6 +233,7 @@ export function SecureChannelMembersModal({ serverId, channelId, channelName, on
                     <UserPlus size={14} className="text-vox-text-muted" />
                   </button>
                 ))}
+                <MemberDirectoryFooter directory={directory} shown={invitable.length} />
               </div>
             )}
           </>

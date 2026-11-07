@@ -16,7 +16,7 @@ model User {
   // express expression indexes, so `users_username_lower_key` is invisible
   // here and `prisma migrate dev` will read it as drift and offer to DROP it.
   // Do not let it: that index is what actually enforces the case-insensitive
-  // rule registerUser only pre-checks (two concurrent 'Alice'/'alice' signups
+  // rule the registration only pre-checks (two concurrent 'Alice'/'alice' signups
   // both pass the check, and every insensitive lookup afterwards — friend
   // requests, member search — becomes nondeterministic between them).
   username    String   @unique
@@ -83,6 +83,15 @@ model User {
   e2eMessageKeyBackups  E2EMessageKeyBackup[]
   secureChannelsCreated Channel[]       @relation("SecureChannelCreator")
   channelMemberships    ChannelMember[]
+  serverBans            ServerBan[]         @relation("ServerBanUser")
+  serverBansIssued      ServerBan[]         @relation("ServerBanActor")
+  joinRequests          ServerJoinRequest[] @relation("JoinRequestUser")
+  joinRequestsDecided   ServerJoinRequest[] @relation("JoinRequestDecider")
+  createdWebhooks       Webhook[]           @relation("WebhookCreator")
+  rotatedWebhooks       Webhook[]           @relation("WebhookRotator")
+  // The presence reaper reads every user the column calls online, each minute
+  @@index([status])
+
 
   @@map("users")
 }
@@ -98,6 +107,34 @@ model Server {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
+  // ─── Server discovery (docs/local/server-discovery-plan.html) ──────────────
+  /// Directory profile. sanitizeText'd, <= LIMITS.SERVER_DESCRIPTION_MAX; optional.
+  description        String?
+  /// Values from DISCOVERY_TAGS only, <= LIMITS.DISCOVERY_MAX_TAGS, deduped.
+  tags               String[]  @default([])
+  /// "Listed in Explore" — the owner's switch. Off hides the server.
+  discoverable       Boolean   @default(true)
+  /// "approval" (join requests, the default) | "open" (join directly).
+  joinMode           String    @default("approval") @map("join_mode")
+  /// Platform-admin curation: a separate Featured row, never mixed into the ranking.
+  featuredAt         DateTime? @map("featured_at")
+  /// Platform-admin block: hidden, and the discovery PATCH refuses to relist while set.
+  discoveryBlockedAt DateTime? @map("discovery_blocked_at")
+  /// Materialised: discoverable AND NOT invitesLocked AND discoveryBlockedAt IS NULL
+  /// AND owner.bannedAt IS NULL. Every write that changes one of those inputs
+  /// calls recomputeListed() (utils/discoveryListing.ts); the nightly pass
+  /// corrects drift. One column so the listing query never joins.
+  discoveryListed    Boolean   @default(true) @map("discovery_listed")
+  /// Maintained inline by joinServerMember() / removeMemberFromServer() — the
+  /// one LIVE figure on a card; the nightly pass recounts. Ranking only:
+  /// ServerDetail.memberCount keeps using _count.
+  memberCount        Int       @default(0) @map("member_count")
+  /// Daily-cycle snapshots written by the discovery stats job, never on write.
+  onlineCount        Int       @default(0) @map("discovery_online_count")
+  weeklyMessages     Int       @default(0) @map("discovery_weekly_messages")
+  activityScore      Int       @default(0) @map("discovery_activity_score")
+  statsRefreshedAt   DateTime? @map("discovery_stats_at")
+
   // Restrict, NOT Cascade: deleting a user must never silently destroy every
   // community they own. The admin delete-user flow transfers or explicitly
   // deletes owned servers first; any other user.delete() now fails safe.
@@ -108,8 +145,74 @@ model Server {
   roles      Role[]
   invites    Invite[]
   limits     ServerLimits?
+  bans         ServerBan[]
+  joinRequests ServerJoinRequest[]
+  webhooks     Webhook[]
 
+  // One index per directory sort, each ending in id so a keyset cursor is a
+  // single index range scan at any table size. No partial indexes: Prisma
+  // cannot express them and `migrate dev` would read them as drift.
+  @@index([discoveryListed, activityScore(sort: Desc), id(sort: Desc)])
+  @@index([discoveryListed, memberCount(sort: Desc), id(sort: Desc)])
+  @@index([discoveryListed, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([discoveryListed, name, id])
+  // The rolling stats refresh picks the stalest listed servers first
+  @@index([discoveryListed, statsRefreshedAt])
+  @@index([featuredAt])
+  // Tag filter
+  @@index([tags(ops: ArrayOps)], type: Gin)
+  // Substring name search — the same pg_trgm mechanism message search uses
+  // (extension installed by migration 20260705120000_search_trgm_and_owner_restrict)
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "servers_name_trgm_idx")
   @@map("servers")
+}
+
+// ─── Server Bans ─────────────────────────────────────────────────────────────
+
+/// Every removal from a server is a ban (plan: "kick is ban"). The row is what
+/// joinServerMember() refuses on — invite, direct join and approved request
+/// alike — and the undo is DELETE /servers/:id/bans/:userId.
+model ServerBan {
+  serverId   String   @map("server_id")
+  userId     String   @map("user_id")
+  bannedById String?  @map("banned_by_id")
+  reason     String? // sanitizeText'd, <= LIMITS.SERVER_BAN_REASON_MAX
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  server   Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  user     User   @relation("ServerBanUser", fields: [userId], references: [id], onDelete: Cascade)
+  bannedBy User?  @relation("ServerBanActor", fields: [bannedById], references: [id], onDelete: SetNull)
+
+  @@id([serverId, userId])
+  @@index([userId])
+  @@map("server_bans")
+}
+
+// ─── Server Join Requests ────────────────────────────────────────────────────
+
+/// A request to join an approval-mode server. Approval DELETES the row (the
+/// membership replaces it); a decline keeps it as the cooldown marker until the
+/// sweep removes it after JOIN_REQUEST_DECLINE_COOLDOWN_DAYS.
+model ServerJoinRequest {
+  id          String    @id @default(cuid())
+  serverId    String    @map("server_id")
+  userId      String    @map("user_id")
+  message     String? // sanitizeText'd, <= LIMITS.JOIN_REQUEST_MESSAGE_MAX; optional
+  status      String    @default("pending") // "pending" | "declined"
+  decidedById String?   @map("decided_by_id")
+  decidedAt   DateTime? @map("decided_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  server    Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  user      User   @relation("JoinRequestUser", fields: [userId], references: [id], onDelete: Cascade)
+  decidedBy User?  @relation("JoinRequestDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, userId])
+  @@index([serverId, status])
+  @@index([userId])
+  @@index([status, createdAt]) // pending TTL sweep
+  @@index([status, decidedAt]) // declined cooldown sweep
+  @@map("server_join_requests")
 }
 
 // ─── Server Resource Limits ─────────────────────────────────────────────────
@@ -120,6 +223,9 @@ model GlobalConfig {
   maxVoiceUsersPerChannel Int      @default(12) @map("max_voice_users_per_channel")
   maxCategoriesPerServer  Int      @default(12) @map("max_categories_per_server")
   maxMembersPerServer     Int      @default(0) @map("max_members_per_server") // 0 = unlimited
+  maxWebhooksPerServer    Int      @default(10) @map("max_webhooks_per_server")
+  /// secure channels per space, counted apart from maxChannelsPerServer
+  maxSecureChannelsPerServer Int   @default(5) @map("max_secure_channels_per_server")
   updatedAt               DateTime @updatedAt @map("updated_at")
 
   @@map("global_config")
@@ -131,6 +237,8 @@ model ServerLimits {
   maxVoiceUsersPerChannel Int?     @map("max_voice_users_per_channel")
   maxCategoriesPerServer  Int?     @map("max_categories_per_server")
   maxMembersPerServer     Int?     @map("max_members_per_server")
+  maxWebhooksPerServer    Int?     @map("max_webhooks_per_server")
+  maxSecureChannelsPerServer Int?  @map("max_secure_channels_per_server")
   updatedAt               DateTime @updatedAt @map("updated_at")
 
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -267,6 +375,7 @@ model Channel {
   reads    ChannelRead[]
   permissionOverrides ChannelPermissionOverride[]
   members  ChannelMember[]
+  webhooks Webhook[]
 
   @@index([serverId])
   @@index([categoryId])
@@ -298,17 +407,29 @@ model Message {
   // E2E DMs: when true, content is an opaque ciphertext envelope (see
   // docs/e2e-dm-spec.md §6) — never sanitized, searched, or mention-resolved.
   encrypted      Boolean   @default(false)
+  // The author wrote @everyone AND held MENTION_EVERYONE in the channel when
+  // the message was sent (or last edited): the server's word that this row
+  // pings the whole channel. Never derived from content on read.
+  mentionsEveryone Boolean @default(false) @map("mentions_everyone")
   type           String    @default("user")
   channelId      String?   @map("channel_id")
   conversationId String?   @map("conversation_id")
-  authorId       String    @map("author_id")
+  // Null ONLY for a webhook-authored row (then webhookId/webhookName are set at
+  // write time). Every reader shapes the author through shapeMessageAuthor()
+  // (utils/messageAuthor.ts), so the wire type keeps a non-null author.
+  authorId       String?   @map("author_id")
+  // Incoming webhooks: the webhook that posted the row, and its name frozen at
+  // post time (the label survives a rename or a deleted webhook — SetNull).
+  webhookId      String?   @map("webhook_id")
+  webhookName    String?   @map("webhook_name")
   replyToId      String?   @map("reply_to_id")
   editedAt       DateTime? @map("edited_at")
   createdAt      DateTime  @default(now()) @map("created_at")
 
   channel      Channel?           @relation(fields: [channelId], references: [id], onDelete: Cascade)
   conversation Conversation?      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  author       User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  author       User?              @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  webhook      Webhook?           @relation(fields: [webhookId], references: [id], onDelete: SetNull)
   replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
   replies      Message[]          @relation("MessageReply")
   reactions    MessageReaction[]
@@ -319,11 +440,54 @@ model Message {
   @@index([conversationId, createdAt])
   @@index([replyToId])
   @@index([authorId])
+  // The webhook FK's ON DELETE SET NULL and the webhook-delete purge both find rows by webhook_id
+  @@index([webhookId])
   @@index([createdAt])
   // Trigram GIN index (pg_trgm) accelerating ILIKE '%q%' message search —
   // without it every search scans the whole messages table (MED-14)
   @@index([content(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("messages")
+}
+
+// ─── Incoming Webhooks ───────────────────────────────────────────────────────
+
+/// A channel's incoming webhook: anything that POSTs JSON to its secret URL
+/// creates a message authored by the webhook (no user). Only the token's
+/// SHA-256 is stored; the plaintext is shown once at creation.
+model Webhook {
+  id          String    @id @default(cuid())
+  serverId    String    @map("server_id")
+  channelId   String    @map("channel_id")
+  name        String                              // 1..LIMITS.WEBHOOK_NAME_MAX, sanitizeText
+  type        String    @default("generic")       // "generic" | "github" (WEBHOOK_TYPES)
+  tokenHash   String    @map("token_hash")        // sha256(token), hex
+  secretEnc   String?   @map("secret_enc")        // github only: AES-256-GCM via TOTP_ENCRYPTION_KEY
+  enabled     Boolean   @default(true)
+  createdById String?   @map("created_by_id")
+  lastUsedAt  DateTime? @map("last_used_at")
+  // Owner decisions of 2026-10-19 (release 2.1.0 A.4):
+  // - a platform admin's disable is STICKY while this is set (the owner's
+  //   PATCH { enabled: true } answers 403; the admin's enable clears it)
+  adminDisabledAt  DateTime? @map("admin_disabled_at")
+  // - a kick/ban of the member who held the live URL (the creator, or whoever
+  //   rotated it last) disabled the webhook and left this mark; any enable,
+  //   the owner's or an admin's, or a rotate clears it
+  creatorRemovedAt DateTime? @map("creator_removed_at")
+  // - who rotated the credential last, and when (SET NULL when the account goes)
+  lastRotatedAt    DateTime? @map("last_rotated_at")
+  lastRotatedById  String?   @map("last_rotated_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  server    Server    @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  channel   Channel   @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation("WebhookCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  lastRotatedBy User? @relation("WebhookRotator", fields: [lastRotatedById], references: [id], onDelete: SetNull)
+  messages  Message[]
+
+  @@index([serverId])
+  @@index([channelId])
+  @@map("webhooks")
 }
 
 // ─── Message Attachments ───────────────────────────────────────────────────
@@ -484,6 +648,63 @@ model IpBan {
   creator User? @relation("IpBanCreator", fields: [bannedBy], references: [id], onDelete: SetNull)
 
   @@map("ip_bans")
+}
+
+/// Mailboxes that asked never to receive Voxium mail again ("Not you? Block
+/// Voxium mail to this address", one click from any account e-mail). Keyed by
+/// the digest of the MAILBOX form of the address (`utils/mailSuppression.ts`),
+/// never the address: the list must not become an address book of people who
+/// are not users. Every user-facing sender in `utils/email.ts` consults it.
+model MailSuppression {
+  mailboxHash String   @id @map("mailbox_hash")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("mail_suppressions")
+}
+
+/// A sign-up waiting for its e-mailed code (verify-first registration). No User
+/// row exists until the code comes back, so an address typed by someone else
+/// never becomes an account. Rows live one hour; a purge removes them.
+/// Every start of a registration writes one row, including the ones that mail
+/// nothing (existing account, blocked mailbox, used-up ledger): those carry a
+/// random code hash nobody holds, so every answer looks the same.
+model PendingRegistration {
+  /// 128-bit random id, base64url; it is what the client sends back
+  id                String   @id
+  username          String
+  email             String
+  emailCanonical    String   @map("email_canonical")
+  displayName       String   @map("display_name")
+  /// bcrypt, computed at the start so every branch does the same work
+  passwordHash      String   @map("password_hash")
+  /// sha256(id + ':' + code), hex
+  codeHash          String   @map("code_hash")
+  codeExpiresAt     DateTime @map("code_expires_at")
+  attempts          Int      @default(0)
+  resends           Int      @default(0)
+  lastSentAt        DateTime? @map("last_sent_at")
+  termsAcceptedAt   DateTime @map("terms_accepted_at")
+  privacyAcceptedAt DateTime @map("privacy_accepted_at")
+  /// normalized address the start came from: the register IP record of the
+  /// account created at completion (the completing address only when this is null)
+  ip                String?
+  createdAt         DateTime @default(now()) @map("created_at")
+  expiresAt         DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("pending_registrations")
+}
+
+/// How many sign-up mails one MAILBOX received recently (first-contact ledger).
+/// Keyed like mail_suppressions: an unkeyed digest of the mailbox, never the
+/// address. Written BEFORE a send and never refunded, so parallel starts cannot
+/// mail one inbox twice. Rows older than the window are purged.
+model SignupMailLedger {
+  mailboxHash   String   @id @map("mailbox_hash")
+  windowStartAt DateTime @map("window_start_at")
+  sent          Int      @default(1)
+
+  @@map("signup_mail_ledger")
 }
 
 // ─── Audit Log ─────────────────────────────────────────────────────────────

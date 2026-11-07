@@ -6,6 +6,8 @@ import {
   ForbiddenError,
   NotFoundError,
   ConflictError,
+  UnsupportedMediaTypeError,
+  ServiceUnavailableError,
   parseDateParam,
 } from '../../utils/errors';
 
@@ -126,6 +128,34 @@ describe('ConflictError', () => {
   });
 });
 
+describe('UnsupportedMediaTypeError', () => {
+  it('has statusCode 415 and the provided message', () => {
+    const err = new UnsupportedMediaTypeError('Send application/json');
+    expect(err.statusCode).toBe(415);
+    expect(err.message).toBe('Send application/json');
+  });
+
+  it('is an operational AppError', () => {
+    const err = new UnsupportedMediaTypeError('x');
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.isOperational).toBe(true);
+  });
+});
+
+describe('ServiceUnavailableError', () => {
+  it('has statusCode 503 and the provided message', () => {
+    const err = new ServiceUnavailableError('Webhook secret is unavailable');
+    expect(err.statusCode).toBe(503);
+    expect(err.message).toBe('Webhook secret is unavailable');
+  });
+
+  it('is an operational AppError', () => {
+    const err = new ServiceUnavailableError('x');
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.isOperational).toBe(true);
+  });
+});
+
 describe('parseDateParam', () => {
   it('returns a Date for a valid ISO string', () => {
     const result = parseDateParam('2024-01-15T10:30:00Z');
@@ -143,5 +173,35 @@ describe('parseDateParam', () => {
 
   it('uses "date" as the default param name', () => {
     expect(() => parseDateParam('invalid')).toThrow('Invalid date parameter');
+  });
+});
+
+describe('every subclass is an instance of ITSELF, not only of AppError', () => {
+  // The base constructor pinned the prototype to AppError.prototype, so
+  // `err instanceof ForbiddenError` was false for a ForbiddenError: the two
+  // catch blocks that asked (the auth middleware, the token refresh) always
+  // fell through to their generic answer.
+  it('instanceof matches the class that was constructed, its base and Error', () => {
+    const cases: Array<[AppError, abstract new (...args: never[]) => AppError]> = [
+      [new BadRequestError('x'), BadRequestError],
+      [new UnauthorizedError(), UnauthorizedError],
+      [new ForbiddenError(), ForbiddenError],
+      [new NotFoundError('Server'), NotFoundError],
+      [new ConflictError('x'), ConflictError],
+      [new UnsupportedMediaTypeError('x'), UnsupportedMediaTypeError],
+      [new ServiceUnavailableError('x'), ServiceUnavailableError],
+    ];
+    for (const [err, cls] of cases) {
+      expect(err).toBeInstanceOf(cls);
+      expect(err).toBeInstanceOf(AppError);
+      expect(err).toBeInstanceOf(Error);
+      expect(Object.getPrototypeOf(err)).toBe(cls.prototype);
+    }
+  });
+
+  it('a sibling class never matches', () => {
+    expect(new ForbiddenError()).not.toBeInstanceOf(UnauthorizedError);
+    expect(new UnauthorizedError()).not.toBeInstanceOf(ForbiddenError);
+    expect(new AppError('x', 418)).not.toBeInstanceOf(ForbiddenError);
   });
 });

@@ -1,4 +1,6 @@
 import { useState, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { Plus } from 'lucide-react';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -14,6 +16,7 @@ interface Props {
 }
 
 export function ReactionDisplay({ reactions, messageId, channelId, conversationId }: Props) {
+  const { t } = useTranslation();
   const [showPicker, setShowPicker] = useState(false);
   const userId = useAuthStore((s) => s.user?.id);
   const addBtnRef = useRef<HTMLButtonElement>(null);
@@ -27,8 +30,8 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
       } else if (channelId) {
         await useChatStore.getState().toggleReaction(channelId, messageId, emoji);
       }
-    } catch {
-      toast.error('Failed to toggle reaction');
+    } catch (err) {
+      toast.error(getTranslatedError(err, t, 'messageItem.failedToToggleReaction'));
     }
   };
 
@@ -60,8 +63,8 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
         ref={addBtnRef}
         onClick={() => setShowPicker(!showPicker)}
         className="flex h-[26px] w-[30px] items-center justify-center rounded-full border border-dashed border-vox-border-strong text-vox-text-muted hover:border-vox-text-muted hover:text-vox-text-primary transition-colors"
-        title="Add reaction"
-        aria-label="Add reaction"
+        title={t('messageItem.addReaction')}
+        aria-label={t('messageItem.addReaction')}
       >
         <Plus size={12} />
       </button>

@@ -56,8 +56,11 @@ function establish(alice: EngineAccount, bob: EngineAccount, firstMessage = 'hel
 }
 
 describe('crypto engine (vodozemac olm1)', () => {
-  it('reports its pinned version', () => {
-    expect(engine_version()).toBe('olm1/vodozemac-0.10.0');
+  it('reports the vodozemac version pinned in Cargo.toml (the string is hand-written in lib.rs)', () => {
+    const cargo = readFileSync(new URL('../../../../../packages/crypto-engine/Cargo.toml', import.meta.url), 'utf8');
+    const pin = /^vodozemac = "=([0-9.]+)"/m.exec(cargo)?.[1];
+    expect(pin).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(engine_version()).toBe(`olm1/vodozemac-${pin}`);
   });
 
   it('completes a full two-party ratchet conversation', () => {

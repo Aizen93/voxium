@@ -5,7 +5,6 @@ import { requireAdmin } from '../middleware/requireSuperAdmin';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
-import { getIO } from '../websocket/socketServer';
 import {
   LIMITS,
   validateThemeName,
@@ -300,12 +299,6 @@ themeRouter.patch('/:themeId', rateLimitThemeManage, async (req: Request<{ theme
       include: { author: { select: authorSelect } },
     });
 
-    // If published, broadcast update
-    if (updated.status === 'published') {
-      const io = getIO();
-      io.emit('theme:updated', formatTheme(updated));
-    }
-
     res.json({ success: true, data: formatTheme(updated) });
   } catch (err: unknown) {
     if (err && typeof err === 'object' && 'code' in err && err.code === 'P2002') {
@@ -326,14 +319,7 @@ themeRouter.delete('/:themeId', rateLimitThemeManage, async (req: Request<{ them
     if (!theme) throw new NotFoundError('Theme');
     if (theme.authorId !== userId) throw new ForbiddenError('You can only delete your own themes');
 
-    const wasPublished = theme.status === 'published';
     await prisma.communityTheme.delete({ where: { id: themeId } });
-
-    // If was published, notify clients
-    if (wasPublished) {
-      const io = getIO();
-      io.emit('theme:removed', { themeId });
-    }
 
     res.json({ success: true, message: 'Theme deleted' });
   } catch (err) {
@@ -360,9 +346,6 @@ themeRouter.post('/:themeId/publish', rateLimitThemeManage, async (req: Request<
       include: { author: { select: authorSelect } },
     });
 
-    const io = getIO();
-    io.emit('theme:published', formatTheme(updated));
-
     res.json({ success: true, data: formatTheme(updated) });
   } catch (err) {
     next(err);
@@ -386,9 +369,6 @@ themeRouter.post('/:themeId/unpublish', rateLimitThemeManage, async (req: Reques
       data: { status: 'draft' },
       include: { author: { select: authorSelect } },
     });
-
-    const io = getIO();
-    io.emit('theme:removed', { themeId });
 
     res.json({ success: true, data: formatTheme(updated) });
   } catch (err) {
@@ -454,9 +434,6 @@ themeRouter.post('/:themeId/remove', requireAdmin, rateLimitThemeManage, async (
       where: { id: themeId },
       data: { status: 'removed' },
     });
-
-    const io = getIO();
-    io.emit('theme:removed', { themeId });
 
     res.json({ success: true, message: 'Theme removed' });
   } catch (err) {

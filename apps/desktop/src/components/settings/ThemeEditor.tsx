@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { X, Download, Save, ChevronDown, RotateCcw, Pipette, Layers, Eye } from 'lucide-react';
 import {
   THEME_COLOR_GROUPS,
@@ -28,34 +29,47 @@ interface ThemeEditorProps {
   initialData?: CommunityThemeData;
 }
 
-const COLOR_LABELS: Record<string, string> = {
-  'bg-primary': 'Primary',
-  'bg-secondary': 'Secondary',
-  'bg-tertiary': 'Tertiary',
-  'bg-hover': 'Hover',
-  'bg-active': 'Active',
-  'bg-floating': 'Floating',
-  sidebar: 'Sidebar',
-  channel: 'Channel List',
-  chat: 'Chat Area',
-  'text-primary': 'Primary',
-  'text-secondary': 'Secondary',
-  'text-muted': 'Muted',
-  'text-link': 'Links',
-  'accent-primary': 'Primary',
-  'accent-hover': 'Hover',
-  'accent-success': 'Success',
-  'accent-warning': 'Warning',
-  'accent-danger': 'Danger',
-  'accent-info': 'Info',
-  border: 'Border',
-  'voice-connected': 'Connected',
-  'voice-speaking': 'Speaking',
-  'voice-muted': 'Muted',
-  'scrollbar-thumb': 'Thumb',
-  'scrollbar-thumb-hover': 'Thumb Hover',
-  'selection-bg': 'Background',
-  'selection-text': 'Text',
+/** The translation key of each color slot's label (`themes.colors.*`). */
+export const COLOR_LABEL_KEYS: Record<string, string> = {
+  'bg-primary': 'themes.colors.primary',
+  'bg-secondary': 'themes.colors.secondary',
+  'bg-tertiary': 'themes.colors.tertiary',
+  'bg-hover': 'themes.colors.hover',
+  'bg-active': 'themes.colors.active',
+  'bg-floating': 'themes.colors.floating',
+  sidebar: 'themes.colors.sidebar',
+  channel: 'themes.colors.channelList',
+  chat: 'themes.colors.chatArea',
+  'text-primary': 'themes.colors.primary',
+  'text-secondary': 'themes.colors.secondary',
+  'text-muted': 'themes.colors.muted',
+  'text-link': 'themes.colors.links',
+  'accent-primary': 'themes.colors.primary',
+  'accent-hover': 'themes.colors.hover',
+  'accent-success': 'themes.colors.success',
+  'accent-warning': 'themes.colors.warning',
+  'accent-danger': 'themes.colors.danger',
+  'accent-info': 'themes.colors.info',
+  border: 'themes.colors.border',
+  'voice-connected': 'themes.colors.connected',
+  'voice-speaking': 'themes.colors.speaking',
+  'voice-muted': 'themes.colors.voiceMuted',
+  'scrollbar-thumb': 'themes.colors.thumb',
+  'scrollbar-thumb-hover': 'themes.colors.thumbHover',
+  'selection-bg': 'themes.colors.background',
+  'selection-text': 'themes.colors.text',
+};
+
+/** The translation key of each color group's title (THEME_COLOR_GROUPS names them in English). */
+export const COLOR_GROUP_LABEL_KEYS: Record<string, string> = {
+  Backgrounds: 'themes.groups.backgrounds',
+  Layout: 'themes.groups.layout',
+  Text: 'themes.groups.text',
+  Accents: 'themes.groups.accents',
+  Borders: 'themes.groups.borders',
+  Voice: 'themes.groups.voice',
+  Scrollbar: 'themes.groups.scrollbar',
+  Selection: 'themes.groups.selection',
 };
 
 function rgbaToHex(value: string): string {
@@ -71,6 +85,7 @@ function rgbaToHex(value: string): string {
 }
 
 export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProps) {
+  const { t } = useTranslation();
   const { setTheme, createLocalTheme, saveLocalTheme } = useSettingsStore();
   const prefill = editTheme?.data ?? initialData;
 
@@ -95,8 +110,8 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
   }, []);
 
   const handleFullPreview = useCallback(() => {
-    startPreview('editor', name.trim() || 'Untitled theme', colors, patterns);
-  }, [startPreview, name, colors, patterns]);
+    startPreview('editor', name.trim() || t('themes.editor.untitled'), colors, patterns);
+  }, [startPreview, name, colors, patterns, t]);
 
   const handleStartFrom = useCallback((themeId: string) => {
     const base = getBuiltInThemeColors(themeId);
@@ -105,14 +120,14 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
 
   const handleSave = useCallback(() => {
     if (!name.trim()) {
-      toast.error('Theme name is required');
+      toast.error(t('themes.editor.nameRequired'));
       return;
     }
     const tags = tagsInput
       .split(',')
-      .map((t) => t.trim())
+      .map((tag) => tag.trim())
       .filter(Boolean)
-      .slice(0, 5);
+      .slice(0, LIMITS.THEME_MAX_TAGS);
 
     // Only include patterns if at least one area has a non-none pattern
     const hasPatterns = Object.values(patterns).some((p) => p && p.type !== 'none');
@@ -132,25 +147,25 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
     if (editTheme) {
       saveLocalTheme(editTheme.localId, data);
       setTheme(`custom:${editTheme.localId}`);
-      toast.success('Theme updated');
+      toast.success(t('themes.editor.updated'));
     } else {
       const localId = createLocalTheme(data);
       setTheme(`custom:${localId}`);
-      toast.success('Theme created');
+      toast.success(t('themes.editor.created'));
     }
     onClose();
-  }, [name, description, tagsInput, colors, patterns, editTheme, saveLocalTheme, createLocalTheme, setTheme, adoptPreview, onClose]);
+  }, [name, description, tagsInput, colors, patterns, editTheme, saveLocalTheme, createLocalTheme, setTheme, adoptPreview, onClose, t]);
 
   const handleExport = useCallback(() => {
     if (!name.trim()) {
-      toast.error('Give your theme a name before exporting');
+      toast.error(t('themes.editor.nameBeforeExport'));
       return;
     }
-    const tags = tagsInput.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 5);
+    const tags = tagsInput.split(',').map((tag) => tag.trim()).filter(Boolean).slice(0, LIMITS.THEME_MAX_TAGS);
     const hasPatterns = Object.values(patterns).some((p) => p && p.type !== 'none');
     exportTheme({ name: name.trim(), description: description.trim(), tags, colors, patterns: hasPatterns ? patterns : undefined, version: editTheme ? editTheme.data.version : 1 });
-    toast.success('Theme exported');
-  }, [name, description, tagsInput, colors, patterns, editTheme]);
+    toast.success(t('themes.editor.exported'));
+  }, [name, description, tagsInput, colors, patterns, editTheme, t]);
 
   const handleClose = useCallback(() => {
     onClose();
@@ -192,7 +207,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
           >
             <Pipette size={14} style={{ color: 'var(--vox-accent-primary)' }} />
             <span className="text-xs font-semibold tracking-wide uppercase" style={{ color: 'var(--vox-text-secondary)' }}>
-              Live Preview
+              {t('themes.editor.livePreview')}
             </span>
             <button
               onClick={handleFullPreview}
@@ -203,10 +218,10 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
                 border: '1px solid var(--vox-border)',
                 color: 'var(--vox-text-secondary)',
               }}
-              title="Apply these colors to the whole app until you stop"
+              title={t('themes.editor.previewInAppHint')}
             >
               <Eye size={12} />
-              Preview in app
+              {t('themes.editor.previewInApp')}
             </button>
           </div>
           <div className="flex-1 min-h-0" style={{ backgroundColor: 'var(--vox-bg-primary)' }}>
@@ -222,13 +237,13 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
             style={{ borderBottom: '1px solid var(--vox-border)', backgroundColor: 'var(--vox-bg-primary)' }}
           >
             <h2 className="text-sm font-bold" style={{ color: 'var(--vox-text-primary)' }}>
-              {editTheme ? 'Edit Theme' : 'Create Theme'}
+              {editTheme ? t('themes.editor.editTitle') : t('settings.appearance.createTheme')}
             </h2>
             <button
               onClick={handleClose}
               className="p-1 rounded-md transition-colors hover:opacity-80"
               style={{ color: 'var(--vox-text-muted)' }}
-              aria-label="Close"
+              aria-label={t('common.close')}
             >
               <X size={18} />
             </button>
@@ -240,13 +255,13 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-medium mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-                  Name <span style={{ color: 'var(--vox-accent-danger)' }}>*</span>
+                  {t('themes.editor.name')} <span style={{ color: 'var(--vox-accent-danger)' }}>*</span>
                 </label>
                 <input
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="My Awesome Theme"
+                  placeholder={t('themes.editor.namePlaceholder')}
                   maxLength={50}
                   className="w-full rounded-lg px-3 py-2 text-sm outline-none transition-colors"
                   style={{
@@ -258,13 +273,13 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
               </div>
               <div>
                 <label className="block text-xs font-medium mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-                  Tags <span className="font-normal" style={{ color: 'var(--vox-text-muted)' }}>(comma-separated, max 5)</span>
+                  {t('themes.editor.tags')} <span className="font-normal" style={{ color: 'var(--vox-text-muted)' }}>{t('themes.editor.tagsHint', { max: LIMITS.THEME_MAX_TAGS })}</span>
                 </label>
                 <input
                   type="text"
                   value={tagsInput}
                   onChange={(e) => setTagsInput(e.target.value)}
-                  placeholder="dark, minimal, blue"
+                  placeholder={t('themes.editor.tagsPlaceholder')}
                   className="w-full rounded-lg px-3 py-2 text-sm outline-none transition-colors"
                   style={{
                     backgroundColor: 'var(--vox-bg-floating)',
@@ -277,12 +292,12 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
 
             <div>
               <label className="block text-xs font-medium mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-                Description
+                {t('themes.editor.description')}
               </label>
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="A brief description of your theme..."
+                placeholder={t('themes.editor.descriptionPlaceholder')}
                 rows={2}
                 maxLength={500}
                 className="w-full rounded-lg px-3 py-2 text-sm outline-none resize-none transition-colors"
@@ -297,20 +312,20 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
             {/* Start from built-in */}
             <div className="flex items-center gap-2">
               <RotateCcw size={13} style={{ color: 'var(--vox-text-muted)' }} />
-              <span className="text-xs" style={{ color: 'var(--vox-text-muted)' }}>Start from:</span>
+              <span className="text-xs" style={{ color: 'var(--vox-text-muted)' }}>{t('themes.editor.startFrom')}</span>
               <div className="flex gap-1.5">
                 {BUILT_IN_THEME_IDS.map((id) => (
                   <button
                     key={id}
                     onClick={() => handleStartFrom(id)}
-                    className="px-2.5 py-1 rounded-md text-xs capitalize transition-all hover:scale-105"
+                    className="px-2.5 py-1 rounded-md text-xs transition-all hover:scale-105"
                     style={{
                       backgroundColor: 'var(--vox-bg-floating)',
                       border: '1px solid var(--vox-border)',
                       color: 'var(--vox-text-secondary)',
                     }}
                   >
-                    {id}
+                    {t(`themes.builtIn.${id}`)}
                   </button>
                 ))}
               </div>
@@ -350,7 +365,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
               }}
             >
               <Download size={13} />
-              Export JSON
+              {t('themes.editor.exportJson')}
             </button>
             <div className="flex gap-2">
               <button
@@ -361,7 +376,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
                   color: 'var(--vox-text-secondary)',
                 }}
               >
-                Cancel
+                {t('common.cancel')}
               </button>
               <button
                 onClick={handleSave}
@@ -369,7 +384,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
                 style={{ backgroundColor: 'var(--vox-accent-primary)' }}
               >
                 <Save size={13} />
-                {editTheme ? 'Update' : 'Save'}
+                {editTheme ? t('themes.editor.update') : t('common.save')}
               </button>
             </div>
           </div>
@@ -485,6 +500,7 @@ function ColorGroup({
   onToggle: () => void;
   onColorChange: (key: string, value: string) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className="rounded-lg overflow-hidden"
@@ -508,7 +524,7 @@ function ColorGroup({
             />
           ))}
         </div>
-        <span className="text-xs font-semibold flex-1">{name}</span>
+        <span className="text-xs font-semibold flex-1">{COLOR_GROUP_LABEL_KEYS[name] ? t(COLOR_GROUP_LABEL_KEYS[name]) : name}</span>
         <span className="text-[10px] tabular-nums" style={{ color: 'var(--vox-text-muted)' }}>
           {keys.length}
         </span>
@@ -528,7 +544,7 @@ function ColorGroup({
             <ColorPicker
               key={key}
               colorKey={key}
-              label={COLOR_LABELS[key] || key}
+              label={COLOR_LABEL_KEYS[key] ? t(COLOR_LABEL_KEYS[key]) : key}
               value={colors[key as keyof ThemeColors]}
               onChange={(val) => onColorChange(key, val)}
             />
@@ -624,19 +640,21 @@ function ColorPicker({
 
 // ─── Patterns & Branding Section ────────────────────────────────────────────
 
-const AREA_LABELS: Record<string, string> = {
-  sidebar: 'Sidebar',
-  channel: 'Channel List',
-  chat: 'Chat Area',
+/** The translation key of each pattern area's title (the same words as its color slot). */
+export const AREA_LABEL_KEYS: Record<string, string> = {
+  sidebar: 'themes.colors.sidebar',
+  channel: 'themes.colors.channelList',
+  chat: 'themes.colors.chatArea',
 };
 
-const PATTERN_TYPE_LABELS: Record<string, string> = {
-  none: 'None',
-  stripes: 'Stripes',
-  grid: 'Grid',
-  dots: 'Dots',
-  crosshatch: 'Crosshatch',
-  'custom-svg': 'Custom SVG',
+/** The translation key of each pattern type's name (`themes.patterns.*`). */
+export const PATTERN_TYPE_LABEL_KEYS: Record<string, string> = {
+  none: 'themes.patterns.none',
+  stripes: 'themes.patterns.stripes',
+  grid: 'themes.patterns.grid',
+  dots: 'themes.patterns.dots',
+  crosshatch: 'themes.patterns.crosshatch',
+  'custom-svg': 'themes.patterns.customSvg',
 };
 
 function makeDefaultPattern(): ThemePattern {
@@ -650,6 +668,7 @@ function PatternsSection({
   patterns: ThemePatterns;
   onPatternsChange: (p: ThemePatterns) => void;
 }) {
+  const { t } = useTranslation();
   const [expandedArea, setExpandedArea] = useState<string>('');
 
   const updatePattern = useCallback(
@@ -665,10 +684,10 @@ function PatternsSection({
       <div className="flex items-center gap-2 mb-2">
         <Layers size={13} style={{ color: 'var(--vox-accent-primary)' }} />
         <span className="text-xs font-semibold" style={{ color: 'var(--vox-text-primary)' }}>
-          Patterns & Branding
+          {t('themes.editor.patternsTitle')}
         </span>
         <span className="text-[10px]" style={{ color: 'var(--vox-text-muted)' }}>
-          (decorative backgrounds)
+          {t('themes.editor.patternsHint')}
         </span>
       </div>
       <div className="space-y-1">
@@ -686,9 +705,9 @@ function PatternsSection({
                 className="w-full flex items-center gap-2.5 px-3 py-2 text-left"
                 style={{ color: 'var(--vox-text-primary)' }}
               >
-                <span className="text-xs font-semibold flex-1">{AREA_LABELS[area]}</span>
+                <span className="text-xs font-semibold flex-1">{t(AREA_LABEL_KEYS[area])}</span>
                 <span className="text-[10px]" style={{ color: 'var(--vox-text-muted)' }}>
-                  {PATTERN_TYPE_LABELS[pattern.type]}
+                  {t(PATTERN_TYPE_LABEL_KEYS[pattern.type])}
                 </span>
                 <ChevronDown
                   size={14}
@@ -721,26 +740,27 @@ function PatternEditor({
   pattern: ThemePattern;
   onChange: (patch: Partial<ThemePattern>) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="px-3 pb-3 space-y-2.5">
       {/* Pattern type */}
       <div>
         <label className="block text-[11px] mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-          Type
+          {t('themes.editor.patternType')}
         </label>
         <div className="flex flex-wrap gap-1">
-          {THEME_PATTERN_TYPES.map((t) => (
+          {THEME_PATTERN_TYPES.map((type) => (
             <button
-              key={t}
-              onClick={() => onChange({ type: t })}
+              key={type}
+              onClick={() => onChange({ type })}
               className="px-2 py-1 rounded text-[10px] transition-colors"
               style={{
-                backgroundColor: pattern.type === t ? 'var(--vox-accent-primary)' : 'var(--vox-bg-secondary)',
-                color: pattern.type === t ? '#fff' : 'var(--vox-text-secondary)',
-                border: `1px solid ${pattern.type === t ? 'var(--vox-accent-primary)' : 'var(--vox-border)'}`,
+                backgroundColor: pattern.type === type ? 'var(--vox-accent-primary)' : 'var(--vox-bg-secondary)',
+                color: pattern.type === type ? '#fff' : 'var(--vox-text-secondary)',
+                border: `1px solid ${pattern.type === type ? 'var(--vox-accent-primary)' : 'var(--vox-border)'}`,
               }}
             >
-              {PATTERN_TYPE_LABELS[t]}
+              {t(PATTERN_TYPE_LABEL_KEYS[type])}
             </button>
           ))}
         </div>
@@ -752,7 +772,7 @@ function PatternEditor({
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-[11px] mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-                Color
+                {t('themes.editor.patternColor')}
               </label>
               <div className="flex items-center gap-2">
                 <input
@@ -782,7 +802,7 @@ function PatternEditor({
             </div>
             <div>
               <label className="block text-[11px] mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-                Opacity ({Math.round(pattern.opacity * 100)}%)
+                {t('themes.editor.opacity', { value: Math.round(pattern.opacity * 100) })}
               </label>
               <input
                 type="range"
@@ -802,7 +822,7 @@ function PatternEditor({
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-[11px] mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-                  Size ({pattern.size ?? (pattern.type === 'grid' ? 40 : pattern.type === 'dots' ? 24 : 20)}px)
+                  {t('themes.editor.size', { value: pattern.size ?? (pattern.type === 'grid' ? 40 : pattern.type === 'dots' ? 24 : 20) })}
                 </label>
                 <input
                   type="range"
@@ -818,7 +838,7 @@ function PatternEditor({
               {(pattern.type === 'stripes' || pattern.type === 'crosshatch') && (
                 <div>
                   <label className="block text-[11px] mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-                    Angle ({pattern.angle ?? (pattern.type === 'crosshatch' ? 45 : -45)}&deg;)
+                    {t('themes.editor.angle', { value: pattern.angle ?? (pattern.type === 'crosshatch' ? 45 : -45) })}
                   </label>
                   <input
                     type="range"
@@ -839,8 +859,9 @@ function PatternEditor({
           {pattern.type === 'custom-svg' && (
             <div>
               <label className="block text-[11px] mb-1" style={{ color: 'var(--vox-text-secondary)' }}>
-                SVG Markup <span className="font-normal" style={{ color: 'var(--vox-text-muted)' }}>
-                  (max {(LIMITS.THEME_SVG_MAX_SIZE / 1000).toFixed(0)}KB &mdash; paste your brand/game SVG here)
+                {t('themes.editor.svgMarkup')} <span className="font-normal" style={{ color: 'var(--vox-text-muted)' }}>
+                  {/* The cap counts CHARACTERS (validateThemePatterns), not bytes */}
+                  {t('themes.editor.svgHint', { max: LIMITS.THEME_SVG_MAX_SIZE.toLocaleString() })}
                 </span>
               </label>
               <textarea
@@ -858,10 +879,10 @@ function PatternEditor({
               />
               <div className="flex items-center justify-between mt-1">
                 <p className="text-[9px]" style={{ color: 'var(--vox-text-muted)' }}>
-                  {(pattern.svgData?.length || 0).toLocaleString()} / {LIMITS.THEME_SVG_MAX_SIZE.toLocaleString()} chars
+                  {t('themes.editor.svgCount', { used: (pattern.svgData?.length || 0).toLocaleString(), max: LIMITS.THEME_SVG_MAX_SIZE.toLocaleString() })}
                 </p>
                 <div className="flex items-center gap-2">
-                  <label className="text-[10px]" style={{ color: 'var(--vox-text-secondary)' }}>Tile size</label>
+                  <label className="text-[10px]" style={{ color: 'var(--vox-text-secondary)' }}>{t('themes.editor.tileSize')}</label>
                   <input
                     type="range"
                     min={50}

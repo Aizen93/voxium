@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { Eye } from 'lucide-react';
 
 /**
@@ -11,6 +12,7 @@ import { Eye } from 'lucide-react';
  * looks and behaves the same in both, Escape included.
  */
 export function ThemePreviewBar({ name, onStop }: { name: string; onStop: () => void }) {
+  const { t } = useTranslation();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onStop();
@@ -30,14 +32,14 @@ export function ThemePreviewBar({ name, onStop }: { name: string; onStop: () => 
     >
       <Eye size={14} style={{ color: 'var(--vox-accent-primary)' }} />
       <span className="text-xs font-medium" style={{ color: 'var(--vox-text-primary)' }}>
-        Previewing: <span className="font-bold">{name}</span>
+        {t('themes.preview.previewing')} <span className="font-bold">{name}</span>
       </span>
       <button
         onClick={onStop}
         className="rounded-lg px-3 py-1 text-xs font-medium text-white"
         style={{ backgroundColor: 'var(--vox-accent-primary)' }}
       >
-        Stop Preview
+        {t('themes.preview.stop')}
       </button>
       <span className="text-[10px]" style={{ color: 'var(--vox-text-muted)' }}>
         Esc

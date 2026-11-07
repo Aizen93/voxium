@@ -187,7 +187,9 @@ describe('AnnotationToolbar', () => {
     expect(container.querySelector('[data-tool="rect"]')!.getAttribute('title')).toBe('voice.annotations.rectangle (R)');
     expect(container.querySelector('[data-tool="rect"]')!.getAttribute('aria-keyshortcuts')).toBe('R');
     expect(container.querySelector('[data-tool="pen"]')!.getAttribute('title')).toBe('voice.annotations.pen');
-    expect(container.querySelector('[aria-label="voice.annotations.undo"]')!.getAttribute('title')).toBe('voice.annotations.undo (Ctrl+Z)');
+    // Ctrl is named the way the UI language labels the key (Strg in German): a translation
+    expect(container.querySelector('[aria-label="voice.annotations.undo"]')!.getAttribute('title')).toBe('voice.annotations.undo (common.ctrlKey+Z)');
+    expect(container.querySelector('[aria-label="voice.annotations.undo"]')!.getAttribute('aria-keyshortcuts')).toBe('Ctrl+Z');
     useSettingsStore.setState({ voiceMode: 'voice_activity' });
   });
 

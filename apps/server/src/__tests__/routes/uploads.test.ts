@@ -21,6 +21,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   return {
     rateLimitUpload: passthrough,
     rateLimitGeneral: passthrough,
+    rateLimitAttachmentRead: passthrough,
   };
 });
 
@@ -67,7 +68,8 @@ vi.mock('../../utils/prisma', () => ({
 import { prisma } from '../../utils/prisma';
 import { uploadRouter } from '../../routes/uploads';
 import { errorHandler } from '../../middleware/errorHandler';
-import { generatePresignedGetUrl, getS3Object } from '../../utils/s3';
+import { generatePresignedGetUrl, generatePresignedPutUrl, getS3Object } from '../../utils/s3';
+import { LIMITS } from '@voxium/shared';
 
 // ─── App setup ──────────────────────────────────────────────────────────────
 
@@ -93,6 +95,9 @@ describe('uploads — GET /avatars/* (public redirect)', () => {
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe(mockPresignedGetUrl);
     expect(generatePresignedGetUrl).toHaveBeenCalledWith('avatars/user-123.webp');
+    // Keys are immutable and the signed link lives an hour: the browser keeps
+    // the redirect for most of it instead of asking again per avatar on screen
+    expect(res.headers['cache-control']).toBe('private, max-age=3000');
   });
 
   it('rejects key with path traversal (..)', async () => {
@@ -270,14 +275,38 @@ describe('uploads — POST /presign/avatar', () => {
     vi.clearAllMocks();
   });
 
-  it('returns presigned PUT URL', async () => {
+  it('returns a presigned PUT URL signed for the declared size', async () => {
     const app = createApp();
-    const res = await request(app).post('/api/v1/uploads/presign/avatar');
+    const res = await request(app).post('/api/v1/uploads/presign/avatar').send({ fileSize: 23_456 });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.uploadUrl).toBe(mockPresignedPutUrl);
     expect(res.body.data.key).toMatch(/^avatars\/user-1-\d+\.webp$/);
+    expect(generatePresignedPutUrl).toHaveBeenCalledWith(res.body.data.key, 'image/webp', 23_456);
+  });
+
+  it('accepts exactly the avatar cap', async () => {
+    const res = await request(createApp()).post('/api/v1/uploads/presign/avatar').send({ fileSize: LIMITS.MAX_AVATAR_SIZE });
+
+    expect(res.status).toBe(200);
+    expect(generatePresignedPutUrl).toHaveBeenCalledWith(expect.any(String), 'image/webp', LIMITS.MAX_AVATAR_SIZE);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['zero', 0],
+    ['negative', -5],
+    ['fractional', 10.5],
+    ['a string', '1024'],
+    ['over the cap', LIMITS.MAX_AVATAR_SIZE + 1],
+    ['several GB', 5 * 1024 * 1024 * 1024],
+  ])('refuses a %s fileSize without signing anything', async (_label, fileSize) => {
+    const res = await request(createApp()).post('/api/v1/uploads/presign/avatar').send(fileSize === undefined ? {} : { fileSize });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/^Invalid file size \(max 0\.5MB\)$/);
+    expect(generatePresignedPutUrl).not.toHaveBeenCalled();
   });
 });
 
@@ -292,10 +321,26 @@ describe('uploads — POST /presign/server-icon/:serverId', () => {
     } as any);
 
     const app = createApp();
-    const res = await request(app).post('/api/v1/uploads/presign/server-icon/srv-1');
+    const res = await request(app).post('/api/v1/uploads/presign/server-icon/srv-1').send({ fileSize: 4096 });
 
     expect(res.status).toBe(200);
     expect(res.body.data.key).toMatch(/^server-icons\/srv-1-\d+\.webp$/);
+    expect(generatePresignedPutUrl).toHaveBeenCalledWith(res.body.data.key, 'image/webp', 4096);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['zero', 0],
+    ['fractional', 1.25],
+    ['over the cap', LIMITS.MAX_SERVER_ICON_SIZE + 1],
+  ])('refuses a %s fileSize before any lookup or signature', async (_label, fileSize) => {
+    const res = await request(createApp())
+      .post('/api/v1/uploads/presign/server-icon/srv-1')
+      .send(fileSize === undefined ? {} : { fileSize });
+
+    expect(res.status).toBe(400);
+    expect(prisma.server.findUnique).not.toHaveBeenCalled();
+    expect(generatePresignedPutUrl).not.toHaveBeenCalled();
   });
 
   it('returns 403 for user without MANAGE_SERVER permission', async () => {
@@ -306,16 +351,17 @@ describe('uploads — POST /presign/server-icon/:serverId', () => {
     vi.mocked(hasServerPermission).mockResolvedValueOnce(false);
 
     const app = createApp();
-    const res = await request(app).post('/api/v1/uploads/presign/server-icon/srv-1');
+    const res = await request(app).post('/api/v1/uploads/presign/server-icon/srv-1').send({ fileSize: 4096 });
 
     expect(res.status).toBe(403);
+    expect(generatePresignedPutUrl).not.toHaveBeenCalled();
   });
 
   it('returns 404 for non-existent server', async () => {
     vi.mocked(prisma.server.findUnique).mockResolvedValueOnce(null);
 
     const app = createApp();
-    const res = await request(app).post('/api/v1/uploads/presign/server-icon/srv-nonexistent');
+    const res = await request(app).post('/api/v1/uploads/presign/server-icon/srv-nonexistent').send({ fileSize: 4096 });
 
     expect(res.status).toBe(404);
   });
@@ -410,6 +456,41 @@ describe('uploads — POST /presign/attachment', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.key).toMatch(/^attachments\/ch-ch-1\//);
+    // The URL is signed for exactly the declared size
+    expect(generatePresignedPutUrl).toHaveBeenCalledWith(res.body.data.key, 'application/pdf', 1024);
+  });
+
+  it('refuses a fractional or oversized declared size without signing anything', async () => {
+    const app = createApp();
+    const base = { fileName: 'report.pdf', mimeType: 'application/pdf', channelId: 'ch-1' };
+
+    let res = await request(app).post('/api/v1/uploads/presign/attachment').send({ ...base, fileSize: 1024.5 });
+    expect(res.status).toBe(400);
+
+    res = await request(app).post('/api/v1/uploads/presign/attachment').send({ ...base, fileSize: LIMITS.MAX_ATTACHMENT_SIZE + 1 });
+    expect(res.status).toBe(400);
+
+    // Video keeps its larger per-type maximum
+    res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ ...base, fileName: 'clip.mp4', mimeType: 'video/mp4', fileSize: LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + 1 });
+    expect(res.status).toBe(400);
+
+    res = await request(app).post('/api/v1/uploads/presign/attachment')
+      .send({ ...base, fileName: 'encrypted.bin', mimeType: 'application/octet-stream', encrypted: true, fileSize: 99.9 });
+    expect(res.status).toBe(400);
+
+    expect(generatePresignedPutUrl).not.toHaveBeenCalled();
+  });
+
+  it('signs a video attachment up to the video maximum', async () => {
+    vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ id: 'ch-1', serverId: 'srv-1' } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1' } as any);
+
+    const res = await request(createApp()).post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'clip.mp4', fileSize: LIMITS.MAX_VIDEO_ATTACHMENT_SIZE, mimeType: 'video/mp4', channelId: 'ch-1' });
+
+    expect(res.status).toBe(200);
+    expect(generatePresignedPutUrl).toHaveBeenCalledWith(res.body.data.key, 'video/mp4', LIMITS.MAX_VIDEO_ATTACHMENT_SIZE);
   });
 
   it('rejects when neither channelId nor conversationId provided', async () => {

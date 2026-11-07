@@ -126,7 +126,7 @@ export function DMVoicePanel() {
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
-          title={selfMute ? 'Unmute' : 'Mute'}
+          title={selfMute ? t('voice.unmute') : t('voice.mute')}
           aria-label={selfMute ? t('voice.unmute') : t('voice.mute')}
         >
           {selfMute ? <MicOff size={18} /> : <Mic size={18} />}
@@ -140,7 +140,7 @@ export function DMVoicePanel() {
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
               : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
-          title={selfDeaf ? 'Undeafen' : 'Deafen'}
+          title={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
           aria-label={selfDeaf ? t('voice.undeafen') : t('voice.deafen')}
         >
           {selfDeaf ? <HeadphoneOff size={18} /> : <Headphones size={18} />}

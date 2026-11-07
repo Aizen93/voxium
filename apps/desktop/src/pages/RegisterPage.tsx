@@ -6,6 +6,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { AuthBackground } from '../components/auth/AuthBackground';
 import { PeekingThief } from '../components/auth/PeekingThief';
 import { LegalDocModal, type LegalDoc } from '../components/legal/LegalDocModal';
+import { RegisterCodeStep } from '../components/auth/RegisterCodeStep';
 
 function getPasswordStrength(pw: string): { level: 'weak' | 'medium' | 'strong'; percent: number; color: string } {
   if (pw.length === 0) return { level: 'weak', percent: 0, color: '#ed4245' };
@@ -24,7 +25,11 @@ function getPasswordStrength(pw: string): { level: 'weak' | 'medium' | 'strong';
 
 export function RegisterPage() {
   const { t } = useTranslation();
-  const { register, cancelRegistration, error, clearError, isRegistering, powProgress } = useAuthStore();
+  const { register, leaveRegistration, error, clearError, isRegistering, powProgress, pendingRegistration } = useAuthStore();
+  // The server accepted the registration and mailed a code: the code step
+  // replaces the form (which keeps its typed values behind it for "Start over").
+  // A pending code step outlives this page, so coming back shows it again.
+  const codeStep = !!pendingRegistration;
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -54,12 +59,12 @@ export function RegisterPage() {
     return () => clearTimeout(typingTimeoutRef.current);
   }, []);
 
-  // Leaving this view abandons the registration. The proof-of-work solve runs
-  // for tens of seconds under subnet pressure, and since it moved off the main
-  // thread the user can navigate away mid-solve — without this it finishes in
-  // the background, POSTs, and signs them into the account they walked away
-  // from, on top of a worker still burning a core.
-  useEffect(() => cancelRegistration, [cancelRegistration]);
+  // Leaving this view stops an in-flight solve. It runs for tens of seconds
+  // under subnet pressure, and since it moved off the main thread the user can
+  // navigate away mid-solve — without this it finishes in the background and
+  // POSTs a sign-up they walked away from, on top of a worker still burning a
+  // core. A pending code step is KEPT: its code is already in the mailbox.
+  useEffect(() => leaveRegistration, [leaveRegistration]);
 
   const isWatching = isPasswordFocused && isTypingPassword;
 
@@ -92,8 +97,9 @@ export function RegisterPage() {
           <PeekingThief isWatching={isWatching} />
           <div className="rounded-2xl border border-vox-border bg-vox-bg-secondary/80 backdrop-blur-sm p-8 shadow-2xl">
           {/* Logo */}
-          <div className="mb-8 flex flex-col items-center animate-fade-in">
+          <div className={`${codeStep ? 'mb-4' : 'mb-8'} flex flex-col items-center animate-fade-in`}>
             <img src="/logo.svg" alt="Voxium" className="h-16 w-16 rounded-2xl shadow-lg shadow-vox-accent-primary/20" />
+            {!codeStep && (<>
             <h1
               className="mt-4 text-2xl font-bold text-vox-text-primary animate-slide-up"
               style={{ animationDelay: '0.1s', animationFillMode: 'backwards' }}
@@ -106,6 +112,7 @@ export function RegisterPage() {
             >
               {t('auth.register.subtitle')}
             </p>
+            </>)}
           </div>
 
           {/* Error */}
@@ -115,6 +122,7 @@ export function RegisterPage() {
             </div>
           )}
 
+          {codeStep ? <RegisterCodeStep /> : (<>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div
               className="animate-slide-up"
@@ -296,6 +304,7 @@ export function RegisterPage() {
               {t('auth.register.signIn')}
             </Link>
           </p>
+          </>)}
           </div>
         </div>
       </div>

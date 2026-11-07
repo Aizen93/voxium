@@ -2,6 +2,8 @@ import type { CSSProperties } from 'react';
 import { THEME_COLOR_KEYS } from '@voxium/shared';
 import type { ThemeColors, ThemePatterns, ThemePattern, CommunityThemeData } from '@voxium/shared';
 import { validateThemeColors, validateThemeName, validateThemePatterns, sanitizeSvg } from '@voxium/shared';
+import i18n from '../i18n';
+import { translateServerError } from '../utils/serverErrors';
 
 const PATTERN_STYLE_ID = 'vox-custom-patterns';
 
@@ -219,34 +221,36 @@ export async function importTheme(file: File): Promise<CommunityThemeData> {
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error('Invalid JSON file');
+    throw new Error(i18n.t('themes.import.invalidJson'));
   }
 
   if (!parsed || typeof parsed !== 'object') {
-    throw new Error('Theme file must contain a JSON object');
+    throw new Error(i18n.t('themes.import.notAnObject'));
   }
 
   const obj = parsed as Record<string, unknown>;
 
   // Validate name
   if (!obj.name || typeof obj.name !== 'string') {
-    throw new Error('Theme must have a name');
+    throw new Error(i18n.t('themes.import.missingName'));
   }
   const nameErr = validateThemeName(obj.name);
-  if (nameErr) throw new Error(nameErr);
+  // The shared validator's sentence, the same one the marketplace answers with
+  if (nameErr) throw new Error(translateServerError(nameErr, i18n.t));
 
   // Validate colors
   if (!obj.colors || typeof obj.colors !== 'object') {
-    throw new Error('Theme must have a colors object');
+    throw new Error(i18n.t('themes.import.missingColors'));
   }
   const colorsErr = validateThemeColors(obj.colors as Record<string, string>);
-  if (colorsErr) throw new Error(colorsErr);
+  // The validator's detail names the offending key: kept verbatim inside the sentence
+  if (colorsErr) throw new Error(i18n.t('themes.import.invalidColors', { detail: colorsErr }));
 
   // Validate patterns if present
   let patterns: CommunityThemeData['patterns'];
   if (obj.patterns && typeof obj.patterns === 'object') {
     const patternsErr = validateThemePatterns(obj.patterns as Record<string, unknown>);
-    if (patternsErr) throw new Error(patternsErr);
+    if (patternsErr) throw new Error(i18n.t('themes.import.invalidPatterns', { detail: patternsErr }));
     patterns = obj.patterns as CommunityThemeData['patterns'];
   }
 

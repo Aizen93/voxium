@@ -3,6 +3,7 @@ import { useAdminStore } from '../stores/adminStore';
 import { useAuthStore } from '../stores/authStore';
 import { AdminGlobe } from './AdminGlobe';
 import { toast } from '../stores/toastStore';
+import { logMessage } from '../utils/apiError';
 import type { InfraServer } from '@voxium/shared';
 
 const PROVIDERS = ['AWS', 'Azure', 'GCP', 'Hetzner', 'DigitalOcean', 'Scaleway', 'Other'];
@@ -43,7 +44,7 @@ function InfraServerForm({ onSubmit }: { onSubmit: (data: Omit<InfraServer, 'id'
       setLongitude('');
       toast.success('Infrastructure server added');
     } catch (err) {
-      console.error('Failed to create infra server:', err);
+      console.error('Failed to create infra server:', logMessage(err));
       toast.error('Failed to add infrastructure server');
     } finally {
       setSubmitting(false);
@@ -110,7 +111,7 @@ export function AdminGeography() {
       await deleteInfraServer(id);
       toast.success('Infrastructure server removed');
     } catch (err) {
-      console.error('Failed to delete infra server:', err);
+      console.error('Failed to delete infra server:', logMessage(err));
       toast.error('Failed to remove infrastructure server');
     }
   };

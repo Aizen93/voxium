@@ -81,6 +81,13 @@ describe('featureFlags — getAllFeatureFlags', () => {
     }
   });
 
+  it('registers the webhooks kill switch, enabled by default', () => {
+    const flag = getAllFeatureFlags().find((f) => f.name === 'webhooks');
+    expect(flag).toMatchObject({ name: 'webhooks', label: 'Incoming Webhooks', enabled: true, isCustom: false });
+    expect(flag!.description).toMatch(/incoming webhooks/i);
+    expect(isFeatureEnabled('webhooks')).toBe(true);
+  });
+
   it('community_funding is disabled by default', () => {
     const flags = getAllFeatureFlags();
     const cf = flags.find((f) => f.name === 'community_funding');

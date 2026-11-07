@@ -8,9 +8,11 @@ import { getTranslatedError } from '../../utils/serverErrors';
 
 interface Props {
   onClose: () => void;
+  /** "Browse public spaces" in the join half hands over to Explore when given. */
+  onExplore?: () => void;
 }
 
-export function CreateServerModal({ onClose }: Props) {
+export function CreateServerModal({ onClose, onExplore }: Props) {
   const { t } = useTranslation();
   const { createServer, setActiveServer, joinServer, uploadServerIcon } = useServerStore();
   const [mode, setMode] = useState<'create' | 'join'>('create');
@@ -112,7 +114,7 @@ export function CreateServerModal({ onClose }: Props) {
             {/* Icon Picker */}
             <div className="flex justify-center">
               <ImageUploadButton
-                displayName={name || 'Server'}
+                displayName={name || t('channel.server')}
                 onFileChange={setIconFile}
                 variant="create"
               />
@@ -155,6 +157,19 @@ export function CreateServerModal({ onClose }: Props) {
             <button type="submit" disabled={loading} className="btn-primary w-full">
               {loading ? t('server.create.joining') : t('server.create.joinServer')}
             </button>
+            {onExplore && (
+              <p className="text-center text-xs text-vox-text-muted">
+                {t('discovery.noInvite')}{' '}
+                <button
+                  type="button"
+                  onClick={() => { onClose(); onExplore(); }}
+                  className="text-vox-accent-primary underline-offset-2 hover:underline"
+                  data-testid="create-modal-explore"
+                >
+                  {t('discovery.browsePublic')}
+                </button>
+              </p>
+            )}
           </form>
         )}
       </div>

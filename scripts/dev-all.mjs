@@ -52,8 +52,10 @@ function pipe(stream, target, isError) {
 }
 
 for (const target of TARGETS) {
-  // shell: true because `pnpm` is a .cmd shim on Windows.
-  const child = spawn('pnpm', target.args, { shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  // shell: true because `pnpm` is a .cmd shim on Windows. The command is ONE string
+  // built from the constants above (never from input): passing an argument array
+  // together with shell: true is deprecated (DEP0190), the arguments are not escaped.
+  const child = spawn(`pnpm ${target.args.join(' ')}`, { shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
   pipe(child.stdout, target, false);
   pipe(child.stderr, target, true);
   children.push(child);

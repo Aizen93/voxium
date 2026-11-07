@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { LIMITS } from '@voxium/shared';
+import { BadRequestError } from '../../utils/errors';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -49,6 +51,7 @@ vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
   return {
     rateLimitGeneral: passthrough,
+    rateLimitProfileUpdate: passthrough,
   };
 });
 
@@ -56,6 +59,14 @@ vi.mock('../../middleware/rateLimiter', () => {
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^(avatars|server-icons)\/[\w-]+\.webp$/,
   deleteFromS3: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Upload read-back (its own unit tests cover the S3 side)
+/** The route stores the key adoptImageAssetUpload returns (the verified server-side copy) */
+const ADOPTED_AVATAR = 'avatars/user-1-1700000000000-0123456789ab.webp';
+const mockAdoptImageAssetUpload = vi.hoisted(() => vi.fn().mockResolvedValue('avatars/user-1-1700000000000-0123456789ab.webp'));
+vi.mock('../../utils/uploadVerification', () => ({
+  adoptImageAssetUpload: (...args: unknown[]) => mockAdoptImageAssetUpload(...args),
 }));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
@@ -357,6 +368,140 @@ describe('User Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data.avatarUrl).toBe('avatars/user-1-1234567890.webp');
+      // A new avatar object is adopted (copied, checked) and the COPY is stored
+      expect(mockAdoptImageAssetUpload).toHaveBeenCalledWith(
+        'avatars/user-1-1234567890.webp', 'avatars/user-1-', LIMITS.MAX_AVATAR_SIZE, 'Invalid avatar key',
+      );
+      expect(prismaMock.user.update.mock.calls[0][0].data.avatarUrl).toBe(ADOPTED_AVATAR);
+    });
+
+    function mockAuthAndCurrentAvatar(current: string | null) {
+      prismaMock.user.findUnique
+        .mockResolvedValueOnce({
+          id: 'user-1', bannedAt: null, tokenVersion: 0, role: 'user',
+          emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+        })
+        .mockResolvedValueOnce({ avatarUrl: current });
+    }
+
+    it('refuses an avatar object the read-back rejects, leaving the profile and the old avatar alone', async () => {
+      const { deleteFromS3 } = await import('../../utils/s3');
+      mockAuthAndCurrentAvatar('avatars/user-1-old.webp');
+      mockAdoptImageAssetUpload.mockRejectedValueOnce(new BadRequestError('Invalid avatar key'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Invalid avatar key');
+      expect(prismaMock.user.update).not.toHaveBeenCalled();
+      expect(deleteFromS3).not.toHaveBeenCalled();
+    });
+
+    it('fails closed (500) when the store cannot be read', async () => {
+      mockAuthAndCurrentAvatar(null);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockAdoptImageAssetUpload.mockRejectedValueOnce(new Error('store unavailable'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(500);
+      expect(prismaMock.user.update).not.toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
+    it('deletes the adopted copy when the profile update fails, keeping the old avatar', async () => {
+      const { deleteFromS3 } = await import('../../utils/s3');
+      mockAuthAndCurrentAvatar('avatars/user-1-old.webp');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.user.update.mockRejectedValueOnce(new Error('db down'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(500);
+      expect(deleteFromS3).toHaveBeenCalledTimes(1);
+      expect(deleteFromS3).toHaveBeenCalledWith(ADOPTED_AVATAR);
+      expect(deleteFromS3).not.toHaveBeenCalledWith('avatars/user-1-old.webp');
+      errorSpy.mockRestore();
+    });
+
+    it('still answers the update failure when deleting the adopted copy fails (logged)', async () => {
+      const { deleteFromS3 } = await import('../../utils/s3');
+      mockAuthAndCurrentAvatar(null);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.user.update.mockRejectedValueOnce(new Error('db down'));
+      vi.mocked(deleteFromS3).mockRejectedValueOnce(new Error('denied'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(500);
+      await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to delete unreferenced avatar copy'), 'denied',
+      ));
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it('deletes nothing when an update without a new avatar fails', async () => {
+      const { deleteFromS3 } = await import('../../utils/s3');
+      mockAuthAndCurrentAvatar('avatars/user-1-1234567890.webp');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.user.update.mockRejectedValueOnce(new Error('db down'));
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(500);
+      expect(deleteFromS3).not.toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
+    it('does not re-read (nor ever delete) the avatar the profile already points at', async () => {
+      mockAuthAndCurrentAvatar('avatars/user-1-1234567890.webp');
+      prismaMock.user.update.mockResolvedValue({
+        id: 'user-1', username: 'testuser', displayName: 'Test User', email: 'test@example.com',
+        avatarUrl: 'avatars/user-1-1234567890.webp', bio: null, status: 'online', createdAt: new Date('2024-01-01'),
+      });
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: 'avatars/user-1-1234567890.webp' });
+
+      expect(res.status).toBe(200);
+      expect(mockAdoptImageAssetUpload).not.toHaveBeenCalled();
+    });
+
+    it('does not read the store for a cleared avatar or a profile edit without one', async () => {
+      mockAuthAndCurrentAvatar('avatars/user-1-old.webp');
+      prismaMock.user.update.mockResolvedValue({
+        id: 'user-1', username: 'testuser', displayName: 'Test User', email: 'test@example.com',
+        avatarUrl: null, bio: null, status: 'online', createdAt: new Date('2024-01-01'),
+      });
+      prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+      const res = await request(app)
+        .patch('/api/v1/users/me/profile')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ avatarUrl: null });
+
+      expect(res.status).toBe(200);
+      expect(mockAdoptImageAssetUpload).not.toHaveBeenCalled();
     });
 
     it('clears avatar by setting null', async () => {

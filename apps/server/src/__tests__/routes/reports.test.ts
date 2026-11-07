@@ -29,6 +29,7 @@ vi.mock('../../websocket/socketServer', () => ({
 vi.mock('../../utils/prisma', () => ({
   prisma: {
     user: { findUnique: vi.fn() },
+    server: { findUnique: vi.fn() },
     report: { findFirst: vi.fn(), create: vi.fn(), count: vi.fn().mockResolvedValue(0) },
     serverMember: { findUnique: vi.fn() },
     channelMember: { findUnique: vi.fn() },
@@ -258,5 +259,122 @@ describe('Report Routes — E2E message reports', () => {
 
     expect(res.status).toBe(404);
     expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Webhook-posted messages (no user author) ───────────────────────────────
+
+describe('Report Routes — webhook-posted messages', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.report.count).mockResolvedValue(0);
+  });
+
+  it('a webhook message (authorId null) cannot be pinned on a user: 400, no report written', async () => {
+    // The row as the route selects it, plus the webhook columns a webhook row
+    // carries: authorId is NULL, so no reportedUserId can ever match it.
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-2' } as any);
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.message.findUnique).mockResolvedValue({
+      id: 'msg-wh',
+      content: 'Build #42 passed',
+      encrypted: false,
+      channelId: 'ch-1',
+      conversationId: null,
+      authorId: null,
+      webhookId: 'wh1',
+      webhookName: 'CI',
+      channel: { serverId: 'srv-1', secure: false },
+    } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'user-1' } as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/reports')
+      .send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-wh', reason: 'Spam from this integration' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Reported user does not match message author' });
+    expect(prisma.message.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'msg-wh' } }));
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Server reports (directory listings) ────────────────────────────────────
+
+describe('Report Routes — type: server', () => {
+  const REASON = 'This listing is spam and misleading';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
+    vi.mocked(prisma.report.create).mockResolvedValue({} as any);
+    vi.mocked(prisma.report.count).mockResolvedValue(1 as any);
+  });
+
+  it('requires serverId (and not reportedUserId — the owner is resolved from the listing)', async () => {
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', reason: REASON });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/serverId/);
+  });
+
+  it('answers a hidden server exactly like a nonexistent one, before any report lookup', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValueOnce(null as any);
+    const missing = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'zzz', reason: REASON });
+    vi.mocked(prisma.server.findUnique).mockResolvedValueOnce({ id: 'srv-1', name: 'S', description: 'd', ownerId: 'owner-1', discoveryListed: false } as any);
+    const hidden = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+    expect(missing.status).toBe(404);
+    expect(hidden.status).toBe(404);
+    expect(hidden.body).toEqual(missing.body);
+    expect(prisma.report.findFirst).not.toHaveBeenCalled();
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses the owner reporting their own server', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'user-1', discoveryListed: true } as any);
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/own server/);
+  });
+
+  it('dedupes on (reporter, server, pending)', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+    vi.mocked(prisma.report.findFirst).mockResolvedValue({ id: 'rep-1' } as any);
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+    expect(res.status).toBe(400);
+    expect(prisma.report.findFirst).toHaveBeenCalledWith({
+      where: { reporterId: 'user-1', serverId: 'srv-1', type: 'server', status: 'pending' },
+      select: { id: true },
+    });
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+
+  it('files the report against the owner with the name + description snapshot (contentSource server) and notifies admins', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'Shady Lounge', description: 'Totally legit', ownerId: 'owner-1', discoveryListed: true } as any);
+
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+
+    expect(res.status).toBe(201);
+    expect(prisma.report.create).toHaveBeenCalledWith({
+      data: {
+        type: 'server',
+        reason: REASON,
+        reporterId: 'user-1',
+        reportedUserId: 'owner-1',
+        messageId: null,
+        messageContent: 'Shady Lounge\n\nTotally legit',
+        contentSource: 'server',
+        channelId: null,
+        conversationId: null,
+        serverId: 'srv-1',
+      },
+    });
+    expect(mockTo).toHaveBeenCalledWith('admin:reports');
+    expect(mockEmit).toHaveBeenCalledWith('report:new', { total: 1 });
+  });
+
+  it('a server without a description snapshots the name alone', async () => {
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'Quiet', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+    await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+    expect(prisma.report.create).toHaveBeenCalledWith({ data: expect.objectContaining({ messageContent: 'Quiet' }) });
   });
 });

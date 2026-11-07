@@ -1,16 +1,21 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MicOff } from 'lucide-react';
 import { useServerStore } from '../../stores/serverStore';
+import { useAuthStore } from '../../stores/authStore';
+import { useConnectionStatus } from '../../hooks/useConnectionStatus';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { MemberContextMenu } from './MemberContextMenu';
+import { MembersDialog } from './MembersDialog';
 import { clsx } from 'clsx';
-import type { ServerMember, VoiceUser } from '@voxium/shared';
+import type { ServerMember } from '@voxium/shared';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
-import { groupPeopleByPresence, voicePresenceKind } from '../../utils/peopleGroups';
+import {
+  groupPeopleByPresence, presentCount, voicePresenceKind, voicePresenceOf, withOwnPresence, type VoicePresence,
+} from '../../utils/peopleGroups';
 
 interface ContextMenuState {
   member: ServerMember;
@@ -22,12 +27,39 @@ interface ContextMenuState {
  * who is active, who is away — instead of role sections. Role identity stays
  * on the rows themselves (name colors, badges); the section axis is what
  * people are doing right now.
+ *
+ * It is a PRESENCE view, not the member list (CLAUDE.md "Server Membership"):
+ * on a small server every member is loaded and the Offline section lists
+ * them; on a big one only the online members are, the Offline section
+ * collapses to a count and a way into the directory (a plain "All members"
+ * dialog, for every member — never Server settings, which is the
+ * administration surface), and when the online members outnumber the slice
+ * the panel says how many more are online.
  */
 export function MemberSidebar() {
   const { t } = useTranslation();
-  const { members, roles, channels } = useServerStore();
-  const channelUsers = useVoiceStore((s) => s.channelUsers);
+  const { members: knownMembers, roles, channels, people, activeServerId } = useServerStore();
+  // Who is in voice and whether they are muted, never who is speaking: a
+  // speaking change hands back the same map, so it does not re-render the panel.
+  const voicePresence = useVoiceStore((s) => voicePresenceOf(s.channelUsers));
+  const selfId = useAuthStore((s) => s.user?.id);
+  const connected = useConnectionStatus() === 'connected';
+  // Our own row reads online while the socket is up (nobody echoes our presence to us)
+  const members = useMemo(() => withOwnPresence(knownMembers, selfId, connected), [knownMembers, selfId, connected]);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [showDirectory, setShowDirectory] = useState(false);
+
+  // A voice participant with no row yet (a big server, someone outside the
+  // slice): ask for it, so the In voice section can show them
+  useEffect(() => {
+    const missing: string[] = [];
+    const known = new Set(members.map((m) => m.userId));
+    for (const ch of channels) {
+      if (ch.type !== 'voice') continue;
+      for (const vu of voicePresence.get(ch.id) || []) if (!known.has(vu.id)) missing.push(vu.id);
+    }
+    if (missing.length) useServerStore.getState().ensureMembers(missing);
+  }, [members, channels, voicePresence]);
 
   // Top-role color per member (unchanged from the role-grouped panel).
   const topRoleColorMap = useMemo(() => {
@@ -52,8 +84,8 @@ export function MemberSidebar() {
   }, [members, roles]);
 
   const groups = useMemo(
-    () => groupPeopleByPresence(members, channels, channelUsers),
-    [members, channels, channelUsers],
+    () => groupPeopleByPresence(members, channels, voicePresence, { includeOffline: people.full }),
+    [members, channels, voicePresence, people.full],
   );
 
   function handleContextMenu(e: React.MouseEvent, member: ServerMember) {
@@ -61,14 +93,19 @@ export function MemberSidebar() {
     setContextMenu({ member, position: { x: e.clientX, y: e.clientY } });
   }
 
-  const online = members.length - groups.offline.length;
+  // With everyone loaded the rows are the truth; otherwise the server's
+  // figure, moved by the events since — never below what is on screen
+  const present = presentCount(groups);
+  const online = people.full ? present : Math.max(people.onlineCount, present);
+  const moreOnline = people.truncated ? Math.max(0, people.onlineCount - present) : 0;
+  const offlineHidden = people.loaded && !people.full ? Math.max(0, people.memberCount - online) : 0;
 
   return (
-    <div className="panel flex h-full w-[272px] flex-none flex-col bg-vox-bg-secondary">
+    <div className="panel flex h-full w-[272px] flex-none flex-col bg-vox-bg-secondary" data-testid="people-panel">
       {/* Header */}
       <div className="flex h-[54px] flex-none items-center gap-2 border-b border-vox-border px-4">
         <span className="text-[14px] font-semibold tracking-[-0.01em] text-vox-text-primary">{t('people.title')}</span>
-        <span className="font-mono text-[11px] text-vox-text-muted">{online}</span>
+        <span className="font-mono text-[11px] text-vox-text-muted" data-testid="people-online-count">{online}</span>
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 py-3">
@@ -113,6 +150,12 @@ export function MemberSidebar() {
           </PeopleSection>
         )}
 
+        {moreOnline > 0 && (
+          <p className="mb-4 px-2 text-[11.5px] text-vox-text-muted" data-testid="people-more-online">
+            {t('people.moreOnline', { count: moreOnline })}
+          </p>
+        )}
+
         {groups.offline.length > 0 && (
           <PeopleSection label={`${t('people.offline')} · ${groups.offline.length}`}>
             {groups.offline.map((member) => (
@@ -126,6 +169,19 @@ export function MemberSidebar() {
             ))}
           </PeopleSection>
         )}
+
+        {people.loaded && !people.full && (
+          <PeopleSection label={`${t('people.offline')} · ${offlineHidden}`}>
+            <button
+              type="button"
+              onClick={() => setShowDirectory(true)}
+              className="flex w-full items-center rounded-lg px-2 py-1.5 text-left text-[12.5px] font-medium text-vox-accent-primary transition-colors hover:bg-vox-bg-hover"
+              data-testid="people-browse-all"
+            >
+              {t('people.browseAll')}
+            </button>
+          </PeopleSection>
+        )}
       </div>
 
       {contextMenu && (
@@ -134,6 +190,10 @@ export function MemberSidebar() {
           position={contextMenu.position}
           onClose={() => setContextMenu(null)}
         />
+      )}
+
+      {showDirectory && activeServerId && (
+        <MembersDialog serverId={activeServerId} onClose={() => setShowDirectory(false)} />
       )}
     </div>
   );
@@ -157,7 +217,7 @@ function PersonRow({
 }: {
   member: ServerMember;
   roleColor?: string;
-  voice?: VoiceUser;
+  voice?: VoicePresence;
   dimmed?: boolean;
   onContextMenu: (e: React.MouseEvent, member: ServerMember) => void;
 }) {
@@ -165,13 +225,10 @@ function PersonRow({
   const name = member.nickname || member.user.displayName;
   const status = member.user.status || 'offline';
 
-  // Rich presence line: voice state when in voice, otherwise status.
+  // Presence line: in voice (muted or not) when in voice, otherwise status.
   let secondLine: string;
-  let secondLineAccent = false;
   if (voice) {
-    const kind = voicePresenceKind(voice);
-    secondLine = kind === 'speaking' ? t('people.speaking') : kind === 'muted' ? t('people.mutedStatus') : t('people.inVoiceStatus');
-    secondLineAccent = kind === 'speaking';
+    secondLine = voicePresenceKind(voice) === 'muted' ? t('people.mutedStatus') : t('people.inVoiceStatus');
   } else if (status === 'dnd') {
     secondLine = t('people.dnd');
   } else if (status === 'idle') {
@@ -196,7 +253,6 @@ function PersonRow({
           displayName={member.user.displayName}
           size="sm"
           status={voice ? undefined : status}
-          speaking={voice?.speaking}
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
@@ -209,12 +265,7 @@ function PersonRow({
             {(member.user.role === 'admin' || member.user.role === 'superadmin') && <StaffBadge />}
             {member.user.isSupporter && <SupporterBadge tier={member.user.supporterTier} />}
           </div>
-          <div
-            className={clsx(
-              'truncate text-[11.5px] leading-tight',
-              secondLineAccent ? 'text-vox-accent-primary' : 'text-vox-text-muted',
-            )}
-          >
+          <div className="truncate text-[11.5px] leading-tight text-vox-text-muted">
             {secondLine}
           </div>
         </div>

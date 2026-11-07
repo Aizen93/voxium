@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { toast } from './toastStore';
+import i18n from '../i18n';
 import type { Friendship, UserStatus } from '@voxium/shared';
 
 type FriendTab = 'online' | 'all' | 'pending' | 'add';
@@ -47,7 +48,7 @@ export const useFriendStore = create<FriendState>((set, get) => ({
       });
     } catch (err) {
       console.error('Failed to fetch friends:', err);
-      toast.error('Failed to load friends');
+      toast.error(i18n.t('friends.failedToLoad'));
     }
   },
 
@@ -111,7 +112,7 @@ export const useFriendStore = create<FriendState>((set, get) => ({
     set((state) => ({
       pendingIncoming: [friendship, ...state.pendingIncoming],
     }));
-    toast.info(`${friendship.user.displayName} sent you a friend request`);
+    toast.info(i18n.t('friends.requestReceived', { name: friendship.user.displayName }));
   },
 
   handleRequestAccepted: ({ friendship }) => {
@@ -119,7 +120,7 @@ export const useFriendStore = create<FriendState>((set, get) => ({
       friends: [friendship, ...state.friends],
       pendingOutgoing: state.pendingOutgoing.filter((f) => f.user.id !== friendship.user.id),
     }));
-    toast.success(`${friendship.user.displayName} accepted your friend request`);
+    toast.success(i18n.t('friends.requestAccepted', { name: friendship.user.displayName }));
   },
 
   handleFriendRemoved: ({ userId }) => {

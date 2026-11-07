@@ -29,17 +29,21 @@ import { FriendsView } from '../friends/FriendsView';
 import { SupportTicketView } from '../dm/SupportTicketView';
 import { useSupportStore } from '../../stores/supportStore';
 import { SearchModal } from '../search/SearchModal';
-import { Search } from 'lucide-react';
 import { UserCard } from './UserCard';
 import { ScreenShareViewer } from '../voice/ScreenShareViewer';
 import { ScreenShareFloating } from '../voice/ScreenShareFloating';
 import { ErrorBoundary } from './ErrorBoundary';
 import { initNotifications, notify } from '../../services/notifications';
+import { notificationAuthorName } from '../../utils/notificationAuthor';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { SharePreflightModal } from '../voice/SharePreflightModal';
+import { discoverySocketHandlers } from '../../services/discoverySocketHandlers';
+import { handleMessageBulkDeleted } from '../../services/webhookSocketHandlers';
+import { handleAppResume } from '../../services/resume';
+import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
@@ -61,7 +65,6 @@ function activeVoiceServerIs(serverId: string): boolean {
 }
 
 export function MainLayout() {
-  const { t } = useTranslation();
   const { fetchServers, activeServerId, channels } = useServerStore();
   const { user } = useAuthStore();
   const activeConversationId = useDMStore((s) => s.activeConversationId);
@@ -114,34 +117,22 @@ export function MainLayout() {
     fetchServers();
   }, [fetchServers]);
 
-  // Re-mark current channel/conversation as read when tab/window regains visibility.
-  // This covers cases where the socket reconnected in the background and unread:init
-  // restored stale counts because a previous markChannelRead API call failed.
+  // The window coming back (restored, un-hidden, the network back): the
+  // resume handler reconnects the socket with a live token when it dropped
+  // — the connect handlers below then refetch everything — or refreshes the
+  // cheap slices when it did not (services/resume.ts).
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.hidden) return;
-      const serverState = useServerStore.getState();
-      // Only when actually in server view — activeChannelId survives switching to DMs
-      if (serverState.activeChannelId && serverState.activeServerId) {
-        serverState.clearUnread(serverState.activeChannelId);
-        serverState.markChannelRead(serverState.activeChannelId);
-      }
-      if (!serverState.activeServerId) {
-        const dmState = useDMStore.getState();
-        if (dmState.activeConversationId) {
-          dmState.clearDMUnread(dmState.activeConversationId);
-          dmState.markConversationRead(dmState.activeConversationId);
-        }
-      }
-      // Re-fetch data that may have become stale while the tab was hidden
-      // (socket events are lost during background disconnects)
-      useDMStore.getState().fetchConversations();
-      if (serverState.activeServerId) {
-        serverState.fetchMembers(serverState.activeServerId);
-      }
+      void handleAppResume();
     };
+    const handleOnline = () => { void handleAppResume(); };
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
+    };
   }, []);
 
   // Set up WebSocket event listeners with proper function references
@@ -171,16 +162,13 @@ export function MainLayout() {
       return !!serverState.activeServerId && !!channelId && channelId === serverState.activeChannelId;
     };
 
-    // Secure channels by the loaded channel list (the trustworthy signal), OR
-    // the message's own encrypted flag — the flag alone must never DOWNGRADE
-    // (that's channelCrypto's refusal rule) but it is always safe as a reason
-    // to decrypt-or-suppress, e.g. for servers whose channel list isn't loaded.
-    const isSecureChannelMessage = (message: Message): boolean => {
-      if (message.encrypted === true) return true;
-      return useServerStore
-        .getState()
-        .channels.some((c) => c.id === message.channelId && c.secure === true);
-    };
+    // Secure channels by the loaded channel list, this device's pin, OR the
+    // message's own encrypted flag (utils/secureChannelGate.ts). The pin is
+    // what keeps a server that flips `secure` to false — or a message:new for
+    // a server the user is not viewing — from routing a forged plaintext row
+    // past channelCrypto's refusal rule.
+    const isSecureChannelMessage = (message: Message): boolean =>
+      isSecureChannelMessageIn(message, useServerStore.getState().channels);
 
     // Store function references so cleanup actually works
     const handlers = {
@@ -206,7 +194,10 @@ export function MainLayout() {
         if (message.author?.id === currentUser?.id) return;
 
         // Check if the current user is mentioned
-        const isMentioned = !!(currentUser && message.mentions?.some((m) => m.id === currentUser.id));
+        // A direct mention, or an @everyone the server accepted (the author
+        // held MENTION_EVERYONE in that channel — `mentionsEveryone` is the
+        // server's word, never the content's)
+        const isMentioned = !!(currentUser && (message.mentions?.some((m) => m.id === currentUser.id) || message.mentionsEveryone));
 
         const isActiveChannel = isViewingChannel(message.channelId);
 
@@ -233,14 +224,20 @@ export function MainLayout() {
           }
         }
         if (settings.enableDesktopNotifications) {
-          const authorName = message.author?.displayName || message.author?.username || 'Someone';
-          const serverName = message.serverName || 'Unknown Server';
-          const channelName = message.channelName || 'unknown';
+          // A webhook's name carries the APP marker: it picks its own name per post
+          const authorName = notificationAuthorName(message.author, i18n.t);
+          const serverName = message.serverName || i18n.t('notifications.unknownServer');
+          const channelName = message.channelName || i18n.t('notifications.unknownChannel');
           const readable = formatNotificationBody(message.content, message.mentions);
           const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
-          const title = isMentioned
-            ? `${authorName} mentioned you in ${serverName}, #${channelName}`
-            : `${serverName}, #${channelName}`;
+          // A direct mention names you; an @everyone the server accepted
+          // (the author held MENTION_EVERYONE) says so instead
+          const mentionedDirectly = !!(currentUser && message.mentions?.some((m) => m.id === currentUser.id));
+          const title = mentionedDirectly
+            ? i18n.t('notifications.mentionedYou', { author: authorName, server: serverName, channel: channelName })
+            : isMentioned
+              ? i18n.t('chat.mentionEveryone.notificationTitle', { author: authorName, server: serverName, channel: channelName })
+              : i18n.t('notifications.channelMessage', { server: serverName, channel: channelName });
           void notify(title, `${authorName}: ${body}`, message.author?.avatarUrl);
         }
       },
@@ -275,8 +272,8 @@ export function MainLayout() {
         useDMStore.getState().updateParticipantStatus(userId, status);
         useFriendStore.getState().updateFriendStatus(userId, status);
       },
-      voiceChannelUsers: ({ channelId, serverId, users: voiceUsers }: { channelId: string; serverId?: string; users: VoiceUser[] }) => {
-        useVoiceStore.getState().setChannelUsers(channelId, voiceUsers, serverId);
+      voiceChannelUsers: ({ channelId, serverId, users: voiceUsers, source }: { channelId: string; serverId?: string; users: VoiceUser[]; source?: 'connect' }) => {
+        useVoiceStore.getState().setChannelUsers(channelId, voiceUsers, serverId, source);
       },
       voiceUserJoined: ({ channelId, serverId, user: voiceUser }: { channelId: string; serverId?: string; user: VoiceUser }) => {
         useVoiceStore.getState().addUserToChannel(channelId, voiceUser, serverId);
@@ -298,7 +295,7 @@ export function MainLayout() {
       },
       voiceForceMove: ({ targetChannelId }: { channelId: string; userId: string; targetChannelId: string }) => {
         useVoiceStore.getState().handleForceMove(targetChannelId);
-        toast.info('You were moved to another voice channel');
+        toast.info(i18n.t('voice.toasts.movedToAnotherChannel'));
       },
       voiceSpeaking: ({ channelId, userId, speaking }: { channelId: string; userId: string; speaking: boolean }) => {
         useVoiceStore.getState().setUserSpeaking(channelId, userId, speaking);
@@ -389,12 +386,14 @@ export function MainLayout() {
         const dmStore = useDMStore.getState();
         const activeConvId = dmStore.activeConversationId;
 
-        // E2E DMs arrive as ciphertext — decrypt (or resolve from the local
-        // cache) before the message touches any store, preview, or notification
-        if (message.encrypted) {
-          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
-          message = await decryptMessageForDisplay(message);
-        }
+        // Every DM goes through the decrypt gate before it touches any store,
+        // preview or notification — never only the ones flagged encrypted. The
+        // flag is the server's word: an `encrypted: false` user row is the
+        // forgery the gate exists to refuse (only system notices are plaintext
+        // since the 2.0 cutover), and skipping the gate on it was the leftover
+        // plaintext branch.
+        const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+        message = await decryptMessageForDisplay(message);
 
         // Update last message in conversation list
         if (message.conversationId) {
@@ -407,6 +406,7 @@ export function MainLayout() {
               id: message.id,
               content: message.content,
               encrypted: message.encrypted,
+              type: message.type,
               createdAt: message.createdAt,
               authorId: message.author?.id,
             });
@@ -427,21 +427,20 @@ export function MainLayout() {
             const settings = useSettingsStore.getState();
             if (settings.enableNotificationSounds) playMessageSound();
             if (settings.enableDesktopNotifications) {
-              const authorName = message.author?.displayName || message.author?.username || 'Someone';
+              const authorName = message.author?.displayName || message.author?.username || i18n.t('notifications.someone');
               const readable = formatNotificationBody(message.content, message.mentions);
               const body = readable?.length > 100 ? readable.slice(0, 100) + '...' : readable;
-              void notify(`DM, ${authorName}`, body, message.author?.avatarUrl);
+              void notify(i18n.t('notifications.dmTitle', { name: authorName }), body, message.author?.avatarUrl);
             }
           }
         }
       },
       dmMessageUpdate: async (message: Message) => {
         // E2E edits arrive as fresh ciphertext — decrypt before the store
-        // (the plaintext cache is versioned by editedAt)
-        if (message.encrypted) {
-          const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
-          message = await decryptMessageForDisplay(message);
-        }
+        // (the plaintext cache is versioned by editedAt). Same gate as a new
+        // message, whatever the flag says.
+        const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
+        message = await decryptMessageForDisplay(message);
         const activeConvId = useDMStore.getState().activeConversationId;
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().updateMessage(message);
@@ -622,7 +621,7 @@ export function MainLayout() {
       memberNicknameUpdated: ({ serverId, userId, nickname }: { serverId: string; userId: string; nickname: string | null }) => {
         useServerStore.getState().handleNicknameUpdated(serverId, userId, nickname);
       },
-      channelPermissionsUpdated: ({ serverId }: { serverId: string; channelId: string }) => {
+      channelPermissionsUpdated: ({ serverId }: { serverId: string }) => {
         // Re-fetch server detail to get updated channel visibility
         const state = useServerStore.getState();
         if (state.activeServerId === serverId) {
@@ -636,8 +635,13 @@ export function MainLayout() {
         if (voiceState.activeChannelId && activeVoiceServerIs(serverId)) {
           voiceState.leaveChannel();
         }
+        // Read before handleMemberKicked drops the server from the strip
+        const spaceName = serverState.servers.find((s) => s.id === serverId)?.name;
         serverState.handleMemberKicked(serverId);
-        toast.warning('You were kicked from the server');
+        // Every kick is a remove-and-ban (removeMemberFromServer with `ban`)
+        toast.warning(spaceName
+          ? i18n.t('server.youWereRemovedAndBanned', { name: spaceName })
+          : i18n.t('server.youWereRemovedAndBannedUnknown'));
       },
       serverDeleted: ({ serverId }: { serverId: string }) => {
         const voiceState = useVoiceStore.getState();
@@ -693,16 +697,16 @@ export function MainLayout() {
         }
 
         serverState.handleServerDeleted(serverId);
-        toast.info('Server was deleted');
+        toast.info(i18n.t('server.deletedToast'));
       },
       announcementInit: ({ announcements }: { announcements: Announcement[] }) => {
         useAnnouncementStore.getState().initAnnouncements(announcements);
       },
       announcementNew: (announcement: Announcement) => {
         useAnnouncementStore.getState().addAnnouncement(announcement);
-        const typeLabels: Record<string, string> = { info: 'Info', warning: 'Warning', maintenance: 'Maintenance' };
-        const label = typeLabels[announcement.type] || 'Announcement';
-        toast.info(`${label}: ${announcement.title}`);
+        const typeLabels: Record<string, string> = { info: i18n.t('notifications.announcementInfo'), warning: i18n.t('notifications.announcementWarning'), maintenance: i18n.t('notifications.announcementMaintenance') };
+        const label = typeLabels[announcement.type] || i18n.t('notifications.announcementGeneric');
+        toast.info(i18n.t('notifications.announcementToast', { label, title: announcement.title }));
       },
       supportMessageNew: (message: SupportMessageData) => {
         useSupportStore.getState().addMessage(message);
@@ -710,11 +714,12 @@ export function MainLayout() {
       supportStatusChange: (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => {
         useSupportStore.getState().updateStatus(data.status, data.claimedById, data.claimedByUsername);
       },
-      voiceError: (data: { message: string }) => {
-        const vs = useVoiceStore.getState();
-        if (vs.activeChannelId) vs.leaveChannel();
-        if (vs.dmCallConversationId) vs.leaveDMCall();
-        toast.error(translateServerError(data.message, i18n.t, 'common.somethingWentWrong'));
+      voiceError: (data: { message: string; channelId?: string }) => {
+        // The store decides (a channel-scoped notice about a channel we left
+        // is ignored); the toast follows only when it acted
+        if (useVoiceStore.getState().handleVoiceError(data)) {
+          toast.error(translateServerError(data.message, i18n.t, 'common.somethingWentWrong'));
+        }
       },
     };
 
@@ -723,6 +728,9 @@ export function MainLayout() {
       ['message:new', handlers.messageNew],
       ['message:update', handlers.messageUpdate],
       ['message:delete', handlers.messageDelete],
+      // A webhook deleted with purge (services/webhookSocketHandlers.ts):
+      // acts only on the channel on screen, validates its payload
+      ['message:bulk_deleted', (data: unknown) => handleMessageBulkDeleted(data, isViewingChannel)],
       ['typing:start', handlers.typingStart],
       ['typing:stop', handlers.typingStop],
       ['presence:update', handlers.presenceUpdate],
@@ -790,6 +798,13 @@ export function MainLayout() {
       ['announcement:new', handlers.announcementNew],
       ['support:message:new', handlers.supportMessageNew],
       ['support:status_change', handlers.supportStatusChange],
+      // Server discovery (services/discoverySocketHandlers.ts): two reach the
+      // requester's user room, two the moderator audience; each validates
+      // its payload shape.
+      ['server:join_approved', discoverySocketHandlers.joinApproved],
+      ['server:join_declined', discoverySocketHandlers.joinDeclined],
+      ['server:join_request', discoverySocketHandlers.joinRequest],
+      ['server:join_request_resolved', discoverySocketHandlers.joinRequestResolved],
     ];
 
     /**
@@ -845,7 +860,7 @@ export function MainLayout() {
       useServerStore.getState().fetchServers();
       const serverId = useServerStore.getState().activeServerId;
       if (serverId) {
-        useServerStore.getState().fetchMembers(serverId);
+        useServerStore.getState().fetchPeople(serverId);
       }
       // Re-fetch DM conversations
       useDMStore.getState().fetchConversations();
@@ -908,17 +923,13 @@ export function MainLayout() {
       <SpacesStrip />
       <div className="flex flex-1 min-h-0 gap-2 bg-vox-bg-primary p-2 pt-0">
         <div className="flex w-[248px] flex-none flex-col min-h-0">
-          <div className="px-1 pb-1 pt-2">
-            <button
-              onClick={() => setShowGlobalSearch(true)}
-              className="flex h-[34px] w-full items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-tertiary px-2.5 text-vox-text-muted transition-colors hover:border-vox-border-strong hover:text-vox-text-secondary"
-            >
-              <Search size={14} className="shrink-0" />
-              <span className="truncate text-[13px]">{t('search.placeholder')}</span>
-              <kbd className="ml-auto shrink-0 rounded-sm bg-vox-bg-hover px-1.5 py-0.5 font-mono text-[10px] text-vox-text-muted/80">
-                {navigator.platform.toUpperCase().includes('MAC') ? '⌘K' : 'Ctrl K'}
-              </kbd>
-            </button>
+          {/* The brand mark heads the sidebar column (the browser build has no
+              title bar). The message search is a field in each chat header: it
+              searches one space or one conversation, so it sits where that
+              context is shown. Ctrl/⌘K still opens it from anywhere. */}
+          <div className="flex h-[46px] flex-none items-center gap-2 px-2.5 pb-1 pt-2" data-testid="sidebar-brand">
+            <img src="/logo.svg" alt="" className="h-6 w-6 rounded-[8px]" draggable={false} />
+            <span className="text-[14px] font-semibold tracking-tight text-vox-text-primary">Voxium</span>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">
             {activeServerId ? <ChannelSidebar /> : <DMList />}

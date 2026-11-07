@@ -5,7 +5,7 @@ import { clearRateLimits } from './api';
 // across tests. An AUTO fixture, not a `page` override: API-only tests that
 // never touch `page` (e.g. pure `request` tests) must be cleared too — one
 // slipped through and inherited the previous test's register spend, tripping
-// the 3/min IP limit with its 10-minute block.
+// the per-IP registration burst limit and its block.
 export const test = base.extend<{ clearLimits: void }>({
   clearLimits: [
     async ({}, use) => {

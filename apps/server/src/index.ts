@@ -40,6 +40,7 @@ import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmen
 import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/registrationHygiene';
 import { startKeyShareCleanup, stopKeyShareCleanup } from './utils/keyShareCleanup';
 import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
+import { startDiscoveryStats, stopDiscoveryStats } from './utils/discoveryStats';
 import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { ensureBucketEncryption } from './utils/s3';
@@ -51,6 +52,7 @@ import { clearVoiceState, dispatchVoiceEvent, handleWorkerDeath } from './websoc
 import { clearDMVoiceState } from './websocket/dmVoiceHandler';
 import { initVoiceCluster, stopVoiceCluster } from './websocket/voiceCluster';
 import { initVoiceRelay } from './websocket/voiceRelay';
+import { startPresenceReaper, stopPresenceReaper } from './utils/presenceReaper';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -170,6 +172,12 @@ async function main() {
   await initVoiceCluster(io);
   console.log('[VoiceCluster] Initialized');
 
+  // Presence reconciliation: every minute, users whose last socket is gone
+  // cluster-wide without a disconnect having unregistered it (a node killed
+  // hard, a failed Redis command) are taken offline and their contacts told.
+  // The voice side has had its reaper since multi-node; presence had none.
+  startPresenceReaper(io, prisma);
+
   // Channel-affinity voice signaling relay (HIGH-15): a channel's mediasoup
   // Router lives on ONE node; peers relay their participants' voice events here
   // and this node dispatches them against shims.
@@ -197,6 +205,11 @@ async function main() {
   // matter more than the sweep itself.
   startOrphanCleanup();
 
+  // Directory activity figures on a rolling daily cycle (every 5 min, lock
+  // held 290 s, budgeted batches) plus the join-request sweeps and the
+  // nightly drift corrections — see utils/discoveryStats.ts.
+  startDiscoveryStats();
+
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n[Node ${NODE_ID()}] Voxium server running on http://0.0.0.0:${PORT}\n`);
     // Signal readiness probe after full initialization (migrations, Redis, mediasoup)
@@ -214,7 +227,9 @@ async function main() {
     stopKeyShareCleanup();
     stopRegistrationHygiene();
     stopOrphanCleanup();
+    stopDiscoveryStats();
     stopVoiceCluster();
+    stopPresenceReaper();
     // Drop our liveness key FIRST so peer reapers promptly clean up any voice
     // state this node owned, instead of waiting out the heartbeat TTL.
     await stopNodeHeartbeat().catch((err) => console.warn('[Shutdown] Heartbeat cleanup failed:', err));

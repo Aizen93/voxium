@@ -1,4 +1,4 @@
-import { useServerStore } from './serverStore';
+import { useServerStore, resetMemberLookupState, retireDirectory } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useDMStore } from './dmStore';
 import { useFriendStore } from './friendStore';
@@ -9,8 +9,10 @@ import { useE2EStore } from './e2eStore';
 import { useAnnotationStore, resetAnnotationModuleState } from './annotationStore';
 import { useAnnotationLiveStore, resetAnnotationLiveModuleState } from './annotationLiveStore';
 import { useMaskLayoutStore, resetMaskLayoutModuleState } from './maskLayoutStore';
+import { useDiscoveryStore, resetDiscoveryModuleState } from './discoveryStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { stopE2EDeviceListWatch } from './e2eStore';
+import { resetServerPermissionsCache } from '../hooks/useServerPermissions';
 
 /**
  * Account-scoped stores that MUST be wiped on logout. Without this, the next
@@ -37,6 +39,8 @@ const ACCOUNT_STORES = [
   // reads a different key) and deliberately survive logout, like trusted
   // devices and the E2E vault
   useMaskLayoutStore,
+  // Explore's browse state and the viewer's isMember/requestPending flags
+  useDiscoveryStore,
 ] as const;
 
 // Captured at module import — before any user interaction — so this is each
@@ -75,6 +79,14 @@ export function resetAccountStores(): void {
   resetAnnotationModuleState();
   resetAnnotationLiveModuleState();
   resetMaskLayoutModuleState();
+  // Explore requests still in flight belong to the account that is leaving
+  resetDiscoveryModuleState();
+  // The member lookup queue and its misses are the old account's servers',
+  // and so is a directory page still in flight
+  resetMemberLookupState();
+  retireDirectory();
+  // The effective-permission answers are the leaving account's too
+  resetServerPermissionsCache();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).

@@ -18,6 +18,9 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
 const prismaMock: Record<string, any> = {
+  // the platform-ban disarm (utils/webhookLifecycle.ts): holds none unless a test says so
+  webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+  serverJoinRequest: { findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
   user: {
     findUnique: vi.fn(),
     update: vi.fn().mockResolvedValue({}),
@@ -51,11 +54,16 @@ vi.mock('../../utils/prisma', () => ({
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) }));
+const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockDisconnectSockets = vi.fn();
+const mockLocalDisconnectSockets = vi.fn();
+const mockIn = vi.fn(() => ({ fetchSockets: mockFetchSockets, disconnectSockets: mockDisconnectSockets }));
+const mockLocalIn = vi.fn(() => ({ disconnectSockets: mockLocalDisconnectSockets }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
     in: mockIn,
+    local: { in: mockLocalIn },
   })),
 }));
 
@@ -103,6 +111,8 @@ vi.mock('../../utils/sanitize', () => ({
 
 // Member broadcast
 const mockBroadcastMemberLeft = vi.fn().mockResolvedValue(undefined);
+const mockEmitToModerators = vi.fn();
+vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: any[]) => mockEmitToModerators(...a) }));
 vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberJoined: vi.fn().mockResolvedValue(undefined),
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
@@ -124,6 +134,13 @@ vi.mock('../../utils/auditLog', () => ({
 // Feature flags
 vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
+}));
+
+// Directory listing column (a report-resolve ban is the third place bannedAt is set)
+const mockRecomputeListedForOwner = vi.fn().mockResolvedValue(0);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: vi.fn().mockResolvedValue(true),
+  recomputeListedForOwner: (...args: any[]) => mockRecomputeListedForOwner(...args),
 }));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
@@ -186,6 +203,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
     mockPendingReport('target-1');
     prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's1' }, { serverId: 's2' }]);
+    prismaMock.serverJoinRequest.findMany.mockResolvedValueOnce([{ serverId: 's3' }]);
 
     const res = await request(app)
       .post('/api/v1/admin/reports/rep-1/resolve')
@@ -202,6 +220,61 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     // Same as the canonical ban route: banned user leaves every member list/room
     expect(mockBroadcastMemberLeft).toHaveBeenCalledWith('target-1', 's1');
     expect(mockBroadcastMemberLeft).toHaveBeenCalledWith('target-1', 's2');
+    // ...and, same as the canonical ban route, their servers leave the directory
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+    // ...and their pending join requests are withdrawn, the moderators told
+    expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
+    expect(mockEmitToModerators).toHaveBeenCalledWith('s3', 'server:join_request_resolved', { serverId: 's3', userId: 'target-1', outcome: 'cancelled' });
+    // ...and signed out everywhere through the shared revocation helper:
+    // room-filtered disconnects, never a per-socket walk
+    expect(mockTo).toHaveBeenCalledWith('user:target-1');
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(mockLocalIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockFetchSockets).not.toHaveBeenCalled();
+  });
+
+  it('signs the banned account out right after the ban is written, even when the fan-out after it fails', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    mockPendingReport('target-1');
+    const order: string[] = [];
+    prismaMock.user.update.mockImplementation(async () => { order.push('ban'); return {}; });
+    mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+    mockDisconnectSockets.mockImplementation(() => { order.push('disconnect'); });
+    prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's1' }]);
+    mockBroadcastMemberLeft.mockRejectedValueOnce(new Error('adapter gone'));
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/api/v1/admin/reports/rep-1/resolve')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ resolution: 'Spam confirmed', action: 'ban' });
+
+    expect(res.status).toBe(500);
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('ban'));
+    expect(order.indexOf('disconnect')).toBeGreaterThan(order.indexOf('force:logout'));
+    consoleSpy.mockRestore();
+    mockEmit.mockReset();
+    mockDisconnectSockets.mockReset();
+  });
+
+  it('resolving WITHOUT a ban leaves the directory alone', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    mockPendingReport('target-1');
+
+    const res = await request(app)
+      .post('/api/v1/admin/reports/rep-1/resolve')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ resolution: 'Not actionable' });
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
   });
 
   it('admin CANNOT ban a peer admin via report resolution (only superadmins can)', async () => {

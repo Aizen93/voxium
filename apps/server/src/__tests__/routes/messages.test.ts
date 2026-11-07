@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME } from '@voxium/shared';
-import { extractMentionIds } from '../../utils/mentions';
+import { buildMegolmEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, LIMITS, Permissions } from '@voxium/shared';
+import { BadRequestError } from '../../utils/errors';
+import { extractMentionIds, batchResolveMentions, attachMentions, resolveMentionsForServer } from '../../utils/mentions';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -107,6 +108,12 @@ vi.mock('../../utils/s3', () => ({
   deleteMultipleFromS3: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Upload read-back (its own unit tests cover the S3 side)
+const mockVerifyAttachmentUploads = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/uploadVerification', () => ({
+  verifyAttachmentUploads: (...args: unknown[]) => mockVerifyAttachmentUploads(...args),
+}));
+
 // Mentions
 vi.mock('../../utils/mentions', () => ({
   extractMentionIds: vi.fn().mockReturnValue([]),
@@ -184,6 +191,7 @@ describe('Message Routes', () => {
     mockHasServerPermission.mockResolvedValue(true);
     mockHasChannelPermission.mockResolvedValue(true);
     mockGetHighestRolePosition.mockResolvedValue(Infinity);
+    mockVerifyAttachmentUploads.mockResolvedValue(undefined);
   });
 
   // ── GET /api/v1/channels/:channelId/messages ───────────────────────────
@@ -337,6 +345,111 @@ describe('Message Routes', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
+    });
+
+    describe('attachments are read back before the row is created', () => {
+      function mockPlainChannel() {
+        prismaMock.channel.findUnique.mockResolvedValue({
+          id: 'ch-1', serverId: 'srv-1', type: 'text', name: 'general', secure: false, server: { name: 'Test Server' },
+        });
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+        const createMany = vi.fn().mockResolvedValue({ count: 2 });
+        prismaMock.$transaction.mockImplementation(async (cb: Function) => cb({
+          message: {
+            create: vi.fn().mockResolvedValue({ id: 'msg-1' }),
+            findUniqueOrThrow: vi.fn().mockResolvedValue(makeMockMessage()),
+          },
+          messageAttachment: { createMany },
+        }));
+        return { createMany };
+      }
+
+      const pdf = { s3Key: 'attachments/ch-ch-1/a1-report.pdf', fileName: 'report.pdf', fileSize: 2048, mimeType: 'application/pdf' };
+      const clip = { s3Key: 'attachments/ch-ch-1/a2-clip.mp4', fileName: 'clip.mp4', fileSize: 9_000_000, mimeType: 'video/mp4' };
+
+      it('verifies every attachment against its per-type maximum, then stores the verified size', async () => {
+        const { createMany } = mockPlainChannel();
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: '', attachments: [pdf, clip] });
+
+        expect(res.status).toBe(201);
+        expect(mockVerifyAttachmentUploads).toHaveBeenCalledWith([
+          { key: pdf.s3Key, declaredSize: 2048, maxSize: LIMITS.MAX_ATTACHMENT_SIZE },
+          { key: clip.s3Key, declaredSize: 9_000_000, maxSize: LIMITS.MAX_VIDEO_ATTACHMENT_SIZE },
+        ]);
+        expect(createMany).toHaveBeenCalledWith({
+          data: [
+            expect.objectContaining({ s3Key: pdf.s3Key, fileSize: 2048 }),
+            expect.objectContaining({ s3Key: clip.s3Key, fileSize: 9_000_000 }),
+          ],
+        });
+      });
+
+      it('answers the verifier refusal and creates nothing', async () => {
+        mockPlainChannel();
+        mockVerifyAttachmentUploads.mockRejectedValueOnce(new BadRequestError('Invalid attachment size'));
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [pdf] });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Invalid attachment size');
+        expect(prismaMock.$transaction).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('fails closed when the store cannot be read', async () => {
+        mockPlainChannel();
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        mockVerifyAttachmentUploads.mockRejectedValueOnce(new Error('store unavailable'));
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [pdf] });
+
+        expect(res.status).toBe(500);
+        expect(prismaMock.$transaction).not.toHaveBeenCalled();
+        errorSpy.mockRestore();
+      });
+
+      it('does not read the store when ATTACH_FILES is missing or the size is fractional', async () => {
+        mockPlainChannel();
+        mockHasChannelPermission.mockImplementation(async (_u: string, _c: string, _s: string, perm: bigint) => perm !== Permissions.ATTACH_FILES);
+
+        let res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [pdf] });
+        expect(res.status).toBe(403);
+
+        mockHasChannelPermission.mockResolvedValue(true);
+        res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [{ ...pdf, fileSize: 2048.5 }] });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Invalid attachment size');
+
+        expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
+      });
+
+      it('does not call the verifier for a message without attachments', async () => {
+        mockPlainChannel();
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'hello' });
+
+        expect(res.status).toBe(201);
+        expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
+      });
     });
 
     it('returns 400 with empty message content', async () => {
@@ -1053,6 +1166,51 @@ describe('Message Routes', () => {
       expect(createManyAttachments).toHaveBeenCalledWith({
         data: [expect.objectContaining({ fileName: E2E_ATTACHMENT_NAME })],
       });
+      // The blob is read back against its ciphertext cap before the row exists
+      expect(mockVerifyAttachmentUploads).toHaveBeenCalledWith([{
+        key: 'attachments/ch-sec-1/aaaa-encrypted.bin',
+        declaredSize: 1024,
+        maxSize: LIMITS.MAX_VIDEO_ATTACHMENT_SIZE + E2E_GCM_TAG_BYTES,
+      }]);
+    });
+
+    it('refuses an encrypted blob whose stored size does not match, creating nothing', async () => {
+      const token = makeToken();
+      mockSecureChannel();
+      const { create } = mockTxCapture();
+      mockVerifyAttachmentUploads.mockRejectedValueOnce(new BadRequestError('Invalid attachment size'));
+
+      const res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          content: ENVELOPE,
+          encrypted: true,
+          attachments: [{ s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin', fileSize: 1024, mimeType: E2E_ATTACHMENT_MIME }],
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Invalid attachment size');
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('refuses a fractional encrypted size before reading the store', async () => {
+      const token = makeToken();
+      mockSecureChannel();
+
+      const res = await request(app)
+        .post('/api/v1/channels/sec-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          content: ENVELOPE,
+          encrypted: true,
+          attachments: [{ s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin', fileSize: 1024.5, mimeType: E2E_ATTACHMENT_MIME }],
+        });
+
+      expect(res.status).toBe(400);
+      expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
     });
 
     it('secure edits must be fresh ciphertexts (plaintext edit → 400, envelope edit stored verbatim)', async () => {
@@ -1088,5 +1246,377 @@ describe('Message Routes', () => {
         }),
       );
     });
+  });
+
+  // ── Incoming webhooks: authorless rows ─────────────────────────────────
+  // A webhook-posted row has author === null plus webhookId/webhookName. The
+  // wire keeps a non-null author (synthesised, isWebhook: true) and the row
+  // never resolves mentions: an unauthenticated URL must never ping anyone.
+
+  describe('webhook-authored rows', () => {
+    const webhookAuthor = { id: 'webhook:wh-1', username: 'CI', displayName: 'CI', avatarUrl: null, isWebhook: true };
+    const user2 = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null };
+
+    function makeWebhookMessage(overrides: Record<string, unknown> = {}) {
+      return makeMockMessage({
+        authorId: null,
+        author: null,
+        webhookId: 'wh-1',
+        webhookName: 'CI',
+        content: 'Build failed, ping @[user-2]',
+        ...overrides,
+      });
+    }
+
+    beforeEach(async () => {
+      // Run the REAL batch resolver/attacher for these tests (the module is
+      // mocked file-wide); prisma.serverMember.findMany is the mocked query
+      const actual = await vi.importActual<typeof import('../../utils/mentions')>('../../utils/mentions');
+      vi.mocked(batchResolveMentions).mockImplementation(actual.batchResolveMentions);
+      vi.mocked(attachMentions).mockImplementation(actual.attachMentions);
+      prismaMock.channel.findUnique.mockResolvedValue({ id: 'ch-1', serverId: 'srv-1', type: 'text', secure: false });
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.findMany.mockResolvedValue([{ user: user2 }]);
+    });
+
+    afterEach(() => {
+      // back to the file-wide defaults so later tests see the plain mocks
+      vi.mocked(batchResolveMentions).mockResolvedValue(new Map());
+      vi.mocked(attachMentions).mockReturnValue([]);
+      vi.mocked(extractMentionIds).mockReturnValue([]);
+    });
+
+    it('DELETE: a plain member is not the author of a webhook row (authorId null) and gets the 403; nothing deleted, nothing emitted', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeWebhookMessage());
+      mockHasChannelPermission.mockImplementation(async (...args: unknown[]) => args[3] !== Permissions.MANAGE_MESSAGES);
+
+      const res = await request(app)
+        .delete('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('You can only delete your own messages');
+      expect(prismaMock.message.delete).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
+    });
+
+    it('DELETE: MANAGE_MESSAGES deletes a webhook row (the only way to remove one post) and emits message:delete', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeWebhookMessage());
+      prismaMock.message.delete.mockResolvedValue({});
+
+      const res = await request(app)
+        .delete('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.message.delete).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+      expect(mockEmit).toHaveBeenCalledWith('message:delete', expect.anything());
+    });
+
+    it('GET (standard page): synthesises the author and resolves no mentions for a webhook row, while a human row on the same page still does', async () => {
+      const token = makeToken();
+      // findMany is newest-first; the route reverses it
+      prismaMock.message.findMany.mockResolvedValue([
+        makeMockMessage({ id: 'msg-human', content: 'hey @[user-2]', webhookId: null, webhookName: null }),
+        makeWebhookMessage({ id: 'msg-hook' }),
+      ]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      const hook = res.body.data.find((m: { id: string }) => m.id === 'msg-hook');
+      const human = res.body.data.find((m: { id: string }) => m.id === 'msg-human');
+      expect(hook.author).toEqual(webhookAuthor);
+      expect(hook.webhookId).toBe('wh-1');
+      expect(hook.mentions).toEqual([]);
+      expect(human.author).toEqual(mockAuthor);
+      expect(human.mentions).toEqual([user2]);
+      // the quoted-author select carries what the shape needs
+      expect(prismaMock.message.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        include: expect.objectContaining({
+          replyTo: { select: expect.objectContaining({ webhookId: true, webhookName: true, author: expect.any(Object) }) },
+        }),
+      }));
+    });
+
+    it('GET (standard page): a page of webhook rows only never queries members at all', async () => {
+      const token = makeToken();
+      prismaMock.message.findMany.mockResolvedValue([makeWebhookMessage({ id: 'a' }), makeWebhookMessage({ id: 'b' })]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.map((m: { mentions: unknown[] }) => m.mentions)).toEqual([[], []]);
+      expect(prismaMock.serverMember.findMany).not.toHaveBeenCalled();
+    });
+
+    it('GET (around mode): synthesises the author and resolves no mentions for a webhook row', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-hook', channelId: 'ch-1', createdAt: new Date('2024-01-01') });
+      prismaMock.message.findMany
+        .mockResolvedValueOnce([makeWebhookMessage({ id: 'msg-hook' })]) // older, incl. the target
+        .mockResolvedValueOnce([makeMockMessage({ id: 'msg-after', content: '@[user-2] look', webhookId: null, webhookName: null })]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages?around=msg-hook')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.targetMessageId).toBe('msg-hook');
+      const hook = res.body.data.find((m: { id: string }) => m.id === 'msg-hook');
+      const after = res.body.data.find((m: { id: string }) => m.id === 'msg-after');
+      expect(hook.author).toEqual(webhookAuthor);
+      expect(hook.mentions).toEqual([]);
+      expect(after.mentions).toEqual([user2]);
+    });
+
+    it('GET: a deleted webhook (webhookId SET NULL) still renders under its frozen name as webhook:deleted', async () => {
+      const token = makeToken();
+      prismaMock.message.findMany.mockResolvedValue([makeWebhookMessage({ id: 'old', webhookId: null, webhookName: 'Old bot' })]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data[0].author).toEqual({
+        id: 'webhook:deleted', username: 'Old bot', displayName: 'Old bot', avatarUrl: null, isWebhook: true,
+      });
+      expect(res.body.data[0].mentions).toEqual([]);
+    });
+
+    it('GET: a human reply quoting a webhook message carries a synthesised replyTo.author', async () => {
+      const token = makeToken();
+      prismaMock.message.findMany.mockResolvedValue([
+        makeMockMessage({
+          id: 'msg-reply',
+          webhookId: null,
+          webhookName: null,
+          replyToId: 'msg-hook',
+          replyTo: { id: 'msg-hook', content: 'Deploy failed', author: null, webhookId: 'wh-1', webhookName: 'CI' },
+        }),
+      ]);
+
+      const res = await request(app)
+        .get('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data[0].author).toEqual(mockAuthor);
+      expect(res.body.data[0].replyTo.author).toEqual(webhookAuthor);
+    });
+
+    function mockSendChannel() {
+      prismaMock.channel.findUnique.mockResolvedValue({
+        id: 'ch-1', serverId: 'srv-1', type: 'text', name: 'general', secure: false, server: { name: 'Test Server' },
+      });
+    }
+
+    function mockCreatedRow(row: Record<string, unknown>) {
+      prismaMock.$transaction.mockImplementation(async (cb: Function) => cb({
+        message: {
+          create: vi.fn().mockResolvedValue({ id: row.id }),
+          findUniqueOrThrow: vi.fn().mockResolvedValue(row),
+        },
+        messageAttachment: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      }));
+    }
+
+    it('POST: a reply quoting a webhook message comes back (response AND message:new) with a synthesised replyTo.author', async () => {
+      const token = makeToken();
+      mockSendChannel();
+      prismaMock.message.findUnique.mockResolvedValue({ channelId: 'ch-1' }); // the replyToId check
+      mockCreatedRow(makeMockMessage({
+        id: 'msg-reply',
+        content: 'on it',
+        webhookId: null,
+        webhookName: null,
+        replyToId: 'msg-hook',
+        replyTo: { id: 'msg-hook', content: 'Deploy failed', author: null, webhookId: 'wh-1', webhookName: 'CI' },
+      }));
+
+      const res = await request(app)
+        .post('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'on it', replyToId: 'msg-hook' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.author).toEqual(mockAuthor);
+      expect(res.body.data.replyTo.author).toEqual(webhookAuthor);
+      const emitted = mockEmit.mock.calls.find((c) => c[0] === 'message:new')![1];
+      expect(emitted.replyTo.author).toEqual(webhookAuthor);
+    });
+
+    it('POST: never resolves mentions for a row carrying a webhookId (defence in depth)', async () => {
+      const token = makeToken();
+      mockSendChannel();
+      vi.mocked(extractMentionIds).mockReturnValue(['user-2']);
+      mockCreatedRow(makeWebhookMessage({ id: 'msg-hook' }));
+
+      const res = await request(app)
+        .post('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'Build failed, ping @[user-2]' });
+
+      expect(res.status).toBe(201);
+      expect(resolveMentionsForServer).toHaveBeenCalledWith([], 'srv-1');
+      expect(res.body.data.author).toEqual(webhookAuthor);
+      const emitted = mockEmit.mock.calls.find((c) => c[0] === 'message:new')![1];
+      expect(emitted.author).toEqual(webhookAuthor);
+    });
+
+    it('POST: a human row still resolves its mentions (the skip is keyed on isWebhookRow: webhookId, webhookName or a null authorId)', async () => {
+      const token = makeToken();
+      mockSendChannel();
+      vi.mocked(extractMentionIds).mockReturnValue(['user-2']);
+      mockCreatedRow(makeMockMessage({ id: 'msg-human', content: 'hey @[user-2]', webhookId: null, webhookName: null }));
+
+      const res = await request(app)
+        .post('/api/v1/channels/ch-1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'hey @[user-2]' });
+
+      expect(res.status).toBe(201);
+      expect(resolveMentionsForServer).toHaveBeenCalledWith(['user-2'], 'srv-1');
+    });
+
+    it('PATCH: a webhook row is nobody\'s to edit (authorId null never matches the caller)', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeWebhookMessage({ channel: { serverId: 'srv-1', secure: false } }));
+
+      const res = await request(app)
+        .patch('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'rewritten' });
+
+      expect(res.status).toBe(403);
+      expect(prismaMock.message.update).not.toHaveBeenCalled();
+    });
+
+    it('PATCH: an edited human reply quoting a webhook message carries a synthesised replyTo.author', async () => {
+      const token = makeToken();
+      prismaMock.message.findUnique.mockResolvedValue(makeMockMessage({ channel: { serverId: 'srv-1', secure: false } }));
+      prismaMock.message.update.mockResolvedValue(makeMockMessage({
+        content: 'edited',
+        editedAt: new Date(),
+        webhookId: null,
+        webhookName: null,
+        replyTo: { id: 'msg-hook', content: 'Deploy failed', author: null, webhookId: 'wh-1', webhookName: 'CI' },
+      }));
+
+      const res = await request(app)
+        .patch('/api/v1/channels/ch-1/messages/msg-1')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ content: 'edited' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.replyTo.author).toEqual(webhookAuthor);
+      const emitted = mockEmit.mock.calls.find((c) => c[0] === 'message:update')![1];
+      expect(emitted.replyTo.author).toEqual(webhookAuthor);
+    });
+  });
+});
+
+// ─── @everyone: the MENTION_EVERYONE permission made real ────────────────────
+//
+// The real flag table (the permissionCalculator mock above carries a stub
+// `Permissions`; the route reads the shared one)
+import { Permissions as RealPermissions } from '@voxium/shared';
+//
+// The flag existed with nothing checking it. A message that contains the
+// token, sent or edited by a member holding the permission in that channel,
+// is flagged `mentionsEveryone` by the server — decided at write time and
+// stored on the row, never derived from the text on read.
+describe('@everyone (MENTION_EVERYONE)', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    app = createApp();
+    prismaMock.channel.findUnique.mockResolvedValue({ id: 'ch-1', serverId: 'srv-1', type: 'text', name: 'general', secure: false, server: { name: 'Test Server' } });
+    prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+    mockHasChannelPermission.mockResolvedValue(true);
+  });
+
+  /** A transaction whose create call is captured. */
+  function captureCreate(content: string) {
+    const create = vi.fn().mockResolvedValue({ id: 'msg-1', content });
+    prismaMock.$transaction.mockImplementation(async (cb: Function) => cb({
+      message: { create, findUniqueOrThrow: vi.fn().mockResolvedValue(makeMockMessage({ content })) },
+      messageAttachment: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    }));
+    return create;
+  }
+
+  it('flags a message that says @everyone when the author holds MENTION_EVERYONE in the channel', async () => {
+    const create = captureCreate('hey @everyone, standup');
+
+    const res = await request(app)
+      .post('/api/v1/channels/ch-1/messages')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: 'hey @everyone, standup' });
+
+    expect(res.status).toBe(201);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: true }) }));
+    expect(mockHasChannelPermission).toHaveBeenCalledWith('user-1', 'ch-1', 'srv-1', RealPermissions.MENTION_EVERYONE);
+  });
+
+  it('stores false — the token stays text — when the author lacks the permission', async () => {
+    mockHasChannelPermission.mockImplementation(async (_u: string, _c: string, _s: string, perm: bigint) => perm !== RealPermissions.MENTION_EVERYONE);
+    const create = captureCreate('hey @everyone');
+
+    const res = await request(app)
+      .post('/api/v1/channels/ch-1/messages')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: 'hey @everyone' });
+
+    expect(res.status).toBe(201);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: false }) }));
+  });
+
+  it('never asks the permission question for a message without the token (and @everyone2 is not the token)', async () => {
+    const create = captureCreate('see @everyone2 later');
+
+    await request(app)
+      .post('/api/v1/channels/ch-1/messages')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: 'see @everyone2 later' });
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: false }) }));
+    expect(mockHasChannelPermission.mock.calls.map((c) => c[3])).not.toContain(RealPermissions.MENTION_EVERYONE);
+  });
+
+  it('an edit re-decides with the editor\'s current permission: the token edited in pings, edited out stops', async () => {
+    prismaMock.message.findUnique.mockResolvedValue(makeMockMessage({ channel: { serverId: 'srv-1', secure: false } }));
+    prismaMock.message.update.mockResolvedValue({ ...makeMockMessage(), content: '@everyone now', editedAt: new Date(), reactions: [] });
+
+    let res = await request(app)
+      .patch('/api/v1/channels/ch-1/messages/msg-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: '@everyone now' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.message.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: true }) }));
+
+    mockHasChannelPermission.mockImplementation(async (_u: string, _c: string, _s: string, perm: bigint) => perm !== RealPermissions.MENTION_EVERYONE);
+    res = await request(app)
+      .patch('/api/v1/channels/ch-1/messages/msg-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: '@everyone now' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.message.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: false }) }));
+
+    mockHasChannelPermission.mockResolvedValue(true);
+    res = await request(app)
+      .patch('/api/v1/channels/ch-1/messages/msg-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ content: 'nobody in particular' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.message.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ mentionsEveryone: false }) }));
   });
 });

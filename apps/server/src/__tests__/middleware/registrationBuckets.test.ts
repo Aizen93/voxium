@@ -106,7 +106,9 @@ describe('registration daily/subnet budgets', () => {
       success: false,
       error: 'Too many requests. Please try again later.',
     });
-    expect(blocked.res.set).toHaveBeenCalledWith('Retry-After', expect.any(String));
+    expect(blocked.res.set).toHaveBeenCalledWith('Retry-After', expect.stringMatching(/^[1-9]\d*$/));
+    expect(blocked.res.status).toHaveBeenCalledWith(429);
+    expect(blocked.json).toHaveBeenCalledTimes(1);
   });
 
   // F2: as plain consuming middleware every 400 charged the bucket — a user who

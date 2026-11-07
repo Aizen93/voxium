@@ -2,28 +2,9 @@ import { useState } from 'react';
 import { Users, Server, ShieldBan, ShieldX, Download, Loader2 } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import { toast } from '../stores/toastStore';
+import { generateCSV, type CsvColumn } from '../utils/csv';
 
 // ─── CSV Utilities ──────────────────────────────────────────────────────────
-
-interface CsvColumn {
-  key: string;
-  label: string;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function generateCSV(rows: any[], columns: CsvColumn[]): string {
-  const escape = (val: unknown): string => {
-    const str = val == null ? '' : String(val);
-    if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
-
-  const header = columns.map((c) => escape(c.label)).join(',');
-  const body = rows.map((row) => columns.map((c) => escape(row[c.key])).join(',')).join('\r\n');
-  return `${header}\r\n${body}`;
-}
 
 function downloadCSV(csv: string, type: string): void {
   const date = new Date().toISOString().slice(0, 10);

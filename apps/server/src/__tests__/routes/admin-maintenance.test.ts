@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -18,6 +18,9 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
 const prismaMock: Record<string, any> = {
+  // the platform-ban disarm (utils/webhookLifecycle.ts): holds none unless a test says so
+  webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+  serverJoinRequest: { findMany: vi.fn().mockResolvedValue([]), deleteMany: vi.fn().mockReturnValue({ op: 'request.deleteMany' }) },
   user: {
     findUnique: vi.fn(),
     findMany: vi.fn().mockResolvedValue([]),
@@ -57,11 +60,16 @@ vi.mock('../../utils/prisma', () => ({
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) }));
+const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockDisconnectSockets = vi.fn();
+const mockLocalDisconnectSockets = vi.fn();
+const mockIn = vi.fn(() => ({ fetchSockets: mockFetchSockets, disconnectSockets: mockDisconnectSockets }));
+const mockLocalIn = vi.fn(() => ({ disconnectSockets: mockLocalDisconnectSockets }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
     in: mockIn,
+    local: { in: mockLocalIn },
   })),
 }));
 
@@ -117,6 +125,8 @@ vi.mock('../../utils/sanitize', () => ({
 
 // Member broadcast
 const mockBroadcastMemberLeft = vi.fn().mockResolvedValue(undefined);
+const mockEmitToModerators = vi.fn();
+vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: any[]) => mockEmitToModerators(...a) }));
 vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberJoined: vi.fn().mockResolvedValue(undefined),
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
@@ -140,10 +150,18 @@ vi.mock('../../utils/featureFlags', () => ({
   isFeatureEnabled: vi.fn().mockReturnValue(true),
 }));
 
+// Directory listing column (owner.bannedAt is one of its four inputs)
+const mockRecomputeListedForOwner = vi.fn().mockResolvedValue(0);
+vi.mock('../../utils/discoveryListing', () => ({
+  recomputeListed: vi.fn().mockResolvedValue(true),
+  recomputeListedForOwner: (...args: any[]) => mockRecomputeListedForOwner(...args),
+}));
+
 // ─── App setup ──────────────────────────────────────────────────────────────
 
 import { adminRouter } from '../../routes/admin';
 import { errorHandler } from '../../middleware/errorHandler';
+import { listAllS3Objects } from '../../utils/s3';
 
 function createApp() {
   const app = express();
@@ -185,8 +203,115 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     prismaMock.serverMember.findMany.mockResolvedValue([]);
     prismaMock.ipRecord.findMany.mockResolvedValue([]);
     prismaMock.ipBan.createMany.mockResolvedValue({ count: 0 });
+    prismaMock.webhook.findMany.mockResolvedValue([]);
+    prismaMock.webhook.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.$transaction.mockImplementation((ops: Promise<unknown>[]) => Promise.all(ops));
     app = createApp();
+  });
+
+  it('disarms the incoming-webhook URLs the banned account holds, in every server, and tells those servers', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.webhook.findMany.mockResolvedValue([{ serverId: 's-1' }, { serverId: 's-2' }]);
+    prismaMock.webhook.updateMany.mockResolvedValue({ count: 3 });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledWith({
+      where: { OR: [{ lastRotatedById: 'target-1' }, { lastRotatedAt: null, createdById: 'target-1' }] },
+      data: { enabled: false, creatorRemovedAt: expect.any(Date) },
+    });
+    expect(mockTo).toHaveBeenCalledWith('server:s-1');
+    expect(mockTo).toHaveBeenCalledWith('server:s-2');
+    expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 's-1' });
+    expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 's-2' });
+  });
+
+  it('a banned account holding no webhook: nothing written, nothing told', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalledWith('webhook:changed', expect.anything());
+  });
+
+  it('signs the banned account out everywhere: force:logout, then a room-filtered disconnect on this node and cluster-wide', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const order: string[] = [];
+    mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+    mockLocalDisconnectSockets.mockImplementation(() => { order.push('disconnect:local'); });
+    mockDisconnectSockets.mockImplementation(() => { order.push('disconnect'); });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(200);
+    expect(mockTo).toHaveBeenCalledWith('user:target-1');
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(mockLocalIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockIn).toHaveBeenCalledWith('user:target-1');
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(order.filter((e) => e === 'force:logout' || e.startsWith('disconnect'))).toEqual(['force:logout', 'disconnect:local', 'disconnect']);
+    expect(mockFetchSockets).not.toHaveBeenCalled();
+    mockEmit.mockReset();
+    mockLocalDisconnectSockets.mockReset();
+    mockDisconnectSockets.mockReset();
+  });
+
+  it('signs the banned account out right after the ban commits, even when the fan-out after it fails', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => {
+      const results = await Promise.all(ops);
+      order.push('commit');
+      return results;
+    });
+    mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+    mockDisconnectSockets.mockImplementation(() => { order.push('disconnect'); });
+    prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's-1' }]);
+    mockBroadcastMemberLeft.mockRejectedValueOnce(new Error('adapter gone'));
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(500);
+    expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+    expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
+    expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('commit'));
+    expect(order.indexOf('disconnect')).toBeGreaterThan(order.indexOf('force:logout'));
+    consoleSpy.mockRestore();
+    mockEmit.mockReset();
+    mockDisconnectSockets.mockReset();
+  });
+
+  it('signs nobody out when the ban transaction fails', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(500);
+    expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+    expect(mockDisconnectSockets).not.toHaveBeenCalled();
+    expect(mockLocalDisconnectSockets).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
   });
 
   it('banIps=true bans account + all known IPs in ONE transaction', async () => {
@@ -204,11 +329,11 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     // ipsBanned in the message comes from createMany's { count }
     expect(res.body.message).toContain('2 IP(s)');
 
-    // Exactly one transaction, holding both statements (user update + IP bans)
+    // Exactly one transaction, holding the three statements (user update + IP bans + the join-request withdrawal)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     const txnOps = prismaMock.$transaction.mock.calls[0][0];
     expect(Array.isArray(txnOps)).toBe(true);
-    expect(txnOps).toHaveLength(2);
+    expect(txnOps).toHaveLength(3);
 
     // Both statements were built for the transaction (invoked before $transaction resolved)
     expect(prismaMock.user.update).toHaveBeenCalledWith({
@@ -226,6 +351,48 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
       ],
       skipDuplicates: true,
     });
+  });
+
+  it('withdraws the banned account\'s pending join requests in the ban transaction and tells each server\'s moderators', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.serverJoinRequest.findMany.mockResolvedValueOnce([{ serverId: 's-9' }]);
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+    expect(res.status).toBe(200);
+    expect(prismaMock.serverJoinRequest.findMany).toHaveBeenCalledWith({ where: { userId: 'target-1', status: 'pending' }, select: { serverId: true } });
+    expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
+    expect(prismaMock.$transaction.mock.calls[0][0]).toContain(prismaMock.serverJoinRequest.deleteMany.mock.results[0].value);
+    expect(mockEmitToModerators).toHaveBeenCalledWith('s-9', 'server:join_request_resolved', { serverId: 's-9', userId: 'target-1', outcome: 'cancelled' });
+  });
+
+  it('hides every server the banned user owns from the directory, after the ban committed', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => { order.push('txn'); return Promise.all(ops); });
+    mockRecomputeListedForOwner.mockImplementation(async () => { order.push('recompute'); return 2; });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(200);
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+    expect(order).toEqual(['txn', 'recompute']);
+  });
+
+  it('does not touch the directory when the ban is refused', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'superadmin' } });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
   });
 });
 
@@ -313,6 +480,35 @@ describe('POST /admin/users/:userId/unban — shared-IP-aware release (MED-13)',
       data: { bannedAt: null, banReason: null },
     });
   });
+
+  it('brings the unbanned user\'s eligible servers back to the directory, after the unban committed', async () => {
+    mockUnbanTarget();
+    prismaMock.ipRecord.findMany.mockResolvedValue([]);
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => { order.push('txn'); return Promise.all(ops); });
+    mockRecomputeListedForOwner.mockImplementation(async () => { order.push('recompute'); return 1; });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockRecomputeListedForOwner).toHaveBeenCalledWith('target-1');
+    expect(order).toEqual(['txn', 'recompute']);
+  });
+
+  it('does not touch the directory when the user is not banned (400)', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user', bannedAt: null } });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /admin/export/users — cursor batching (MED-12)', () => {
@@ -389,8 +585,8 @@ describe('GET /admin/top-servers — subquery aggregation (MED-12)', () => {
 });
 
 // NOTE: this route has a 60-second in-module cache (topUploadersCache) that
-// persists across tests in this file — keep it to a SINGLE test so the second
-// hit never silently asserts against a cached response.
+// persists across tests in this file — every test past the first moves the
+// clock beyond that TTL first, so no hit asserts against a cached response.
 describe('GET /admin/storage/top-uploaders — SQL aggregation + top-N name resolution (MED-12)', () => {
   let app: express.Express;
 
@@ -436,6 +632,63 @@ describe('GET /admin/storage/top-uploaders — SQL aggregation + top-N name reso
     ]);
     expect(typeof res.body.data[0].fileCount).toBe('number');
     expect(typeof res.body.data[0].totalSize).toBe('number');
+  });
+});
+
+describe('GET /admin/storage/top-uploaders — avatar and icon keys', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Past the cache the previous describe filled
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    app = createApp();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('attributes uploaded AND adopted avatar/icon keys to their owner, merged with the attachment totals', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' } });
+    vi.mocked(listAllS3Objects).mockResolvedValueOnce([
+      // An uploaded key: {id}-{ts}.webp
+      { key: 'avatars/cuser1-1700000000000.webp', size: 10, lastModified: new Date() },
+      // An adopted copy: {id}-{ts}-{12 hex}.webp
+      { key: 'avatars/cuser1-1700000000001-0123456789ab.webp', size: 20, lastModified: new Date() },
+      { key: 'server-icons/csrv1-1700000000002-abcdef012345.webp', size: 30, lastModified: new Date() },
+      // No owner id before a dash: skipped
+      { key: 'avatars/-1700000000003.webp', size: 999, lastModified: new Date() },
+      { key: 'avatars/nodash.webp', size: 999, lastModified: new Date() },
+      // Attachments come from the database, never from the listing
+      { key: 'attachments/ch-c1/1700000000004-a.pdf', size: 999, lastModified: new Date() },
+    ] as never);
+    prismaMock.$queryRawUnsafe.mockImplementation((sql: string) => {
+      if (sql.includes('m.author_id')) {
+        return Promise.resolve([{ entity_id: 'cuser1', file_count: 2n, total_size: 100n }]);
+      }
+      return Promise.resolve([{ entity_id: 'csrv1', file_count: 1n, total_size: 50n }]);
+    });
+    prismaMock.user.findMany.mockResolvedValue([{ id: 'cuser1', username: 'alice' }]);
+    prismaMock.server.findMany.mockResolvedValue([{ id: 'csrv1', name: 'My Space' }]);
+
+    const res = await request(app)
+      .get('/api/v1/admin/storage/top-uploaders')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.user.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: { in: ['cuser1'] } },
+    }));
+    expect(prismaMock.server.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: { in: ['csrv1'] } },
+    }));
+    // One entry per owner, nothing left over as a 'Deleted' entity
+    expect(res.body.data).toEqual([
+      { entityId: 'cuser1', type: 'user', fileCount: 4, totalSize: 130, entityName: 'alice' },
+      { entityId: 'csrv1', type: 'server', fileCount: 2, totalSize: 80, entityName: 'My Space' },
+    ]);
   });
 });
 
@@ -503,5 +756,33 @@ describe('POST /admin/ip-bans — stores the canonical address form', () => {
 
     expect(res.status).toBe(400);
     expect(prismaMock.ipBan.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /admin/users/:userId/unban — the ban hierarchy applies to the lift too', () => {
+  let app: express.Express;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.user.update.mockResolvedValue({});
+    prismaMock.ipBan.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.ipRecord.findMany.mockResolvedValue([]);
+    prismaMock.$transaction.mockImplementation((ops: Promise<unknown>[]) => Promise.all(ops));
+    app = createApp();
+  });
+
+  it('an admin cannot unban another admin (the ban was a superadmin\'s to place, so it is theirs to lift)', async () => {
+    mockUsers({
+      'admin-1': { role: 'admin' },
+      'target-1': { role: 'admin', bannedAt: new Date('2026-01-01T00:00:00Z') },
+    });
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('super admins');
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
   });
 });

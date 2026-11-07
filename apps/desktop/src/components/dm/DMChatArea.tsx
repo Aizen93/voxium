@@ -10,8 +10,9 @@ import { DMCallPanel } from './DMCallPanel';
 import { MessageInput } from '../chat/MessageInput';
 import { Avatar } from '../common/Avatar';
 import { UserHoverTarget } from '../common/UserHoverTarget';
-import { Phone, PhoneOff, Search } from 'lucide-react';
+import { Phone, PhoneOff } from 'lucide-react';
 import { SearchModal } from '../search/SearchModal';
+import { SearchField } from '../search/SearchField';
 import { E2EControls } from './E2EControls';
 import { clsx } from 'clsx';
 import type { UserStatus } from '@voxium/shared';
@@ -164,14 +165,7 @@ export function DMChatArea() {
           </h3>
         </UserHoverTarget>
         <E2EControls conversation={conversation} />
-        <button
-          onClick={() => setShowSearch(true)}
-          className="rounded-md p-1.5 text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
-          title={t('dm.searchMessages')}
-          aria-label={t('dm.searchMessages')}
-        >
-          <Search size={18} />
-        </button>
+        <SearchField onOpen={() => setShowSearch(true)} label={t('dm.searchMessages')} />
         {isInCall ? (
           <button
             onClick={handleEndCall}

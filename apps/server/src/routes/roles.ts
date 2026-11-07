@@ -12,7 +12,7 @@ import {
   permissionsToString,
   ALL_PERMISSIONS,
 } from '@voxium/shared';
-import type { Role, ChannelPermissionOverride, MemberRole } from '@voxium/shared';
+import type { Role, MemberRole } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitRoleManage } from '../middleware/rateLimiter';
@@ -136,8 +136,11 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
     const existing = await prisma.role.findFirst({ where: { serverId, name } });
     if (existing) throw new ConflictError('A role with this name already exists');
 
-    // Check role limit
-    const roleCount = await prisma.role.count({ where: { serverId } });
+    // Check role limit: the roles members create, not the @everyone row every
+    // server carries (the client counts the same way, so its "max roles"
+    // notice and this refusal agree — counting @everyone here made the 25th
+    // custom role fail with a message the client never showed)
+    const roleCount = await prisma.role.count({ where: { serverId, isDefault: false } });
     if (roleCount >= LIMITS.MAX_ROLES_PER_SERVER) {
       throw new BadRequestError(`Server can have at most ${LIMITS.MAX_ROLES_PER_SERVER} roles`);
     }
@@ -499,12 +502,13 @@ roleRouter.put(
       }
 
       // Validate that allow and deny don't overlap, and strip the flags that
-      // cannot be granted via channel overrides: ADMINISTRATOR, and
-      // CREATE_SECURE_CHANNELS (server-level only — a channel-scoped grant of
-      // "may create secure channels" is meaningless and would just confuse
-      // effective-permission displays)
+      // cannot be granted via channel overrides: ADMINISTRATOR, and the two
+      // server-level-only flags CREATE_SECURE_CHANNELS and MANAGE_WEBHOOKS (a
+      // channel-scoped grant of either is meaningless and would just confuse
+      // effective-permission displays — webhook management is checked against
+      // the SERVER permissions, so a channel grant must never look like one)
       const CHANNEL_OVERRIDE_MASK =
-        ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR & ~Permissions.CREATE_SECURE_CHANNELS;
+        ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR & ~Permissions.CREATE_SECURE_CHANNELS & ~Permissions.MANAGE_WEBHOOKS;
       const allowBits = permissionsFromString(allow) & CHANNEL_OVERRIDE_MASK;
       const denyBits = permissionsFromString(deny) & CHANNEL_OVERRIDE_MASK;
       if ((allowBits & denyBits) !== 0n) {
@@ -537,17 +541,16 @@ roleRouter.put(
         });
       }
 
-      // Fetch all overrides for the channel to broadcast
+      // The caller (who holds MANAGE_ROLES) gets the channel's overrides back
       const allOverrides = await prisma.channelPermissionOverride.findMany({
         where: { channelId },
         include: { role: true },
       });
 
-      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, {
-        serverId,
-        channelId,
-        overrides: allOverrides as unknown as ChannelPermissionOverride[],
-      });
+      // { serverId } only: members of the space refetch what they may see. The
+      // channel id and its overrides must not travel on the space-wide room, which
+      // reaches members without VIEW_CHANNEL on this channel too.
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId });
 
       // Override may have granted/revoked VIEW_CHANNEL for this channel
       void syncChannelVisibilityRooms(serverId, { channelId });
@@ -586,16 +589,10 @@ roleRouter.delete(
         where: { channelId, roleId },
       });
 
-      const allOverrides = await prisma.channelPermissionOverride.findMany({
-        where: { channelId },
-        include: { role: true },
-      });
-
-      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, {
-        serverId,
-        channelId,
-        overrides: allOverrides as unknown as ChannelPermissionOverride[],
-      });
+      // { serverId } only: members of the space refetch what they may see. The
+      // channel id and its overrides must not travel on the space-wide room, which
+      // reaches members without VIEW_CHANNEL on this channel too.
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId });
 
       // Removing an override may restore/revoke VIEW_CHANNEL for this channel
       void syncChannelVisibilityRooms(serverId, { channelId });

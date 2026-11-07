@@ -156,7 +156,8 @@ friendRouter.post('/request', rateLimitFriendRequest, async (req: Request, res: 
 
 // ─── Accept friend request ───────────────────────────────────────────────────
 
-friendRouter.post('/:friendshipId/accept', async (req: Request<{ friendshipId: string }>, res: Response, next: NextFunction) => {
+// Accepts and removals share the request bucket
+friendRouter.post('/:friendshipId/accept', rateLimitFriendRequest, async (req: Request<{ friendshipId: string }>, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
     const { friendshipId } = req.params;
@@ -196,7 +197,7 @@ friendRouter.post('/:friendshipId/accept', async (req: Request<{ friendshipId: s
 
 // ─── Remove / cancel / decline friendship ────────────────────────────────────
 
-friendRouter.delete('/:friendshipId', async (req: Request<{ friendshipId: string }>, res: Response, next: NextFunction) => {
+friendRouter.delete('/:friendshipId', rateLimitFriendRequest, async (req: Request<{ friendshipId: string }>, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
     const { friendshipId } = req.params;

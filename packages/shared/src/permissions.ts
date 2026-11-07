@@ -37,6 +37,11 @@ export const Permissions = {
   // from channel overrides like ADMINISTRATOR, and it grants nothing inside a
   // secure channel — access there is membership-derived, never role-derived.
   CREATE_SECURE_CHANNELS: 1n << 20n,
+
+  // Incoming webhooks: create, edit, rotate and delete a server's webhooks.
+  // Server-level only, like CREATE_SECURE_CHANNELS: stripped from channel
+  // overrides, so a channel override can never hand out a webhook URL.
+  MANAGE_WEBHOOKS:    1n << 21n,
 } as const;
 
 export type PermissionFlag = (typeof Permissions)[keyof typeof Permissions];
@@ -70,7 +75,8 @@ export const DEFAULT_ADMIN_PERMISSIONS =
   Permissions.MUTE_MEMBERS |
   Permissions.DEAFEN_MEMBERS |
   Permissions.MOVE_MEMBERS |
-  Permissions.CREATE_SECURE_CHANNELS;
+  Permissions.CREATE_SECURE_CHANNELS |
+  Permissions.MANAGE_WEBHOOKS;
 
 // ─── Permission Utility Functions ────────────────────────────────────────────
 
@@ -188,9 +194,12 @@ export const PERMISSION_LIST: PermissionInfo[] = [
   { flag: Permissions.MANAGE_SERVER, key: 'MANAGE_SERVER', name: 'Manage Server', description: 'Allows members to edit server name, icon, and settings', category: 'general' },
   { flag: Permissions.MANAGE_ROLES, key: 'MANAGE_ROLES', name: 'Manage Roles', description: 'Allows members to create, edit, and delete roles below their own', category: 'general' },
   { flag: Permissions.CREATE_SECURE_CHANNELS, key: 'CREATE_SECURE_CHANNELS', name: 'Create Secure Channels', description: 'Allows members to create invite-only end-to-end encrypted channels', category: 'general' },
+  { flag: Permissions.MANAGE_WEBHOOKS, key: 'MANAGE_WEBHOOKS', name: 'Manage Webhooks', description: 'Allows members to create, edit, and delete incoming webhooks', category: 'general' },
   // Membership
   { flag: Permissions.CREATE_INVITES, key: 'CREATE_INVITES', name: 'Create Invites', description: 'Allows members to create server invite links', category: 'membership' },
-  { flag: Permissions.KICK_MEMBERS, key: 'KICK_MEMBERS', name: 'Kick Members', description: 'Allows members to kick other members with lower roles', category: 'membership' },
+  // Kick always bans now (server discovery), so one flag covers all of
+  // membership moderation: remove-and-ban, unban, approve or decline join requests.
+  { flag: Permissions.KICK_MEMBERS, key: 'KICK_MEMBERS', name: 'Manage Members', description: 'Allows members to remove and ban members with lower roles, unban them, and approve or decline join requests', category: 'membership' },
   { flag: Permissions.MANAGE_NICKNAMES, key: 'MANAGE_NICKNAMES', name: 'Manage Nicknames', description: 'Allows members to change other members\' display names', category: 'membership' },
   { flag: Permissions.CHANGE_NICKNAME, key: 'CHANGE_NICKNAME', name: 'Change Nickname', description: 'Allows members to change their own display name', category: 'membership' },
   // Text

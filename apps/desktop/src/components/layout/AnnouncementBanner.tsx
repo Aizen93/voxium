@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Info, AlertTriangle, Wrench, X } from 'lucide-react';
 import { useAnnouncementStore } from '../../stores/announcementStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -11,6 +12,7 @@ const TYPE_CONFIG: Record<AnnouncementType, { icon: typeof Info; bg: string; tex
 };
 
 export function AnnouncementBanner() {
+  const { t } = useTranslation();
   const announcements = useAnnouncementStore((s) => s.announcements);
   const dismissedIds = useAnnouncementStore((s) => s.dismissedIds);
   const dismiss = useAnnouncementStore((s) => s.dismissAnnouncement);
@@ -42,12 +44,12 @@ export function AnnouncementBanner() {
       <span className="font-semibold">{announcement.title}</span>
       <span className="opacity-80 truncate">{announcement.content}</span>
       {active.length > 1 && (
-        <span className="shrink-0 opacity-70">+{active.length - 1} more</span>
+        <span className="shrink-0 opacity-70">{t('notifications.announcementMore', { n: active.length - 1 })}</span>
       )}
       <button
         onClick={() => dismiss(announcement.id)}
         className="absolute right-2 shrink-0 p-0.5 rounded hover:bg-white/10"
-        aria-label="Dismiss announcement"
+        aria-label={t('notifications.dismissAnnouncement')}
       >
         <X size={12} />
       </button>

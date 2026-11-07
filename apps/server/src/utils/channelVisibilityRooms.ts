@@ -1,4 +1,5 @@
 import { getIO } from '../websocket/socketServer';
+import { getVoiceStateForServers, replayVoiceState } from '../websocket/voiceHandler';
 import { prisma } from './prisma';
 import { filterVisibleChannelsForUsers } from './permissionCalculator';
 
@@ -81,6 +82,21 @@ export async function syncChannelVisibilityRooms(
     // ~20k uncapped queries, and rateLimitRoleManage allows 20 such edits a
     // minute. Membership is re-verified inside the batch (a user who left
     // loses their rooms), which also subsumes the old per-user lookup.
+    // A socket that ENTERS a channel room here missed every voice event in
+    // it, exactly like a socket that just connected: the occupants are
+    // replayed to it (`source: 'connect'`: a snapshot to the client), or the
+    // channel reads empty until someone moves. One Redis read decides which
+    // of the affected channels have occupants at all, so the per-user replay
+    // runs only for users who gained one of THOSE — a role edit on a big
+    // server with nobody in voice costs one round trip, not one per user.
+    const affectedIds = new Set(channels.map((c) => c.id));
+    let occupied = new Set<string>();
+    try {
+      occupied = new Set((await getVoiceStateForServers([serverId])).map((v) => v.channelId).filter((id) => affectedIds.has(id)));
+    } catch (err) {
+      console.warn('[Visibility] Could not read voice occupancy for the replay:', err instanceof Error ? err.message : err);
+    }
+
     const uids = [...socketsByUser.keys()];
     for (let i = 0; i < uids.length; i += USER_BATCH) {
       const batch = uids.slice(i, i + USER_BATCH);
@@ -88,15 +104,24 @@ export async function syncChannelVisibilityRooms(
       for (const uid of batch) {
         const visibleIds = visibleByUser.get(uid) ?? new Set<string>();
         const userSockets = socketsByUser.get(uid)!;
+        const gained = new Set<string>();
         for (const ch of channels) {
           for (const s of userSockets) {
             if (visibleIds.has(ch.id)) {
+              if (occupied.has(ch.id) && s.rooms?.has(`channel:${ch.id}`) !== true) gained.add(ch.id);
               s.join(`channel:${ch.id}`);
             } else if (!inVoiceChannel(s, ch.id)) {
               // Never cut a socket off from the voice channel it is actively in —
               // it must keep receiving that channel's presence events until it leaves
               s.leave(`channel:${ch.id}`);
             }
+          }
+        }
+        if (gained.size > 0) {
+          try {
+            await replayVoiceState(io.to(`user:${uid}`), [serverId], gained, { source: 'connect' });
+          } catch (err) {
+            console.warn('[Visibility] Could not replay voice occupancy to', uid, '(the rooms are joined):', err instanceof Error ? err.message : err);
           }
         }
       }

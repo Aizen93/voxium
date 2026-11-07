@@ -2,6 +2,8 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
+  CopyObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   ListObjectsV2Command,
@@ -102,24 +104,106 @@ export const VALID_ATTACHMENT_KEY_RE = /^attachments\/(ch|dm)-[\w-]+\/[\w]+-[\w]
 /**
  * Generate a presigned PUT URL for direct client upload to S3.
  * Sets ContentType and CacheControl as object metadata.
+ *
+ * The URL is signed for EXACTLY `contentLength` bytes: Content-Length is a
+ * signed header, so the store refuses a body of any other length. Browsers
+ * set Content-Length themselves from the Blob they PUT, so the client sends
+ * nothing extra — only Content-Type and Content-Length are signed, never a
+ * header the client does not send on its own (an unsent signed header 403s
+ * every upload; that is why SSE is bucket-default, see above).
  */
 export async function generatePresignedPutUrl(
   key: string,
   contentType: string,
+  contentLength: number,
   expiresIn = 300,
 ): Promise<string> {
+  if (!Number.isSafeInteger(contentLength) || contentLength <= 0) {
+    throw new Error(`Invalid upload size for a presigned PUT: ${String(contentLength)}`);
+  }
   const command = new PutObjectCommand({
     Bucket: getBucket(),
     Key: key,
     ContentType: contentType,
+    ContentLength: contentLength,
     CacheControl: 'public, max-age=31536000, immutable',
     // NO ServerSideEncryption here — see ensureBucketEncryption() above.
   });
 
   return getSignedUrl(getS3Client(), command, {
     expiresIn,
-    signableHeaders: new Set(['content-type']),
+    signableHeaders: new Set(['content-type', 'content-length']),
   });
+}
+
+/** Whether an S3 error means "no such object" (HeadObject answers `NotFound`). */
+function isMissingObjectError(err: unknown): boolean {
+  const e = err as { name?: string; $metadata?: { httpStatusCode?: number } } | null;
+  return !!e && (e.name === 'NotFound' || e.name === 'NoSuchKey' || e.$metadata?.httpStatusCode === 404);
+}
+
+export interface S3ObjectHead {
+  size: number;
+  contentType: string | null;
+}
+
+/**
+ * Read an object's stored size and type without its body. Resolves `null`
+ * when the object does not exist; every other failure is rethrown (callers
+ * fail closed on it).
+ */
+export async function headS3Object(key: string): Promise<S3ObjectHead | null> {
+  try {
+    const res = await getS3Client().send(new HeadObjectCommand({ Bucket: getBucket(), Key: key }));
+    if (typeof res.ContentLength !== 'number') {
+      throw new Error(`HeadObject returned no size for ${key}`);
+    }
+    return { size: res.ContentLength, contentType: res.ContentType ?? null };
+  } catch (err) {
+    if (isMissingObjectError(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Read the bytes [start, end] (inclusive) of an object. Resolves `null` when
+ * the object does not exist; every other failure is rethrown.
+ */
+export async function getS3ObjectRange(key: string, start: number, end: number): Promise<Buffer | null> {
+  try {
+    const res = await getS3Client().send(
+      new GetObjectCommand({ Bucket: getBucket(), Key: key, Range: `bytes=${start}-${end}` }),
+    );
+    if (!res.Body) return Buffer.alloc(0);
+    const bytes = await res.Body.transformToByteArray();
+    // A store that ignores Range would hand back the whole object: keep only
+    // what was asked for
+    return Buffer.from(bytes.subarray(0, end - start + 1));
+  } catch (err) {
+    if (isMissingObjectError(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Server-side copy of an object to a new key (metadata, type and cache headers
+ * kept). Resolves `false` when the source does not exist; every other failure
+ * is rethrown. The destination is a key no client was ever given an upload URL
+ * for, which is what makes a check on the copy final.
+ */
+export async function copyS3Object(sourceKey: string, destKey: string): Promise<boolean> {
+  try {
+    await getS3Client().send(new CopyObjectCommand({
+      Bucket: getBucket(),
+      Key: destKey,
+      CopySource: `${getBucket()}/${sourceKey.split('/').map(encodeURIComponent).join('/')}`,
+      MetadataDirective: 'COPY',
+    }));
+    return true;
+  } catch (err) {
+    if (isMissingObjectError(err)) return false;
+    throw err;
+  }
 }
 
 /**

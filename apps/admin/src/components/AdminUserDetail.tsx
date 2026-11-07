@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Ban, ShieldOff, Trash2, Globe, ShieldCheck, ShieldMinus, Heart, Sparkles, Crown } from 'lucide-react';
+import { ArrowLeft, Ban, ShieldOff, Trash2, Globe, ShieldCheck, ShieldMinus, Heart, Sparkles, Crown, Server as ServerIcon } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
 import { useAdminStore } from '../stores/adminStore';
+import type { OwnedServerInfo } from '../stores/adminStore';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { AdminDeleteUserModal } from './AdminDeleteUserModal';
+import { DirectoryChips } from './DirectoryChips';
 import { toast } from '../stores/toastStore';
+import { logMessage } from '../utils/apiError';
 
 interface Props {
   userId: string;
@@ -12,9 +15,14 @@ interface Props {
 }
 
 export function AdminUserDetail({ userId, onBack }: Props) {
-  const { selectedUser, fetchUserDetail, banUser, unbanUser, deleteUser, updateUserRole, toggleSupporter } = useAdminStore();
+  const { selectedUser, fetchUserDetail, fetchUserOwnedServers, banUser, unbanUser, deleteUser, updateUserRole, toggleSupporter } = useAdminStore();
   const currentUser = useAuthStore((s) => s.user);
   const isSuperAdmin = currentUser?.role === 'superadmin';
+  // What the server allows (routes/admin.ts): an admin may ban or delete
+  // members only; a superadmin anyone who is not a superadmin
+  const canModerateTarget = selectedUser
+    ? (isSuperAdmin ? selectedUser.role !== 'superadmin' : selectedUser.role === 'user')
+    : false;
   const [confirmAction, setConfirmAction] = useState<'ban' | 'unban' | 'delete' | 'deleteWithTransfer' | 'promote' | 'demote' | null>(null);
   const [banReason, setBanReason] = useState('');
   const [banIps, setBanIps] = useState(false);
@@ -22,6 +30,25 @@ export function AdminUserDetail({ userId, onBack }: Props) {
   useEffect(() => {
     fetchUserDetail(userId);
   }, [userId, fetchUserDetail]);
+
+  // The servers this user owns, with what each one shows in Explore. Loaded
+  // beside the detail (a separate endpoint the delete-user flow shares).
+  const [ownedServers, setOwnedServers] = useState<OwnedServerInfo[] | null>(null);
+  // A platform ban / unban from this page changes every owned server's
+  // listing (the owner's ban is one of its inputs): reload the panel too.
+  const [ownedReload, setOwnedReload] = useState(0);
+  const reloadOwnedServers = () => setOwnedReload((n) => n + 1);
+  useEffect(() => {
+    let cancelled = false;
+    setOwnedServers(null);
+    fetchUserOwnedServers(userId)
+      .then((list) => { if (!cancelled) setOwnedServers(list); })
+      .catch((err) => {
+        console.error('Failed to load owned servers:', logMessage(err));
+        if (!cancelled) { setOwnedServers([]); toast.error('Failed to load owned servers'); }
+      });
+    return () => { cancelled = true; };
+  }, [userId, fetchUserOwnedServers, ownedReload]);
 
   if (!selectedUser) {
     return (
@@ -125,7 +152,10 @@ export function AdminUserDetail({ userId, onBack }: Props) {
         {/* Actions */}
         {selectedUser.role !== 'superadmin' && (
           <div className="mt-6 flex flex-wrap gap-3">
-            {selectedUser.bannedAt ? (
+            {/* The server lets an admin ban or delete members only, and a
+                superadmin anyone but another superadmin: the buttons used to
+                show regardless and fail with a generic error */}
+            {canModerateTarget && (selectedUser.bannedAt ? (
               <button
                 onClick={() => setConfirmAction('unban')}
                 className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-vox-accent-success/20 text-vox-accent-success hover:bg-vox-accent-success/30"
@@ -139,15 +169,25 @@ export function AdminUserDetail({ userId, onBack }: Props) {
               >
                 <Ban size={14} /> Ban User
               </button>
+            ))}
+            {canModerateTarget && (
+              <button
+                onClick={() => setConfirmAction(
+                  (selectedUser._count?.ownedServers ?? 0) > 0 ? 'deleteWithTransfer' : 'delete'
+                )}
+                className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30"
+              >
+                <Trash2 size={14} /> Delete User
+              </button>
             )}
-            <button
-              onClick={() => setConfirmAction(
-                (selectedUser._count?.ownedServers ?? 0) > 0 ? 'deleteWithTransfer' : 'delete'
-              )}
-              className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30"
-            >
-              <Trash2 size={14} /> Delete User
-            </button>
+            {!canModerateTarget && (
+              // Inside this block the target is never a superadmin (the whole
+              // action row is hidden for them above): the only refusal left
+              // is an admin looking at another admin
+              <span className="text-xs text-vox-text-muted self-center">
+                Only a superadmin can ban or delete an admin.
+              </span>
+            )}
 
             {isSuperAdmin && (
               selectedUser.role === 'admin' ? (
@@ -245,6 +285,38 @@ export function AdminUserDetail({ userId, onBack }: Props) {
         </div>
       )}
 
+      {/* Owned servers: the directory profile and state of each */}
+      {ownedServers && ownedServers.length > 0 && (
+        <div className="rounded-lg bg-vox-bg-secondary border border-vox-border p-4" data-testid="owned-servers-panel">
+          <h3 className="text-sm font-semibold text-vox-text-primary mb-3 flex items-center gap-2">
+            <ServerIcon size={14} /> Owned Servers
+          </h3>
+          <div className="space-y-3">
+            {ownedServers.map((server) => (
+              <div key={server.id} className="flex flex-col gap-1 border-b border-vox-border/50 pb-3 last:border-0 last:pb-0" data-testid="owned-server-row">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium text-vox-text-primary truncate">{server.name}</span>
+                  <span className="text-xs text-vox-text-muted shrink-0">
+                    {server.memberCount} {server.memberCount === 1 ? 'member' : 'members'}
+                  </span>
+                </div>
+                <DirectoryChips server={server} />
+                <p className="text-xs text-vox-text-secondary whitespace-pre-wrap" data-testid="owned-server-description">
+                  {server.description ?? <span className="italic text-vox-text-muted">No description</span>}
+                </p>
+                {server.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1" data-testid="owned-server-tags">
+                    {server.tags.map((tag) => (
+                      <span key={tag} className="px-1.5 py-0.5 rounded bg-vox-bg-hover text-[10px] text-vox-text-secondary">{tag}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Ban Modal */}
       {confirmAction === 'ban' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
@@ -274,6 +346,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
                     setBanIps(false);
                     setConfirmAction(null);
                     fetchUserDetail(userId);
+                    reloadOwnedServers();
                   } catch { toast.error('Failed to ban user'); }
                 }}
                 className="px-4 py-2 text-sm rounded-md bg-vox-accent-danger text-white hover:bg-red-600"
@@ -297,6 +370,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
               await unbanUser(selectedUser!.id);
               toast.success('User unbanned');
               fetchUserDetail(userId);
+              reloadOwnedServers();
             } catch { toast.error('Failed to unban user'); }
             setConfirmAction(null);
           }}
@@ -336,7 +410,7 @@ export function AdminUserDetail({ userId, onBack }: Props) {
       {confirmAction === 'promote' && (
         <AdminConfirmModal
           title="Promote to Admin"
-          message={`Promote "${selectedUser.username}" to admin? They will have full access to the admin dashboard.`}
+          message={`Promote "${selectedUser.username}" to admin? They will get access to the admin dashboard; changing roles, managing infrastructure servers and banning or deleting other admins stay superadmin-only.`}
           confirmLabel="Promote"
           danger={false}
           onConfirm={async () => {

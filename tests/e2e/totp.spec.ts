@@ -2,7 +2,7 @@ import * as OTPAuth from 'otpauth';
 import { test, expect } from './helpers/fixtures';
 import { testUser } from './helpers/auth';
 import { API_URL, registerUser } from './helpers/api';
-import { dmHeading } from './helpers/selectors';
+import { dmHeading, logoutButton } from './helpers/selectors';
 import { clearRateLimits } from './helpers/rateLimits';
 
 /** Generate a valid TOTP code from a base32 secret */
@@ -138,7 +138,7 @@ test.describe('TOTP Two-Factor Authentication', () => {
     expect(hasTrustedToken).toBe(true);
 
     // Logout (trusted device token should persist)
-    await page.locator('button[title="Logout"]').click();
+    await logoutButton(page).click();
 
     // Second login: should skip TOTP entirely
     await page.goto('/login');

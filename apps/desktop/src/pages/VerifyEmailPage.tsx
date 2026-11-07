@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../services/api';
@@ -6,24 +6,34 @@ import { useAuthStore } from '../stores/authStore';
 import { CheckCircle, AlertCircle } from 'lucide-react';
 import { translateServerError } from '../utils/serverErrors';
 
-// Module-scope: survives React StrictMode unmount/remount cycles
+// Module-scope: survives React StrictMode unmount/remount cycles, and a
+// double click never posts the same token twice
 const processedTokens = new Set<string>();
 
+/** @internal tests */
+export function _resetProcessedTokensForTests(): void {
+  processedTokens.clear();
+}
+
+/**
+ * The legacy verification link (accounts created before sign-up codes). It
+ * NEVER posts on load: mail security gateways open the links in incoming
+ * mail to scan them, and a scanner's visit would verify the address for
+ * whoever typed it. A person clicks the button; a scanner does not.
+ */
 export function VerifyEmailPage() {
   const { t } = useTranslation();
   const { token } = useParams<{ token: string }>();
   const { user, checkAuth } = useAuthStore();
-  const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
-  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>(token ? 'idle' : 'error');
+  const [error, setError] = useState<string | null>(token ? null : t('auth.verifyEmail.missingToken'));
 
-  useEffect(() => {
-    if (!token) {
-      setStatus('error');
-      setError(t('auth.verifyEmail.missingToken'));
-      return;
-    }
+  const handleVerify = () => {
+    if (!token) return;
     if (processedTokens.has(token)) return;
     processedTokens.add(token);
+    setStatus('loading');
+    setError(null);
 
     api.post('/auth/verify-email', { token })
       .then(() => {
@@ -32,12 +42,19 @@ export function VerifyEmailPage() {
         checkAuth();
       })
       .catch((err) => {
-        // Allow retry on transient/network errors (keep in set only for server rejections)
-        if (!err.response) processedTokens.delete(token);
+        const message = translateServerError(err?.response?.data?.error, t, 'auth.verifyEmail.failed');
+        setError(message);
+        if (!err?.response) {
+          // Transient (no answer): the token was never judged, so the button
+          // comes back for another try (kept in the set only for server rejections)
+          console.warn('[VerifyEmail] Verification request failed without an answer:', err instanceof Error ? err.message : err);
+          processedTokens.delete(token);
+          setStatus('idle');
+          return;
+        }
         setStatus('error');
-        setError(translateServerError(err.response?.data?.error, t, 'auth.verifyEmail.failed'));
       });
-  }, [token]); // intentionally omit user/checkAuth — only re-run when token changes
+  };
 
   return (
     <div className="flex h-full items-center justify-center bg-vox-bg-primary">
@@ -47,6 +64,21 @@ export function VerifyEmailPage() {
             <img src="/logo.svg" alt="Voxium" className="h-16 w-16 rounded-2xl shadow-lg shadow-vox-accent-primary/20" />
             <h1 className="mt-4 text-2xl font-bold text-vox-text-primary">{t('auth.verifyEmail.title')}</h1>
           </div>
+
+          {status === 'idle' && (
+            <div className="space-y-4">
+              <p className="text-center text-sm text-vox-text-secondary">{t('auth.verifyEmail.prompt')}</p>
+              {error && (
+                <div className="flex items-center gap-3 rounded-lg bg-vox-accent-danger/10 border border-vox-accent-danger/20 px-4 py-3">
+                  <AlertCircle size={20} className="shrink-0 text-vox-accent-danger" />
+                  <p className="text-sm text-vox-accent-danger">{error}</p>
+                </div>
+              )}
+              <button type="button" onClick={handleVerify} className="btn-primary block w-full py-2.5">
+                {t('auth.verifyEmail.verifyButton')}
+              </button>
+            </div>
+          )}
 
           {status === 'loading' && (
             <div className="flex flex-col items-center gap-4 py-4">

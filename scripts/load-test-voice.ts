@@ -12,7 +12,7 @@
  */
 
 import axios from 'axios';
-import { solveRegistrationPow } from '../packages/shared/src/pow';
+import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { Chrome111 } from 'mediasoup-client/handlers/Chrome111';
@@ -77,7 +77,7 @@ const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } })
 // every POST regardless of outcome and are never refunded, so a rerun after a
 // partial failure hits them before the others; registerAttemptSubnet (300/day
 // per /24) is the one a third default run of the day hits from one host.
-const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'admin', 'general'];
+const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'admin', 'general'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ function setupMedia(user: TestUser, channelId: string): Promise<void> {
       clearTimeout(timer);
       try {
         // 1. Create Device
-        const device = new Device({ handlerFactory: Chrome111.createFactory() });
+        const device = new Device({ handlerFactory: Chrome111.createFactory({}) });
         await device.load({ routerRtpCapabilities: data.routerRtpCapabilities as RtpCapabilities });
         user.device = device;
 
@@ -302,10 +302,14 @@ async function run() {
         batch.push(
           (async () => {
             try {
-              const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
-              const pow = await solveRegistrationPow(chal.data);
-              await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow, acceptTerms: true, acceptPrivacy: true });
-            } catch { /* exists */ }
+              // Verify-first: start, known code set in the DB, complete
+              await registerTestUser(API, { username, email, password: PASSWORD });
+            } catch (err) {
+              // 409 = the username is taken (an earlier run): log in below
+              if (!axios.isAxiosError(err) || err.response?.status !== 409) {
+                console.warn(`  register ${username} failed:`, axios.isAxiosError(err) ? err.response?.data ?? err.message : (err as Error).message);
+              }
+            }
             const { token } = await login(email);
             try {
               const { data: inv } = await axios.post(`${API}/invites/servers/${target.serverId}`, {}, h(seed.token));
@@ -322,6 +326,7 @@ async function run() {
     }
   }
   console.log(`  ${created} users ready                `);
+  await closeRegisterTestUserDb();
 
   // Step 5
   console.log(`\n[5/5] Joining voice channels with full media...`);

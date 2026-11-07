@@ -22,7 +22,7 @@
 
 import { spawn, type ChildProcess } from 'child_process';
 import axios from 'axios';
-import { solveRegistrationPow } from '../packages/shared/src/pow';
+import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import path from 'path';
 import { createClient as createRedisClient } from 'redis';
@@ -143,19 +143,14 @@ async function login(api: string, username: string): Promise<string> {
 
 async function registerUser(api: string, username: string): Promise<string> {
   try {
-    // Registration requires a solved proof-of-work challenge (dev difficulty
-    // is tiny; same code path as production)
-    const { data: chal } = await axios.get(`${api}/auth/register-challenge`);
-    const pow = await solveRegistrationPow(chal.data);
-    const res = await axios.post(`${api}/auth/register`, {
+    // Verify-first registration: proof-of-work + consent (dev difficulty is
+    // tiny; same code path as production), then the known code set in the DB
+    const data = await registerTestUser(api, {
       username,
       email: `${username}@multinode.test`,
       password: PASSWORD,
-      pow,
-      acceptTerms: true,
-      acceptPrivacy: true,
     });
-    return res.data.data.accessToken;
+    return data.accessToken;
   } catch (err: any) {
     if (err.response?.status === 409) {
       // Already exists, login
@@ -552,7 +547,7 @@ class VoiceClient {
   /** Device + transports + consumer plumbing (mirrors the desktop client). */
   async setupMedia(): Promise<void> {
     const data = this.transportInfo!;
-    const device = new Device({ handlerFactory: Chrome111.createFactory() });
+    const device = new Device({ handlerFactory: Chrome111.createFactory({}) });
     await device.load({ routerRtpCapabilities: data.routerRtpCapabilities as RtpCapabilities });
     this.device = device;
 
@@ -879,9 +874,11 @@ async function main() {
     console.log('Test users ready\n');
   } catch (err: any) {
     console.error('Failed to create test users:', err.response?.data || err.message);
+    await closeRegisterTestUserDb().catch((e) => console.warn('DB disconnect failed:', e.message));
     await cleanup();
     process.exit(1);
   }
+  await closeRegisterTestUserDb().catch((e) => console.warn('DB disconnect failed:', e.message));
 
   // Step 4: Ensure both users are in a shared server (create one if needed)
   let serverId: string | null = null;

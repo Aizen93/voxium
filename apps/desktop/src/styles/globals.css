@@ -202,6 +202,13 @@
   @apply text-[10.5px] font-semibold uppercase tracking-[0.1em] text-vox-text-muted;
 }
 
+/* The channel sidebar's category and section headings: 3px larger than a
+   section label, so a category reads as a heading over its rail of channels
+   (owner, 2026-10-25). */
+@utility category-label {
+  @apply text-[13.5px] font-semibold uppercase tracking-[0.08em] text-vox-text-muted;
+}
+
 /* Accent-tinted chip/button fill (Join voice, active channel, Voice pill).
  * Pair with text-vox-accent-primary; hover with hover:bg-vox-accent-tint-strong. */
 @utility tint {
@@ -268,4 +275,21 @@
   .vox-reaction {
     animation-name: vox-reaction-fade;
   }
+}
+
+/* Activity badge (Explore cards, the owner's Discovery tab): a shine sweeps
+   the crest on hover. The rect starts off the left of the viewBox and crosses
+   it; it stays parked outside otherwise, and never moves under reduced motion. */
+.vox-tier-badge .vox-tier-shine {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .vox-tier-badge:hover .vox-tier-shine {
+    opacity: 1;
+    animation: vox-tier-shine 1.1s ease-in-out;
+  }
+}
+@keyframes vox-tier-shine {
+  from { transform: translateX(0) skewX(-20deg); }
+  to { transform: translateX(120px) skewX(-20deg); }
 }

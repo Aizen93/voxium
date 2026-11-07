@@ -9,6 +9,12 @@ const STORAGE_KEY = 'voxium_settings';
 
 type VoiceMode = 'voice_activity' | 'push_to_talk';
 export type VoiceQuality = 'low' | 'medium' | 'high';
+/**
+ * How the spaces strip is shown: pinned along the top of the app, or folded
+ * into a notch under the title bar until the pointer rests on it (`auto`).
+ * A device preference like the theme: it survives logout and is never synced.
+ */
+export type SpacesStripMode = 'pinned' | 'auto';
 
 type BuiltInThemeId = (typeof BUILT_IN_THEME_IDS)[number];
 
@@ -22,11 +28,12 @@ export type ThemeId = BuiltInThemeId | `custom:${string}`;
  */
 export type SettingsTab = 'account' | 'security' | 'appearance' | 'audio' | 'language';
 
-export const THEMES: { id: BuiltInThemeId; label: string }[] = [
-  { id: 'dark', label: 'Dark' },
-  { id: 'light', label: 'Light' },
-  { id: 'midnight', label: 'Midnight' },
-  { id: 'tactical', label: 'Tactical' },
+/** The built-in themes, in picker order; the name each shows is a translation (`themes.builtIn.*`). */
+export const THEMES: { id: BuiltInThemeId; labelKey: string }[] = [
+  { id: 'dark', labelKey: 'themes.builtIn.dark' },
+  { id: 'light', labelKey: 'themes.builtIn.light' },
+  { id: 'midnight', labelKey: 'themes.builtIn.midnight' },
+  { id: 'tactical', labelKey: 'themes.builtIn.tactical' },
 ];
 
 /** Opus maxBitrate in bps for each quality level */
@@ -56,6 +63,7 @@ interface PersistedSettings {
   enableNoiseSuppression: boolean;
   enableNotificationSounds: boolean;
   enableDesktopNotifications: boolean;
+  spacesStripMode: SpacesStripMode;
 }
 
 interface SettingsState extends PersistedSettings {
@@ -91,6 +99,7 @@ interface SettingsState extends PersistedSettings {
   setEnableNoiseSuppression: (enabled: boolean) => void;
   setEnableNotificationSounds: (enabled: boolean) => void;
   setEnableDesktopNotifications: (enabled: boolean) => void;
+  setSpacesStripMode: (mode: SpacesStripMode) => void;
   // Custom theme management
   installCustomTheme: (remoteId: string, data: CommunityThemeData) => string;
   uninstallCustomTheme: (localId: string) => void;
@@ -153,6 +162,7 @@ function loadPersistedSettings(): PersistedSettings {
         enableNoiseSuppression: parsed.enableNoiseSuppression !== false,
         enableNotificationSounds: parsed.enableNotificationSounds !== false,
         enableDesktopNotifications: parsed.enableDesktopNotifications !== false,
+        spacesStripMode: parsed.spacesStripMode === 'auto' ? 'auto' : 'pinned',
       };
     }
   } catch {
@@ -171,6 +181,7 @@ function loadPersistedSettings(): PersistedSettings {
     enableNoiseSuppression: true,
     enableNotificationSounds: true,
     enableDesktopNotifications: true,
+    spacesStripMode: 'pinned',
   };
 }
 
@@ -189,6 +200,7 @@ function persistSettings(state: PersistedSettings) {
       enableNoiseSuppression: state.enableNoiseSuppression,
       enableNotificationSounds: state.enableNotificationSounds,
       enableDesktopNotifications: state.enableDesktopNotifications,
+      spacesStripMode: state.spacesStripMode,
     }));
   } catch {
     // ignore storage errors
@@ -299,6 +311,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setEnableDesktopNotifications: (enabled: boolean) => {
     set({ enableDesktopNotifications: enabled });
+    persistSettings(get());
+  },
+
+  setSpacesStripMode: (mode: SpacesStripMode) => {
+    set({ spacesStripMode: mode });
     persistSettings(get());
   },
 

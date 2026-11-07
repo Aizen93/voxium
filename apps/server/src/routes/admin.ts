@@ -6,6 +6,7 @@ import { rateLimitAdmin, normalizeIp } from '../middleware/rateLimiter';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { prisma } from '../utils/prisma';
 import { deleteUserAccount } from '../utils/accountDeletion';
+import { revokeUserSessions } from '../utils/sessionRevocation';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
@@ -15,24 +16,27 @@ import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
 import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { emitToModerators } from '../utils/moderatorAudience';
+import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode, Server, AdminWebhook } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
+import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
+import { serverSelect } from '../utils/serverSelect';
+import {
+  webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhooksHeldBy,
+} from '../utils/webhookLifecycle';
 
 export const adminRouter = Router();
 
 adminRouter.use(authenticate, requireAdmin, rateLimitAdmin);
 
 /** Force-logout and disconnect a user across all nodes. */
-async function forceLogoutUser(userId: string, reason: string): Promise<void> {
-  const io = getIO();
-  io.to(`user:${userId}`).emit('force:logout', { reason });
-  const sockets = await io.in(`user:${userId}`).fetchSockets();
-  for (const s of sockets) s.disconnect(true);
+function forceLogoutUser(userId: string, reason: string): void {
+  revokeUserSessions(userId, { forceLogoutReason: reason });
 }
 
 /** Remove all sockets from a server room across all nodes. */
@@ -114,9 +118,13 @@ adminRouter.get('/registration-stats', async (_req: Request, res: Response, next
       prisma.user.count({ where: { createdAt: { gte: hourAgo } } }),
       prisma.user.count({ where: { createdAt: { gte: dayAgo } } }),
       prisma.user.count({ where: { emailVerified: false } }),
+      // Addresses that REGISTERED accounts this week: the record's kind is
+      // fixed at first sight, and the account's creation date says when.
+      // (`lastSeenAt` is refreshed by every login, so filtering on it counted
+      // returning accounts instead — useless for anti-bot triage.)
       prisma.ipRecord.groupBy({
         by: ['ip'],
-        where: { kind: 'register', lastSeenAt: { gte: weekAgo } },
+        where: { kind: 'register', user: { createdAt: { gte: weekAgo } } },
         _count: { ip: true },
         orderBy: { _count: { ip: 'desc' } },
         take: 10,
@@ -348,6 +356,11 @@ adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: st
         id: true,
         name: true,
         iconUrl: true,
+        // Directory state (server discovery): what this owner shows the
+        // world, and whether it is currently in Explore
+        description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true,
+        featuredAt: true, discoveryBlockedAt: true, invitesLocked: true,
+        owner: { select: { bannedAt: true } },
         _count: { select: { members: true } },
         members: {
           where: { userId: { not: user.id } },
@@ -367,6 +380,15 @@ adminRouter.get('/users/:userId/owned-servers', async (req: Request<{ userId: st
       name: s.name,
       iconUrl: s.iconUrl,
       memberCount: s._count.members,
+      description: s.description,
+      tags: s.tags,
+      discoverable: s.discoverable,
+      discoveryListed: s.discoveryListed,
+      joinMode: s.joinMode,
+      featuredAt: s.featuredAt,
+      discoveryBlockedAt: s.discoveryBlockedAt,
+      invitesLocked: s.invitesLocked,
+      ownerBannedAt: s.owner.bannedAt,
       members: s.members.map((m) => ({
         userId: m.userId,
         username: m.user.username,
@@ -407,6 +429,14 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       ? await prisma.ipRecord.findMany({ where: { userId: targetId }, select: { ip: true } })
       : [];
 
+    // A banned account's pending join requests go with the ban: approving
+    // one later would admit an account that cannot sign in. Read first so
+    // the moderators of each server can be told after the commit.
+    const pendingRequests = await prisma.serverJoinRequest.findMany({
+      where: { userId: targetId, status: 'pending' },
+      select: { serverId: true },
+    });
+
     const [, ipBanResult] = await prisma.$transaction([
       prisma.user.update({
         where: { id: targetId },
@@ -420,8 +450,26 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
         data: ipRecords.map((r) => ({ ip: r.ip, reason: sanitizedReason, bannedBy: req.user!.userId })),
         skipDuplicates: true, // already-banned IPs are fine
       }),
+      prisma.serverJoinRequest.deleteMany({ where: { userId: targetId } }),
     ]);
     ipsBanned = ipBanResult.count;
+
+    // The ban is committed: sign the account out everywhere NOW (force:logout,
+    // then a room-filtered disconnect on every node), before the fan-out
+    // below, whose awaits may throw into next(err).
+    forceLogoutUser(targetId, 'Your account has been banned');
+
+    // A banned owner's servers leave the directory without anyone having to
+    // think about it (owner.bannedAt is one of the listing column's inputs).
+    await recomputeListedForOwner(targetId);
+
+    // The incoming-webhook URLs the account holds stop posting with it, in
+    // every server (the kick rule one level up; utils/webhookLifecycle.ts)
+    const webhooksDisarmed = (await disarmWebhooksHeldBy(targetId)).length;
+
+    for (const { serverId } of pendingRequests) {
+      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: targetId, outcome: 'cancelled' });
+    }
 
     // Notify servers that user left
     const memberships = await prisma.serverMember.findMany({
@@ -432,9 +480,6 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       await broadcastMemberLeft(targetId, serverId);
     }
 
-    // Force logout then disconnect active socket (works across all nodes)
-    await forceLogoutUser(targetId, 'Your account has been banned');
-
     logAuditEvent({
       actorId: req.user!.userId,
       action: 'user.ban',
@@ -442,7 +487,7 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       targetId: targetId,
       // knownIps distinguishes "user had no IPs" from "all IPs already banned"
       // (createMany with skipDuplicates only counts NEWLY inserted bans)
-      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned, knownIps: ipRecords.length },
+      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned, knownIps: ipRecords.length, webhooksDisarmed },
     });
 
     const message = !banIps
@@ -460,9 +505,11 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
 
 adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
   try {
-    const user = await prisma.user.findUnique({ where: { id: req.params.userId }, select: { id: true, bannedAt: true } });
+    const user = await prisma.user.findUnique({ where: { id: req.params.userId }, select: { id: true, bannedAt: true, role: true } });
     if (!user) throw new NotFoundError('User');
     if (!user.bannedAt) throw new BadRequestError('User is not banned');
+    // The same hierarchy the ban applies: an admin's ban is a superadmin's to lift
+    if (user.role === 'admin' && req.user!.role !== 'superadmin') throw new ForbiddenError('Only super admins can unban other admins');
 
     // Remove IP bans for this user's IPs — but only if no other banned user
     // shares that IP. Resolved in ONE query instead of a findFirst per IP
@@ -497,6 +544,10 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
         : []),
     ]);
 
+    // Their servers come back to the directory where the per-server inputs
+    // (discoverable, invites unlocked, not admin-blocked) still allow it.
+    await recomputeListedForOwner(req.params.userId);
+
     logAuditEvent({
       actorId: req.user!.userId,
       action: 'user.unban',
@@ -511,12 +562,51 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
   }
 });
 
+type OwnedServerAction =
+  | { serverId: string; action: 'transfer'; newOwnerId: string }
+  | { serverId: string; action: 'delete' };
+
+/**
+ * The `serverActions` of DELETE /users/:userId, checked whole BEFORE anything
+ * runs: absent means none; otherwise an array with one entry per space, each
+ * `{ serverId, action: 'transfer' | 'delete' }`, a transfer naming an heir who
+ * is not the account being deleted. TypeScript is erased: any action but
+ * 'transfer' used to take the branch that deletes the space, and a bad
+ * transfer was refused only after the entries before it had run.
+ */
+function parseOwnedServerActions(raw: unknown, targetId: string): OwnedServerAction[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new BadRequestError('serverActions must be an array');
+  const seen = new Set<string>();
+  return raw.map((entry: unknown): OwnedServerAction => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new BadRequestError('Each serverAction must be an object');
+    }
+    const { serverId, action, newOwnerId } = entry as Record<string, unknown>;
+    if (typeof serverId !== 'string' || serverId.length === 0) {
+      throw new BadRequestError('Each serverAction needs a serverId');
+    }
+    if (seen.has(serverId)) throw new BadRequestError(`Duplicate serverAction for server "${serverId}"`);
+    seen.add(serverId);
+    if (action === 'delete') return { serverId, action };
+    if (action !== 'transfer') {
+      throw new BadRequestError(`serverAction for server "${serverId}" must be "transfer" or "delete"`);
+    }
+    if (typeof newOwnerId !== 'string' || newOwnerId.length === 0) {
+      throw new BadRequestError(`newOwnerId required for transfer of server "${serverId}"`);
+    }
+    if (newOwnerId === targetId) throw new BadRequestError('Cannot transfer to the user being deleted');
+    return { serverId, action, newOwnerId };
+  });
+}
+
 adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, res: Response, next: NextFunction) => {
   try {
     const { userId: targetId } = req.params;
-    const { serverActions } = req.body as {
-      serverActions?: Array<{ serverId: string; action: 'transfer' | 'delete'; newOwnerId?: string }>;
-    };
+    // Express 5 leaves req.body undefined for a request without a body, and the
+    // dashboard sends none when the account owns no space.
+    const serverActions = parseOwnedServerActions(
+      ((req.body ?? {}) as { serverActions?: unknown }).serverActions, targetId);
 
     if (targetId === req.user!.userId) throw new ForbiddenError('Cannot delete yourself');
 
@@ -555,21 +645,24 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
         }
       }
 
+      // Every heir, before the loop's first action: a `delete` action has already
+      // removed its space when a later heir fails, and the account survives that
+      // answer. Bounded by the servers one account can own.
+      for (const action of serverActions) {
+        if (action.action !== 'transfer') continue;
+        const newOwner = await prisma.user.findUnique({
+          where: { id: action.newOwnerId },
+          select: { id: true, bannedAt: true },
+        });
+        if (!newOwner) throw new NotFoundError('Transfer target user');
+        if (newOwner.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
+      }
+
       const io = getIO();
 
       // Process each server action
       for (const action of serverActions) {
         if (action.action === 'transfer') {
-          if (!action.newOwnerId) throw new BadRequestError(`newOwnerId required for transfer of server "${action.serverId}"`);
-          if (action.newOwnerId === targetId) throw new BadRequestError('Cannot transfer to the user being deleted');
-
-          // Validate new owner exists and is not banned
-          const newOwner = await prisma.user.findUnique({
-            where: { id: action.newOwnerId },
-            select: { id: true, bannedAt: true },
-          });
-          if (!newOwner) throw new NotFoundError('Transfer target user');
-          if (newOwner.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
 
           // Check if new owner is already a member
           const existingMembership = await prisma.serverMember.findUnique({
@@ -584,7 +677,19 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
               select: { id: true },
             });
 
+            // A request the heir had open on this very server is settled by
+            // the membership, the way joinServerMember settles one.
+            const heirRequest = await prisma.serverJoinRequest.findUnique({
+              where: { serverId_userId: { serverId: action.serverId, userId: action.newOwnerId } },
+              select: { status: true },
+            });
+
             await prisma.$transaction([
+              // This is the one path besides server creation that makes a
+              // member without joinServerMember's ban check: an admin-chosen
+              // heir is an explicit unban, so the row (if any) goes with it.
+              prisma.serverBan.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
+              prisma.serverJoinRequest.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
               prisma.serverMember.create({
                 data: { userId: action.newOwnerId, serverId: action.serverId, role: 'owner' },
               }),
@@ -595,13 +700,20 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
                   create: { userId: action.newOwnerId!, channelId: ch.id, lastReadAt: new Date() },
                 })
               ),
+              // The heir becomes a member here, so the inline member count
+              // (server discovery) moves in the same transaction.
               prisma.server.update({
                 where: { id: action.serverId },
-                data: { ownerId: action.newOwnerId },
+                data: { ownerId: action.newOwnerId, memberCount: { increment: 1 } },
               }),
             ]);
 
             await broadcastMemberJoined(action.newOwnerId, action.serverId);
+            if (heirRequest?.status === 'pending') {
+              await emitToModerators(action.serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, {
+                serverId: action.serverId, userId: action.newOwnerId, outcome: 'joined',
+              });
+            }
           } else {
             // Already a member — transfer ownership in transaction
             await prisma.$transaction([
@@ -621,6 +733,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             void syncChannelVisibilityRooms(action.serverId, { userId: action.newOwnerId });
           }
 
+          // ownerId decides whose ban state feeds the listing column: the
+          // deleted (often banned) owner's servers were hidden by
+          // recomputeListedForOwner, and the unbanned heir's take their place.
+          await recomputeListed(action.serverId);
+
           // Emit role + server update events
           io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
             serverId: action.serverId,
@@ -630,11 +747,15 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
           const updatedServer = await prisma.server.findUnique({
             where: { id: action.serverId },
-            select: { id: true, name: true, iconUrl: true, ownerId: true, invitesLocked: true, createdAt: true },
+            select: {
+              id: true, name: true, iconUrl: true, ownerId: true, invitesLocked: true, createdAt: true,
+              description: true, tags: true, discoverable: true, joinMode: true,
+            },
           });
           if (updatedServer) {
             io.to(`server:${action.serverId}`).emit(WS_EVENTS.SERVER_UPDATED, {
               ...updatedServer,
+              joinMode: updatedServer.joinMode as ServerJoinMode,
               createdAt: updatedServer.createdAt.toISOString(),
             });
           }
@@ -716,6 +837,16 @@ adminRouter.patch('/users/:userId/role', requireSuperAdmin, async (req: Request<
       where: { id: targetId },
       data: { role },
     });
+
+    // Staff rooms are for staff only. On a demotion to user the account's
+    // sockets are ended on every node (a disconnect leaves every room, the
+    // staff rooms and the support ticket rooms included), so a reconnect
+    // joins only the rooms a user joins: the subscribe handlers read the role
+    // from the database. The tokens stay valid: no force:logout. An account
+    // that is still staff keeps its subscriptions.
+    if (role === 'user') {
+      revokeUserSessions(targetId);
+    }
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -818,13 +949,17 @@ adminRouter.get('/servers', async (req: Request, res: Response, next: NextFuncti
     if (search) {
       where.name = { contains: search, mode: 'insensitive' };
     }
+    // Directory view: only servers that currently appear in Explore
+    if (req.query.listed === '1') where.discoveryListed = true;
 
     const [servers, total] = await Promise.all([
       prisma.server.findMany({
         where,
         select: {
           id: true, name: true, iconUrl: true, ownerId: true, createdAt: true,
-          owner: { select: { username: true } },
+          description: true, tags: true, discoverable: true, discoveryListed: true, joinMode: true,
+          featuredAt: true, discoveryBlockedAt: true, invitesLocked: true,
+          owner: { select: { username: true, bannedAt: true } },
           _count: { select: { members: true, channels: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -872,9 +1007,202 @@ adminRouter.get('/servers', async (req: Request, res: Response, next: NextFuncti
       channelCount: s._count.channels,
       messageCount: serverMessageCounts.get(s.id) || 0,
       createdAt: s.createdAt,
+      description: s.description,
+      tags: s.tags,
+      discoverable: s.discoverable,
+      discoveryListed: s.discoveryListed,
+      joinMode: s.joinMode,
+      featuredAt: s.featuredAt,
+      discoveryBlockedAt: s.discoveryBlockedAt,
+      invitesLocked: s.invitesLocked,
+      ownerBannedAt: s.owner.bannedAt,
     }));
 
     res.json({ success: true, data, total, page, limit, hasMore: page * limit < total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Directory curation: feature / unfeature, block / unblock. Curated means a
+// person chose it; Featured never jumps the ranked list. Block hides the
+// server and the owner cannot relist until unblocked (hiding alone invites a
+// relist war). Every change is audited.
+adminRouter.patch('/servers/:serverId/discovery', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.featured !== undefined && typeof body.featured !== 'boolean') throw new BadRequestError('featured must be a boolean');
+    if (body.blocked !== undefined && typeof body.blocked !== 'boolean') throw new BadRequestError('blocked must be a boolean');
+    if (body.featured === undefined && body.blocked === undefined) throw new BadRequestError('Provide featured and/or blocked');
+
+    const server = await prisma.server.findUnique({
+      where: { id: serverId },
+      select: { id: true, discoveryListed: true, featuredAt: true, discoveryBlockedAt: true },
+    });
+    if (!server) throw new NotFoundError('Server');
+
+    const data: { featuredAt?: Date | null; discoveryBlockedAt?: Date | null; discoverable?: boolean } = {};
+    const actions: Array<'server.discovery_feature' | 'server.discovery_unfeature' | 'server.discovery_block' | 'server.discovery_unblock'> = [];
+
+    if (body.blocked === true) {
+      data.discoverable = false;
+      data.featuredAt = null;
+      data.discoveryBlockedAt = server.discoveryBlockedAt ?? new Date();
+      if (!server.discoveryBlockedAt) actions.push('server.discovery_block');
+      if (server.featuredAt) actions.push('server.discovery_unfeature');
+    } else if (body.blocked === false) {
+      data.discoveryBlockedAt = null;
+      if (server.discoveryBlockedAt) actions.push('server.discovery_unblock');
+    }
+
+    if (body.featured === true) {
+      if (body.blocked === true) throw new BadRequestError('A blocked server cannot be featured');
+      // Only listed servers can be featured — a Featured row of hidden
+      // servers would be a list of 404s
+      if (!server.discoveryListed) throw new BadRequestError('Only listed servers can be featured');
+      if (!server.featuredAt) {
+        data.featuredAt = new Date();
+        actions.push('server.discovery_feature');
+      }
+    } else if (body.featured === false && body.blocked !== true) {
+      data.featuredAt = null;
+      if (server.featuredAt) actions.push('server.discovery_unfeature');
+    }
+
+    const updated = await prisma.server.update({
+      where: { id: serverId },
+      data,
+      select: { ...serverSelect, discoveryListed: true, featuredAt: true, discoveryBlockedAt: true },
+    });
+
+    // discoveryBlockedAt / discoverable are inputs of the listing column (never throws)
+    const discoveryListed = (await recomputeListed(serverId)) ?? updated.discoveryListed;
+
+    const { discoveryListed: _ignored, featuredAt, discoveryBlockedAt, ...serverShape } = updated;
+    getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, serverShape as unknown as Server);
+
+    for (const action of actions) {
+      logAuditEvent({ actorId: req.user!.userId, action, targetType: 'server', targetId: serverId });
+    }
+
+    res.json({
+      success: true,
+      data: { id: serverId, discoverable: updated.discoverable, discoveryListed, featuredAt, discoveryBlockedAt },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Webhooks (moderation) ──────────────────────────────────────────────────
+// A platform admin's view of a server's incoming webhooks: EVERY one of them
+// (no VIEW_CHANNEL filter: an admin holds no server role here), with disable /
+// enable and delete (+ purge). The shapes are the owner's
+// (utils/webhookLifecycle.ts): never the token hash nor the sealed secret, and
+// the token itself exists nowhere server-side to send. Every mutation is
+// audited and announces itself to open Integrations tabs exactly like an
+// owner's (the delete runs the owner's transaction, row lock first).
+
+// Bounded by the per-server cap (admin maximum 100), like the owner's list:
+// unpaginated, so `total` is its length.
+adminRouter.get('/servers/:serverId/webhooks', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const [server, rows] = await Promise.all([
+      prisma.server.findUnique({ where: { id: serverId }, select: { id: true } }),
+      prisma.webhook.findMany({
+        where: { serverId },
+        orderBy: { createdAt: 'asc' },
+        select: { ...webhookSelect, channel: { select: { name: true, secure: true } } },
+      }),
+    ]);
+    if (!server) throw new NotFoundError('Server');
+
+    const data: AdminWebhook[] = rows.map((row) => ({
+      ...toWebhook(row),
+      // A webhook never targets a secure channel (the create and move checks
+      // refuse one); should a row ever, its name stays off the dashboard
+      channelName: row.channel.secure ? null : row.channel.name,
+    }));
+    res.json({ success: true, data, total: rows.length });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Disable / enable. The execute route answers a disabled webhook 403
+// `Webhook is disabled`; its messages stay.
+//
+// An admin's disable is STICKY: `adminDisabledAt` makes the owner's
+// PATCH { enabled: true } answer 403 (routes/webhooks.ts), so an incident
+// response cannot be undone by the server it targets. Only an admin's enable
+// clears it. A repeated disable refreshes the timestamp (the latest decision).
+//
+// An enable also clears `creatorRemovedAt`, exactly like the owner's: any
+// enable means the row was reviewed, and an enabled webhook must never carry
+// a "disabled because its creator was removed" note.
+adminRouter.patch('/webhooks/:webhookId', async (req: Request<{ webhookId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { webhookId } = req.params;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.enabled === undefined) throw new BadRequestError('Provide enabled');
+    if (typeof body.enabled !== 'boolean') throw new BadRequestError('enabled must be a boolean');
+    const enabled = body.enabled;
+
+    let row;
+    try {
+      row = await prisma.webhook.update({
+        where: { id: webhookId },
+        data: enabled
+          ? { enabled: true, adminDisabledAt: null, creatorRemovedAt: null }
+          : { enabled: false, adminDisabledAt: new Date() },
+        select: webhookSelect,
+      });
+    } catch (err) {
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Webhook');
+      throw err;
+    }
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: enabled ? 'webhook.enable' : 'webhook.disable',
+      targetType: 'webhook',
+      targetId: row.id,
+      metadata: { serverId: row.serverId, channelId: row.channelId, name: row.name },
+    });
+    emitWebhookChanged(row.serverId);
+
+    res.json({ success: true, data: toWebhook(row) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Delete; `?purge=1` (or `true`) also deletes every message it posted.
+adminRouter.delete('/webhooks/:webhookId', async (req: Request<{ webhookId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const purge = isPurgeRequested(req.query.purge);
+    const result = await deleteWebhookWithPurge(req.params.webhookId, purge);
+    // No locked row: no such webhook, or a concurrent delete already committed
+    if (!result) throw new NotFoundError('Webhook');
+
+    emitWebhookDeletion(result, purge);
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'webhook.delete',
+      targetType: 'webhook',
+      targetId: result.webhookId,
+      metadata: {
+        serverId: result.serverId,
+        channelId: result.channelId,
+        name: result.name,
+        purge,
+        deletedMessages: result.deletedMessages,
+      },
+    });
+
+    res.json({ success: true, data: { deletedMessages: result.deletedMessages } });
   } catch (err) {
     next(err);
   }
@@ -917,6 +1245,32 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
 });
 
 // ─── Resource Limits ────────────────────────────────────────────────────────
+// Every write is audited with the six limit fields before and after it, and
+// nothing else in the metadata: a limit is a platform-wide lever (0 webhooks
+// freezes creation, a low member cap closes every server's door), so who
+// moved it and from what must be on the record.
+
+interface ServerLimitOverrides {
+  maxChannelsPerServer: number | null;
+  maxVoiceUsersPerChannel: number | null;
+  maxCategoriesPerServer: number | null;
+  maxMembersPerServer: number | null;
+  maxWebhooksPerServer: number | null;
+  maxSecureChannelsPerServer: number | null;
+}
+
+/** The six override fields of a ServerLimits row; no row is all null (every
+ *  limit falls back to the global value). */
+function serverLimitOverrides(row: ServerLimitOverrides | null): ServerLimitOverrides {
+  return {
+    maxChannelsPerServer: row ? row.maxChannelsPerServer : null,
+    maxVoiceUsersPerChannel: row ? row.maxVoiceUsersPerChannel : null,
+    maxCategoriesPerServer: row ? row.maxCategoriesPerServer : null,
+    maxMembersPerServer: row ? row.maxMembersPerServer : null,
+    maxWebhooksPerServer: row ? row.maxWebhooksPerServer : null,
+    maxSecureChannelsPerServer: row ? row.maxSecureChannelsPerServer : null,
+  };
+}
 
 // Get global resource limits
 adminRouter.get('/limits/global', async (_req: Request, res: Response, next: NextFunction) => {
@@ -929,25 +1283,55 @@ adminRouter.get('/limits/global', async (_req: Request, res: Response, next: Nex
 // Update global resource limits
 adminRouter.put('/limits/global', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer } = req.body;
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer, maxSecureChannelsPerServer } = req.body;
     const data: Record<string, number> = {};
-    if (maxChannelsPerServer !== undefined) data.maxChannelsPerServer = Math.max(1, Math.min(500, Number(maxChannelsPerServer)));
-    if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = Math.max(1, Math.min(500, Number(maxVoiceUsersPerChannel)));
-    if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = Math.max(1, Math.min(200, Number(maxCategoriesPerServer)));
-    if (maxMembersPerServer !== undefined) data.maxMembersPerServer = Math.max(0, Math.min(100000, Number(maxMembersPerServer)));
+    // Every field is a whole number or a 400. A bare Number() turned null, ''
+    // or text into 0 or NaN: the floor of 1 masked it for four fields, and for
+    // webhooks (where 0 is a real value: it freezes creation) it was a
+    // platform-wide freeze by accident; a fraction is refused rather than
+    // handed to Prisma (a 500 with a stack)
+    const limit = (name: string, value: unknown, min: number, max: number): number => {
+      const n = typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+      if (!Number.isInteger(n)) throw new BadRequestError(`${name} must be an integer`);
+      return Math.max(min, Math.min(max, n));
+    };
+    if (maxChannelsPerServer !== undefined) data.maxChannelsPerServer = limit('maxChannelsPerServer', maxChannelsPerServer, 1, 500);
+    if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = limit('maxVoiceUsersPerChannel', maxVoiceUsersPerChannel, 1, 500);
+    if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = limit('maxCategoriesPerServer', maxCategoriesPerServer, 1, 200);
+    if (maxMembersPerServer !== undefined) data.maxMembersPerServer = limit('maxMembersPerServer', maxMembersPerServer, 0, 100000);
+    if (maxWebhooksPerServer !== undefined) data.maxWebhooksPerServer = limit('maxWebhooksPerServer', maxWebhooksPerServer, 0, 100);
+    // 0 freezes secure-channel creation platform-wide (existing ones stay)
+    if (maxSecureChannelsPerServer !== undefined) data.maxSecureChannelsPerServer = limit('maxSecureChannelsPerServer', maxSecureChannelsPerServer, 0, 100);
 
+    // The values in force before this write (a missing row is created with
+    // the defaults, which is what was in force), read after the validation
+    // so a refused body touches nothing
+    const before = await getGlobalLimits();
     const config = await prisma.globalConfig.upsert({
       where: { id: 'global' },
       create: { id: 'global', ...data },
       update: data,
     });
-
-    res.json({ success: true, data: {
+    const after = {
       maxChannelsPerServer: config.maxChannelsPerServer,
       maxVoiceUsersPerChannel: config.maxVoiceUsersPerChannel,
       maxCategoriesPerServer: config.maxCategoriesPerServer,
       maxMembersPerServer: config.maxMembersPerServer,
-    }});
+      maxWebhooksPerServer: config.maxWebhooksPerServer,
+      maxSecureChannelsPerServer: config.maxSecureChannelsPerServer,
+    };
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'limits.update_global',
+      targetType: 'global_config',
+      targetId: 'global',
+      metadata: { before, after },
+    });
+
+    res.json({ success: true, data: after });
   } catch (err) { next(err); }
 });
 
@@ -960,11 +1344,15 @@ adminRouter.get('/limits/servers/:serverId', async (req: Request<{ serverId: str
       maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
       maxCategoriesPerServer: limits.maxCategoriesPerServer,
       maxMembersPerServer: limits.maxMembersPerServer,
+      maxWebhooksPerServer: limits.maxWebhooksPerServer,
+      maxSecureChannelsPerServer: limits.maxSecureChannelsPerServer,
     } : {
       maxChannelsPerServer: null,
       maxVoiceUsersPerChannel: null,
       maxCategoriesPerServer: null,
       maxMembersPerServer: null,
+      maxWebhooksPerServer: null,
+      maxSecureChannelsPerServer: null,
     }});
   } catch (err) { next(err); }
 });
@@ -975,11 +1363,15 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
     const server = await prisma.server.findUnique({ where: { id: req.params.serverId }, select: { id: true } });
     if (!server) throw new NotFoundError('Server');
 
-    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer } = req.body;
+    const { maxChannelsPerServer, maxVoiceUsersPerChannel, maxCategoriesPerServer, maxMembersPerServer, maxWebhooksPerServer, maxSecureChannelsPerServer } = req.body;
+    // null, '' or text means "use the global value"; a fraction is refused
+    // rather than handed to Prisma (a 500 with a stack)
     const toInt = (v: unknown): number | null => {
       if (v === null || v === undefined || v === '') return null;
       const n = Number(v);
-      return isNaN(n) ? null : n;
+      if (isNaN(n)) return null;
+      if (!Number.isInteger(n)) throw new BadRequestError('Limits must be whole numbers');
+      return n;
     };
 
     const data = {
@@ -987,30 +1379,52 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
       maxVoiceUsersPerChannel: maxVoiceUsersPerChannel !== undefined ? (toInt(maxVoiceUsersPerChannel) !== null ? Math.max(1, Math.min(500, toInt(maxVoiceUsersPerChannel)!)) : null) : undefined,
       maxCategoriesPerServer: maxCategoriesPerServer !== undefined ? (toInt(maxCategoriesPerServer) !== null ? Math.max(1, Math.min(200, toInt(maxCategoriesPerServer)!)) : null) : undefined,
       maxMembersPerServer: maxMembersPerServer !== undefined ? (toInt(maxMembersPerServer) !== null ? Math.max(0, Math.min(100000, toInt(maxMembersPerServer)!)) : null) : undefined,
+      // 0 freezes webhook creation on this one server; null falls back to global
+      maxWebhooksPerServer: maxWebhooksPerServer !== undefined ? (toInt(maxWebhooksPerServer) !== null ? Math.max(0, Math.min(100, toInt(maxWebhooksPerServer)!)) : null) : undefined,
+      // 0 freezes secure-channel creation on this one space; null falls back to global
+      maxSecureChannelsPerServer: maxSecureChannelsPerServer !== undefined ? (toInt(maxSecureChannelsPerServer) !== null ? Math.max(0, Math.min(100, toInt(maxSecureChannelsPerServer)!)) : null) : undefined,
     };
 
     // Remove undefined keys
     const cleanData = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
 
+    const before = serverLimitOverrides(
+      await prisma.serverLimits.findUnique({ where: { serverId: req.params.serverId } }),
+    );
     const limits = await prisma.serverLimits.upsert({
       where: { serverId: req.params.serverId },
       create: { serverId: req.params.serverId, ...cleanData },
       update: cleanData,
     });
+    const after = serverLimitOverrides(limits);
 
-    res.json({ success: true, data: {
-      maxChannelsPerServer: limits.maxChannelsPerServer,
-      maxVoiceUsersPerChannel: limits.maxVoiceUsersPerChannel,
-      maxCategoriesPerServer: limits.maxCategoriesPerServer,
-      maxMembersPerServer: limits.maxMembersPerServer,
-    }});
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'limits.update_server',
+      targetType: 'server',
+      targetId: req.params.serverId,
+      metadata: { before, after },
+    });
+
+    res.json({ success: true, data: after });
   } catch (err) { next(err); }
 });
 
 // Reset per-server limits (remove all overrides)
 adminRouter.delete('/limits/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
-    await prisma.serverLimits.deleteMany({ where: { serverId: req.params.serverId } });
+    const { serverId } = req.params;
+    const before = serverLimitOverrides(await prisma.serverLimits.findUnique({ where: { serverId } }));
+    await prisma.serverLimits.deleteMany({ where: { serverId } });
+
+    logAuditEvent({
+      actorId: req.user!.userId,
+      action: 'limits.reset_server',
+      targetType: 'server',
+      targetId: serverId,
+      metadata: { before },
+    });
+
     res.json({ success: true, message: 'Server limits reset to global defaults' });
   } catch (err) { next(err); }
 });
@@ -1392,9 +1806,12 @@ adminRouter.get('/storage/top-uploaders', async (_req: Request, res: Response, n
         continue; // attachments handled via DB below
       }
 
-      const lastDash = filename.lastIndexOf('-');
-      if (lastDash <= 0) continue;
-      const entityId = filename.slice(0, lastDash);
+      // `{id}-{ts}.webp` (an uploaded key) or `{id}-{ts}-{hex}.webp` (an
+      // adopted copy): the owner id is everything before the FIRST dash (a
+      // cuid holds none)
+      const firstDash = filename.indexOf('-');
+      if (firstDash <= 0) continue;
+      const entityId = filename.slice(0, firstDash);
 
       const existing = s3EntityMap.get(entityId);
       if (existing) {
@@ -2286,6 +2703,24 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
       });
 
+      // Committed: sign the account out everywhere before the fan-out below,
+      // whose awaits may throw into next(err).
+      forceLogoutUser(banTarget.id, 'Your account has been banned');
+
+      // Same as the canonical ban route: a banned owner's servers leave the
+      // directory, their pending join requests are withdrawn, and the webhook
+      // URLs they hold stop posting.
+      await recomputeListedForOwner(banTarget.id);
+      const webhooksDisarmed = (await disarmWebhooksHeldBy(banTarget.id)).length;
+      const bannedPending = await prisma.serverJoinRequest.findMany({
+        where: { userId: banTarget.id, status: 'pending' },
+        select: { serverId: true },
+      });
+      await prisma.serverJoinRequest.deleteMany({ where: { userId: banTarget.id } });
+      for (const { serverId } of bannedPending) {
+        await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: banTarget.id, outcome: 'cancelled' });
+      }
+
       // Remove the banned user from all server member lists/rooms — same as the
       // canonical ban route. Without this the banned user lingers in member lists.
       const memberships = await prisma.serverMember.findMany({
@@ -2296,15 +2731,12 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         await broadcastMemberLeft(banTarget.id, serverId);
       }
 
-      // Force logout then disconnect active sockets (works across all nodes)
-      await forceLogoutUser(banTarget.id, 'Your account has been banned');
-
       logAuditEvent({
         actorId: req.user!.userId,
         action: 'user.ban',
         targetType: 'user',
         targetId: banTarget.id,
-        metadata: { reason: `Report resolved: ${sanitizedResolution}` },
+        metadata: { reason: `Report resolved: ${sanitizedResolution}`, webhooksDisarmed },
       });
     }
 

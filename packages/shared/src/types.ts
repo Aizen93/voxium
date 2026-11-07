@@ -1,4 +1,5 @@
 import type { AnnotationOp, AnnotationScene, AnnotationLiveEvent } from './annotations.js';
+import type { ServerJoinMode, DiscoveryTier, WebhookType } from './constants.js';
 
 // ─── User ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,14 @@ export interface Server {
   invitesLocked: boolean;
   ownerId: string;
   createdAt: string;
+  // Directory profile (docs/local/server-discovery-plan.html). Every select
+  // that spells out invitesLocked/ownerId/createdAt carries these too.
+  description: string | null;
+  tags: string[];
+  /** "Listed in Explore" — the owner's switch; eligibility also needs invites
+   *  unlocked, no admin block and an unbanned owner (materialised server-side). */
+  discoverable: boolean;
+  joinMode: ServerJoinMode;
 }
 
 export interface ServerSummary {
@@ -82,6 +91,99 @@ export interface ServerDetail extends Server {
 
 export interface CreateServerRequest {
   name: string;
+}
+
+// ─── Server discovery ───────────────────────────────────────────────────────
+
+/** One directory card. The three activity inputs are printed on the card —
+ *  they ARE the ranking. memberCount is live; the rest is a daily snapshot. */
+export interface DiscoveryServer {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  description: string | null;
+  tags: string[];
+  memberCount: number;
+  onlineCount: number;
+  weeklyMessages: number;
+  joinMode: ServerJoinMode;
+  featured: boolean;
+  isMember: boolean;
+  requestPending: boolean;
+  createdAt: string;
+  /** When the daily cycle last refreshed the activity figures; null until the first pass. */
+  statsRefreshedAt: string | null;
+  /** The activity badge: a rank among listed spaces by the same score (DISCOVERY_TIER_TOP_FRACTION); null below Bronze or before the first computation. */
+  tier: DiscoveryTier | null;
+}
+
+/** The score at every tier's cut, as the stats job stores it (Redis `discovery:tiers`). `thresholds` is null below the minimum population. */
+export interface DiscoveryTierThresholds {
+  computedAt: string;
+  population: number;
+  thresholds: Record<DiscoveryTier, number> | null;
+}
+
+export interface DiscoveryPage {
+  /** Only on the first page without a query — a separate row, never mixed into the ranked list. */
+  featured: DiscoveryServer[];
+  servers: DiscoveryServer[];
+  nextCursor: string | null;
+  /** Capped at DISCOVERY_TOTAL_CAP (the client shows "1,000+"). */
+  totalCapped: number;
+}
+
+/** A user summary carried by bans and join requests. */
+export interface ServerMemberSummary {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+}
+
+export interface ServerBan {
+  serverId: string;
+  userId: string;
+  reason: string | null;
+  createdAt: string;
+  user: ServerMemberSummary;
+  bannedBy: { id: string; username: string; displayName: string } | null;
+}
+
+export type ServerJoinRequestStatus = 'pending' | 'declined';
+
+export interface ServerJoinRequest {
+  id: string;
+  serverId: string;
+  userId: string;
+  message: string | null;
+  status: ServerJoinRequestStatus;
+  createdAt: string;
+  user: ServerMemberSummary;
+}
+
+/** 'joined' = the requester got in by another door (invite, open-mode join) and the request was swept. */
+export type ServerJoinRequestOutcome = 'approved' | 'declined' | 'cancelled' | 'joined';
+
+/** What the owner's Discovery tab reads from GET /servers/:id — the live
+ *  member count, the daily activity snapshot and the curation/block state. */
+export interface ServerDiscoveryInfo {
+  memberCount: number;
+  onlineCount: number;
+  weeklyMessages: number;
+  statsRefreshedAt: string | null;
+  discoveryListed: boolean;
+  discoveryBlockedAt: string | null;
+  featuredAt: string | null;
+  /** The Active sort's score: online × 10 + messages this week + members (DISCOVERY_SCORE_WEIGHTS). */
+  activityScore: number;
+  tier: DiscoveryTier | null;
+  /** The next tier up and the score it starts at; null at the top or without cuts. */
+  nextTier: { tier: DiscoveryTier; score: number } | null;
+  /** False while the directory has fewer active spaces than DISCOVERY_TIER_MIN_POPULATION (no badges anywhere). */
+  tiersAvailable: boolean;
+  /** The score every tier starts at, for the ladder; null without cuts. */
+  tierThresholds: Record<DiscoveryTier, number> | null;
 }
 
 // ─── Category ───────────────────────────────────────────────────────────────
@@ -166,8 +268,20 @@ export interface Message {
     encrypted?: boolean;
     author: MessageAuthor;
   } | null;
+  /** Always present: for a webhook-authored row the server synthesises it
+   *  (`isWebhook: true`, id `webhook:{webhookId}` — never a user id). */
   author: MessageAuthor;
+  /** Set when an incoming webhook posted the message (null once the webhook
+   *  is deleted: the message stays, labelled with the name it posted under). */
+  webhookId?: string | null;
+  /** The name the webhook posted under, frozen at post time: what labels the
+   *  row once the webhook is deleted. Only on webhook-authored rows. */
+  webhookName?: string | null;
   mentions?: MessageAuthor[];
+  /** The server's word that this message pings the whole channel: the author
+   *  wrote `@everyone` AND held MENTION_EVERYONE there when it was sent (or
+   *  last edited). Absent or false: the token, if present, is plain text. */
+  mentionsEveryone?: boolean;
   attachments?: Attachment[];
   createdAt: string;
   editedAt: string | null;
@@ -182,6 +296,58 @@ export interface MessageAuthor {
   role?: UserRole;
   isSupporter?: boolean;
   supporterTier?: SupporterTier;
+  /** A synthesised author for a webhook-posted message: there is no user
+   *  behind it (no profile, no DM, no mention). */
+  isWebhook?: boolean;
+}
+
+// ─── Incoming Webhooks ───────────────────────────────────────────────────────
+
+/** A webhook as the management API lists it. Never carries the token, its
+ *  hash or the GitHub secret. */
+export interface Webhook {
+  id: string;
+  serverId: string;
+  channelId: string;
+  name: string;
+  type: WebhookType;
+  enabled: boolean;
+  /** Set while a platform admin's disable is in force: `enabled` is false and
+   *  the owner's PATCH { enabled: true } answers 403 until an admin re-enables. */
+  adminDisabledAt: string | null;
+  /** Set when a kick or ban of the member who held the live URL (the creator,
+   *  or whoever rotated it last) disabled the webhook: the URL may have left
+   *  with them. Cleared by any enable (owner or admin) or a rotate. */
+  creatorRemovedAt: string | null;
+  createdBy: { id: string; username: string; displayName: string } | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+  /** The last rotation of the credential, and who did it (null before the first). */
+  lastRotatedAt: string | null;
+  lastRotatedBy: { id: string; username: string; displayName: string } | null;
+}
+
+/** A channel a webhook may be bound to by THIS caller (GET
+ *  /servers/:serverId/webhooks/targets): a non-secure text channel of the
+ *  server the caller can VIEW and SEND_MESSAGES in, as the create and move
+ *  checks decide it. */
+export interface WebhookTarget {
+  id: string;
+  name: string;
+  categoryId: string | null;
+  position: number;
+}
+
+/** The create/rotate answer: the plaintext token (and, for "github", the
+ *  signing secret) are shown exactly once. */
+export type WebhookCreated = Webhook & { token: string; secret?: string };
+
+/** A row of the platform-admin webhook list (GET /admin/servers/:id/webhooks):
+ *  every webhook of the server, plus its channel's name. `null` for a secure
+ *  channel, which a webhook never targets (the create and move checks refuse
+ *  one): should a row ever point at one, its name stays off the dashboard. */
+export interface AdminWebhook extends Webhook {
+  channelName: string | null;
 }
 
 export interface SendMessageRequest {
@@ -258,7 +424,10 @@ export interface Conversation {
   user1Id: string;
   user2Id: string;
   participant: MessageAuthor; // the OTHER user (populated at query time)
-  lastMessage: { id: string; content: string; encrypted?: boolean; createdAt: string; authorId: string } | null;
+  /** With the notice text, `type` decides whether an unencrypted preview may
+   *  be shown at all: only a listed system notice can be plaintext since the
+   *  2.0 cutover (a 2.0 server sends no `type`; the text still decides). */
+  lastMessage: { id: string; content: string; encrypted?: boolean; type?: Message['type']; createdAt: string; authorId: string } | null;
   /** E2E DMs: when this conversation started being encrypted. Always set —
    *  conversations are born encrypted (docs/e2e-always-on-plan.md §4.2), so
    *  this is status, never a flag to branch "is encryption on?" against. */
@@ -298,6 +467,8 @@ export interface ServerToClientEvents {
   'message:new': (message: Message) => void;
   'message:update': (message: Message) => void;
   'message:delete': (data: { messageId: string; channelId: string }) => void;
+  'message:bulk_deleted': (data: { channelId: string; webhookId: string; count: number }) => void;
+  'webhook:changed': (data: { serverId: string }) => void;
   'channel:created': (channel: Channel) => void;
   'channel:updated': (channel: Channel) => void;
   'channel:deleted': (data: { channelId: string; serverId: string }) => void;
@@ -311,7 +482,11 @@ export interface ServerToClientEvents {
   // serverId lets clients keep a channel→server map for cross-server voice
   // presence (the spaces strip's "live" indicators). Removal events don't
   // carry it — removing by channelId alone is always sufficient.
-  'voice:channel_users': (data: { channelId: string; serverId?: string; users: VoiceUser[] }) => void;
+  // `source: 'connect'` marks a SNAPSHOT replay (socket connect, joining a
+  // server) as opposed to the list a voice:join answers with: a client that is
+  // re-joining its own channel ignores the snapshot for THAT channel, since its
+  // join replay is fresher and the snapshot can land after it.
+  'voice:channel_users': (data: { channelId: string; serverId?: string; users: VoiceUser[]; source?: 'connect' }) => void;
   'voice:user_joined': (data: { channelId: string; serverId?: string; user: VoiceUser }) => void;
   'voice:user_left': (data: { channelId: string; userId: string }) => void;
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => void;
@@ -324,7 +499,10 @@ export interface ServerToClientEvents {
   'voice:e2e:key': (data: { channelId: string; from: string; fromDeviceId: string; envelope: string }) => void;
   'voice:e2e:key_request': (data: { channelId: string; from: string }) => void;
   'voice:force_moved': (data: { channelId: string; userId: string; targetChannelId: string }) => void;
-  'voice:error': (data: { message: string }) => void;
+  // `channelId`, when present, scopes the error to ONE server voice channel:
+  // the client acts on it only while that channel is its active one (a late
+  // notice about a channel it has since left must not end its new call).
+  'voice:error': (data: { message: string; channelId?: string }) => void;
   'voice:transport_created': (data: {
     routerRtpCapabilities: unknown;
     sendTransport: TransportOptions;
@@ -379,10 +557,16 @@ export interface ServerToClientEvents {
   'role:updated': (data: { serverId: string; role: Role }) => void;
   'role:deleted': (data: { serverId: string; roleId: string }) => void;
   'role:reordered': (data: { serverId: string; roles: { id: string; position: number }[] }) => void;
-  'channel:permissions_updated': (data: { serverId: string; channelId: string; overrides: ChannelPermissionOverride[] }) => void;
+  'channel:permissions_updated': (data: { serverId: string }) => void;
   'member:nickname_updated': (data: { serverId: string; userId: string; nickname: string | null }) => void;
   'member:kicked': (data: { serverId: string; userId: string }) => void;
   'server:deleted': (data: { serverId: string }) => void;
+  // Server discovery join requests (moderator audience only — never server:{id})
+  'server:join_request': (data: { serverId: string; request: ServerJoinRequest }) => void;
+  'server:join_request_resolved': (data: { serverId: string; userId: string; outcome: ServerJoinRequestOutcome }) => void;
+  // To the requester's user:{id} room
+  'server:join_approved': (data: { server: Server }) => void;
+  'server:join_declined': (data: { serverId: string; serverName: string }) => void;
   'voice:screen_share:start': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:stop': (data: { channelId: string; userId: string }) => void;
   'voice:screen_share:state': (data: { channelId: string; sharingUserId: string | null }) => void;
@@ -407,10 +591,6 @@ export interface ServerToClientEvents {
   'support:message:new': (message: SupportMessageData) => void;
   'support:status_change': (data: { ticketId: string; status: SupportTicketStatus; claimedById?: string; claimedByUsername?: string }) => void;
   'support:ticket:new': (data: { total: number }) => void;
-  // Community Themes
-  'theme:published': (theme: CommunityTheme) => void;
-  'theme:updated': (theme: CommunityTheme) => void;
-  'theme:removed': (data: { themeId: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -505,6 +685,31 @@ export interface ServerMember {
   roles?: Role[];
 }
 
+/**
+ * GET /servers/:id/members/online — the People panel's slice. `full` means
+ * the server is small enough that every member is here, offline included;
+ * otherwise only members whose status is not offline, with the viewer and
+ * the owner/admins first, and `truncated` when online members exist beyond
+ * the cap (`onlineCount` is the server's figure either way).
+ */
+export interface ServerPeople {
+  data: ServerMember[];
+  memberCount: number;
+  onlineCount: number;
+  full: boolean;
+  truncated: boolean;
+}
+
+/** GET /servers/:id/members (keyset mode) — one page of the directory. */
+export interface MemberDirectoryPage {
+  data: ServerMember[];
+  /** Members matching the filter (the whole membership when unfiltered). */
+  total: number;
+  hasMore: boolean;
+  /** Opaque, signed; hand it back as `cursor` for the next page. */
+  nextCursor: string | null;
+}
+
 // ─── Roles & Permissions ────────────────────────────────────────────────────
 
 export interface Role {
@@ -594,7 +799,22 @@ export interface AdminServer {
   channelCount: number;
   messageCount: number;
   createdAt: string;
+  // Directory state (server discovery)
+  description: string | null;
+  tags: string[];
+  discoverable: boolean;
+  /** The materialised eligibility: discoverable AND invites unlocked AND not blocked AND owner not banned. */
+  discoveryListed: boolean;
+  joinMode: ServerJoinMode;
+  featuredAt: string | null;
+  discoveryBlockedAt: string | null;
+  invitesLocked: boolean;
+  /** The fourth listing input: a platform-banned owner hides every server they own. */
+  ownerBannedAt: string | null;
 }
+
+/** What GET /admin/export/servers returns per row — the pre-directory columns only. */
+export type AdminServerExport = Pick<AdminServer, 'id' | 'name' | 'iconUrl' | 'ownerId' | 'ownerUsername' | 'memberCount' | 'channelCount' | 'messageCount' | 'createdAt'>;
 
 export interface BanRecord {
   id: string;
@@ -687,6 +907,9 @@ export interface ResourceLimits {
   maxVoiceUsersPerChannel: number;
   maxCategoriesPerServer: number;
   maxMembersPerServer: number; // 0 = unlimited
+  maxWebhooksPerServer: number;
+  /** secure channels per space; maxChannelsPerServer counts the other channels */
+  maxSecureChannelsPerServer: number;
 }
 
 export interface ServerResourceLimits {
@@ -694,6 +917,8 @@ export interface ServerResourceLimits {
   maxVoiceUsersPerChannel: number | null;
   maxCategoriesPerServer: number | null;
   maxMembersPerServer: number | null;
+  maxWebhooksPerServer: number | null;
+  maxSecureChannelsPerServer: number | null;
 }
 
 // ─── Storage ─────────────────────────────────────────────────────────────────
@@ -733,7 +958,8 @@ export interface StorageTopUploader {
 // ─── Reports ────────────────────────────────────────────────────────────────
 
 export type ReportStatus = 'pending' | 'resolved' | 'dismissed';
-export type ReportType = 'message' | 'user';
+/** 'server' = a directory listing (the owner is the reported user; name and description snapshot in messageContent). */
+export type ReportType = 'message' | 'user' | 'server';
 
 export interface Report {
   id: string;
@@ -840,6 +1066,8 @@ export interface CommunityTheme extends CommunityThemeData {
 export type AuditAction =
   | 'user.ban' | 'user.unban' | 'user.delete' | 'user.role_change'
   | 'server.delete'
+  | 'server.discovery_feature' | 'server.discovery_unfeature'
+  | 'server.discovery_block' | 'server.discovery_unblock'
   | 'ip_ban.create' | 'ip_ban.delete'
   | 'storage.file_delete' | 'storage.cleanup_orphans'
   | 'registration.hygiene_sweep'
@@ -847,7 +1075,9 @@ export type AuditAction =
   | 'report.resolve' | 'report.dismiss'
   | 'support.claim' | 'support.close'
   | 'ratelimit.update' | 'ratelimit.reset' | 'ratelimit.clear_user'
-  | 'feature_flag.update' | 'feature_flag.reset';
+  | 'feature_flag.update' | 'feature_flag.reset'
+  | 'webhook.disable' | 'webhook.enable' | 'webhook.delete'
+  | 'limits.update_global' | 'limits.update_server' | 'limits.reset_server';
 
 // ─── Announcements ─────────────────────────────────────────────────────────
 

@@ -16,8 +16,28 @@ const html = readFileSync(resolve(ROOT, 'index.html'), 'utf8');
 describe('index.html SEO contract', () => {
   it('carries the title and description', () => {
     expect(html).toContain('<title>Voxium — Privacy-First Real-Time Communication Platform</title>');
-    expect(html).toMatch(/<meta name="description" content="Privacy-first voice, video, chat and screen sharing\./);
+    expect(html).toMatch(/<meta name="description" content="Privacy-first voice, chat and screen sharing\./);
     expect(html).toContain('<link rel="canonical" href="https://voxium.app/"');
+  });
+
+  it('claims only what the app does', () => {
+    // No camera video exists (voice is microphone-only, video is screen
+    // sharing; camera support is still a roadmap item), only DMs and
+    // invite-only secure channels (text and voice) are end-to-end encrypted,
+    // and the server does keep what running the service needs (account
+    // e-mail, IP records): "no data collection" was not true, "no data
+    // harvesting" is the landing's own claim.
+    expect(html).not.toMatch(/voice, video/i);
+    expect(html).not.toMatch(/Self-hostable, E2E encrypted,/);
+    expect(html).not.toMatch(/data collection/i);
+    const description = 'Privacy-first voice, chat and screen sharing. Self-hostable, end-to-end encrypted DMs and secure channels, no phone number required.';
+    // Search engines cut a snippet at roughly 155 characters
+    expect(description.length).toBeLessThanOrEqual(155);
+    for (const tag of ['name="description"', 'property="og:description"', 'name="twitter:description"']) {
+      expect(html, tag).toContain(`${tag} content="${description}"`);
+    }
+    const ld = JSON.parse(html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)![1]);
+    expect(ld.description).toBe(description);
   });
 
   it('carries the full Open Graph card', () => {
@@ -64,6 +84,29 @@ describe('index.html SEO contract', () => {
     // communities, self-hosting always free. "Free forever" / "nothing to
     // buy" style claims contradict the planned Plus and server tiers.
     expect(html).not.toMatch(/forever|nothing to buy|always be free|free for everyone/i);
+  });
+
+  // The claims the roadmap cannot keep (ROADMAP.md §9). Used for the locale
+  // scan below; the shell check above keeps its own literal.
+  const FORBIDDEN_CLAIMS = /forever|nothing to buy|always be free|free for everyone|no subscriptions?\b/i;
+
+  it('the guard itself catches the phrase that lived in the locales', () => {
+    expect('Join the open communication revolution. No credit card. No subscription.').toMatch(FORBIDDEN_CLAIMS);
+    expect('No subscriptions, ever.').toMatch(FORBIDDEN_CLAIMS);
+    expect('Join the open communication revolution. No credit card. No paywall.').not.toMatch(FORBIDDEN_CLAIMS);
+  });
+
+  it('the translated landing copy makes no such promise either', () => {
+    // The shell check above never saw the locale strings: "No subscription."
+    // sat in landing.cta.subtitle for months while the roadmap planned Plus
+    // and server tiers. The English source is the one translators follow.
+    const en = JSON.parse(readFileSync(resolve(ROOT, 'src/i18n/locales/en.json'), 'utf8')) as { landing: unknown };
+    const flat = (v: unknown): string[] => (typeof v === 'string' ? [v] : v && typeof v === 'object' ? Object.values(v as object).flatMap(flat) : []);
+    const texts = flat(en.landing);
+    expect(texts.length).toBeGreaterThan(20);
+    for (const text of texts) {
+      expect(text, text).not.toMatch(FORBIDDEN_CLAIMS);
+    }
   });
 
   it('makes no open-source claim — Voxium is source-available (VCL-1.0)', () => {

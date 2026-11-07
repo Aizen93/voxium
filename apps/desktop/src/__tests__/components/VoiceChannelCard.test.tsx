@@ -43,6 +43,8 @@ vi.mock('../../stores/serverStore', () => {
     createCategory: vi.fn(),
     deleteCategory: vi.fn(),
     members: [],
+    people: { full: true, truncated: false, onlineCount: 0, memberCount: 0, loaded: true },
+    ensureMembers: vi.fn(),
     roles: [],
     unreadCounts: {},
     reorderCategories: vi.fn(),

@@ -9,6 +9,9 @@ export const LIMITS = {
   USERNAME_MIN: 3,
   USERNAME_MAX: 32,
   DISPLAY_NAME_MAX: 64,
+  /** RFC 5321: a whole address, and its local part (validateEmail) */
+  EMAIL_MAX: 254,
+  EMAIL_LOCAL_MAX: 64,
   PASSWORD_MIN: 8,
   PASSWORD_MAX: 72,
   SERVER_NAME_MIN: 2,
@@ -43,6 +46,14 @@ export const LIMITS = {
   MAX_ATTACHMENTS_PER_MESSAGE: 5,
   MAX_ATTACHMENT_SIZE: 8 * 1024 * 1024, // 8 MB (default for non-video files)
   MAX_VIDEO_ATTACHMENT_SIZE: 12 * 1024 * 1024, // 12 MB (for video files)
+  // Avatars and space icons are 256x256 images the client encodes before the
+  // upload (WebP, or PNG on a webview without a WebP encoder): tens of KB, a
+  // PNG of noise stays under 300 KB. The presigned PUT is signed for the exact
+  // declared size, and the declared size may not exceed these.
+  MAX_AVATAR_SIZE: 512 * 1024, // 512 KiB
+  MAX_SERVER_ICON_SIZE: 512 * 1024, // 512 KiB
+  // Largest edge (px) the stored avatar/icon header may declare
+  MAX_IMAGE_ASSET_EDGE: 1024,
   ATTACHMENT_RETENTION_DAYS: 3,
   MAX_ROLES_PER_SERVER: 25,
   ROLE_NAME_MIN: 1,
@@ -56,7 +67,51 @@ export const LIMITS = {
   THEME_MAX_PER_USER: 10,
   THEMES_PER_PAGE: 20,
   THEME_SVG_MAX_SIZE: 10_000, // 10KB max for custom SVG patterns
+  // Server discovery (docs/local/server-discovery-plan.html)
+  SERVER_DESCRIPTION_MAX: 300,
+  DISCOVERY_MAX_TAGS: 5,
+  SERVER_BAN_REASON_MAX: 300,
+  JOIN_REQUEST_MESSAGE_MAX: 300,
+  // Incoming webhooks (docs/local/webhooks-plan.html)
+  MAX_WEBHOOKS_PER_SERVER: 10,
+  /** secure (invite-only E2E) channels per space, counted apart from MAX_CHANNELS_PER_SERVER */
+  MAX_SECURE_CHANNELS_PER_SERVER: 5,
+  WEBHOOK_NAME_MAX: 64,
+  WEBHOOK_BODY_MAX_BYTES: 1_048_576, // 1 MiB, the execute route's own body parser
+  WEBHOOK_EMBEDS_MAX: 10,
+  WEBHOOK_EMBED_FIELDS_MAX: 25,
 } as const;
+
+/** Incoming webhook kinds: "generic" takes the Discord-shaped payload,
+ *  "github" verifies X-Hub-Signature-256 and formats GitHub events. */
+export const WEBHOOK_TYPES = ['generic', 'github'] as const;
+export type WebhookType = (typeof WEBHOOK_TYPES)[number];
+
+/**
+ * The exact message every webhook route answers (403) while the `webhooks`
+ * feature flag is off. The desktop's Integrations tab keys its "disabled"
+ * state on this sentence, so the server and the client must share one copy.
+ */
+export const WEBHOOKS_DISABLED_MESSAGE = 'Webhooks are currently disabled';
+
+/**
+ * The charset of every id a client may hand the server (cuids, role ids, user
+ * ids): what `/servers/:id/members/lookup` and the directory's role filter
+ * accept, and what the webhook execute route requires of a webhook id before
+ * it spends a query. A synthesised webhook author id (`webhook:{id}`) can
+ * NEVER pass it, on purpose: the colon keeps it out of every member lookup.
+ * No `g` flag, so `.test()` carries no `lastIndex` state between calls.
+ */
+export const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * The prefix of the author id the server synthesises for a webhook-posted
+ * message (`webhook:{webhookId}`, or `webhook:deleted` once the webhook is
+ * gone; utils/messageAuthor.ts). The colon keeps it out of OPAQUE_ID_RE, so
+ * it is never looked up as a user id; the desktop matches reply quotes on it
+ * (chatStore.removeWebhookMessages).
+ */
+export const WEBHOOK_AUTHOR_ID_PREFIX = 'webhook:';
 
 /**
  * Max serialized dm:voice:signal payload the server will relay (UTF-16 chars,
@@ -150,6 +205,119 @@ export const ANNOTATION_LIVE_POINTER_FADE_MS = 700;
 export const ANNOTATION_FADE_AFTER_MS = 3_000;
 export const ANNOTATION_FADE_OUT_MS = 800;
 
+// ─── Server discovery ────────────────────────────────────────────────────────
+// Decisions and reasons: docs/local/server-discovery-plan.html.
+
+/** The tag vocabulary. Fixed and lowercase on purpose: free-text tags need
+ *  moderation and cannot be translated or indexed cleanly. Grows by PR, and
+ *  every entry ships with a `discovery.tags.*` label in all 11 locales. */
+export const DISCOVERY_TAGS = [
+  'gaming', 'esports', 'open-source', 'programming', 'science', 'education',
+  'languages', 'music', 'art', 'film-tv', 'creators', 'community',
+] as const;
+export type DiscoveryTag = (typeof DISCOVERY_TAGS)[number];
+
+/** Who may join a listed server: approval-first (the default — with every
+ *  server listed by default, no community becomes an open door overnight)
+ *  or open (Join lands in the server at once). */
+export const SERVER_JOIN_MODES = ['approval', 'open'] as const;
+export type ServerJoinMode = (typeof SERVER_JOIN_MODES)[number];
+
+/** The four transparent sorts. Nothing is personalised. */
+export const DISCOVERY_SORTS = ['active', 'members', 'newest', 'name'] as const;
+export type DiscoverySort = (typeof DISCOVERY_SORTS)[number];
+
+/** Active = online × 10 + messages in 7 days × 1 + members × 1. The ONE place
+ *  the weights live: the stats job interpolates them into its UPDATE and the
+ *  card prints the three inputs, so the ranking is auditable by anyone. */
+export const DISCOVERY_SCORE_WEIGHTS = { online: 10, messages: 1, members: 1 } as const;
+
+/** Activity badges, from the same score and nothing else: a badge is a RANK
+ *  among the listed spaces that have any activity — the top half earns
+ *  Bronze, the top 1% Diamond. Lowest to highest. The cuts (the score at each
+ *  percentile) are recomputed hourly by the stats job; a tie at a cut is in. */
+export const DISCOVERY_TIERS = ['bronze', 'silver', 'gold', 'platinum', 'diamond'] as const;
+export type DiscoveryTier = (typeof DISCOVERY_TIERS)[number];
+/** The top fraction of active listed spaces each tier covers. */
+export const DISCOVERY_TIER_TOP_FRACTION: Record<DiscoveryTier, number> = {
+  bronze: 0.5, silver: 0.25, gold: 0.1, platinum: 0.03, diamond: 0.01,
+};
+/** No badges at all below this many active listed spaces: six servers have no "top 1%". */
+export const DISCOVERY_TIER_MIN_POPULATION = 10;
+export function isDiscoveryTier(value: unknown): value is DiscoveryTier {
+  return typeof value === 'string' && (DISCOVERY_TIERS as readonly string[]).includes(value);
+}
+
+/**
+ * Member lists. Two views, two contracts: the People panel is a PRESENCE
+ * view (everyone while the server is small, the online slice above that),
+ * Server settings → Members is a server-paged DIRECTORY.
+ */
+export const MEMBER_LIST = {
+  /** Up to this many members the People panel loads everyone, offline
+   *  included. Above it the panel loads the online members only, and this is
+   *  also where the online slice stops (staff and the viewer first, then by
+   *  join date) — the rest is reported as a count. 250: a mid-sized
+   *  community's offline tail is already a list nobody scrolls, and the
+   *  directory has it. */
+  PEOPLE_MAX_ROWS: 250,
+  /** Ids one batched member lookup accepts. */
+  LOOKUP_MAX_IDS: 100,
+  /** Rows a member search returns at most; the mention autocomplete asks for the default. */
+  SEARCH_MAX: 20,
+  SEARCH_DEFAULT: 8,
+  /** Directory search text, in characters. */
+  QUERY_MAX: 100,
+  /** How long typing settles before a member search goes to the server. */
+  TYPING_DEBOUNCE_MS: 300,
+} as const;
+
+/** Directory role filters besides a role id: the coarse roles and "no role". */
+export const MEMBER_DIRECTORY_ROLE_FILTERS = ['owner', 'admin', 'none'] as const;
+
+export const DISCOVERY_PAGE_SIZE = 24;
+export const DISCOVERY_MAX_PAGE_SIZE = 48;
+/** Keyset depth cap — beyond it the answer is "refine your search". */
+export const DISCOVERY_MAX_PAGES = 50;
+/** Totals are never a full count: count over a subquery limited to CAP + 1
+ *  rows, shown as "1,000+". */
+export const DISCOVERY_TOTAL_CAP = 1000;
+/** 3 characters so the trigram index is usable; 64 bounds the ILIKE pattern. */
+export const DISCOVERY_SEARCH_MIN = 3;
+export const DISCOVERY_SEARCH_MAX = 64;
+
+/** A declined request is the cooldown marker; the sweep deletes it after this. */
+export const JOIN_REQUEST_DECLINE_COOLDOWN_DAYS = 7;
+/** Pending requests older than this are deleted; the user can ask again. */
+export const JOIN_REQUEST_PENDING_TTL_DAYS = 30;
+
+// ─── Retention and trust periods the UI and the legal copy quote ─────────────
+// One copy each: the server jobs run on them, and the admin dashboard and the
+// locale fact test read them from here instead of restating the number.
+
+/** IpRecord rows unseen for this long are deleted by the registration hygiene sweep. */
+export const IP_RECORD_RETENTION_DAYS = 180;
+/** The orphan sweep never deletes an unreferenced S3 object younger than this. */
+export const ORPHAN_GRACE_DAYS = 7;
+/** Lifetime of the trusted-device token a successful TOTP sign-in issues (skips TOTP on that device). */
+export const TRUSTED_DEVICE_TTL_DAYS = 30;
+/** Minimum age to use the Service: France's age of digital consent; the Terms and the Privacy Policy read it. */
+export const MINIMUM_AGE = 15;
+
+/** Characters that text shown to STRANGERS (a server description, a join
+ *  request message, a ban reason) may never carry: control characters and the
+ *  bidi-override / zero-width / invisible format characters that let text
+ *  visually read as something it is not — ANNOTATION_TEXT_FORBIDDEN_RE's set
+ *  plus the C1 controls, the soft hyphen, the Arabic and Mongolian format
+ *  marks, the line/paragraph separators, the interlinear annotation and
+ *  noncharacter block, and the TAG characters (U+E0000–E007F, invisible text
+ *  carriers — hence the `u` flag, without which no astral code point can be
+ *  matched at all). The newline (U+000A) is allowed because descriptions are
+ *  multi-line. Non-global on purpose (`.test()` on a /g regex mutates
+ *  lastIndex). */
+// eslint-disable-next-line no-control-regex
+export const DISCOVERY_TEXT_FORBIDDEN_RE = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\uFFFE\uFFFF\u{E0000}-\u{E007F}]/u;
+
 export const THEME_PATTERN_TYPES = ['none', 'stripes', 'grid', 'dots', 'crosshatch', 'custom-svg'] as const;
 export type ThemePatternType = (typeof THEME_PATTERN_TYPES)[number];
 
@@ -172,6 +340,50 @@ export const INVITE_CODE_LENGTH = 8;
 
 /** Regex to match @[userId] mention tokens in message content */
 export const MENTION_RE = /@\[([^\]]{1,30})\]/g;
+
+/** The `@everyone` token, exactly this spelling. */
+export const EVERYONE_MENTION = '@everyone';
+
+/**
+ * Where `@everyone` tokens start in `content`: the token is not preceded by
+ * a word character or another `@` (`me@everyone`, `@@everyone` are not it),
+ * not a prefix of a longer word (`@everyone-else`, `@everyone2` are not it),
+ * and never inside a user mention (`@[…]`). One function for the server (does
+ * the message ping?) and the renderer (where to draw the badge), so the two
+ * can never disagree — and a plain scan rather than a lookbehind regex, which
+ * the oldest WebKit the desktop app runs on rejects at parse time (a syntax
+ * error there takes the whole bundle down). Whether the token PINGS anyone is
+ * the server's decision at send time (`Message.mentionsEveryone`: the author
+ * held MENTION_EVERYONE in the channel); a renderer must never treat the bare
+ * text as a mention.
+ */
+export function findEveryoneMentions(content: string): number[] {
+  const mentionSpans: Array<[number, number]> = [];
+  const re = new RegExp(MENTION_RE.source, MENTION_RE.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) mentionSpans.push([m.index, m.index + m[0].length]);
+  const insideMention = (i: number) => mentionSpans.some(([s, e]) => i >= s && i < e);
+
+  const found: number[] = [];
+  let from = 0;
+  for (;;) {
+    const i = content.indexOf(EVERYONE_MENTION, from);
+    if (i < 0) break;
+    from = i + EVERYONE_MENTION.length;
+    const before = i === 0 ? '' : content[i - 1];
+    const after = content[i + EVERYONE_MENTION.length] ?? '';
+    if (before !== '' && /[\w@]/.test(before)) continue;
+    if (after !== '' && /[\w-]/.test(after)) continue;
+    if (insideMention(i)) continue;
+    found.push(i);
+  }
+  return found;
+}
+
+/** Whether `content` contains an @everyone token. */
+export function mentionsEveryone(content: string): boolean {
+  return findEveryoneMentions(content).length > 0;
+}
 
 export const WS_EVENTS = {
   MESSAGE_NEW: 'message:new',
@@ -246,6 +458,13 @@ export const WS_EVENTS = {
   MEMBER_ROLE_UPDATED: 'member:role_updated',
   MEMBER_KICKED: 'member:kicked',
   SERVER_DELETED: 'server:deleted',
+  // Server discovery join requests. The first two go ONLY to the moderator
+  // audience (user:{id} rooms of KICK_MEMBERS / ADMINISTRATOR holders + the
+  // owner — never server:{id}); the last two go to the requester's user room.
+  SERVER_JOIN_REQUEST: 'server:join_request',
+  SERVER_JOIN_REQUEST_RESOLVED: 'server:join_request_resolved',
+  SERVER_JOIN_APPROVED: 'server:join_approved',
+  SERVER_JOIN_DECLINED: 'server:join_declined',
   VOICE_SERVER_MUTE: 'voice:server_mute',
   VOICE_SERVER_DEAFEN: 'voice:server_deafen',
   VOICE_FORCE_MOVE: 'voice:force_move',
@@ -278,10 +497,10 @@ export const WS_EVENTS = {
   MEMBER_ROLES_UPDATED: 'member:roles_updated',
   CHANNEL_PERMISSIONS_UPDATED: 'channel:permissions_updated',
   MEMBER_NICKNAME_UPDATED: 'member:nickname_updated',
-  // Community Themes
-  THEME_PUBLISHED: 'theme:published',
-  THEME_UPDATED: 'theme:updated',
-  THEME_REMOVED: 'theme:removed',
+  // Incoming webhooks: the server's webhook list changed (moderators refetch);
+  // a webhook's messages were purged from one channel in one statement.
+  WEBHOOK_CHANGED: 'webhook:changed',
+  MESSAGE_BULK_DELETED: 'message:bulk_deleted',
 } as const;
 
 export const THEME_COLOR_KEYS = [
@@ -329,3 +548,32 @@ export const TRANSLUCENT_THEME_COLOR_KEYS: readonly ThemeColorKey[] = [
 ] as const;
 
 export const BUILT_IN_THEME_IDS = ['dark', 'light', 'midnight', 'tactical'] as const;
+
+// ─── Verify-first registration ──────────────────────────────────────────────
+// No account exists until the 6-digit code mailed to the address comes back.
+// The start of a registration answers the same for every address (new, already
+// registered, blocked, recently mailed), so it reveals nothing about any of them.
+export const SIGNUP = {
+  CODE_LENGTH: 6,
+  /** a mailed code works this long */
+  CODE_TTL_MINUTES: 15,
+  /** a pending registration (and its id) lives this long */
+  PENDING_TTL_MINUTES: 60,
+  /** wrong codes allowed per pending registration before it is burned */
+  MAX_CODE_ATTEMPTS: 10,
+  /** one resend per pending registration, no earlier than this after the first mail */
+  RESEND_AFTER_SECONDS: 600,
+  MAX_RESENDS: 1,
+  /** sign-up mails one mailbox can receive per window, whatever the number of attempts */
+  LEDGER_MAX_MAILS: 2,
+  /** of those, the "you already have an account" notice goes out only on an otherwise empty window */
+  LEDGER_MAX_NOTICES: 1,
+  LEDGER_WINDOW_DAYS: 30,
+} as const;
+
+/** The only synchronous conflict of a registration start: usernames are public. */
+export const USERNAME_TAKEN_MESSAGE = 'This username is already taken';
+/** Every refused completion (wrong, expired or used-up code, unknown id): one answer. */
+export const SIGNUP_CODE_INVALID_MESSAGE = 'Invalid or expired code';
+/** Only ever shown to someone who just proved they read the mailbox. */
+export const SIGNUP_EMAIL_REGISTERED_MESSAGE = 'This email address already has an account. Sign in instead.';

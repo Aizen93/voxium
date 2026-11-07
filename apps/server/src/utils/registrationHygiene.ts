@@ -18,6 +18,8 @@ import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
 import { logAuditEvent } from './auditLog';
 import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
+import { purgeExpiredSignupState } from '../services/signupService';
+import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let spikeIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -26,7 +28,8 @@ let stopped = true;
 const SWEEP_HOUR = 4;
 const SWEEP_MINUTE = 30;
 export const UNVERIFIED_ACCOUNT_TTL_DAYS = 7;
-export const IP_RETENTION_DAYS = 180;
+/** The shared constant (the admin dashboard quotes it), under this module's existing name. */
+export const IP_RETENTION_DAYS = IP_RECORD_RETENTION_DAYS;
 
 /** Only one node sweeps. Both would otherwise run the identical `deleteMany`
  *  at 04:30: harmless (the loser matches zero rows) but it makes the loser's
@@ -106,6 +109,21 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
   const dryRun = opts.dryRun === true;
   const userCutoff = new Date(Date.now() - UNVERIFIED_ACCOUNT_TTL_DAYS * 24 * 60 * 60 * 1000);
   const ipCutoff = new Date(Date.now() - IP_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+
+  // Verify-first sign-up state past its life: inert already (every check reads
+  // the timestamps), purged so the tables stay small. FIRST, in its own try:
+  // a failing step of the sweep below cannot skip it, and its failure cannot
+  // hide the sweep's result.
+  if (!dryRun) {
+    try {
+      const purged = await purgeExpiredSignupState();
+      if (purged.pending || purged.ledger) {
+        console.log(`[RegHygiene] Purged ${purged.pending} expired pending registration(s) and ${purged.ledger} sign-up mail ledger row(s)`);
+      }
+    } catch (err) {
+      console.error('[RegHygiene] Sign-up state purge failed:', err instanceof Error ? err.message : err);
+    }
+  }
 
   // Defense-in-depth guards on the delete, not just the flag:
   //  - role 'user' only — an unverified admin should be impossible, but a
@@ -316,7 +334,7 @@ export async function checkRegistrationSpike(): Promise<void> {
     await sendAdminAlert(alertTo, `Registration spike: ${lastHour} signups in the last hour`, [
       `${lastHour} accounts were registered in the last hour (threshold ${REGISTRATION_SPIKE_PER_HOUR}).`,
       'Review the admin dashboard registration panel: top registering IPs, unverified backlog.',
-      'If this is an attack: ban the source IPs/ranges, or flip the registration feature flag off.',
+      'If this is an attack: ban the source IPs (one address per ban), or flip the registration feature flag off.',
     ]);
   } catch (err) {
     console.error('[RegHygiene] Spike alert email failed:', describeEmailError(err));

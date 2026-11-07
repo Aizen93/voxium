@@ -24,20 +24,34 @@ import { roleRouter } from './routes/roles';
 import { secureChannelRouter } from './routes/secureChannels';
 import { themeRouter } from './routes/themes';
 import { e2eRouter } from './routes/e2e';
+import { discoveryRouter } from './routes/discovery';
+import { webhookExecuteRouter } from './routes/webhookExecute';
+import { webhookRouter } from './routes/webhooks';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
 import { trustsProxy, trustedProxyHops } from './utils/trustProxy';
+import { redactUrl } from './utils/redactUrl';
 
 export const app = express();
 
 // Enable trust proxy lazily (env vars not available at module scope due to import hoisting)
 let _trustProxySet = false;
+let _forwardedWithoutTrustWarned = false;
 app.use((req, _res, next) => {
   if (!_trustProxySet) {
     _trustProxySet = true;
     if (trustsProxy()) {
       req.app.set('trust proxy', trustedProxyHops());
     }
+  }
+  // A reverse proxy in front of a process that does not trust it: every
+  // caller IS the proxy's address — one rate-limit bucket, one IpBan key,
+  // one registration budget for the whole platform — and the symptom is
+  // "429 on the login page without doing anything". Said once, the first
+  // time a forwarded request shows it.
+  if (!_forwardedWithoutTrustWarned && !trustsProxy() && req.headers['x-forwarded-for'] !== undefined) {
+    _forwardedWithoutTrustWarned = true;
+    console.warn('[TrustProxy] Requests arrive with X-Forwarded-For but the proxy is not trusted (NODE_ENV is not production and TRUST_PROXY is not true): every client is rate-limited and ban-checked as ONE address, the proxy\'s. Behind a reverse proxy set TRUST_PROXY=true (and TRUST_PROXY_HOPS to the number of proxies).');
   }
   next();
 });
@@ -101,6 +115,9 @@ app.use(cors({
     }
   },
   credentials: true,
+  // Not CORS-safelisted: without this a cross-origin client (the desktop app,
+  // the dev server) never sees a 429's Retry-After and retries blind
+  exposedHeaders: ['Retry-After'],
   maxAge: 86400, // Cache preflight responses for 24 hours
 }));
 
@@ -119,13 +136,15 @@ let _morganHandler: express.RequestHandler | null = null;
 function getMorganHandler(): express.RequestHandler {
   if (!_morganHandler) {
     const fmt = process.env.LOG_FORMAT || (process.env.NODE_ENV === 'production' ? 'json' : 'dev');
+    // Every format prints the redacted URL (the 'dev' format too: LOG_FORMAT
+    // can select it in production, and a token on a terminal is still a token)
+    morgan.token<express.Request, express.Response>('url', (rq) => redactUrl(rq.originalUrl || rq.url));
     if (fmt === 'json') {
       morgan.token('body-size', (_rq, rs) => rs.getHeader('content-length') as string || '0');
-      // Invite codes are single-use bearer credentials — keep them out of
-      // durable access logs (tokens/reset codes travel in POST bodies, which
-      // morgan never captures; invite codes are the one credential in a URL)
-      const redactUrl = (url: string | undefined): string | undefined =>
-        url?.replace(/(\/invites\/)[^/?]+/, '$1[redacted]');
+      // Credentials in a URL stay out of durable access logs (utils/redactUrl.ts):
+      // invite codes (single-use bearer credentials) and incoming-webhook tokens
+      // (/api/v1/webhooks/:id/[redacted] — a bearer credential in a URL, like an
+      // invite code). Tokens/reset codes in POST bodies never reach morgan.
       _morganHandler = morgan((tokens, rq, rs) => JSON.stringify({
         ts: new Date().toISOString(),
         rid: rq.id,
@@ -147,6 +166,13 @@ app.use((req, res, next) => {
 });
 
 app.use(compression());
+// Incoming-webhook execute route (public, token in the URL). Mounted HERE, on
+// purpose: after morgan (logged, token redacted) and compression; BEFORE the
+// global 100 KB parser below, because it has its own 1 MB parser (GitHub push
+// payloads routinely exceed 100 KB); and OUTSIDE the api router, so not under
+// its per-IP rateLimitGeneral (GitHub's deliveries to every server share a
+// few egress addresses) — it brings its own per-IP and per-webhook limiters.
+app.use('/api/v1/webhooks', webhookExecuteRouter);
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
@@ -234,6 +260,10 @@ api.use('/admin', adminRouter);
 api.use('/support', supportRouter);
 api.use('/themes', themeRouter);
 api.use('/e2e', e2eRouter);
+api.use('/discovery', discoveryRouter);
+// Incoming-webhook MANAGEMENT (authenticated, MANAGE_WEBHOOKS); the public
+// execute endpoint is mounted above, outside this router.
+api.use('/servers/:serverId/webhooks', webhookRouter);
 
 app.use('/api/v1', api);
 

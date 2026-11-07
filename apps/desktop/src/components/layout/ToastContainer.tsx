@@ -1,4 +1,5 @@
 import { useToastStore } from '../../stores/toastStore';
+import { useTranslation } from 'react-i18next';
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react';
 
 const iconMap = {
@@ -16,6 +17,7 @@ const colorMap = {
 };
 
 export function ToastContainer() {
+  const { t } = useTranslation();
   const { toasts, removeToast } = useToastStore();
 
   if (toasts.length === 0) return null;
@@ -34,14 +36,14 @@ export function ToastContainer() {
       role="status"
       aria-live="polite"
     >
-      {toasts.map((t) => {
-        const Icon = iconMap[t.type];
-        const colors = colorMap[t.type];
+      {toasts.map((item) => {
+        const Icon = iconMap[item.type];
+        const colors = colorMap[item.type];
         const [barColor, textColor] = colors.split(' ');
 
         return (
           <div
-            key={t.id}
+            key={item.id}
             className="flex overflow-hidden rounded-lg border border-vox-border bg-vox-bg-floating shadow-lg animate-slide-in-right"
           >
             {/* Color accent bar */}
@@ -49,11 +51,11 @@ export function ToastContainer() {
 
             <div className="flex flex-1 items-start gap-2.5 px-3 py-2.5">
               <Icon size={16} className={`shrink-0 mt-0.5 ${textColor}`} />
-              <p className="flex-1 text-sm text-vox-text-primary">{t.message}</p>
+              <p className="flex-1 text-sm text-vox-text-primary">{item.message}</p>
               <button
-                onClick={() => removeToast(t.id)}
+                onClick={() => removeToast(item.id)}
                 className="shrink-0 text-vox-text-muted hover:text-vox-text-primary transition-colors"
-                aria-label="Dismiss"
+                aria-label={t('common.dismiss')}
               >
                 <X size={14} />
               </button>

@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { APIRequestContext, Page } from '@playwright/test';
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser, sendFriendRequest, acceptFriendRequest, API_URL } from './helpers/api';
@@ -30,10 +30,34 @@ async function openDMWith(page: Page, username: string) {
   await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });
 }
 
+/** Send from the composer and wait for the message ROW (not the composer:
+ *  React mirrors a textarea's value into its text content, so `getByText`
+ *  would match the unsent draft of a send the client dropped). */
 async function sendMessage(page: Page, text: string) {
   await page.locator('textarea').first().fill(text);
   await page.locator('textarea').first().press('Enter');
-  await expect(page.getByText(text).first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('p.leading-relaxed', { hasText: text }).first()).toBeVisible({ timeout: 15_000 });
+}
+
+/**
+ * A peer's page having LOADED does not mean its E2E device is PUBLISHED —
+ * engine init, the vault and the device-key upload land asynchronously after
+ * the socket connects. A send before that finds no device to encrypt to and
+ * is dropped silently (the composer keeps the text). Measured on a dev
+ * machine: the sender's badge is up at ~2.5 s, the peer's `PUT /e2e/devices`
+ * lands ~0.3 s later. Wait on the authoritative signal, as dm-flow.spec does.
+ */
+async function waitForPublishedDevice(request: APIRequestContext, viewerToken: string, userId: string) {
+  await expect
+    .poll(async () => {
+      const res = await request.get(`${API_URL}/e2e/devices/${userId}`, {
+        headers: { Authorization: `Bearer ${viewerToken}` },
+      });
+      if (!res.ok()) return 0;
+      const body = (await res.json()) as { data?: { devices?: unknown[] } };
+      return body.data?.devices?.length ?? 0;
+    }, { timeout: 30_000, message: `the E2E device of ${userId} was never published` })
+    .toBeGreaterThan(0);
 }
 
 /** The 60-digit safety number shown in the modal, as one string. */
@@ -98,10 +122,12 @@ test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quara
     await expect(page.locator('button[title="Enable end-to-end encryption"]')).toHaveCount(0);
 
     // ── 2. Encrypted messages flow both ways ──
+    // Not before B's device exists to encrypt to (see waitForPublishedDevice)
+    await waitForPublishedDevice(request, dataA.accessToken, dataB.user.id);
     const secretA = `top secret from A ${Date.now()}`;
     await page.locator('textarea').fill(secretA);
     await page.keyboard.press('Enter');
-    await expect(page.getByText(secretA).first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('p.leading-relaxed', { hasText: secretA }).first()).toBeVisible({ timeout: 10_000 });
 
     // B opens the conversation, sees the DECRYPTED text + badge
     await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
@@ -214,6 +240,7 @@ test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quara
 
     // A message is what puts the conversation in B's list now. Enabling
     // encryption used to do it, and there is nothing to enable any more.
+    await waitForPublishedDevice(request, dataA.accessToken, dataB.user.id);
     const beforeSecond = `sent before the second device ${Date.now()}`;
     await sendMessage(page, beforeSecond);
 
