@@ -19,7 +19,10 @@ crate-type = ["cdylib", "rlib"]
 # fixtures/vodozemac-0.10.0.json) must keep opening under the current pin.
 # Bump only after reviewing the changelog + RustSec advisories (see
 # .github/workflows/crypto-deps-watch.yml) and re-running that test.
-vodozemac = "=0.11.1"
+# 0.11.2 (reviewed 2026-11-07, RustSec 2026-0445 and 2026-0451): bug fixes only:
+# zeroize enabled on the RustCrypto crates, the Olm root-key ratchet output
+# zeroized, cipher keys expanded on the heap, no panic on a 31/33-byte key.
+vodozemac = "=0.11.2"
 # E2E attachment file encryption (AES-256-GCM). RustCrypto, same family as
 # vodozemac's own internals; keeps file crypto out of JS entirely.
 aes-gcm = "0.10"
