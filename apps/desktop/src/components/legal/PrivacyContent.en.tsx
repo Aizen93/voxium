@@ -1,4 +1,4 @@
-import { MINIMUM_AGE } from '@voxium/shared';
+import { MINIMUM_AGE, SIGNUP } from '@voxium/shared';
 import { LEGAL_OPERATOR, publisherOf } from './operator';
 import { MailLink } from './MailLink';
 
@@ -30,7 +30,7 @@ export function PrivacyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Privacy Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 25, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 30, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -41,6 +41,12 @@ export function PrivacyContentEn() {
               <strong className="text-vox-text-primary">Account information</strong>, username, email address (with a
               normalised copy of it, used only to stop one inbox from opening several accounts), and your password,
               stored hashed
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Sign-up data</strong>, while you register: the username,
+              email address, display name and password (hashed) you enter, the time you accepted the Terms of Service
+              and this Privacy Policy, and the IP address the sign-up came from. No account is created until you
+              enter the code we email to that address
             </li>
             <li>
               <strong className="text-vox-text-primary">Profile data</strong>, display name, avatar, bio and the
@@ -204,6 +210,17 @@ export function PrivacyContentEn() {
               our server logs, which record the IP address of each request, are rotated automatically and kept only
               for a short period
             </li>
+            <li>
+              <strong className="text-vox-text-primary">Sign-up attempts</strong> that are not completed expire{' '}
+              {SIGNUP.PENDING_TTL_MINUTES} minutes after they start and are then deleted by a daily clean-up; a
+              completed one becomes your account
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Sign-up email counts</strong> are kept to stop repeated
+              sign-up emails to one mailbox: a hashed form of the mailbox (never the address itself) and the number of
+              sign-up emails sent to it, kept for {SIGNUP.LEDGER_WINDOW_DAYS} days from the first of them, then
+              deleted by a daily clean-up
+            </li>
             <li><strong className="text-vox-text-primary">Accounts whose email is never verified</strong> are deleted 7 days after registration</li>
             <li>
               <strong className="text-vox-text-primary">Join requests</strong> to a space are deleted 30 days after
@@ -258,9 +275,13 @@ export function PrivacyContentEn() {
           </p>
           <ul className="list-disc list-inside space-y-1.5 ml-2">
             <li>
-              <strong className="text-vox-text-primary">Email.</strong> Account emails (address verification and
-              password reset) are sent through an email delivery provider, which receives your email address and the
-              message
+              <strong className="text-vox-text-primary">Email.</strong> Account emails (the sign-up code, address
+              verification for accounts created before sign-up codes, password reset, and a notice to the holder of
+              an address that already has an account when someone tries to sign up with it) are sent through an
+              email delivery provider, which receives your email address and the
+              message. Every such email carries a link that lets whoever receives it block all further email from
+              Voxium to that address; we then keep a hashed form of the address, from which it cannot be read back,
+              for as long as the block stands
             </li>
             <li>
               <strong className="text-vox-text-primary">App updates.</strong> When it starts, the desktop app asks

@@ -149,6 +149,7 @@ apps/server/
 │   │   └── stats.ts        # Public stats endpoint
 │   ├── services/
 │   │   ├── authService.ts  # Auth business logic
+│   │   ├── signupService.ts # Verify-first registration: start (pending row + mailed code), resend, complete (creates the account), expired-state purge
 │   │   └── totpService.ts  # TOTP 2FA (encrypted secrets, backup codes, replay protection)
 │   ├── middleware/
 │   │   ├── auth.ts         # JWT authentication middleware
@@ -176,7 +177,7 @@ apps/server/
 │       ├── email.ts             # Nodemailer transporter + password reset email + cleanup report email
 │       ├── attachmentCleanup.ts # Scheduled job (daily 4 AM) — expires attachments older than retention period, deletes from S3, emails report
 │       ├── orphanCleanup.ts    # Scheduled job (daily 5 AM) — deletes S3 objects nothing references, age-gated (7d) and leader-locked; backstop for delete paths that miss a blob
-│       ├── registrationHygiene.ts # Scheduled job (daily 4:30 AM) — deletes unverified accounts past the 7d TTL + IpRecords past 180d; leader-locked, records each run for the admin panel
+│       ├── registrationHygiene.ts # Scheduled job (daily 4:30 AM) — purges expired pending sign-ups and sign-up mail ledger rows first, then deletes unverified accounts past the 7d TTL + IpRecords past 180d; leader-locked, records each run for the admin panel
 │       ├── reactions.ts         # Shared reaction aggregation (channels + DMs)
 │       ├── mentions.ts          # @mention extraction, resolution, batch resolution (server members only)
 │       ├── memberBroadcast.ts   # Server room join + member event broadcast
@@ -861,7 +862,7 @@ erDiagram
     User ||--o{ E2EMessageKeyBackup : "has many"
 ```
 
-Not every table is drawn as a relation. `InfraServer` (the hosting locations an admin lists under `/admin/infra-servers`) stands alone. Four E2E tables (`E2EDeviceRegistry`, `E2EMasterKey`, `E2EKeyShare`, `E2EMasterTransfer`) hold user and device ids by value, with no foreign key: `purgeE2EMaterial()` (`utils/e2ePurge.ts`) deletes them explicitly when an account goes, and only ciphertext, public keys and sealed envelopes ever reach any of the E2E tables. `Report` likewise carries `channelId`, `conversationId` and `serverId` as plain ids, and keeps a copy of the reported text (`messageContent`).
+Not every table is drawn as a relation. `InfraServer` (the hosting locations an admin lists under `/admin/infra-servers`) stands alone, and so do the sign-up tables: `PendingRegistration` (`pending_registrations`: a registration waiting for its mailed code, with the bcrypt hash, the code's SHA-256 bound to the row id, the attempt and resend counters, the consent timestamps and the address the start came from; it lives `SIGNUP.PENDING_TTL_MINUTES`) and `SignupMailLedger` (`signup_mail_ledger`: per mailbox digest, the sign-up mails sent in the current `SIGNUP.LEDGER_WINDOW_DAYS` window) hold no account id, because no account exists until the code comes back; `MailSuppression` (`mail_suppressions`) holds only mailbox digests. Four E2E tables (`E2EDeviceRegistry`, `E2EMasterKey`, `E2EKeyShare`, `E2EMasterTransfer`) hold user and device ids by value, with no foreign key: `purgeE2EMaterial()` (`utils/e2ePurge.ts`) deletes them explicitly when an account goes, and only ciphertext, public keys and sealed envelopes ever reach any of the E2E tables. `Report` likewise carries `channelId`, `conversationId` and `serverId` as plain ids, and keeps a copy of the reported text (`messageContent`).
 
 ### Key Indexes
 
@@ -1272,7 +1273,9 @@ sequenceDiagram
     Server-->>Client: Fresh tokens (current session survives)
 ```
 
-### Email Verification Flow
+### Registration Flow (verify-first)
+
+No account exists until the mailed code comes back (`services/signupService.ts`). The start answers the same 202 for every address — new, already registered, blocked, on a capped or disposable domain, or out of sign-up mails — so the answer says nothing about the address; only a username already taken is refused at once (usernames are public). The account created at completion is verified from birth.
 
 ```mermaid
 sequenceDiagram
@@ -1281,14 +1284,49 @@ sequenceDiagram
     participant DB as Database
     participant Email as Email (SMTP)
 
-    Note over Client,Email: Registration
-    Client->>Server: POST /auth/register { username, email, password }
-    Server->>Server: Normalize email (lowercase + trim)
-    Server->>DB: Create user with emailVerified=false
-    Server->>Server: Generate crypto.randomBytes(32)
-    Server->>DB: Store SHA-256 hash + 24hr expiry
-    Server->>Email: Send raw token (fire-and-forget)
-    Server-->>Client: Auth tokens (authenticated but unverified)
+    Note over Client,Email: Start (creates no account)
+    Client->>Server: GET /auth/register-challenge
+    Server-->>Client: Proof-of-work challenge
+    Client->>Server: POST /auth/register { username, email, password, pow, acceptTerms, acceptPrivacy }
+    Server->>Server: Consent, proof-of-work, IP ban, username, bcrypt (on every branch)
+    Server->>DB: Insert pending_registrations row (code 15 min, row 60 min)
+    Server-->>Client: 202 { pendingId, resendAfterSeconds }
+    alt new address, and the mailbox's ledger has a slot
+        Server->>Email: 6-digit sign-up code (after the answer)
+    else the address has a verified account, and no sign-up mail went out this window
+        Server->>Email: "You already have an account" notice
+    else blocked mailbox, disposable or capped domain, ledger spent
+        Note right of Server: No mail
+    end
+
+    Note over Client,Email: Resend (once, 10 min after the first code)
+    Client->>Server: POST /auth/register/resend { pendingId }
+    Server-->>Client: 202 (always, before the row is read)
+    Server->>Email: New code, only for a row that mailed one and while the ledger allows
+
+    Note over Client,Email: Complete
+    Client->>Server: POST /auth/register/complete { pendingId, code, username? }
+    Server->>DB: attempts + 1, atomically (10 per row)
+    Server->>DB: Create user (emailVerified=true, consent timestamps) + delete the pending row
+    Server->>DB: IpRecord kind=register (the start's address)
+    Server-->>Client: 201 { user, accessToken, refreshToken }
+```
+
+- A wrong, expired or used-up code is one 400 (`Invalid or expired code`). A username taken in the meantime is a 409 that costs no attempt: the client asks for another name and sends the SAME code with it.
+- The mailbox ledger (`signup_mail_ledger`, keyed by the unkeyed SHA-256 of the mailbox) allows `SIGNUP.LEDGER_MAX_MAILS` (2) sign-up mails per `SIGNUP.LEDGER_WINDOW_DAYS` (30) days, codes and resends together; the existing-account notice goes out only on an otherwise empty window. A slot is claimed in one statement BEFORE the send and never given back.
+- The success budgets (`registerDaily`, `registerSubnet`) and the novel-domain count are charged at completion, where an account is created; the start is bounded by the never-refunded `registerAttempt` / `registerAttemptSubnet` pair.
+- The desktop client keeps a pending code step in memory while the user visits the sign-in or reset pages, so the mailed code still works when they come back; "Start over", a sign-in and logout drop it.
+
+### Email Verification Flow
+
+Accounts created by the verify-first registration are verified at creation. This flow serves the accounts that are not (created before it): they verify through a link, and stay gated until they do.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    participant DB as Database
+    participant Email as Email (SMTP)
 
     Note over Client,Email: Verify Email
     Client->>Server: POST /auth/verify-email { token }
@@ -1348,19 +1386,24 @@ nothing about a visitor leaves the infrastructure):
 
 ```mermaid
 flowchart TD
-    A[POST /auth/register] --> B{Rate limits<br/>5/min + 5/day per IP<br/>20/day per /24 subnet}
+    A[POST /auth/register] --> B{Rate limits<br/>5/min per IP<br/>30 attempts/day per IP<br/>300 per /24 subnet}
     B -->|over budget| R1[429]
     B --> C{Proof-of-work valid?<br/>HMAC challenge, single-use,<br/>difficulty scales with subnet pressure}
     C -->|missing/invalid/replayed| R2[400 generic]
     C --> D{IP banned?}
     D -->|banned| R3[403]
-    D --> E{Disposable domain?<br/>CANONICAL email taken?<br/>gmail dots/+tags collapsed}
-    E -->|either| R4[409 generic — same message,<br/>no oracle]
-    E --> F{Novel-domain budget?<br/>10/day per non-provider domain,<br/>consumed only on SUCCESS}
-    F -->|exhausted| R5[429]
-    F --> G[Create user +<br/>IpRecord kind=register]
-    G --> H[Verification mail<br/>max 5/day per canonical inbox]
-    H --> I[Unverified after 7 days?<br/>Daily sweep deletes the account]
+    D --> U{Username taken?}
+    U -->|taken| R4[409]
+    U --> P[Pending row + the same 202<br/>on every branch below]
+    P --> E{Disposable domain or<br/>blocked mailbox?}
+    E -->|yes| S[No mail]
+    E -->|no| F{CANONICAL email<br/>held by a verified account?<br/>gmail dots/+tags collapsed}
+    F -->|yes| N[Existing-account notice<br/>only on an otherwise empty ledger window]
+    F -->|no| G{Novel domain over 10/day,<br/>or 2 sign-up mails to this<br/>mailbox in 30 days already?}
+    G -->|yes| S
+    G -->|no| H[6-digit sign-up code]
+    H --> K[POST /auth/register/complete<br/>code right: create the verified user<br/>+ IpRecord kind=register,<br/>charge 5/day per IP, 20/day per /24<br/>and the domain count]
+    P --> X[Pending rows expire after 60 min;<br/>nightly sweep purges them and spent ledger windows]
 ```
 
 Key mechanisms:
@@ -1369,10 +1412,13 @@ Key mechanisms:
 |-----------|-----------------|
 | **Canonical email uniqueness** (`email_canonical`, unique) — lowercase everywhere; gmail-family additionally strips dots and `+tags` | One Gmail inbox minting unlimited "unique" addresses (`j.o.h.n+x@gmail.com` ≡ `john@gmail.com`) |
 | **Proof-of-work** — self-hosted, ALTCHA-style; server-enforced so direct-API scripts pay the same CPU as browsers; HMAC key derived from `JWT_SECRET` (cannot be unconfigured); base 16 bits, +2 per same-subnet registration that day (each step quadruples the work) | Off-the-shelf bot tooling; makes distributed campaigns pay per attempt. Known limit: a native SHA-256 solver is ~100× faster than browser WebCrypto — PoW raises cost, it does not make registration impossible |
-| **Long-window budgets** — 5/IP/day, 20 per /24 (IPv6 /48) per day, 10 per novel email domain per day (major consumer providers exempt; domain budget consumed only on successful create so garbage attempts cannot lock out a legitimate small-org domain) | Slow drips that slide under per-minute limits (one signup every 45 min = 32/day); catch-all domains that defeat the disposable blocklist |
+| **Verify-first registration** — the start creates no account, only a `pending_registrations` row, and answers the same 202 for every address; the account is created when the mailed 6-digit code comes back (10 attempts per row, code valid 15 minutes, row 60 minutes, one resend after 10 minutes) | An account exists only for someone who reads the mailbox; the start says nothing about whether an address is registered |
+| **Sign-up mail ledger** — `signup_mail_ledger`, per mailbox digest: 2 sign-up mails (codes and resends) per 30 days, and the existing-account notice only on an otherwise empty window; the slot is claimed before the send and never refunded | One mailbox receives a bounded number of sign-up mails, however many starts name it |
+| **Long-window budgets** — 5 accounts/IP/day, 20 per /24 (IPv6 /48) per day, charged at completion; 30 starts/IP/day and 300 per /24 (never refunded) bound the starts; 10 per novel email domain per day (major consumer providers exempt; counted only when an account is created, and a start for a domain over the cap mails nothing) | Slow drips that slide under per-minute limits (one signup every 45 min = 32/day); catch-all domains that defeat the disposable blocklist |
 | **IP attribution + bans at the door** — registration records an `IpRecord` with `kind: 'register'` (offline geoip, never a third-party lookup); `IpBan` is enforced at registration, login, and socket connect | Anonymous registration; banned sources re-registering |
 | **Mail caps per canonical inbox** — 5 verification + 5 password-reset sends per day, regardless of source IP or account; reset cap skips silently (that endpoint must answer identically for existing and unknown emails) | Drip-harassment of breached-list victims; SMTP reputation damage |
-| **Unverified-account TTL** — daily 4:30 AM sweep deletes accounts unverified after 7 days (guards: `role='user'`, no owned servers); the same sweep expires `IpRecord` rows unseen for 180 days (GDPR retention) | Bot harvests holding value; squatted usernames/emails; indefinite IP retention |
+| **Mail suppression list** — every account e-mail ends with "Not you? Block Voxium mail to this address"; one click on that link puts the MAILBOX (canonical form, `+tag` dropped for every domain) on `mail_suppressions`, stored as an unkeyed SHA-256 digest, never the address; every user-facing sender refuses a listed mailbox before the transport, and the same link allows mail again | Anyone can stop all Voxium account mail to their mailbox with one click, for good, whoever typed the address; one block covers every `+tag` spelling of that mailbox at every provider |
+| **Unverified-account TTL** — daily 4:30 AM sweep first purges expired pending sign-ups and ledger rows past their window, then deletes accounts unverified after 7 days (guards: `role='user'`, no owned servers); the same sweep expires `IpRecord` rows unseen for 180 days (GDPR retention). A completed sign-up replaces an unverified account on the same mailbox under the same guards | Bot harvests holding value; squatted usernames/emails; indefinite IP retention |
 | **Observability** — `/admin/registration-stats` + the Users-tab panel (signups/hour and /24h, unverified backlog, top registering IPs and email domains over 7 days); hourly spike check mails the operator at 30+ signups/hour (Redis-deduped, one sender across the cluster) | Waves progressing unnoticed; the ultimate backstop is operational — the `registration` feature flag is a live killswitch |
 
 All counters are Redis-backed under the `rl:` prefix (admin-tunable at runtime,
@@ -1663,7 +1709,10 @@ Voice occupancy (`voice:channel_users`) is replayed to a socket on connect and t
 ### Email System
 
 Nodemailer transporter (`utils/email.ts`) with configurable SMTP:
-- **Verification emails** (`sendVerificationEmail`) — HTML + plaintext with the verify link (`/verify-email/{token}`), 24hr expiry; sent fire-and-forget at registration and again on resend (the resend is capped per canonical inbox)
+- **Sign-up code emails** (`sendSignupCodeEmail`) — HTML + plaintext with the 6-digit code, 15 min expiry; sent after the registration start's answer and on its one resend, within the sign-up mail ledger
+- **Existing-account notices** (`sendSignupExistingAccountEmail`) — sent instead of a code when the address already has a verified account, once per ledger window
+- **Verification emails** (`sendVerificationEmail`) — HTML + plaintext with the verify link (`/verify-email/{token}`), 24hr expiry; sent on resend to an account not verified yet (capped per canonical inbox)
+- Every mail to a user-typed address goes through `sendUserMail`, which refuses a blocked mailbox and prints the block link
 - **Password reset emails** — HTML + plaintext with reset link, 1hr expiry
 - **Cleanup report emails** — HTML + plaintext summary table sent to `CLEANUP_REPORT_EMAIL` after each daily attachment cleanup run
 - **Admin alerts** (`sendAdminAlert`) — plain operational text to `CLEANUP_REPORT_EMAIL` (opt-in: unset means no alert); the hourly registration-spike check in `utils/registrationHygiene.ts` is the caller today, Redis-deduped so a sustained wave sends one alert per window across the cluster

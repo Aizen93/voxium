@@ -103,6 +103,11 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // without a deploy.
   registerAttemptSubnet:
                   { keyPrefix: 'rl:regattnet', points: 300, duration: 86400, blockDuration: 0, keyType: 'subnet',    label: 'Register (daily attempts per subnet)' },
+  // Verify-first registration: code submissions and resends per address. The
+  // per-pending-registration attempt cap (SIGNUP.MAX_CODE_ATTEMPTS) lives in the
+  // database; these bound one source across many pending ids.
+  registerComplete: { keyPrefix: 'rl:regdone', points: 30, duration: 900, blockDuration: 0, keyType: 'ip',     label: 'Register: submit code (per IP)' },
+  registerResend:   { keyPrefix: 'rl:regrsnd', points: 10, duration: 900, blockDuration: 0, keyType: 'ip',     label: 'Register: resend code (per IP)' },
   // Challenge minting is stateless (HMAC) so it is cheap to serve, but a
   // limit keeps a hostile client from turning the endpoint into a hash-mint
   // treadmill. Generous: a legit flow needs exactly one per registration.
@@ -177,6 +182,11 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // so this only bounds lookups — 5 per quarter hour and a 5-minute block
   // refused the sixth colleague verifying from one office.
   verifyEmail:        { keyPrefix: 'rl:vfyeml', points: 20, duration: 900, blockDuration: 0,  keyType: 'ip',     label: 'Verify Email' },
+  // The mail-block page (`/auth/mail-block*`): unauthenticated, reached from a
+  // link in an e-mail, three cheap calls per visit (status, block, allow). Per
+  // address like `verifyEmail`, no block: the token is the credential, this
+  // only keeps a scripted caller from hammering the lookup.
+  mailBlock:          { keyPrefix: 'rl:mailblk', points: 20, duration: 900, blockDuration: 0,  keyType: 'ip',     label: 'Mail block link' },
   resendVerification: { keyPrefix: 'rl:verify', points: 3, duration: 300, blockDuration: 300, keyType: 'userId', label: 'Resend Verification' },
   markRead:       { keyPrefix: 'rl:markread',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Mark Read' },
   roleManage:     { keyPrefix: 'rl:role',      points: 20,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Role Manage' },
@@ -928,6 +938,8 @@ export const rateLimitDmOpen = createMiddleware('dmOpen', byUserId);
 export const rateLimitAttachmentRead = createMiddleware('attachmentRead', byIp);
 export const rateLimitRegisterAttempt = createMiddleware('registerAttempt', byIp);
 export const rateLimitRegisterAttemptSubnet = createMiddleware('registerAttemptSubnet', bySubnet);
+export const rateLimitRegisterComplete = createMiddleware('registerComplete', byIp);
+export const rateLimitRegisterResend = createMiddleware('registerResend', byIp);
 export const rateLimitPowChallenge = createMiddleware('powChallenge', byIp);
 export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
 export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);
@@ -951,6 +963,7 @@ export const rateLimitReport = createMiddleware('report', byUserId);
 export const rateLimitSupport = createMiddleware('support', byUserId);
 export const rateLimitTOTP = createMiddleware('totp', byUserId);
 export const rateLimitVerifyEmail = createMiddleware('verifyEmail', byIp);
+export const rateLimitMailBlock = createMiddleware('mailBlock', byIp);
 export const rateLimitResendVerification = createMiddleware('resendVerification', byUserId);
 export const rateLimitMarkRead = createMiddleware('markRead', byUserId);
 export const rateLimitRoleManage = createMiddleware('roleManage', byUserId);

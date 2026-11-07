@@ -507,7 +507,7 @@ curl http://localhost:3001/health
 
 ### Register a User
 
-Registration cannot be done with a single `curl`: `POST /api/v1/auth/register` requires a solved proof-of-work (`GET /api/v1/auth/register-challenge`, solved with `solveRegistrationPow` from `@voxium/shared`) and explicit `acceptTerms: true` / `acceptPrivacy: true` consent, and a new account must verify its email before it can use the API. Register through the app, or log in with a seeded demo account as below.
+Registration cannot be done with a single `curl`: `POST /api/v1/auth/register` requires a solved proof-of-work (`GET /api/v1/auth/register-challenge`, solved with `solveRegistrationPow` from `@voxium/shared`) and explicit `acceptTerms: true` / `acceptPrivacy: true` consent, and it creates no account: it answers `202` with a `pendingId`, and the account is created by `POST /api/v1/auth/register/complete` with the 6-digit code mailed to the address. Register through the app, or log in with a seeded demo account as below.
 
 ### Login
 ```bash

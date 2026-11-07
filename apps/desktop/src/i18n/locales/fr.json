@@ -79,7 +79,27 @@
       "signIn": "Se connecter",
       "passwordWeak": "Mot de passe faible",
       "passwordMedium": "Force moyenne",
-      "passwordStrong": "Mot de passe fort"
+      "passwordStrong": "Mot de passe fort",
+      "code": {
+        "title": "Consultez votre boîte de réception",
+        "sentTo": "Nous avons envoyé un code à {{length}} chiffres à {{email}}. Il expire dans {{minutes}} minutes.",
+        "codeLabel": "Code d’inscription",
+        "submit": "Vérifier et créer le compte",
+        "verifying": "Vérification…",
+        "resend": "Envoyer un nouveau code",
+        "resendIn": "Vous pourrez demander un nouveau code dans {{time}}.",
+        "resent": "Nous avons demandé un nouveau code. Quand il arrive, utilisez-le à la place du précédent.",
+        "resendFailed": "Impossible de demander un nouveau code. Réessayez dans un instant.",
+        "usernameLabel": "Nouveau nom d’utilisateur",
+        "usernameTakenHint": "Ce nom d’utilisateur a été pris entre-temps. Choisissez-en un autre : votre code reste valable.",
+        "haveAccount": "Si vous avez déjà un compte, connectez-vous ou réinitialisez votre mot de passe.",
+        "signIn": "Se connecter",
+        "resetPassword": "Réinitialiser le mot de passe",
+        "spamHint": "Toujours rien ? Vérifiez votre dossier de spam ou de courrier indésirable.",
+        "startOver": "Recommencer",
+        "startOverWarning": "Recommencer envoie un nouveau code. Une adresse reçoit au plus {{mails}} e-mails d’inscription en {{days}} jours : le code déjà envoyé est en général celui à utiliser.",
+        "startOverConfirm": "Recommencer quand même"
+      }
     },
     "totp": {
       "title": "Authentification à deux facteurs",
@@ -125,7 +145,25 @@
       "goToLogin": "Aller à la connexion",
       "goBack": "Retour",
       "missingToken": "Jeton de vérification manquant.",
-      "failed": "La vérification a échoué. Le lien est peut-être invalide ou expiré."
+      "failed": "La vérification a échoué. Le lien est peut-être invalide ou expiré.",
+      "prompt": "Confirmez cette adresse e-mail pour votre compte Voxium.",
+      "verifyButton": "Vérifier mon e-mail"
+    },
+    "mailBlock": {
+      "title": "E-mails de Voxium à cette adresse",
+      "checking": "Vérification du lien…",
+      "intro": "Si vous n'avez pas créé de compte Voxium ni demandé de réinitialisation de mot de passe, quelqu'un d'autre a saisi votre adresse. Un clic suffit pour que Voxium n'envoie plus aucun e-mail à cette adresse.",
+      "block": "Bloquer les e-mails de Voxium à cette adresse",
+      "blockedIntro": "Voxium n'envoie plus d'e-mails à cette adresse.",
+      "allow": "Autoriser de nouveau les e-mails de Voxium",
+      "working": "Enregistrement…",
+      "blockedDone": "C'est fait. Cette adresse ne recevra plus aucun e-mail de Voxium. Vous pourrez les autoriser de nouveau depuis cette page à tout moment.",
+      "allowedDone": "Les e-mails de Voxium à cette adresse sont de nouveau autorisés.",
+      "note": "Cela ne concerne que les e-mails de compte envoyés par Voxium (codes d’inscription, vérification de l’adresse, réinitialisation du mot de passe et avis concernant le compte). Aucun compte n’est créé ni supprimé.",
+      "invalidLink": "Ce lien est invalide ou a expiré. Utilisez le lien d'un e-mail Voxium plus récent.",
+      "failed": "Une erreur s'est produite. Veuillez réessayer.",
+      "retry": "Réessayer",
+      "home": "Retour à Voxium"
     },
     "consent": {
       "title": "Avant de continuer",
@@ -1319,7 +1357,7 @@
     "invalidTwoFactorCode": "Code d'authentification à deux facteurs invalide",
     "emailAlreadyVerified": "Votre adresse e-mail est déjà vérifiée",
     "tooManyVerificationEmails": "Trop d'e-mails de vérification demandés — réessayez demain",
-    "tooManyDomainRegistrations": "Trop d'inscriptions depuis ce domaine e-mail aujourd'hui — réessayez plus tard",
+    "mailBlocked": "Les e-mails à cette adresse sont bloqués — utilisez le lien d'un e-mail Voxium précédent pour les autoriser de nouveau",
     "registrationChallengeInvalid": "La vérification d'inscription est invalide ou a expiré — actualisez la page et réessayez",
     "powExpired": "La vérification d'inscription a pris trop de temps — veuillez réessayer",
     "powUnavailable": "Ce navigateur ne peut pas effectuer la vérification d'inscription (WebCrypto indisponible)",
@@ -1447,7 +1485,10 @@
     "screenShareTaken": "Quelqu'un d'autre partage déjà son écran dans ce salon",
     "noPermissionSpeak": "Vous n'avez pas l'autorisation de parler dans ce salon",
     "searchQueryTooShort": "La recherche doit contenir au moins {{min}} caractères",
-    "searchQueryTooLong": "La recherche doit contenir au plus {{max}} caractères"
+    "searchQueryTooLong": "La recherche doit contenir au plus {{max}} caractères",
+    "usernameTaken": "Ce nom d’utilisateur est déjà pris",
+    "signupCodeInvalid": "Code invalide ou expiré",
+    "signupEmailRegistered": "Cette adresse e-mail a déjà un compte. Connectez-vous plutôt."
   },
   "e2e": {
     "badgeTitle": "Chiffré de bout en bout — voir le numéro de sécurité",

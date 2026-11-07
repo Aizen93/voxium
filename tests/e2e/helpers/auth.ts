@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { verifyUserEmailByEmail } from './db';
+import { setLatestPendingRegistrationCodeForEmail, TEST_SIGNUP_CODE } from './db';
 
 /** Unique suffix for test isolation — avoids collisions across runs. */
 export function uniqueId() {
@@ -16,42 +16,52 @@ export function testUser(prefix = 'user') {
   };
 }
 
-/** Register via the UI. Auto-verifies email and reloads so the user lands in the main layout. */
+/** The code step's input (shown once the server accepted the registration form). */
+export function signupCodeInput(page: Page) {
+  return page.getByLabel('Sign-up code', { exact: true });
+}
+
+/**
+ * Fill and submit the registration form, then wait for the code step: the
+ * server answered 202 and nothing exists yet but a pending registration.
+ */
+export async function startRegistrationViaUI(
+  page: Page,
+  user: { username: string; email: string; password: string },
+) {
+  await page.goto('/register');
+  await page.getByPlaceholder('Pick a username').fill(user.username);
+  await page.getByPlaceholder('you@example.com').fill(user.email);
+  await page.getByPlaceholder('At least 8 characters').fill(user.password);
+  await page.getByLabel(/Terms of Service/).check();
+  await page.getByLabel(/Privacy Policy/).check();
+  await page.getByRole('button', { name: 'Create Account' }).click();
+  await signupCodeInput(page).waitFor({ timeout: 15_000 });
+}
+
+/**
+ * On the code step: make the known test code the valid one for this address
+ * (the pending id never reaches the UI, so the newest pending row for the
+ * e-mail), type it and submit.
+ */
+export async function submitKnownSignupCode(page: Page, email: string) {
+  await setLatestPendingRegistrationCodeForEmail(email, TEST_SIGNUP_CODE);
+  await signupCodeInput(page).fill(TEST_SIGNUP_CODE);
+  await page.getByRole('button', { name: 'Verify and create account' }).click();
+}
+
+/**
+ * Register via the UI: the form, the code step with the known code, then the
+ * main layout (the account is created verified, so no verification gate).
+ */
 export async function registerViaUI(
   page: Page,
   user: { username: string; email: string; password: string },
 ) {
-  await page.goto('/register');
-  await page.getByPlaceholder('Pick a username').fill(user.username);
-  await page.getByPlaceholder('you@example.com').fill(user.email);
-  await page.getByPlaceholder('At least 8 characters').fill(user.password);
-  await page.getByLabel(/Terms of Service/).check();
-  await page.getByLabel(/Privacy Policy/).check();
-  await page.getByRole('button', { name: 'Create Account' }).click();
-  // Unverified users land on the verification pending page
+  await startRegistrationViaUI(page, user);
+  await submitKnownSignupCode(page, user.email);
   await page.waitForURL('/', { timeout: 15_000 });
-
-  // Auto-verify email in DB so the test can proceed to the main layout
-  await verifyUserEmailByEmail(user.email);
-  await page.reload();
-  await page.waitForURL('/', { timeout: 15_000 });
-  // Wait for main layout to confirm we're past the verification gate
   await page.getByRole('heading', { name: 'Direct Messages' }).first().waitFor({ timeout: 10_000 });
-}
-
-/** Register via the UI WITHOUT auto-verifying. User lands on the verification pending page. */
-export async function registerViaUIUnverified(
-  page: Page,
-  user: { username: string; email: string; password: string },
-) {
-  await page.goto('/register');
-  await page.getByPlaceholder('Pick a username').fill(user.username);
-  await page.getByPlaceholder('you@example.com').fill(user.email);
-  await page.getByPlaceholder('At least 8 characters').fill(user.password);
-  await page.getByLabel(/Terms of Service/).check();
-  await page.getByLabel(/Privacy Policy/).check();
-  await page.getByRole('button', { name: 'Create Account' }).click();
-  await page.waitForURL('/', { timeout: 15_000 });
 }
 
 /** Login via the UI. Waits for the main layout to appear. */

@@ -79,7 +79,27 @@
       "signIn": "サインイン",
       "passwordWeak": "弱いパスワード",
       "passwordMedium": "普通の強度",
-      "passwordStrong": "強いパスワード"
+      "passwordStrong": "強いパスワード",
+      "code": {
+        "title": "受信トレイを確認してください",
+        "sentTo": "{{length}} 桁のコードを {{email}} に送信しました。有効期限は {{minutes}} 分です。",
+        "codeLabel": "登録コード",
+        "submit": "確認してアカウントを作成",
+        "verifying": "確認中…",
+        "resend": "新しいコードを送信",
+        "resendIn": "{{time}} 後に新しいコードをリクエストできます。",
+        "resent": "新しいコードをリクエストしました。届いたら、前のコードの代わりにそちらを使ってください。",
+        "resendFailed": "新しいコードをリクエストできませんでした。しばらくしてからもう一度お試しください。",
+        "usernameLabel": "新しいユーザー名",
+        "usernameTakenHint": "そのユーザー名はその間に使われてしまいました。別の名前を選んでください。コードはそのまま使えます。",
+        "haveAccount": "すでにアカウントをお持ちの場合は、ログインするかパスワードをリセットしてください。",
+        "signIn": "ログイン",
+        "resetPassword": "パスワードをリセット",
+        "spamHint": "まだ届きませんか？迷惑メールフォルダを確認してください。",
+        "startOver": "最初からやり直す",
+        "startOverWarning": "最初からやり直すと新しいコードが送信されます。1 つのアドレスが受け取れる登録メールは {{days}} 日間で最大 {{mails}} 通のため、通常はすでに届いたコードを使ってください。",
+        "startOverConfirm": "それでもやり直す"
+      }
     },
     "totp": {
       "title": "二要素認証",
@@ -125,7 +145,25 @@
       "goToLogin": "ログインへ",
       "goBack": "戻る",
       "missingToken": "認証トークンがありません。",
-      "failed": "認証に失敗しました。リンクが無効または期限切れの可能性があります。"
+      "failed": "認証に失敗しました。リンクが無効または期限切れの可能性があります。",
+      "prompt": "Voxium アカウントのこのメールアドレスを確認してください。",
+      "verifyButton": "メールアドレスを確認"
+    },
+    "mailBlock": {
+      "title": "このアドレスへの Voxium からのメール",
+      "checking": "リンクを確認しています…",
+      "intro": "Voxium のアカウントを作成しておらず、パスワードの再設定も申請していない場合、他の誰かがあなたのアドレスを入力しました。ワンクリックで、このアドレスへの Voxium からのメールをすべて止められます。",
+      "block": "このアドレスへの Voxium のメールをブロック",
+      "blockedIntro": "Voxium はこのアドレスにメールを送信しなくなりました。",
+      "allow": "Voxium のメールを再び許可",
+      "working": "保存中…",
+      "blockedDone": "完了しました。このアドレスには Voxium からのメールが届かなくなります。このページからいつでも再び許可できます。",
+      "allowedDone": "このアドレスへの Voxium からのメールは再び許可されました。",
+      "note": "対象は Voxium が送信するアカウント関連のメール（登録コード、アドレスの確認、パスワードの再設定、アカウントに関するお知らせ）のみです。アカウントが作成または削除されることはありません。",
+      "invalidLink": "このリンクは無効か、期限が切れています。より新しい Voxium のメールのリンクを使用してください。",
+      "failed": "問題が発生しました。もう一度お試しください。",
+      "retry": "もう一度試す",
+      "home": "Voxium に戻る"
     },
     "consent": {
       "title": "続行する前に",
@@ -1317,7 +1355,7 @@
     "invalidTwoFactorCode": "2段階認証コードが無効です",
     "emailAlreadyVerified": "メールアドレスは確認済みです",
     "tooManyVerificationEmails": "確認メールのリクエストが多すぎます — 明日もう一度お試しください",
-    "tooManyDomainRegistrations": "本日はこのメールドメインからの登録が多すぎます — 後でもう一度お試しください",
+    "mailBlocked": "このアドレスへのメールはブロックされています — 再び許可するには、以前の Voxium のメールにあるリンクを使用してください",
     "registrationChallengeInvalid": "登録チェックが無効か期限切れです — 再読み込みしてもう一度お試しください",
     "powExpired": "登録チェックに時間がかかりすぎました — もう一度お試しください",
     "powUnavailable": "このブラウザーでは登録チェックを実行できません（WebCrypto を利用できません）",
@@ -1445,7 +1483,10 @@
     "screenShareTaken": "このチャンネルでは別の人がすでに共有しています",
     "noPermissionSpeak": "このチャンネルで発言する権限がありません",
     "searchQueryTooShort": "検索語は {{min}} 文字以上にしてください",
-    "searchQueryTooLong": "検索語は {{max}} 文字以内にしてください"
+    "searchQueryTooLong": "検索語は {{max}} 文字以内にしてください",
+    "usernameTaken": "このユーザー名はすでに使われています",
+    "signupCodeInvalid": "コードが無効か、有効期限が切れています",
+    "signupEmailRegistered": "このメールアドレスにはすでにアカウントがあります。代わりにログインしてください。"
   },
   "e2e": {
     "badgeTitle": "エンドツーエンド暗号化済み — 安全番号を表示",

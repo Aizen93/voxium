@@ -14,7 +14,7 @@ process.env.JWT_REFRESH_SECRET = JWT_REFRESH_SECRET;
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
-const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, passthroughMiddleware } = vi.hoisted(() => {
+const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockPrismaMailSuppression, mockRedisClient, passthroughMiddleware } = vi.hoisted(() => {
   const mockPrismaUser = {
     findUnique: vi.fn(),
     findFirst: vi.fn(),
@@ -25,6 +25,12 @@ const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, pa
 
   const mockPrismaIpBan = {
     findUnique: vi.fn(),
+  };
+
+  const mockPrismaMailSuppression = {
+    findUnique: vi.fn(),
+    upsert: vi.fn(),
+    deleteMany: vi.fn(),
   };
 
   const mockPrismaIpRecord = {
@@ -53,7 +59,7 @@ const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, pa
 
   const passthroughMiddleware = (_req: unknown, _res: unknown, next: () => void) => next();
 
-  return { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockRedisClient, passthroughMiddleware };
+  return { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockPrismaMailSuppression, mockRedisClient, passthroughMiddleware };
 });
 
 // Mock Prisma — must be declared before app import
@@ -62,6 +68,7 @@ vi.mock('../../utils/prisma', () => ({
     user: mockPrismaUser,
     ipBan: mockPrismaIpBan,
     ipRecord: mockPrismaIpRecord,
+    mailSuppression: mockPrismaMailSuppression,
     $queryRaw: vi.fn().mockResolvedValue([{ result: 1 }]),
   },
 }));
@@ -83,6 +90,7 @@ vi.mock('../../utils/redis', () => ({
 vi.mock('../../utils/email', () => ({
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
+  MailSuppressedError: class MailSuppressedError extends Error {},
 }));
 
 // Mock feature flags
@@ -131,11 +139,28 @@ vi.mock('../../routes/support', () => ({ supportRouter: Router() }));
 vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 
 // Mock rate limiters — pass through all requests for most tests
+// The registration limiters are spies, so each route's chain can be observed.
+const {
+  rateLimitRegisterMock, rateLimitRegisterAttemptMock, rateLimitRegisterAttemptSubnetMock,
+  rateLimitRegisterCompleteMock, rateLimitRegisterResendMock, chargeRegistrationBudgetsMock,
+} = vi.hoisted(() => {
+  const spy = () => vi.fn((_req: unknown, _res: unknown, next: () => void) => next());
+  return {
+    rateLimitRegisterMock: spy(),
+    rateLimitRegisterAttemptMock: spy(),
+    rateLimitRegisterAttemptSubnetMock: spy(),
+    rateLimitRegisterCompleteMock: spy(),
+    rateLimitRegisterResendMock: spy(),
+    chargeRegistrationBudgetsMock: spy(),
+  };
+});
 vi.mock('../../middleware/rateLimiter', () => ({
-  rateLimitRegister: passthroughMiddleware,
-  rateLimitRegisterAttempt: passthroughMiddleware,
-  rateLimitRegisterAttemptSubnet: passthroughMiddleware,
-  chargeRegistrationBudgets: passthroughMiddleware,
+  rateLimitRegister: rateLimitRegisterMock,
+  rateLimitRegisterAttempt: rateLimitRegisterAttemptMock,
+  rateLimitRegisterAttemptSubnet: rateLimitRegisterAttemptSubnetMock,
+  rateLimitRegisterComplete: rateLimitRegisterCompleteMock,
+  rateLimitRegisterResend: rateLimitRegisterResendMock,
+  chargeRegistrationBudgets: chargeRegistrationBudgetsMock,
   rateLimitPowChallenge: passthroughMiddleware,
   normalizeIp: (ip: string) => (ip.startsWith('::ffff:') ? ip.slice(7) : ip),
   subnetOf: (ip: string) => ip,
@@ -154,6 +179,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitChangePassword: passthroughMiddleware,
   rateLimitTOTP: passthroughMiddleware,
   rateLimitVerifyEmail: passthroughMiddleware,
+  rateLimitMailBlock: passthroughMiddleware,
   rateLimitResendVerification: passthroughMiddleware,
   rateLimitConsent: passthroughMiddleware,
   rateLimitDeleteAccount: passthroughMiddleware,
@@ -201,8 +227,24 @@ vi.mock('../../utils/registrationPow', () => ({
   verifyRegistrationPow: mockVerifyPow,
 }));
 
+// Verify-first registration: the service is mocked, the routes are under test
+const { startRegistrationMock, completeRegistrationMock, resendRegistrationCodeMock } = vi.hoisted(() => ({
+  startRegistrationMock: vi.fn(),
+  completeRegistrationMock: vi.fn(),
+  resendRegistrationCodeMock: vi.fn(),
+}));
+vi.mock('../../services/signupService', () => ({
+  startRegistration: (...a: unknown[]) => startRegistrationMock(...a),
+  completeRegistration: (...a: unknown[]) => completeRegistrationMock(...a),
+  resendRegistrationCode: (...a: unknown[]) => resendRegistrationCodeMock(...a),
+  purgeExpiredSignupState: vi.fn().mockResolvedValue({ pending: 0, ledger: 0 }),
+}));
+
 // Now import the app (after all mocks are set up)
 import { app } from '../../app';
+import { isFeatureEnabled } from '../../utils/featureFlags';
+import { BadRequestError, ConflictError, ForbiddenError } from '../../utils/errors';
+import { SIGNUP, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE } from '@voxium/shared';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -274,14 +316,40 @@ describe('GET /api/v1/auth/register-challenge', () => {
   });
 });
 
+// ─── Verify-first registration (services/signupService.ts, mocked here) ──────
+// The service has its own suite (signupService.test.ts); these tests observe
+// what the ROUTES decide: the gates, their order, the limiters on each route,
+// the status codes and the exact shapes.
+
+const START_BODY = {
+  username: 'testuser',
+  email: 'test@example.com',
+  password: 'password123',
+  acceptTerms: true,
+  acceptPrivacy: true,
+};
+const START_RESULT = { pendingId: 'p'.repeat(22), resendAfterSeconds: SIGNUP.RESEND_AFTER_SECONDS };
+
+/** Only the registration flag is turned off: other middleware may read other flags. */
+function registrationDisabled() {
+  vi.mocked(isFeatureEnabled).mockImplementation((name: string) => name !== 'registration');
+}
+
+const order = (fn: { mock: { invocationCallOrder: number[] } }) => fn.mock.invocationCallOrder[0];
+
+beforeEach(() => {
+  vi.mocked(isFeatureEnabled).mockImplementation(() => true);
+  startRegistrationMock.mockReset().mockResolvedValue(START_RESULT);
+  completeRegistrationMock.mockReset();
+  resendRegistrationCodeMock.mockReset().mockImplementation(async (pendingId: string) => ({
+    pendingId, resendAfterSeconds: SIGNUP.RESEND_AFTER_SECONDS,
+  }));
+});
+
 describe('POST /api/v1/auth/register — consent (CNIL/GDPR)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockPrismaUser.findFirst.mockResolvedValue(null);
-    mockPrismaUser.create.mockResolvedValue({ ...MOCK_USER });
   });
-
-  const body = { username: 'testuser', email: 'test@example.com', password: 'password123' };
 
   it.each([
     ['no consent at all', {}],
@@ -289,32 +357,29 @@ describe('POST /api/v1/auth/register — consent (CNIL/GDPR)', () => {
     ['privacy only', { acceptPrivacy: true }],
     ['a truthy string is not acceptance', { acceptTerms: 'true', acceptPrivacy: 'true' }],
     ['explicit refusal', { acceptTerms: true, acceptPrivacy: false }],
-  ])('refuses to register with %s', async (_label, consent) => {
+  ])('refuses to start a registration with %s', async (_label, consent) => {
+    const { acceptTerms: _t, acceptPrivacy: _p, ...body } = START_BODY;
     const res = await request(app)
       .post('/api/v1/auth/register')
       .send({ ...body, ...consent });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/accept the (Terms of Service|Privacy Policy)/);
-    expect(mockPrismaUser.create).not.toHaveBeenCalled();
+    expect(startRegistrationMock).not.toHaveBeenCalled();
     // Refused with the other cheap validations, BEFORE the proof-of-work is
     // verified — a verify burns the challenge, and the client only refetches
     // one on expiry
     expect(mockVerifyPow).not.toHaveBeenCalled();
   });
 
-  it('records WHEN each document was accepted, not just that it was', async () => {
-    const before = Date.now();
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({ ...body, acceptTerms: true, acceptPrivacy: true });
+  it('hands both acceptances to the service as the literal booleans it records', async () => {
+    const res = await request(app).post('/api/v1/auth/register').send(START_BODY);
 
-    expect(res.status).toBe(201);
-    const data = mockPrismaUser.create.mock.calls[0][0].data;
-    expect(data.termsAcceptedAt).toBeInstanceOf(Date);
-    expect(data.privacyAcceptedAt).toBeInstanceOf(Date);
-    expect(data.termsAcceptedAt.getTime()).toBeGreaterThanOrEqual(before);
-    expect(data.privacyAcceptedAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(res.status).toBe(202);
+    expect(startRegistrationMock).toHaveBeenCalledWith(
+      'testuser', 'test@example.com', 'password123', undefined, expect.any(String),
+      { acceptTerms: true, acceptPrivacy: true },
+    );
   });
 });
 
@@ -323,218 +388,261 @@ describe('POST /api/v1/auth/register — proof-of-work gate', () => {
     vi.clearAllMocks();
   });
 
-  it('verifies the PoW BEFORE creating anything — a failed solve never reaches the service', async () => {
-    mockVerifyPow.mockRejectedValueOnce(Object.assign(new Error('Registration challenge is invalid or expired — refresh and try again'), { statusCode: 400 }));
+  it('verifies the PoW BEFORE the service runs — a failed solve never reaches it', async () => {
+    mockVerifyPow.mockRejectedValueOnce(new BadRequestError('Registration challenge is invalid or expired — refresh and try again'));
 
     const res = await request(app)
       .post('/api/v1/auth/register')
-      .send({ username: 'bot', email: 'bot@example.com', password: 'ValidPass123', acceptTerms: true, acceptPrivacy: true });
+      .send({ ...START_BODY, username: 'bot', email: 'bot@example.com' });
 
     expect(mockVerifyPow).toHaveBeenCalled();
-    expect(mockPrismaUser.create).not.toHaveBeenCalled();
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(startRegistrationMock).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Registration challenge is invalid or expired — refresh and try again');
+  });
+
+  it('verifies the submitted solution against the caller\'s normalized address', async () => {
+    const pow = { challenge: 'c'.repeat(32), difficulty: 4, expires: 4102444800000, sig: 's'.repeat(64), nonce: '42' };
+    await request(app).post('/api/v1/auth/register').send({ ...START_BODY, pow });
+
+    expect(mockVerifyPow).toHaveBeenCalledWith(expect.any(String), pow);
+    expect(mockVerifyPow.mock.calls[0][0]).not.toMatch(/^::ffff:/i);
+    expect(order(mockVerifyPow)).toBeLessThan(order(startRegistrationMock));
+  });
+
+  it.each([
+    ['a missing username', { username: undefined }, 'Username is required'],
+    ['a missing email', { email: undefined }, 'Email is required'],
+    ['a missing password', { password: undefined }, 'Password is required'],
+    ['a non-string username', { username: ['testuser'] }, 'Username is required'],
+    ['a non-string display name', { displayName: { html: '<b>x</b>' } }, 'Display name must be a string'],
+  ])('refuses %s with a 400 before the PoW is verified', async (_label, patch, message) => {
+    const res = await request(app).post('/api/v1/auth/register').send({ ...START_BODY, ...patch });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: message });
+    expect(mockVerifyPow).not.toHaveBeenCalled();
+    expect(startRegistrationMock).not.toHaveBeenCalled();
   });
 });
 
-describe('POST /api/v1/auth/register', () => {
+describe('POST /api/v1/auth/register — the start of a verify-first registration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('returns 201 with user and tokens on success', async () => {
-    mockPrismaUser.findFirst.mockResolvedValue(null); // no duplicate
-    mockPrismaUser.create.mockResolvedValue({ ...MOCK_USER });
+  it('answers 202 with the pending id and the resend delay, and NO account or tokens', async () => {
+    const res = await request(app).post('/api/v1/auth/register').send({ ...START_BODY, displayName: 'Tester' });
 
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'testuser',
-        email: 'test@example.com',
-        password: 'password123',
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(201);
-    expect(res.body.success).toBe(true);
-    expect(res.body.data).toHaveProperty('user');
-    expect(res.body.data).toHaveProperty('accessToken');
-    expect(res.body.data).toHaveProperty('refreshToken');
-    expect(res.body.data.user.username).toBe('testuser');
-    // tokenVersion must NOT be exposed in the response
-    expect(res.body.data.user).not.toHaveProperty('tokenVersion');
-  });
-
-  it('rejects duplicate email/username with generic error (enumeration prevention)', async () => {
-    mockPrismaUser.findFirst.mockResolvedValue({ id: 'existing-user' }); // duplicate found
-
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'testuser',
-        email: 'test@example.com',
-        password: 'password123',
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(409);
-    expect(res.body.success).toBe(false);
-    // Must say "Username or email" not which specific field
-    expect(res.body.error).toBe('Username or email already in use');
-  });
-
-  it('rejects missing username', async () => {
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        email: 'test@example.com',
-        password: 'password123',
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.success).toBe(false);
-    expect(res.body.error).toBe('Username is required');
-  });
-
-  it('rejects missing email', async () => {
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'testuser',
-        password: 'password123',
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.success).toBe(false);
-    expect(res.body.error).toBe('Email is required');
-  });
-
-  it('rejects missing password', async () => {
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'testuser',
-        email: 'test@example.com',
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.success).toBe(false);
-    expect(res.body.error).toBe('Password is required');
-  });
-
-  it('rejects password longer than 72 chars (bcrypt limit)', async () => {
-    const longPassword = 'a'.repeat(73);
-
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'testuser',
-        email: 'test@example.com',
-        password: longPassword,
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/72/); // error message references the 72 char limit
-  });
-
-  it('normalizes email to lowercase', async () => {
-    mockPrismaUser.findFirst.mockResolvedValue(null);
-    mockPrismaUser.create.mockResolvedValue({ ...MOCK_USER, email: 'test@example.com' });
-
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'testuser',
-        email: 'TEST@EXAMPLE.COM',
-        password: 'password123',
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(201);
-    // Verify the email passed to Prisma create was lowercased
-    const createCall = mockPrismaUser.create.mock.calls[0]?.[0];
-    expect(createCall?.data?.email).toBe('test@example.com');
-  });
-
-  it('rejects short username (less than 3 chars)', async () => {
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'ab',
-        email: 'test@example.com',
-        password: 'password123',
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.success).toBe(false);
-  });
-
-  it('rejects invalid email format', async () => {
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'testuser',
-        email: 'not-an-email',
-        password: 'password123',
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.success).toBe(false);
-  });
-
-  it('rejects short password (less than 8 chars)', async () => {
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'testuser',
-        email: 'test@example.com',
-        password: 'short',
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.success).toBe(false);
-  });
-
-  it('checks username uniqueness case-insensitively (MED-4)', async () => {
-    // "alice" already exists — registering "Alice" must be rejected
-    mockPrismaUser.findFirst.mockResolvedValue({ id: 'existing-user' });
-
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        username: 'Alice',
-        email: 'brand-new@example.com',
-        password: 'password123',
-        acceptTerms: true,
-        acceptPrivacy: true,
-      });
-
-    expect(res.status).toBe(409);
-    expect(res.body.success).toBe(false);
-    expect(res.body.error).toBe('Username or email already in use');
-    // The duplicate lookup must match the username case-insensitively
-    expect(mockPrismaUser.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          OR: expect.arrayContaining([
-            { username: { equals: 'Alice', mode: 'insensitive' } },
-          ]),
-        }),
-      }),
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ success: true, data: START_RESULT });
+    expect(startRegistrationMock).toHaveBeenCalledWith(
+      'testuser', 'test@example.com', 'password123', 'Tester', expect.any(String),
+      { acceptTerms: true, acceptPrivacy: true },
     );
+    expect(mockPrismaUser.create).not.toHaveBeenCalled();
+  });
+
+  it('answers the same 202 for an address that already has an account (the service decides, the route says nothing)', async () => {
+    const first = await request(app).post('/api/v1/auth/register').send(START_BODY);
+    const second = await request(app).post('/api/v1/auth/register').send({ ...START_BODY, email: 'already@example.com' });
+
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect(Object.keys(second.body.data).sort()).toEqual(Object.keys(first.body.data).sort());
+  });
+
+  it('a taken username is the one 409, with the public message', async () => {
+    startRegistrationMock.mockRejectedValueOnce(new ConflictError(USERNAME_TAKEN_MESSAGE));
+
+    const res = await request(app).post('/api/v1/auth/register').send({ ...START_BODY, username: 'Alice' });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ success: false, error: USERNAME_TAKEN_MESSAGE });
+  });
+
+  it('passes the service\'s validation refusals and the IP ban through', async () => {
+    startRegistrationMock.mockRejectedValueOnce(new BadRequestError('Invalid email address'));
+    const invalid = await request(app).post('/api/v1/auth/register').send({ ...START_BODY, email: 'victim@gmail.com(1)' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.error).toBe('Invalid email address');
+
+    startRegistrationMock.mockRejectedValueOnce(new ForbiddenError('Account banned: bot wave'));
+    const banned = await request(app).post('/api/v1/auth/register').send(START_BODY);
+    expect(banned.status).toBe(403);
+    expect(banned.body.error).toBe('Account banned: bot wave');
+  });
+
+  it('a disabled registration answers 403 before the PoW and the service', async () => {
+    registrationDisabled();
+
+    const res = await request(app).post('/api/v1/auth/register').send(START_BODY);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ success: false, error: 'Registration is currently disabled' });
+    expect(mockVerifyPow).not.toHaveBeenCalled();
+    expect(startRegistrationMock).not.toHaveBeenCalled();
+  });
+
+  it('runs the attempt limiters, and NOT the success budgets (nothing is created here)', async () => {
+    await request(app).post('/api/v1/auth/register').send(START_BODY);
+
+    expect(rateLimitRegisterMock).toHaveBeenCalledTimes(1);
+    expect(rateLimitRegisterAttemptMock).toHaveBeenCalledTimes(1);
+    expect(rateLimitRegisterAttemptSubnetMock).toHaveBeenCalledTimes(1);
+    expect(chargeRegistrationBudgetsMock).not.toHaveBeenCalled();
+    expect(rateLimitRegisterCompleteMock).not.toHaveBeenCalled();
+    expect(rateLimitRegisterResendMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/v1/auth/register/complete', () => {
+  const COMPLETE_RESULT = {
+    user: {
+      id: 'user-123', username: 'testuser', displayName: 'testuser', email: 'test@example.com',
+      avatarUrl: null, bio: null, status: 'offline', role: 'user', totpEnabled: false,
+      emailVerified: true, isSupporter: false, supporterTier: null, createdAt: '2026-10-30T00:00:00.000Z',
+      consentRequired: false,
+    },
+    accessToken: 'access-token',
+    refreshToken: 'refresh-token',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    completeRegistrationMock.mockResolvedValue(COMPLETE_RESULT);
+  });
+
+  it('answers 201 with the user and tokens — the answer the one-step registration gave', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/register/complete')
+      .send({ pendingId: 'p'.repeat(22), code: '123456' });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ success: true, data: COMPLETE_RESULT });
+    expect(completeRegistrationMock).toHaveBeenCalledWith('p'.repeat(22), '123456', undefined, expect.any(String));
+  });
+
+  it('forwards a new username with the same code, and the raw values for the service to check', async () => {
+    await request(app)
+      .post('/api/v1/auth/register/complete')
+      .send({ pendingId: 'p'.repeat(22), code: '123456', username: 'other_name' });
+    expect(completeRegistrationMock).toHaveBeenLastCalledWith('p'.repeat(22), '123456', 'other_name', expect.any(String));
+
+    await request(app)
+      .post('/api/v1/auth/register/complete')
+      .send({ pendingId: 7, code: 123456 });
+    expect(completeRegistrationMock).toHaveBeenLastCalledWith(7, 123456, undefined, expect.any(String));
+  });
+
+  it.each([
+    ['a refused code', new BadRequestError(SIGNUP_CODE_INVALID_MESSAGE), 400, SIGNUP_CODE_INVALID_MESSAGE],
+    ['a taken username', new ConflictError(USERNAME_TAKEN_MESSAGE), 409, USERNAME_TAKEN_MESSAGE],
+    ['an address that already has an account', new ConflictError(SIGNUP_EMAIL_REGISTERED_MESSAGE), 409, SIGNUP_EMAIL_REGISTERED_MESSAGE],
+  ])('answers %s with its status and exact message', async (_label, err, status, message) => {
+    completeRegistrationMock.mockRejectedValueOnce(err);
+
+    const res = await request(app)
+      .post('/api/v1/auth/register/complete')
+      .send({ pendingId: 'p'.repeat(22), code: '123456' });
+
+    expect(res.status).toBe(status);
+    expect(res.body).toEqual({ success: false, error: message });
+  });
+
+  it('a disabled registration answers 403 without completing anything', async () => {
+    registrationDisabled();
+
+    const res = await request(app)
+      .post('/api/v1/auth/register/complete')
+      .send({ pendingId: 'p'.repeat(22), code: '123456' });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ success: false, error: 'Registration is currently disabled' });
+    expect(completeRegistrationMock).not.toHaveBeenCalled();
+  });
+
+  it('runs its own limiter, then charges the success budgets — where an account is created', async () => {
+    await request(app)
+      .post('/api/v1/auth/register/complete')
+      .send({ pendingId: 'p'.repeat(22), code: '123456' });
+
+    expect(rateLimitRegisterCompleteMock).toHaveBeenCalledTimes(1);
+    expect(chargeRegistrationBudgetsMock).toHaveBeenCalledTimes(1);
+    expect(order(rateLimitRegisterCompleteMock)).toBeLessThan(order(chargeRegistrationBudgetsMock));
+    expect(order(chargeRegistrationBudgetsMock)).toBeLessThan(order(completeRegistrationMock));
+    // The start's attempt buckets are not charged again here, and no PoW is asked
+    expect(rateLimitRegisterMock).not.toHaveBeenCalled();
+    expect(rateLimitRegisterAttemptMock).not.toHaveBeenCalled();
+    expect(rateLimitRegisterAttemptSubnetMock).not.toHaveBeenCalled();
+    expect(mockVerifyPow).not.toHaveBeenCalled();
+  });
+
+  it('a spent success budget stops the request before the service', async () => {
+    chargeRegistrationBudgetsMock.mockImplementationOnce((_req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) => {
+      res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    });
+
+    const res = await request(app)
+      .post('/api/v1/auth/register/complete')
+      .send({ pendingId: 'p'.repeat(22), code: '123456' });
+
+    expect(res.status).toBe(429);
+    expect(completeRegistrationMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/v1/auth/register/resend', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('always answers 202 with the pending id and the resend delay', async () => {
+    const res = await request(app).post('/api/v1/auth/register/resend').send({ pendingId: 'p'.repeat(22) });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ success: true, data: { pendingId: 'p'.repeat(22), resendAfterSeconds: SIGNUP.RESEND_AFTER_SECONDS } });
+    expect(resendRegistrationCodeMock).toHaveBeenCalledWith('p'.repeat(22));
+  });
+
+  it.each([
+    ['a missing id', {}],
+    ['a numeric id', { pendingId: 42 }],
+    ['an object id', { pendingId: { $ne: null } }],
+  ])('hands the service an empty id for %s', async (_label, body) => {
+    const res = await request(app).post('/api/v1/auth/register/resend').send(body);
+
+    expect(res.status).toBe(202);
+    expect(resendRegistrationCodeMock).toHaveBeenCalledWith('');
+  });
+
+  it('a disabled registration answers 403 without resending', async () => {
+    registrationDisabled();
+
+    const res = await request(app).post('/api/v1/auth/register/resend').send({ pendingId: 'p'.repeat(22) });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ success: false, error: 'Registration is currently disabled' });
+    expect(resendRegistrationCodeMock).not.toHaveBeenCalled();
+  });
+
+  it('runs its own limiter and charges no registration budget', async () => {
+    await request(app).post('/api/v1/auth/register/resend').send({ pendingId: 'p'.repeat(22) });
+
+    expect(rateLimitRegisterResendMock).toHaveBeenCalledTimes(1);
+    expect(chargeRegistrationBudgetsMock).not.toHaveBeenCalled();
+    expect(rateLimitRegisterCompleteMock).not.toHaveBeenCalled();
+    expect(rateLimitRegisterMock).not.toHaveBeenCalled();
+  });
+
+  it('a service failure is an error response, not a silent 202', async () => {
+    resendRegistrationCodeMock.mockRejectedValueOnce(new Error('db gone'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(app).post('/api/v1/auth/register/resend').send({ pendingId: 'p'.repeat(22) });
+
+    expect(res.status).toBe(500);
+    error.mockRestore();
   });
 });
 
@@ -1143,6 +1251,91 @@ describe('POST /api/v1/auth/forgot-password', () => {
     // requestPasswordReset calls prisma.user.findUnique with lowercased email
     const findCall = mockPrismaUser.findUnique.mock.calls[0]?.[0];
     expect(findCall?.where?.email).toBe('test@example.com');
+  });
+});
+
+describe('POST /api/v1/auth/mail-block — "Not you? Block Voxium mail to this address"', () => {
+  // The real token helpers: this is the signature, purpose and digest check
+  // the routes rely on, against the JWT_SECRET this file sets.
+  let mailBlockToken: (email: string) => string;
+  let mailboxDigest: (email: string) => string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    ({ mailBlockToken, mailboxDigest } = await import('../../utils/mailSuppression'));
+    mockPrismaMailSuppression.findUnique.mockResolvedValue(null);
+    mockPrismaMailSuppression.upsert.mockResolvedValue({});
+    mockPrismaMailSuppression.deleteMany.mockResolvedValue({ count: 1 });
+  });
+
+  it('status answers whether the mailbox the token names is blocked', async () => {
+    const token = mailBlockToken('victim+1@outlook.com');
+
+    let res = await request(app).post('/api/v1/auth/mail-block/status').send({ token });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { blocked: false } });
+    expect(mockPrismaMailSuppression.findUnique).toHaveBeenCalledWith({
+      where: { mailboxHash: mailboxDigest('victim@outlook.com') },
+      select: { mailboxHash: true },
+    });
+
+    mockPrismaMailSuppression.findUnique.mockResolvedValue({ mailboxHash: mailboxDigest('victim@outlook.com') });
+    res = await request(app).post('/api/v1/auth/mail-block/status').send({ token });
+    expect(res.body).toEqual({ success: true, data: { blocked: true } });
+  });
+
+  it('block puts the mailbox digest on the list — one click, no session, no address in the request', async () => {
+    const token = mailBlockToken('victim@example.com');
+    const res = await request(app).post('/api/v1/auth/mail-block').send({ token });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { blocked: true } });
+    expect(mockPrismaMailSuppression.upsert).toHaveBeenCalledWith({
+      where: { mailboxHash: mailboxDigest('victim@example.com') },
+      create: { mailboxHash: mailboxDigest('victim@example.com') },
+      update: {},
+    });
+    expect(JSON.stringify(mockPrismaMailSuppression.upsert.mock.calls)).not.toContain('victim@example.com');
+  });
+
+  it('unblock takes it off again (the mailbox owner can change their mind from the same link)', async () => {
+    const token = mailBlockToken('victim@example.com');
+    const res = await request(app).post('/api/v1/auth/mail-unblock').send({ token });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { blocked: false } });
+    expect(mockPrismaMailSuppression.deleteMany).toHaveBeenCalledWith({
+      where: { mailboxHash: mailboxDigest('victim@example.com') },
+    });
+  });
+
+  it.each(['/mail-block/status', '/mail-block', '/mail-unblock'])('%s answers one 400 for a missing, malformed, forged or foreign-purpose token', async (path) => {
+    const forged = jwt.sign({ purpose: 'mail-block', m: 'a'.repeat(64) }, 'wrong-secret', { algorithm: 'HS256' });
+    const access = jwt.sign({ userId: 'u-1', username: 'alice' }, JWT_SECRET, { algorithm: 'HS256' });
+    const totp = jwt.sign({ userId: 'u-1', purpose: 'totp-verify' }, JWT_SECRET, { algorithm: 'HS256' });
+
+    for (const body of [{}, { token: '' }, { token: 42 }, { token: 'garbage' }, { token: forged }, { token: access }, { token: totp }, { token: 'x'.repeat(1025) }]) {
+      const res = await request(app).post(`/api/v1/auth${path}`).send(body);
+      expect(res.status, JSON.stringify(body).slice(0, 60)).toBe(400);
+      expect(res.body).toEqual({ success: false, error: 'Invalid or expired mail-block link' });
+    }
+    expect(mockPrismaMailSuppression.findUnique).not.toHaveBeenCalled();
+    expect(mockPrismaMailSuppression.upsert).not.toHaveBeenCalled();
+    expect(mockPrismaMailSuppression.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('a store failure is a 500, never a false "blocked" or a silent success', async () => {
+    const token = mailBlockToken('victim@example.com');
+    mockPrismaMailSuppression.upsert.mockRejectedValueOnce(new Error('db down'));
+    const res = await request(app).post('/api/v1/auth/mail-block').send({ token });
+    expect(res.status).toBe(500);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('the token opens nothing else: /auth/me refuses it', async () => {
+    const token = mailBlockToken('victim@example.com');
+    const res = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(401);
   });
 });
 

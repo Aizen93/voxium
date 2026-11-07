@@ -1,5 +1,8 @@
 import { PrismaClient } from '../../../apps/server/src/generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { canonicalizeEmail } from '@voxium/shared';
+import bcrypt from 'bcryptjs';
+import { createHash } from 'crypto';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
@@ -77,15 +80,6 @@ export async function verifyUserEmail(userId: string) {
   });
 }
 
-/** Verify a user's email by email address (avoids JWT parsing in UI helpers). */
-export async function verifyUserEmailByEmail(email: string) {
-  const db = getPrisma();
-  await db.user.update({
-    where: { email: email.toLowerCase().trim() },
-    data: { emailVerified: true, emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
-  });
-}
-
 /** Create a verification token for a user and return the raw (unhashed) token for testing. */
 export async function createVerificationToken(userId: string): Promise<string> {
   const crypto = await import('crypto');
@@ -147,7 +141,70 @@ export async function getE2EKeyShareCount(recipientUserId: string, recipientDevi
   });
 }
 
-/** Disconnect Prisma (call in afterAll or global teardown). */
+/**
+ * The sign-up code every e2e registration completes with. The server mails a
+ * random code; a test replaces the stored hash with this one's (the sanctioned
+ * test path, like `verifyUserEmail`: there is no server bypass flag).
+ */
+export const TEST_SIGNUP_CODE = '123456';
+
+/** The stored form of a sign-up code — `signupCodeHash` in apps/server/src/services/signupService.ts. */
+function signupCodeHash(pendingId: string, code: string): string {
+  return createHash('sha256').update(`${pendingId}:${code}`).digest('hex');
+}
+
+/** Make `code` the valid code of the pending registration `pendingId`. */
+export async function setPendingRegistrationCode(pendingId: string, code: string = TEST_SIGNUP_CODE): Promise<void> {
+  const db = getPrisma();
+  const { count } = await db.pendingRegistration.updateMany({
+    where: { id: pendingId },
+    data: { codeHash: signupCodeHash(pendingId, code) },
+  });
+  if (count !== 1) throw new Error(`No pending registration ${pendingId}`);
+}
+
+/**
+ * Make `code` the valid code of the NEWEST pending registration for `email`
+ * (the UI never shows the pending id). Returns that pending id.
+ */
+export async function setLatestPendingRegistrationCodeForEmail(email: string, code: string = TEST_SIGNUP_CODE): Promise<string> {
+  const db = getPrisma();
+  const row = await db.pendingRegistration.findFirst({
+    where: { email: email.toLowerCase().trim() },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+  if (!row) throw new Error(`No pending registration for ${email}`);
+  await setPendingRegistrationCode(row.id, code);
+  return row.id;
+}
+
+/**
+ * Create a LEGACY unverified account straight in the database: the kind an
+ * account created before verify-first registration can still be (the sign-up
+ * flow itself only ever creates verified accounts). Consent is recorded so
+ * only the e-mail gate applies. Returns the new user's id.
+ */
+export async function createLegacyUnverifiedUser(user: { username: string; email: string; password: string }): Promise<string> {
+  const db = getPrisma();
+  const email = user.email.toLowerCase().trim();
+  const now = new Date();
+  const created = await db.user.create({
+    data: {
+      username: user.username,
+      displayName: user.username,
+      email,
+      emailCanonical: canonicalizeEmail(email),
+      password: await bcrypt.hash(user.password, 10),
+      emailVerified: false,
+      termsAcceptedAt: now,
+      privacyAcceptedAt: now,
+    },
+    select: { id: true },
+  });
+  return created.id;
+}
+
 /** Server-side view of a channel's messages — proves what was actually stored. */
 export async function getChannelMessagesServerState(channelId: string) {
   const db = getPrisma();
@@ -182,6 +239,7 @@ export async function getSecureChannelServerState(channelId: string) {
   });
 }
 
+/** Disconnect Prisma (call in afterAll or global teardown). */
 export async function disconnectDb() {
   if (prisma) {
     await prisma.$disconnect();

@@ -16,7 +16,7 @@ model User {
   // express expression indexes, so `users_username_lower_key` is invisible
   // here and `prisma migrate dev` will read it as drift and offer to DROP it.
   // Do not let it: that index is what actually enforces the case-insensitive
-  // rule registerUser only pre-checks (two concurrent 'Alice'/'alice' signups
+  // rule the registration only pre-checks (two concurrent 'Alice'/'alice' signups
   // both pass the check, and every insensitive lookup afterwards — friend
   // requests, member search — becomes nondeterministic between them).
   username    String   @unique
@@ -648,6 +648,63 @@ model IpBan {
   creator User? @relation("IpBanCreator", fields: [bannedBy], references: [id], onDelete: SetNull)
 
   @@map("ip_bans")
+}
+
+/// Mailboxes that asked never to receive Voxium mail again ("Not you? Block
+/// Voxium mail to this address", one click from any account e-mail). Keyed by
+/// the digest of the MAILBOX form of the address (`utils/mailSuppression.ts`),
+/// never the address: the list must not become an address book of people who
+/// are not users. Every user-facing sender in `utils/email.ts` consults it.
+model MailSuppression {
+  mailboxHash String   @id @map("mailbox_hash")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("mail_suppressions")
+}
+
+/// A sign-up waiting for its e-mailed code (verify-first registration). No User
+/// row exists until the code comes back, so an address typed by someone else
+/// never becomes an account. Rows live one hour; a purge removes them.
+/// Every start of a registration writes one row, including the ones that mail
+/// nothing (existing account, blocked mailbox, used-up ledger): those carry a
+/// random code hash nobody holds, so every answer looks the same.
+model PendingRegistration {
+  /// 128-bit random id, base64url; it is what the client sends back
+  id                String   @id
+  username          String
+  email             String
+  emailCanonical    String   @map("email_canonical")
+  displayName       String   @map("display_name")
+  /// bcrypt, computed at the start so every branch does the same work
+  passwordHash      String   @map("password_hash")
+  /// sha256(id + ':' + code), hex
+  codeHash          String   @map("code_hash")
+  codeExpiresAt     DateTime @map("code_expires_at")
+  attempts          Int      @default(0)
+  resends           Int      @default(0)
+  lastSentAt        DateTime? @map("last_sent_at")
+  termsAcceptedAt   DateTime @map("terms_accepted_at")
+  privacyAcceptedAt DateTime @map("privacy_accepted_at")
+  /// normalized address the start came from: the register IP record of the
+  /// account created at completion (the completing address only when this is null)
+  ip                String?
+  createdAt         DateTime @default(now()) @map("created_at")
+  expiresAt         DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("pending_registrations")
+}
+
+/// How many sign-up mails one MAILBOX received recently (first-contact ledger).
+/// Keyed like mail_suppressions: an unkeyed digest of the mailbox, never the
+/// address. Written BEFORE a send and never refunded, so parallel starts cannot
+/// mail one inbox twice. Rows older than the window are purged.
+model SignupMailLedger {
+  mailboxHash   String   @id @map("mailbox_hash")
+  windowStartAt DateTime @map("window_start_at")
+  sent          Int      @default(1)
+
+  @@map("signup_mail_ledger")
 }
 
 // ─── Audit Log ─────────────────────────────────────────────────────────────

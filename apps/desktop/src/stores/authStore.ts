@@ -14,10 +14,27 @@ import { processImage } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
 import type { User, RegistrationConsent } from '@voxium/shared';
-import { PowExpiredError, PowAbortedError } from '@voxium/shared';
+import { PowExpiredError, PowAbortedError, SIGNUP, USERNAME_TAKEN_MESSAGE } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
 import { forgetLocalE2EState } from '../services/e2e/e2eService';
 import { activateSecurePins, deactivateSecurePins, forgetSecurePins } from '../utils/securePins';
+
+/** A registration the server accepted (202) and mailed a code for. No
+ *  account exists yet: `/auth/register/complete` creates it from the code. */
+export interface PendingRegistration {
+  pendingId: string;
+  /** The address as typed, only to name it on the code step */
+  email: string;
+  /** Seconds after `issuedAt` before the one resend is allowed */
+  resendAfterSeconds: number;
+  /** Local time (ms) the code was asked for: the resend countdown's anchor */
+  issuedAt: number;
+  /** The one resend is spent: the code step hides its button */
+  resendUsed: boolean;
+  /** The completion answered "username taken": the code step asks for
+   *  another one and retries with the same code */
+  usernameTaken: boolean;
+}
 
 interface AuthState {
   user: User | null;
@@ -46,11 +63,26 @@ interface AuthState {
   login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
   verifyTOTP: (code: string) => Promise<void>;
   cancelTOTP: () => void;
+  /** The verify-first registration, step one: proof of work, then the
+   *  request. Creates NO account and signs nobody in: on the server's 202 it
+   *  leaves `pendingRegistration` set, and the code step takes over. */
   register: (username: string, email: string, password: string, consent: RegistrationConsent) => Promise<void>;
-  /** Abandon an in-flight registration: stop the solve and clear its state.
-   *  Without it the abandoned solve finishes, POSTs, and signs the user into
-   *  the account they walked away from. */
+  /** The registration the server mailed a code for, or null. */
+  pendingRegistration: PendingRegistration | null;
+  /** Step two: the mailed code (and a new username after a "taken" answer)
+   *  creates the account and signs the user in, exactly as a sign-in does. */
+  completeRegistration: (code: string, username?: string) => Promise<void>;
+  /** The one second code a pending registration may ask for. */
+  resendRegistrationCode: () => Promise<void>;
+  /** "Start over": abandon the registration for good — stop an in-flight
+   *  step and drop the pending code step, so the form comes back. */
   cancelRegistration: () => void;
+  /** The registration view was left: stop an in-flight solve (and quiet a
+   *  request already sent), but KEEP a pending code step. The server already
+   *  mailed its code and spent one of the address's few sign-up mails, and the
+   *  code works only with this pending id: coming back to /register shows the
+   *  code step again. Memory only — a reload starts over. */
+  leaveRegistration: () => void;
   logout: () => void;
   /** The session restore at launch: loads the stored session, verifies it
    *  with `/auth/me`, connects. Single-flight. A transport failure keeps the
@@ -251,6 +283,10 @@ function isAuthRefusal(err: unknown): boolean {
  *  snapshot `resetAccountStores` captures. */
 let registrationAbort: AbortController | null = null;
 
+/** A 2xx registration answer without the pending id the code step needs:
+ *  shown as the generic failure, never as its own (English) message. */
+class RegistrationAnswerError extends Error {}
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isAuthenticated: false,
@@ -259,6 +295,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isRegistering: false,
   error: null,
   powProgress: null,
+  pendingRegistration: null,
   totpRequired: false,
   totpToken: null,
   totpRememberMe: true,
@@ -281,7 +318,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (canConnect(user)) {
         connectSocket(accessToken);
       }
-      set({ user, isAuthenticated: true, isSubmitting: false });
+      // A sign-in ends any sign-up left pending on this machine: its typed
+      // address must not wait on the register page for the next person
+      set({ user, isAuthenticated: true, isSubmitting: false, pendingRegistration: null });
     } catch (err) {
       set({
         error: getTranslatedError(err, i18n.t, 'auth.login.loginFailed'),
@@ -305,7 +344,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (canConnect(user)) {
         connectSocket(accessToken);
       }
-      set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true });
+      set({
+        user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null, totpRememberMe: true,
+        pendingRegistration: null,
+      });
     } catch (err) {
       set({
         error: getTranslatedError(err, i18n.t, 'settings.security.invalidCode'),
@@ -323,7 +365,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     registrationAbort?.abort();
     const controller = new AbortController();
     registrationAbort = controller;
-    set({ isRegistering: true, error: null, powProgress: 0 });
+    set({ isRegistering: true, error: null, powProgress: 0, pendingRegistration: null });
     discardStaleSession();
     try {
       // Anti-bot proof-of-work: fetch a challenge and burn CPU solving it. No
@@ -334,6 +376,69 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (controller.signal.aborted) throw new PowAbortedError();
 
       const { data } = await api.post('/auth/register', { username, email, password, pow, ...consent });
+      // Once sent, the start is kept even when the view was left meanwhile:
+      // the server mailed a code that works only with this pending id, so
+      // coming back to /register finds the code step. Unless someone signed
+      // in since — their session never carries another person's sign-up — or
+      // a newer attempt replaced this one.
+      if (controller.signal.aborted && (get().isAuthenticated || registrationAbort !== null)) {
+        throw new PowAbortedError();
+      }
+      const answer = (data?.data ?? {}) as { pendingId?: unknown; resendAfterSeconds?: unknown };
+      if (typeof answer.pendingId !== 'string' || answer.pendingId.length === 0) {
+        throw new RegistrationAnswerError('Registration answer carried no pending id');
+      }
+      const resendAfterSeconds = typeof answer.resendAfterSeconds === 'number' && Number.isFinite(answer.resendAfterSeconds) && answer.resendAfterSeconds >= 0
+        ? answer.resendAfterSeconds
+        : SIGNUP.RESEND_AFTER_SECONDS;
+
+      set({
+        pendingRegistration: {
+          pendingId: answer.pendingId,
+          email,
+          resendAfterSeconds,
+          issuedAt: Date.now(),
+          resendUsed: false,
+          usernameTaken: false,
+        },
+        isRegistering: false,
+        powProgress: null,
+      });
+    } catch (err) {
+      // An abandoned solve is not a failure to report — the view is gone and
+      // `leaveRegistration` already cleared the flags. The same goes for a
+      // POST that was already in flight when the view was left: the store's
+      // `error` is shared with LoginPage, which would render a 409 from this
+      // abandoned registration as a failed login the user never attempted.
+      if (err instanceof PowAbortedError) throw err;
+      if (controller.signal.aborted) throw new PowAbortedError();
+      set({
+        error: err instanceof RegistrationAnswerError
+          ? i18n.t('auth.register.registrationFailed')
+          : getTranslatedError(err, i18n.t, 'auth.register.registrationFailed'),
+        isRegistering: false,
+        powProgress: null,
+      });
+      throw err;
+    } finally {
+      if (registrationAbort === controller) registrationAbort = null;
+    }
+  },
+
+  completeRegistration: async (code, username) => {
+    const pending = get().pendingRegistration;
+    if (!pending) return;
+    registrationAbort?.abort();
+    const controller = new AbortController();
+    registrationAbort = controller;
+    set({ isRegistering: true, error: null });
+    // The answer is a sign-in: whatever this launch kept of an older session
+    // must not ride along on it, nor be renewed over the new one
+    discardStaleSession();
+    try {
+      const body: { pendingId: string; code: string; username?: string } = { pendingId: pending.pendingId, code };
+      if (username !== undefined) body.username = username;
+      const { data } = await api.post('/auth/register/complete', body);
       const { user, accessToken, refreshToken } = data.data;
 
       // The account now EXISTS, so there is nothing left to abandon: finish the
@@ -348,25 +453,55 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
       setTokens(accessToken, refreshToken, true);
 
-      // Don't connect socket until email is verified (consent was just given)
+      // The code proved the mailbox and the consent travelled with step one,
+      // but the socket still waits for whatever the server says is missing
       if (canConnect(user)) {
         connectSocket(accessToken);
       }
 
-      set({ user, isAuthenticated: true, isRegistering: false, powProgress: null });
+      set({ user, isAuthenticated: true, isRegistering: false, pendingRegistration: null });
     } catch (err) {
-      // An abandoned solve is not a failure to report — the view is gone and
-      // `cancelRegistration` already cleared the flags. The same goes for a
-      // POST that was already in flight when the view was left: the store's
-      // `error` is shared with LoginPage, which would render a 409 from this
-      // abandoned registration as a failed login the user never attempted.
-      if (err instanceof PowAbortedError) throw err;
-      if (controller.signal.aborted) throw new PowAbortedError();
+      // A view left mid-request: `error` is shared with LoginPage, which would
+      // show this abandoned step's answer as a failed sign-in
+      if (controller.signal.aborted) throw err;
+      const serverMessage = (err as { response?: { data?: { error?: unknown } } } | null)?.response?.data?.error;
+      const latest = get().pendingRegistration;
       set({
         error: getTranslatedError(err, i18n.t, 'auth.register.registrationFailed'),
         isRegistering: false,
-        powProgress: null,
+        // A taken username costs no attempt: the same code goes again with
+        // another name, so the code step asks for one
+        ...(serverMessage === USERNAME_TAKEN_MESSAGE && latest && latest.pendingId === pending.pendingId
+          ? { pendingRegistration: { ...latest, usernameTaken: true } }
+          : {}),
       });
+      throw err;
+    } finally {
+      if (registrationAbort === controller) registrationAbort = null;
+    }
+  },
+
+  resendRegistrationCode: async () => {
+    const pending = get().pendingRegistration;
+    if (!pending || pending.resendUsed) return;
+    registrationAbort?.abort();
+    const controller = new AbortController();
+    registrationAbort = controller;
+    set({ error: null });
+    try {
+      await api.post('/auth/register/resend', { pendingId: pending.pendingId });
+      const latest = get().pendingRegistration;
+      if (latest && latest.pendingId === pending.pendingId) {
+        set({ pendingRegistration: { ...latest, resendUsed: true } });
+      }
+    } catch (err) {
+      // Only a limiter or the network refuses it (the route always answers
+      // 202): the button stays, and the reason shows
+      console.warn('[Auth] Sign-up code resend failed:', err instanceof Error ? err.message : err);
+      // A view left meanwhile: `error` is shared with LoginPage
+      if (!controller.signal.aborted && get().pendingRegistration?.pendingId === pending.pendingId) {
+        set({ error: getTranslatedError(err, i18n.t, 'auth.register.code.resendFailed') });
+      }
       throw err;
     } finally {
       if (registrationAbort === controller) registrationAbort = null;
@@ -376,7 +511,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   cancelRegistration: () => {
     registrationAbort?.abort();
     registrationAbort = null;
-    set({ isRegistering: false, powProgress: null });
+    // The code step's refusal must not follow the user anywhere
+    set({ isRegistering: false, powProgress: null, pendingRegistration: null, error: null });
+  },
+
+  leaveRegistration: () => {
+    registrationAbort?.abort();
+    registrationAbort = null;
+    // `error` is shared with LoginPage, where the code step's last refusal
+    // ("Invalid or expired code") would read as a failed sign-in
+    set({ isRegistering: false, powProgress: null, error: null });
   },
 
   logout: () => {
@@ -396,7 +540,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // Wipe every account-scoped store — on a shared machine the next login must
     // never see the previous account's servers, DMs, or support transcript
     resetAccountStores();
-    set({ user: null, isAuthenticated: false });
+    set({ user: null, isAuthenticated: false, pendingRegistration: null });
   },
 
   retrySessionRestore: async () => {

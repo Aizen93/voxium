@@ -8,7 +8,7 @@
  */
 
 import axios, { type AxiosError } from 'axios';
-import { solveRegistrationPow } from '../packages/shared/src/pow';
+import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import pg from 'pg';
 import { readFileSync, existsSync } from 'fs';
@@ -90,7 +90,7 @@ function fail(desc: string, err: unknown) {
 
 const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
 
-const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerDomain', 'powChallenge', 'admin', 'general', 'roleManage', 'memberManage', 'categoryManage', 'upload', 'messageSend', 'search', 'markRead'];
+const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'powChallenge', 'admin', 'general', 'roleManage', 'memberManage', 'categoryManage', 'upload', 'messageSend', 'search', 'markRead'];
 
 async function login(email: string): Promise<{ token: string; userId: string }> {
   const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD });
@@ -130,31 +130,15 @@ async function resetRateLimits(token: string): Promise<void> {
 
 async function registerUser(username: string, email: string): Promise<{ token: string; userId: string }> {
   try {
-    // Registration requires a solved proof-of-work and explicit consent to the
-    // legal documents — the same code path a browser takes. Without the pow
-    // the 400 used to be swallowed here and login then failed on an account
-    // that was never created.
-    const { data: chal } = await axios.get(`${API}/auth/register-challenge`);
-    const pow = await solveRegistrationPow(chal.data);
-    await axios.post(`${API}/auth/register`, { username, email, password: PASSWORD, pow, acceptTerms: true, acceptPrivacy: true });
+    // Verify-first registration (proof-of-work + consent, then the code): the
+    // shared helper sets a known code in the DB and completes, so the account
+    // is created verified.
+    const data = await registerTestUser(API, { username, email, password: PASSWORD });
+    return { token: data.accessToken, userId: data.user.id };
   } catch (err) {
-    if (!axios.isAxiosError(err) || err.response?.status !== 409) throw err; // 409 = already exists
+    if (!axios.isAxiosError(err) || err.response?.status !== 409) throw err; // 409 = username taken
   }
   return login(email);
-}
-
-/** Verify a user's email directly in PostgreSQL (same approach as E2E test helpers). */
-async function verifyEmailDirect(userId: string): Promise<void> {
-  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
-  await client.connect();
-  try {
-    await client.query(
-      `UPDATE "users" SET "email_verified" = true, "email_verification_token" = NULL, "email_verification_token_expires_at" = NULL WHERE "id" = $1`,
-      [userId],
-    );
-  } finally {
-    await client.end();
-  }
 }
 
 /** Promote a user to superadmin directly in PostgreSQL. */
@@ -242,7 +226,6 @@ async function run() {
     const adminUsername = `permadmin_${adminSuffix}`;
     const adminEmail = `${adminUsername}@permtest.local`;
     const { userId: adminUserId } = await registerUser(adminUsername, adminEmail);
-    await verifyEmailDirect(adminUserId);
     await promoteSuperadminDirect(adminUserId);
     // Login to get a token with superadmin role
     alice = await login(adminEmail);
@@ -271,21 +254,16 @@ async function run() {
     throw new Error('Cannot continue without test server');
   }
 
-  // Test 3: Register 3 test users with unique random names, verify emails
+  // Test 3: Register 3 test users with unique random names (created verified)
   try {
     for (let i = 0; i < 3; i++) {
       const suffix = randomSuffix();
       const username = `testperm_${suffix}`;
       const email = `${username}@permtest.local`;
+      // Registration completes with the code, so the account is already verified
       const { token, userId } = await registerUser(username, email);
 
-      // Verify email via direct DB access
-      await verifyEmailDirect(userId);
-
-      // Re-login after verification so the token is for a verified user
-      const freshLogin = await login(email);
-
-      testUsers.push({ username, email, token: freshLogin.token, userId: freshLogin.userId });
+      testUsers.push({ username, email, token, userId });
     }
     pass(`Register 3 test users: ${testUsers.map((u) => u.username).join(', ')}`);
   } catch (err) {
@@ -1776,6 +1754,7 @@ async function main() {
     console.error('\nFatal error:', (err as Error).message);
   } finally {
     await cleanup();
+    await closeRegisterTestUserDb().catch((err) => console.warn('DB disconnect failed:', (err as Error).message));
   }
 
   // ─── Summary ─────────────────────────────────────────────────────────────

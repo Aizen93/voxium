@@ -18,6 +18,7 @@ import { deleteMultipleFromS3 } from './s3';
 import { sendAdminAlert, describeEmailError } from './email';
 import { logAuditEvent } from './auditLog';
 import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
+import { purgeExpiredSignupState } from '../services/signupService';
 import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -108,6 +109,21 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
   const dryRun = opts.dryRun === true;
   const userCutoff = new Date(Date.now() - UNVERIFIED_ACCOUNT_TTL_DAYS * 24 * 60 * 60 * 1000);
   const ipCutoff = new Date(Date.now() - IP_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+
+  // Verify-first sign-up state past its life: inert already (every check reads
+  // the timestamps), purged so the tables stay small. FIRST, in its own try:
+  // a failing step of the sweep below cannot skip it, and its failure cannot
+  // hide the sweep's result.
+  if (!dryRun) {
+    try {
+      const purged = await purgeExpiredSignupState();
+      if (purged.pending || purged.ledger) {
+        console.log(`[RegHygiene] Purged ${purged.pending} expired pending registration(s) and ${purged.ledger} sign-up mail ledger row(s)`);
+      }
+    } catch (err) {
+      console.error('[RegHygiene] Sign-up state purge failed:', err instanceof Error ? err.message : err);
+    }
+  }
 
   // Defense-in-depth guards on the delete, not just the flag:
   //  - role 'user' only — an unverified admin should be impossible, but a

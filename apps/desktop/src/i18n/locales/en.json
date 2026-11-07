@@ -79,7 +79,27 @@
       "signIn": "Sign in",
       "passwordWeak": "Weak password",
       "passwordMedium": "Medium strength",
-      "passwordStrong": "Strong password"
+      "passwordStrong": "Strong password",
+      "code": {
+        "title": "Check your inbox",
+        "sentTo": "We sent a {{length}}-digit code to {{email}}. It expires in {{minutes}} minutes.",
+        "codeLabel": "Sign-up code",
+        "submit": "Verify and create account",
+        "verifying": "Verifying…",
+        "resend": "Send a new code",
+        "resendIn": "You can ask for a new code in {{time}}.",
+        "resent": "We asked for a new code. When it arrives, use it instead of the previous one.",
+        "resendFailed": "Could not ask for a new code. Try again in a moment.",
+        "usernameLabel": "New username",
+        "usernameTakenHint": "That username was taken in the meantime. Pick another one: your code still works.",
+        "haveAccount": "If you already have an account, sign in or reset your password.",
+        "signIn": "Sign in",
+        "resetPassword": "Reset password",
+        "spamHint": "Nothing yet? Check your spam or junk folder.",
+        "startOver": "Start over",
+        "startOverWarning": "Starting over sends a new code. An address receives at most {{mails}} sign-up emails in {{days}} days, so the code already sent is usually the one to use.",
+        "startOverConfirm": "Start over anyway"
+      }
     },
     "totp": {
       "title": "Two-Factor Authentication",
@@ -125,7 +145,25 @@
       "goToLogin": "Go to Login",
       "goBack": "Go Back",
       "missingToken": "Missing verification token.",
-      "failed": "Verification failed. The link may be invalid or expired."
+      "failed": "Verification failed. The link may be invalid or expired.",
+      "prompt": "Confirm this email address for your Voxium account.",
+      "verifyButton": "Verify my email"
+    },
+    "mailBlock": {
+      "title": "Voxium email to this address",
+      "checking": "Checking this link…",
+      "intro": "If you did not create a Voxium account or ask for a password reset, someone else typed your address. One click stops every email from Voxium to this address.",
+      "block": "Block Voxium mail to this address",
+      "blockedIntro": "Voxium no longer sends email to this address.",
+      "allow": "Allow Voxium mail again",
+      "working": "Saving…",
+      "blockedDone": "Done. This address will receive no more email from Voxium. You can allow it again from this page at any time.",
+      "allowedDone": "Email from Voxium to this address is allowed again.",
+      "note": "This only concerns the account emails Voxium sends (sign-up codes, address verification, password reset and account notices). It creates or deletes no account.",
+      "invalidLink": "This link is invalid or has expired. Use the link from a more recent Voxium email.",
+      "failed": "Something went wrong. Please try again.",
+      "retry": "Try again",
+      "home": "Back to Voxium"
     },
     "consent": {
       "title": "Before you continue",
@@ -1319,7 +1357,7 @@
     "invalidTwoFactorCode": "Invalid two-factor authentication code",
     "emailAlreadyVerified": "Your email address is already verified",
     "tooManyVerificationEmails": "Too many verification emails requested — try again tomorrow",
-    "tooManyDomainRegistrations": "Too many registrations from this email domain today — try again later",
+    "mailBlocked": "Mail to this address is blocked — use the link in an earlier Voxium email to allow it again",
     "registrationChallengeInvalid": "Registration check is invalid or expired — refresh and try again",
     "powExpired": "The registration check took too long — please try again",
     "powUnavailable": "This browser cannot run the registration check (WebCrypto is unavailable)",
@@ -1447,7 +1485,10 @@
     "screenShareTaken": "Someone else is already sharing in this channel",
     "noPermissionSpeak": "You do not have permission to speak in this channel",
     "searchQueryTooShort": "Search query must be at least {{min}} characters",
-    "searchQueryTooLong": "Search query must be at most {{max}} characters"
+    "searchQueryTooLong": "Search query must be at most {{max}} characters",
+    "usernameTaken": "This username is already taken",
+    "signupCodeInvalid": "Invalid or expired code",
+    "signupEmailRegistered": "This email address already has an account. Sign in instead."
   },
   "e2e": {
     "badgeTitle": "End-to-end encrypted — view safety number",

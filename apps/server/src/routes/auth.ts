@@ -1,10 +1,12 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { logAuditEvent } from '../utils/auditLog';
-import { registerUser, loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
+import { loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
+import { startRegistration, completeRegistration, resendRegistrationCode } from '../services/signupService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, rateLimitRegisterComplete, rateLimitRegisterResend, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitMailBlock, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
+import { readMailBlockToken, isDigestSuppressed, suppressDigest, unsuppressDigest } from '../utils/mailSuppression';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 
@@ -28,15 +30,16 @@ authRouter.get('/register-challenge', rateLimitPowChallenge, async (req: Request
   }
 });
 
-// The daily/subnet buckets are charged ATOMICALLY here and refunded unless the
-// request actually creates an account — a failed attempt must not spend a real
-// user's or a whole /24's signup budget, but a read-then-charge-later split
-// would let a concurrent burst walk straight through the cap.
+// Verify-first registration (services/signupService.ts). The start never
+// creates an account and answers the same 202 for every address; the account
+// is created by /register/complete when the mailed code comes back.
+//
 // `registerAttempt` (per address) and `registerAttemptSubnet` (per /24, per
-// /48) are the never-refunded buckets that bound enumeration. Both are needed:
-// a 409 on a random username means the email exists, and an attacker who can
-// rotate addresses inside one range pays the per-address cap 254 times over.
-authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, chargeRegistrationBudgets, async (req: Request, res: Response, next: NextFunction) => {
+// /48) are the never-refunded buckets that bound how many starts a source can
+// make. The daily/subnet SUCCESS budgets are charged on /register/complete,
+// where an account is actually created (consume atomically, refund on any
+// non-2xx: see chargeRegistrationBudgets).
+authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!isFeatureEnabled('registration')) {
       res.status(403).json({ success: false, error: 'Registration is currently disabled' });
@@ -46,6 +49,7 @@ authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLi
     if (!username || typeof username !== 'string') { res.status(400).json({ success: false, error: 'Username is required' }); return; }
     if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
     if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
+    if (displayName !== undefined && typeof displayName !== 'string') { res.status(400).json({ success: false, error: 'Display name must be a string' }); return; }
     // Consent (CNIL/GDPR): both documents, each as its own explicit `true` —
     // a truthy string or a missing field is not acceptance. Checked with the
     // other cheap validations, BEFORE the proof-of-work is verified: a verify
@@ -57,12 +61,41 @@ authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLi
     // the same hash work as a browser — cadence and IP rotation don't help.
     await verifyRegistrationPow(normalizeIp(req.ip || req.socket.remoteAddress || 'unknown'), pow);
 
-    const result = await registerUser(username, email, password, displayName, req.ip || req.socket.remoteAddress, { acceptTerms, acceptPrivacy });
+    const result = await startRegistration(username, email, password, displayName, req.ip || req.socket.remoteAddress, { acceptTerms, acceptPrivacy });
+    res.status(202).json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
 
-    res.status(201).json({
-      success: true,
-      data: result,
-    });
+// The mailed code comes back: create the account and sign the user in (the
+// same answer the old one-step registration gave). Per-pending attempts are
+// capped in the database; this limiter bounds a source across many ids.
+authRouter.post('/register/complete', rateLimitRegisterComplete, chargeRegistrationBudgets, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!isFeatureEnabled('registration')) {
+      res.status(403).json({ success: false, error: 'Registration is currently disabled' });
+      return;
+    }
+    const { pendingId, code, username } = req.body;
+    const result = await completeRegistration(pendingId, code, username, req.ip || req.socket.remoteAddress);
+    res.status(201).json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// A second code for the same pending registration (once, after a delay, within
+// the mailbox ledger). Always the same 202.
+authRouter.post('/register/resend', rateLimitRegisterResend, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!isFeatureEnabled('registration')) {
+      res.status(403).json({ success: false, error: 'Registration is currently disabled' });
+      return;
+    }
+    const { pendingId } = req.body;
+    const result = await resendRegistrationCode(typeof pendingId === 'string' ? pendingId : '');
+    res.status(202).json({ success: true, data: result });
   } catch (err) {
     next(err);
   }
@@ -251,6 +284,56 @@ authRouter.post('/verify-email', rateLimitVerifyEmail, async (req: Request, res:
     }
     await verifyEmail(normalizedToken);
     res.json({ success: true, message: 'Email verified successfully.' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// "Not you? Block Voxium mail to this address" — the link every account e-mail
+// carries (utils/mailSuppression.ts). Three calls, all on the token from that
+// link and nothing else: no session, no address in the request. The token
+// names a mailbox DIGEST, so the page never learns the address either, and a
+// bad token answers one sentence whatever is wrong with it.
+const MAIL_BLOCK_INVALID = 'Invalid or expired mail-block link';
+const MAIL_BLOCK_TOKEN_MAX_CHARS = 1024;
+
+/** The mailbox digest the request's token names, or null after a 400 was sent. */
+function mailBlockDigest(req: Request, res: Response): string | null {
+  const token: unknown = req.body?.token;
+  const digest = typeof token === 'string' && token.length > 0 && token.length <= MAIL_BLOCK_TOKEN_MAX_CHARS
+    ? readMailBlockToken(token)
+    : null;
+  if (!digest) res.status(400).json({ success: false, error: MAIL_BLOCK_INVALID });
+  return digest;
+}
+
+authRouter.post('/mail-block/status', rateLimitMailBlock, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const digest = mailBlockDigest(req, res);
+    if (!digest) return;
+    res.json({ success: true, data: { blocked: await isDigestSuppressed(digest) } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/mail-block', rateLimitMailBlock, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const digest = mailBlockDigest(req, res);
+    if (!digest) return;
+    await suppressDigest(digest);
+    res.json({ success: true, data: { blocked: true } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.post('/mail-unblock', rateLimitMailBlock, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const digest = mailBlockDigest(req, res);
+    if (!digest) return;
+    await unsuppressDigest(digest);
+    res.json({ success: true, data: { blocked: false } });
   } catch (err) {
     next(err);
   }

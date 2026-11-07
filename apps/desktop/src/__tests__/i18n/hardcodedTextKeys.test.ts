@@ -20,6 +20,7 @@ const SRC = fileURLToPath(new URL('../../', import.meta.url));
 const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url));
 
 const SOURCES = [
+  'components/auth/RegisterCodeStep.tsx',
   'components/chat/ImageLightbox.tsx',
   'components/chat/MentionAutocomplete.tsx',
   'components/chat/MessageContent.tsx',
@@ -52,9 +53,13 @@ const SOURCES = [
   'components/voice/ConnectionQuality.tsx',
   'components/voice/DMVoicePanel.tsx',
   'pages/CookiePolicyPage.tsx',
+  'pages/EmailVerificationPendingPage.tsx',
   'pages/LandingPage.tsx',
+  'pages/MailBlockPage.tsx',
   'pages/PrivacyPage.tsx',
+  'pages/RegisterPage.tsx',
   'pages/TermsPage.tsx',
+  'pages/VerifyEmailPage.tsx',
   'services/themeEngine.ts',
   'stores/chatStore.ts',
   'stores/dmStore.ts',

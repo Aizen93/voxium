@@ -540,3 +540,32 @@ export const TRANSLUCENT_THEME_COLOR_KEYS: readonly ThemeColorKey[] = [
 ] as const;
 
 export const BUILT_IN_THEME_IDS = ['dark', 'light', 'midnight', 'tactical'] as const;
+
+// ─── Verify-first registration ──────────────────────────────────────────────
+// No account exists until the 6-digit code mailed to the address comes back.
+// The start of a registration answers the same for every address (new, already
+// registered, blocked, recently mailed), so it reveals nothing about any of them.
+export const SIGNUP = {
+  CODE_LENGTH: 6,
+  /** a mailed code works this long */
+  CODE_TTL_MINUTES: 15,
+  /** a pending registration (and its id) lives this long */
+  PENDING_TTL_MINUTES: 60,
+  /** wrong codes allowed per pending registration before it is burned */
+  MAX_CODE_ATTEMPTS: 10,
+  /** one resend per pending registration, no earlier than this after the first mail */
+  RESEND_AFTER_SECONDS: 600,
+  MAX_RESENDS: 1,
+  /** sign-up mails one mailbox can receive per window, whatever the number of attempts */
+  LEDGER_MAX_MAILS: 2,
+  /** of those, the "you already have an account" notice goes out only on an otherwise empty window */
+  LEDGER_MAX_NOTICES: 1,
+  LEDGER_WINDOW_DAYS: 30,
+} as const;
+
+/** The only synchronous conflict of a registration start: usernames are public. */
+export const USERNAME_TAKEN_MESSAGE = 'This username is already taken';
+/** Every refused completion (wrong, expired or used-up code, unknown id): one answer. */
+export const SIGNUP_CODE_INVALID_MESSAGE = 'Invalid or expired code';
+/** Only ever shown to someone who just proved they read the mailbox. */
+export const SIGNUP_EMAIL_REGISTERED_MESSAGE = 'This email address already has an account. Sign in instead.';

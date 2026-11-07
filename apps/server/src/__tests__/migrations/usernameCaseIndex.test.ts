@@ -13,7 +13,8 @@ import { resolve } from 'node:path';
  * was exercised against the dev database (case-variant insert rejected with
  * P2002, then rolled back). What a unit test usefully adds is noticing if
  * someone deletes the index, the schema warning, or the P2002 mapping that
- * keeps the race from surfacing as a 500 with the constraint name in the logs.
+ * keeps the race from surfacing as a 500 with the constraint name in the logs
+ * (its behaviour is exercised in services/signupService.test.ts).
  */
 
 const REPO = resolve(__dirname, '../../../../..');
@@ -22,11 +23,11 @@ const MIGRATION = resolve(
   'apps/server/prisma/migrations/20260820210000_username_case_insensitive_unique/migration.sql'
 );
 const SCHEMA = resolve(REPO, 'apps/server/prisma/schema.prisma');
-const AUTH_SERVICE = resolve(REPO, 'apps/server/src/services/authService.ts');
+const SIGNUP_SERVICE = resolve(REPO, 'apps/server/src/services/signupService.ts');
 
 const sql = readFileSync(MIGRATION, 'utf8');
 const schema = readFileSync(SCHEMA, 'utf8');
-const authService = readFileSync(AUTH_SERVICE, 'utf8');
+const signupService = readFileSync(SIGNUP_SERVICE, 'utf8');
 
 describe('username case-insensitive uniqueness is enforced by the database', () => {
   it('creates the functional unique index, idempotently', () => {
@@ -74,8 +75,12 @@ describe('username case-insensitive uniqueness is enforced by the database', () 
     expect(schema).toMatch(/drift/i);
   });
 
-  it('maps the constraint violation to the enumeration-safe conflict, not a raw Prisma error', () => {
-    expect(authService).toContain("code === 'P2002'");
-    expect(authService).toMatch(/P2002[\s\S]{0,200}Username or email already in use/);
+  it('maps the constraint violation to a 409 the client understands, not a raw Prisma error', () => {
+    // Account creation lives in completeRegistration (verify-first sign-up):
+    // a username race answers the public "username taken" conflict, an e-mail
+    // race the "already has an account" one (told only to the mailbox owner).
+    expect(signupService).toContain("code === 'P2002'");
+    expect(signupService).toMatch(/P2002[\s\S]{0,400}ConflictError\(SIGNUP_EMAIL_REGISTERED_MESSAGE\)/);
+    expect(signupService).toMatch(/P2002[\s\S]{0,500}ConflictError\(USERNAME_TAKEN_MESSAGE\)/);
   });
 });

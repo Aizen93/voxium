@@ -1,14 +1,66 @@
 import { test, expect } from './helpers/fixtures';
-import { testUser, registerViaUI, registerViaUIUnverified, loginViaUI } from './helpers/auth';
-import { registerUser } from './helpers/api';
+import {
+  testUser, loginViaUI, startRegistrationViaUI, submitKnownSignupCode, signupCodeInput,
+} from './helpers/auth';
+import { API_URL, registerUser } from './helpers/api';
+import { setLatestPendingRegistrationCodeForEmail } from './helpers/db';
 import { dmHeading } from './helpers/selectors';
 
 test.describe('Authentication', () => {
   test('register a new account', async ({ page }) => {
     const user = testUser('reg');
-    await registerViaUIUnverified(page, user);
-    // New registrations land on verification pending page (email not yet verified)
-    await expect(page.getByText('Verify your email')).toBeVisible({ timeout: 10_000 });
+    await startRegistrationViaUI(page, user);
+
+    // The code step: nothing is created until the mailed code comes back
+    await expect(page.getByRole('heading', { name: 'Check your inbox' })).toBeVisible();
+    await expect(page.getByText(user.email).first()).toBeVisible();
+    await expect(signupCodeInput(page)).toBeVisible();
+    // One resend, and only after a delay: disabled with its countdown at first
+    await expect(page.getByRole('button', { name: /Send a new code/ })).toBeDisabled();
+    await expect(page.getByRole('link', { name: /sign in/i }).first()).toHaveAttribute('href', /\/login$/);
+
+    await submitKnownSignupCode(page, user.email);
+
+    // Verified from the start: straight into the app, no verification gate
+    await page.waitForURL('/', { timeout: 15_000 });
+    await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Verify your email')).toBeHidden();
+  });
+
+  test('a wrong sign-up code is refused and the account is not created', async ({ page, request }) => {
+    const user = testUser('regbad');
+    await startRegistrationViaUI(page, user);
+    // The known code is the valid one; any other is wrong
+    await setLatestPendingRegistrationCodeForEmail(user.email);
+
+    await signupCodeInput(page).fill('000000');
+    await page.getByRole('button', { name: 'Verify and create account' }).click();
+    await expect(page.getByText('Invalid or expired code')).toBeVisible({ timeout: 10_000 });
+    await expect(signupCodeInput(page)).toBeVisible();
+
+    // No account behind the address yet
+    const login = await request.post(`${API_URL}/auth/login`, {
+      data: { email: user.email, password: user.password },
+    });
+    expect(login.ok()).toBe(false);
+  });
+
+  test('a username taken during the code step can be replaced with the same code', async ({ page, request }) => {
+    const user = testUser('regtk');
+    await startRegistrationViaUI(page, user);
+
+    // Someone else completes a registration with that username meanwhile
+    await registerUser(request, { ...testUser('regtko'), username: user.username });
+
+    await submitKnownSignupCode(page, user.email);
+    const usernameField = page.getByPlaceholder('Pick a username');
+    await expect(usernameField).toBeVisible({ timeout: 10_000 });
+
+    // A new name, the same code (a taken username costs no attempt)
+    await usernameField.fill(`${user.username}x`);
+    await page.getByRole('button', { name: 'Verify and create account' }).click();
+    await page.waitForURL('/', { timeout: 15_000 });
+    await expect(dmHeading(page)).toBeVisible({ timeout: 10_000 });
   });
 
   test('login with existing account', async ({ page, request }) => {

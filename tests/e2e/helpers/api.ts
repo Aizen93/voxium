@@ -24,8 +24,6 @@ export async function clearRateLimits() {
   }
 }
 
-/** Register a new user via the API. Auto-verifies email for testing. Returns access + refresh tokens. */
-
 /**
  * Fetch and solve the registration proof-of-work (anti-bot Phase 3). Dev/test
  * servers issue a tiny difficulty, so this costs microseconds while still
@@ -38,40 +36,77 @@ async function solveRegisterChallenge(request: APIRequestContext) {
   return solveRegistrationPow(data);
 }
 
+export type RegisteredUser = {
+  accessToken: string;
+  refreshToken: string;
+  user: { id: string; username: string; email: string };
+};
+
+/**
+ * Start a verify-first registration (POST /auth/register, 202). Creates no
+ * account; returns the pending id the code is completed against.
+ */
+export async function startRegistration(
+  request: APIRequestContext,
+  user: { username: string; email: string; password: string },
+): Promise<string> {
+  const pow = await solveRegisterChallenge(request);
+  // Consent is required server-side, exactly as the form requires it
+  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow, acceptTerms: true, acceptPrivacy: true } });
+  if (res.status() !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+  const { data } = await res.json();
+  return data.pendingId as string;
+}
+
+/** Complete a pending registration with its code (POST /auth/register/complete, 201). */
+export async function completeRegistration(
+  request: APIRequestContext,
+  pendingId: string,
+  code: string,
+  username?: string,
+): Promise<RegisteredUser> {
+  const res = await request.post(`${API_URL}/auth/register/complete`, {
+    data: { pendingId, code, ...(username !== undefined ? { username } : {}) },
+  });
+  if (res.status() !== 201) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Register complete failed (${res.status()}): ${body.error || res.statusText()}`);
+  }
+  const { data } = await res.json();
+  return data as RegisteredUser;
+}
+
+/**
+ * Register a new user via the API: start, replace the mailed code with the
+ * known test code in the database, complete. The account is created verified
+ * (the code proved the mailbox). Returns access + refresh tokens and the user.
+ */
 export async function registerUser(
   request: APIRequestContext,
   user: { username: string; email: string; password: string },
-) {
-  const pow = await solveRegisterChallenge(request);
-  // Consent is required server-side, exactly as the form requires it
-  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow, acceptTerms: true, acceptPrivacy: true } });
-  if (!res.ok()) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);
-  }
-  const { data } = await res.json();
-
-  // Auto-verify email so tests don't get blocked by the verification gate
-  const { verifyUserEmail } = await import('./db');
-  await verifyUserEmail(data.user.id);
-
-  return data as { accessToken: string; refreshToken: string; user: { id: string; username: string } };
+): Promise<RegisteredUser> {
+  const pendingId = await startRegistration(request, user);
+  const { setPendingRegistrationCode, TEST_SIGNUP_CODE } = await import('./db');
+  await setPendingRegistrationCode(pendingId, TEST_SIGNUP_CODE);
+  return completeRegistration(request, pendingId, TEST_SIGNUP_CODE);
 }
 
-/** Register a new user via the API WITHOUT auto-verifying email. For testing the verification flow. */
+/**
+ * A LEGACY unverified account (registration no longer creates one): inserted
+ * straight into the database, then signed in through the API. For the
+ * link-based verification flow that older accounts still use.
+ */
 export async function registerUserUnverified(
   request: APIRequestContext,
   user: { username: string; email: string; password: string },
-) {
-  const pow = await solveRegisterChallenge(request);
-  // Consent is required server-side, exactly as the form requires it
-  const res = await request.post(`${API_URL}/auth/register`, { data: { ...user, pow, acceptTerms: true, acceptPrivacy: true } });
-  if (!res.ok()) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(`Register failed (${res.status()}): ${body.error || res.statusText()}`);
-  }
-  const { data } = await res.json();
-  return data as { accessToken: string; refreshToken: string; user: { id: string; username: string; email: string } };
+): Promise<RegisteredUser> {
+  const { createLegacyUnverifiedUser } = await import('./db');
+  await createLegacyUnverifiedUser(user);
+  const data = await loginUser(request, { email: user.email, password: user.password });
+  return data as RegisteredUser;
 }
 
 /** Login via the API. Returns access + refresh tokens. */

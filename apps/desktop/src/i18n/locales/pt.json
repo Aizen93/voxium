@@ -79,7 +79,27 @@
       "signIn": "Entrar",
       "passwordWeak": "Senha fraca",
       "passwordMedium": "Força média",
-      "passwordStrong": "Senha forte"
+      "passwordStrong": "Senha forte",
+      "code": {
+        "title": "Verifique sua caixa de entrada",
+        "sentTo": "Enviamos um código de {{length}} dígitos para {{email}}. Ele expira em {{minutes}} minutos.",
+        "codeLabel": "Código de cadastro",
+        "submit": "Verificar e criar conta",
+        "verifying": "Verificando…",
+        "resend": "Enviar um novo código",
+        "resendIn": "Você poderá pedir um novo código em {{time}}.",
+        "resent": "Pedimos um novo código. Quando ele chegar, use-o no lugar do anterior.",
+        "resendFailed": "Não foi possível pedir um novo código. Tente novamente em instantes.",
+        "usernameLabel": "Novo nome de usuário",
+        "usernameTakenHint": "Esse nome de usuário foi ocupado nesse meio-tempo. Escolha outro: seu código continua válido.",
+        "haveAccount": "Se você já tem uma conta, entre ou redefina sua senha.",
+        "signIn": "Entrar",
+        "resetPassword": "Redefinir senha",
+        "spamHint": "Nada ainda? Verifique sua pasta de spam ou lixo eletrônico.",
+        "startOver": "Recomeçar",
+        "startOverWarning": "Recomeçar envia um novo código. Um endereço recebe no máximo {{mails}} e-mails de cadastro em {{days}} dias, então normalmente o código já enviado é o que deve ser usado.",
+        "startOverConfirm": "Recomeçar mesmo assim"
+      }
     },
     "totp": {
       "title": "Autenticação de dois fatores",
@@ -125,7 +145,25 @@
       "goToLogin": "Ir para o login",
       "goBack": "Voltar",
       "missingToken": "Token de verificação não encontrado.",
-      "failed": "A verificação falhou. O link pode ser inválido ou ter expirado."
+      "failed": "A verificação falhou. O link pode ser inválido ou ter expirado.",
+      "prompt": "Confirme este endereço de e-mail para sua conta Voxium.",
+      "verifyButton": "Verificar meu e-mail"
+    },
+    "mailBlock": {
+      "title": "E-mails do Voxium para este endereço",
+      "checking": "Verificando este link…",
+      "intro": "Se você não criou uma conta no Voxium nem pediu a redefinição de senha, outra pessoa digitou o seu endereço. Um clique interrompe todos os e-mails do Voxium para este endereço.",
+      "block": "Bloquear e-mails do Voxium para este endereço",
+      "blockedIntro": "O Voxium não envia mais e-mails para este endereço.",
+      "allow": "Permitir e-mails do Voxium novamente",
+      "working": "Salvando…",
+      "blockedDone": "Pronto. Este endereço não receberá mais e-mails do Voxium. Você pode permiti-los novamente nesta página a qualquer momento.",
+      "allowedDone": "Os e-mails do Voxium para este endereço estão permitidos novamente.",
+      "note": "Isto afeta apenas os e-mails de conta enviados pelo Voxium (códigos de cadastro, verificação do endereço, redefinição de senha e avisos sobre a conta). Nenhuma conta é criada ou excluída.",
+      "invalidLink": "Este link é inválido ou expirou. Use o link de um e-mail mais recente do Voxium.",
+      "failed": "Algo deu errado. Tente novamente.",
+      "retry": "Tentar novamente",
+      "home": "Voltar ao Voxium"
     },
     "consent": {
       "title": "Antes de continuar",
@@ -1319,7 +1357,7 @@
     "invalidTwoFactorCode": "Código de autenticação de dois fatores inválido",
     "emailAlreadyVerified": "Seu endereço de e-mail já foi verificado",
     "tooManyVerificationEmails": "Muitos e-mails de verificação solicitados — tente novamente amanhã",
-    "tooManyDomainRegistrations": "Muitos cadastros deste domínio de e-mail hoje — tente novamente mais tarde",
+    "mailBlocked": "Os e-mails para este endereço estão bloqueados — use o link de um e-mail anterior do Voxium para permiti-los novamente",
     "registrationChallengeInvalid": "A verificação de cadastro é inválida ou expirou — atualize e tente novamente",
     "powExpired": "A verificação de cadastro demorou demais — tente novamente",
     "powUnavailable": "Este navegador não consegue executar a verificação de cadastro (WebCrypto indisponível)",
@@ -1447,7 +1485,10 @@
     "screenShareTaken": "Outra pessoa já está compartilhando neste canal",
     "noPermissionSpeak": "Você não tem permissão para falar neste canal",
     "searchQueryTooShort": "A pesquisa deve ter pelo menos {{min}} caracteres",
-    "searchQueryTooLong": "A pesquisa deve ter no máximo {{max}} caracteres"
+    "searchQueryTooLong": "A pesquisa deve ter no máximo {{max}} caracteres",
+    "usernameTaken": "Este nome de usuário já está em uso",
+    "signupCodeInvalid": "Código inválido ou expirado",
+    "signupEmailRegistered": "Este endereço de e-mail já tem uma conta. Entre em vez disso."
   },
   "e2e": {
     "badgeTitle": "Criptografia de ponta a ponta — ver número de segurança",
