@@ -896,7 +896,7 @@
       "title": "공유 준비",
       "subtitle": "비공개 부분을 가리고 메모나 이미지를 추가하세요 — 방송 전까지 아무것도 공유되지 않습니다",
       "monitorNudge": "전체 화면을 공유하고 있습니다 — 알림과 다른 모든 창이 보입니다. 비공개 부분을 가리세요.",
-      "maskCount": "마스크 {{count}}개",
+      "maskCount_other": "마스크 {{count}}개",
       "skipNextTime": "다음부터 표시 안 함(전체 화면 경고는 유지)",
       "cancel": "취소",
       "goLive": "방송 시작"
@@ -1563,7 +1563,6 @@
     "active": "활동 중",
     "away": "자리 비움",
     "offline": "오프라인",
-    "speaking": "말하는 중",
     "mutedStatus": "음소거됨",
     "inVoiceStatus": "음성 채널",
     "dnd": "방해 금지",

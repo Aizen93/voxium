@@ -897,7 +897,8 @@
       "title": "Préparez votre partage",
       "subtitle": "Masquez ce qui est privé et ajoutez notes ou images — rien n'est partagé avant le direct",
       "monitorNudge": "Vous partagez un écran entier — les notifications et toutes les autres fenêtres seront visibles. Couvrez ce qui est privé.",
-      "maskCount": "{{count}} masques",
+      "maskCount_one": "{{count}} masque",
+      "maskCount_other": "{{count}} masques",
       "skipNextTime": "Ne plus afficher (l’avertissement plein écran reste)",
       "cancel": "Annuler",
       "goLive": "Passer en direct"
@@ -1564,7 +1565,6 @@
     "active": "Actifs",
     "away": "Absents",
     "offline": "Hors ligne",
-    "speaking": "Parle",
     "mutedStatus": "Muet",
     "inVoiceStatus": "En vocal",
     "dnd": "Ne pas déranger",

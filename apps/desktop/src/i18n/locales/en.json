@@ -897,7 +897,8 @@
       "title": "Prepare your share",
       "subtitle": "Cover anything private and add notes or images — nothing is shared until you go live",
       "monitorNudge": "You are sharing a whole screen — notifications and every other window will be visible. Cover anything private.",
-      "maskCount": "{{count}} masks",
+      "maskCount_one": "{{count}} mask",
+      "maskCount_other": "{{count}} masks",
       "skipNextTime": "Do not show this again (the whole-screen warning stays)",
       "cancel": "Cancel",
       "goLive": "Go live"
@@ -1564,7 +1565,6 @@
     "active": "Active",
     "away": "Away",
     "offline": "Offline",
-    "speaking": "Speaking",
     "mutedStatus": "Muted",
     "inVoiceStatus": "In voice",
     "dnd": "Do not disturb",

@@ -897,7 +897,8 @@
       "title": "Prepara a tua partilha",
       "subtitle": "Cubra o que é privado e adicione notas ou imagens — nada é compartilhado até você entrar ao vivo",
       "monitorNudge": "Estás a partilhar um ecrã inteiro — as notificações e todas as outras janelas ficarão visíveis. Cobre o que é privado.",
-      "maskCount": "{{count}} máscaras",
+      "maskCount_one": "{{count}} máscara",
+      "maskCount_other": "{{count}} máscaras",
       "skipNextTime": "Não voltar a mostrar (o aviso de ecrã inteiro mantém-se)",
       "cancel": "Cancelar",
       "goLive": "Emitir"
@@ -1564,7 +1565,6 @@
     "active": "Ativos",
     "away": "Ausentes",
     "offline": "Offline",
-    "speaking": "Falando",
     "mutedStatus": "Mutado",
     "inVoiceStatus": "Em voz",
     "dnd": "Não perturbe",

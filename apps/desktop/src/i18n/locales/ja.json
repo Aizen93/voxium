@@ -896,7 +896,7 @@
       "title": "共有の準備",
       "subtitle": "プライベートな部分を隠し、メモや画像を追加 — 配信開始まで何も共有されません",
       "monitorNudge": "画面全体を共有しています — 通知や他のすべてのウィンドウが見えます。プライベートな部分を隠してください。",
-      "maskCount": "マスク {{count}} 件",
+      "maskCount_other": "マスク {{count}} 件",
       "skipNextTime": "次回から表示しない（全画面の警告は残ります）",
       "cancel": "キャンセル",
       "goLive": "配信開始"
@@ -1563,7 +1563,6 @@
     "active": "アクティブ",
     "away": "離席中",
     "offline": "オフライン",
-    "speaking": "話し中",
     "mutedStatus": "ミュート中",
     "inVoiceStatus": "ボイス中",
     "dnd": "取り込み中",

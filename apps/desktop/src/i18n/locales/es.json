@@ -897,7 +897,8 @@
       "title": "Prepara tu pantalla compartida",
       "subtitle": "Cubre lo privado y añade notas o imágenes: no se comparte nada hasta que emitas",
       "monitorNudge": "Estás compartiendo una pantalla completa: las notificaciones y todas las demás ventanas serán visibles. Cubre lo privado.",
-      "maskCount": "{{count}} máscaras",
+      "maskCount_one": "{{count}} máscara",
+      "maskCount_other": "{{count}} máscaras",
       "skipNextTime": "No volver a mostrar (el aviso de pantalla completa se mantiene)",
       "cancel": "Cancelar",
       "goLive": "Emitir"
@@ -1564,7 +1565,6 @@
     "active": "Activos",
     "away": "Ausentes",
     "offline": "Desconectados",
-    "speaking": "Hablando",
     "mutedStatus": "Silenciado",
     "inVoiceStatus": "En voz",
     "dnd": "No molestar",

@@ -897,7 +897,8 @@
       "title": "Bereite deine Übertragung vor",
       "subtitle": "Decke Privates ab und füge Notizen oder Bilder hinzu — nichts wird vor dem Livegang geteilt",
       "monitorNudge": "Du teilst einen ganzen Bildschirm — Benachrichtigungen und alle anderen Fenster sind sichtbar. Decke Privates ab.",
-      "maskCount": "{{count}} Masken",
+      "maskCount_one": "{{count}} Maske",
+      "maskCount_other": "{{count}} Masken",
       "skipNextTime": "Nicht mehr anzeigen (die Ganzbildschirm-Warnung bleibt)",
       "cancel": "Abbrechen",
       "goLive": "Live gehen"
@@ -1564,7 +1565,6 @@
     "active": "Aktiv",
     "away": "Abwesend",
     "offline": "Offline",
-    "speaking": "Spricht",
     "mutedStatus": "Stummgeschaltet",
     "inVoiceStatus": "Im Sprachkanal",
     "dnd": "Nicht stören",

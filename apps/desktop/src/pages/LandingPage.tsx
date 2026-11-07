@@ -558,22 +558,29 @@ function formatNumber(n: number): string {
 
 /* ─── Stats Section ─── */
 
-function StatsSection() {
+export function StatsSection() {
   const { t } = useTranslation();
   const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
   const [stats, setStats] = useState<{ users: number; servers: number; messages: number } | null>(null);
   const [visible, setVisible] = useState(false);
   const sectionRef = useRef<HTMLDivElement>(null);
+  // The section polls every 30 s: a failure is logged once, and again only
+  // after a fetch has succeeded, so an endpoint that is down cannot fill the console.
+  const failureLoggedRef = useRef(false);
 
   const fetchStats = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/stats`);
-      if (res.ok) {
-        const json = await res.json();
-        setStats(json.data);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      setStats(json.data);
+      failureLoggedRef.current = false;
+    } catch (err) {
+      // Non-critical: the cards keep their last figures, or the dash.
+      if (!failureLoggedRef.current) {
+        failureLoggedRef.current = true;
+        console.warn('[Landing] Failed to fetch stats:', err instanceof Error ? err.message : err);
       }
-    } catch {
-      // silently ignore — stats are non-critical
     }
   }, [API_BASE]);
 
