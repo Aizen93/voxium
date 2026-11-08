@@ -328,6 +328,14 @@ cd apps/desktop
 pnpm tauri:build
 ```
 
+Avatars and space icons load from your object storage, which the app's Content Security Policy must name. Set `TAURI_ASSET_ORIGIN` to that storage's origin (`https://host[:port]`) and build with the generated overlay instead:
+
+```bash
+cd apps/desktop
+TAURI_ASSET_ORIGIN=https://objects.example.com node scripts/tauri-release-config.mjs > /tmp/tauri.release.json
+pnpm tauri build --config /tmp/tauri.release.json
+```
+
 This creates platform-specific installers in `apps/desktop/src-tauri/target/release/bundle/`:
 - **Windows:** `.msi` and `.exe` installers
 - **macOS:** `.dmg` and `.app` bundle
