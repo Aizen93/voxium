@@ -396,6 +396,10 @@ PORT=3001
 # Add the Tauri desktop origins so the native apps can connect too:
 # https://tauri.localhost (Windows), tauri://localhost (macOS), http://tauri.localhost (Linux)
 CORS_ORIGIN=https://yourdomain.com,https://tauri.localhost,tauri://localhost,http://tauri.localhost
+# The object-storage BUCKET needs the same origins in its own CORS rules (methods GET, PUT, HEAD;
+# headers *): avatars, space icons and attachments are uploaded straight from the client to a
+# presigned URL, and a bucket that allows only the web origin fails the desktop app's uploads
+# with "Failed to fetch" while the images still display. scripts/setup-dev-bucket.ts shows the rule.
 CLIENT_URL=https://yourdomain.com
 # Set to true when running behind a reverse proxy (nginx etc.)
 TRUST_PROXY=true
