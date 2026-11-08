@@ -1,5 +1,7 @@
 import dotenv from 'dotenv';
-dotenv.config();
+// quiet: dotenv prints "injected env (N) from .env" at every boot otherwise
+// (on stderr from dotenv 18, i.e. into the process manager's error log).
+dotenv.config({ quiet: true });
 
 // Validate required env vars before any module reads them
 const REQUIRED_ENV_VARS = [

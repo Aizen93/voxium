@@ -4,5 +4,5 @@ import dotenv from 'dotenv';
 import path from 'path';
 
 // Load .env.test if it exists, otherwise fall back to .env
-dotenv.config({ path: path.resolve(__dirname, '../../.env.test') });
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../../.env.test'), quiet: true });
+dotenv.config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
