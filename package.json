@@ -66,8 +66,8 @@
     "@prisma/adapter-pg": "^7.10.1",
     "@roamhq/wrtc": "^0.10.0",
     "eslint": "^10.14.0",
-    "mediasoup-client": "^3.25.3",
-    "otpauth": "^9.5.2",
+    "mediasoup-client": "^3.26.0",
+    "otpauth": "^9.6.0",
     "redis": "^5.11.0",
     "typescript-eslint": "^8.72.1"
   },
