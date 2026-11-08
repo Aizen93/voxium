@@ -53,6 +53,7 @@ const joinServerMember = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/serverJoin', () => ({ joinServerMember: (...a: any[]) => joinServerMember(...a) }));
 
 import { discoveryRouter, DISCOVERY_PAGE_CACHE_TTL_S } from '../../routes/discovery';
+import { DISCOVERY_PAGE_GENERATION_KEY } from '../../utils/discoveryPageCache';
 import { errorHandler } from '../../middleware/errorHandler';
 import { encodeDiscoveryCursor, decodeDiscoveryCursor, hashDiscoveryQuery } from '../../utils/discoveryCursor';
 import { ForbiddenError, BadRequestError } from '../../utils/errors';
@@ -328,17 +329,22 @@ describe('GET /discovery/servers', () => {
     expect(res.body.data.nextCursor).toBeNull();
   });
 
-  it('serves the public part from the 60 s cache, keyed by sort/tag/hash(q)/cursor/limit, and still resolves per-user flags', async () => {
+  it('serves the public part from the 60 s cache, keyed by generation/sort/tag/hash(q)/cursor/limit, and still resolves per-user flags', async () => {
     const qh = hashDiscoveryQuery('voxium');
-    redis.get.mockResolvedValue(JSON.stringify({
+    const cachedPage = JSON.stringify({
       featured: [], servers: [{ ...row(7), createdAt: NOW.toISOString(), featured: false }], nextCursor: null, totalCapped: 1,
-    }));
+    });
+    redis.get.mockImplementation(async (key: string) => {
+      if (key === DISCOVERY_PAGE_GENERATION_KEY) return '4';
+      return key.startsWith('discovery:page:4:') ? cachedPage : null;
+    });
     prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-7' }]);
 
     const res = await request(app).get('/api/v1/discovery/servers?q=voxium&tag=gaming&sort=members&limit=10');
 
     expect(res.status).toBe(200);
-    expect(redis.get).toHaveBeenCalledWith(`discovery:page:members:gaming:${qh}::10`);
+    expect(redis.get).toHaveBeenCalledWith(DISCOVERY_PAGE_GENERATION_KEY);
+    expect(redis.get).toHaveBeenCalledWith(`discovery:page:4:members:gaming:${qh}::10`);
     expect(prismaMock.server.findMany).not.toHaveBeenCalled();
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
     expect(redis.set).not.toHaveBeenCalled();
@@ -355,14 +361,38 @@ describe('GET /discovery/servers', () => {
     const res = await request(app).get('/api/v1/discovery/servers');
     expect(res.status).toBe(200);
     expect(res.body.data.servers[0].requestPending).toBe(true);
-    expect(redis.set).toHaveBeenCalledWith('discovery:page:active::::24', expect.any(String), { EX: DISCOVERY_PAGE_CACHE_TTL_S });
+    // generation 0 before any bump
+    expect(redis.set).toHaveBeenCalledWith('discovery:page:0:active::::24', expect.any(String), { EX: DISCOVERY_PAGE_CACHE_TTL_S });
     const cached = JSON.parse(redis.set.mock.calls[0][1]);
     expect(cached.servers[0]).not.toHaveProperty('isMember');
     expect(cached.servers[0]).not.toHaveProperty('requestPending');
     expect(DISCOVERY_PAGE_CACHE_TTL_S).toBe(60);
   });
 
-  it('a cache outage is logged and the page is served uncached', async () => {
+  it('a bumped generation leaves every page cached under the old one unreached: the next open recomputes and caches under the new one', async () => {
+    const stalePage = JSON.stringify({
+      featured: [], servers: [{ ...row(7), createdAt: NOW.toISOString(), featured: false }], nextCursor: null, totalCapped: 1,
+    });
+    let generation = '4';
+    redis.get.mockImplementation(async (key: string) => {
+      if (key === DISCOVERY_PAGE_GENERATION_KEY) return generation;
+      return key === 'discovery:page:4:active::::24' ? stalePage : null;
+    });
+    prismaMock.server.findMany.mockResolvedValue([row(1)]);
+
+    let res = await request(app).get('/api/v1/discovery/servers');
+    expect(res.body.data.servers[0].id).toBe('srv-7');
+    expect(prismaMock.server.findMany).not.toHaveBeenCalled();
+
+    generation = '5'; // a write bumped it (a space hidden, renamed, blocked, deleted …)
+    res = await request(app).get('/api/v1/discovery/servers');
+    expect(res.status).toBe(200);
+    expect(res.body.data.servers[0].id).toBe('srv-1');
+    expect(prismaMock.server.findMany).toHaveBeenCalled();
+    expect(redis.set).toHaveBeenCalledWith('discovery:page:5:active::::24', expect.any(String), { EX: DISCOVERY_PAGE_CACHE_TTL_S });
+  });
+
+  it('a cache outage is logged and the page is served uncached, and nothing is written under a key without a generation', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     redis.get.mockRejectedValue(new Error('redis down'));
     redis.set.mockRejectedValue(new Error('redis down'));
@@ -371,7 +401,26 @@ describe('GET /discovery/servers', () => {
     const res = await request(app).get('/api/v1/discovery/servers');
     expect(res.status).toBe(200);
     expect(res.body.data.servers).toHaveLength(1);
-    expect(warn).toHaveBeenCalledTimes(3); // the read, the write, and the tier cuts — each fails open on its own;
+    // the generation read and the tier cuts — each fails open on its own; the
+    // write is skipped (no generation, no key), not attempted
+    expect(redis.set).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+
+  it('a generation that reads but a page that does not: served uncached, the write still attempted under the generation it read', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    redis.get.mockImplementation(async (key: string) => {
+      if (key === DISCOVERY_PAGE_GENERATION_KEY) return '2';
+      throw new Error('redis down');
+    });
+    prismaMock.server.findMany.mockResolvedValue([row(1)]);
+
+    const res = await request(app).get('/api/v1/discovery/servers');
+    expect(res.status).toBe(200);
+    // a failed page read means Redis is not answering: no write is attempted either
+    expect(redis.set).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Page cache read failed'), 'redis down');
     warn.mockRestore();
   });
 

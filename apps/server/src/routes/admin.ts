@@ -25,6 +25,7 @@ import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLo
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
 import { logAuditEvent } from '../utils/auditLog';
 import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
+import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { serverSelect } from '../utils/serverSelect';
 import {
   webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhooksHeldBy,
@@ -773,6 +774,7 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           // user-facing DELETE /servers/:id already does exactly this.
           const doomed = await prisma.server.findUnique({ where: { id: action.serverId }, select: { iconUrl: true } });
           await prisma.server.delete({ where: { id: action.serverId } });
+          await bumpDiscoveryPageCache('admin server delete');
           if (doomed?.iconUrl) {
             await deleteFromS3(doomed.iconUrl).catch((err) =>
               console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
@@ -1076,8 +1078,11 @@ adminRouter.patch('/servers/:serverId/discovery', async (req: Request<{ serverId
       select: { ...serverSelect, discoveryListed: true, featuredAt: true, discoveryBlockedAt: true },
     });
 
-    // discoveryBlockedAt / discoverable are inputs of the listing column (never throws)
+    // discoveryBlockedAt / discoverable are inputs of the listing column (never
+    // throws); Featured is a row of its own on the first page, so the cached
+    // pages are bumped whether or not the listing flipped (never throws either)
     const discoveryListed = (await recomputeListed(serverId)) ?? updated.discoveryListed;
+    await bumpDiscoveryPageCache('admin discovery curation');
 
     const { discoveryListed: _ignored, featuredAt, discoveryBlockedAt, ...serverShape } = updated;
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, serverShape as unknown as Server);
@@ -1229,6 +1234,8 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
 
     // Cascade delete
     await prisma.server.delete({ where: { id: server.id } });
+    // A deleted space must not stay on a cached Explore page (never throws)
+    await bumpDiscoveryPageCache('admin server delete');
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -2004,7 +2011,9 @@ adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, n
     if (key.startsWith('avatars/')) {
       await prisma.user.updateMany({ where: { avatarUrl: key }, data: { avatarUrl: null } });
     } else if (key.startsWith('server-icons/')) {
-      await prisma.server.updateMany({ where: { iconUrl: key }, data: { iconUrl: null } });
+      const cleared = await prisma.server.updateMany({ where: { iconUrl: key }, data: { iconUrl: null } });
+      // A space lost its icon: its Explore card changed (never throws)
+      if (cleared.count > 0) await bumpDiscoveryPageCache('admin storage delete (space icon)');
     } else if (key.startsWith('attachments/')) {
       await prisma.messageAttachment.updateMany({ where: { s3Key: key }, data: { expired: true } });
     }

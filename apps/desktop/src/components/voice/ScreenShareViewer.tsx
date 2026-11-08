@@ -13,6 +13,7 @@ import { useAnnotationShortcuts } from '../../hooks/useAnnotationShortcuts';
 import { useStageZoom, ZoomPill, MagnifierLens } from './StageZoom';
 import { ReactionStrip, ReactionOverlay } from './Reactions';
 import { SnapshotMenu } from './SnapshotMenu';
+import { ShareStatusLabel } from './ShareStatusLabel';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 
 // A board has nothing to cover — every tool but the privacy mask
@@ -85,9 +86,7 @@ export function ScreenShareViewer() {
     <div className="flex h-full flex-col bg-black">
       {/* Header bar */}
       <div className="flex items-center justify-between px-4 py-2 bg-vox-bg-secondary border-b border-vox-border">
-        <span className="text-sm text-vox-text-primary">
-          {isLocalSharing ? t('voice.youAreSharing') : t('voice.userIsSharing', { name: sharerName })}
-        </span>
+        <ShareStatusLabel isLocalSharing={isLocalSharing} sharerName={sharerName} />
         <div className="flex items-center gap-1">
           {stream && <SnapshotMenu videoRef={videoRef} sharerName={sharerName} />}
           <button

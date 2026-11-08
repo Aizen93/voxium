@@ -57,6 +57,12 @@ vi.mock('../../utils/discoveryListing', () => ({
   recomputeListed: (...a: any[]) => mockRecomputeListed(...a),
   recomputeListedForOwner: vi.fn().mockResolvedValue(0),
 }));
+// The Explore page cache's generation: curation changes the Featured row and
+// the listing, a delete removes a card, so both bump it
+const mockBumpDiscoveryPageCache = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/discoveryPageCache', () => ({
+  bumpDiscoveryPageCache: (...a: any[]) => mockBumpDiscoveryPageCache(...a),
+}));
 
 import { adminRouter } from '../../routes/admin';
 import { errorHandler } from '../../middleware/errorHandler';
@@ -131,6 +137,18 @@ describe('PATCH /admin/servers/:serverId/discovery', () => {
     expect(mockLogAuditEvent).toHaveBeenCalledWith({ actorId: 'admin-1', action: 'server.discovery_feature', targetType: 'server', targetId: 'srv-1' });
     expect(res.body.data).toMatchObject({ id: 'srv-1', discoveryListed: true });
     expect(res.body.data.featuredAt).toBeTruthy();
+    // Featured is a row of its own on the first page: the cached pages are
+    // stale although the listing did not flip — bumped after the write
+    expect(mockBumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+    expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('admin discovery curation');
+    expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.update.mock.invocationCallOrder[0]);
+  });
+
+  it('a refused curation (unknown server, body error) bumps nothing', async () => {
+    expect((await patch({ featured: 'yes' })).status).toBe(400);
+    prismaMock.server.findUnique.mockResolvedValue(null);
+    expect((await patch({ featured: true })).status).toBe(404);
+    expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
   });
 
   it('feature twice is idempotent: no second audit row', async () => {
@@ -162,6 +180,8 @@ describe('PATCH /admin/servers/:serverId/discovery', () => {
     expect(res.body.data).toMatchObject({ discoverable: false, discoveryListed: false });
     const actions = mockLogAuditEvent.mock.calls.map(([e]: any[]) => e.action).sort();
     expect(actions).toEqual(['server.discovery_block', 'server.discovery_unfeature']);
+    // the next open of Explore must not show the blocked space
+    expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('admin discovery curation');
   });
 
   it('a blocked server cannot be featured in the same call', async () => {
@@ -190,6 +210,52 @@ describe('PATCH /admin/servers/:serverId/discovery', () => {
     const res = await patch({ featured: true });
     expect(res.status).toBe(200);
     expect(res.body.data.discoveryListed).toBe(true);
+  });
+});
+
+describe('DELETE /admin/servers/:serverId', () => {
+  const del = (id: string) => request(app).delete(`/api/v1/admin/servers/${id}`).set('Authorization', `Bearer ${makeToken()}`);
+
+  it('deletes the row, then bumps the page cache so the card leaves Explore at the next open, and audits', async () => {
+    prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S' });
+    prismaMock.server.delete = vi.fn().mockResolvedValue({});
+
+    const res = await del('srv-1');
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+    expect(mockBumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+    expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('admin server delete');
+    expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(mockEmit).toHaveBeenCalledWith('server:deleted', { serverId: 'srv-1' });
+    expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'server.delete', targetId: 'srv-1' }));
+  });
+
+  it('an unknown server is 404 and bumps nothing', async () => {
+    prismaMock.server.findUnique.mockResolvedValue(null);
+    prismaMock.server.delete = vi.fn();
+    expect((await del('ghost')).status).toBe(404);
+    expect(prismaMock.server.delete).not.toHaveBeenCalled();
+    expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
+  });
+});
+
+describe('DELETE /admin/storage/files/server-icons/* — a space icon removed from storage', () => {
+  const del = (key: string) => request(app).delete(`/api/v1/admin/storage/files/${key}`).set('Authorization', `Bearer ${makeToken()}`);
+
+  it('clears the icon reference and bumps the page cache when a space held it (its card changed)', async () => {
+    prismaMock.server.updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const res = await del('server-icons/srv-1-1700000000-abcd.webp');
+    expect(res.status).toBe(200);
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({ where: { iconUrl: 'server-icons/srv-1-1700000000-abcd.webp' }, data: { iconUrl: null } });
+    expect(mockBumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+    expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('admin storage delete (space icon)');
+  });
+
+  it('bumps nothing when no space referenced the key', async () => {
+    prismaMock.server.updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    expect((await del('server-icons/orphan.webp')).status).toBe(200);
+    expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
   });
 });
 

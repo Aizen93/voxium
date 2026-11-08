@@ -24,6 +24,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { removeMemberFromServer } from '../utils/removeMember';
 import { recomputeListed } from '../utils/discoveryListing';
+import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
 import { joinServerMember } from '../utils/serverJoin';
 import { serverSelect } from '../utils/serverSelect';
@@ -162,6 +163,10 @@ serverRouter.post('/', rateLimitMemberManage, async (req: Request, res: Response
         },
       });
     });
+
+    // Listed by default: the new space must be on Explore at its next open,
+    // not after the cached pages expire (never throws)
+    await bumpDiscoveryPageCache('server create');
 
     // Add creator's socket to the new server room so server-scoped events work
     await joinServerRoom(req.user!.userId, server.id);
@@ -646,6 +651,9 @@ serverRouter.patch('/:serverId', rateLimitMemberManage, async (req: Request<{ se
       deleteFromS3(oldIconUrl).catch((err) => console.warn('[S3] Failed to delete old asset:', err));
     }
 
+    // The name and the icon are on the Explore card (never throws)
+    await bumpDiscoveryPageCache('server update');
+
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
 
     res.json({ success: true, data: updated });
@@ -721,6 +729,8 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
 
     // 4. Delete from DB (Prisma cascade handles channels, members, messages, reactions, reads, categories, invites)
     await prisma.server.delete({ where: { id: serverId } });
+    // A deleted space must not stay on a cached Explore page (never throws)
+    await bumpDiscoveryPageCache('server delete');
 
     // 5. Clean up S3 icon if exists
     if (server.iconUrl) {
@@ -994,8 +1004,11 @@ serverRouter.patch('/:serverId/discovery', rateLimitMemberManage, async (req: Re
       data: updateData,
     });
 
-    // discoverable is one of the listing column's four inputs (never throws)
+    // discoverable is one of the listing column's four inputs (never throws);
+    // description, tags and join mode are on the card, so the pages are
+    // bumped whether or not the listing flipped (never throws either)
     await recomputeListed(serverId);
+    await bumpDiscoveryPageCache('discovery profile update');
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.SERVER_UPDATED, updated as unknown as Server);
 

@@ -189,6 +189,12 @@ vi.mock('../../utils/discoveryListing', () => ({
   recomputeListedForOwner: vi.fn().mockResolvedValue(0),
 }));
 
+// The Explore page cache's generation: bumped by the writes that change a card
+const mockBumpDiscoveryPageCache = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/discoveryPageCache', () => ({
+  bumpDiscoveryPageCache: (...args: any[]) => mockBumpDiscoveryPageCache(...args),
+}));
+
 // The join helper (approval runs it with the request delete as extra write)
 const mockJoinServerMember = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../utils/serverJoin', () => ({
@@ -411,6 +417,16 @@ describe('Server Routes', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.name).toBe('My Server');
       expect(res.body.data.memberCount).toBe(1);
+      // listed by default: the cached Explore pages are stale, bumped after the transaction committed
+      expect(mockBumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+      expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('server create');
+      expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.$transaction.mock.invocationCallOrder[0]);
+    });
+
+    it('a refused creation (name invalid) bumps nothing', async () => {
+      const res = await request(app).post('/api/v1/servers').set('Authorization', `Bearer ${makeToken()}`).send({ name: '' });
+      expect(res.status).toBe(400);
+      expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
     });
 
     it('seeds the inline member count with the creator (the one membership that skips joinServerMember)', async () => {
@@ -616,6 +632,21 @@ describe('Server Routes', () => {
       expect(mockTo).toHaveBeenCalledWith('server:srv-1');
       // server:updated must carry the directory profile too
       expect(prismaMock.server.update).toHaveBeenCalledWith(expect.objectContaining({ select: SERVER_SELECT }));
+      // the name is on the Explore card: the cached pages are stale, after the write
+      expect(mockBumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+      expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('server update');
+      expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.update.mock.invocationCallOrder[0]);
+    });
+
+    it('a refused update bumps nothing', async () => {
+      const token = makeToken({ userId: 'user-2' });
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'Old Name', iconUrl: null, ownerId: 'user-1' });
+      mockHasServerPermission.mockResolvedValue(false);
+
+      const res = await request(app).patch('/api/v1/servers/srv-1').set('Authorization', `Bearer ${token}`).send({ name: 'New Name' });
+
+      expect(res.status).toBe(403);
+      expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
     });
 
     it('returns 403 for non-owner', async () => {
@@ -840,6 +871,10 @@ describe('Server Routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.message).toBe('Server deleted');
+      // a deleted space must leave the cached Explore pages: bumped after the delete committed
+      expect(mockBumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+      expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('server delete');
+      expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
     });
 
     it('returns 403 for non-owner', async () => {
@@ -1204,10 +1239,11 @@ describe('Server Routes', () => {
       expect(res.status).toBe(200);
     });
 
-    it('writes the sanitized profile (deduped tags, empty description → null), recomputes AFTER the update, emits server:updated', async () => {
+    it('writes the sanitized profile (deduped tags, empty description → null), recomputes AFTER the update, bumps the page cache, emits server:updated', async () => {
       const order: string[] = [];
       prismaMock.server.update.mockImplementation(async () => { order.push('update'); return UPDATED; });
       mockRecomputeListed.mockImplementation(async () => { order.push('recompute'); return true; });
+      mockBumpDiscoveryPageCache.mockImplementation(async () => { order.push('bump'); });
 
       const res = await patch({ discoverable: false, joinMode: 'open', description: ' <i>Hi</i> there ', tags: ['music', 'gaming', 'music'] });
 
@@ -1217,7 +1253,10 @@ describe('Server Routes', () => {
         select: SERVER_SELECT,
         data: { discoverable: false, joinMode: 'open', description: 'Hi there', tags: ['music', 'gaming'] },
       });
-      expect(order).toEqual(['update', 'recompute']);
+      // description, tags and join mode are on the card: bumped even when the
+      // listing itself did not flip (the recompute bumps for that on its own)
+      expect(order).toEqual(['update', 'recompute', 'bump']);
+      expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('discovery profile update');
       expect(mockTo).toHaveBeenCalledWith('server:srv-1');
       expect(mockEmit).toHaveBeenCalledWith('server:updated', expect.objectContaining({ id: 'srv-1', joinMode: 'open' }));
       expect(res.body.data.joinMode).toBe('open');

@@ -22,6 +22,7 @@ const SOURCES = [
   fileURLToPath(new URL('../../components/voice/SnapshotMenu.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/AnnotationEditorLayer.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareViewer.tsx', import.meta.url)),
+  fileURLToPath(new URL('../../components/voice/ShareStatusLabel.tsx', import.meta.url)),
   fileURLToPath(new URL('../../components/voice/ScreenShareFloating.tsx', import.meta.url)),
   // sceneFull toast lives in the store's flush path, reached via i18n.t()
   fileURLToPath(new URL('../../stores/annotationStore.ts', import.meta.url)),

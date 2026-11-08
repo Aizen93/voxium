@@ -87,6 +87,23 @@ jobs:
       - name: Build shared package
         run: pnpm build:shared
 
+      # The desktop CSP (tauri.conf.json) names only the app's own hosts, while
+      # avatars and space icons redirect to the deployment's object store and
+      # their upload is a direct PUT to it. The release build merges that origin
+      # into img-src / connect-src through a config overlay the Tauri CLI applies
+      # over tauri.conf.json (apps/desktop/scripts/tauriCsp.mjs). The origin is a
+      # deployment detail kept in a repository secret, never in the repository;
+      # unset, the script prints {} and the base policy ships unchanged.
+      - name: Write the release CSP overlay
+        shell: bash
+        env:
+          TAURI_ASSET_ORIGIN: ${{ secrets.TAURI_ASSET_ORIGIN }}
+        run: |
+          if [ -z "${TAURI_ASSET_ORIGIN:-}" ]; then
+            echo "::warning::TAURI_ASSET_ORIGIN is unset: the installers ship the base CSP and show no avatars or space icons"
+          fi
+          node apps/desktop/scripts/tauri-release-config.mjs > "$RUNNER_TEMP/tauri.release.json"
+
       - name: Build and release Tauri app
         uses: tauri-apps/tauri-action@1ddc7b49b13c3038297360482fcb3e058764d7c9 # v0.6.2
         env:
@@ -98,6 +115,7 @@ jobs:
         with:
           projectPath: apps/desktop
           tauriScript: pnpm tauri
+          args: --config "${{ runner.temp }}/tauri.release.json"
           tagName: ${{ github.ref_name }}
           releaseName: 'Voxium ${{ github.ref_name }}'
           releaseDraft: false

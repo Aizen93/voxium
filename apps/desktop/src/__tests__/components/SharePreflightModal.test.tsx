@@ -240,3 +240,22 @@ describe('SharePreflightModal', () => {
     useAnnotationStore.setState({ maskStyle: 'cover' });
   });
 });
+
+describe('SharePreflightModal — size (owner, 2026-11-08: a small preview hides the areas that need covering)', () => {
+  it('the dialog fills nearly the whole window, and the video keeps its frame-sized box for the annotation canvas', () => {
+    render();
+    openPreflight('monitor');
+    const dialog = document.querySelector('[data-testid="share-preflight-dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog!.className).toContain('h-[min(92vh,1100px)]');
+    expect(dialog!.className).toContain('max-w-[min(96vw,1800px)]');
+    expect(dialog!.className).not.toContain('max-w-3xl');
+    // the video has NO explicit size: with max-h/max-w alone its box is the
+    // rendered frame, which AnnotationCanvas positions masks against
+    const video = modal()!.querySelector('video')!;
+    expect(video.className).toContain('max-h-full');
+    expect(video.className).toContain('max-w-full');
+    expect(video.className).toContain('object-contain');
+    expect(video.className).not.toMatch(/(^|\s)(w|h)-(full|\[)/);
+  });
+});

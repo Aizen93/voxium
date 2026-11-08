@@ -1,4 +1,5 @@
 import { prisma } from './prisma';
+import { bumpDiscoveryPageCache } from './discoveryPageCache';
 
 /**
  * The four inputs of `Server.discoveryListed`, the materialised column the
@@ -70,7 +71,7 @@ export async function recomputeListed(serverId: string): Promise<boolean | null>
       // here is fine: the writer that changed the inputs recomputes too.
       // updateMany, not update: a server deleted between the read and the
       // write is a no-op here, not a P2025 to log.
-      await prisma.server.updateMany({
+      const written = await prisma.server.updateMany({
         where: {
           id: serverId,
           discoverable: server.discoverable,
@@ -80,6 +81,10 @@ export async function recomputeListed(serverId: string): Promise<boolean | null>
         },
         data: { discoveryListed: listed },
       });
+      // The server entered or left Explore: the cached pages are stale now
+      // (a compare-and-set miss changed nothing, and the writer that won
+      // bumps for its own write).
+      if (written.count > 0) await bumpDiscoveryPageCache(`recomputeListed(${serverId})`);
     }
     return listed;
   } catch (err) {
@@ -116,6 +121,7 @@ export async function recomputeListedForOwner(ownerId: string): Promise<number |
           },
           data: { discoveryListed: true },
         });
+    if (result.count > 0) await bumpDiscoveryPageCache(`recomputeListedForOwner(${ownerId})`);
     return result.count;
   } catch (err) {
     logFailure(`recomputeListedForOwner(${ownerId}) failed`, err);

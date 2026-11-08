@@ -1,6 +1,6 @@
 [package]
 name = "voxium"
-version = "2.1.0"
+version = "2.1.1"
 description = "Voxium - Modern voice & text communication platform"
 authors = ["Voxium Team"]
 edition = "2021"
@@ -27,3 +27,8 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri-winrt-notification = "0.7"
+# Hiding WebView2's screen-share bar (src/share_bar.rs): the same webview2-com
+# and windows-core versions wry links, so the controller types are one type.
+webview2-com = "0.39"
+windows-core = "0.62"
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

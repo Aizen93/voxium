@@ -167,8 +167,15 @@ export function SharePreflightModal() {
   );
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" data-testid="share-preflight">
-      <div className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-vox-border bg-vox-bg-primary shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" data-testid="share-preflight">
+      {/* Nearly the whole window: the sharer is looking for areas to cover, and
+          a whole-screen capture must read at close to its real size. The video
+          keeps max-h/max-w with no explicit size, so its box stays the rendered
+          frame the annotation canvas positions against. */}
+      <div
+        className="flex h-[min(92vh,1100px)] w-full max-w-[min(96vw,1800px)] flex-col overflow-hidden rounded-lg border border-vox-border bg-vox-bg-primary shadow-2xl"
+        data-testid="share-preflight-dialog"
+      >
         <div className="border-b border-vox-border px-4 py-3">
           <h2 className="text-sm font-semibold text-vox-text-primary">{t('voice.preflight.title')}</h2>
           <p className="mt-0.5 text-xs text-vox-text-muted">{t('voice.preflight.subtitle')}</p>
