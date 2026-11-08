@@ -20,6 +20,10 @@ vi.mock('../../utils/discoveryTiers', () => ({
   DISCOVERY_TIERS_KEY: 'discovery:tiers',
   refreshTierThresholds: (...a: unknown[]) => refreshTierThresholds(...a),
 }));
+// Refreshed figures and corrected rows change what the Explore cards print:
+// the page cache's generation moves with them (once per run, never per batch)
+const bumpDiscoveryPageCache = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/discoveryPageCache', () => ({ bumpDiscoveryPageCache: (...a: unknown[]) => bumpDiscoveryPageCache(...a) }));
 
 import {
   runDiscoveryStatsCycle, startDiscoveryStats, stopDiscoveryStats, pickStaleServerIds, recomputeServerStats,
@@ -141,6 +145,10 @@ describe('the cycle', () => {
     expect(run).toMatchObject({ refreshed: 650, batches: 2, backlog: 0 });
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(4); // two aggregates per batch, no backlog count
+    // one bump for the run (two batches), after the last batch was written
+    expect(bumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+    expect(bumpDiscoveryPageCache).toHaveBeenCalledWith('stats cycle');
+    expect(bumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.$executeRaw.mock.invocationCallOrder[1]);
     // held on success: no compare-and-delete release
     expect(redis.eval).not.toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('backlog older than 48h: 0'));
@@ -180,6 +188,7 @@ describe('the cycle', () => {
     expect(run).toBeNull();
     expect(prismaMock.server.findMany).not.toHaveBeenCalled();
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
+    expect(bumpDiscoveryPageCache).not.toHaveBeenCalled();
     expect(timeouts).toHaveBeenLastCalledWith(expect.any(Function), DISCOVERY_STATS_INTERVAL_MS);
     timeouts.mockRestore();
   });
@@ -274,6 +283,16 @@ describe('housekeeping on the same timer', () => {
     expect(backstop).toContain('UPDATE servers s SET discovery_listed = false');
     expect(backstop).toContain('u.banned_at IS NOT NULL');
     expect(backstop).toContain('s.discovery_listed = true');
+    // rows changed → the cached pages show them wrong → one bump, after the statements
+    expect(bumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+    expect(bumpDiscoveryPageCache).toHaveBeenCalledWith('nightly drift correction');
+    expect(bumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.$executeRaw.mock.invocationCallOrder[2]);
+  });
+
+  it('a daily correction that found nothing to fix bumps nothing', async () => {
+    prismaMock.$executeRaw.mockResolvedValue(0);
+    await expect(correctDrift()).resolves.toEqual({ memberCounts: 0, listed: 0 });
+    expect(bumpDiscoveryPageCache).not.toHaveBeenCalled();
   });
 
   it('the badge cuts are refreshed with the hourly housekeeping, at once when the key is missing, and otherwise left alone', async () => {
@@ -346,9 +365,11 @@ describe('housekeeping on the same timer', () => {
     vi.clearAllMocks();
     redis.set.mockImplementation(async (key: string) => (key === DISCOVERY_STATS_LOCK_KEY ? 'OK' : null));
     const quiet = await runDiscoveryStatsCycle();
-    expect(quiet).toMatchObject({ hourlyHousekeeping: false, dailyHousekeeping: false });
+    expect(quiet).toMatchObject({ refreshed: 0, hourlyHousekeeping: false, dailyHousekeeping: false });
     expect(prismaMock.serverJoinRequest.deleteMany).not.toHaveBeenCalled();
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
+    // nothing stale, nothing claimed: the cached pages are still right
+    expect(bumpDiscoveryPageCache).not.toHaveBeenCalled();
   });
 
   it('countStatsBacklog counts listed servers with missing or 48 h-old figures through a CAPPED subquery, never a full count', async () => {

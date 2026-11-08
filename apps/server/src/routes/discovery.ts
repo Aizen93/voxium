@@ -3,6 +3,7 @@ import { authenticate, requireVerifiedEmail, requireConsent } from '../middlewar
 import { rateLimitDiscoveryBrowse, rateLimitDiscoveryJoin } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { getTierThresholds, tierOf } from '../utils/discoveryTiers';
+import { discoveryPageGeneration } from '../utils/discoveryPageCache';
 import { getRedis } from '../utils/redis';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
@@ -233,12 +234,22 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
 
     // The public part of the page is shared by every viewer for a minute —
     // this is what absorbs the burst when a popular server links to Explore.
-    const cacheKey = `discovery:page:${sort}:${tag}:${qHash}:${cursorToken}:${limit}`;
+    // The key carries the directory's generation (utils/discoveryPageCache.ts):
+    // every write that changes a card or the listing bumps it, so the next
+    // open of Explore after a change recomputes instead of reading the old
+    // page, while a burst between two changes still hits the cache. Explore
+    // stays pull-based: nothing is pushed to an open modal.
+    let cacheKey: string | null = null;
     let publicPage: PublicPage | null = null;
     try {
+      const generation = await discoveryPageGeneration();
+      cacheKey = `discovery:page:${generation}:${sort}:${tag}:${qHash}:${cursorToken}:${limit}`;
       const cached = await getRedis().get(cacheKey);
       if (cached) publicPage = JSON.parse(cached) as PublicPage;
     } catch (err) {
+      // Without the generation a key could name a stale page: this request
+      // is served uncached and nothing is written (cacheKey stays null).
+      cacheKey = null;
       console.warn('[Discovery] Page cache read failed (serving uncached):', err instanceof Error ? err.message : err);
     }
 
@@ -286,10 +297,12 @@ discoveryRouter.get('/servers', rateLimitDiscoveryBrowse, async (req: Request, r
         nextCursor,
         totalCapped,
       };
-      try {
-        await getRedis().set(cacheKey, JSON.stringify(publicPage), { EX: DISCOVERY_PAGE_CACHE_TTL_S });
-      } catch (err) {
-        console.warn('[Discovery] Page cache write failed:', err instanceof Error ? err.message : err);
+      if (cacheKey) {
+        try {
+          await getRedis().set(cacheKey, JSON.stringify(publicPage), { EX: DISCOVERY_PAGE_CACHE_TTL_S });
+        } catch (err) {
+          console.warn('[Discovery] Page cache write failed:', err instanceof Error ? err.message : err);
+        }
       }
     }
 

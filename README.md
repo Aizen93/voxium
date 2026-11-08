@@ -328,6 +328,14 @@ cd apps/desktop
 pnpm tauri:build
 ```
 
+Avatars and space icons load from your object storage, which the app's Content Security Policy must name. Set `TAURI_ASSET_ORIGIN` to that storage's origin (`https://host[:port]`) and build with the generated overlay instead:
+
+```bash
+cd apps/desktop
+TAURI_ASSET_ORIGIN=https://objects.example.com node scripts/tauri-release-config.mjs > /tmp/tauri.release.json
+pnpm tauri build --config /tmp/tauri.release.json
+```
+
 This creates platform-specific installers in `apps/desktop/src-tauri/target/release/bundle/`:
 - **Windows:** `.msi` and `.exe` installers
 - **macOS:** `.dmg` and `.app` bundle
@@ -620,7 +628,7 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 
 ## Testing
 
-Voxium has three Vitest suites — over 3,000 server, 2,500 desktop and 120 admin unit and integration tests as of 2026-10-27 — plus a Playwright E2E suite.
+Voxium has three Vitest suites — over 3,500 server, 2,700 desktop and 140 admin unit and integration tests as of 2026-11-08 — plus a Playwright E2E suite.
 
 ### Running Tests
 

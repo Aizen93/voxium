@@ -10,6 +10,8 @@ const prismaMock = vi.hoisted(() => ({ $queryRaw: vi.fn() }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
 const redis = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn() }));
 vi.mock('../../utils/redis', () => ({ getRedis: () => redis }));
+const bumpDiscoveryPageCache = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/discoveryPageCache', () => ({ bumpDiscoveryPageCache: (...a: unknown[]) => bumpDiscoveryPageCache(...a) }));
 
 import {
   computeTierThresholds, refreshTierThresholds, getTierThresholds, tierOf, nextTierFor,
@@ -64,10 +66,14 @@ describe('computeTierThresholds', () => {
 });
 
 describe('refreshTierThresholds / getTierThresholds', () => {
-  it('stores the cuts under the tiers key with a day of TTL, and reads them back', async () => {
+  it('stores the cuts under the tiers key with a day of TTL, bumps the page cache (new cuts move badges), and reads them back', async () => {
     prismaMock.$queryRaw.mockResolvedValue([{ n: 50, cuts: [10, 20, 40, 60, 80] }]);
     const stored = await refreshTierThresholds();
     expect(redis.set).toHaveBeenCalledWith(DISCOVERY_TIERS_KEY, JSON.stringify(stored), { EX: DISCOVERY_TIERS_TTL_S });
+    expect(bumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
+    expect(bumpDiscoveryPageCache).toHaveBeenCalledWith('tier cuts refresh');
+    // stored first, then bumped: a page rebuilt after the bump reads the new cuts
+    expect(redis.set.mock.invocationCallOrder[0]).toBeLessThan(bumpDiscoveryPageCache.mock.invocationCallOrder[0]);
 
     redis.get.mockResolvedValue(JSON.stringify(CUTS));
     await expect(getTierThresholds()).resolves.toEqual(CUTS);

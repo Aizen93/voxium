@@ -108,14 +108,20 @@ describe('locale copy states the facts the code implements', () => {
     ru: 'вебхук', uk: 'вебхук', ja: 'ウェブフック', ko: '웹후크', zh: 'webhook', ar: 'خطاف',
   };
 
-  it.each(locales.map((l) => [l.name, l.bundle] as const))('%s: the comparison table shows the incoming webhooks that shipped', (name, bundle) => {
+  it.each(locales.map((l) => [l.name, l.bundle] as const))('%s: the comparison table has an incoming-webhooks row, named by the word the app uses', (name, bundle) => {
     expect(WEBHOOK_STEMS[name], `${name}.json has no webhook stem in this test`).toBeDefined();
-    expect(lookup(bundle, 'landing.comparison.webhooksBotsPlanned').toLowerCase()).toContain(WEBHOOK_STEMS[name]);
+    expect(lookup(bundle, 'landing.comparison.incomingWebhooks').toLowerCase()).toContain(WEBHOOK_STEMS[name]);
   });
 
-  it('the "Custom Bots / API" row uses that cell, not a bare "Planned"', () => {
+  it('incoming webhooks (shipped in 2.1.0) and custom bots (planned) are two rows: webhooks a plain check, bots "Planned"', () => {
     const source = readFileSync(LANDING_PAGE, 'utf-8');
-    expect(source).toMatch(/feature: t\('landing\.comparison\.customBots'\),\s*voxium: t\('landing\.comparison\.webhooksBotsPlanned'\)/);
+    expect(source).toMatch(/feature: t\('landing\.comparison\.incomingWebhooks'\),\s*voxium: true/);
+    expect(source).toMatch(/feature: t\('landing\.comparison\.customBots'\),\s*voxium: t\('landing\.comparison\.planned'\)/);
+    // the old combined cell is gone from the page and from every locale
+    expect(source).not.toContain('webhooksBotsPlanned');
+    for (const { name, bundle } of locales) {
+      expect(() => lookup(bundle, 'landing.comparison.webhooksBotsPlanned'), name).toThrow();
+    }
   });
 
   // Voxium is source-available (VCL-1.0): no locale may call it open source,

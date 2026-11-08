@@ -2,6 +2,7 @@ import { prisma } from './prisma';
 import { getRedis } from './redis';
 import { withClusterLock, wasSkipped, lockToken, releaseLockIfOwned } from './dailySchedule';
 import { refreshTierThresholds, DISCOVERY_TIERS_KEY } from './discoveryTiers';
+import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { DISCOVERY_SCORE_WEIGHTS, JOIN_REQUEST_DECLINE_COOLDOWN_DAYS, JOIN_REQUEST_PENDING_TTL_DAYS } from '@voxium/shared';
 
 // The directory's activity figures on a daily cycle
@@ -241,6 +242,8 @@ export async function correctDrift(): Promise<{ memberCounts: number; listed: nu
     UPDATE servers s SET discovery_listed = false
     FROM users u
     WHERE u.id = s.owner_id AND u.banned_at IS NOT NULL AND s.discovery_listed = true`;
+  // A corrected count or listing flag is a card or a row Explore shows differently
+  if (memberCounts + listed + bannedBackstop > 0) await bumpDiscoveryPageCache('nightly drift correction');
   return { memberCounts, listed: listed + bannedBackstop };
 }
 
@@ -280,6 +283,10 @@ async function runCycleBody(): Promise<DiscoveryStatsRun> {
     refreshed += ids.length;
     batches += 1;
   }
+
+  // The refreshed figures (online count, weekly messages, the Active sort's
+  // score) are what the cards print: one bump for the whole run, never per batch.
+  if (refreshed > 0) await bumpDiscoveryPageCache('stats cycle');
 
   // Nothing stale was left to pick, so nothing can be older than 48 h
   const backlog = drained ? 0 : await countStatsBacklog();
