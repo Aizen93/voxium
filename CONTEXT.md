@@ -4,7 +4,7 @@
 
 **Voxium** is a modern, source-available voice and text communication platform. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, a shared types package, and a Rust/WASM end-to-end encryption engine.
 
-**Version:** 2.1.0 (2.1.1 in preparation)
+**Version:** 2.1.1 (in preparation; 2.1.0 is the current release, 2026-11-07)
 **Date:** 2026-11-08
 
 ## Project Structure
