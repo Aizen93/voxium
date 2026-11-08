@@ -31,10 +31,12 @@ async function clickVoiceChannel(
   page: Parameters<Parameters<typeof test>[1]>[0]['page'],
   channelName: string,
 ) {
-  // Voice channel items render as a button containing a Volume2 SVG (class lucide-volume2)
-  // and a <span> with the channel name. Target the button with both to avoid ambiguity.
+  // Voice channel items render as a button containing a Volume2 SVG and a <span>
+  // with the channel name. Target the button with both to avoid ambiguity. The
+  // icon's class is the kebab-case icon name, `lucide-volume-2`: lucide-react 1
+  // emits only that form (0.x also emitted `lucide-volume2`, which is gone).
   const voiceBtn = page
-    .locator('button:has(svg.lucide-volume2)')
+    .locator('button:has(svg.lucide-volume-2)')
     .filter({ hasText: channelName })
     .first();
   await voiceBtn.click();
