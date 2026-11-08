@@ -1,5 +1,6 @@
 import { prisma } from './prisma';
 import { getRedis } from './redis';
+import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { DISCOVERY_TIERS, DISCOVERY_TIER_TOP_FRACTION, DISCOVERY_TIER_MIN_POPULATION } from '@voxium/shared';
 import type { DiscoveryTier, DiscoveryTierThresholds } from '@voxium/shared';
 
@@ -42,10 +43,11 @@ export async function computeTierThresholds(now: Date = new Date()): Promise<Dis
   return { computedAt: now.toISOString(), population: n, thresholds };
 }
 
-/** Compute and store the cuts; the stats cycle calls this. */
+/** Compute and store the cuts; the stats cycle calls this. New cuts move badges, so the cached pages go with them. */
 export async function refreshTierThresholds(): Promise<DiscoveryTierThresholds> {
   const cuts = await computeTierThresholds();
   await getRedis().set(DISCOVERY_TIERS_KEY, JSON.stringify(cuts), { EX: DISCOVERY_TIERS_TTL_S });
+  await bumpDiscoveryPageCache('tier cuts refresh');
   return cuts;
 }
 

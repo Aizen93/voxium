@@ -227,6 +227,11 @@ vi.mock('../../utils/discoveryListing', () => ({
   recomputeListed: (...args: any[]) => mockRecomputeListed(...args),
   recomputeListedForOwner: vi.fn().mockResolvedValue(0),
 }));
+// A deleted owned server leaves the cached Explore pages through the generation bump
+const mockBumpDiscoveryPageCache = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../utils/discoveryPageCache', () => ({
+  bumpDiscoveryPageCache: (...args: any[]) => mockBumpDiscoveryPageCache(...args),
+}));
 
 // ─── App setup ──────────────────────────────────────────────────────────────
 
@@ -401,6 +406,9 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+    // the deleted space leaves the cached Explore pages (bumped after the delete)
+    expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('admin server delete');
+    expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
     expectAtomicPurgeAndDelete('target-1');
   });
 
