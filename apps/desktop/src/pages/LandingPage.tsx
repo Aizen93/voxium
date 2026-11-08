@@ -195,6 +195,27 @@ function ShieldSvg({ className }: { className?: string }) {
   );
 }
 
+/* ─── Version ─── */
+
+/** The release this site and the installers were built from: APP_VERSION reads
+ *  the shared package's manifest, which the release bump sets with the others. */
+export const RELEASE_URL = `https://github.com/Aizen93/voxium/releases/tag/v${APP_VERSION}`;
+
+/** The running version, shown next to the download buttons and in the footer (owner, 2026-11-08). */
+export function VersionBadge({ className = '' }: { className?: string }) {
+  return (
+    <a
+      href={RELEASE_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      data-testid="landing-version"
+      className={`inline-flex items-center rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-0.5 font-mono text-xs text-vox-text-muted transition-colors hover:border-white/20 hover:text-vox-text-primary ${className}`}
+    >
+      v{APP_VERSION}
+    </a>
+  );
+}
+
 /* ─── Download URLs ─── */
 
 const DOWNLOAD_URLS = {
@@ -493,6 +514,7 @@ function Hero() {
               </svg>
               {t('landing.hero.downloadLinux')}
             </a>
+            <VersionBadge className="self-center" />
           </div>
 
           {/* Trust row */}
@@ -1491,6 +1513,7 @@ function Footer() {
             <div className="flex items-center gap-2.5 mb-3">
               <img src="/logo_static.svg" alt="Voxium" className="h-8 w-8 rounded-lg" />
               <span className="text-lg font-bold text-vox-text-primary">Voxium</span>
+              <VersionBadge />
             </div>
             <p className="text-sm text-vox-text-muted leading-relaxed max-w-xs">
               {t('landing.footer.tagline')}
