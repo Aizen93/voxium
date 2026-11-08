@@ -1,0 +1,73 @@
+name: Desktop shell
+
+# The Tauri shell (apps/desktop/src-tauri) is the one part of the repository
+# that CI never compiled: a Cargo change could pass every check and fail at
+# the release build. This job compiles it on every change to the shell, on
+# Windows, where share_bar.rs (cfg(windows)) is part of the build and the
+# webview2-com / windows-core versions can be checked.
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'apps/desktop/src-tauri/**'
+      - '.github/workflows/desktop-shell.yml'
+  pull_request:
+    paths:
+      - 'apps/desktop/src-tauri/**'
+      - '.github/workflows/desktop-shell.yml'
+
+concurrency:
+  group: desktop-shell-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: cargo check & test (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/desktop/src-tauri
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+
+      # A debug check embeds no frontend (build.devUrl is set), so the Vite
+      # build is not needed here; --locked refuses a Cargo.lock that does not
+      # match Cargo.toml instead of rewriting it.
+      - name: cargo check
+        run: cargo check --locked
+
+      - name: cargo test
+        run: cargo test --locked --lib
+
+      # share_bar.rs links webview2-com and windows-core at the versions wry
+      # links; a second copy of webview2-com in the graph means two incompatible
+      # sets of COM bindings (CLAUDE.md, Tauri). `cargo tree -i` prints one
+      # root line per version present.
+      - name: One webview2-com in the dependency graph
+        run: |
+          n=$(cargo tree -i webview2-com --locked | grep -cE '^webview2-com v')
+          if [ "$n" -ne 1 ]; then
+            echo "::error::Cargo.lock holds $n versions of webview2-com (expected 1)"
+            cargo tree -i webview2-com --locked
+            exit 1
+          fi

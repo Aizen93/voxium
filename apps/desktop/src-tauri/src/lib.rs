@@ -53,13 +53,18 @@ fn cache_avatar_to_file(api_base: &str, key: &str) -> Result<std::path::PathBuf,
     }
 
     let url = format!("{}/uploads/{}", api_base.trim_end_matches('/'), key);
+    // The 10 s budget covers the whole exchange, the 302 to the object store
+    // included (ureq follows it; a non-2xx final answer is an Err).
     let response = ureq::get(&url)
-        .timeout(std::time::Duration::from_secs(10))
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .build()
         .call()
         .map_err(|_| "Avatar download failed".to_string())?;
 
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(1_048_577)
         .read_to_end(&mut bytes)
