@@ -1177,8 +1177,15 @@ function ComparisonTable() {
     { feature: t('landing.comparison.lightweightClient'), voxium: 'Tauri (~10MB)',      discord: 'Electron',     teamspeak: 'Native',       matrix: 'Electron' },
     { feature: t('landing.comparison.encryption'),        voxium: 'E2E (Olm/Megolm)',  discord: 'TLS',          teamspeak: 'AES',          matrix: 'E2E (Olm)' },
     { feature: t('landing.comparison.encryptedChannels'), voxium: true,                discord: false,          teamspeak: false,          matrix: true },
-    // Incoming webhooks shipped (routes/webhooks.ts, webhookExecute.ts); bots have not
-    { feature: t('landing.comparison.customBots'),        voxium: t('landing.comparison.webhooksBotsPlanned'), discord: true, teamspeak: 'Plugins + SDK', matrix: true },
+    // Incoming webhooks shipped in 2.1.0 (routes/webhooks.ts, webhookExecute.ts): their own row.
+    // TeamSpeak: checked 2026-11-08 against the official TS6 server README and
+    // CONFIG.md and the feature pages — no webhook feature; the server offers a
+    // request/response query API and metrics only. Matrix: inbound webhooks are
+    // the Hookshot bridge (matrix.org), which a homeserver admin deploys — not a
+    // built-in feature of a free account, hence "Via Hookshot". Agents / bots
+    // are planned.
+    { feature: t('landing.comparison.incomingWebhooks'),  voxium: true,                discord: true,           teamspeak: false,          matrix: t('landing.comparison.viaHookshot') },
+    { feature: t('landing.comparison.customBots'),        voxium: t('landing.comparison.planned'), discord: true, teamspeak: 'Plugins + SDK', matrix: true },
     { feature: t('landing.comparison.mobileApp'),         voxium: t('landing.comparison.planned'), discord: true, teamspeak: true,           matrix: true },
   ];
 
