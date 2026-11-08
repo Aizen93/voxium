@@ -19,7 +19,7 @@ Voxium/
 │   ├── shared/           # TypeScript types, validators, constants
 │   └── crypto-engine/    # Rust/WASM E2E engine (vodozemac), committed pkg/
 ├── docker-compose.yml    # Redis + coturn STUN server
-└── CLAUDE.md             # Conventions and commands
+└── CONTRIBUTING.md       # How to contribute: commands and conventions
 ```
 
 ## Key Features Implemented
@@ -80,7 +80,9 @@ Voxium/
 - [x] ~~Horizontal scaling foundation~~ (done — Socket.IO Redis adapter, Redis-based presence/DM voice state, multi-node test passing)
 - [x] ~~@Mention system~~ (done — server-side search, styled badges, highlight, mention sound)
 - [x] ~~Global DM call panel~~ (done — DMVoicePanel visible from any view)
-- [ ] Mobile app (React Native)
+- [ ] 2.2.0: stabilisation after 2.1.1 — bug fixes, code-quality and security passes
+- [ ] Mobile apps — Android and iOS, native (Kotlin Multiplatform shared logic, Compose and SwiftUI, the Rust E2E core ported in); the next big step
+- [ ] Agents and the bot API — planned after the mobile apps
 - [x] ~~E2E encryption for DMs~~ (done in 2.0.0 — also secure channels, secure voice and sealed call signaling)
 - [ ] Prometheus + Grafana monitoring
 
@@ -107,7 +109,7 @@ Voxium/
 
 - **Internationalization (i18n)** (2026-03-23) -- 11-language support (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL for Arabic; language selector in settings; i18next with browser detection and localStorage persistence.
 
-- **Community Themes Review** (2026-03-21) -- Review found: patterns dropped on install (BUG), patterns not restored after preview (BUG), version not bumped for pattern-only changes, search missing debounce, empty catch blocks; see CONTEXT_CHANGELOG.md for full findings.
+- **Community Themes Review** (2026-03-21) -- Review found: patterns dropped on install (BUG), patterns not restored after preview (BUG), version not bumped for pattern-only changes, search missing debounce, empty catch blocks.
 
 - **Community Themes** (2026-03-21) -- Theme creation, marketplace browsing, JSON import/export, live preview editor, install/uninstall tracking; backend CRUD + admin moderation + 49 tests.
 
@@ -151,8 +153,8 @@ Voxium/
 
 - **Attachment Security Hardening + Admin Storage** (2026-03-08) — Switched attachment access from presigned URL redirects to server-side proxy streaming (S3 URL never reaches client). Added `expired` soft-delete flag to `MessageAttachment` — expired files show placeholder in chat UI instead of silently disappearing. Self-healing proxy auto-marks attachments as expired when S3 returns `NoSuchKey`. Daily 4 AM cleanup job expires attachments older than 3 days, sends email report to `CLEANUP_REPORT_EMAIL`. Admin storage dashboard extended: 5 stat cards (total, avatars, server-icons, attachments, orphaned), file browser with type/status filters (Active/Orphaned/Expired), top uploaders aggregated from S3 + DB (users and servers), context-aware delete messages. Image lightbox for in-app image viewing. Download notifications via toast. E2E rate limit fixture for per-test Redis clearing.
 
-- **Attachment Security Audit** (2026-03-08) -- Read-only security review of file attachment system. Found 1 HIGH (JWT token leakage via query param), 5 MEDIUM (input validation gaps, no content-length enforcement, no presigned URL tracking, cleanup ordering), 4 LOW issues. No code changes; see CONTEXT_CHANGELOG.md for full findings.
-- **File Attachments Review** (2026-03-08) -- Read-only review of message attachment feature. Found stale-index bug in `MessageInput.tsx` upload state management; see CONTEXT_CHANGELOG.md for details.
+- **Attachment Security Audit** (2026-03-08) -- Read-only security review of file attachment system. Found 1 HIGH (JWT token leakage via query param), 5 MEDIUM (input validation gaps, no content-length enforcement, no presigned URL tracking, cleanup ordering), 4 LOW issues. No code changes.
+- **File Attachments Review** (2026-03-08) -- Read-only review of message attachment feature. Found stale-index bug in `MessageInput.tsx` upload state management.
 - **SFU Voice Optimization** (2026-03-08) — Silence detection pauses mediasoup producers when noise gate detects silence (70-94% bandwidth reduction in typical use). Voice quality selector (low 16kbps / medium 32kbps / high 64kbps) applied to SFU producer encoding + DM SDP. Recv transport capped at 1.5 Mbps for fair bandwidth distribution. All voice:join error paths now emit `voice:error` with user-facing messages. Eliminated `as any` lint warnings via typed `emitSpeaking()` helper. Review fixes: reconnect callback re-registration, screen-audio producer filtering, teardown callback consistency.
 
 - **Dynamic Resource Limits** (2026-03-07) — 3-tier limit resolution system (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, and members. `GlobalConfig` + `ServerLimits` Prisma models, `getEffectiveLimits()` utility, admin CRUD endpoints, admin UI with global editor + per-server modal, read-only Limits tab in server settings, enforcement in channel/category creation, voice join, and invite join.
@@ -169,8 +171,7 @@ Voxium/
 
 ## Related Documents
 
-- **`CLAUDE.md`** — Commands, conventions, architecture patterns, important invariants
-- **`CHANGELOG.md`** — Release notes (2.0.0, 2.1.0; 2.1.1 and 2.2.0 unreleased)
+- **`CONTRIBUTING.md`** — Commands, conventions and the contribution workflow
+- **GitHub Releases** — the release notes of every version
 - **`docs/e2e-dm-spec.md`** — End-to-end encryption protocol
 - **`ARCHITECTURE.md`** — Detailed system architecture, database design, scalability strategy
-- **`CONTEXT_CHANGELOG.md`** — Full feature-by-feature development history with file changes and review notes
