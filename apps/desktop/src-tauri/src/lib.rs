@@ -1,5 +1,8 @@
 use std::io::Read;
 
+#[cfg(windows)]
+mod share_bar;
+
 /// Strict regex matching the server's VALID_S3_KEY_RE: (avatars|server-icons)/[word-dash]+.webp
 /// Prevents path traversal, null bytes, and unexpected characters in the key.
 fn is_valid_avatar_key(key: &str) -> bool {
@@ -427,6 +430,11 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let icon = tauri::include_image!("icons/icon.png");
                 let _ = window.set_icon(icon.clone());
+
+                // WebView2 names the page origin on its screen-share bar; the
+                // bar is hidden once a capture starts (share_bar.rs, Windows only)
+                #[cfg(windows)]
+                share_bar::hide_on_capture(&window, share_bar::app_host(&app.config()));
 
                 // If tray is available: close → hide to tray
                 // If no tray (Linux GNOME/Wayland): close → quit the app

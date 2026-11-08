@@ -4739,6 +4739,9 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-winrt-notification 0.7.3",
  "ureq",
+ "webview2-com",
+ "windows-core 0.62.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
