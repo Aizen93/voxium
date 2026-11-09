@@ -28,9 +28,9 @@
  */
 
 import { spawn, type ChildProcess } from 'child_process';
-import net from 'net';
 import axios from 'axios';
 import { killProcessTree } from './lib/processTree.mjs';
+import { portProblem } from './lib/portProbe.mjs';
 import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import path from 'path';
@@ -98,16 +98,6 @@ function assert(condition: boolean, name: string, detail?: string) {
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-/** True when nothing listens on the port (the servers bind 0.0.0.0). */
-function isPortFree(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const probe = net.createServer();
-    probe.once('error', () => resolve(false));
-    probe.once('listening', () => probe.close(() => resolve(true)));
-    probe.listen(port, '0.0.0.0');
-  });
 }
 
 function isRunning(child: ChildProcess | null): child is ChildProcess {
@@ -934,10 +924,12 @@ async function main() {
   console.log('═══════════════════════════════════════════════════════════\n');
 
   // Step 0: a dev backend (or a server an earlier run left) on our ports would
-  // answer /health for a node that never started
+  // answer /health for a node that never started. Probed on both wildcards
+  // and both loopbacks (scripts/lib/portProbe.mjs).
   for (const port of [NODE1_PORT, NODE2_PORT]) {
-    if (!(await isPortFree(port))) {
-      console.error(`\nFATAL: port ${port} is already in use; stop whatever listens on it and run again`);
+    const problem = await portProblem(port);
+    if (problem) {
+      console.error(`\nFATAL: port ${port} cannot be used: ${problem}. Stop whatever holds it and run again`);
       process.exit(1);
     }
   }
