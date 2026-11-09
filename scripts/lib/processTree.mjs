@@ -19,23 +19,48 @@
 
 import { spawn as nodeSpawn } from 'node:child_process';
 
-/** taskkill's exit code when the pid is gone already (the tree died first). */
-export const TASKKILL_NOT_FOUND = 128;
+/**
+ * taskkill's exit code when it terminated nothing. It means two things: the
+ * pid was not found (the tree died first, the usual case here), or it found
+ * the tree and could terminate none of it (`taskkill /pid 4 /T /F` answers
+ * 128 too). killProcessTree tells them apart by asking whether the root pid
+ * is still running.
+ */
+export const TASKKILL_NOTHING_KILLED = 128;
+
+/**
+ * Whether `pid` is a running process. `process.kill(pid, 0)` signals nothing:
+ * it throws ESRCH for a process that is gone, on Windows too (libuv checks
+ * the exit code), and EPERM for one that runs but cannot be signalled.
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+export function isPidRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err && typeof err === 'object' && 'code' in err && err.code === 'EPERM';
+  }
+}
 
 /**
  * Kill `child` and, on Windows, its whole process tree.
  *
  * Never kills a pid whose process this script has seen exit: Windows reuses
  * pids, and `taskkill /T` on a recycled one would take an unrelated tree.
- * Never rejects; a failure is logged and the promise still resolves.
+ * Never rejects; a failure is logged and the promise still resolves. A
+ * taskkill that terminated nothing (128) is a failure only when the root pid
+ * is still running afterwards; when it is gone the tree had died first.
  *
  * @param {{ pid?: number, exitCode: number | null, signalCode: NodeJS.Signals | null, kill(signal?: NodeJS.Signals): boolean }} child
- * @param {{ signal?: NodeJS.Signals, platform?: NodeJS.Platform, spawn?: typeof nodeSpawn }} [options]
+ * @param {{ signal?: NodeJS.Signals, platform?: NodeJS.Platform, spawn?: typeof nodeSpawn, isRunning?: (pid: number) => boolean }} [options]
  *   `signal` is used on POSIX only (taskkill /F has no gentler form);
- *   `platform` and `spawn` exist for the tests.
+ *   `platform`, `spawn` and `isRunning` exist for the tests.
  * @returns {Promise<void>} resolves once taskkill has finished (Windows) or the signal is sent (POSIX)
  */
-export function killProcessTree(child, { signal = 'SIGTERM', platform = process.platform, spawn = nodeSpawn } = {}) {
+export function killProcessTree(child, { signal = 'SIGTERM', platform = process.platform, spawn = nodeSpawn, isRunning = isPidRunning } = {}) {
   if (!child || child.pid === undefined) return Promise.resolve();
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
 
@@ -70,7 +95,19 @@ export function killProcessTree(child, { signal = 'SIGTERM', platform = process.
       done();
     });
     killer.on('close', (code) => {
-      if (code !== 0 && code !== TASKKILL_NOT_FOUND && code !== null) {
+      if (code === TASKKILL_NOTHING_KILLED) {
+        // Not found (the tree died first) or found and refused: only the
+        // second leaves the root running
+        let running = false;
+        try {
+          running = isRunning(pid);
+        } catch (err) {
+          console.warn(`[processTree] could not check pid ${pid} after taskkill: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (running) {
+          console.warn(`[processTree] taskkill for pid ${pid} terminated nothing (exit 128) and pid ${pid} is still running`);
+        }
+      } else if (code !== 0 && code !== null) {
         console.warn(`[processTree] taskkill for pid ${pid} exited with ${code}`);
       }
       done();

@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { killProcessTree, TASKKILL_NOT_FOUND } from '../../../../../scripts/lib/processTree.mjs';
+import { isPidRunning, killProcessTree, TASKKILL_NOTHING_KILLED } from '../../../../../scripts/lib/processTree.mjs';
 
 // The tree-kill helper of the ROOT dev scripts (scripts/dev-all.mjs,
 // scripts/test-multi-node.ts). It lives in the server suite, beside
@@ -63,10 +63,37 @@ describe('killProcessTree — win32 branch (taskkill)', () => {
     expect((spawnMock.mock.calls[0] as unknown as [string, string[]])[1]).toEqual(['/pid', '7', '/T', '/F']);
   });
 
-  it('treats "process not found" (128) as done, without a warning: the tree died first', async () => {
+  it('treats exit 128 as done, without a warning, when the root pid is gone afterwards (the tree died first)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    await killProcessTree(fakeChild(), { platform: 'win32', spawn: fakeSpawn({ code: TASKKILL_NOT_FOUND }) as never });
+    const isRunning = vi.fn(() => false);
+    await killProcessTree(fakeChild({ pid: 1234 }), { platform: 'win32', spawn: fakeSpawn({ code: TASKKILL_NOTHING_KILLED }) as never, isRunning });
+    expect(isRunning).toHaveBeenCalledWith(1234);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('logs exit 128 when the root pid is still running (taskkill found the tree and terminated none of it)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const isRunning = vi.fn(() => true);
+    await expect(
+      killProcessTree(fakeChild({ pid: 4 }), { platform: 'win32', spawn: fakeSpawn({ code: TASKKILL_NOTHING_KILLED }) as never, isRunning }),
+    ).resolves.toBeUndefined();
+    expect(isRunning).toHaveBeenCalledWith(4);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('taskkill for pid 4 terminated nothing (exit 128) and pid 4 is still running'));
+  });
+
+  it('logs a failing liveness check after exit 128 and still resolves', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const isRunning = vi.fn(() => { throw new Error('probe failed'); });
+    await expect(
+      killProcessTree(fakeChild({ pid: 8 }), { platform: 'win32', spawn: fakeSpawn({ code: TASKKILL_NOTHING_KILLED }) as never, isRunning }),
+    ).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not check pid 8 after taskkill: probe failed'));
+  });
+
+  it('does not probe the pid after a taskkill that succeeded', async () => {
+    const isRunning = vi.fn(() => true);
+    await killProcessTree(fakeChild({ pid: 9 }), { platform: 'win32', spawn: fakeSpawn({ code: 0 }) as never, isRunning });
+    expect(isRunning).not.toHaveBeenCalled();
   });
 
   it('logs any other non-zero taskkill exit and still resolves', async () => {
@@ -157,57 +184,110 @@ describe('killProcessTree — POSIX branch (the signal, as before)', () => {
 // no such job. Killing the cmd.exe at the top of a chain is what orphaned the
 // servers.
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+describe('isPidRunning (the probe after a taskkill that terminated nothing)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('is true for this process', () => {
+    expect(isPidRunning(process.pid)).toBe(true);
+  });
+
+  it('is false for a process that is gone (ESRCH)', () => {
+    vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' }); });
+    expect(isPidRunning(1234)).toBe(false);
+  });
+
+  it('is true for a process that runs but cannot be signalled (EPERM, like pid 4)', () => {
+    vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' }); });
+    expect(isPidRunning(4)).toBe(true);
+  });
+
+  it('only probes: it sends signal 0', () => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    expect(isPidRunning(77)).toBe(true);
+    expect(kill).toHaveBeenCalledWith(77, 0);
+  });
+});
+
+// ── Real processes (Windows only: the branch this helper exists for) ─────────
+//
+// The wrapper is cmd.exe, as with `spawn(..., { shell: true })` in the dev
+// scripts. It matters which: libuv puts every child a NODE process spawns into
+// a kill-on-close job object, so a node parent's own children die with it
+// (only its direct children: the job is silent-breakaway), while cmd.exe has
+// no such job. Killing the cmd.exe at the top of a chain is what orphaned the
+// servers.
+
+/** The grandchild exits by itself after this long, so a failed run cannot leave it for good. */
+const GRANDCHILD_LIFETIME_MS = 60_000;
+
+interface Spawned {
+  wrapper: ChildProcess;
+  grandchildPid: number | null;
+  /** set once this test saw the grandchild end: its pid may be reused after that */
+  grandchildGone: boolean;
 }
 
 async function waitUntilGone(pid: number, timeoutMs = 5000): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (!isAlive(pid)) return true;
+    if (!isPidRunning(pid)) return true;
     await new Promise((r) => setTimeout(r, 50));
   }
-  return !isAlive(pid);
+  return !isPidRunning(pid);
+}
+
+async function waitUntilGrandchildGone(record: Spawned): Promise<boolean> {
+  const gone = await waitUntilGone(record.grandchildPid!);
+  if (gone) record.grandchildGone = true;
+  return gone;
 }
 
 describe.runIf(process.platform === 'win32')('killProcessTree — real process tree on Windows', () => {
   let dir = '';
   let script = '';
-  const spawned: number[] = [];
+  const spawned: Spawned[] = [];
 
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), 'voxium-processtree-'));
     script = join(dir, 'grandchild.js');
-    // Prints its own pid, then idles like a server would
-    writeFileSync(script, "process.stdout.write(String(process.pid) + '\\n');\nsetInterval(() => {}, 1000);\n");
+    // Prints its own pid, then idles like a server would (bounded, see above)
+    writeFileSync(script, `process.stdout.write(String(process.pid) + '\\n');\nsetTimeout(() => process.exit(0), ${GRANDCHILD_LIFETIME_MS});\n`);
   });
 
   afterAll(() => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     // A failed assertion must not leave a process behind
-    for (const pid of spawned.splice(0)) {
-      if (isAlive(pid)) {
-        try { process.kill(pid); } catch (err) { console.warn(`cleanup of pid ${pid} failed: ${(err as Error).message}`); }
+    for (const record of spawned.splice(0)) {
+      // The wrapper is our child: its handle says whether it exited, so a
+      // pid Windows has handed to another process is never touched. Its tree
+      // holds the grandchild.
+      if (record.wrapper.exitCode === null && record.wrapper.signalCode === null) {
+        await killProcessTree(record.wrapper);
+        continue;
+      }
+      // The grandchild is not ours (no handle): end it only while this test
+      // never saw it end; it cannot have exited on its own this early
+      const pid = record.grandchildPid;
+      if (pid !== null && !record.grandchildGone && isPidRunning(pid)) {
+        try { process.kill(pid); } catch (err) { console.warn(`cleanup of grandchild pid ${pid} failed: ${(err as Error).message}`); }
       }
     }
   });
 
   /** cmd.exe → node: resolves once the node grandchild has printed its pid. */
-  function spawnWrappedNode(): Promise<{ wrapper: ChildProcess; childPid: number }> {
+  function spawnWrappedNode(): Promise<Spawned & { grandchildPid: number }> {
     return new Promise((resolve, reject) => {
       // One command string with shell: true, as scripts/dev-all.mjs spawns
       const wrapper = spawn(`"${process.execPath}" "${script}"`, { shell: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-      spawned.push(wrapper.pid!);
+      const record: Spawned = { wrapper, grandchildPid: null, grandchildGone: false };
+      spawned.push(record);
       let out = '';
-      const timer = setTimeout(() => reject(new Error('the grandchild never printed its pid')), 8000);
+      const timer = setTimeout(() => reject(new Error(
+        `the grandchild never printed its pid within 8 s; afterEach kills the wrapper's tree, but a grandchild may be left behind (it exits by itself within ${GRANDCHILD_LIFETIME_MS / 1000} s)`,
+      )), 8000);
       wrapper.on('error', (err) => { clearTimeout(timer); reject(err); });
       wrapper.stdout!.setEncoding('utf8');
       wrapper.stdout!.on('data', (chunk: string) => {
@@ -215,41 +295,44 @@ describe.runIf(process.platform === 'win32')('killProcessTree — real process t
         const match = /^(\d+)\r?\n/.exec(out);
         if (match) {
           clearTimeout(timer);
-          const childPid = Number(match[1]);
-          spawned.push(childPid);
-          resolve({ wrapper, childPid });
+          record.grandchildPid = Number(match[1]);
+          resolve(record as Spawned & { grandchildPid: number });
         }
       });
     });
   }
 
   it('child.kill() alone leaves the grandchild running (the bug, reproduced)', async () => {
-    const { wrapper, childPid } = await spawnWrappedNode();
-    expect(childPid).not.toBe(wrapper.pid);
-    expect(isAlive(childPid)).toBe(true);
+    const record = await spawnWrappedNode();
+    const { wrapper, grandchildPid } = record;
+    expect(grandchildPid).not.toBe(wrapper.pid);
+    expect(isPidRunning(grandchildPid)).toBe(true);
 
     wrapper.kill();
     expect(await waitUntilGone(wrapper.pid!)).toBe(true);
     // a second later the grandchild is still there: nobody ended it
     await new Promise((r) => setTimeout(r, 1000));
-    expect(isAlive(childPid)).toBe(true);
+    expect(isPidRunning(grandchildPid)).toBe(true);
   }, 20000);
 
   it('ends the wrapper AND the grandchild', async () => {
-    const { wrapper, childPid } = await spawnWrappedNode();
-    expect(isAlive(wrapper.pid!)).toBe(true);
-    expect(isAlive(childPid)).toBe(true);
+    const record = await spawnWrappedNode();
+    const { wrapper, grandchildPid } = record;
+    expect(isPidRunning(wrapper.pid!)).toBe(true);
+    expect(isPidRunning(grandchildPid)).toBe(true);
 
     await killProcessTree(wrapper);
 
     expect(await waitUntilGone(wrapper.pid!)).toBe(true);
-    expect(await waitUntilGone(childPid)).toBe(true);
+    expect(await waitUntilGrandchildGone(record)).toBe(true);
   }, 20000);
 
   it('does not run taskkill again for a child that has exited (its pid may be reused)', async () => {
-    const { wrapper } = await spawnWrappedNode();
+    const record = await spawnWrappedNode();
+    const { wrapper } = record;
     await killProcessTree(wrapper);
     await new Promise<void>((r) => (wrapper.exitCode !== null || wrapper.signalCode !== null ? r() : wrapper.once('exit', () => r())));
+    expect(await waitUntilGrandchildGone(record)).toBe(true);
 
     const spawnMock = fakeSpawn({ code: 0 });
     await killProcessTree(wrapper, { spawn: spawnMock as never });
