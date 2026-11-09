@@ -17,6 +17,12 @@
  * it; without PG_OVERLAP_REPORT it does nothing, and it never throws into the
  * process it is loaded in. One JSON line per overlap is appended to the file;
  * CI fails the job when the file is not empty.
+ *
+ * An empty report only means something if the guard was armed where the
+ * queries run, so every process that arms appends one JSON line
+ * ({ pid, argv }) to `<report>.armed`. CI also fails unless that file names
+ * the server's entry (apps/server/src/index.ts): a moved package or a
+ * changed adapter must not read as a clean run.
  */
 const report = process.env.PG_OVERLAP_REPORT;
 
@@ -66,6 +72,13 @@ function arm() {
   };
   guarded.__pgOverlapGuard = true;
   Client.prototype.query = guarded;
+  // The positive signal: this process watches pg from here on. A marker that
+  // cannot be written leaves CI failing on its absence, which is the point
+  try {
+    fs.appendFileSync(`${report}.armed`, `${JSON.stringify({ pid: process.pid, argv: process.argv.slice(1) })}\n`);
+  } catch (err) {
+    process.stderr.write(`[pg-overlap-guard] armed, but could not write ${report}.armed: ${err && err.message}\n`);
+  }
 }
 
 if (report) {

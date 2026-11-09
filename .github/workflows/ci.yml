@@ -325,16 +325,26 @@ jobs:
           REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
           QUARANTINE_REPORT: ${{ runner.temp }}/pg-overlaps-quarantine.jsonl
         run: |
+          # An empty report proves nothing unless the guard armed in the
+          # server itself: each arming process leaves a line in <report>.armed
+          if ! grep -qs 'apps/server/src/index.ts' "$QUARANTINE_REPORT.armed"; then
+            echo "::warning::the pg overlap guard did not arm in the server during the quarantined specs"
+          fi
           if [ -s "$QUARANTINE_REPORT" ]; then
             echo "::warning::$(wc -l < "$QUARANTINE_REPORT") pg queries issued on a busy client during the quarantined specs"
             cat "$QUARANTINE_REPORT"
+          fi
+          if ! grep -qs 'apps/server/src/index.ts' "$REPORT.armed"; then
+            echo "::error::the pg overlap guard never armed in the server process (no apps/server/src/index.ts line in $REPORT.armed), so an empty report would prove nothing. Is @prisma/adapter-pg still resolvable from apps/server?"
+            cat "$REPORT.armed" 2>/dev/null || true
+            exit 1
           fi
           if [ -s "$REPORT" ]; then
             echo "::error::$(wc -l < "$REPORT") pg queries issued on a busy client (two queries at once on one connection)"
             cat "$REPORT"
             exit 1
           fi
-          echo "No query was issued on a busy pg client."
+          echo "No query was issued on a busy pg client (guard armed in: $(grep -c 'apps/server/src/index.ts' "$REPORT.armed") server process(es))."
 
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
