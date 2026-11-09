@@ -24,7 +24,9 @@ const BADGE_UNSIGNED = 'button[title="A device is not signed by the account key 
 /** Open the DM with a user from the Friends list. */
 async function openDMWith(page: Page, username: string) {
   await page.getByText('Friends').first().click();
-  await page.getByText('All').click();
+  // By role, not text: getByText('All') also matches the signed-in user's own
+  // name whenever the random suffix puts "all" in it ("mda" + "llx5mf").
+  await page.getByRole('button', { name: 'All', exact: true }).click();
   await expect(page.getByText(username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
   await page.locator('button[title="Message"]').first().click();
   await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });
@@ -108,7 +110,7 @@ test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quara
 
     // A: open the DM via Friends → Message
     await page.getByText('Friends').first().click();
-    await page.getByText('All').click();
+    await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page.getByText(userB.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
     await page.locator('button[title="Message"]').first().click();
     await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });

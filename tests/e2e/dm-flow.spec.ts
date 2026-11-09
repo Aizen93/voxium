@@ -22,7 +22,7 @@ test.describe('DM flow: friend request -> accept -> message', () => {
 
     // Click Friends tab, then "All" to see all friends (not just online)
     await page.getByText('Friends').first().click();
-    await page.getByText('All').click();
+    await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page.getByText(userB.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 
     // Click the Message button next to user B to start a DM
