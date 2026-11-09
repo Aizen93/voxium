@@ -52,9 +52,10 @@ vi.mock('../../mediasoup/mediasoupManager', () => ({ getSfuStats: vi.fn().mockRe
 vi.mock('../../utils/serverLimits', () => ({ getGlobalLimits: vi.fn().mockResolvedValue({}) }));
 vi.mock('../../utils/sanitize', () => ({ sanitizeText: vi.fn((s: string) => s) }));
 vi.mock('../../utils/memberBroadcast', () => ({ broadcastMemberJoined: vi.fn(), broadcastMemberLeft: vi.fn() }));
+const mockDeleteFromS3 = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/, VALID_ATTACHMENT_KEY_RE: /^attachments\//,
-  listAllS3Objects: vi.fn().mockResolvedValue([]), deleteFromS3: vi.fn().mockResolvedValue(undefined),
+  listAllS3Objects: vi.fn().mockResolvedValue([]), deleteFromS3: (...a: any[]) => mockDeleteFromS3(...a),
 }));
 const mockLogAuditEvent = vi.fn();
 vi.mock('../../utils/auditLog', () => ({ logAuditEvent: (...a: any[]) => mockLogAuditEvent(...a) }));
@@ -246,6 +247,54 @@ describe('DELETE /admin/servers/:serverId', () => {
     expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
     expect(mockSocketsLeave).not.toHaveBeenCalled();
     expect(mockLocalSocketsLeave).not.toHaveBeenCalled();
+  });
+
+  describe('icon blob', () => {
+    const ICON = 'server-icons/srv-1-1700000000000-0123456789ab.webp';
+
+    beforeEach(() => {
+      prismaMock.server.delete = vi.fn().mockResolvedValue({});
+    });
+
+    it('deletes the stored icon key from storage AFTER the row is deleted', async () => {
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: ICON });
+
+      const res = await del('srv-1');
+
+      expect(res.status).toBe(200);
+      // The key is read with the row, before the row goes
+      expect(prismaMock.server.findUnique).toHaveBeenCalledWith({ where: { id: 'srv-1' }, select: { id: true, name: true, iconUrl: true } });
+      expect(mockDeleteFromS3).toHaveBeenCalledTimes(1);
+      expect(mockDeleteFromS3).toHaveBeenCalledWith(ICON);
+      expect(mockDeleteFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    });
+
+    it('touches storage not at all for a space without an icon', async () => {
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: null });
+
+      const res = await del('srv-1');
+
+      expect(res.status).toBe(200);
+      expect(mockDeleteFromS3).not.toHaveBeenCalled();
+    });
+
+    it('still answers 200 when the storage delete fails, and logs it (the orphan sweep reclaims the blob)', async () => {
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: ICON });
+      mockDeleteFromS3.mockRejectedValueOnce(new Error('S3 unavailable'));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const res = await del('srv-1');
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ success: true, message: 'Server deleted' });
+        expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'server.delete', targetId: 'srv-1' }));
+        await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+          '[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', 'S3 unavailable'));
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   describe('room cleanup', () => {

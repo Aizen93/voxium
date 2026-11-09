@@ -1233,9 +1233,10 @@ adminRouter.delete('/webhooks/:webhookId', async (req: Request<{ webhookId: stri
 
 adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
+    // The icon key is read BEFORE the row goes, its blob deleted after
     const server = await prisma.server.findUnique({
       where: { id: req.params.serverId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, iconUrl: true },
     });
     if (!server) throw new NotFoundError('Server');
 
@@ -1254,6 +1255,14 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
     await prisma.server.delete({ where: { id: server.id } });
     // A deleted space must not stay on a cached Explore page (never throws)
     await bumpDiscoveryPageCache('admin server delete');
+
+    // The icon blob goes AFTER the row, so a failed delete never strands a
+    // live space without its icon. Best-effort and never awaited, as on the
+    // owner's DELETE /servers/:serverId: the response does not wait on S3.
+    if (server.iconUrl) {
+      deleteFromS3(server.iconUrl).catch((err) =>
+        console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
+    }
 
     logAuditEvent({
       actorId: req.user!.userId,
