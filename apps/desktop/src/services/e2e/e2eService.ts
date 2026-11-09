@@ -605,15 +605,29 @@ export class E2EService {
     const status = res.data.data as { registered: boolean; deviceId?: string; curve25519Key?: string };
 
     if (status.registered && status.deviceId === this.deviceId && status.curve25519Key === account.curve25519Key()) {
+      // The slot holds this identity, so the upload that registered it landed.
+      // Keys the account still lists as unpublished come from an upload cut
+      // short after it was sent (this registration's, or a replenish batch).
+      // The server reports how many keys it holds, not which, but marking them
+      // is right either way: a key the server has is published, and one it
+      // never received can simply never be claimed. Left unmarked, they would
+      // ride along with the next replenish batch, past OTK_UPLOAD_MAX.
+      if ((account.oneTimeKeys() as OneTimeKeyPair[]).length > 0) {
+        account.markKeysAsPublished();
+        await this.persistAccount();
+        this.assertLive();
+      }
       return;
     }
 
-    // Reuse unpublished keys if a previous registration attempt failed mid-way
+    // Reuse unpublished keys if a previous registration attempt failed mid-way,
+    // never more than one upload may carry (the server refuses the whole batch)
     let otks = account.oneTimeKeys() as OneTimeKeyPair[];
     if (otks.length < E2E_LIMITS.OTK_TARGET) {
       account.generateOneTimeKeys(E2E_LIMITS.OTK_TARGET - otks.length);
       otks = account.oneTimeKeys() as OneTimeKeyPair[];
     }
+    otks = otks.slice(0, E2E_LIMITS.OTK_UPLOAD_MAX);
     let fallback = account.fallbackKey() as OneTimeKeyPair | null;
     if (!fallback) {
       account.generateFallbackKey();
@@ -633,11 +647,15 @@ export class E2EService {
       oneTimeKeys: otks.map((k) => this.signedPreKey(account, k)),
       fallbackKey: this.signedPreKey(account, fallback),
     });
-    // Disposed during the upload: the keys are on the server but the account
-    // that would mark them published is freed. The pickle saved above still
-    // lists them, so the next start re-offers the same keys rather than new ones.
+    // Disposed during the upload: the keys are on the server, but the account
+    // that would mark them published is freed, so the pickle saved above still
+    // lists them as unpublished. The next start finds the slot registered with
+    // this identity and marks them there (the early return above).
     this.assertLive();
 
+    // Marks every unpublished key, the ones past the cap included: those were
+    // never sent, so no peer can claim them, and replenishment tops the pool
+    // up from the count the server reports.
     account.markKeysAsPublished();
     await this.persistAccount();
     // our own list version just changed — force a refetch on the next send
@@ -653,8 +671,14 @@ export class E2EService {
       const count = status.oneTimeKeyCount ?? 0;
       if (count >= E2E_LIMITS.OTK_LOW_WATER) return;
 
-      account.generateOneTimeKeys(Math.min(E2E_LIMITS.OTK_TARGET - count, E2E_LIMITS.OTK_UPLOAD_MAX));
-      const fresh = account.oneTimeKeys() as OneTimeKeyPair[];
+      // A batch whose upload failed is still in the account, unpublished, and
+      // goes out with this one: generate only what it does not already cover,
+      // and never send more than one upload may carry, or the server refuses
+      // the batch on every attempt and the pool drains to the fallback key.
+      const wanted = Math.min(E2E_LIMITS.OTK_TARGET - count, E2E_LIMITS.OTK_UPLOAD_MAX);
+      const pending = (account.oneTimeKeys() as OneTimeKeyPair[]).length;
+      if (pending < wanted) account.generateOneTimeKeys(wanted - pending);
+      const fresh = (account.oneTimeKeys() as OneTimeKeyPair[]).slice(0, E2E_LIMITS.OTK_UPLOAD_MAX);
       if (fresh.length === 0) return;
       await this.persistAccount();
       await this.api.post('/e2e/devices/me/keys', {

@@ -328,6 +328,14 @@ function createFakeServer() {
       async put(url: string, payload: FakePutBody) {
         if (url === '/e2e/devices') {
           const body = payload as E2EDeviceRegistration;
+          // routes/e2e.ts: 1–OTK_UPLOAD_MAX keys per registration
+          if (
+            !Array.isArray(body.oneTimeKeys) ||
+            body.oneTimeKeys.length === 0 ||
+            body.oneTimeKeys.length > E2E_LIMITS.OTK_UPLOAD_MAX
+          ) {
+            throw new Error(`400: oneTimeKeys must contain 1–${E2E_LIMITS.OTK_UPLOAD_MAX} keys`);
+          }
           const user = userOf(userId);
           const existing = user.devices.get(body.deviceId);
           if (!existing && user.devices.size >= E2E_LIMITS.MAX_DEVICES) {
@@ -416,6 +424,13 @@ function createFakeServer() {
           const body = payload as DeviceKeysBody;
           const device = userOf(userId).devices.get(body.deviceId);
           if (!device) throw new Error('403: no device');
+          // routes/e2e.ts: 1–OTK_UPLOAD_MAX keys per upload, refused whole otherwise
+          if (
+            body.oneTimeKeys &&
+            (body.oneTimeKeys.length === 0 || body.oneTimeKeys.length > E2E_LIMITS.OTK_UPLOAD_MAX)
+          ) {
+            throw new Error(`400: oneTimeKeys must contain 1–${E2E_LIMITS.OTK_UPLOAD_MAX} keys`);
+          }
           if (body.oneTimeKeys) device.oneTimeKeys.push(...body.oneTimeKeys);
           if (body.fallbackKey) device.fallbackKey = body.fallbackKey;
           return ok({ oneTimeKeyCount: device.oneTimeKeys.length });
@@ -3943,6 +3958,7 @@ describe('E2EService — lifecycle', () => {
    */
   function holdingApi(base: ReturnType<Server['apiFor']>, hold: (verb: string, url: string) => boolean) {
     const writes: string[] = [];
+    const reads: string[] = [];
     let release!: () => void;
     const released = new Promise<void>((resolve) => (release = resolve));
     let reached!: () => void;
@@ -3950,7 +3966,7 @@ describe('E2EService — lifecycle', () => {
     let holding = true;
     const verb = (name: 'get' | 'put' | 'post' | 'delete') =>
       async (url: string, body?: unknown) => {
-        if (name !== 'get') writes.push(`${name.toUpperCase()} ${url.split('?')[0]}`);
+        (name === 'get' ? reads : writes).push(`${name.toUpperCase()} ${url.split('?')[0]}`);
         if (holding && hold(name, url)) {
           holding = false;
           reached();
@@ -3962,19 +3978,45 @@ describe('E2EService — lifecycle', () => {
     return {
       api: { get: verb('get'), put: verb('put'), post: verb('post'), delete: verb('delete') },
       writes,
+      reads,
       held,
       release,
     };
   }
 
-  function serviceOver(userId: string, api: unknown) {
+  /** A service over `api`; pass an earlier device's key provider and vault to restart it. */
+  function serviceOver(
+    userId: string,
+    api: unknown,
+    opts: { keyProvider?: PickleKeyProvider; vaultNamespace?: string } = {}
+  ) {
     return new E2EService(userId, {
       api: api as E2EServiceOptions['api'],
-      keyProvider: memoryKeyProvider(),
+      keyProvider: opts.keyProvider ?? memoryKeyProvider(),
       wasmInput: wasmBytes,
-      vaultNamespace: `v${++vaultSeq}`,
+      vaultNamespace: opts.vaultNamespace ?? `v${++vaultSeq}`,
       deviceListCacheMs: 0,
     });
+  }
+
+  /** The fake's client with every call to `match` failing once, then working. */
+  function failingOnce(base: ReturnType<Server['apiFor']>, match: (verb: string, url: string) => boolean) {
+    let armed = false;
+    const verb = (name: 'get' | 'put' | 'post' | 'delete') =>
+      async (url: string, body?: unknown) => {
+        if (armed && match(name, url)) {
+          armed = false;
+          throw new Error('503: service unavailable');
+        }
+        const call = base[name] as (url: string, body?: unknown) => Promise<unknown>;
+        return call(url, body);
+      };
+    return {
+      api: { get: verb('get'), put: verb('put'), post: verb('post'), delete: verb('delete') },
+      arm: () => {
+        armed = true;
+      },
+    };
   }
 
   const nthGetOfOwnStatus = (n: number) => {
@@ -4076,4 +4118,87 @@ describe('E2EService — lifecycle', () => {
 
     await expect(alice.service.replenishOneTimeKeys()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
   });
+
+  describe('one-time keys after an interrupted upload', () => {
+    const poolOf = (server: Server, userId: string, deviceId: string) => server.deviceOf(userId, deviceId).oneTimeKeys;
+
+    it('marks the keys of a registration the server took before a dispose cut it short', async () => {
+      // Otherwise the account keeps all of them as unpublished, the next
+      // replenish sends them again on top of a fresh batch, past
+      // OTK_UPLOAD_MAX, and the server refuses that upload every time: the
+      // pool drains to the fallback key.
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      const keyProvider = memoryKeyProvider();
+      const vaultNamespace = `v${++vaultSeq}`;
+      const gate = holdingApi(server.apiFor(userId), (verb, url) => verb === 'put' && url === '/e2e/devices');
+      const first = serviceOver(userId, gate.api, { keyProvider, vaultNamespace });
+      const init = first.initialize();
+      await gate.held;
+      first.dispose();
+      gate.release();
+      await expect(init).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+
+      // the server took the upload
+      const [deviceId] = [...server.userOf(userId).devices.keys()];
+      expect(poolOf(server, userId, deviceId)).toHaveLength(E2E_LIMITS.OTK_TARGET);
+
+      const restarted = makeDevice(server, userId, { keyProvider, vaultNamespace });
+      await restarted.service.initialize();
+      expect(restarted.service.deviceId).toBe(deviceId);
+
+      // peers claim keys until the pool is under the low-water mark
+      poolOf(server, userId, deviceId).splice(0, E2E_LIMITS.OTK_TARGET - 10);
+      await restarted.service.replenishOneTimeKeys();
+
+      const pool = poolOf(server, userId, deviceId);
+      expect(pool).toHaveLength(E2E_LIMITS.OTK_TARGET);
+      expect(new Set(pool.map((k) => k.keyId)).size).toBe(pool.length);
+    });
+
+    it('sends at most OTK_UPLOAD_MAX keys per replenish, an earlier unsent batch included', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      const flaky = failingOnce(server.apiFor(userId), (verb, url) => verb === 'post' && url === '/e2e/devices/me/keys');
+      const service = serviceOver(userId, flaky.api);
+      await service.initialize();
+      await flushQueue();
+      poolOf(server, userId, service.deviceId).splice(0, E2E_LIMITS.OTK_TARGET - 10);
+
+      // this batch is generated and kept, but never reaches the server
+      flaky.arm();
+      await expect(service.replenishOneTimeKeys()).rejects.toThrow('503');
+
+      await service.replenishOneTimeKeys();
+      expect(poolOf(server, userId, service.deviceId)).toHaveLength(E2E_LIMITS.OTK_TARGET);
+    });
+
+    it('registers with at most OTK_UPLOAD_MAX keys when the account holds more unpublished ones', async () => {
+      // The state an earlier build could leave behind; the server has since
+      // lost the device, so the next start registers it again.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      await alice.service.initialize();
+      await flushQueue();
+      const internals = alice.service as unknown as { account: EngineAccount; persistAccount(): Promise<void> };
+      internals.account.generateOneTimeKeys(E2E_LIMITS.OTK_UPLOAD_MAX + 10);
+      await internals.persistAccount();
+      alice.service.dispose();
+      server.userOf(alice.userId).devices.clear();
+
+      const restarted = makeDevice(server, alice.userId, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await restarted.service.initialize();
+      const pool = poolOf(server, alice.userId, restarted.service.deviceId);
+      expect(pool.length).toBeGreaterThan(0);
+      expect(pool.length).toBeLessThanOrEqual(E2E_LIMITS.OTK_UPLOAD_MAX);
+    });
+  });
+
+  // (end of lifecycle tests)
 });
