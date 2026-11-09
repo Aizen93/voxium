@@ -467,6 +467,39 @@ describe('Secure Channel Routes', () => {
       expect(mockTo).toHaveBeenCalledWith('user:user-9');
     });
 
+    it('reads the duplicate and the cap one after the other under the channel lock, never at once', async () => {
+      // Issued together (Promise.all), Prisma ran the findUnique as its own
+      // batch beside the count: two queries at once on the transaction's one
+      // pg connection. Each tracked call stays pending a few ms, so any
+      // overlap shows up as two in flight.
+      const order: string[] = [];
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const track = async <T>(label: string, value: T): Promise<T> => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        order.push(label);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return value;
+      };
+      prismaMock.$queryRaw.mockImplementation(() => track('tx:lock', [{ id: CH.id }]));
+      prismaMock.channelMember.findUnique.mockReset();
+      prismaMock.channelMember.findUnique
+        .mockResolvedValueOnce({ isCreator: true }) // caller gate, before the transaction
+        .mockImplementationOnce(() => track('tx:duplicate', null));
+      prismaMock.channelMember.count.mockImplementation(() => track('tx:count', 2));
+      prismaMock.channelMember.create.mockImplementation(() => track('tx:create', {}));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(201);
+      expect(order).toEqual(['tx:lock', 'tx:duplicate', 'tx:count', 'tx:create']);
+      expect(maxInFlight).toBe(1);
+    });
+
     it('a failing occupancy replay is logged and the invitation still succeeds', async () => {
       mockReplayVoiceState.mockRejectedValueOnce(new Error('redis away'));
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
