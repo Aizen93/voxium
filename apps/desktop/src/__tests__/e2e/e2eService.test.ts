@@ -32,7 +32,7 @@ vi.mock('../../services/api', () => ({ api: {} }));
 import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
-import { E2EVault, type PickleKeyProvider } from '../../services/e2e/vault';
+import { E2EVault, E2EVaultClosedError, type PickleKeyProvider } from '../../services/e2e/vault';
 
 const require = createRequire(import.meta.url);
 const wasmBytes = readFileSync(require.resolve('@voxium/crypto-engine/wasm'));
@@ -4403,6 +4403,34 @@ describe('E2EService — lifecycle', () => {
       const last = restart(server, alice);
       await last.service.initialize();
       expect((await last.service.decryptMessage(message)).failed).toBe(true);
+    });
+
+    it('keeps a share re-decryptable when a run is cut between its Olm decrypt and its session import', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'survives a cut');
+
+      // the run stops right where the session would be written (a teardown,
+      // the window closing): the Olm message is decrypted, nothing is imported
+      const cut = restart(server, alice);
+      const cutVault = (cut.service as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(cutVault, 'putInboundGroupSession').mockRejectedValueOnce(new E2EVaultClosedError());
+      await cut.service.initialize();
+      await cut.service.claimMasterTransfers(); // queued behind the start-up claim
+      expect(await pendingIn(alice)).toHaveLength(1);
+      await cut.service.dispose();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      expect((await again.service.decryptMessage(message)).text).toBe('survives a cut');
+      expect(await pendingIn(alice)).toHaveLength(0);
     });
 
     it('drops a kept share once its session reached this device another way', async () => {
