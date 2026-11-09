@@ -77,6 +77,22 @@ describe('a message event whose decrypt outlived the session is dropped', () => 
       const effect = body.search(/useChatStore\.getState\(\)\.(addMessage|updateMessage)|updateLastMessage\(|increment(DM)?Unread\(|play[A-Za-z]*Sound\(|fetchConversations\(|notify\(/);
       expect(effect, `${name} must reach no store before the check`).toBeGreaterThan(drop);
     });
+
+    it(`${name} checks the session again after every later await, before the next side effect`, () => {
+      // e.g. a first message of a new conversation waits for the conversation
+      // list, and the unread count and the notification come after that
+      const body = handlerBody(source, name);
+      const dropText = 'if (!shown || signedInUser() !== session) return;';
+      const rest = body.slice(body.indexOf(dropText) + dropText.length);
+      const effects = /useChatStore\.getState\(\)\.(addMessage|updateMessage)|updateLastMessage\(|increment(DM)?Unread\(|play[A-Za-z]*Sound\(|notify\(/;
+      for (const match of rest.matchAll(/await [^;]+;/g)) {
+        const after = rest.slice(match.index! + match[0].length);
+        const check = after.indexOf('signedInUser() !== session');
+        const next = after.search(effects);
+        expect(check, `${name}: no session check after "${match[0]}"`).toBeGreaterThan(-1);
+        if (next > -1) expect(check, `${name}: "${match[0]}" reaches a side effect unchecked`).toBeLessThan(next);
+      }
+    });
   }
 });
 

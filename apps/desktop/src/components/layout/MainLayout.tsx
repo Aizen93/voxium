@@ -416,6 +416,8 @@ export function MainLayout() {
           const exists = dmStore.conversations.some((c) => c.id === message.conversationId);
           if (!exists) {
             await dmStore.fetchConversations();
+            // another await: the session may have ended during it too
+            if (signedInUser() !== session) return;
           } else {
             dmStore.updateLastMessage(message.conversationId, {
               id: message.id,
