@@ -121,10 +121,14 @@ vi.mock('../../utils/e2ePurge', () => ({
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
 const mockDisconnectSockets = vi.fn();
+// fetchSockets stays reachable on every operator so a regression to it is an
+// explicit assertion failure, not a TypeError
 const mockFetchSockets = vi.fn().mockResolvedValue([]);
-const mockIn = vi.fn(() => ({ fetchSockets: mockFetchSockets, disconnectSockets: mockDisconnectSockets }));
+const mockSocketsLeave = vi.fn();
+const mockIn = vi.fn((_rooms: string | string[]) => ({ fetchSockets: mockFetchSockets, disconnectSockets: mockDisconnectSockets, socketsLeave: mockSocketsLeave }));
 const mockLocalDisconnectSockets = vi.fn();
-const mockLocalIn = vi.fn(() => ({ disconnectSockets: mockLocalDisconnectSockets }));
+const mockLocalSocketsLeave = vi.fn();
+const mockLocalIn = vi.fn((_rooms: string | string[]) => ({ fetchSockets: mockFetchSockets, disconnectSockets: mockLocalDisconnectSockets, socketsLeave: mockLocalSocketsLeave }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
@@ -515,6 +519,76 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expect(purgeE2EMaterialMock).toHaveBeenCalledWith('target-1', txMock);
     expect(purgeE2EMaterialMock.mock.calls[0][0]).not.toBe('admin-1');
     expect(txMock.user.delete).toHaveBeenCalledWith({ where: { id: 'target-1' } });
+  });
+});
+
+describe('DELETE /admin/users/:userId — an owned space deleted with the account leaves its rooms', () => {
+  let app: express.Express;
+  const rooms = ['server:srv-owned', 'channel:ch-text', 'channel:ch-voice', 'channel:ch-secure'];
+
+  beforeEach(() => {
+    app = createApp();
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-owned', name: 'Owned' }]);
+    // Every channel, text, voice and secure alike: no visibility filter
+    prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-text' }, { id: 'ch-voice' }, { id: 'ch-secure' }]);
+  });
+
+  const deleteOwner = () => request(app)
+    .delete('/api/v1/admin/users/target-1')
+    .set('Authorization', `Bearer ${makeToken()}`)
+    .send({ serverActions: [{ serverId: 'srv-owned', action: 'delete' }] });
+
+  it('makes every socket in ANY of the space rooms leave ALL of them, on this node and then cluster-wide', async () => {
+    const res = await deleteOwner();
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.channel.findMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned' }, select: { id: true } });
+    // The server room AND every channel room, as the owner's own delete does
+    expect(mockLocalIn).toHaveBeenCalledWith(rooms);
+    expect(mockLocalSocketsLeave).toHaveBeenCalledTimes(1);
+    expect(mockLocalSocketsLeave).toHaveBeenCalledWith(rooms);
+    expect(mockIn).toHaveBeenCalledWith(rooms);
+    expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
+    expect(mockSocketsLeave).toHaveBeenCalledWith(rooms);
+    expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
+  });
+
+  it('leaves the rooms after the server:deleted notice and before the space row is deleted', async () => {
+    await deleteOwner();
+
+    const noticeIndex = mockEmit.mock.calls.findIndex(([event]: [string]) => event === 'server:deleted');
+    expect(noticeIndex).toBeGreaterThanOrEqual(0);
+    const noticeOrder = mockEmit.mock.invocationCallOrder[noticeIndex];
+    expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
+    expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
+    expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+  });
+
+  it('leaves only the server room when the space has no channels', async () => {
+    prismaMock.channel.findMany.mockResolvedValue([]);
+
+    await deleteOwner();
+
+    expect(mockLocalSocketsLeave).toHaveBeenCalledWith(['server:srv-owned']);
+    expect(mockSocketsLeave).toHaveBeenCalledWith(['server:srv-owned']);
+  });
+
+  it('never fetches the sockets: a stalled peer cannot abort the account deletion halfway', async () => {
+    // A fetch waits on every node and throws after 5 s when one peer is
+    // unresponsive: here it stopped the deletion after the space's members
+    // were told it was gone, with the space and the account still in place
+    mockFetchSockets.mockRejectedValue(new Error('timeout reached while waiting for fetchSockets response'));
+    try {
+      const res = await deleteOwner();
+
+      expect(res.status).toBe(200);
+      expect(mockFetchSockets).not.toHaveBeenCalled();
+      expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+      expectAtomicPurgeAndDelete('target-1');
+    } finally {
+      mockFetchSockets.mockResolvedValue([]);
+    }
   });
 });
 

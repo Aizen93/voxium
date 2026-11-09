@@ -27,8 +27,15 @@ vi.mock('../../utils/prisma', () => ({
 
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
+// fetchSockets stays reachable on every operator so a regression to it is an
+// explicit assertion failure, not a TypeError
+const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockSocketsLeave = vi.fn();
+const mockLocalSocketsLeave = vi.fn();
+const mockIn = vi.fn((_rooms: string | string[]) => ({ fetchSockets: mockFetchSockets, socketsLeave: mockSocketsLeave }));
+const mockLocalIn = vi.fn((_rooms: string | string[]) => ({ fetchSockets: mockFetchSockets, socketsLeave: mockLocalSocketsLeave }));
 vi.mock('../../websocket/socketServer', () => ({
-  getIO: vi.fn(() => ({ to: mockTo, in: vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) })) })),
+  getIO: vi.fn(() => ({ to: mockTo, in: mockIn, local: { in: mockLocalIn } })),
 }));
 vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
@@ -237,6 +244,61 @@ describe('DELETE /admin/servers/:serverId', () => {
     expect((await del('ghost')).status).toBe(404);
     expect(prismaMock.server.delete).not.toHaveBeenCalled();
     expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
+    expect(mockSocketsLeave).not.toHaveBeenCalled();
+    expect(mockLocalSocketsLeave).not.toHaveBeenCalled();
+  });
+
+  describe('room cleanup', () => {
+    const rooms = ['server:srv-1', 'channel:ch-text', 'channel:ch-voice', 'channel:ch-secure'];
+
+    beforeEach(() => {
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S' });
+      prismaMock.server.delete = vi.fn().mockResolvedValue({});
+      // Every channel, text, voice and secure alike: no visibility filter
+      prismaMock.channel.findMany.mockResolvedValueOnce([{ id: 'ch-text' }, { id: 'ch-voice' }, { id: 'ch-secure' }]);
+    });
+
+    it('makes every socket in ANY of the space rooms leave ALL of them, on this node and then cluster-wide', async () => {
+      const res = await del('srv-1');
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.channel.findMany).toHaveBeenCalledWith({ where: { serverId: 'srv-1' }, select: { id: true } });
+      // The server room AND every channel room, as the owner's own delete does
+      expect(mockLocalIn).toHaveBeenCalledTimes(1);
+      expect(mockLocalIn).toHaveBeenCalledWith(rooms);
+      expect(mockLocalSocketsLeave).toHaveBeenCalledTimes(1);
+      expect(mockLocalSocketsLeave).toHaveBeenCalledWith(rooms);
+      expect(mockIn).toHaveBeenCalledTimes(1);
+      expect(mockIn).toHaveBeenCalledWith(rooms);
+      expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
+      expect(mockSocketsLeave).toHaveBeenCalledWith(rooms);
+      expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
+    });
+
+    it('leaves the rooms after the server:deleted notice and before the row is deleted', async () => {
+      await del('srv-1');
+
+      const noticeIndex = mockEmit.mock.calls.findIndex(([event]: [string]) => event === 'server:deleted');
+      expect(noticeIndex).toBeGreaterThanOrEqual(0);
+      const noticeOrder = mockEmit.mock.invocationCallOrder[noticeIndex];
+      expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
+      expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
+      expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    });
+
+    it('never fetches the sockets: a fetch waits on every node and throws when one peer is unresponsive', async () => {
+      mockFetchSockets.mockRejectedValue(new Error('timeout reached while waiting for fetchSockets response'));
+      try {
+        const res = await del('srv-1');
+
+        expect(res.status).toBe(200);
+        expect(mockFetchSockets).not.toHaveBeenCalled();
+        expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'server.delete', targetId: 'srv-1' }));
+      } finally {
+        mockFetchSockets.mockResolvedValue([]);
+      }
+    });
   });
 });
 
