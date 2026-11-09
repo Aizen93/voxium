@@ -358,4 +358,64 @@ test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quara
     await contextA2.close();
     await contextB.close();
   });
+
+  test("a peer's first device, published after we looked, is trusted on first use", async ({ page, request, browser }) => {
+    test.setTimeout(120_000);
+
+    const userA = testUser('tofa');
+    const userB = testUser('tofb');
+    const dataA = await registerUser(request, userA);
+    const dataB = await registerUser(request, userB);
+    await sendFriendRequest(request, dataA.accessToken, userB.username);
+    await acceptFriendRequest(request, dataB.accessToken, dataA.user.id);
+
+    // B's very first device upload is parked until A has read B's device list,
+    // so A always sees it empty first: the ordering the tests above only reach
+    // when B's app happens to start slower than A's.
+    let releaseB!: () => void;
+    const bMayPublish = new Promise<void>((resolve) => (releaseB = resolve));
+    const contextB = await browser.newContext();
+    await contextB.route('**/api/v1/e2e/devices', async (route) => {
+      if (route.request().method() === 'PUT') await bMayPublish;
+      await route.continue();
+    });
+    const pageB = await contextB.newPage();
+
+    const aReadsB = page.waitForResponse(
+      (res) =>
+        res.request().method() === 'GET' &&
+        new URL(res.url()).pathname.endsWith(`/e2e/devices/${dataB.user.id}`),
+      { timeout: 30_000 }
+    );
+    await injectAuth(page, dataA);
+    await injectAuth(pageB, dataB);
+    await openDMWith(page, userB.username);
+    await expect(page.locator(BADGE)).toBeVisible({ timeout: 20_000 });
+    const firstLook = (await (await aReadsB).json()) as { data: { devices: unknown[] } };
+    expect(firstLook.data.devices).toHaveLength(0);
+
+    releaseB();
+    await waitForPublishedDevice(request, dataA.accessToken, dataB.user.id);
+
+    // A's send re-reads B's list, which now names B's first device
+    const hello = `first contact ${Date.now()}`;
+    await sendMessage(page, hello);
+
+    await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
+    await pageB.getByText(userA.username, { exact: true }).first().click();
+    await expect(pageB.getByText(hello).first()).toBeVisible({ timeout: 15_000 });
+    const reply = `reply to first contact ${Date.now()}`;
+    await sendMessage(pageB, reply);
+    await expect(page.getByText(reply).first()).toBeVisible({ timeout: 15_000 });
+
+    // That first device is the baseline, not a device added since: the badge
+    // carries no warning, and the safety numbers agree.
+    await expect(page.locator(BADGE_NEW_DEVICE)).toHaveCount(0);
+    await expect(page.locator(BADGE)).toBeVisible();
+    const safetyA = await readSafetyNumber(page);
+    const safetyB = await readSafetyNumber(pageB);
+    expect(safetyA).toBe(safetyB);
+
+    await contextB.close();
+  });
 });
