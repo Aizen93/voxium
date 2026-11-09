@@ -4219,5 +4219,104 @@ describe('E2EService — lifecycle', () => {
     });
   });
 
-  // (end of lifecycle tests)
+  describe('background work after a dispose', () => {
+    const sharesFor = (server: Server, userId: string) => server.shares.filter((s) => s.recipientUserId === userId);
+
+    it('a dispose during the start-up key-share claim still imports the shares it took', async () => {
+      // The server deletes what it hands out: a claim answered after the
+      // dispose holds the only copy of those session keys.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      alice.service.dispose(); // the app is closed
+
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'sent while you were away');
+      expect(sharesFor(server, alice.userId)).toHaveLength(1);
+
+      // the next start's claim is answered only after a logout disposed it
+      const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'));
+      const restarted = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await restarted.initialize();
+      await gate.held;
+      restarted.dispose();
+      gate.release();
+      await vi.waitFor(() => expect(sharesFor(server, alice.userId)).toHaveLength(0));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // the share is gone from the server, and still not lost
+      const again = makeDevice(server, alice.userId, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await again.service.initialize();
+      const result = await again.service.decryptMessage({
+        id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope,
+      });
+      expect(result.text).toBe('sent while you were away');
+    });
+
+    it('a disposed service claims no key shares: they wait on the server for the next start', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'still in the inbox');
+      alice.service.dispose();
+
+      // a decrypt that would otherwise drain the inbox looking for the session
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      await alice.service.decryptMessage(message).catch(() => undefined);
+      expect(sharesFor(server, alice.userId)).toHaveLength(1);
+
+      const again = makeDevice(server, alice.userId, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('still in the inbox');
+    });
+
+    it('runs the start-up backup pass on the queue: a dispose before it starts seals and uploads nothing', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      // alice's own copy of this session has not been backed up yet
+      await alice.service.encryptMessage('c1', bob.userId, 'needs a backup');
+      alice.service.dispose();
+
+      const recorder = holdingApi(server.apiFor(alice.userId), () => false);
+      const restarted = serviceOver(alice.userId, recorder.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      const warn = vi.spyOn(console, 'warn');
+      const error = vi.spyOn(console, 'error');
+      try {
+        await restarted.initialize();
+        restarted.dispose();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+        expect(logged).not.toMatch(/null pointer/);
+        expect(recorder.writes).not.toContain('POST /e2e/message-keys');
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
+    });
+  });
 });

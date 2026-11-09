@@ -213,9 +213,26 @@ function isConnectionGone(err: unknown): boolean {
   return /database connection is closing|connection is closing|InvalidStateError/i.test(message);
 }
 
+/**
+ * The vault was closed on purpose: close() runs when the E2E service is
+ * disposed (logout, account switch, account deletion). Unlike a connection the
+ * browser took away, it is never reopened, and work still in flight stops at
+ * its next access instead of bringing the database back.
+ */
+export class E2EVaultClosedError extends Error {
+  constructor() {
+    super('E2E vault closed');
+    this.name = 'E2EVaultClosedError';
+  }
+}
+
 export class E2EVault {
   private db: IDBDatabase | null = null;
   private pickleKeyBytes: Uint8Array | null = null;
+  /** Set by close(), never cleared. */
+  private closedForGood = false;
+  /** Set by stopReopening() (or close()): a lost connection stays lost. */
+  private reopenRefused = false;
 
   constructor(
     private readonly userId: string,
@@ -224,7 +241,13 @@ export class E2EVault {
     private readonly namespace?: string
   ) {}
 
+  /** Throw if close() ran: called before every access and after every await. */
+  private assertNotClosed(): void {
+    if (this.closedForGood) throw new E2EVaultClosedError();
+  }
+
   async open(): Promise<void> {
+    this.assertNotClosed();
     if (this.db) return;
     const name = vaultDbName(this.userId, this.namespace);
     // Anything under an older prefix belongs to key material the server no
@@ -239,6 +262,11 @@ export class E2EVault {
       }
     };
     const db = await requestToPromise(req as IDBRequest<IDBDatabase>);
+    if (this.closedForGood) {
+      // closed while this connection was being opened: it is not ours to keep
+      db.close();
+      throw new E2EVaultClosedError();
+    }
     // A page that gets backgrounded can have its IndexedDB connection closed
     // out from under it — the browser freezes or discards hidden tabs, and the
     // Tauri webview does the same when the window is hidden. The handle stays
@@ -261,7 +289,10 @@ export class E2EVault {
     // Resolve the pickle key up-front (keychain access is async) so crypto
     // paths keep a synchronous accessor after open()
     if (!this.pickleKeyBytes) {
-      this.pickleKeyBytes = await this.loadOrCreatePickleKey();
+      const key = await this.loadOrCreatePickleKey();
+      // close() already dropped the connection; keep nothing it would have freed
+      this.assertNotClosed();
+      this.pickleKeyBytes = key;
     }
   }
 
@@ -277,6 +308,9 @@ export class E2EVault {
     // retries, and the next launch finds the real key. Swallowing it here is
     // how a transient keychain outage turns into a new identity.
     const stored = await this.keyProvider.load(this.userId);
+    // Closed meanwhile: a key minted now would be saved for a session that has
+    // ended, and could replace one another session stored in the meantime.
+    this.assertNotClosed();
     if (stored) {
       let raw: Uint8Array | null = null;
       try {
@@ -299,6 +333,7 @@ export class E2EVault {
   }
 
   private store(mode: IDBTransactionMode): IDBObjectStore {
+    this.assertNotClosed();
     if (!this.db) throw new Error('vault not opened');
     return this.db.transaction(KV_STORE, mode).objectStore(KV_STORE);
   }
@@ -310,21 +345,35 @@ export class E2EVault {
    * the handle can already be unusable by the time we look, and `transaction()`
    * then throws InvalidStateError synchronously. Both paths land here, and both
    * are retried exactly once — a second failure is a real fault and is raised.
+   *
+   * A vault closed on purpose is never reopened, and an operation that was
+   * running when close() came fails rather than returning: its caller holds
+   * engine objects that were freed with the service, and must go no further.
    */
   private async withStore<T>(
     mode: IDBTransactionMode,
     run: (store: IDBObjectStore) => Promise<T>
   ): Promise<T> {
-    if (!this.db) await this.open();
+    this.assertNotClosed();
+    if (!this.db) {
+      if (this.reopenRefused) throw new E2EVaultClosedError();
+      await this.open();
+    }
     try {
-      return await run(this.store(mode));
+      const result = await run(this.store(mode));
+      this.assertNotClosed();
+      return result;
     } catch (err) {
+      if (this.closedForGood) throw err instanceof E2EVaultClosedError ? err : new E2EVaultClosedError();
       if (!isConnectionGone(err)) throw err;
+      if (this.reopenRefused) throw new E2EVaultClosedError();
       console.warn('e2e: vault connection was gone — reopening and retrying once');
       this.db?.close();
       this.db = null;
       await this.open();
-      return run(this.store(mode));
+      const result = await run(this.store(mode));
+      this.assertNotClosed();
+      return result;
     }
   }
 
@@ -571,7 +620,21 @@ export class E2EVault {
     });
   }
 
+  /**
+   * Keep the open connection usable, but never open another one. For the
+   * stretch between a dispose and the close() that follows a key-share claim
+   * still in flight: if the browser drops the connection meanwhile (an account
+   * deletion's deleteDatabase does exactly that), reopening would recreate the
+   * database being deleted.
+   */
+  stopReopening(): void {
+    this.reopenRefused = true;
+  }
+
+  /** Close for good (the service is being disposed); see E2EVaultClosedError. */
   close(): void {
+    this.closedForGood = true;
+    this.reopenRefused = true;
     this.db?.close();
     this.db = null;
     this.pickleKeyBytes = null;

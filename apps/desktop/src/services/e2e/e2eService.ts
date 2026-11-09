@@ -388,6 +388,11 @@ export class E2EService {
   private initInFlight: Promise<void> | null = null;
   /** Set by dispose(), never cleared: a disposed service is not restarted. */
   private disposed = false;
+  /**
+   * Set once the engine objects are freed and the vault is closed. Usually at
+   * dispose(); later when a key-share claim is in flight (see dispose()).
+   */
+  private tornDown = false;
   private claimInFlight: Promise<number> | null = null;
   /** session id → last time we drained the inbox looking for it */
   private missingSessions = new Map<string, number>();
@@ -397,10 +402,44 @@ export class E2EService {
     private readonly userId: string,
     opts: E2EServiceOptions = {}
   ) {
-    this.api = opts.api ?? defaultApi;
+    this.api = this.guardedApi(opts.api ?? defaultApi);
     this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace);
     this.wasmInput = opts.wasmInput;
     this.deviceListCacheMs = opts.deviceListCacheMs ?? DEVICE_LIST_CACHE_MS;
+  }
+
+  /**
+   * Every request this service makes, checked against dispose() on both sides
+   * of its await. Together with the vault (which fails any access after it was
+   * closed), this is the liveness check after each await of every task: work
+   * that was waiting on the network when the service was torn down stops
+   * there, before it touches a freed engine object.
+   *
+   * Writes are refused as soon as dispose() runs: nothing is published for a
+   * session that has ended. Reads stay allowed until the teardown itself, which
+   * a key-share claim in flight postpones so it can finish importing.
+   */
+  private guardedApi(client: typeof defaultApi): typeof defaultApi {
+    const read = async <R>(call: () => Promise<R>): Promise<R> => {
+      this.assertNotTornDown();
+      const res = await call();
+      this.assertNotTornDown();
+      return res;
+    };
+    const write = async <R>(call: () => Promise<R>): Promise<R> => {
+      this.assertLive();
+      const res = await call();
+      this.assertNotTornDown();
+      return res;
+    };
+    const guarded = {
+      get: (...args: Parameters<typeof client.get>) => read(() => client.get(...args)),
+      put: (...args: Parameters<typeof client.put>) => write(() => client.put(...args)),
+      post: (...args: Parameters<typeof client.post>) => write(() => client.post(...args)),
+      delete: (...args: Parameters<typeof client.delete>) => write(() => client.delete(...args)),
+    };
+    // Only these four verbs are used here; the cast keeps the client's type.
+    return guarded as unknown as typeof defaultApi;
   }
 
   /** Serialize all crypto-state mutations (ratchet advance ⇒ pickle persist). */
@@ -424,6 +463,11 @@ export class E2EService {
     if (this.disposed) throw new E2EServiceDisposedError();
   }
 
+  /** Throw once the engine objects are freed (see tornDown). */
+  private assertNotTornDown(): void {
+    if (this.tornDown) throw new E2EServiceDisposedError();
+  }
+
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
 
   /**
@@ -436,9 +480,15 @@ export class E2EService {
     if (this.initialized) return Promise.resolve();
     if (this.disposed) return Promise.reject(new E2EServiceDisposedError());
     if (!this.initInFlight) {
-      this.initInFlight = this.initializeOnce().finally(() => {
-        this.initInFlight = null;
-      });
+      this.initInFlight = this.initializeOnce()
+        .catch((err: unknown) => {
+          // Whatever stopped a run that a dispose overtook (a closed vault, a
+          // refused request), the cause is the dispose.
+          throw this.disposed && !(err instanceof E2EServiceDisposedError) ? new E2EServiceDisposedError() : err;
+        })
+        .finally(() => {
+          this.initInFlight = null;
+        });
     }
     return this.initInFlight;
   }
@@ -446,12 +496,10 @@ export class E2EService {
   private async initializeOnce(): Promise<void> {
     await initEngine(this.wasmInput);
     this.assertLive();
+    // A dispose during open() closes the vault, and open() then drops the
+    // connection it was making and throws (E2EVaultClosedError).
     await this.vault.open();
-    if (this.disposed) {
-      // dispose() closed a vault that was not open yet; this connection is new
-      this.vault.close();
-      throw new E2EServiceDisposedError();
-    }
+    this.assertLive();
 
     let deviceId = await this.vault.getDeviceId();
     this.assertLive();
@@ -520,9 +568,33 @@ export class E2EService {
     });
   }
 
+  /**
+   * End this service: no new work starts, no request goes out, and the engine
+   * objects are freed and the vault closed.
+   *
+   * Except while a key-share claim is in flight. The server deletes the shares
+   * it hands out (claim-and-delete, one-shot Olm bodies), so a claim answered
+   * after this point holds the only copy of those session keys. The teardown
+   * then waits for the claim to import them into the vault, where the next
+   * start of this account finds them; the claim reads no further page.
+   */
   dispose(): void {
     // First, so work resuming after this point sees it before any freed handle
     this.disposed = true;
+    const claim = this.claimInFlight;
+    if (claim) {
+      // the claim may use the open connection, never a new one
+      this.vault.stopReopening();
+      const teardown = () => this.teardown();
+      claim.then(teardown, teardown);
+      return;
+    }
+    this.teardown();
+  }
+
+  private teardown(): void {
+    if (this.tornDown) return;
+    this.tornDown = true;
     this.account?.free();
     this.account = null;
     this.masterKey?.free();
@@ -1370,6 +1442,13 @@ export class E2EService {
    * so a steady state costs nothing.
    */
   async backupMessageKeys(): Promise<number> {
+    // On the queue: it holds the master key across vault reads and uploads, and
+    // the queue is what keeps a dispose, or a master-key replacement (restore,
+    // reset, transfer), from freeing that key under it.
+    return this.enqueue(() => this.backupMessageKeysUnqueued());
+  }
+
+  private async backupMessageKeysUnqueued(): Promise<number> {
     const master = this.masterKey;
     if (!master) return 0; // only a device holding the account key can seal
 
@@ -2701,11 +2780,17 @@ export class E2EService {
    */
   private async claimKeyShares(): Promise<number> {
     if (this.claimInFlight) return this.claimInFlight;
+    // A disposed service could not import what it claims: leave the shares on
+    // the server for the next start of this account.
+    this.assertLive();
     const run = (async () => {
       let imported = 0;
       // Drain every page: the inbox is oldest-first and capped per response, so
       // stopping at one page would let queued older shares delay a live one.
       for (let page = 0; page < MAX_CLAIM_PAGES; page++) {
+        // Disposed meanwhile: this page is imported (dispose() waits for it),
+        // the next one stays on the server.
+        if (this.disposed) break;
         const res = await this.api.get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}`);
         const shares = (res.data.data as { shares?: unknown[] }).shares;
         if (!Array.isArray(shares) || shares.length === 0) break;
