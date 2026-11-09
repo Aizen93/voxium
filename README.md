@@ -650,7 +650,7 @@ pnpm --filter @voxium/server test:coverage
 # or reuses ones already running on 3001/8080/8082; needs PostgreSQL + Redis,
 # plus an SMTP catcher on :1025 for the email-verification specs — e.g.
 # docker run -p 1025:1025 axllent/mailpit — and a working S3 bucket for the
-# encrypted-attachment upload in the quarantined spec)
+# encrypted-attachment upload in e2e-encryption.spec.ts)
 pnpm test:e2e               # Headless
 pnpm test:e2e:ui             # Interactive UI mode
 pnpm test:e2e:headed         # Visible browser
@@ -664,9 +664,9 @@ npx playwright test --grep-invert @quarantine
 
 E2E runs on every pull request and blocks merging. The job provisions
 PostgreSQL, Redis, Mailpit and MinIO, applies migrations, and runs the suite on
-Chromium plus the encrypted-voice spec on Firefox. Specs tagged `@quarantine`
-still run, but in a non-blocking step — see the note at the top of
-`tests/e2e/e2e-encryption.spec.ts` for why that one is currently tagged.
+Chromium plus the encrypted-voice spec on Firefox. A spec tagged `@quarantine`
+still runs, but in a non-blocking step, with a note in the spec saying why it is
+tagged; no spec is tagged at the moment.
 
 ### Test Coverage
 

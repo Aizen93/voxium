@@ -6,9 +6,10 @@ import { getConversationServerState, getE2EDevices, getE2EKeyShareCount } from '
 import { clearRateLimits } from './helpers/rateLimits';
 
 // Live two-client smoke test of the full E2E DM flow (docs/e2e-dm-spec.md):
-// enable + badge, cross-client encrypt/decrypt, matching safety numbers,
-// encrypted edits, encrypted attachments — finishing with DB-level proof
-// that the server only ever stored ciphertext and opaque blobs.
+// the badge, cross-client encrypt/decrypt, matching safety numbers, encrypted
+// edits, encrypted attachments — finishing with DB-level proof that the server
+// only ever stored ciphertext and opaque blobs — then multi-device key shares
+// and revocation, and a peer's first device published after we looked.
 
 // 1x1 red PNG
 const TINY_PNG = Buffer.from(
@@ -82,16 +83,8 @@ async function closeModal(page: Page) {
   }
 }
 
-// QUARANTINED (@quarantine) — runs in CI but does not block merges.
-// This spec is intermittently red on the E2E badge / crypto-engine init
-// ("initialization failed: null pointer passed to rust"), which leaves the
-// safety-number button absent and fails whichever assertion reaches it first.
-// It is NOT caused by the secure-voice work: `git diff 3ff4ae2..HEAD` touches
-// none of e2e-encryption.spec.ts, e2eService.ts, dmCrypto.ts or
-// channelCrypto.ts. Gating merges on it would block PRs at random, so it is
-// tagged out of the blocking run until the engine-init race is diagnosed.
-// Re-blocking it is a one-word change: drop the tag below.
-test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quarantine' }, () => {
+// Out of @quarantine since 2026-11-09: 68 traced attempts (8 on the old code, 60 on the fix) logged no "null pointer passed to rust".
+test.describe('E2E encrypted DMs — live two-client smoke test', () => {
   test('badge, safety numbers, edits, attachments, and ciphertext-only server state', async ({ page, request, browser }) => {
     test.setTimeout(180_000);
 
