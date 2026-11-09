@@ -45,3 +45,14 @@ describe('the socket-connect hot path never serializes every socket in the clust
     expect(read('websocket/socketServer.ts')).not.toMatch(/\bio\.fetchSockets\(/);
   });
 });
+
+describe('deleting a space never waits on every node', () => {
+  // A room-scoped fetchSockets() has the same failure mode: it waits for every
+  // node's reply and throws after 5 s when one peer is unresponsive. The space
+  // delete route fetched the sockets of each of its rooms to make them leave,
+  // so a stalled node sharing the Redis answered the delete with a 500 after
+  // 5010 ms. Room membership is an adapter operation (`socketsLeave`).
+  it('routes/servers.ts calls no fetchSockets()', () => {
+    expect(read('routes/servers.ts')).not.toMatch(/\.fetchSockets\(/);
+  });
+});
