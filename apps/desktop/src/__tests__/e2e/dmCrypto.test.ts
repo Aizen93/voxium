@@ -37,7 +37,34 @@ import {
   DECRYPT_FAILED_CONTENT,
 } from '../../services/e2e/dmCrypto';
 import { decryptedRow, ownSentRow, refusedRow, withoutServerAssertions } from '../../services/e2e/displayGate';
+import { E2EServiceDisposedError } from '../../services/e2e/e2eService';
+import { E2EVaultClosedError } from '../../services/e2e/vault';
 import { useDMStore } from '../../stores/dmStore';
+
+describe('a DM decrypt that a logout overtook', () => {
+  // The socket handlers in MainLayout await this without a catch: a decrypt
+  // still running when the session ends must settle, not reject.
+  it.each([
+    ['the service was disposed', () => new E2EServiceDisposedError()],
+    ['the vault was closed', () => new E2EVaultClosedError()],
+  ])('settles as a refused row when %s', async (_reason, failure) => {
+    decryptMessage.mockRejectedValueOnce(failure());
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      const out = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy') }));
+      expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it('still rejects for any other failure', async () => {
+    decryptMessage.mockRejectedValueOnce(new Error('engine state corrupt'));
+    await expect(
+      decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy') }))
+    ).rejects.toThrow('engine state corrupt');
+  });
+});
 
 function dmRow(over: Partial<Message> = {}): Message {
   return {

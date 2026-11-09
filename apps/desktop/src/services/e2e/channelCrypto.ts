@@ -11,6 +11,7 @@ import { buildE2EPlaintext, parseE2EPlaintext, e2eChannelScope } from '@voxium/s
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
 import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
+import { isE2ESessionEnded } from './session';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
@@ -45,8 +46,21 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * be a server-side forgery — honouring it would put words under a member's
  * name with no decrypt-failure marker. The flag is the server's word; it does
  * not get to decide whether a message was end-to-end encrypted.
+ *
+ * A decrypt the session's end overtook settles as the refused row, as in
+ * dmCrypto: socket handlers await this without a catch.
  */
 export async function decryptChannelMessageForDisplay(input: Message): Promise<Message> {
+  try {
+    return await decryptChannelOneForDisplay(input);
+  } catch (err) {
+    if (!isE2ESessionEnded(err)) throw err;
+    console.debug(`e2e: decrypt of ${input.id} ended with the session:`, err instanceof Error ? err.message : err);
+    return refusedRow(withoutServerAssertions(input));
+  }
+}
+
+async function decryptChannelOneForDisplay(input: Message): Promise<Message> {
   // e2eAttachments come out of the decrypted payload only, and mentions are
   // never resolved for encrypted rows (see dmCrypto)
   const message = withoutServerAssertions(input);

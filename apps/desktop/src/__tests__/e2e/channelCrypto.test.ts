@@ -53,6 +53,8 @@ import {
   DECRYPT_FAILED_CONTENT,
   E2EIdentityChangedError,
 } from '../../services/e2e/channelCrypto';
+import { E2EServiceDisposedError } from '../../services/e2e/e2eService';
+import { E2EVaultClosedError } from '../../services/e2e/vault';
 
 const ENVELOPE = buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVydGV4dA');
 
@@ -71,6 +73,31 @@ function channelRow(over: Partial<Message> = {}): Message {
     ...over,
   } as unknown as Message;
 }
+
+describe('a secure-channel decrypt that a logout overtook', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    ['the service was disposed', () => new E2EServiceDisposedError()],
+    ['the vault was closed', () => new E2EVaultClosedError()],
+  ])('settles as a refused row when %s', async (_reason, failure) => {
+    decryptMessage.mockRejectedValueOnce(failure());
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      const out = await decryptChannelMessageForDisplay(channelRow());
+      expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it('still rejects for any other failure', async () => {
+    decryptMessage.mockRejectedValueOnce(new Error('engine state corrupt'));
+    await expect(decryptChannelMessageForDisplay(channelRow())).rejects.toThrow('engine state corrupt');
+  });
+});
 
 describe('channelCrypto — display boundary', () => {
   beforeEach(() => {
