@@ -735,3 +735,79 @@ describe('e2eStore logout hygiene', () => {
     expect(state.keyBackup).toBeNull();
   });
 });
+
+describe('e2eStore actions across a logout', () => {
+  // An action still waiting on the service when the user signs out belongs to
+  // the session that started it. When it resumes, the store already belongs
+  // to the next session, and it must leave that state as it finds it.
+  type HeldMock = {
+    getMockImplementation(): ((...args: unknown[]) => unknown) | undefined;
+    mockImplementationOnce(fn: (...args: unknown[]) => unknown): unknown;
+  };
+  /** Make the next call to `fn` wait for `gate`, then answer as it normally would. */
+  const holdOnce = (fn: unknown, gate: Promise<void>) => {
+    const mock = fn as HeldMock;
+    const answer = mock.getMockImplementation();
+    mock.mockImplementationOnce(async (...args: unknown[]) => {
+      await gate;
+      return answer?.(...args);
+    });
+  };
+  const data = () =>
+    Object.fromEntries(Object.entries(useE2EStore.getState()).filter(([, value]) => typeof value !== 'function'));
+
+  const store = () => useE2EStore.getState();
+  const cases: Array<{ action: string; held: () => unknown; run: () => Promise<unknown> }> = [
+    { action: 'acceptNewIdentity', held: () => service.acceptNewIdentity, run: () => store().acceptNewIdentity(USER, PEER) },
+    { action: 'refreshDeviceList', held: () => service.fetchDeviceList, run: () => store().refreshDeviceList(USER, PEER) },
+    { action: 'acknowledgeDeviceList', held: () => service.acknowledgeDeviceList, run: () => store().acknowledgeDeviceList(USER, PEER) },
+    { action: 'acknowledgeOwnDevices', held: () => service.acknowledgeDeviceList, run: () => store().acknowledgeOwnDevices(USER, ['laptop']) },
+    { action: 'markAccountVerified', held: () => service.markIdentityVerified, run: () => store().markAccountVerified(USER, PEER) },
+    { action: 'loadOwnDevices', held: () => service.listOwnDevices, run: () => store().loadOwnDevices(USER) },
+    { action: 'revokeDevice', held: () => service.revokeDevice, run: () => store().revokeDevice(USER, 'laptop') },
+    { action: 'approveDevice', held: () => service.approveDevice, run: () => store().approveDevice(USER, 'laptop') },
+    { action: 'approveLinkedDevice', held: () => service.approveDevice, run: () => store().approveLinkedDevice(USER, 'laptop') },
+    { action: 'resetAccountIdentity', held: () => service.resetAccountIdentity, run: () => store().resetAccountIdentity(USER) },
+    { action: 'loadKeyBackup', held: () => service.keyBackupInfo, run: () => store().loadKeyBackup(USER) },
+    { action: 'createKeyBackup', held: () => service.createKeyBackup, run: () => store().createKeyBackup(USER) },
+    { action: 'deleteKeyBackup', held: () => service.deleteKeyBackup, run: () => store().deleteKeyBackup(USER) },
+    { action: 'restoreKeyBackup', held: () => service.restoreKeyBackup, run: () => store().restoreKeyBackup(USER, RECOVERY_KEY) },
+  ];
+
+  it.each(cases)('$action applies nothing once a logout overtook it', async ({ held, run }) => {
+    // Answers that would all show if written: an unsigned own device, a key
+    // the device holds, a backup that exists.
+    service._masterSecret = true;
+    service._canApprove = true;
+    service.setStatus({
+      version: 2,
+      deviceIds: ['this-device', 'laptop'],
+      newDeviceIds: ['laptop'],
+      unsignedDeviceIds: ['laptop'],
+      changed: true,
+    });
+    service.keyBackupInfo.mockResolvedValue({ exists: true, updatedAt: '2026-11-09T00:00:00.000Z' });
+    service.isAccountVerified.mockResolvedValue(true);
+
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    holdOnce(held(), gate);
+    const pending = run();
+
+    // logout, then the next session has state of its own
+    stopE2EDeviceListWatch();
+    useE2EStore.setState(pristine, true);
+    useE2EStore.setState({
+      identityWarnings: { [PEER]: true },
+      newDeviceWarnings: { [PEER]: ['p9'] },
+      accountVerified: { [PEER]: false },
+    });
+    const before = JSON.stringify(data());
+
+    open();
+    await pending.catch(() => undefined);
+    await settle();
+
+    expect(JSON.stringify(data())).toBe(before);
+  });
+});
