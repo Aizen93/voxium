@@ -202,7 +202,9 @@ send messages"), never a silent downgrade. It is now the only path.
 
 ## 7. Client persistence (vault)
 
-Per account, IndexedDB `voxium-e2e-{userId}` (`services/e2e/vault.ts`):
+Per account, IndexedDB `voxium-e2e-v2-{userId}` (`services/e2e/vault.ts`,
+`VAULT_DB_PREFIX`; a vault under the older `voxium-e2e-{userId}` name predates
+the always-on cutover and is dropped when the new one opens):
 
 | Key | Value |
 |---|---|
