@@ -2780,9 +2780,8 @@ export class E2EService {
    */
   private async claimKeyShares(): Promise<number> {
     if (this.claimInFlight) return this.claimInFlight;
-    // A disposed service could not import what it claims: leave the shares on
-    // the server for the next start of this account.
-    this.assertLive();
+    // No disposal check of its own: every caller runs on the queue, which
+    // starts nothing for a disposed service, and a closed vault fails first.
     const run = (async () => {
       let imported = 0;
       // Drain every page: the inbox is oldest-first and capped per response, so
