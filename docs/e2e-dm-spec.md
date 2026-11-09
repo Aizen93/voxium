@@ -473,7 +473,10 @@ offline, refused; an identity change is not this case) is kept and retried by
 the next claim, at the latest at the next start of the account, together with
 any later share from the same sender, which may need the Olm session the first
 one sets up. A kept share is dropped once its session reached the device
-another way, or after its fifth deferred attempt. Disposing the service
+another way, or once the server has refused the look-up of its sender
+(403/404) in five starts of the client; a failure that says nothing about the
+sender (signed out, rate limited, offline) is never counted, and one start
+counts once however many claims it makes. Disposing the service
 (logout, account switch) while a claim is in flight lets the claim finish
 the page it holds, for at most 10 s; whatever it had not processed by then
 stays kept.

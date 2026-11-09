@@ -212,10 +212,24 @@ class E2EUnusableTransferError extends Error {
  * it, and nothing about the share itself is wrong.
  */
 class E2EShareDeferredError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /**
+     * The server refused the look-up outright (403/404): the only answer that
+     * counts toward MAX_PENDING_SHARE_ATTEMPTS. Signed out, rate limited,
+     * offline or disposed say nothing about the sender and are never counted.
+     */
+    readonly definitive = false
+  ) {
     super(message);
     this.name = 'E2EShareDeferredError';
   }
+}
+
+/** A 403 or 404 from the server: an answer about the request, not about the connection. */
+function isDefinitiveRefusal(err: unknown): boolean {
+  const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
+  return status === 403 || status === 404;
 }
 
 /**
@@ -271,9 +285,11 @@ const MAX_SHARE_RETRIES = 10;
 /** Hard stop when draining the key-share inbox (guards a hostile server). */
 const MAX_CLAIM_PAGES = 20;
 /**
- * A kept key share whose sender still cannot be looked up after this many runs
- * is dropped: its sender rotates on a later send, and a share that can never
- * be checked must not be kept forever.
+ * A kept key share whose sender's look-up the server has refused (403/404) in
+ * this many starts is dropped: its sender rotates on a later send, and a share
+ * that can never be checked must not be kept forever. A failure that says
+ * nothing about the sender (signed out, rate limited, offline) is not counted,
+ * and a start counts at most once however many claim runs it makes.
  */
 const MAX_PENDING_SHARE_ATTEMPTS = 5;
 /** How long a dispose waits for a key-share claim in flight before tearing down anyway. */
@@ -435,6 +451,8 @@ export class E2EService {
   private claimInFlight: Promise<number> | null = null;
   /** session id → last time we drained the inbox looking for it */
   private missingSessions = new Map<string, number>();
+  /** Kept shares whose refused look-up was already counted in this start (see processPendingShares). */
+  private deferralsCounted = new Set<string>();
   private deviceListListeners = new Set<(userId: string) => void>();
 
   constructor(
@@ -2936,9 +2954,15 @@ export class E2EService {
       } catch (err) {
         if (err instanceof E2EShareDeferredError) {
           deferredSenders.add(sender);
+          // Counted only for a refusal, and once per start of the service:
+          // every decrypt miss starts a claim run, and a page of messages
+          // under unknown sessions would otherwise spend all the attempts in
+          // one burst of runs.
+          if (!err.definitive || this.deferralsCounted.has(key)) continue; // kept as it is
+          this.deferralsCounted.add(key);
           const attempts = record.attempts + 1;
           if (attempts >= MAX_PENDING_SHARE_ATTEMPTS) {
-            console.warn(`e2e: dropping a key share after ${attempts} attempts to check its sender:`, errText(err));
+            console.warn(`e2e: dropping a key share after ${attempts} refused look-ups of its sender:`, errText(err));
             await this.vault.deletePendingShare(key);
           } else {
             await this.vault.putPendingShare(key, { ...record, attempts });
@@ -2985,7 +3009,10 @@ export class E2EService {
         // out, offline, refused, disposed) only means "not now", and the share
         // is kept for a later run rather than lost.
         if (err instanceof E2EIdentityChangedError) throw err;
-        throw new E2EShareDeferredError(`sender ${senderUserId} could not be looked up: ${errText(err)}`);
+        throw new E2EShareDeferredError(
+          `sender ${senderUserId} could not be looked up: ${errText(err)}`,
+          isDefinitiveRefusal(err)
+        );
       }
       identity = await this.vault.getIdentity(senderUserId, senderDeviceId);
     }

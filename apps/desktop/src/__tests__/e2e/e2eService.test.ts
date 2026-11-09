@@ -14,6 +14,7 @@ import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import {
   E2E_LIMITS,
   buildE2EEnvelope,
+  buildMegolmEnvelope,
   parseE2EEnvelope,
   buildVoiceKeyPlaintext,
   parseVoiceKeyPlaintext,
@@ -164,6 +165,10 @@ function createFakeServer() {
   let failKeyshareUploads = false;
   let failSignaturePublish = false;
   let failDeviceListReads = false;
+  let refuseDeviceListReads = false;
+  /** Shaped like the axios error the real client throws: the status on `response`. */
+  const httpError = (status: number, message: string) =>
+    Object.assign(new Error(`${status}: ${message}`), { response: { status } });
   const hiddenDevices = new Set<string>();
   const backups = new Map<string, { blob: string; updatedAt: string }>();
   interface StoredMessageKey {
@@ -217,7 +222,7 @@ function createFakeServer() {
    * every request it makes answers 401.
    */
   const assertSignedIn = (userId: string) => {
-    if (loggedOut.has(userId)) throw new Error('401: unauthorized');
+    if (loggedOut.has(userId)) throw httpError(401, 'unauthorized');
   };
 
   function apiFor(userId: string) {
@@ -320,7 +325,8 @@ function createFakeServer() {
 
         const deviceMatch = path.match(/^\/e2e\/devices\/(.+)$/);
         if (deviceMatch) {
-          if (failDeviceListReads) throw new Error('429: too many requests');
+          if (failDeviceListReads) throw httpError(429, 'too many requests');
+          if (refuseDeviceListReads) throw httpError(403, 'no shared context');
           const user = userOf(deviceMatch[1]);
           return ok({
             devices: [...user.devices.values()]
@@ -658,6 +664,8 @@ function createFakeServer() {
     setMasterKeyPublishFailure: (fail: boolean) => { failMasterKeyPublish = fail; },
     /** Rate limit / network blip on device-list reads. */
     setDeviceListReadFailure: (fail: boolean) => { failDeviceListReads = fail; },
+    /** A definitive refusal of device-list reads (403), as for a user one no longer shares a context with. */
+    setDeviceListReadRefusal: (refuse: boolean) => { refuseDeviceListReads = refuse; },
     /** Omit one device from every list response (a server can do this at will). */
     hideDevice: (u: string, d: string | null) => {
       if (d) hiddenDevices.add(`${u}/${d}`);
@@ -4333,7 +4341,8 @@ describe('E2EService — lifecycle', () => {
       const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
       const kept = await pendingIn(alice);
       expect(kept).toHaveLength(1);
-      expect(kept[0].record.attempts).toBe(1);
+      // signed out is not a verdict on the sender: no attempt is counted
+      expect(kept[0].record.attempts).toBe(0);
 
       const again = restart(server, alice);
       await again.service.initialize();
@@ -4350,20 +4359,47 @@ describe('E2EService — lifecycle', () => {
       expect((await again.service.decryptMessage(message)).text).toBe('sent while you were away');
     });
 
-    it('keeps retrying a share it still cannot check, and drops it after the fifth attempt', async () => {
-      const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
-      server.setDeviceListReadFailure(true); // Bob's list still cannot be read
-      for (let attempt = 2; attempt <= 5; attempt++) {
+    /** Decrypts of messages under sessions this device lacks: each one starts a claim run. */
+    const missOn = async (party: { service: E2EService }, bobId: string, sessionIds: string[]) => {
+      for (const sid of sessionIds) {
+        const miss = await party.service.decryptMessage({
+          id: `miss-${sid}`, conversationId: 'c1', authorId: bobId, content: buildMegolmEnvelope(sid, 'Y2lwaGVy'),
+        });
+        expect(miss.failed).toBe(true);
+      }
+    };
+
+    it('keeps a share through a burst of failed look-ups (429), however many claims they span', async () => {
+      // A page with several undecryptable messages starts one claim per
+      // missing session; one rate-limit answer must not spend the share.
+      const { server, alice, bob, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      server.setDeviceListReadFailure(true);
+      const again = restart(server, alice);
+      await again.service.initialize();
+      await missOn(again, bob.userId, ['bWlzczE', 'bWlzczI', 'bWlzczM']);
+      expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
+      await again.service.dispose();
+
+      server.setDeviceListReadFailure(false);
+      const later = restart(server, alice);
+      await later.service.initialize();
+      expect((await later.service.decryptMessage(message)).text).toBe('sent while you were away');
+    });
+
+    it('drops a share whose sender is refused after the fifth start, counting one attempt per start', async () => {
+      const { server, alice, bob, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      server.setDeviceListReadRefusal(true); // a definitive answer: 403
+      for (let start = 1; start <= 5; start++) {
         const again = restart(server, alice);
         await again.service.initialize();
-        await again.service.claimMasterTransfers(); // queued behind the start-up claim
+        await missOn(again, bob.userId, [`c3RhcnQ${start}a`, `c3RhcnQ${start}b`]); // more claims, same start
         const kept = await pendingIn(alice);
-        if (attempt < 5) expect(kept.map((p) => p.record.attempts)).toEqual([attempt]);
+        if (start < 5) expect(kept.map((p) => p.record.attempts)).toEqual([start]);
         else expect(kept).toHaveLength(0);
         await again.service.dispose();
       }
 
-      server.setDeviceListReadFailure(false);
+      server.setDeviceListReadRefusal(false);
       const last = restart(server, alice);
       await last.service.initialize();
       expect((await last.service.decryptMessage(message)).failed).toBe(true);
