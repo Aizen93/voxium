@@ -713,19 +713,28 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
     // 2. Notify all members before removing them from rooms
     io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED, { serverId });
 
-    // 3. Remove all sockets from server room and channel rooms
+    // 3. Remove all sockets from server room and channel rooms.
+    //    Adapter-wide room operations, never a `fetchSockets()` round trip: it
+    //    waits for every node's reply and throws after 5 s when one peer is
+    //    unresponsive, which answered the whole delete with a 500.
+    //    Addressed to the UNION of the rooms, not the server room alone: a
+    //    socket can be in a `channel:{id}` room without `server:{id}` (a
+    //    `channel:join` or `voice:join` handled before its connect setup joined
+    //    the server rooms, or a setup whose membership query failed followed by
+    //    a `user:{id}`-targeted channel join), and it must leave too.
+    //    Twice on purpose, local form first (see utils/memberBroadcast.ts): the
+    //    Redis adapter only publishes the cluster-wide form and applies it on
+    //    this node when its own message comes back. It goes out after the
+    //    server:deleted broadcast on the same Redis connection, so every peer
+    //    delivers the notice before it applies the leave.
     const channels = await prisma.channel.findMany({
       where: { serverId },
       select: { id: true },
     });
 
     const roomsToLeave = [`server:${serverId}`, ...channels.map((c) => `channel:${c.id}`)];
-    for (const room of roomsToLeave) {
-      const socketsInRoom = await io.in(room).fetchSockets();
-      for (const s of socketsInRoom) {
-        s.leave(room);
-      }
-    }
+    io.local.in(roomsToLeave).socketsLeave(roomsToLeave);
+    io.in(roomsToLeave).socketsLeave(roomsToLeave);
 
     // 4. Delete from DB (Prisma cascade handles channels, members, messages, reactions, reads, categories, invites)
     await prisma.server.delete({ where: { id: serverId } });
