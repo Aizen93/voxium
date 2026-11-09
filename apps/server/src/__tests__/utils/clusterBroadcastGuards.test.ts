@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { relative, resolve, sep } from 'node:path';
 
 /**
  * Source-shape guards for adapter-wide broadcasts whose failure mode is a
@@ -16,6 +16,17 @@ import { resolve } from 'node:path';
 
 const SERVER = resolve(__dirname, '../..');
 const read = (rel: string) => readFileSync(resolve(SERVER, rel), 'utf8');
+
+/** Every TypeScript source under src/, tests and the generated Prisma client left out. */
+function sourceFiles(dir: string = SERVER): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      return entry.name === '__tests__' || entry.name === 'generated' ? [] : sourceFiles(path);
+    }
+    return entry.name.endsWith('.ts') ? [relative(SERVER, path).split(sep).join('/')] : [];
+  });
+}
 
 describe('shutdown disconnects only THIS node', () => {
   const index = read('index.ts');
@@ -46,13 +57,39 @@ describe('the socket-connect hot path never serializes every socket in the clust
   });
 });
 
-describe('deleting a space never waits on every node', () => {
-  // A room-scoped fetchSockets() has the same failure mode: it waits for every
-  // node's reply and throws after 5 s when one peer is unresponsive. The space
-  // delete route fetched the sockets of each of its rooms to make them leave,
-  // so a stalled node sharing the Redis answered the delete with a 500 after
-  // 5010 ms. Room membership is an adapter operation (`socketsLeave`).
-  it('routes/servers.ts calls no fetchSockets()', () => {
-    expect(read('routes/servers.ts')).not.toMatch(/\.fetchSockets\(/);
+describe('fetchSockets() appears only where nothing waits on its answer', () => {
+  // A room-scoped fetchSockets() has the same failure mode as the unscoped
+  // one: it waits for every node's reply and throws after 5 s when one peer is
+  // unresponsive. The space delete route fetched the sockets of each of its
+  // rooms to make them leave, so a stalled node sharing the Redis answered the
+  // delete with a 500 after 5010 ms; the conversation delete and the admin
+  // space deletes did the same. Room membership is an adapter operation
+  // (`socketsJoin` / `socketsLeave`, `io.local` first): no call site may come
+  // back without its own entry here. A file that drops its call drops its entry.
+  const ALLOWED: Record<string, number> = {
+    // Needs each socket's userId and rooms to recompute visibility per user;
+    // every caller fires and forgets it and it logs a failure, so a stalled
+    // peer fails no request (that resync is skipped until the next reconnect).
+    'utils/channelVisibilityRooms.ts': 1,
+    // The one-socket existence check, used only when the adapter has no
+    // allRooms snapshot (never the Redis adapter); every caller skips on a throw.
+    'utils/redis.ts': 1,
+  };
+
+  it('every other file under src/ calls none', () => {
+    const found: Record<string, number> = {};
+    for (const file of sourceFiles()) {
+      const count = read(file).match(/\.fetchSockets\(/g)?.length ?? 0;
+      if (count > 0) found[file] = count;
+    }
+    expect(found).toEqual(ALLOWED);
+  });
+
+  it('the walk reaches the route files it guards', () => {
+    // An empty or misdirected walk would pass the check above vacuously
+    const files = sourceFiles();
+    for (const file of ['routes/servers.ts', 'routes/dm.ts', 'routes/admin.ts', ...Object.keys(ALLOWED)]) {
+      expect(files).toContain(file);
+    }
   });
 });
