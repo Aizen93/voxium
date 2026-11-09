@@ -16,24 +16,46 @@ import ts from 'typescript';
  * pg 8 queues them and deprecates it ("Calling client.query() when the
  * client is already executing a query is deprecated"); pg 9 removes it.
  *
- * With relationJoins every relation load is ONE statement (LEFT JOIN
- * LATERAL + JSONB), the default strategy. So this guard pins:
+ * With relationJoins a relation load is ONE statement (LEFT JOIN LATERAL +
+ * JSONB), the default strategy, with one exception: a query with a
+ * `cursor`, at its root or in any relation it loads, falls back to one
+ * query per relation (the engine's query_can_be_resolved_with_joins,
+ * prisma/orm#23564; probed: a root or a nested cursor with two relations
+ * overlaps again inside a transaction). So this guard pins:
  * 1. the schema's generator enables relationJoins;
  * 2. no query opts back out with `relationLoadStrategy: 'query'` on a
- *    shape loading two or more relations (one relation is a parent query
- *    plus one child, never two at once). Every `relationLoadStrategy` key
- *    must sit in a query's own argument literal, with a literal value, or
- *    the scan cannot check it and refuses it;
+ *    shape loading two or more relations. Siblings would run at once; a
+ *    chain (replyTo -> its author) runs its queries one after the other
+ *    and is refused anyway, by choice: the rule stays one number, not a
+ *    tree analysis. One relation (a parent query plus one child) passes.
+ *    Every `relationLoadStrategy` key must sit in a query's own argument
+ *    literal, with a literal value, or the scan cannot check it and
+ *    refuses it;
  * 3. no findUnique / findUniqueOrThrow on a transaction client is issued
  *    together (Promise.all/allSettled/race/any) with another operation on
- *    it. Prisma batches same-tick operations of one interactive
- *    transaction under one key and runs that batch sequentially, but a
- *    findUnique gets a key of its own and the batches run side by side
- *    (seen on the secure-channel invite). `Promise.all([tx.a.findFirst(),
- *    tx.a.count()])` lands in one batch and is allowed.
+ *    it, a raw one included (`tx.$queryRaw\`...\``, `tx.$executeRaw(...)`).
+ *    Prisma batches same-tick operations of one interactive transaction
+ *    under one key and runs that batch sequentially, but a findUnique gets
+ *    a key of its own and the batches run side by side (seen on the
+ *    secure-channel invite; a raw query beside a findUnique overlaps too).
+ *    `Promise.all([tx.a.findFirst(), tx.a.count()])` lands in one batch and
+ *    is allowed;
+ * 4. inside a transaction (interactive callback or array form), no query
+ *    with a `cursor` (root or nested) loads two or more relations: the
+ *    cursor turns the joins back into concurrent queries on the
+ *    transaction's connection. Outside a transaction those queries go to
+ *    the pool, so a cursor is allowed there.
  *
- * Not seen by the scan: operations on a transaction client started in
- * different ticks without being awaited. Await each before the next.
+ * Shapes are resolved through consts of the same file and of relative
+ * imports, spreads and `x.select`; a name declared more than once in a file
+ * is refused rather than guessed.
+ *
+ * Not seen by the scan:
+ * - operations on a transaction client started in different ticks without
+ *   being awaited. Await each before the next;
+ * - helpers that receive the transaction client (`bumpDeviceListVersion(tx)`,
+ *   `purgeE2EMaterial(userId, tx)`): only the callback's own code is
+ *   scanned, so a helper must follow rules 3 and 4 by itself.
  */
 
 const SERVER_ROOT = resolve(__dirname, '../../..');
@@ -102,19 +124,40 @@ class Scanner {
     return `${relative(SRC, sf.fileName).split(sep).join('/')}:${line}`;
   }
 
-  /** The initializer of a `const NAME =` in this file, or of the export a relative import names. */
+  private ambiguous = new Set<string>();
+
+  /**
+   * The initializer of a `const NAME =` in this file, or of the export a
+   * relative import names. A name declared more than once in the file (two
+   * consts in different scopes, a parameter, an import) is refused with its
+   * own message: the scan has no scopes and will not guess which one a query
+   * uses.
+   */
   private declarationOf(name: string, sf: ts.SourceFile): ts.Expression | null {
-    let found: ts.Expression | null = null;
+    const initializers: ts.Expression[] = [];
+    let declarations = 0;
     const visit = (n: ts.Node) => {
-      if (found) return;
-      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name && n.initializer) {
-        found = n.initializer;
-        return;
+      if ((ts.isVariableDeclaration(n) || ts.isParameter(n)) && ts.isIdentifier(n.name) && n.name.text === name) {
+        declarations++;
+        if (ts.isVariableDeclaration(n) && n.initializer) initializers.push(n.initializer);
+      } else if (ts.isImportSpecifier(n) && n.name.text === name) {
+        declarations++;
       }
       ts.forEachChild(n, visit);
     };
     visit(sf);
-    if (found) return found;
+    if (declarations > 1) {
+      const key = `${sf.fileName}#${name}`;
+      if (!this.ambiguous.has(key)) {
+        this.ambiguous.add(key);
+        this.result.violations.push(
+          `${relative(SRC, sf.fileName).split(sep).join('/')}: \`${name}\` is declared ${declarations} times in this file;`
+          + ' the scan cannot tell which one a query uses: give them distinct names',
+        );
+      }
+      return null;
+    }
+    if (initializers.length === 1) return initializers[0];
     for (const st of sf.statements) {
       if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
       const spec = st.moduleSpecifier.text;
@@ -220,7 +263,7 @@ class Scanner {
     } else if (n >= 2) {
       this.result.violations.push(
         `${at} ${delegate}.${callee.name.text}: relationLoadStrategy 'query' on a shape loading ${n} relations`
-        + ' runs their queries at once (on one connection inside a transaction)',
+        + ' (refused from two: siblings run at once, on one connection inside a transaction; a chain is refused by choice)',
       );
     }
   }
@@ -233,6 +276,73 @@ class Scanner {
     if (!ts.isPropertyAccessExpression(target) || !ts.isIdentifier(target.expression)) return null;
     if (target.expression.text !== root || target.name.text.startsWith('$')) return null;
     return [target.name.text, callee.name.text];
+  }
+
+  /** `<root>.$<op>(...)` or `<root>.$<op>\`...\`` (a raw query) → `$<op>`, else null. */
+  private static rawOp(node: ts.Node, root: string): string | null {
+    const target = ts.isCallExpression(node) ? node.expression : ts.isTaggedTemplateExpression(node) ? node.tag : null;
+    if (!target || !ts.isPropertyAccessExpression(target) || !ts.isIdentifier(target.expression)) return null;
+    if (target.expression.text !== root || !target.name.text.startsWith('$')) return null;
+    return target.name.text;
+  }
+
+  /** Does this query, or any relation it loads, have a `cursor`? null when not knowable. */
+  private hasCursor(args: Map<string, ts.Expression>, model: string): boolean | null {
+    if (args.has('cursor')) return true;
+    const fields = this.relations.get(model);
+    if (!fields) return null;
+    for (const kind of ['include', 'select'] as const) {
+      const value = args.get(kind);
+      if (!value) continue;
+      const level = this.resolveObject(value, value.getSourceFile());
+      if (!level) return null;
+      for (const [key, v] of level) {
+        const related = fields.get(key);
+        const vv = unwrap(v);
+        if (!related || vv.kind === ts.SyntaxKind.TrueKeyword || vv.kind === ts.SyntaxKind.FalseKeyword) continue;
+        const nested = this.resolveObject(vv, vv.getSourceFile());
+        if (!nested) return null;
+        const below = this.hasCursor(nested, related);
+        if (below !== false) return below;
+      }
+    }
+    return false;
+  }
+
+  /** Rule 4, for one query inside a transaction. */
+  private checkCursor(call: ts.CallExpression, delegate: string, op: string) {
+    const arg = call.arguments[0];
+    if (!arg) return;
+    const at = `${this.where(call)} ${delegate}.${op}`;
+    const model = delegate.charAt(0).toUpperCase() + delegate.slice(1);
+    const args = this.resolveObject(arg, call.getSourceFile());
+    const cursor = args ? this.hasCursor(args, model) : null;
+    if (cursor === null) {
+      this.result.violations.push(`${at}: its argument cannot be resolved, so a cursor inside the transaction cannot be ruled out`);
+      return;
+    }
+    if (!cursor) return;
+    const n = this.relationCount(args!, model);
+    if (n === null) {
+      this.result.violations.push(`${at}: a cursor inside a transaction on a shape the scan cannot resolve`);
+    } else if (n >= 2) {
+      this.result.violations.push(
+        `${at}: a cursor inside a transaction with ${n} relations falls back to one query per relation,`
+        + ' at once on the transaction\'s connection (move the read out of the transaction or drop the cursor)',
+      );
+    }
+  }
+
+  /** Rule 4 over every query of a transaction: `root` is the callback's client, or `prisma` in the array form. */
+  private checkCursors(node: ts.Node, root: string) {
+    const visit = (n: ts.Node) => {
+      if (ts.isCallExpression(n)) {
+        const op = Scanner.opCall(n, root);
+        if (op) this.checkCursor(n, op[0], op[1]);
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(node);
   }
 
   /** Rule 3, inside one interactive transaction callback. */
@@ -250,6 +360,8 @@ class Scanner {
             const op = Scanner.opCall(m, tx);
             if (op) sites.push(`${op[0]}.${op[1]}`);
           }
+          const raw = Scanner.rawOp(m, tx);
+          if (raw) sites.push(raw);
           ts.forEachChild(m, collect);
         };
         collect(n.arguments[0]);
@@ -280,7 +392,14 @@ class Scanner {
         && n.expression.name.text === '$transaction' && n.arguments[0]) {
         this.result.transactions++;
         const first = n.arguments[0];
-        if (ts.isArrowFunction(first) || ts.isFunctionExpression(first)) this.checkConcurrentFindUnique(first);
+        if (ts.isArrowFunction(first) || ts.isFunctionExpression(first)) {
+          this.checkConcurrentFindUnique(first);
+          const param = first.parameters[0];
+          if (param && ts.isIdentifier(param.name)) this.checkCursors(first.body, param.name.text);
+        } else {
+          // the array form: the queries are built on the root client inside the literal
+          this.checkCursors(first, 'prisma');
+        }
       }
       ts.forEachChild(n, visit);
     };
@@ -388,6 +507,58 @@ describe('the scan itself (controls)', () => {
       });`);
     expect(r.violations).toEqual([
       expect.stringMatching(/Promise\.all\(channelMember\.findUnique, channelMember\.count\): a findUnique is batched apart/),
+    ]);
+  });
+
+  it('counts a raw query on the transaction client (tagged template or call) as an operation beside a findUnique', () => {
+    const r = scanSnippet(`
+      export const f = (id: string) => prisma.$transaction(async (tx) => {
+        await Promise.all([tx.$queryRaw\`SELECT 1\`, tx.message.findUnique({ where: { id } })]);
+        await Promise.all([tx.$executeRawUnsafe('SELECT 1'), tx.message.findUniqueOrThrow({ where: { id } })]);
+        await Promise.all([tx.$queryRaw\`SELECT 1\`, tx.message.findMany({ where: { id } })]);
+      });`);
+    expect(r.violations).toEqual([
+      expect.stringMatching(/Promise\.all\(\$queryRaw, message\.findUnique\): a findUnique is batched apart/),
+      expect.stringMatching(/Promise\.all\(\$executeRawUnsafe, message\.findUniqueOrThrow\): a findUnique is batched apart/),
+    ]);
+  });
+
+  it('refuses a cursor on two or more relations inside a transaction (root or nested, callback or array form), nowhere else', () => {
+    const r = scanSnippet(`
+      export const inTx = (id: string) => prisma.$transaction(async (tx) => {
+        await tx.message.findMany({ cursor: { id }, include: { author: true, attachments: true }, take: 5 });
+        await tx.channel.findFirst({ include: { server: true, messages: { cursor: { id }, take: 2, select: { id: true } } } });
+        await tx.message.findMany({ cursor: { id }, include: { author: true }, take: 5 });
+        await tx.message.findMany({ include: { author: true, attachments: true }, take: 5 });
+      });
+      export const batch = (id: string) => prisma.$transaction([
+        prisma.message.findMany({ cursor: { id }, include: { author: true, reactions: true } }),
+        prisma.user.count(),
+      ]);
+      export const outside = (id: string) => prisma.message.findMany({ cursor: { id }, include: { author: true, attachments: true } });`);
+    expect(r.violations).toEqual([
+      expect.stringMatching(/:3 message\.findMany: a cursor inside a transaction with 2 relations falls back to one query per relation/),
+      expect.stringMatching(/:4 channel\.findFirst: a cursor inside a transaction with 2 relations/),
+      expect.stringMatching(/:9 message\.findMany: a cursor inside a transaction with 2 relations/),
+    ]);
+  });
+
+  it('fails closed on a transaction query whose argument it cannot resolve (a cursor could hide in it)', () => {
+    const r = scanSnippet(`
+      export const f = (args: { where: object }) => prisma.$transaction(async (tx) => tx.message.findMany(args));`);
+    expect(r.violations).toEqual([expect.stringMatching(/message\.findMany: its argument cannot be resolved, so a cursor inside the transaction cannot be ruled out/)]);
+  });
+
+  it('refuses a name declared more than once in the file instead of guessing which one a query uses', () => {
+    const r = scanSnippet(`
+      export const a = () => { const shape = { include: { author: true } } as const; return shape; };
+      export const b = () => {
+        const shape = { include: { author: true, attachments: true } } as const;
+        return prisma.message.findMany({ ...shape, relationLoadStrategy: 'query' });
+      };`);
+    expect(r.violations).toEqual([
+      '__snippet__.ts: `shape` is declared 2 times in this file; the scan cannot tell which one a query uses: give them distinct names',
+      expect.stringMatching(/relationLoadStrategy 'query' on a shape the scan cannot resolve/),
     ]);
   });
 
