@@ -55,6 +55,7 @@ import {
 } from './engine';
 import {
   E2EVault,
+  type DeviceListState,
   type InboundGroupSessionRecord,
   type MessagePosition,
   type OutboundGroupSessionRecord,
@@ -257,6 +258,22 @@ function sameDeviceSet(a: string[], b: string[]): boolean {
   const sortedA = [...a].sort();
   const sortedB = [...b].sort();
   return sortedA.every((id, i) => id === sortedB[i]);
+}
+
+/**
+ * A stored device-list state that records no device (now, acknowledged, or
+ * outstanding) and no account key. Earlier builds wrote one on the first look
+ * at a user who had published nothing yet; it carries nothing to compare a
+ * later list against.
+ */
+function holdsNoIdentity(state: DeviceListState): boolean {
+  return (
+    state.deviceIds.length === 0 &&
+    state.acknowledgedDeviceIds.length === 0 &&
+    (state.unacknowledgedDeviceIds ?? []).length === 0 &&
+    !state.masterKey &&
+    !state.acknowledgedMasterKey
+  );
 }
 
 /**
@@ -1593,8 +1610,15 @@ export class E2EService {
   private async recordDeviceListState(userId: string, list: E2EPinnedDeviceList): Promise<void> {
     const deviceIds = list.devices.map((d) => d.deviceId);
     const crossSigned = new Set(list.devices.filter((d) => d.crossSigned).map((d) => d.deviceId));
-    const state = await this.vault.getDeviceListState(userId);
+    const stored = await this.vault.getDeviceListState(userId);
+    // A list that names no device and no account key names no identity: it is
+    // what the server answers for someone who has not started the app yet.
+    // Trust on first use pins the first identity SEEN (spec §4.4), so neither
+    // such an answer nor a stored state built from one can be the baseline —
+    // otherwise the peer's first device would read as one added since.
+    const state = stored && !holdsNoIdentity(stored) ? stored : undefined;
     if (!state) {
+      if (deviceIds.length === 0 && !list.masterKey) return;
       // First sight of this user's devices: nothing to warn about yet (TOFU).
       await this.vault.putDeviceListState(userId, {
         version: list.listVersion,

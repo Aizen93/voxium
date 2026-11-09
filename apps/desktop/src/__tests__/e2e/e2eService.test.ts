@@ -31,7 +31,7 @@ vi.mock('../../services/api', () => ({ api: {} }));
 import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey } from '../../services/e2e/engine';
-import type { PickleKeyProvider } from '../../services/e2e/vault';
+import { E2EVault, type PickleKeyProvider } from '../../services/e2e/vault';
 
 const require = createRequire(import.meta.url);
 const wasmBytes = readFileSync(require.resolve('@voxium/crypto-engine/wasm'));
@@ -3699,5 +3699,177 @@ describe('E2EService — device-sealed payloads', () => {
     await expect(
       alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'must not send')
     ).rejects.toBeInstanceOf(E2EIdentityChangedError);
+  });
+});
+
+describe('E2EService — the first list that names a device or an account key is the baseline', () => {
+  // A peer who has never started the app publishes nothing, and the server
+  // answers their device list with an empty one. That answer names no identity,
+  // so it cannot be the trust-on-first-use baseline (spec §4.4): the first look
+  // that names a device or an account key is.
+
+  it("trusts a peer's first device on first use when we looked before they had one", async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+
+    // Alice opens the conversation before Bob ever started the app
+    expect((await alice.service.fetchDeviceList(bobId, true)).devices).toHaveLength(0);
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({
+      deviceIds: [bobPhone.service.deviceId],
+      newDeviceIds: [],
+      unsignedDeviceIds: [],
+      changed: false,
+    });
+  });
+
+  it('makes that first non-empty look a full baseline: a later unsigned device still warns', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true); // nothing published yet
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+
+    // an approved tablet is vouched for by the account key Alice just pinned…
+    const bobTablet = makeDevice(server, bobId);
+    await bobTablet.service.initialize();
+    await bobPhone.service.approveDevice(bobTablet.service.deviceId);
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({ newDeviceIds: [], changed: false });
+
+    // …a device the account key does not vouch for is reported as new AND unsigned
+    const rogue = makeDevice(server, bobId);
+    await rogue.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+    const status = await alice.service.deviceListStatus(bobId);
+    expect(status.changed).toBe(true);
+    expect(status.newDeviceIds).toEqual([rogue.service.deviceId]);
+    expect(status.unsignedDeviceIds).toEqual([rogue.service.deviceId]);
+  });
+
+  it('…also when the device is published before its account key', async () => {
+    // The real registration order: PUT /e2e/devices lands first, the master key
+    // and its signature over the device a round trip later.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true); // empty
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await flushQueue();
+    server.clearCrossSigning(bobId); // the device row is there, the account key not yet
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({ newDeviceIds: [], changed: false });
+
+    // the account key lands: the same install restarts and publishes it again
+    bobPhone.service.dispose();
+    const bobAgain = makeDevice(server, bobId, {
+      keyProvider: bobPhone.keyProvider,
+      vaultNamespace: bobPhone.vaultNamespace,
+    });
+    await bobAgain.service.initialize();
+    expect(server.userOf(bobId).masterKey).toBeTruthy();
+
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({
+      newDeviceIds: [],
+      unsignedDeviceIds: [],
+      changed: false,
+    });
+  });
+
+  it('treats a stored list that holds nothing as no baseline (what an earlier build wrote)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+
+    // The exact record the first look at an empty list used to leave behind
+    const vault = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
+    await vault.open();
+    await vault.putDeviceListState(bobId, {
+      version: 0,
+      deviceIds: [],
+      acknowledgedVersion: 0,
+      acknowledgedDeviceIds: [],
+      masterKey: null,
+      acknowledgedMasterKey: null,
+      crossSignedDeviceIds: [],
+    });
+    vault.close();
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({
+      deviceIds: [bobPhone.service.deviceId],
+      newDeviceIds: [],
+      changed: false,
+    });
+  });
+
+  it('keeps a baseline when the list names an account key but no device', async () => {
+    // An account key is an identity: pinning it is what lets a device it signs
+    // later be trusted, and what makes an unsigned arrival stand out.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    await alice.service.initialize();
+    await bobPhone.service.initialize();
+    await flushQueue();
+
+    server.hideDevice(bobId, bobPhone.service.deviceId);
+    const first = await alice.service.fetchDeviceList(bobId, true);
+    expect(first.devices).toHaveLength(0);
+    expect(first.masterKey).toBeTruthy();
+
+    // the phone comes back together with a device the account key never signed
+    const rogue = makeDevice(server, bobId);
+    await rogue.service.initialize();
+    server.hideDevice(bobId, null);
+    await alice.service.fetchDeviceList(bobId, true);
+
+    const status = await alice.service.deviceListStatus(bobId);
+    expect(status.newDeviceIds).toEqual([rogue.service.deviceId]);
+    expect(status.unsignedDeviceIds).toEqual([rogue.service.deviceId]);
+  });
+
+  it('applies the same rule to a secure-channel member who has no device yet', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const channelId = `ch-${uniq}`;
+    await alice.service.initialize();
+    server.setChannelMembers(channelId, [alice.userId, bobId]);
+
+    await alice.service.fetchChannelDeviceLists(channelId); // Bob: nothing published
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await alice.service.fetchChannelDeviceLists(channelId);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({
+      deviceIds: [bobPhone.service.deviceId],
+      newDeviceIds: [],
+      changed: false,
+    });
   });
 });
