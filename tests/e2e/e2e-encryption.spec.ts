@@ -83,7 +83,10 @@ async function closeModal(page: Page) {
   }
 }
 
-// Out of @quarantine since 2026-11-09: 68 traced attempts (8 on the old code, 60 on the fix) logged no "null pointer passed to rust".
+// Out of @quarantine since 2026-11-09. The flake was a peer's empty first device
+// list taken as the trust baseline (the third test forces that order) and a
+// strict-mode clash on the Friends "All" filter. The "null pointer passed to
+// rust" start-up error is covered by unit tests (e2eService "lifecycle").
 test.describe('E2E encrypted DMs — live two-client smoke test', () => {
   test('badge, safety numbers, edits, attachments, and ciphertext-only server state', async ({ page, request, browser }) => {
     test.setTimeout(180_000);
@@ -370,47 +373,60 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     let releaseB!: () => void;
     const bMayPublish = new Promise<void>((resolve) => (releaseB = resolve));
     const contextB = await browser.newContext();
-    await contextB.route('**/api/v1/e2e/devices', async (route) => {
-      if (route.request().method() === 'PUT') await bMayPublish;
-      await route.continue();
-    });
-    const pageB = await contextB.newPage();
+    try {
+      await contextB.route('**/api/v1/e2e/devices', async (route) => {
+        if (route.request().method() === 'PUT') await bMayPublish;
+        await route.continue();
+      });
+      const pageB = await contextB.newPage();
 
-    const aReadsB = page.waitForResponse(
-      (res) =>
-        res.request().method() === 'GET' &&
-        new URL(res.url()).pathname.endsWith(`/e2e/devices/${dataB.user.id}`),
-      { timeout: 30_000 }
-    );
-    await injectAuth(page, dataA);
-    await injectAuth(pageB, dataB);
-    await openDMWith(page, userB.username);
-    await expect(page.locator(BADGE)).toBeVisible({ timeout: 20_000 });
-    const firstLook = (await (await aReadsB).json()) as { data: { devices: unknown[] } };
-    expect(firstLook.data.devices).toHaveLength(0);
+      // Settles either way, so a failure before it is awaited leaves no
+      // rejection behind; a timeout is rethrown where it is read.
+      const aReadsB = page
+        .waitForResponse(
+          (res) =>
+            res.request().method() === 'GET' &&
+            new URL(res.url()).pathname.endsWith(`/e2e/devices/${dataB.user.id}`),
+          { timeout: 30_000 }
+        )
+        .then(
+          (response) => ({ response }),
+          (error: unknown) => ({ error })
+        );
+      await injectAuth(page, dataA);
+      await injectAuth(pageB, dataB);
+      await openDMWith(page, userB.username);
+      await expect(page.locator(BADGE)).toBeVisible({ timeout: 20_000 });
+      const looked = await aReadsB;
+      if ('error' in looked) throw looked.error;
+      const firstLook = (await looked.response.json()) as { data: { devices: unknown[] } };
+      expect(firstLook.data.devices).toHaveLength(0);
 
-    releaseB();
-    await waitForPublishedDevice(request, dataA.accessToken, dataB.user.id);
+      releaseB();
+      await waitForPublishedDevice(request, dataA.accessToken, dataB.user.id);
 
-    // A's send re-reads B's list, which now names B's first device
-    const hello = `first contact ${Date.now()}`;
-    await sendMessage(page, hello);
+      // A's send re-reads B's list, which now names B's first device
+      const hello = `first contact ${Date.now()}`;
+      await sendMessage(page, hello);
 
-    await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
-    await pageB.getByText(userA.username, { exact: true }).first().click();
-    await expect(pageB.getByText(hello).first()).toBeVisible({ timeout: 15_000 });
-    const reply = `reply to first contact ${Date.now()}`;
-    await sendMessage(pageB, reply);
-    await expect(page.getByText(reply).first()).toBeVisible({ timeout: 15_000 });
+      await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
+      await pageB.getByText(userA.username, { exact: true }).first().click();
+      await expect(pageB.getByText(hello).first()).toBeVisible({ timeout: 15_000 });
+      const reply = `reply to first contact ${Date.now()}`;
+      await sendMessage(pageB, reply);
+      await expect(page.getByText(reply).first()).toBeVisible({ timeout: 15_000 });
 
-    // That first device is the baseline, not a device added since: the badge
-    // carries no warning, and the safety numbers agree.
-    await expect(page.locator(BADGE_NEW_DEVICE)).toHaveCount(0);
-    await expect(page.locator(BADGE)).toBeVisible();
-    const safetyA = await readSafetyNumber(page);
-    const safetyB = await readSafetyNumber(pageB);
-    expect(safetyA).toBe(safetyB);
-
-    await contextB.close();
+      // That first device is the baseline, not a device added since: the badge
+      // carries no warning, and the safety numbers agree.
+      await expect(page.locator(BADGE_NEW_DEVICE)).toHaveCount(0);
+      await expect(page.locator(BADGE)).toBeVisible();
+      const safetyA = await readSafetyNumber(page);
+      const safetyB = await readSafetyNumber(pageB);
+      expect(safetyA).toBe(safetyB);
+    } finally {
+      // a parked upload is let go before its context closes, failure or not
+      releaseB();
+      await contextB.close();
+    }
   });
 });
