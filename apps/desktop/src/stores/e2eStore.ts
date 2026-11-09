@@ -176,10 +176,13 @@ export const useE2EStore = create<E2EState>((set, get) => ({
     set({ initializing: true, error: null });
     try {
       const service = getE2EService(userId);
-      await service.initialize();
       // The send path refreshes device lists too (rotation decisions). Without
       // this subscription a device appearing mid-conversation would silently
       // receive session keys while the UI badge stayed green until remount.
+      //
+      // Subscribed BEFORE initialize(): the service can read and record a list
+      // while it is still starting up, and an event nobody was listening for
+      // is a warning the badge never shows.
       if (unsubscribeDeviceListChanges) unsubscribeDeviceListChanges();
       unsubscribeDeviceListChanges = service.onDeviceListChanged((changedUserId) => {
         void service
@@ -207,6 +210,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
             console.warn('e2e: device-list status check failed:', err instanceof Error ? err.message : err);
           });
       });
+      await service.initialize();
       set({
         ready: true,
         initializing: false,
@@ -244,6 +248,8 @@ export const useE2EStore = create<E2EState>((set, get) => ({
     } catch (err) {
       const message = err instanceof Error ? err.message : 'E2E initialization failed';
       console.warn('e2e: initialization failed:', message);
+      // a service that never started has nothing to report; the retry subscribes again
+      stopE2EDeviceListWatch();
       set({ ready: false, initializing: false, error: message });
     }
   },

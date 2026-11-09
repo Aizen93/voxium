@@ -259,6 +259,26 @@ describe('e2eStore device-list subscription', () => {
     await useE2EStore.getState().initialize(USER);
     expect(listeners.size).toBe(1);
   });
+
+  it('hears a device-list event the service emits while it is still initializing', async () => {
+    // The service can record a list (and emit) before initialize() resolves;
+    // a listener attached only afterwards would never learn about it.
+    service.initialize.mockImplementationOnce(async () => {
+      service.setStatus({
+        version: 1,
+        deviceIds: ['p1', 'p2'],
+        newDeviceIds: [],
+        unsignedDeviceIds: ['p2'],
+        changed: false,
+      });
+      for (const listener of listeners) listener(PEER);
+    });
+
+    await useE2EStore.getState().initialize(USER);
+    await settle();
+
+    expect(useE2EStore.getState().unsignedDeviceWarnings[PEER]).toEqual(['p2']);
+  });
 });
 
 describe('e2eStore peer actions', () => {

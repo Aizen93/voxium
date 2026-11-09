@@ -3873,3 +3873,63 @@ describe('E2EService — the first list that names a device or an account key is
     });
   });
 });
+
+describe('E2EService — device-list events', () => {
+  it('tells listeners about the first look at a list, not only about later changes', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    await alice.service.initialize();
+    await bobPhone.service.initialize();
+    await flushQueue();
+
+    const seen: string[] = [];
+    alice.service.onDeviceListChanged((userId) => seen.push(userId));
+
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(seen.filter((id) => id === bobId)).toEqual([bobId]);
+
+    // a look that changes nothing stays quiet
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(seen.filter((id) => id === bobId)).toEqual([bobId]);
+  });
+
+  it('says nothing about a look that recorded nothing (an empty list)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+    await flushQueue();
+
+    const seen: string[] = [];
+    alice.service.onDeviceListChanged((userId) => seen.push(userId));
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(seen).toEqual([]);
+  });
+
+  it('lets an unapproved second device learn it is unsigned from its own start-up', async () => {
+    // Nothing about the account changes during this device's first session, so
+    // the read its start-up makes is the only event there will be. It has to
+    // reach the store, or the badge reads as fine on the one device the account
+    // key does not vouch for.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+
+    const laptop = makeDevice(server, aliceId);
+    const seen: string[] = [];
+    laptop.service.onDeviceListChanged((userId) => seen.push(userId));
+    await laptop.service.initialize();
+    // queued behind the start-up claim, so that claim (and its list read) is done
+    await laptop.service.claimMasterTransfers();
+
+    expect(seen).toContain(aliceId);
+    expect((await laptop.service.deviceListStatus(aliceId)).unsignedDeviceIds).toContain(laptop.service.deviceId);
+  });
+});

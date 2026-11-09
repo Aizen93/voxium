@@ -1629,6 +1629,11 @@ export class E2EService {
         acknowledgedMasterKey: list.masterKey,
         crossSignedDeviceIds: [...crossSigned],
       });
+      // Nothing is NEW, but the status is not empty: a device the account key
+      // does not vouch for is unsigned from the first look, and for our own
+      // list that includes this very device before anyone approved it. The
+      // first look is often the only event of a session, so it is announced.
+      this.emitDeviceListChanged(userId);
       return;
     }
 
