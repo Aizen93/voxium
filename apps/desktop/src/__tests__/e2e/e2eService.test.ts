@@ -180,6 +180,8 @@ function createFakeServer() {
   const forgedOwnKeys = new Map<string, { curve25519Key: string; ed25519Key: string }>();
   /** Secure-channel membership: channelId → member user ids (first = creator). */
   const channels = new Map<string, Set<string>>();
+  /** Users whose client has signed out: every request of theirs answers 401. */
+  const loggedOut = new Set<string>();
 
   const ok = (data: unknown) => ({ data: { success: true, data } });
   const userOf = (userId: string): StoredUser => {
@@ -209,9 +211,19 @@ function createFakeServer() {
     return [path, new URLSearchParams(query ?? '')];
   };
 
+  /**
+   * The real client loses its bearer at logout (authStore.logout clears the
+   * tokens BEFORE resetAccountStores disposes the service), so from then on
+   * every request it makes answers 401.
+   */
+  const assertSignedIn = (userId: string) => {
+    if (loggedOut.has(userId)) throw new Error('401: unauthorized');
+  };
+
   function apiFor(userId: string) {
     return {
       async get(url: string) {
+        assertSignedIn(userId);
         const [path, query] = split(url);
 
         if (path === '/e2e/master-transfers') {
@@ -326,6 +338,7 @@ function createFakeServer() {
       },
 
       async put(url: string, payload: FakePutBody) {
+        assertSignedIn(userId);
         if (url === '/e2e/devices') {
           const body = payload as E2EDeviceRegistration;
           // routes/e2e.ts: 1–OTK_UPLOAD_MAX keys per registration
@@ -418,6 +431,7 @@ function createFakeServer() {
       },
 
       async post(url: string, payload?: FakePostBody) {
+        assertSignedIn(userId);
         const [path, query] = split(url);
 
         if (path === '/e2e/devices/me/keys') {
@@ -597,6 +611,7 @@ function createFakeServer() {
       },
 
       async delete(url: string) {
+        assertSignedIn(userId);
         if (url === '/e2e/backup') {
           return ok({ deleted: backups.delete(userId) });
         }
@@ -653,6 +668,11 @@ function createFakeServer() {
     /** Answer device-list reads with keys the server chose for someone's device. */
     forgeDeviceKeys: (u: string, d: string, keys: { curve25519Key: string; ed25519Key: string }) => {
       forgedOwnKeys.set(`${u}/${d}`, keys);
+    },
+    /** Sign a user's client out (its tokens are gone) or back in. */
+    setLoggedOut: (u: string, out: boolean) => {
+      if (out) loggedOut.add(u);
+      else loggedOut.delete(u);
     },
     /** Set a secure channel's member list (first member = creator). */
     setChannelMembers: (channelId: string, userIds: string[]) => {
@@ -3956,7 +3976,12 @@ describe('E2EService — lifecycle', () => {
    * initialize() waits on the network. Every write that reaches the client is
    * recorded, held or not.
    */
-  function holdingApi(base: ReturnType<Server['apiFor']>, hold: (verb: string, url: string) => boolean) {
+  function holdingApi(
+    base: ReturnType<Server['apiFor']>,
+    hold: (verb: string, url: string) => boolean,
+    /** 'response': the server has answered (and acted) before the hold, as for a reply still in flight */
+    phase: 'request' | 'response' = 'request'
+  ) {
     const writes: string[] = [];
     const reads: string[] = [];
     let release!: () => void;
@@ -3967,13 +3992,19 @@ describe('E2EService — lifecycle', () => {
     const verb = (name: 'get' | 'put' | 'post' | 'delete') =>
       async (url: string, body?: unknown) => {
         (name === 'get' ? reads : writes).push(`${name.toUpperCase()} ${url.split('?')[0]}`);
-        if (holding && hold(name, url)) {
-          holding = false;
+        const call = base[name] as (url: string, body?: unknown) => Promise<unknown>;
+        const parked = holding && hold(name, url);
+        if (parked) holding = false;
+        if (parked && phase === 'request') {
           reached();
           await released;
         }
-        const call = base[name] as (url: string, body?: unknown) => Promise<unknown>;
-        return call(url, body);
+        const answer = await call(url, body);
+        if (parked && phase === 'response') {
+          reached();
+          await released;
+        }
+        return answer;
       };
     return {
       api: { get: verb('get'), put: verb('put'), post: verb('post'), delete: verb('delete') },
@@ -4219,12 +4250,28 @@ describe('E2EService — lifecycle', () => {
     });
   });
 
-  describe('background work after a dispose', () => {
+  describe('key shares claimed around a logout', () => {
+    // GET /e2e/keyshares deletes what it returns, so a claim answered after a
+    // logout holds the only copy of those session keys. And logout clears the
+    // tokens before it disposes the service: from then on every request,
+    // including the look-up of a sender this device has never seen, is a 401.
+    type Party = { userId: string; keyProvider: PickleKeyProvider; vaultNamespace: string };
     const sharesFor = (server: Server, userId: string) => server.shares.filter((s) => s.recipientUserId === userId);
+    const restart = (server: Server, party: Party) =>
+      makeDevice(server, party.userId, { keyProvider: party.keyProvider, vaultNamespace: party.vaultNamespace });
+    /** The key shares kept in a party's vault, read over a connection of its own. */
+    const pendingIn = async (party: Party) => {
+      const vault = new E2EVault(party.userId, party.keyProvider, party.vaultNamespace);
+      await vault.open();
+      try {
+        return await vault.listPendingShares();
+      } finally {
+        vault.close();
+      }
+    };
 
-    it('a dispose during the start-up key-share claim still imports the shares it took', async () => {
-      // The server deletes what it hands out: a claim answered after the
-      // dispose holds the only copy of those session keys.
+    /** Alice was away while Bob wrote; her next start's claim is answered after she signed out. */
+    async function claimAnsweredAfterLogout(opts: { aliceKnowsBob: boolean }) {
       uniq++;
       const server = createFakeServer();
       const alice = makeParty(server, 'alice');
@@ -4232,35 +4279,100 @@ describe('E2EService — lifecycle', () => {
       await alice.service.initialize();
       await bob.service.initialize();
       await flushQueue();
-      alice.service.dispose(); // the app is closed
+      if (opts.aliceKnowsBob) await alice.service.fetchDeviceList(bob.userId, true);
+      await alice.service.dispose(); // the app is closed
 
       const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'sent while you were away');
       expect(sharesFor(server, alice.userId)).toHaveLength(1);
 
-      // the next start's claim is answered only after a logout disposed it
-      const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'));
+      const gate = holdingApi(
+        server.apiFor(alice.userId),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
       const restarted = serviceOver(alice.userId, gate.api, {
         keyProvider: alice.keyProvider,
         vaultNamespace: alice.vaultNamespace,
       });
       await restarted.initialize();
       await gate.held;
-      restarted.dispose();
-      gate.release();
-      await vi.waitFor(() => expect(sharesFor(server, alice.userId)).toHaveLength(0));
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(sharesFor(server, alice.userId)).toHaveLength(0); // deleted on read
 
-      // the share is gone from the server, and still not lost
-      const again = makeDevice(server, alice.userId, {
-        keyProvider: alice.keyProvider,
-        vaultNamespace: alice.vaultNamespace,
-      });
+      server.setLoggedOut(alice.userId, true); // logout: the tokens go first…
+      const tornDown = restarted.dispose(); // …then the service
+      gate.release();
+      await tornDown;
+      server.setLoggedOut(alice.userId, false); // she signs in again later
+
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      return { server, alice, bob, message };
+    }
+
+    it("keeps a share whose sender it cannot look up at logout, and imports it at the next start", async () => {
+      const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      const kept = await pendingIn(alice);
+      expect(kept).toHaveLength(1);
+      expect(kept[0].record.attempts).toBe(1);
+
+      const again = restart(server, alice);
       await again.service.initialize();
-      const result = await again.service.decryptMessage({
-        id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope,
-      });
-      expect(result.text).toBe('sent while you were away');
+      expect((await again.service.decryptMessage(message)).text).toBe('sent while you were away');
+      expect(await pendingIn(alice)).toHaveLength(0);
     });
 
+    it('imports a share from a sender it already knows before the teardown, without the network', async () => {
+      const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: true });
+      expect(await pendingIn(alice)).toHaveLength(0);
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('sent while you were away');
+    });
+
+    it('keeps retrying a share it still cannot check, and drops it after the fifth attempt', async () => {
+      const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      server.setDeviceListReadFailure(true); // Bob's list still cannot be read
+      for (let attempt = 2; attempt <= 5; attempt++) {
+        const again = restart(server, alice);
+        await again.service.initialize();
+        await again.service.claimMasterTransfers(); // queued behind the start-up claim
+        const kept = await pendingIn(alice);
+        if (attempt < 5) expect(kept.map((p) => p.record.attempts)).toEqual([attempt]);
+        else expect(kept).toHaveLength(0);
+        await again.service.dispose();
+      }
+
+      server.setDeviceListReadFailure(false);
+      const last = restart(server, alice);
+      await last.service.initialize();
+      expect((await last.service.decryptMessage(message)).failed).toBe(true);
+    });
+
+    it('drops a kept share once its session reached this device another way', async () => {
+      const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      const [kept] = await pendingIn(alice);
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('sent while you were away');
+      await again.service.dispose();
+
+      // the same share turns up kept again (a copy left by a run that was cut short)
+      const vault = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
+      await vault.open();
+      await vault.putPendingShare(kept.key, kept.record);
+      vault.close();
+
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        const third = restart(server, alice);
+        await third.service.initialize();
+        await third.service.claimMasterTransfers();
+        expect(await pendingIn(alice)).toHaveLength(0);
+        // dropped for its session, not retried (its one-time key was spent)
+        expect(warn.mock.calls.flat().map(String).join('\n')).not.toMatch(/discarding an unusable key share/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 });

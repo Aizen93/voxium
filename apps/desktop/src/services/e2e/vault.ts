@@ -14,6 +14,7 @@
 //   dlv:{userId}                     last seen/acknowledged device-list version
 //   gs:{conversationId}              our outbound Megolm session for a DM
 //   igs:{sessionId}                  an inbound Megolm session + its attribution
+//   pks:{createdAt}|{shareId}        a claimed key share not imported yet (§12.3)
 //   pt:{messageId}                   decrypted-plaintext cache entry
 //
 // `master_secret` holds the Ed25519 master private key that cross-signs this
@@ -154,6 +155,19 @@ export interface InboundGroupSessionRecord {
   /** Author every message under this session MUST have (spec §12, D6). */
   senderUserId: string;
   senderDeviceId: string;
+}
+
+/**
+ * A key share as the inbox handed it out, kept until it is imported (spec
+ * §12.3). The server deletes a share when it returns it, so from the claim on
+ * this is the only copy. The body is the Olm ciphertext addressed to this
+ * device: what the server held, no more.
+ */
+export interface PendingKeyShare {
+  share: Record<string, unknown>;
+  /** Imports that had to wait because the sender could not be looked up. */
+  attempts: number;
+  receivedAt: number;
 }
 
 export interface CachedPlaintext {
@@ -552,6 +566,37 @@ export class E2EVault {
     const known = new Set(await this.getBackedUpSessionIds());
     for (const id of sessionIds) known.add(id);
     await this.put('bku:sessions', [...known]);
+  }
+
+  // ── Key shares claimed but not imported yet (spec §12.3) ──
+
+  /** Keep a claimed page in one transaction, before any of it is processed. */
+  putPendingShares(entries: Array<{ key: string; record: PendingKeyShare }>): Promise<void> {
+    if (entries.length === 0) return Promise.resolve();
+    return this.withStore('readwrite', (s) =>
+      Promise.all(entries.map((e) => requestToPromise(s.put(e.record, e.key)))).then(() => undefined)
+    );
+  }
+
+  putPendingShare(key: string, record: PendingKeyShare): Promise<void> {
+    return this.put(key, record);
+  }
+
+  deletePendingShare(key: string): Promise<void> {
+    return this.delete(key);
+  }
+
+  /** Oldest first (the key starts with the share's creation time), in one transaction. */
+  listPendingShares(): Promise<Array<{ key: string; record: PendingKeyShare }>> {
+    const range = IDBKeyRange.bound('pks:', `pks:${KEY_MAX}`);
+    return this.withStore('readonly', async (s) => {
+      // both requests issued in this tick: one transaction, the same key order
+      const [keys, values] = await Promise.all([
+        requestToPromise(s.getAllKeys(range)),
+        requestToPromise(s.getAll(range)),
+      ]);
+      return keys.map((key, i) => ({ key: String(key), record: values[i] as PendingKeyShare }));
+    });
   }
 
   /** Every inbound group session this device holds (spec §16 backup). */

@@ -55,10 +55,12 @@ import {
 } from './engine';
 import {
   E2EVault,
+  E2EVaultClosedError,
   type DeviceListState,
   type InboundGroupSessionRecord,
   type MessagePosition,
   type OutboundGroupSessionRecord,
+  type PendingKeyShare,
   type PickleKeyProvider,
   type PinnedIdentity,
   vaultDbName,
@@ -203,6 +205,19 @@ class E2EUnusableTransferError extends Error {
 }
 
 /**
+ * A key share that cannot be imported NOW: its sender's device is not pinned
+ * and their list cannot be read (signed out, offline, refused). The share is
+ * kept in the vault and retried, never discarded — the server already deleted
+ * it, and nothing about the share itself is wrong.
+ */
+class E2EShareDeferredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'E2EShareDeferredError';
+  }
+}
+
+/**
  * The recipient has no device that can receive encrypted messages yet.
  *
  * Not an error in the usual sense — it is a normal state for an account that
@@ -252,6 +267,22 @@ const SHARE_RETRY_BACKOFF_MS = 30_000;
 const MAX_SHARE_RETRIES = 10;
 /** Hard stop when draining the key-share inbox (guards a hostile server). */
 const MAX_CLAIM_PAGES = 20;
+/**
+ * A kept key share whose sender still cannot be looked up after this many runs
+ * is dropped: its sender rotates on a later send, and a share that can never
+ * be checked must not be kept forever.
+ */
+const MAX_PENDING_SHARE_ATTEMPTS = 5;
+
+/**
+ * Vault key of a claimed key share: its creation time first, so a listing
+ * returns shares oldest first (the order their Olm messages were sent in).
+ */
+function pendingShareKey(share: Record<string, unknown>): string {
+  const createdAt = typeof share.createdAt === 'string' ? share.createdAt : '';
+  const id = typeof share.id === 'string' ? share.id : generateDeviceId();
+  return `pks:${createdAt}|${id}`;
+}
 
 /** Client-generated, stable per install (D2): 22 chars of base64url randomness. */
 function generateDeviceId(): string {
@@ -575,21 +606,24 @@ export class E2EService {
    * Except while a key-share claim is in flight. The server deletes the shares
    * it hands out (claim-and-delete, one-shot Olm bodies), so a claim answered
    * after this point holds the only copy of those session keys. The teardown
-   * then waits for the claim to import them into the vault, where the next
-   * start of this account finds them; the claim reads no further page.
+   * then waits for the claim to import them, or to keep the ones it cannot
+   * (pks:, see claimKeyShares), where the next start of this account finds
+   * them; the claim reads no further page.
+   *
+   * Resolves once the teardown has run.
    */
-  dispose(): void {
+  dispose(): Promise<void> {
     // First, so work resuming after this point sees it before any freed handle
     this.disposed = true;
     const claim = this.claimInFlight;
-    if (claim) {
-      // the claim may use the open connection, never a new one
-      this.vault.stopReopening();
-      const teardown = () => this.teardown();
-      claim.then(teardown, teardown);
-      return;
+    if (!claim) {
+      this.teardown();
+      return Promise.resolve();
     }
-    this.teardown();
+    // the claim may use the open connection, never a new one
+    this.vault.stopReopening();
+    const teardown = () => this.teardown();
+    return claim.then(teardown, teardown);
   }
 
   private teardown(): void {
@@ -2773,8 +2807,14 @@ export class E2EService {
   /**
    * Claim (and thereby delete) this device's pending key shares and import the
    * group sessions they carry. Olm pre-key bodies are one-shot, so the server
-   * hands each share out exactly once — everything that fails here is lost, and
-   * the sender recovers by rotating.
+   * hands each share out exactly once.
+   *
+   * Every claimed page is written to the vault (`pks:`) before anything is
+   * done with it, and each share leaves it only once it is imported or found
+   * unusable: a run cut short (a logout, the teardown deadline, a closed
+   * window) leaves the rest there, and the next run starts with them. So does
+   * a share whose sender cannot be looked up right now (see
+   * E2EShareDeferredError), up to MAX_PENDING_SHARE_ATTEMPTS runs.
    *
    * Callers must already hold the serial queue (this mutates Olm state).
    */
@@ -2783,7 +2823,11 @@ export class E2EService {
     // No disposal check of its own: every caller runs on the queue, which
     // starts nothing for a disposed service, and a closed vault fails first.
     const run = (async () => {
-      let imported = 0;
+      // Senders whose shares wait in this run: a later share of theirs waits
+      // behind, since it may ride the Olm session an earlier one sets up.
+      const deferredSenders = new Set<string>();
+      // Kept shares first: they are older than anything still on the server.
+      let imported = await this.processPendingShares(await this.vault.listPendingShares(), deferredSenders, true);
       // Drain every page: the inbox is oldest-first and capped per response, so
       // stopping at one page would let queued older shares delay a live one.
       for (let page = 0; page < MAX_CLAIM_PAGES; page++) {
@@ -2793,13 +2837,14 @@ export class E2EService {
         const res = await this.api.get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}`);
         const shares = (res.data.data as { shares?: unknown[] }).shares;
         if (!Array.isArray(shares) || shares.length === 0) break;
-        for (const share of shares) {
-          try {
-            if (await this.importKeyShare(share as Record<string, unknown>)) imported++;
-          } catch (err) {
-            console.warn('e2e: discarding an unusable key share:', errText(err));
-          }
-        }
+        // The server has deleted these: written before anything else is done
+        const receivedAt = Date.now();
+        const entries = shares.map((share) => ({
+          key: pendingShareKey(share as Record<string, unknown>),
+          record: { share: share as Record<string, unknown>, attempts: 0, receivedAt },
+        }));
+        await this.vault.putPendingShares(entries);
+        imported += await this.processPendingShares(entries, deferredSenders, false);
         if (shares.length < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
       }
       return imported;
@@ -2808,6 +2853,54 @@ export class E2EService {
     });
     this.claimInFlight = run;
     return run;
+  }
+
+  /**
+   * Import kept key shares in order, removing each one that is done with.
+   * `retry` marks shares kept by an earlier run: one whose session reached this
+   * device another way meanwhile (a re-share, a restored backup) is dropped
+   * without being decrypted again.
+   */
+  private async processPendingShares(
+    entries: Array<{ key: string; record: PendingKeyShare }>,
+    deferredSenders: Set<string>,
+    retry: boolean
+  ): Promise<number> {
+    let imported = 0;
+    for (const { key, record } of entries) {
+      const { share } = record;
+      const sender = typeof share.senderUserId === 'string' ? share.senderUserId : '';
+      try {
+        if (retry && typeof share.sessionId === 'string' && (await this.loadInbound(share.sessionId))) {
+          await this.vault.deletePendingShare(key);
+          continue;
+        }
+        if (deferredSenders.has(sender)) {
+          throw new E2EShareDeferredError(`an earlier share from ${sender} is still waiting`);
+        }
+        if (await this.importKeyShare(share)) imported++;
+        await this.vault.deletePendingShare(key);
+      } catch (err) {
+        if (err instanceof E2EShareDeferredError) {
+          deferredSenders.add(sender);
+          const attempts = record.attempts + 1;
+          if (attempts >= MAX_PENDING_SHARE_ATTEMPTS) {
+            console.warn(`e2e: dropping a key share after ${attempts} attempts to check its sender:`, errText(err));
+            await this.vault.deletePendingShare(key);
+          } else {
+            await this.vault.putPendingShare(key, { ...record, attempts });
+          }
+          continue;
+        }
+        // The service went away under this run: what is left stays kept
+        if (this.tornDown || err instanceof E2EServiceDisposedError || err instanceof E2EVaultClosedError) {
+          throw err;
+        }
+        console.warn('e2e: discarding an unusable key share:', errText(err));
+        await this.vault.deletePendingShare(key);
+      }
+    }
+    return imported;
   }
 
   private async importKeyShare(share: Record<string, unknown>): Promise<boolean> {
@@ -2832,7 +2925,15 @@ export class E2EService {
     // list before trusting anything it says.
     let identity = await this.vault.getIdentity(senderUserId, senderDeviceId);
     if (!identity) {
-      await this.fetchDeviceList(senderUserId, true);
+      try {
+        await this.fetchDeviceList(senderUserId, true);
+      } catch (err) {
+        // A changed identity is a verdict on the sender; anything else (signed
+        // out, offline, refused, disposed) only means "not now", and the share
+        // is kept for a later run rather than lost.
+        if (err instanceof E2EIdentityChangedError) throw err;
+        throw new E2EShareDeferredError(`sender ${senderUserId} could not be looked up: ${errText(err)}`);
+      }
       identity = await this.vault.getIdentity(senderUserId, senderDeviceId);
     }
     if (!identity) throw new Error(`unknown sender device ${senderUserId}/${senderDeviceId}`);
