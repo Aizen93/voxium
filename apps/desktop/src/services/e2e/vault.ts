@@ -599,15 +599,14 @@ export class E2EVault {
     });
   }
 
-  /** Every inbound group session this device holds (spec §16 backup). */
-  async listInboundGroupSessions(): Promise<InboundGroupSessionRecord[]> {
-    const keys = await this.keysWithPrefix('igs:');
-    const records: InboundGroupSessionRecord[] = [];
-    for (const key of keys) {
-      const record = await this.get<InboundGroupSessionRecord>(key);
-      if (record) records.push(record);
-    }
-    return records;
+  /**
+   * Every inbound group session this device holds (spec §16 backup), read in
+   * ONE transaction: the backup pass runs this at every start, and a read per
+   * session made it cost one transaction per session ever received.
+   */
+  listInboundGroupSessions(): Promise<InboundGroupSessionRecord[]> {
+    const range = IDBKeyRange.bound('igs:', `igs:${KEY_MAX}`);
+    return this.withStore('readonly', (s) => requestToPromise(s.getAll(range))) as Promise<InboundGroupSessionRecord[]>;
   }
 
   async deleteInboundGroupSessionsFrom(userId: string): Promise<string[]> {

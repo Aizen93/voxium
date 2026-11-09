@@ -1508,19 +1508,34 @@ export class E2EService {
    * so a steady state costs nothing.
    */
   async backupMessageKeys(): Promise<number> {
-    // On the queue: it holds the master key across vault reads and uploads, and
-    // the queue is what keeps a dispose, or a master-key replacement (restore,
-    // reset, transfer), from freeing that key under it.
+    // The check runs off the queue and costs two reads; this runs at every
+    // start, and nothing pending is the common case, which must not hold up
+    // the first send or decrypt behind it.
+    if (!this.masterKey) return 0;
+    if ((await this.sessionsPendingBackup()).length === 0) return 0;
+    // The pass itself is on the queue: it holds the master key across vault
+    // reads and uploads, and the queue is what keeps a dispose, or a
+    // master-key replacement (restore, reset, transfer), from freeing that key
+    // under it.
     return this.enqueue(() => this.backupMessageKeysUnqueued());
+  }
+
+  /** Session records not uploaded yet: two reads (one transaction each). */
+  private async sessionsPendingBackup(): Promise<InboundGroupSessionRecord[]> {
+    const [records, uploaded] = await Promise.all([
+      this.vault.listInboundGroupSessions(),
+      this.vault.getBackedUpSessionIds(),
+    ]);
+    const done = new Set(uploaded);
+    return records.filter((r) => !done.has(r.sessionId));
   }
 
   private async backupMessageKeysUnqueued(): Promise<number> {
     const master = this.masterKey;
     if (!master) return 0; // only a device holding the account key can seal
 
-    const records = await this.vault.listInboundGroupSessions();
-    const uploaded = await this.vault.getBackedUpSessionIds();
-    const pending = records.filter((r) => !uploaded.includes(r.sessionId));
+    // read again on the queue: what the check saw may have changed meanwhile
+    const pending = await this.sessionsPendingBackup();
     if (pending.length === 0) return 0;
 
     let stored = 0;

@@ -30,7 +30,7 @@ vi.mock('../../services/api', () => ({ api: {} }));
 
 import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
 import { generateRecoveryKey } from '../../services/e2e/engine';
-import { initEngine, EngineAccount, EngineMasterKey } from '../../services/e2e/engine';
+import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
 import { E2EVault, type PickleKeyProvider } from '../../services/e2e/vault';
 
 const require = createRequire(import.meta.url);
@@ -4462,6 +4462,107 @@ describe('E2EService — lifecycle', () => {
         await expect(tornDown).resolves.toBeUndefined();
         expect(error.mock.calls.flat().map(String).join('\n')).toMatch(/teardown failed[\s\S]*close failed/);
       } finally {
+        error.mockRestore();
+      }
+    });
+  });
+
+  describe('the message-key backup pass', () => {
+    type Internals = {
+      vault: E2EVault;
+      enqueue<T>(fn: () => Promise<T>): Promise<T>;
+      importInboundGroupSession(
+        key: string,
+        meta: { sessionId: string; conversationId: string; senderUserId: string; senderDeviceId: string }
+      ): Promise<boolean>;
+    };
+    const internalsOf = (service: E2EService) => service as unknown as Internals;
+
+    it('reads the sessions in one transaction, and does not wait on the queue when nothing is pending', async () => {
+      // It runs at every start; a wait behind the queue holds up the first
+      // send or decrypt, and one transaction per session made that wait long.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      await alice.service.initialize();
+      await flushQueue();
+
+      // a few hundred sessions, every one of them already backed up
+      const vault = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
+      await vault.open();
+      const ids = Array.from({ length: 300 }, (_, i) => `session-${i}`);
+      for (const sessionId of ids) {
+        await vault.putInboundGroupSession(sessionId, {
+          pickle: 'not read when nothing is pending',
+          sessionId,
+          conversationId: 'c1',
+          senderUserId: 'peer',
+          senderDeviceId: 'peer-device',
+        });
+      }
+      await vault.addBackedUpSessionIds(ids);
+      vault.close();
+
+      const internals = internalsOf(alice.service);
+      let unblock!: () => void;
+      const blocker = internals.enqueue(() => new Promise<void>((resolve) => (unblock = resolve)));
+      const db = (internals.vault as unknown as { db: IDBDatabase }).db;
+      const transaction = vi.spyOn(db, 'transaction');
+      try {
+        let stored: number | undefined;
+        void alice.service.backupMessageKeys().then((n) => (stored = n));
+        await vi.waitFor(() => expect(stored).toBe(0));
+        expect(transaction.mock.calls.length).toBeLessThanOrEqual(2);
+      } finally {
+        transaction.mockRestore();
+        unblock();
+        await blocker;
+      }
+    });
+
+    it('a master-key replacement during a backup pass waits for it instead of freeing the key it seals with', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      // the first upload of the pass is held: a second batch is still to seal
+      const gate = holdingApi(server.apiFor(userId), (verb, url) => verb === 'post' && url === '/e2e/message-keys');
+      const service = serviceOver(userId, gate.api);
+      await service.initialize();
+      await flushQueue();
+      const recoveryKey = await service.createKeyBackup();
+
+      const internals = internalsOf(service);
+      const count = E2E_LIMITS.MESSAGE_KEY_BATCH_MAX + 1;
+      for (let i = 0; i < count; i++) {
+        const outbound = new EngineGroupSession();
+        await internals.importInboundGroupSession(outbound.sessionKey(), {
+          sessionId: outbound.sessionId(),
+          conversationId: 'c1',
+          senderUserId: 'peer',
+          senderDeviceId: 'peer-device',
+        });
+        outbound.free();
+      }
+
+      const warn = vi.spyOn(console, 'warn');
+      const error = vi.spyOn(console, 'error');
+      try {
+        const backup = service.backupMessageKeys();
+        await gate.held;
+        // restoring the account key replaces (and frees) the one the pass holds
+        const restore = service.restoreKeyBackup(recoveryKey);
+        // a restore free to start would have sent its first request by now
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(gate.reads).not.toContain('GET /e2e/backup');
+        gate.release();
+
+        await expect(backup).resolves.toBe(count);
+        await expect(restore).resolves.toBeUndefined();
+        expect(server.messageKeys).toHaveLength(count);
+        const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+        expect(logged).not.toMatch(/null pointer/);
+      } finally {
+        warn.mockRestore();
         error.mockRestore();
       }
     });
