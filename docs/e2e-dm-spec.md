@@ -214,6 +214,7 @@ the always-on cutover and is dropped when the new one opens):
 | `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5); first written by the first list that names a device or an account key |
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
 | `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
+| `pks:{createdAt}\|{shareId}` | a claimed key share not imported yet, as the inbox returned it (Olm ciphertext + routing fields, §12.3) |
 | `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 
@@ -463,6 +464,19 @@ And each message index of a session is bound, on this device, to the one
 (message id, version) it was first shown as (`mi:{sessionId}:{messageIndex}`
 in the vault, §7): an index served under another id or version, or below the
 newest version the id has shown in the same session, is refused (§9.1).
+
+Since the claim deletes, the client writes every claimed page to the vault
+(`pks:{createdAt}|{shareId}`, §7) before it processes any of it, and removes a
+share only once it is imported or found unusable. A share whose sender device
+is not pinned yet and whose device list cannot be read now (signed out,
+offline, refused; an identity change is not this case) is kept and retried by
+the next claim, at the latest at the next start of the account, together with
+any later share from the same sender, which may need the Olm session the first
+one sets up. A kept share is dropped once its session reached the device
+another way, or after its fifth deferred attempt. Disposing the service
+(logout, account switch) while a claim is in flight lets the claim finish
+the page it holds, for at most 10 s; whatever it had not processed by then
+stays kept.
 
 ### 12.4 Rotation
 
