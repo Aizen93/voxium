@@ -4374,5 +4374,96 @@ describe('E2EService — lifecycle', () => {
         warn.mockRestore();
       }
     });
+
+    it('tears down at the deadline when a claim hangs, and keeps what it had not imported', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'sent before the hang');
+
+      // the claim is answered, the look-up of Bob's devices never is
+      const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url === `/e2e/devices/${bob.userId}`);
+      const restarted = new E2EService(alice.userId, {
+        api: gate.api as unknown as E2EServiceOptions['api'],
+        keyProvider: alice.keyProvider,
+        wasmInput: wasmBytes,
+        vaultNamespace: alice.vaultNamespace,
+        deviceListCacheMs: 0,
+        teardownDeadlineMs: 50,
+      });
+      await restarted.initialize();
+      await gate.held;
+
+      await restarted.dispose(); // resolves at the deadline, the look-up still hanging
+      expect((restarted as unknown as { tornDown: boolean }).tornDown).toBe(true);
+      gate.release();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      expect((await again.service.decryptMessage(message)).text).toBe('sent before the hang');
+    });
+
+    it('refuses initialize() once disposed, while a claim still holds the teardown back', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      await bob.service.encryptMessage('c1', alice.userId, 'in the inbox');
+
+      const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'));
+      const restarted = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await restarted.initialize();
+      await gate.held;
+      const tornDown = restarted.dispose();
+      await expect(restarted.initialize()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      gate.release();
+      await tornDown;
+    });
+
+    it('logs a teardown that fails after a claim, instead of leaving a rejection behind', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      await bob.service.encryptMessage('c1', alice.userId, 'in the inbox');
+
+      const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'));
+      const restarted = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await restarted.initialize();
+      await gate.held;
+      const vault = (restarted as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(vault, 'close').mockImplementation(() => {
+        throw new Error('close failed');
+      });
+      const error = vi.spyOn(console, 'error');
+      try {
+        const tornDown = restarted.dispose();
+        gate.release();
+        await expect(tornDown).resolves.toBeUndefined();
+        expect(error.mock.calls.flat().map(String).join('\n')).toMatch(/teardown failed[\s\S]*close failed/);
+      } finally {
+        error.mockRestore();
+      }
+    });
   });
 });

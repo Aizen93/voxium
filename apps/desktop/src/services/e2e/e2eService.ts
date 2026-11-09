@@ -255,6 +255,8 @@ export interface E2EServiceOptions {
   vaultNamespace?: string;
   /** How long a fetched device list may be reused before re-checking (ms). */
   deviceListCacheMs?: number;
+  /** Test hook: how long dispose() waits for a key-share claim in flight (ms). */
+  teardownDeadlineMs?: number;
 }
 
 /** Re-poll the key-share inbox for a still-unknown session at most this often. */
@@ -273,6 +275,10 @@ const MAX_CLAIM_PAGES = 20;
  * be checked must not be kept forever.
  */
 const MAX_PENDING_SHARE_ATTEMPTS = 5;
+/** How long a dispose waits for a key-share claim in flight before tearing down anyway. */
+const TEARDOWN_DEADLINE_MS = 10_000;
+
+const noop = (): void => {};
 
 /**
  * Vault key of a claimed key share: its creation time first, so a listing
@@ -375,6 +381,7 @@ export class E2EService {
   private readonly vault: E2EVault;
   private readonly wasmInput?: BufferSource;
   private readonly deviceListCacheMs: number;
+  private readonly teardownDeadlineMs: number;
 
   private account: EngineAccount | null = null;
   /** This account's cross-signing master key — only if THIS device holds it. */
@@ -437,6 +444,7 @@ export class E2EService {
     this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace);
     this.wasmInput = opts.wasmInput;
     this.deviceListCacheMs = opts.deviceListCacheMs ?? DEVICE_LIST_CACHE_MS;
+    this.teardownDeadlineMs = opts.teardownDeadlineMs ?? TEARDOWN_DEADLINE_MS;
   }
 
   /**
@@ -508,8 +516,10 @@ export class E2EService {
    * A failed run clears the slot, so the next call tries again.
    */
   initialize(): Promise<void> {
-    if (this.initialized) return Promise.resolve();
+    // disposed first: until the teardown runs (a claim can hold it back) the
+    // service still reads as initialized
     if (this.disposed) return Promise.reject(new E2EServiceDisposedError());
+    if (this.initialized) return Promise.resolve();
     if (!this.initInFlight) {
       this.initInFlight = this.initializeOnce()
         .catch((err: unknown) => {
@@ -617,13 +627,35 @@ export class E2EService {
     this.disposed = true;
     const claim = this.claimInFlight;
     if (!claim) {
-      this.teardown();
+      this.teardownLogged();
       return Promise.resolve();
     }
     // the claim may use the open connection, never a new one
     this.vault.stopReopening();
-    const teardown = () => this.teardown();
-    return claim.then(teardown, teardown);
+    // Bounded: a request can hang (the client sets no timeout). At the
+    // deadline the teardown runs anyway, and what the claim had not imported
+    // stays kept in the vault for the next start.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.teardownDeadlineMs);
+    });
+    return Promise.race([claim.then(noop, noop), deadline]).then(() => {
+      clearTimeout(timer);
+      this.teardownLogged();
+    });
+  }
+
+  /**
+   * teardown(), logging a failure: dispose() runs from logout and account
+   * switches, which must not fail on it, and the deferred path has nobody
+   * awaiting it to report one.
+   */
+  private teardownLogged(): void {
+    try {
+      this.teardown();
+    } catch (err) {
+      console.error('e2e: teardown failed after dispose:', errText(err));
+    }
   }
 
   private teardown(): void {
