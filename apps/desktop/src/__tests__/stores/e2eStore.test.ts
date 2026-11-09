@@ -281,6 +281,62 @@ describe('e2eStore device-list subscription', () => {
   });
 });
 
+describe('e2eStore across a logout', () => {
+  /** What resetAccountStores does to this store on logout. */
+  const logout = () => {
+    stopE2EDeviceListWatch();
+    useE2EStore.setState(pristine, true);
+  };
+
+  it('applies nothing from an initialization that a logout overtook', async () => {
+    let finish!: () => void;
+    service.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => (finish = resolve)));
+
+    const pending = useE2EStore.getState().initialize(USER);
+    logout();
+    finish();
+    await pending;
+    await settle();
+
+    const state = useE2EStore.getState();
+    expect(state.ready).toBe(false);
+    expect(state.initializing).toBe(false);
+    expect(state.error).toBeNull();
+    expect(listeners.size).toBe(0);
+    expect(service.claimMasterTransfers).not.toHaveBeenCalled();
+  });
+
+  it('records no error from it either', async () => {
+    let fail!: (err: Error) => void;
+    service.initialize.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => (fail = reject)));
+
+    const pending = useE2EStore.getState().initialize(USER);
+    logout();
+    fail(new Error('E2E service disposed'));
+    await pending;
+
+    expect(useE2EStore.getState().error).toBeNull();
+    expect(useE2EStore.getState().initializing).toBe(false);
+  });
+
+  it('lets the next session initialize while the overtaken one is still pending', async () => {
+    let finishFirst!: () => void;
+    service.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => (finishFirst = resolve)));
+    const first = useE2EStore.getState().initialize(USER);
+    logout();
+
+    await useE2EStore.getState().initialize(USER);
+    expect(useE2EStore.getState().ready).toBe(true);
+
+    // the old continuation lands last and must not undo the new session
+    finishFirst();
+    await first;
+    await settle();
+    expect(useE2EStore.getState().ready).toBe(true);
+    expect(listeners.size).toBe(1);
+  });
+});
+
 describe('e2eStore peer actions', () => {
   it('flags an identity change rather than throwing out of the refresh', async () => {
     service.fetchDeviceList.mockRejectedValueOnce(new E2EIdentityChangedError(PEER));

@@ -9,6 +9,21 @@ import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../s
 let unsubscribeDeviceListChanges: (() => void) | null = null;
 
 /**
+ * Advanced when a session's E2E watch ends (logout). Work an earlier session
+ * started — an initialize() still waiting on the server, a status read in
+ * flight — compares its generation and applies nothing to the next session's
+ * store.
+ */
+let sessionGeneration = 0;
+
+function unsubscribeDeviceList(): void {
+  if (unsubscribeDeviceListChanges) {
+    unsubscribeDeviceListChanges();
+    unsubscribeDeviceListChanges = null;
+  }
+}
+
+/**
  * The own-account slice of a device-list status, in one place: every caller
  * that recomputes it has to agree on which device is "this" one, or the badge
  * ends up warning about the device the user is sitting in front of (or worse,
@@ -46,10 +61,8 @@ export class E2ELinkingCodeUnknownError extends Error {
 
 /** Called by resetAccountStores on logout — the service itself is disposed there. */
 export function stopE2EDeviceListWatch(): void {
-  if (unsubscribeDeviceListChanges) {
-    unsubscribeDeviceListChanges();
-    unsubscribeDeviceListChanges = null;
-  }
+  sessionGeneration++;
+  unsubscribeDeviceList();
 }
 
 /** The device a linking code named: everything the user gets to check before approving. */
@@ -174,6 +187,10 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   initialize: async (userId: string) => {
     if (get().ready || get().initializing) return;
     set({ initializing: true, error: null });
+    // A logout while this runs ends the session that asked for it: from then on
+    // the store belongs to the next one, and nothing below may write to it.
+    const generation = sessionGeneration;
+    const current = () => generation === sessionGeneration;
     try {
       const service = getE2EService(userId);
       // The send path refreshes device lists too (rotation decisions). Without
@@ -183,11 +200,12 @@ export const useE2EStore = create<E2EState>((set, get) => ({
       // Subscribed BEFORE initialize(): the service can read and record a list
       // while it is still starting up, and an event nobody was listening for
       // is a warning the badge never shows.
-      if (unsubscribeDeviceListChanges) unsubscribeDeviceListChanges();
+      unsubscribeDeviceList();
       unsubscribeDeviceListChanges = service.onDeviceListChanged((changedUserId) => {
         void service
           .deviceListStatus(changedUserId)
           .then((status) => {
+            if (!current()) return;
             set((state) => {
               // Our own list: a device we did not add is as dangerous as an
               // injected peer device — it receives every session key we fan out.
@@ -211,6 +229,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
           });
       });
       await service.initialize();
+      if (!current()) return;
       set({
         ready: true,
         initializing: false,
@@ -228,6 +247,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
       void service
         .claimMasterTransfers()
         .then(() => {
+          if (!current()) return;
           set({ masterReady: service.hasMasterSecret(), canApprove: service.canApproveDevices() });
         })
         .catch((err) => {
@@ -240,6 +260,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
       void service
         .deviceListStatus(userId)
         .then((status) => {
+          if (!current()) return;
           set(ownStatusPatch(service, status));
         })
         .catch((err) => {
@@ -247,9 +268,15 @@ export const useE2EStore = create<E2EState>((set, get) => ({
         });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'E2E initialization failed';
+      if (!current()) {
+        // Usually E2EServiceDisposedError: the logout disposed the service this
+        // run was starting. Not the next session's failure to record.
+        console.warn('e2e: initialization ended with the session that started it:', message);
+        return;
+      }
       console.warn('e2e: initialization failed:', message);
       // a service that never started has nothing to report; the retry subscribes again
-      stopE2EDeviceListWatch();
+      unsubscribeDeviceList();
       set({ ready: false, initializing: false, error: message });
     }
   },

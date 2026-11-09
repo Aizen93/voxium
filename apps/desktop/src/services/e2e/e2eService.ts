@@ -219,6 +219,18 @@ export class E2EPeerNotReadyError extends Error {
   }
 }
 
+/**
+ * The service was disposed (logout, account switch, account deletion) while
+ * this work was waiting. Its engine handles are freed and its vault is closed,
+ * so the work stops here rather than touching either.
+ */
+export class E2EServiceDisposedError extends Error {
+  constructor() {
+    super('E2E service disposed');
+    this.name = 'E2EServiceDisposedError';
+  }
+}
+
 export interface E2EServiceOptions {
   api?: typeof defaultApi;
   keyProvider?: PickleKeyProvider;
@@ -372,6 +384,10 @@ export class E2EService {
 
   private queue: Promise<unknown> = Promise.resolve();
   private initialized = false;
+  /** The run of initialize() in progress: concurrent callers share it. */
+  private initInFlight: Promise<void> | null = null;
+  /** Set by dispose(), never cleared: a disposed service is not restarted. */
+  private disposed = false;
   private claimInFlight: Promise<number> | null = null;
   /** session id → last time we drained the inbox looking for it */
   private missingSessions = new Map<string, number>();
@@ -389,26 +405,65 @@ export class E2EService {
 
   /** Serialize all crypto-state mutations (ratchet advance ⇒ pickle persist). */
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(() => fn());
+    const run = this.queue.then(() => {
+      // Queued before a dispose, started after it: everything it would touch
+      // is freed or closed.
+      this.assertLive();
+      return fn();
+    });
     this.queue = run.catch(() => undefined);
     return run;
   }
 
+  /**
+   * Throw if dispose() ran. Called after every await on the start-up path: the
+   * engine objects held across that await may have been freed meanwhile, and
+   * the next step would publish keys for a session that has ended.
+   */
+  private assertLive(): void {
+    if (this.disposed) throw new E2EServiceDisposedError();
+  }
+
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
 
-  async initialize(): Promise<void> {
-    if (this.initialized) return;
+  /**
+   * Single-flight: every caller gets the same run. Two runs over an empty
+   * vault would each mint a device id and an account and register both, and
+   * the second registration replaces the identity the first one published.
+   * A failed run clears the slot, so the next call tries again.
+   */
+  initialize(): Promise<void> {
+    if (this.initialized) return Promise.resolve();
+    if (this.disposed) return Promise.reject(new E2EServiceDisposedError());
+    if (!this.initInFlight) {
+      this.initInFlight = this.initializeOnce().finally(() => {
+        this.initInFlight = null;
+      });
+    }
+    return this.initInFlight;
+  }
+
+  private async initializeOnce(): Promise<void> {
     await initEngine(this.wasmInput);
+    this.assertLive();
     await this.vault.open();
+    if (this.disposed) {
+      // dispose() closed a vault that was not open yet; this connection is new
+      this.vault.close();
+      throw new E2EServiceDisposedError();
+    }
 
     let deviceId = await this.vault.getDeviceId();
+    this.assertLive();
     if (!deviceId || !E2E_DEVICE_ID_RE.test(deviceId)) {
       deviceId = generateDeviceId();
       await this.vault.putDeviceId(deviceId);
+      this.assertLive();
     }
     this.myDeviceId = deviceId;
 
     const pickle = await this.vault.getAccountPickle();
+    this.assertLive();
     if (pickle) {
       try {
         this.account = EngineAccount.fromPickle(pickle, this.vault.pickleKey());
@@ -424,15 +479,21 @@ export class E2EService {
       this.account = new EngineAccount();
       await this.persistAccount();
     }
+    this.assertLive();
 
     await this.ensureRegistered();
+    this.assertLive();
     // Cross-signing bootstrap (spec §14, D5). Never fatal: a device that cannot
     // publish or hold a master key still encrypts — it is only "unsigned".
+    // A dispose is not a bootstrap failure, though: swallowing it here would
+    // mark a disposed service initialized.
     try {
       await this.bootstrapMasterKey();
     } catch (err) {
+      if (err instanceof E2EServiceDisposedError) throw err;
       console.warn('e2e: cross-signing bootstrap failed — this device stays unsigned:', errText(err));
     }
+    this.assertLive();
     this.initialized = true;
 
     // None of these may block the UI: key shares are re-claimed lazily on a
@@ -456,6 +517,8 @@ export class E2EService {
   }
 
   dispose(): void {
+    // First, so work resuming after this point sees it before any freed handle
+    this.disposed = true;
     this.account?.free();
     this.account = null;
     this.masterKey?.free();
@@ -534,8 +597,11 @@ export class E2EService {
    * slot on (userId, deviceId).
    */
   private async ensureRegistered(): Promise<void> {
+    // `account` is held across the awaits below; assertLive() after each one is
+    // what keeps a dispose landing meanwhile from reaching a freed handle.
     const account = this.requireAccount();
     const res = await this.api.get(`/e2e/devices/me?deviceId=${encodeURIComponent(this.deviceId)}`);
+    this.assertLive();
     const status = res.data.data as { registered: boolean; deviceId?: string; curve25519Key?: string };
 
     if (status.registered && status.deviceId === this.deviceId && status.curve25519Key === account.curve25519Key()) {
@@ -555,6 +621,7 @@ export class E2EService {
       if (!fallback) throw new Error('failed to generate fallback key');
     }
     await this.persistAccount();
+    this.assertLive();
 
     await this.api.put('/e2e/devices', {
       deviceId: this.deviceId,
@@ -566,6 +633,10 @@ export class E2EService {
       oneTimeKeys: otks.map((k) => this.signedPreKey(account, k)),
       fallbackKey: this.signedPreKey(account, fallback),
     });
+    // Disposed during the upload: the keys are on the server but the account
+    // that would mark them published is freed. The pickle saved above still
+    // lists them, so the next start re-offers the same keys rather than new ones.
+    this.assertLive();
 
     account.markKeysAsPublished();
     await this.persistAccount();
@@ -670,7 +741,10 @@ export class E2EService {
    * one we already pinned — each of those would silently re-root account trust.
    */
   private async bootstrapMasterKey(): Promise<void> {
+    // Runs inside initialize(): every await below is followed by assertLive()
+    // before the next handle use or write, like the rest of start-up.
     const sealed = await this.vault.getMasterSecret();
+    this.assertLive();
     if (sealed && !this.masterKey) {
       try {
         this.masterKey = EngineMasterKey.fromSealed(sealed, this.vault.pickleKey());
@@ -683,6 +757,7 @@ export class E2EService {
     }
 
     const res = await this.api.get(`/e2e/devices/me?deviceId=${encodeURIComponent(this.deviceId)}`);
+    this.assertLive();
     const data = res.data.data as {
       devices?: E2EDeviceEntry[];
       masterKey?: string | null;
@@ -714,12 +789,14 @@ export class E2EService {
     };
     const published = this.verifiedMasterKey(this.userId, data.masterKey, data.masterSignature);
     const pinned = await this.vault.getMasterIdentity(this.userId);
+    this.assertLive();
 
     // ── A. We hold the secret: it is the account key, full stop. ──
     if (this.masterKey) {
       const mine = this.masterKey.publicKey();
       if (pinned?.masterKey !== mine) {
         await this.vault.putMasterIdentity(this.userId, { masterKey: mine, verified: true });
+        this.assertLive();
       }
       if (!published) {
         // Server has none yet (fresh account, or it lost the row): publish ours.
@@ -769,7 +846,11 @@ export class E2EService {
     // Sealed BEFORE publishing: a crash between the two would otherwise publish
     // a key nobody holds, and it can never be replaced silently.
     await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
+    this.assertLive();
     await this.publishMasterKey(master, [own]);
+    // Published, then disposed: the sealed copy above makes the next start
+    // take path A with this same key, so nothing is lost by stopping here.
+    this.assertLive();
     await this.vault.putMasterIdentity(this.userId, { masterKey: master.publicKey(), verified: true });
     this.deviceListCache.delete(this.userId);
   }

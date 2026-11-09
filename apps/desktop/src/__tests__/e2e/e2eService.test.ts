@@ -3933,3 +3933,147 @@ describe('E2EService — device-list events', () => {
     expect((await laptop.service.deviceListStatus(aliceId)).unsignedDeviceIds).toContain(laptop.service.deviceId);
   });
 });
+
+describe('E2EService — lifecycle', () => {
+  /**
+   * The fake server's client, with the first call that matches `hold` parked
+   * until `release()`: the moment a logout or account switch can land while
+   * initialize() waits on the network. Every write that reaches the client is
+   * recorded, held or not.
+   */
+  function holdingApi(base: ReturnType<Server['apiFor']>, hold: (verb: string, url: string) => boolean) {
+    const writes: string[] = [];
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const held = new Promise<void>((resolve) => (reached = resolve));
+    let holding = true;
+    const verb = (name: 'get' | 'put' | 'post' | 'delete') =>
+      async (url: string, body?: unknown) => {
+        if (name !== 'get') writes.push(`${name.toUpperCase()} ${url.split('?')[0]}`);
+        if (holding && hold(name, url)) {
+          holding = false;
+          reached();
+          await released;
+        }
+        const call = base[name] as (url: string, body?: unknown) => Promise<unknown>;
+        return call(url, body);
+      };
+    return {
+      api: { get: verb('get'), put: verb('put'), post: verb('post'), delete: verb('delete') },
+      writes,
+      held,
+      release,
+    };
+  }
+
+  function serviceOver(userId: string, api: unknown) {
+    return new E2EService(userId, {
+      api: api as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+  }
+
+  const nthGetOfOwnStatus = (n: number) => {
+    let seen = 0;
+    return (verb: string, url: string) => verb === 'get' && url.startsWith('/e2e/devices/me?') && ++seen === n;
+  };
+
+  it.each([
+    {
+      label: 'the registration status read',
+      hold: () => nthGetOfOwnStatus(1),
+      writes: [] as string[],
+    },
+    {
+      label: 'the device upload',
+      hold: () => (verb: string, url: string) => verb === 'put' && url === '/e2e/devices',
+      writes: ['PUT /e2e/devices'],
+    },
+    {
+      label: 'the cross-signing status read',
+      hold: () => nthGetOfOwnStatus(2),
+      writes: ['PUT /e2e/devices'],
+    },
+  ])('a dispose while initialize waits on $label aborts it and publishes nothing more', async ({ hold, writes }) => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const gate = holdingApi(server.apiFor(userId), hold());
+    const service = serviceOver(userId, gate.api);
+    const warn = vi.spyOn(console, 'warn');
+    const error = vi.spyOn(console, 'error');
+    try {
+      const init = service.initialize();
+      await gate.held;
+      service.dispose();
+      gate.release();
+
+      await expect(init).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      await flushQueue();
+      expect(gate.writes).toEqual(writes);
+      // a disposed service stays disposed
+      await expect(service.initialize()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      // and nothing touched a freed engine handle on the way out
+      const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+      expect(logged).not.toMatch(/null pointer/);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it('runs one initialization for concurrent callers: an empty vault yields one device', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = holdingApi(server.apiFor(userId), () => false);
+    const service = serviceOver(userId, recorder.api);
+
+    await Promise.all([service.initialize(), service.initialize()]);
+    await flushQueue();
+
+    // one device, registered once: a second run would mint a second identity
+    // and re-register the slot with it
+    expect([...server.userOf(userId).devices.keys()]).toEqual([service.deviceId]);
+    expect(recorder.writes.filter((w) => w === 'PUT /e2e/devices')).toHaveLength(1);
+    expect(recorder.writes.filter((w) => w === 'PUT /e2e/master-key')).toHaveLength(1);
+  });
+
+  it('lets a caller try again after an initialization that failed', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const base = server.apiFor(userId);
+    let failNext = true;
+    const api = {
+      ...base,
+      async get(url: string) {
+        if (failNext && url.startsWith('/e2e/devices/me?')) {
+          failNext = false;
+          throw new Error('503: service unavailable');
+        }
+        return base.get(url);
+      },
+    };
+    const service = serviceOver(userId, api);
+
+    await expect(service.initialize()).rejects.toThrow('503');
+    await service.initialize();
+    expect([...server.userOf(userId).devices.keys()]).toEqual([service.deviceId]);
+  });
+
+  it('refuses queued work on a disposed service instead of touching freed handles', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    await alice.service.initialize();
+    await flushQueue();
+    alice.service.dispose();
+
+    await expect(alice.service.replenishOneTimeKeys()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+  });
+});
