@@ -4200,5 +4200,24 @@ describe('E2EService — lifecycle', () => {
     });
   });
 
+  describe('a retried initialization', () => {
+    it('frees the account a failed run left behind before replacing it', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      const flaky = failingOnce(server.apiFor(userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/devices/me?'));
+      const service = serviceOver(userId, flaky.api);
+
+      flaky.arm();
+      await expect(service.initialize()).rejects.toThrow('503');
+      const left = (service as unknown as { account: { free(): void } | null }).account;
+      expect(left).toBeTruthy();
+      const free = vi.spyOn(left!, 'free');
+
+      await service.initialize();
+      expect(free).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // (end of lifecycle tests)
 });

@@ -464,6 +464,10 @@ export class E2EService {
 
     const pickle = await this.vault.getAccountPickle();
     this.assertLive();
+    // A retry after a failed run: that run's account is replaced below, and a
+    // replaced wrapper still holds its engine memory until it is freed.
+    this.account?.free();
+    this.account = null;
     if (pickle) {
       try {
         this.account = EngineAccount.fromPickle(pickle, this.vault.pickleKey());
