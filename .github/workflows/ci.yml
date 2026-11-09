@@ -285,20 +285,56 @@ jobs:
       # spec, which is intermittently red for a pre-existing crypto-engine
       # init race (see the note at the top of that file). A merge gate that
       # fails at random trains everyone to ignore it.
+      #
+      # NODE_OPTIONS reaches the servers through Playwright's webServer, which
+      # passes its own environment on (the configs set no `env`): every node
+      # process of the run loads scripts/lib/pg-overlap-guard.cjs, which
+      # records each query issued on a pg client already running one. The
+      # "No concurrent queries" step below fails the job on any record.
       - name: E2E tests (Chromium)
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
+          PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
         run: npx playwright test --grep-invert @quarantine --reporter=github,line
 
       # The flagship E2E-voice proof is the one place a second browser engine
       # earns its runtime: it exercises the RTCRtpScriptTransform path that
       # Chromium's legacy insertable-streams path never touches.
       - name: E2E secure voice (Firefox — cross-engine transform path)
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
+          PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
         run: npx playwright test secure-voice --config=playwright-firefox.config.ts --reporter=github,line
 
       # Visible but non-blocking, so the quarantine cannot rot silently: the
-      # step goes red in the UI while the job still passes.
+      # step goes red in the UI while the job still passes. Its overlap
+      # records go to a file of their own, reported as a warning only.
       - name: E2E quarantined specs (non-blocking)
         continue-on-error: true
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
+          PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps-quarantine.jsonl
         run: npx playwright test --grep @quarantine --reporter=github,line
+
+      # Two queries at once on one pg connection: pg 8 queues them (and warns
+      # once per process, from the third), pg 9 removes the queueing. The
+      # source-side rule is apps/server/src/__tests__/utils/transactionRelationLoads.test.ts.
+      - name: No concurrent queries on one pg connection
+        if: ${{ !cancelled() }}
+        env:
+          REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
+          QUARANTINE_REPORT: ${{ runner.temp }}/pg-overlaps-quarantine.jsonl
+        run: |
+          if [ -s "$QUARANTINE_REPORT" ]; then
+            echo "::warning::$(wc -l < "$QUARANTINE_REPORT") pg queries issued on a busy client during the quarantined specs"
+            cat "$QUARANTINE_REPORT"
+          fi
+          if [ -s "$REPORT" ]; then
+            echo "::error::$(wc -l < "$REPORT") pg queries issued on a busy client (two queries at once on one connection)"
+            cat "$REPORT"
+            exit 1
+          fi
+          echo "No query was issued on a busy pg client."
 
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
