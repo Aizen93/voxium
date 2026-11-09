@@ -17,11 +17,20 @@
  * Usage:
  *   npx tsx scripts/test-multi-node.ts
  *
- * Requires: PostgreSQL + Redis running, apps/server/.env configured.
+ * Requires: PostgreSQL + Redis running, apps/server/.env configured, and
+ * ports 3001/3002 free (the run refuses to start next to a dev backend).
+ *
+ * Repeatable: the run creates its space "MultiNode Test Server" and deletes it
+ * at the end; one an interrupted run left behind is deleted at the next start
+ * (the test account may own only MAX_SERVERS_PER_USER spaces). Both servers
+ * are stopped with their whole process tree on every exit path (Windows:
+ * taskkill /T, scripts/lib/processTree.mjs), so none is left holding a port.
  */
 
 import { spawn, type ChildProcess } from 'child_process';
+import net from 'net';
 import axios from 'axios';
+import { killProcessTree } from './lib/processTree.mjs';
 import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import path from 'path';
@@ -63,9 +72,12 @@ const API2 = `http://localhost:${NODE2_PORT}/api/v1`;
 const WS1 = `http://localhost:${NODE1_PORT}`;
 const WS2 = `http://localhost:${NODE2_PORT}`;
 const PASSWORD = 'password123';
+const TEST_SPACE_NAME = 'MultiNode Test Server';
 
 let node1: ChildProcess | null = null;
 let node2: ChildProcess | null = null;
+/** The space this run created, deleted by cleanup() as its owner. */
+let testSpace: { id: string; ownerToken: string } | null = null;
 let passed = 0;
 let failed = 0;
 const results: Array<{ name: string; pass: boolean; detail?: string }> = [];
@@ -88,9 +100,25 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function waitForServer(port: number, maxWait = 30000): Promise<boolean> {
+/** True when nothing listens on the port (the servers bind 0.0.0.0). */
+function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.once('listening', () => probe.close(() => resolve(true)));
+    probe.listen(port, '0.0.0.0');
+  });
+}
+
+function isRunning(child: ChildProcess | null): child is ChildProcess {
+  return !!child && child.exitCode === null && child.signalCode === null;
+}
+
+async function waitForServer(port: number, child: ChildProcess, maxWait = 30000): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < maxWait) {
+    // A server that died at boot never answers: stop waiting for it
+    if (!isRunning(child)) return false;
     try {
       await axios.get(`http://localhost:${port}/health`, { timeout: 2000 });
       return true;
@@ -103,7 +131,11 @@ async function waitForServer(port: number, maxWait = 30000): Promise<boolean> {
 
 function startServer(port: number, nodeId: string, mediasoupMinPort: number, mediasoupMaxPort: number): ChildProcess {
   const serverEntry = path.resolve('apps/server/src/index.ts');
-  const child = spawn('npx', ['tsx', serverEntry], {
+  // This node binary with tsx's loader, no shell and no npx: the pid we hold
+  // IS the server, so stopping it stops the server (its mediasoup workers are
+  // its own children, which the tree kill in cleanup() also ends). `--import
+  // tsx` resolves from the cwd, apps/server, which depends on tsx.
+  const child = spawn(process.execPath, ['--import', 'tsx', serverEntry], {
     // dotenv resolves .env from CWD — must be apps/server or the boot-time
     // env validation kills the process before it ever listens
     cwd: path.resolve('apps/server'),
@@ -116,7 +148,6 @@ function startServer(port: number, nodeId: string, mediasoupMinPort: number, med
       MEDIASOUP_NUM_WORKERS: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
-    shell: true,
   });
 
   // Prefix output with node ID
@@ -185,15 +216,97 @@ function connectSocket(ws: string, token: string): Promise<Socket> {
   });
 }
 
-// ─── Cleanup ────────────────────────────────────────────────────────────────
+// ─── Test space ─────────────────────────────────────────────────────────────
 
-async function cleanup() {
-  if (node1) { node1.kill(); node1 = null; }
-  if (node2) { node2.kill(); node2 = null; }
-  await sleep(1000);
+const auth = (token: string) => ({ headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
+
+function errorText(err: any): string {
+  return err?.response?.data?.error || err?.message || String(err);
 }
 
-process.on('SIGINT', async () => { await cleanup(); process.exit(1); });
+/** Delete this account's leftover test spaces, then create a fresh one with
+ *  the second user in it. Returns the space id. */
+async function setUpTestSpace(ownerToken: string, memberToken: string): Promise<string> {
+  const me = await axios.get(`${API1}/auth/me`, auth(ownerToken));
+  const ownerId: string = me.data.data.id;
+  const mine = await axios.get(`${API1}/servers`, auth(ownerToken));
+  const leftovers = (mine.data.data as Array<{ id: string; name: string; ownerId: string }>)
+    .filter((s) => s.ownerId === ownerId && s.name === TEST_SPACE_NAME);
+  for (const s of leftovers) {
+    await axios.delete(`${API1}/servers/${s.id}`, auth(ownerToken));
+    console.log(`Deleted the test space an earlier run left behind: ${s.id}`);
+  }
+
+  const serverRes = await axios.post(`${API1}/servers`, { name: TEST_SPACE_NAME }, auth(ownerToken));
+  const serverId: string = serverRes.data.data.id;
+  testSpace = { id: serverId, ownerToken };
+
+  // Create an invite and have user2 join
+  const inviteRes = await axios.post(`${API1}/invites/servers/${serverId}`, {}, auth(ownerToken));
+  const code = inviteRes.data.data.code;
+  await axios.post(`${API2}/invites/${code}/join`, {}, auth(memberToken));
+  return serverId;
+}
+
+/** Delete the run's space through a node still running (node-1 is gone after
+ *  the crash test). Never throws: a space left behind is deleted at the next
+ *  start. */
+async function deleteTestSpace(): Promise<void> {
+  if (!testSpace) return;
+  const { id, ownerToken } = testSpace;
+  testSpace = null;
+  const apis = [isRunning(node2) ? API2 : null, isRunning(node1) ? API1 : null].filter((a): a is string => a !== null);
+  for (const api of apis) {
+    try {
+      await axios.delete(`${api}/servers/${id}`, auth(ownerToken));
+      console.log(`Test space deleted: ${id}`);
+      return;
+    } catch (err: any) {
+      console.warn(`Could not delete the test space through ${api}: ${errorText(err)}`);
+    }
+  }
+  console.warn(`The test space ${id} was left behind; the next run deletes it before it starts`);
+}
+
+// ─── Cleanup ────────────────────────────────────────────────────────────────
+
+let cleanupDone: Promise<void> | null = null;
+
+/** Delete the test space, then stop both servers with their process trees.
+ *  Idempotent: every exit path calls it, and they can overlap. */
+function cleanup(): Promise<void> {
+  if (!cleanupDone) {
+    cleanupDone = (async () => {
+      try {
+        await deleteTestSpace();
+      } catch (err) {
+        console.warn('Test space cleanup failed:', errorText(err));
+      }
+      const running = [node1, node2];
+      node1 = null;
+      node2 = null;
+      await Promise.all(running.map((child) => killProcessTree(child)));
+      await sleep(1000);
+    })();
+  }
+  return cleanupDone;
+}
+
+async function exitAfterCleanup(code: number): Promise<never> {
+  await cleanup();
+  process.exit(code);
+}
+
+process.on('SIGINT', () => { void exitAfterCleanup(1); });
+process.on('SIGTERM', () => { void exitAfterCleanup(1); });
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+  void exitAfterCleanup(1);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+  void exitAfterCleanup(1);
+});
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -758,21 +871,6 @@ async function testServerVoiceCrossNode(redis: any, token1: string, token2: stri
   }
 }
 
-/** Kill a spawned server hard (Windows: taskkill the whole tree — SIGKILL on the
- *  shell wrapper would orphan the actual node process). */
-function killServerHard(child: ChildProcess): Promise<void> {
-  return new Promise((resolve) => {
-    if (process.platform === 'win32') {
-      const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { shell: true, stdio: 'ignore' });
-      killer.on('close', () => resolve());
-      killer.on('error', () => resolve());
-    } else {
-      child.kill('SIGKILL');
-      resolve();
-    }
-  });
-}
-
 async function testOwnerCrashTakeover(redis: any, token1: string, token2: string, serverId: string) {
   console.log('\n── Test: Owner-Node Crash Takeover (waits out the 30s heartbeat) ──');
 
@@ -788,9 +886,10 @@ async function testOwnerCrashTakeover(redis: any, token1: string, token2: string
   await bob.join(channelId);
   assert((await redis.get(ownerKey)) === 'node-1', 'Pre-crash: node-1 owns the channel');
 
-  // Crash the owner (SIGKILL-equivalent — no graceful shutdown hooks run)
+  // Crash the owner: no graceful shutdown hook runs (POSIX SIGKILL; Windows
+  // taskkill /T /F, which also ends its mediasoup worker)
   console.log('    Killing node-1 (owner) hard...');
-  await killServerHard(node1!);
+  await killProcessTree(node1, { signal: 'SIGKILL' });
   node1 = null;
 
   // Wait for the heartbeat to expire so the peer can detect the death
@@ -834,17 +933,26 @@ async function main() {
   console.log('  Multi-Node Horizontal Scaling Test');
   console.log('═══════════════════════════════════════════════════════════\n');
 
-  // Step 1: Start two server instances
-  console.log('Starting node-1 on port 3001...');
-  node1 = startServer(NODE1_PORT, 'node-1', NODE1_PORTS[0], NODE1_PORTS[1]);
+  // Step 0: a dev backend (or a server an earlier run left) on our ports would
+  // answer /health for a node that never started
+  for (const port of [NODE1_PORT, NODE2_PORT]) {
+    if (!(await isPortFree(port))) {
+      console.error(`\nFATAL: port ${port} is already in use; stop whatever listens on it and run again`);
+      process.exit(1);
+    }
+  }
 
-  console.log('Starting node-2 on port 3002...');
+  // Step 1: Start two server instances
+  node1 = startServer(NODE1_PORT, 'node-1', NODE1_PORTS[0], NODE1_PORTS[1]);
+  console.log(`Starting node-1 on port 3001 (pid ${node1.pid})...`);
+
   node2 = startServer(NODE2_PORT, 'node-2', NODE2_PORTS[0], NODE2_PORTS[1]);
+  console.log(`Starting node-2 on port 3002 (pid ${node2.pid})...`);
 
   console.log('Waiting for servers to be ready...');
   const [ready1, ready2] = await Promise.all([
-    waitForServer(NODE1_PORT),
-    waitForServer(NODE2_PORT),
+    waitForServer(NODE1_PORT, node1),
+    waitForServer(NODE2_PORT, node2),
   ]);
 
   if (!ready1 || !ready2) {
@@ -880,25 +988,13 @@ async function main() {
   }
   await closeRegisterTestUserDb().catch((e) => console.warn('DB disconnect failed:', e.message));
 
-  // Step 4: Ensure both users are in a shared server (create one if needed)
+  // Step 4: Both users in a fresh shared space (cleanup() deletes it)
   let serverId: string | null = null;
   try {
-    const serverRes = await axios.post(`${API1}/servers`, { name: 'MultiNode Test Server' }, {
-      headers: { Authorization: `Bearer ${user1Token}` },
-    });
-    serverId = serverRes.data.data.id;
-
-    // Create an invite and have user2 join
-    const inviteRes = await axios.post(`${API1}/invites/servers/${serverId}`, {}, {
-      headers: { Authorization: `Bearer ${user1Token}` },
-    });
-    const code = inviteRes.data.data.code;
-    await axios.post(`${API2}/invites/${code}/join`, {}, {
-      headers: { Authorization: `Bearer ${user2Token}` },
-    });
+    serverId = await setUpTestSpace(user1Token, user2Token);
     console.log(`Shared server created: ${serverId}\n`);
   } catch (err: any) {
-    console.warn('Server setup warning:', err.response?.data?.error || err.message);
+    console.warn('Server setup warning:', errorText(err));
   }
 
   // ── Run tests ──────────────────────────────────────────────────────────
