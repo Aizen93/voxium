@@ -74,6 +74,13 @@ function channelRow(over: Partial<Message> = {}): Message {
   } as unknown as Message;
 }
 
+/** The single-message gate for a row it answers; its null answer (the session ended) is tested apart. */
+async function shownForChannel(message: Message): Promise<Message> {
+  const out = await decryptChannelMessageForDisplay(message);
+  if (!out) throw new Error(`the gate answered null for ${message.id}`);
+  return out;
+}
+
 describe('a secure-channel decrypt that a logout overtook', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -82,12 +89,12 @@ describe('a secure-channel decrypt that a logout overtook', () => {
   it.each([
     ['the service was disposed', () => new E2EServiceDisposedError()],
     ['the vault was closed', () => new E2EVaultClosedError()],
-  ])('settles as a refused row when %s', async (_reason, failure) => {
+  ])('settles as null when %s', async (_reason, failure) => {
     decryptMessage.mockRejectedValueOnce(failure());
     const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
     try {
       const out = await decryptChannelMessageForDisplay(channelRow());
-      expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
+      expect(out).toBeNull();
     } finally {
       debug.mockRestore();
     }
@@ -106,7 +113,7 @@ describe('channelCrypto — display boundary', () => {
   });
 
   it('decrypts through the CHANNEL scope, never a bare id', async () => {
-    const result = await decryptChannelMessageForDisplay(channelRow());
+    const result = await shownForChannel(channelRow());
 
     expect(result.content).toBe('decrypted!');
     expect(decryptMessage).toHaveBeenCalledWith(
@@ -115,7 +122,7 @@ describe('channelCrypto — display boundary', () => {
   });
 
   it('REFUSES an encrypted:false user row — the flag is the server\'s word', async () => {
-    const result = await decryptChannelMessageForDisplay(
+    const result = await shownForChannel(
       channelRow({ encrypted: false, content: 'forged words under a member\'s name' }),
     );
 
@@ -127,7 +134,7 @@ describe('channelCrypto — display boundary', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const row = channelRow({ encrypted: false, type: 'system', content: 'Voice call started', attachments: [{ id: 'a1', s3Key: 'attachments/ch-x/y', fileName: 'y', fileSize: 1, mimeType: 'image/png', expired: false }] } as Partial<Message>);
-      const result = await decryptChannelMessageForDisplay(row);
+      const result = await shownForChannel(row);
 
       expect(result.content).toBe(DECRYPT_FAILED_CONTENT);
       expect(result.encrypted).toBe(true);
@@ -140,7 +147,7 @@ describe('channelCrypto — display boundary', () => {
   it('drops a wire e2eAttachments and locks an unencrypted reply quote on an authentic message', async () => {
     decryptMessage.mockResolvedValue({ text: buildE2EPlaintext('hello') });
     const author = { id: 'peer', username: 'peer', displayName: 'Peer' };
-    const result = await decryptChannelMessageForDisplay(channelRow({
+    const result = await shownForChannel(channelRow({
       e2eAttachments: [{ s3Key: 'attachments/ch-x/evil', key: 'k', iv: 'i', fileName: 'f', fileSize: 1, mimeType: 'image/png' }],
       replyTo: { id: 'p1', content: 'forged quote', encrypted: false, author },
     } as Partial<Message>));
@@ -152,7 +159,7 @@ describe('channelCrypto — display boundary', () => {
 
   it('a row that fails to decrypt keeps no plaintext attachments either', async () => {
     decryptMessage.mockResolvedValue({ failed: true, text: '' });
-    const result = await decryptChannelMessageForDisplay(channelRow({
+    const result = await shownForChannel(channelRow({
       attachments: [{ id: 'a1', s3Key: 'attachments/ch-x/y.exe', fileName: 'y.exe', fileSize: 1, mimeType: 'application/octet-stream', expired: false }],
     } as Partial<Message>));
     expect(result.content).toBe(DECRYPT_FAILED_CONTENT);
@@ -160,7 +167,7 @@ describe('channelCrypto — display boundary', () => {
   });
 
   it('a row without a channel id is refused outright — there is no scope to decrypt it under', async () => {
-    const result = await decryptChannelMessageForDisplay(channelRow({
+    const result = await shownForChannel(channelRow({
       channelId: null,
       attachments: [{ id: 'a1', s3Key: 'attachments/ch-x/y.exe', fileName: 'y.exe', fileSize: 1, mimeType: 'application/octet-stream', expired: false }],
       replyTo: { id: 'p1', content: 'quoted', encrypted: false, author: { id: 'peer', username: 'peer', displayName: 'Peer' } },
@@ -172,13 +179,13 @@ describe('channelCrypto — display boundary', () => {
   });
 
   it('an encrypted row decrypts as a USER row whatever type the server put on it', async () => {
-    const result = await decryptChannelMessageForDisplay(channelRow({ type: 'system' }));
+    const result = await shownForChannel(channelRow({ type: 'system' }));
     expect(result.content).toBe('decrypted!');
     expect(result.type).toBe('user');
   });
 
   it('a quote without an author is dropped whole', async () => {
-    const result = await decryptChannelMessageForDisplay(channelRow({
+    const result = await shownForChannel(channelRow({
       replyTo: { id: 'p1', content: ENVELOPE, encrypted: true },
     } as Partial<Message>));
     expect(result.replyTo).toBeNull();
@@ -208,10 +215,10 @@ describe('channelCrypto — display boundary', () => {
     } as Partial<Message>;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const decrypted = await decryptChannelMessageForDisplay(channelRow(claim));
-      const forged = await decryptChannelMessageForDisplay(channelRow({ ...claim, encrypted: false, content: 'forged' }));
+      const decrypted = await shownForChannel(channelRow(claim));
+      const forged = await shownForChannel(channelRow({ ...claim, encrypted: false, content: 'forged' }));
       decryptMessage.mockResolvedValue({ failed: true, text: '' });
-      const undecryptable = await decryptChannelMessageForDisplay(channelRow({ ...claim, createdAt: '2020-01-01T00:00:00.000Z' }));
+      const undecryptable = await shownForChannel(channelRow({ ...claim, createdAt: '2020-01-01T00:00:00.000Z' }));
       expect(decrypted.content).toBe('decrypted!');
       expect(forged.content).toBe(DECRYPT_FAILED_CONTENT);
       expect(undecryptable.content).toBe(DECRYPT_FAILED_CONTENT);
@@ -237,7 +244,7 @@ describe('channelCrypto — display boundary', () => {
     };
     decryptMessage.mockResolvedValue({ text: buildE2EPlaintext('with file', [meta as never]) });
 
-    const result = await decryptChannelMessageForDisplay(channelRow());
+    const result = await shownForChannel(channelRow());
 
     expect(result.content).toBe('with file');
     expect(result.e2eAttachments?.[0]?.fileName).toBe('real.pdf');

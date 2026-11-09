@@ -54,17 +54,18 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * Own echoes can still race the send path's cache write, and legacy olm1 own
  * messages are cache-only, so own messages fall back to retrying the cache.
  *
- * A decrypt the session's end overtook (logout, account switch) settles as the
- * refused row: its callers include socket handlers that do not catch, and
- * there is nothing to report about a session that is over.
+ * A decrypt the session's end overtook (logout, account switch) settles as
+ * `null`: nothing about it may be shown, counted or notified, since the
+ * screen and the stores belong to whoever signs in next. Its callers include
+ * socket handlers that do not catch, so it never rejects for that.
  */
-export async function decryptMessageForDisplay(input: Message): Promise<Message> {
+export async function decryptMessageForDisplay(input: Message): Promise<Message | null> {
   try {
     return await decryptOneForDisplay(input);
   } catch (err) {
     if (!isE2ESessionEnded(err)) throw err;
     console.debug(`e2e: decrypt of ${input.id} ended with the session:`, err instanceof Error ? err.message : err);
-    return refusedRow(withoutServerAssertions(input));
+    return null;
   }
 }
 
@@ -157,7 +158,8 @@ export async function decryptMessagesForDisplay(messages: Message[]): Promise<Me
   const out: Message[] = [];
   for (const m of messages) {
     try {
-      out.push(await decryptMessageForDisplay(m));
+      // a row the session's end overtook keeps the page's shape as a refused row
+      out.push((await decryptMessageForDisplay(m)) ?? refusedRow(withoutServerAssertions(m)));
     } catch (err) {
       // One message whose decrypt PIPELINE fails (vault IO, engine state —
       // not mere bad ciphertext, which degrades inside) must not abort the

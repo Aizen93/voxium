@@ -47,16 +47,17 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * name with no decrypt-failure marker. The flag is the server's word; it does
  * not get to decide whether a message was end-to-end encrypted.
  *
- * A decrypt the session's end overtook settles as the refused row, as in
- * dmCrypto: socket handlers await this without a catch.
+ * A decrypt the session's end overtook settles as `null`, as in dmCrypto:
+ * nothing of it may reach the next session's screen, and socket handlers
+ * await this without a catch.
  */
-export async function decryptChannelMessageForDisplay(input: Message): Promise<Message> {
+export async function decryptChannelMessageForDisplay(input: Message): Promise<Message | null> {
   try {
     return await decryptChannelOneForDisplay(input);
   } catch (err) {
     if (!isE2ESessionEnded(err)) throw err;
     console.debug(`e2e: decrypt of ${input.id} ended with the session:`, err instanceof Error ? err.message : err);
-    return refusedRow(withoutServerAssertions(input));
+    return null;
   }
 }
 
@@ -118,7 +119,8 @@ export async function decryptChannelMessagesForDisplay(messages: Message[]): Pro
   const out: Message[] = [];
   for (const m of messages) {
     try {
-      out.push(await decryptChannelMessageForDisplay(m));
+      // a row the session's end overtook keeps the page's shape as a refused row
+      out.push((await decryptChannelMessageForDisplay(m)) ?? refusedRow(withoutServerAssertions(m)));
     } catch (err) {
       console.error(`e2e: decrypt pipeline failed for message ${m.id}:`, err);
       out.push(refusedRow(m));

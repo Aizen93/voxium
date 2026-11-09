@@ -44,10 +44,38 @@ describe('DM socket events always pass the decrypt gate', () => {
       // the gate, in any spelling (an if, a ternary, a comparison)
       expect(body.slice(0, gate)).not.toMatch(/\.encrypted\b/);
       // the gate's RESULT is what the handler carries on with
-      expect(body).toMatch(/message = await decryptMessageForDisplay\(message\)/);
+      expect(body).toMatch(/const shown = await decryptMessageForDisplay\(message\)/);
+      expect(body).toMatch(/message = shown;/);
       // and every side effect comes after it
       const effect = body.search(/useChatStore\.getState\(\)\.(addMessage|updateMessage)|updateLastMessage\(|incrementDMUnread\(|play[A-Za-z]*Sound\(|fetchConversations\(|notify\(/);
       expect(effect, `${name} must reach the store after the gate`).toBeGreaterThan(gate);
+    });
+  }
+});
+
+describe('a message event whose decrypt outlived the session is dropped', () => {
+  // A decrypt still running at logout settles as null (dmCrypto,
+  // channelCrypto). A handler that carried on would count the unread, add the
+  // message and notify with the signed-out account's names, on the login
+  // screen or into the next account's session.
+  const source = readFileSync(LAYOUT, 'utf8');
+  const cases: Array<[string, string]> = [
+    ['messageNew', 'decryptChannelMessageForDisplay'],
+    ['messageUpdate', 'decryptChannelMessageForDisplay'],
+    ['dmMessageNew', 'decryptMessageForDisplay'],
+    ['dmMessageUpdate', 'decryptMessageForDisplay'],
+  ];
+  for (const [name, gateFn] of cases) {
+    it(`${name} returns on a null gate answer, or a different signed-in user, before any side effect`, () => {
+      const body = handlerBody(source, name);
+      const capture = body.indexOf('const session = signedInUser();');
+      const gate = body.indexOf(`const shown = await ${gateFn}(message);`);
+      const drop = body.indexOf('if (!shown || signedInUser() !== session) return;');
+      expect(capture, `${name} must note the session before the decrypt`).toBeGreaterThan(-1);
+      expect(gate, `${name} must keep the gate's answer`).toBeGreaterThan(capture);
+      expect(drop, `${name} must drop an event the session's end overtook`).toBeGreaterThan(gate);
+      const effect = body.search(/useChatStore\.getState\(\)\.(addMessage|updateMessage)|updateLastMessage\(|increment(DM)?Unread\(|play[A-Za-z]*Sound\(|fetchConversations\(|notify\(/);
+      expect(effect, `${name} must reach no store before the check`).toBeGreaterThan(drop);
     });
   }
 });
