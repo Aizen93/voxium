@@ -93,6 +93,13 @@ let app: express.Express;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks keeps the *Once queues: a value queued for a call the route
+  // stopped making would answer a later test instead (a leftover S3 rejection
+  // turned the storage delete below into a 500)
+  prismaMock.channel.findMany.mockReset();
+  prismaMock.channel.findMany.mockResolvedValue([]);
+  mockDeleteFromS3.mockReset();
+  mockDeleteFromS3.mockResolvedValue(undefined);
   app = createApp();
   prismaMock.user.findUnique.mockResolvedValue({
     id: 'admin-1', role: 'admin', bannedAt: null, tokenVersion: 0, emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),

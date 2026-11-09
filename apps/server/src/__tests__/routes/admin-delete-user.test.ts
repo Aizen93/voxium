@@ -208,11 +208,12 @@ vi.mock('../../utils/secureChannelLifecycle', () => ({
 }));
 
 // S3
+const mockDeleteFromS3 = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,
   VALID_ATTACHMENT_KEY_RE: /^attachments\//,
   listAllS3Objects: vi.fn().mockResolvedValue([]),
-  deleteFromS3: vi.fn().mockResolvedValue(undefined),
+  deleteFromS3: (...args: any[]) => mockDeleteFromS3(...args),
 }));
 
 // Audit log
@@ -326,6 +327,11 @@ beforeEach(() => {
   prismaMock.server.findMany.mockResolvedValue([]);
   prismaMock.server.delete.mockResolvedValue({});
   prismaMock.server.findUnique.mockResolvedValue(null);
+  // Back to the declared defaults: clearAllMocks keeps both the implementations
+  // a test set and the *Once queues a test left unconsumed
+  prismaMock.channel.findMany.mockResolvedValue([]);
+  mockDeleteFromS3.mockReset();
+  mockDeleteFromS3.mockResolvedValue(undefined);
 });
 
 describe('DELETE /admin/users/:userId — E2E key material dies with the account', () => {
@@ -572,6 +578,37 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
 
     expect(mockLocalSocketsLeave).toHaveBeenCalledWith(['server:srv-owned']);
     expect(mockSocketsLeave).toHaveBeenCalledWith(['server:srv-owned']);
+  });
+
+  it('deletes the space icon from storage after its row, without waiting on storage', async () => {
+    const icon = 'server-icons/srv-owned-1700000000000-0123456789ab.webp';
+    prismaMock.server.findUnique.mockResolvedValue({ iconUrl: icon });
+    // A storage call that never settles: the deletion must answer anyway
+    mockDeleteFromS3.mockReturnValue(new Promise(() => {}));
+
+    const res = await deleteOwner();
+
+    expect(res.status).toBe(200);
+    expect(mockDeleteFromS3).toHaveBeenCalledTimes(1);
+    expect(mockDeleteFromS3).toHaveBeenCalledWith(icon);
+    expect(mockDeleteFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expectAtomicPurgeAndDelete('target-1');
+  });
+
+  it('a failed icon delete is logged and the account deletion still completes', async () => {
+    prismaMock.server.findUnique.mockResolvedValue({ iconUrl: 'server-icons/srv-owned-1700000000000-0123456789ab.webp' });
+    mockDeleteFromS3.mockRejectedValue(new Error('S3 unavailable'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await deleteOwner();
+
+      expect(res.status).toBe(200);
+      expectAtomicPurgeAndDelete('target-1');
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+        '[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', 'S3 unavailable'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('never fetches the sockets: a stalled peer cannot abort the account deletion halfway', async () => {

@@ -789,12 +789,13 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           await clearServerRooms(action.serverId);
           // Read the icon key BEFORE the row goes; delete the blob after, so a
           // failed delete never strands a live server without its icon. The
-          // user-facing DELETE /servers/:id already does exactly this.
+          // user-facing DELETE /servers/:id already does exactly this, and
+          // like it (and DELETE /admin/servers/:id) never waits on storage.
           const doomed = await prisma.server.findUnique({ where: { id: action.serverId }, select: { iconUrl: true } });
           await prisma.server.delete({ where: { id: action.serverId } });
           await bumpDiscoveryPageCache('admin server delete');
           if (doomed?.iconUrl) {
-            await deleteFromS3(doomed.iconUrl).catch((err) =>
+            deleteFromS3(doomed.iconUrl).catch((err) =>
               console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
           }
         }
