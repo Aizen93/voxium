@@ -157,8 +157,10 @@ serverRouter.post('/', rateLimitMemberManage, async (req: Request, res: Response
       return tx.server.findUniqueOrThrow({
         where: { id: srv.id },
         include: {
-          channels: { orderBy: { position: 'asc' } },
-          categories: { orderBy: { position: 'asc' } },
+          // id breaks position ties: the order must not depend on how the
+          // relation is loaded (one joined statement or a query per relation)
+          channels: { orderBy: [{ position: 'asc' }, { id: 'asc' }] },
+          categories: { orderBy: [{ position: 'asc' }, { id: 'asc' }] },
           _count: { select: { members: true } },
         },
       });
@@ -201,8 +203,9 @@ serverRouter.get('/:serverId', async (req: Request<{ serverId: string }>, res: R
     const server = await prisma.server.findUnique({
       where: { id: serverId },
       include: {
-        channels: { orderBy: { position: 'asc' } },
-        categories: { orderBy: { position: 'asc' } },
+        // id breaks position ties, as in the create's read-back
+        channels: { orderBy: [{ position: 'asc' }, { id: 'asc' }] },
+        categories: { orderBy: [{ position: 'asc' }, { id: 'asc' }] },
         roles: { orderBy: { position: 'asc' } },
         _count: { select: { members: true } },
       },

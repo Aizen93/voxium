@@ -171,7 +171,9 @@ channelRouter.get('/', async (req: Request<{ serverId: string }>, res: Response,
 
     const allChannels = await prisma.channel.findMany({
       where: { serverId },
-      orderBy: { position: 'asc' },
+      // id breaks position ties, as GET /servers/:serverId does: the sidebar
+      // keeps whichever order its last list arrived in for equal positions
+      orderBy: [{ position: 'asc' }, { id: 'asc' }],
     });
 
     const channels = await filterVisibleChannels(req.user!.userId, serverId, allChannels);

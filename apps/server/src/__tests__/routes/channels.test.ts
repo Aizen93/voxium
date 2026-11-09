@@ -222,6 +222,11 @@ describe('Channel Routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data).toHaveLength(2);
+      // id breaks position ties, as GET /servers/:serverId does
+      expect(prismaMock.channel.findMany).toHaveBeenCalledWith({
+        where: { serverId: 'srv-1' },
+        orderBy: [{ position: 'asc' }, { id: 'asc' }],
+      });
     });
 
     it('returns 403 for non-member', async () => {
