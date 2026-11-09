@@ -4,11 +4,20 @@ import request from 'supertest';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
-const { mockEmit, mockTo, mockFetchSockets } = vi.hoisted(() => {
+const {
+  mockEmit, mockTo, mockFetchSockets, mockIn, mockLocalIn, mockSocketsJoin, mockSocketsLeave, mockLocalSocketsLeave,
+} = vi.hoisted(() => {
   const mockEmit = vi.fn();
   const mockTo = vi.fn().mockReturnValue({ emit: mockEmit });
+  // fetchSockets stays reachable on every operator so a regression to it is an
+  // explicit assertion failure, not a TypeError
   const mockFetchSockets = vi.fn().mockResolvedValue([]);
-  return { mockEmit, mockTo, mockFetchSockets };
+  const mockSocketsJoin = vi.fn();
+  const mockSocketsLeave = vi.fn();
+  const mockLocalSocketsLeave = vi.fn();
+  const mockIn = vi.fn().mockReturnValue({ fetchSockets: mockFetchSockets, socketsJoin: mockSocketsJoin, socketsLeave: mockSocketsLeave });
+  const mockLocalIn = vi.fn().mockReturnValue({ fetchSockets: mockFetchSockets, socketsLeave: mockLocalSocketsLeave });
+  return { mockEmit, mockTo, mockFetchSockets, mockIn, mockLocalIn, mockSocketsJoin, mockSocketsLeave, mockLocalSocketsLeave };
 });
 
 // Mock auth middleware — always injects a test user
@@ -39,11 +48,8 @@ vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn().mockReturnValue({
     to: mockTo,
     fetchSockets: mockFetchSockets,
-    in: vi.fn().mockReturnValue({
-      fetchSockets: vi.fn().mockResolvedValue([]),
-      socketsJoin: vi.fn(),
-      socketsLeave: vi.fn(),
-    }),
+    in: mockIn,
+    local: { in: mockLocalIn },
   }),
 }));
 
@@ -669,6 +675,61 @@ describe('DM routes — DELETE /:conversationId', () => {
     const res = await request(app).delete('/api/v1/dm/conv-nonexistent');
 
     expect(res.status).toBe(404);
+  });
+
+  describe('room cleanup', () => {
+    const deleteConversation = () => {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
+      vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
+      return request(createApp()).delete('/api/v1/dm/conv-1');
+    };
+
+    it('makes every socket in the DM room leave it, on this node and then cluster-wide', async () => {
+      const res = await deleteConversation();
+
+      expect(res.status).toBe(200);
+      expect(mockLocalIn).toHaveBeenCalledTimes(1);
+      expect(mockLocalIn).toHaveBeenCalledWith(['dm:conv-1']);
+      expect(mockLocalSocketsLeave).toHaveBeenCalledTimes(1);
+      expect(mockLocalSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
+      expect(mockIn).toHaveBeenCalledTimes(1);
+      expect(mockIn).toHaveBeenCalledWith(['dm:conv-1']);
+      expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
+      expect(mockSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
+      expect(mockSocketsJoin).not.toHaveBeenCalled();
+    });
+
+    it('applies the local form first: the Redis adapter applies the cluster form on this node only on its echo', async () => {
+      await deleteConversation();
+
+      expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
+    });
+
+    it('leaves the room after the dm:conversation:deleted notice', async () => {
+      await deleteConversation();
+
+      const noticeIndex = mockEmit.mock.calls.findIndex(([event]) => event === 'dm:conversation:deleted');
+      expect(noticeIndex).toBeGreaterThanOrEqual(0);
+      const noticeOrder = mockEmit.mock.invocationCallOrder[noticeIndex];
+      expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
+      expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
+    });
+
+    it('never fetches the sockets: a fetch waits on every node and throws when one peer is unresponsive', async () => {
+      // The conversation is already deleted when the room is cleared: a fetch
+      // timing out there answered 500 for a delete that had happened
+      mockFetchSockets.mockRejectedValue(new Error('timeout reached while waiting for fetchSockets response'));
+      try {
+        const res = await deleteConversation();
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ success: true, message: 'Conversation deleted' });
+        expect(mockFetchSockets).not.toHaveBeenCalled();
+      } finally {
+        mockFetchSockets.mockResolvedValue([]);
+      }
+    });
   });
 });
 

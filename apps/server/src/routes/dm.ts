@@ -570,11 +570,16 @@ dmRouter.delete('/:conversationId', rateLimitInteract, async (req: Request<{ con
     const io = getIO();
     io.to(`dm:${conversationId}`).emit('dm:conversation:deleted', { conversationId });
 
-    // Remove all sockets from the DM room
-    const sockets = await io.in(`dm:${conversationId}`).fetchSockets();
-    for (const s of sockets) {
-      s.leave(`dm:${conversationId}`);
-    }
+    // Remove all sockets from the DM room. An adapter-wide room operation,
+    // never a `fetchSockets()` round trip: it waits for every node's reply and
+    // throws after 5 s when one peer is unresponsive, which answered 500 for a
+    // conversation already deleted above. Local form first, then cluster-wide
+    // (see utils/memberBroadcast.ts: the Redis adapter applies the cluster
+    // form on this node only when its own message comes back). Published after
+    // the notice on the same Redis connection, so peers deliver it first.
+    const rooms = [`dm:${conversationId}`];
+    io.local.in(rooms).socketsLeave(rooms);
+    io.in(rooms).socketsLeave(rooms);
 
     res.json({ success: true, message: 'Conversation deleted' });
   } catch (err) {
