@@ -744,14 +744,22 @@ describe('e2eStore actions across a logout', () => {
     getMockImplementation(): ((...args: unknown[]) => unknown) | undefined;
     mockImplementationOnce(fn: (...args: unknown[]) => unknown): unknown;
   };
-  /** Make the next call to `fn` wait for `gate`, then answer as it normally would. */
-  const holdOnce = (fn: unknown, gate: Promise<void>) => {
+  /**
+   * Make the next call to `fn` wait for `gate`, then answer as it normally
+   * would. Resolves once that call is made: the logout has to land while the
+   * action waits THERE, or an earlier check is what stops it.
+   */
+  const holdOnce = (fn: unknown, gate: Promise<void>): Promise<void> => {
     const mock = fn as HeldMock;
     const answer = mock.getMockImplementation();
+    let reached!: () => void;
+    const isReached = new Promise<void>((resolve) => (reached = resolve));
     mock.mockImplementationOnce(async (...args: unknown[]) => {
+      reached();
       await gate;
       return answer?.(...args);
     });
+    return isReached;
   };
   const data = () =>
     Object.fromEntries(Object.entries(useE2EStore.getState()).filter(([, value]) => typeof value !== 'function'));
@@ -772,6 +780,14 @@ describe('e2eStore actions across a logout', () => {
     { action: 'createKeyBackup', held: () => service.createKeyBackup, run: () => store().createKeyBackup(USER) },
     { action: 'deleteKeyBackup', held: () => service.deleteKeyBackup, run: () => store().deleteKeyBackup(USER) },
     { action: 'restoreKeyBackup', held: () => service.restoreKeyBackup, run: () => store().restoreKeyBackup(USER, RECOVERY_KEY) },
+    // the same actions overtaken at a LATER await, after their first one returned
+    { action: 'refreshDeviceList, at its last read', held: () => service.isAccountVerified, run: () => store().refreshDeviceList(USER, PEER) },
+    { action: 'acknowledgeOwnDevices, at the status read', held: () => service.deviceListStatus, run: () => store().acknowledgeOwnDevices(USER, ['laptop']) },
+    { action: 'revokeDevice, at the status read', held: () => service.deviceListStatus, run: () => store().revokeDevice(USER, 'laptop') },
+    { action: 'approveDevice, at the device reload', held: () => service.listOwnDevices, run: () => store().approveDevice(USER, 'laptop') },
+    { action: 'resetAccountIdentity, at the backup read', held: () => service.keyBackupInfo, run: () => store().resetAccountIdentity(USER) },
+    { action: 'restoreKeyBackup, at the status read', held: () => service.deviceListStatus, run: () => store().restoreKeyBackup(USER, RECOVERY_KEY) },
+    { action: 'createKeyBackup, at the backup read', held: () => service.keyBackupInfo, run: () => store().createKeyBackup(USER) },
   ];
 
   it.each(cases)('$action applies nothing once a logout overtook it', async ({ held, run }) => {
@@ -791,8 +807,9 @@ describe('e2eStore actions across a logout', () => {
 
     let open!: () => void;
     const gate = new Promise<void>((resolve) => (open = resolve));
-    holdOnce(held(), gate);
+    const reached = holdOnce(held(), gate);
     const pending = run();
+    await reached;
 
     // logout, then the next session has state of its own
     stopE2EDeviceListWatch();
