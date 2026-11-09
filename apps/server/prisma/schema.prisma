@@ -1,6 +1,17 @@
+// relationJoins: an include/select of relations is ONE SQL statement (LEFT
+// JOIN LATERAL + JSONB), the default strategy once the feature is on, EXCEPT
+// when the query or any relation in it has a `cursor`: Prisma then falls
+// back to one query per relation (prisma/orm#23564). Loaded that way,
+// sibling relations run at once, and inside a transaction (interactive,
+// array form, or the one Prisma opens around a write that returns
+// relations) they all land on its single pg connection, which pg 8
+// deprecates and pg 9 removes. On a shape with two or more relations, never
+// pass relationLoadStrategy: 'query', nor a cursor inside a transaction:
+// __tests__/utils/transactionRelationLoads.test.ts.
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
