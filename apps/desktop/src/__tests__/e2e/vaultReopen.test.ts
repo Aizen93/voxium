@@ -49,6 +49,16 @@ describe('vault survives the browser closing its connection', () => {
     expect((await vault.getPlaintext('m2'))?.text).toBe('written after the connection died');
   });
 
+  it('reopens for the plaintext scan too (it used to bypass the reopen path)', async () => {
+    const vault = makeVault();
+    await vault.open();
+    await vault.putPlaintext('m5', { conversationId: 'c-scan', text: 'found by the scan' });
+    (vault as unknown as { db: IDBDatabase | null }).db!.close();
+
+    const found = await vault.listPlaintexts('c-scan');
+    expect(found.map((f) => f.entry.text)).toEqual(['found by the scan']);
+  });
+
   it('keeps working across repeated hide/restore cycles', async () => {
     // The reported symptom recurred every time the window was hidden, so once
     // is not enough — the recovery must not be a one-shot.

@@ -644,24 +644,28 @@ export class E2EVault {
    * cheap, and it avoids a schema migration for a dedicated index.
    */
   listPlaintexts(conversationId: string): Promise<Array<{ messageId: string; entry: CachedPlaintext }>> {
-    return new Promise((resolve, reject) => {
-      const results: Array<{ messageId: string; entry: CachedPlaintext }> = [];
-      const range = IDBKeyRange.bound('pt:', `pt:${KEY_MAX}`);
-      const cursorReq = this.store('readonly').openCursor(range);
-      cursorReq.onerror = () => reject(cursorReq.error ?? new Error('IndexedDB cursor failed'));
-      cursorReq.onsuccess = () => {
-        const cursor = cursorReq.result;
-        if (!cursor) {
-          resolve(results);
-          return;
-        }
-        const entry = cursor.value as CachedPlaintext;
-        if (entry.conversationId === conversationId && !entry.failed) {
-          results.push({ messageId: String(cursor.key).slice(3), entry });
-        }
-        cursor.continue();
-      };
-    });
+    // Through withStore like every other access: a connection the browser
+    // dropped is reopened, and a vault closed on purpose is not
+    return this.withStore('readonly', (store) =>
+      new Promise((resolve, reject) => {
+        const results: Array<{ messageId: string; entry: CachedPlaintext }> = [];
+        const range = IDBKeyRange.bound('pt:', `pt:${KEY_MAX}`);
+        const cursorReq = store.openCursor(range);
+        cursorReq.onerror = () => reject(cursorReq.error ?? new Error('IndexedDB cursor failed'));
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) {
+            resolve(results);
+            return;
+          }
+          const entry = cursor.value as CachedPlaintext;
+          if (entry.conversationId === conversationId && !entry.failed) {
+            results.push({ messageId: String(cursor.key).slice(3), entry });
+          }
+          cursor.continue();
+        };
+      })
+    );
   }
 
   /**

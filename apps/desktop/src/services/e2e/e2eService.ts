@@ -525,8 +525,13 @@ export class E2EService {
       this.initInFlight = this.initializeOnce()
         .catch((err: unknown) => {
           // Whatever stopped a run that a dispose overtook (a closed vault, a
-          // refused request), the cause is the dispose.
-          throw this.disposed && !(err instanceof E2EServiceDisposedError) ? new E2EServiceDisposedError() : err;
+          // refused request), the caller is told it was the dispose; what it
+          // actually was is logged, since that is the only place it survives.
+          if (this.disposed && !(err instanceof E2EServiceDisposedError)) {
+            console.warn('e2e: initialization stopped after a dispose:', errText(err));
+            throw new E2EServiceDisposedError();
+          }
+          throw err;
         })
         .finally(() => {
           this.initInFlight = null;

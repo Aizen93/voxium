@@ -4116,6 +4116,27 @@ describe('E2EService — lifecycle', () => {
     expect(recorder.writes.filter((w) => w === 'PUT /e2e/master-key')).toHaveLength(1);
   });
 
+  it('logs what actually stopped a run a dispose overtook before reporting the dispose', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const flaky = failingOnce(server.apiFor(userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/devices/me?'));
+    const gate = holdingApi(flaky.api as unknown as ReturnType<Server['apiFor']>, nthGetOfOwnStatus(1));
+    const service = serviceOver(userId, gate.api);
+    flaky.arm(); // the held request then fails on its own as well
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      const init = service.initialize();
+      await gate.held;
+      void service.dispose();
+      gate.release();
+      await expect(init).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/503: service unavailable/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('lets a caller try again after an initialization that failed', async () => {
     uniq++;
     const server = createFakeServer();
