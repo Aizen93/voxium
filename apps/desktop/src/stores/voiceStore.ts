@@ -2518,7 +2518,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         });
       }
     } catch (err) {
-      console.warn('[DMVoice] Device-list pre-warm setup failed:', err);
+      // the account signed out during the imports above: nothing to warm
+      const { isE2ESessionEnded } = await import('../services/e2e/session');
+      if (isE2ESessionEnded(err)) console.debug('[DMVoice] Device-list pre-warm skipped: the session ended');
+      else console.warn('[DMVoice] Device-list pre-warm setup failed:', err);
     }
 
     if (generation !== voiceSessionGeneration) return; // superseded during the async imports

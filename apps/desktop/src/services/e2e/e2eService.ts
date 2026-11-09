@@ -66,6 +66,7 @@ import {
   vaultDbName,
 } from './vault';
 import { pinSecure } from '../../utils/securePins';
+import { currentE2ESessionUser } from './session';
 
 interface OneTimeKeyPair {
   keyId: string;
@@ -3593,17 +3594,25 @@ export class E2EService {
 let activeService: E2EService | null = null;
 let activeUserId: string | null = null;
 
+/**
+ * The signed-in account's service, created on first use. Refused
+ * (E2EServiceDisposedError) for anyone else: a caller that read its user id
+ * before an await can come back after that user signed out, and a service made
+ * for it would open, after an account deletion recreate, the vault of an
+ * account nobody is signed in to.
+ */
 export function getE2EService(userId: string): E2EService {
-  if (!activeService || activeUserId !== userId) {
-    activeService?.dispose();
-    activeService = new E2EService(userId);
-    activeUserId = userId;
-  }
+  if (activeService && activeUserId === userId) return activeService;
+  const signedIn = currentE2ESessionUser();
+  if (signedIn !== undefined && signedIn !== userId) throw new E2EServiceDisposedError();
+  void activeService?.dispose();
+  activeService = new E2EService(userId);
+  activeUserId = userId;
   return activeService;
 }
 
 export function disposeE2EService(): void {
-  activeService?.dispose();
+  void activeService?.dispose();
   activeService = null;
   activeUserId = null;
 }

@@ -229,6 +229,24 @@ describe('participant lifecycle', () => {
     expect(encryptToDevice).not.toHaveBeenCalled();
   });
 
+  it('a key step the logout overtook ends quietly instead of reporting a key failure', async () => {
+    await begunSession();
+    const ended = new Error('E2E service disposed');
+    ended.name = 'E2EServiceDisposedError';
+    fetchChannelDeviceLists.mockRejectedValueOnce(ended);
+    const error = vi.spyOn(console, 'error');
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      confirmMembership(CH);
+      await flush();
+      expect(error.mock.calls.flat().map(String).join('\n')).not.toMatch(/Key chain step failed/);
+      expect(debug).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+      debug.mockRestore();
+    }
+  });
+
   it('confirmMembership removes peers the endpoint no longer lists and rotates fresh', async () => {
     await begunSession();
     onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });

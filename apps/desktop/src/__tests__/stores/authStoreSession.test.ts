@@ -52,6 +52,7 @@ import {
   _resetSessionRestoreForTests,
 } from '../../stores/authStore';
 import { useServerStore } from '../../stores/serverStore';
+import { currentE2ESessionUser } from '../../services/e2e/session';
 
 const me = { id: 'u-1', username: 'alice', emailVerified: true, consentRequired: false };
 
@@ -829,5 +830,15 @@ describe('authStore.uploadAvatar — the presign is signed for the processed ima
 
     await expect(useAuthStore.getState().uploadAvatar(original)).rejects.toThrow('S3 upload failed: 403');
     expect(api.patch).not.toHaveBeenCalled();
+  });
+});
+
+describe('authStore — the signed-in user is the E2E session', () => {
+  it('reports the current user to getE2EService, and nobody once signed out', () => {
+    // getE2EService refuses a service for anyone else (services/e2e/session.ts)
+    useAuthStore.setState({ user: me as never });
+    expect(currentE2ESessionUser()).toBe('u-1');
+    useAuthStore.setState({ user: null });
+    expect(currentE2ESessionUser()).toBeNull();
   });
 });

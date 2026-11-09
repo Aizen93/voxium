@@ -24,6 +24,7 @@ import {
   type VoiceUser,
 } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError } from './e2eService';
+import { isE2ESessionEnded } from './session';
 import { getSocket } from '../socket';
 import {
   createFrameCryptoSession,
@@ -168,6 +169,13 @@ function enqueue(state: SecureVoiceSessionState, step: () => Promise<void>): voi
     if (state.ended) return;
     await step();
   }).catch((err) => {
+    // A step the logout overtook (the service it held was disposed, or the
+    // account is no longer the signed-in one) is not a key failure: the call
+    // ends with the session anyway.
+    if (isE2ESessionEnded(err)) {
+      console.debug('[SecureVoice] Key chain step ended with the session:', err instanceof Error ? err.message : err);
+      return;
+    }
     console.error('[SecureVoice] Key chain step failed:', err);
   });
 }

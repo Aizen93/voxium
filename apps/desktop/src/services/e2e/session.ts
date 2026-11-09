@@ -15,3 +15,19 @@
 export function isE2ESessionEnded(err: unknown): boolean {
   return err instanceof Error && (err.name === 'E2EServiceDisposedError' || err.name === 'E2EVaultClosedError');
 }
+
+let sessionUser: (() => string | null) | null = null;
+
+/**
+ * Who is signed in, as getE2EService asks it. authStore registers its user
+ * here (it imports the E2E service, so the service cannot import it back);
+ * `null` unregisters.
+ */
+export function registerE2ESessionUser(source: (() => string | null) | null): void {
+  sessionUser = source;
+}
+
+/** The signed-in user's id, null when signed out, undefined when nothing registered a source. */
+export function currentE2ESessionUser(): string | null | undefined {
+  return sessionUser ? sessionUser() : undefined;
+}
