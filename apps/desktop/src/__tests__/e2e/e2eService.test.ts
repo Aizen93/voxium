@@ -4450,6 +4450,104 @@ describe('E2EService — lifecycle', () => {
       expect(await pendingIn(alice)).toHaveLength(0);
     });
 
+    /** The fake's client with the claimed pages rewritten on their way back. */
+    const mangledClaims = (base: ReturnType<Server['apiFor']>, rewrite: (res: { data: { data?: { shares?: unknown[] } } }) => unknown) => ({
+      ...base,
+      async get(url: string) {
+        const res = (await base.get(url)) as { data: { data?: { shares?: unknown[] } } };
+        return url.startsWith('/e2e/keyshares') && (res.data.data?.shares?.length ?? 0) > 0 ? rewrite(res) : res;
+      },
+    }) as unknown as ReturnType<Server['apiFor']>;
+    const withJunk = (res: { data: { data?: { shares?: unknown[] } } }) => {
+      res.data.data!.shares = [null, 42, ...(res.data.data!.shares ?? [])];
+      return res;
+    };
+
+    /** Alice was away while Bob wrote; returns what her next start needs. */
+    async function bobWroteWhileAliceWasAway(text: string) {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, text);
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      return { server, alice, bob, message };
+    }
+
+    it('skips a malformed element of a claimed page and imports the rest of it', async () => {
+      const { server, alice, message } = await bobWroteWhileAliceWasAway('next to junk');
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        const again = serviceOver(alice.userId, mangledClaims(server.apiFor(alice.userId), withJunk), {
+          keyProvider: alice.keyProvider,
+          vaultNamespace: alice.vaultNamespace,
+        });
+        await again.initialize();
+        expect((await again.decryptMessage(message)).text).toBe('next to junk');
+        expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/malformed key share/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it.each([
+      ['a malformed element', withJunk, 1],
+      ['no page at all', () => ({ data: {} }), 0],
+    ])('writes a late answer with %s as far as it goes, and releases the kept connection', async (_what, rewrite, kept) => {
+      const { server, alice, message } = await bobWroteWhileAliceWasAway('late and messy');
+      const gate = holdingApi(
+        mangledClaims(server.apiFor(alice.userId), rewrite),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const restarted = new E2EService(alice.userId, {
+        api: gate.api as unknown as E2EServiceOptions['api'],
+        keyProvider: alice.keyProvider,
+        wasmInput: wasmBytes,
+        vaultNamespace: alice.vaultNamespace,
+        deviceListCacheMs: 0,
+        teardownDeadlineMs: 50,
+      });
+      await restarted.initialize();
+      await gate.held;
+      await restarted.dispose();
+      gate.release();
+
+      const vault = (restarted as unknown as { vault: { lateDb: IDBDatabase | null } }).vault;
+      await vi.waitFor(() => expect(vault.lateDb).toBeNull());
+      expect(await pendingIn(alice)).toHaveLength(kept);
+      if (kept) {
+        const again = restart(server, alice);
+        await again.service.initialize();
+        expect((await again.service.decryptMessage(message)).text).toBe('late and messy');
+      }
+    });
+
+    it('keeps a share whose session could not be stored (a full disk), for the next start', async () => {
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept through a full disk');
+      const tight = restart(server, alice);
+      const tightVault = (tight.service as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(tightVault, 'putInboundGroupSession').mockRejectedValueOnce(
+        new DOMException('The quota has been exceeded.', 'QuotaExceededError')
+      );
+      await tight.service.initialize();
+      await tight.service.claimMasterTransfers(); // queued behind the start-up claim
+      expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
+      // a later claim of the same start leaves it alone: this start's Olm state already moved past it
+      await missOn(tight, bob.userId, ['cXVvdGE']);
+      expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
+      await tight.service.dispose();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('kept through a full disk');
+      expect(await pendingIn(alice)).toHaveLength(0);
+    });
+
     it('drops a kept share once its session reached this device another way', async () => {
       const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
       const [kept] = await pendingIn(alice);

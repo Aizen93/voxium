@@ -226,6 +226,15 @@ class E2EShareDeferredError extends Error {
   }
 }
 
+/**
+ * The browser's storage failed a write (a full disk, a storage error): says
+ * nothing about the data being written. Not E2EVaultClosedError, which a
+ * dispose causes and callers check for first.
+ */
+function isStorageFailure(err: unknown): boolean {
+  return typeof DOMException !== 'undefined' && err instanceof DOMException;
+}
+
 /** A 403 or 404 from the server: an answer about the request, not about the connection. */
 function isDefinitiveRefusal(err: unknown): boolean {
   const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
@@ -305,6 +314,31 @@ function pendingShareKey(share: Record<string, unknown>): string {
   const createdAt = typeof share.createdAt === 'string' ? share.createdAt : '';
   const id = typeof share.id === 'string' ? share.id : generateDeviceId();
   return `pks:${createdAt}|${id}`;
+}
+
+/**
+ * A claimed page as vault entries. Tolerant by necessity: the server deleted
+ * the page when it answered, so one malformed element (logged and skipped)
+ * must not cost the others, and an answer without a page is an empty one.
+ * `served` is what the server sent, malformed elements included.
+ */
+function claimedPageEntries(res: unknown): {
+  served: number;
+  entries: Array<{ key: string; record: PendingKeyShare }>;
+} {
+  const shares = (res as { data?: { data?: { shares?: unknown } } } | null)?.data?.data?.shares;
+  const page: unknown[] = Array.isArray(shares) ? shares : [];
+  const receivedAt = Date.now();
+  const entries: Array<{ key: string; record: PendingKeyShare }> = [];
+  for (const element of page) {
+    if (element === null || typeof element !== 'object' || Array.isArray(element)) {
+      console.warn('e2e: skipping a malformed key share in a claimed page');
+      continue;
+    }
+    const share = element as Record<string, unknown>;
+    entries.push({ key: pendingShareKey(share), record: { share, attempts: 0, receivedAt } });
+  }
+  return { served: page.length, entries };
 }
 
 /** Client-generated, stable per install (D2): 22 chars of base64url randomness. */
@@ -457,6 +491,8 @@ export class E2EService {
   private missingSessions = new Map<string, number>();
   /** Kept shares whose refused look-up was already counted in this start (see processPendingShares). */
   private deferralsCounted = new Set<string>();
+  /** Senders whose shares wait for the next start after a storage failure (see processPendingShares). */
+  private sendersHeldUntilRestart = new Set<string>();
   private deviceListListeners = new Set<(userId: string) => void>();
 
   constructor(
@@ -2958,24 +2994,25 @@ export class E2EService {
           .finally(() => {
             this.claimPageInFlight = false;
           });
-        const shares = (res.data.data as { shares?: unknown[] }).shares;
-        const page = Array.isArray(shares) ? shares : [];
-        // The server has deleted these: written before anything else is done
-        const receivedAt = Date.now();
-        const entries = page.map((share) => ({
-          key: pendingShareKey(share as Record<string, unknown>),
-          record: { share: share as Record<string, unknown>, attempts: 0, receivedAt },
-        }));
         if (this.tornDown) {
           // Torn down while the answer was on its way: write it raw on the
           // connection the teardown kept for it, for the next start, and stop.
-          await this.vault.writePendingSharesLate(entries);
+          // The release covers the parsing too: a malformed answer must not
+          // keep that connection open.
+          try {
+            await this.vault.writePendingSharesLate(claimedPageEntries(res).entries);
+          } finally {
+            this.vault.releaseLateConnection();
+          }
           throw new E2EServiceDisposedError();
         }
-        if (page.length === 0) break;
+        // The server has deleted these: written before anything else is done
+        const { served, entries } = claimedPageEntries(res);
+        if (served === 0) break;
         await this.vault.putPendingShares(entries);
         imported += await this.processPendingShares(entries, deferredSenders, false);
-        if (page.length < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
+        // the server's count, malformed elements included, decides whether more pages wait
+        if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
       }
       return imported;
     })().finally(() => {
@@ -3000,6 +3037,10 @@ export class E2EService {
     for (const { key, record } of entries) {
       const { share } = record;
       const sender = typeof share.senderUserId === 'string' ? share.senderUserId : '';
+      // Held since a storage failure this start: the Olm state in memory has
+      // moved past their messages, which decrypt again only from the state on
+      // disk, at the next start. Kept as they are, nothing counted.
+      if (this.sendersHeldUntilRestart.has(sender)) continue;
       try {
         if (retry && typeof share.sessionId === 'string' && (await this.loadInbound(share.sessionId))) {
           await this.vault.deletePendingShare(key);
@@ -3041,6 +3082,13 @@ export class E2EService {
         // The service went away under this run: what is left stays kept
         if (this.tornDown || err instanceof E2EServiceDisposedError || err instanceof E2EVaultClosedError) {
           throw err;
+        }
+        if (isStorageFailure(err)) {
+          // Nothing wrong with the share, only with the disk: kept with its
+          // Olm state unwritten, and its sender's shares held behind it.
+          this.sendersHeldUntilRestart.add(sender);
+          console.warn('e2e: keeping a key share whose session could not be stored (retried at the next start):', errText(err));
+          continue;
         }
         console.warn('e2e: discarding an unusable key share:', errText(err));
         await this.vault.deletePendingShare(key);
@@ -3118,11 +3166,12 @@ export class E2EService {
       return { imported, persistOlm: staged.persist };
     } catch (err) {
       // An unusable share is discarded, so the Olm state its message advanced
-      // is saved now. A run cut short (the service went away) saves nothing:
-      // the share stays kept and its message must still decrypt next time.
-      if (!(this.tornDown || err instanceof E2EServiceDisposedError || err instanceof E2EVaultClosedError)) {
-        await staged.persist();
-      }
+      // is saved now. A run cut short (the service went away) or a storage
+      // failure saves nothing: the share stays kept, and its message must
+      // still decrypt from the state on disk next time.
+      const keptForLater =
+        this.tornDown || err instanceof E2EServiceDisposedError || err instanceof E2EVaultClosedError || isStorageFailure(err);
+      if (!keptForLater) await staged.persist();
       throw err;
     }
   }

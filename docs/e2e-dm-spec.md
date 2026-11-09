@@ -467,16 +467,22 @@ newest version the id has shown in the same session, is refused (§9.1).
 
 Since the claim deletes, the client writes every claimed page to the vault
 (`pks:{createdAt}|{shareId}`, §7) before it processes any of it, and removes a
-share only once it is imported or found unusable. A share whose sender device
-is not pinned yet and whose device list cannot be read now (signed out,
+share only once it is imported or found unusable. A malformed element of a
+page is logged and skipped; the rest of the page is kept. A share whose sender
+device is not pinned yet and whose device list cannot be read now (signed out,
 offline, refused; an identity change is not this case) is kept and retried by
-the next claim, at the latest at the next start of the account, together with
-any later share from the same sender, which may need the Olm session the first
-one sets up. A kept share is dropped once its session reached the device
-another way, or once the server has refused the look-up of its sender
-(403/404) in five starts of the client; a failure that says nothing about the
-sender (signed out, rate limited, offline) is never counted, and one start
-counts once however many claims it makes. Disposing the service
+the next claim, at the latest at the next start of the account. Later shares
+from the same sender wait behind it, since they may need the Olm session it
+sets up; they are not counted while they wait, and once the first one is
+dropped each is counted on its own. A kept share is dropped once its session
+reached the device another way, or once the server has refused the look-up of
+its sender (403/404) in five starts of the client, one start counting once
+however many claims it makes. A failure that says nothing about the sender
+(401, 429, 5xx, offline) is never counted, so such a share stays kept until
+the look-up succeeds. A storage failure while its session is written (a full
+disk) keeps the share too, with the Olm state its message advanced left
+unwritten; it and its sender's later shares wait for the next start, where
+that message decrypts again from the state on disk. Disposing the service
 (logout, account switch) while a claim is in flight lets the claim finish
 the page it holds, for at most 10 s; whatever it had not processed by then
 stays kept, and a page whose answer only arrives after that is still written,
