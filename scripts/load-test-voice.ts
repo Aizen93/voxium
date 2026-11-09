@@ -19,6 +19,8 @@
  * holds the clients 60 s after the last one joined, runs the same cleanup and
  * exits by itself: 0, or 1 when a user failed to join with media. A signal
  * still stops it earlier. A failure at any step also restores the limits.
+ * The hold is 1 to 86400 s (a day); each request of the cleanup gives up
+ * after 10 s, so a hung backend cannot keep the run alive.
  */
 
 import axios from 'axios';
@@ -54,12 +56,19 @@ const PASSWORD = 'password123';
 const SEED_EMAIL = 'alice@example.com';
 const BATCH = 10;
 
+// A day. setTimeout takes at most 2^31 - 1 ms (about 24.8 days) and fires at
+// once above it, so the bound also keeps the timer meaningful.
+const MAX_HOLD_SECONDS = 86_400;
+// Each call on the way out (the seed sign-in, every limit reset) is bounded:
+// a hung backend must not keep an unattended run alive
+const CLEANUP_REQUEST_TIMEOUT_MS = 10_000;
+
 /** Seconds to hold the clients before the automatic cleanup; null = until a signal. */
 function parseHoldSeconds(raw: string | undefined): number | null {
   if (raw === undefined || raw.trim() === '') return null;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    console.error(`LOAD_TEST_HOLD_SECONDS must be a positive whole number of seconds, got "${raw}"`);
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_HOLD_SECONDS) {
+    console.error(`LOAD_TEST_HOLD_SECONDS must be a whole number of seconds from 1 to ${MAX_HOLD_SECONDS}, got "${raw}"`);
     process.exit(1);
   }
   return value;
@@ -103,14 +112,15 @@ const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemp
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-async function login(email: string): Promise<{ token: string; userId: string }> {
-  const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD });
+/** `timeoutMs` bounds each request (0, axios' default, waits forever). */
+async function login(email: string, timeoutMs = 0): Promise<{ token: string; userId: string }> {
+  const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD }, { timeout: timeoutMs });
   const r = data.data || data;
   // Accounts from runs before consent-at-signup existed are refused every
   // functional route and the socket until they accept (CNIL/GDPR gate) —
   // do what a real client does on its consent screen. Idempotent.
   if (r.user?.consentRequired) {
-    await axios.post(`${API}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, h(r.accessToken));
+    await axios.post(`${API}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, { ...h(r.accessToken), timeout: timeoutMs });
   }
   return { token: r.accessToken, userId: r.user.id };
 }
@@ -136,8 +146,7 @@ async function resetRateLimits(token: string): Promise<void> {
   const order = [...LIMITS_TO_RAISE.filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
   for (const name of order) {
     try {
-      // bounded: this runs on the way out, a hung backend must not hold it
-      await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, { ...h(token), timeout: 10000 });
+      await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, { ...h(token), timeout: CLEANUP_REQUEST_TIMEOUT_MS });
     } catch (err) {
       console.warn(`  could not restore '${name}' (reset it from the admin dashboard): ${errorText(err)}`);
     }
@@ -314,10 +323,11 @@ function disconnectAll(): void {
 async function restoreRateLimits(): Promise<void> {
   if (!limitsRaised) return;
   console.log('Restoring rate limits...');
-  // A fresh token: the one from the start may have expired during a long hold
+  // A fresh token: the one from the start may have expired during a long hold.
+  // Bounded like the resets; a timeout falls back to the first token.
   let token = seedToken;
   try {
-    token = (await login(SEED_EMAIL)).token;
+    token = (await login(SEED_EMAIL, CLEANUP_REQUEST_TIMEOUT_MS)).token;
   } catch (err) {
     console.warn(`  could not sign the seed user in again (${errorText(err)}); trying the first token`);
   }
