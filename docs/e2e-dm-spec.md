@@ -150,6 +150,9 @@ vodozemac, which rejects pre-key messages not created by that identity.
 ### 4.4 Trust model
 
 Trust-on-first-use: the first identity seen for a peer is pinned in the vault.
+An empty answer (no device, no account key: an account that has not started
+the app yet) is not an identity, so it is never the baseline; the first device
+list that names a device or an account key is (§12.5).
 Safety-number comparison (§8) upgrades a pin to *verified*. Any later change
 is a hard error surfaced in the UI (shield-alert badge + warning modal) and
 requires explicit "Accept new keys". Accepting re-pins (unverified) and drops
@@ -206,7 +209,7 @@ Per account, IndexedDB `voxium-e2e-{userId}` (`services/e2e/vault.ts`):
 | `account` | Olm account pickle (encrypted **inside vodozemac**, ChaCha20-Poly1305, pickle key) |
 | `session:{peerUserId}` | Olm session pickle (same encryption) |
 | `identity:{peerUserId}:{deviceId}` | pinned `{curve25519Key, ed25519Key, verified}`, per device |
-| `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5) |
+| `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5); first written by the first list that names a device or an account key |
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
 | `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
 | `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
@@ -503,9 +506,21 @@ read.
 - **The device set — not `listVersion` — drives the new-device warning.** A
   hostile server can replay or roll back the version; it cannot make the set it
   serves match what the user acknowledged.
+- **The baseline is the first list that names an identity.** The first time a
+  user's list names a device or an account key, it is recorded as seen and
+  acknowledged (TOFU, §4.4), with that account key as the acknowledged one
+  (§14.3). A list naming neither (the answer for an account that has not
+  started the app) records nothing, and a stored state holding neither is
+  treated as absent, so the account's first device is never reported as one
+  added since. A list naming an account key but no device does record a
+  baseline: devices that key signs later are trusted, unsigned ones warn.
 - The service emits device-list change events (`onDeviceListChanged`), which the
   store subscribes to, so a device appearing mid-conversation raises the warning
-  immediately instead of at the next component mount.
+  immediately instead of at the next component mount. The first recorded list
+  emits one too: nothing in it is new, but an unsigned device (this device
+  itself, on an install nobody has approved yet) is reported from that first
+  look, which may be the only one of the session. The store subscribes before
+  the service's `initialize()` resolves.
 - **This applies to our OWN account too.** A server that registers a device
   under the local user's id would otherwise receive every session key we fan
   out with no signal at all — the mirror image of peer injection. Unrecognised
