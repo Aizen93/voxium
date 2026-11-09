@@ -4145,6 +4145,23 @@ describe('E2EService — lifecycle', () => {
     }
   });
 
+  it('does not warn about the start-up tasks a dispose stopped', async () => {
+    // A logout right after sign-in ends the claim, the replenishment and the
+    // backup pass on purpose: that is not something to warn about.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      await alice.service.initialize();
+      await alice.service.dispose();
+      await flushQueue();
+      expect(warn.mock.calls.flat().map(String).join('\n')).not.toMatch(/E2E vault closed|E2E service disposed/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('lets a caller try again after an initialization that failed', async () => {
     uniq++;
     const server = createFakeServer();

@@ -66,7 +66,7 @@ import {
   vaultDbName,
 } from './vault';
 import { pinSecure } from '../../utils/securePins';
-import { currentE2ESessionUser } from './session';
+import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 
 interface OneTimeKeyPair {
   keyId: string;
@@ -622,20 +622,29 @@ export class E2EService {
     // decrypt miss, replenishment only matters for future peers, and the master
     // secret only arrives once another device approves this one.
     this.enqueue(() => this.claimKeyShares()).catch((err) => {
-      console.warn('e2e: initial key-share claim failed:', errText(err));
+      this.logStartupTaskFailure('initial key-share claim', err);
     });
     this.enqueue(() => this.claimMasterTransfersUnqueued()).catch((err) => {
-      console.warn('e2e: initial master-transfer claim failed:', errText(err));
+      this.logStartupTaskFailure('initial master-transfer claim', err);
     });
     this.replenishOneTimeKeys().catch((err) => {
-      console.warn('e2e: one-time key replenishment failed:', errText(err));
+      this.logStartupTaskFailure('one-time key replenishment', err);
     });
     // Catch up on sessions that arrived while this device was offline. Best
     // effort by design: history backup falling behind must never stop the
     // client working, and the next launch tries again.
     this.backupMessageKeys().catch((err) => {
-      console.warn('e2e: message-key backup pass failed:', errText(err));
+      this.logStartupTaskFailure('message-key backup pass', err);
     });
+  }
+
+  /** A start-up task a dispose stopped ended on purpose: not a warning. */
+  private logStartupTaskFailure(task: string, err: unknown): void {
+    if (this.disposed && isE2ESessionEnded(err)) {
+      console.debug(`e2e: ${task} stopped by a dispose`);
+      return;
+    }
+    console.warn(`e2e: ${task} failed:`, errText(err));
   }
 
   /**

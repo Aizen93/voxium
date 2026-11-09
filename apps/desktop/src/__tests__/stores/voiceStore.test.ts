@@ -1136,6 +1136,31 @@ describe('voiceStore', () => {
       expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
     });
 
+    it.each(['inbound', 'outbound'])(
+      'drops an %s signal the session’s end overtook quietly, without an error or an abort',
+      async (direction) => {
+        // logout already left the call: there is nothing to abort or report
+        useVoiceStore.getState().setLocalUserId('me');
+        useVoiceStore.setState({ dmCallConversationId: 'conv-1', dmCallPeerDevice: PEER, dmCallUsers: [peerUser] });
+        const ended = Object.assign(new Error('E2E service disposed'), { name: 'E2EServiceDisposedError' });
+        const error = vi.spyOn(console, 'error');
+        try {
+          if (direction === 'inbound') {
+            cc.decryptCallSignal.mockRejectedValue(ended);
+            useVoiceStore.getState().handleDMSignal('peer-x', '{"v":1,"e":"olm1","t":1,"b":"x"}');
+          } else {
+            cc.encryptCallSignal.mockRejectedValue(ended);
+            useVoiceStore.getState().createDMPeer('peer-x', true);
+          }
+          await flushAsync();
+          expect(error.mock.calls.flat().map(String).join('\n')).not.toMatch(/aborting call/);
+          expect(socketEmit()).not.toHaveBeenCalledWith('dm:voice:leave', 'conv-1');
+        } finally {
+          error.mockRestore();
+        }
+      }
+    );
+
     it('aborts when the peer joins without an E2E call device (un-updated client)', () => {
       useVoiceStore.getState().setLocalUserId('me');
       useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
