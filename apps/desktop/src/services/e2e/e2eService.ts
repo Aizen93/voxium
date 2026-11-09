@@ -3298,6 +3298,11 @@ export class E2EService {
       if (lastAttempt === undefined || Date.now() - lastAttempt >= SHARE_CLAIM_RETRY_MS) {
         this.missingSessions.set(sessionId, Date.now());
         await this.claimKeyShares();
+        // The claim may be the one a dispose was waiting for, and the teardown
+        // runs as it settles: go no further on what it freed. (Today the
+        // claim's promise wrapper settles a tick before the teardown starts;
+        // this does not rely on it.)
+        this.assertNotTornDown();
         entry = await this.loadInbound(sessionId);
       }
     }
