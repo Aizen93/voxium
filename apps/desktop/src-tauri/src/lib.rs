@@ -3,6 +3,10 @@ use std::io::Read;
 #[cfg(windows)]
 mod share_bar;
 
+// Ctrl-C in the dev console exits with 0 (debug builds on Windows only)
+#[cfg(all(windows, debug_assertions))]
+mod dev_console;
+
 /// Strict regex matching the server's VALID_S3_KEY_RE: (avatars|server-icons)/[word-dash]+.webp
 /// Prevents path traversal, null bytes, and unexpected characters in the key.
 fn is_valid_avatar_key(key: &str) -> bool {
@@ -377,6 +381,12 @@ pub fn run() {
         ])
         .setup(|app| {
             use tauri::Manager;
+
+            // `pnpm dev`'s Ctrl-C reaches this console process too: exit 0
+            // instead of STATUS_CONTROL_C_EXIT, which cargo and the Tauri CLI
+            // report as an error (dev_console.rs)
+            #[cfg(all(windows, debug_assertions))]
+            dev_console::exit_cleanly_on_ctrl_c();
 
             // System tray with "Show" and "Quit" menu
             // On Linux (GNOME/Wayland), tray creation can fail if libappindicator
