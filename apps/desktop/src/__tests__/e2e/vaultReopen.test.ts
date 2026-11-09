@@ -138,6 +138,36 @@ describe('a vault closed on purpose stays closed', () => {
     expect(internalsOf(vault).db).toBeNull();
   });
 
+  it('keeps one connection for a late write of key shares, and for nothing else', async () => {
+    const vault = makeVault();
+    await vault.open();
+    vault.closeKeepingConnectionForPendingShares();
+    await expect(vault.getPlaintext('m1')).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+
+    const record = { share: { id: 's1' }, attempts: 0, receivedAt: 1 };
+    await vault.writePendingSharesLate([{ key: 'pks:2026|s1', record }]);
+    // used once, then released
+    await expect(vault.writePendingSharesLate([{ key: 'pks:2026|s2', record }])).rejects.toMatchObject({
+      name: 'E2EVaultClosedError',
+    });
+
+    const reader = new E2EVault(`user-${n}`, { load: async () => btoa(String.fromCharCode(...new Uint8Array(32).fill(7))), save: async () => {} }, `reopen-${n}`);
+    await reader.open();
+    expect((await reader.listPendingShares()).map((p) => p.key)).toEqual(['pks:2026|s1']);
+    reader.close();
+  });
+
+  it('lets a version change take the kept connection at once (an account deletion waits on it)', async () => {
+    const vault = makeVault();
+    await vault.open();
+    const db = internalsOf(vault).db!;
+    vault.closeKeepingConnectionForPendingShares();
+    db.onversionchange!(new Event('versionchange') as IDBVersionChangeEvent);
+    await expect(
+      vault.writePendingSharesLate([{ key: 'pks:2026|s1', record: { share: {}, attempts: 0, receivedAt: 1 } }])
+    ).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+  });
+
   it('saves no fresh pickle key when it is closed while open() waits for the key store', async () => {
     n++;
     let answer!: (key: string | null) => void;

@@ -479,7 +479,9 @@ sender (signed out, rate limited, offline) is never counted, and one start
 counts once however many claims it makes. Disposing the service
 (logout, account switch) while a claim is in flight lets the claim finish
 the page it holds, for at most 10 s; whatever it had not processed by then
-stays kept.
+stays kept, and a page whose answer only arrives after that is still written,
+raw, on the one vault connection the teardown keeps open for it (released at
+once on a version change, i.e. an account deletion).
 
 ### 12.4 Rotation
 

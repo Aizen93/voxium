@@ -395,6 +395,8 @@ export class E2ERecoveryKeyFormatError extends Error {
 
 export class E2EService {
   private readonly api: typeof defaultApi;
+  /** The unguarded client: only for the key-share claim's GET (see claimKeyShares). */
+  private readonly client: typeof defaultApi;
   private readonly vault: E2EVault;
   private readonly wasmInput?: BufferSource;
   private readonly deviceListCacheMs: number;
@@ -449,6 +451,8 @@ export class E2EService {
    */
   private tornDown = false;
   private claimInFlight: Promise<number> | null = null;
+  /** A claim's GET is on its way: a teardown keeps one vault connection for its answer. */
+  private claimPageInFlight = false;
   /** session id → last time we drained the inbox looking for it */
   private missingSessions = new Map<string, number>();
   /** Kept shares whose refused look-up was already counted in this start (see processPendingShares). */
@@ -459,7 +463,8 @@ export class E2EService {
     private readonly userId: string,
     opts: E2EServiceOptions = {}
   ) {
-    this.api = this.guardedApi(opts.api ?? defaultApi);
+    this.client = opts.api ?? defaultApi;
+    this.api = this.guardedApi(this.client);
     this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace);
     this.wasmInput = opts.wasmInput;
     this.deviceListCacheMs = opts.deviceListCacheMs ?? DEVICE_LIST_CACHE_MS;
@@ -698,7 +703,11 @@ export class E2EService {
     for (const { session } of this.inbound.values()) session.free();
     this.inbound.clear();
     this.deviceListCache.clear();
-    this.vault.close();
+    // A claim's answer still on its way holds shares the server already
+    // deleted: one connection stays open for writing that page, raw, and
+    // nothing else (claimKeyShares). A version change closes it at once.
+    if (this.claimPageInFlight) this.vault.closeKeepingConnectionForPendingShares();
+    else this.vault.close();
     this.initialized = false;
   }
 
@@ -2926,18 +2935,38 @@ export class E2EService {
         // Disposed meanwhile: this page is imported (dispose() waits for it),
         // the next one stays on the server.
         if (this.disposed) break;
-        const res = await this.api.get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}`);
+        // The unguarded client: an answer that comes back after the teardown
+        // (the dispose deadline passed) still holds shares the server has
+        // deleted, and must reach the vault rather than be thrown away.
+        this.claimPageInFlight = true;
+        const res = await this.client
+          .get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}`)
+          .catch((err: unknown) => {
+            // no answer to write: the connection kept for one is not needed
+            if (this.tornDown) this.vault.releaseLateConnection();
+            throw err;
+          })
+          .finally(() => {
+            this.claimPageInFlight = false;
+          });
         const shares = (res.data.data as { shares?: unknown[] }).shares;
-        if (!Array.isArray(shares) || shares.length === 0) break;
+        const page = Array.isArray(shares) ? shares : [];
         // The server has deleted these: written before anything else is done
         const receivedAt = Date.now();
-        const entries = shares.map((share) => ({
+        const entries = page.map((share) => ({
           key: pendingShareKey(share as Record<string, unknown>),
           record: { share: share as Record<string, unknown>, attempts: 0, receivedAt },
         }));
+        if (this.tornDown) {
+          // Torn down while the answer was on its way: write it raw on the
+          // connection the teardown kept for it, for the next start, and stop.
+          await this.vault.writePendingSharesLate(entries);
+          throw new E2EServiceDisposedError();
+        }
+        if (page.length === 0) break;
         await this.vault.putPendingShares(entries);
         imported += await this.processPendingShares(entries, deferredSenders, false);
-        if (shares.length < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
+        if (page.length < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
       }
       return imported;
     })().finally(() => {

@@ -247,6 +247,12 @@ export class E2EVault {
   private closedForGood = false;
   /** Set by stopReopening() (or close()): a lost connection stays lost. */
   private reopenRefused = false;
+  /**
+   * The connection close() kept for one late write of claimed key shares (see
+   * closeKeepingConnectionForPendingShares); null once used, released, or
+   * taken away by the browser.
+   */
+  private lateDb: IDBDatabase | null = null;
 
   constructor(
     private readonly userId: string,
@@ -294,10 +300,13 @@ export class E2EVault {
     db.onclose = () => {
       console.warn('e2e: vault connection was closed by the browser — will reopen on next use');
       if (this.db === db) this.db = null;
+      if (this.lateDb === db) this.lateDb = null;
     };
     db.onversionchange = () => {
+      // also the kept connection, at once: an account deletion is waiting on it
       db.close();
       if (this.db === db) this.db = null;
+      if (this.lateDb === db) this.lateDb = null;
     };
     this.db = db;
     // Resolve the pickle key up-front (keychain access is async) so crypto
@@ -677,6 +686,38 @@ export class E2EVault {
    */
   stopReopening(): void {
     this.reopenRefused = true;
+  }
+
+  /**
+   * close(), except that the open connection is kept for ONE late write of
+   * claimed key shares (writePendingSharesLate), then released. Every other
+   * access fails exactly as after close(). For a teardown that runs while a
+   * claim's answer is still on its way: the server deletes the shares it
+   * returns, so that answer has to land somewhere when it comes.
+   */
+  closeKeepingConnectionForPendingShares(): void {
+    this.lateDb = this.db;
+    this.db = null; // so close() leaves it open
+    this.close();
+  }
+
+  /** The late write, on the kept connection; releases it either way. */
+  async writePendingSharesLate(entries: Array<{ key: string; record: PendingKeyShare }>): Promise<void> {
+    const db = this.lateDb;
+    if (!db) throw new E2EVaultClosedError(); // released, or the browser took it
+    try {
+      if (entries.length === 0) return;
+      const store = db.transaction(KV_STORE, 'readwrite').objectStore(KV_STORE);
+      await Promise.all(entries.map((e) => requestToPromise(store.put(e.record, e.key))));
+    } finally {
+      this.releaseLateConnection();
+    }
+  }
+
+  /** Drop the connection kept for a late write that will not come. */
+  releaseLateConnection(): void {
+    this.lateDb?.close();
+    this.lateDb = null;
   }
 
   /** Close for good (the service is being disposed); see E2EVaultClosedError. */

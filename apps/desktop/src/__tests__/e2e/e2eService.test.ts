@@ -4494,6 +4494,45 @@ describe('E2EService — lifecycle', () => {
       expect((await again.service.decryptMessage(message)).text).toBe('sent before the hang');
     });
 
+    it('writes a claim answer that arrives after the deadline, raw, for the next start', async () => {
+      // The server deleted the page when it answered; the teardown has run.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'answered after the deadline');
+
+      const gate = holdingApi(
+        server.apiFor(alice.userId),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const restarted = new E2EService(alice.userId, {
+        api: gate.api as unknown as E2EServiceOptions['api'],
+        keyProvider: alice.keyProvider,
+        wasmInput: wasmBytes,
+        vaultNamespace: alice.vaultNamespace,
+        deviceListCacheMs: 0,
+        teardownDeadlineMs: 50,
+      });
+      await restarted.initialize();
+      await gate.held;
+      expect(sharesFor(server, alice.userId)).toHaveLength(0); // deleted on read
+      await restarted.dispose(); // the deadline passes with the answer still on its way
+      expect((restarted as unknown as { tornDown: boolean }).tornDown).toBe(true);
+      gate.release();
+      await vi.waitFor(async () => expect(await pendingIn(alice)).toHaveLength(1));
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      expect((await again.service.decryptMessage(message)).text).toBe('answered after the deadline');
+    });
+
     it('refuses initialize() once disposed, while a claim still holds the teardown back', async () => {
       uniq++;
       const server = createFakeServer();
