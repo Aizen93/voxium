@@ -107,7 +107,7 @@ Solid lines are the topology the repository documents and production runs (one n
 |-----------|-----------|
 | Containers | Docker + Docker Compose |
 | Orchestration (future) | Kubernetes |
-| CI/CD | GitHub Actions (lint, typecheck, build, release, Docker) |
+| CI/CD | GitHub Actions (lint, typecheck, unit and E2E tests, build, a Rust check of the desktop shell on Windows, release, Docker) |
 | Monitoring (future) | Prometheus + Grafana |
 
 ---

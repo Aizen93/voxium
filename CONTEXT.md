@@ -4,8 +4,8 @@
 
 **Voxium** is a modern, source-available voice and text communication platform. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, a shared types package, and a Rust/WASM end-to-end encryption engine.
 
-**Version:** 2.1.1 (in preparation; 2.1.0 is the current release, 2026-11-07)
-**Date:** 2026-11-08
+**Version:** 2.1.1 (current release, 2026-11-08); 2.2.0 in preparation (stabilisation, late November 2026)
+**Date:** 2026-11-09
 
 ## Project Structure
 
@@ -88,7 +88,9 @@ Voxium/
 
 ## Recent Changes
 
-- **v2.1.1 (in preparation) — Desktop and Explore fixes** (2026-11-08) -- Desktop avatars and space icons display again (the release build merges the object-store origin into the Tauri CSP from `TAURI_ASSET_ORIGIN`); Explore is fresh at its next open (page-cache generation bumped by every listing change, still pull-based); WebView2's screen-share bar hidden on Windows (`share_bar.rs`); "Prepare your share" fills the window; the sharer's header line is red with a recording dot. PR #231.
+- **2.2.0 (in preparation) — November dependency round and a Rust CI job** (2026-11-09) -- Dependabot's round merged one PR at a time (i18next 26, dotenv 18, lucide-react 1.69, mediasoup 3.32.2, the grouped minors, actions/checkout 7, actions/cache 6, build-push-action 7, gitleaks-action 3, tauri-action re-pinned to the moved `v0.6.2` tag); the desktop shell's avatar download ported to ureq 3 (PR #236) with a new `desktop-shell.yml` workflow that compiles the Rust shell on Windows for every change under `apps/desktop/src-tauri` — no CI job compiled Rust before, so a Cargo bump could pass every check and fail at the release build; the server loads `.env` quietly and the voice e2e helper uses the kebab-case icon class (PR #235).
+
+- **v2.1.1 — Desktop and Explore fixes** (released 2026-11-08) -- Desktop avatars and space icons display again (the release build merges the object-store origin into the Tauri CSP from `TAURI_ASSET_ORIGIN`); Explore is fresh at its next open (page-cache generation bumped by every listing change, still pull-based); WebView2's screen-share bar hidden on Windows (`share_bar.rs`); "Prepare your share" fills the window; the sharer's header line is red with a recording dot. PR #231.
 
 - **v2.1.0 — Spaces navigation and wording** (released 2026-11-07) -- Two-zone spaces strip (Messages | Spaces) with pinned/auto modes; message search moved into the chat headers; categories with rails and visible create controls; two-column secure-channel dialog with member-directory pickers; 'space' wording in every user-facing string (11 locales, landing page, legal EN+FR), guarded by spaceWording.test.ts. Also in 2.1.0: space discovery, incoming webhooks, annotations and masks, registration abuse defenses.
 

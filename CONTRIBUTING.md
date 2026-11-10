@@ -90,6 +90,7 @@ Voxium/
 |-------------|-----|
 | `packages/shared/` | `pnpm build:shared` before consuming apps see changes |
 | `prisma/schema.prisma` | `cd apps/server && npx prisma migrate dev --name <name>` |
+| `apps/desktop/src-tauri/` (Rust or Cargo files) | `cd apps/desktop/src-tauri && cargo check --locked && cargo test --lib` — CI runs the same on Windows for every change there |
 | Any TypeScript | `pnpm typecheck` (automatic via pre-commit hook) |
 
 ### Commit Messages
