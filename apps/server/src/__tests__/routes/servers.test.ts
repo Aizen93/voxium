@@ -429,6 +429,40 @@ describe('Server Routes', () => {
       expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.$transaction.mock.invocationCallOrder[0]);
     });
 
+    it('orders channels and categories by position, then id, in the create read-back and the detail read', async () => {
+      // A tie on position must come back in one order whatever the relation
+      // load strategy (one joined statement or a query per relation)
+      const TIE_BROKEN = { orderBy: [{ position: 'asc' }, { id: 'asc' }] };
+      prismaMock.server.count.mockResolvedValue(0);
+      const txRead = vi.fn().mockResolvedValue({
+        id: 'srv-new', name: 'My Server', iconUrl: null, ownerId: 'user-1', invitesLocked: false, createdAt: new Date(),
+        channels: [], categories: [], _count: { members: 1 },
+      });
+      prismaMock.$transaction.mockImplementation(async (cb: Function) => cb({
+        server: { create: vi.fn().mockResolvedValue({ id: 'srv-new' }), findUniqueOrThrow: txRead },
+        category: { create: vi.fn().mockResolvedValue({ id: 'cat-1' }) },
+        channel: { createMany: vi.fn().mockResolvedValue({ count: 2 }) },
+        role: { create: vi.fn().mockResolvedValue({ id: 'role-everyone' }) },
+      }));
+
+      const created = await request(app).post('/api/v1/servers').set('Authorization', `Bearer ${makeToken()}`).send({ name: 'My Server' });
+      expect(created.status).toBe(201);
+      expect(txRead).toHaveBeenCalledWith(expect.objectContaining({
+        include: expect.objectContaining({ channels: TIE_BROKEN, categories: TIE_BROKEN }),
+      }));
+
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.server.findUnique.mockResolvedValueOnce({
+        id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1', invitesLocked: false, createdAt: new Date(),
+        channels: [], categories: [], roles: [], _count: { members: 3 },
+      });
+      const detail = await request(app).get('/api/v1/servers/srv-1').set('Authorization', `Bearer ${makeToken()}`);
+      expect(detail.status).toBe(200);
+      expect(prismaMock.server.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+        include: expect.objectContaining({ channels: TIE_BROKEN, categories: TIE_BROKEN }),
+      }));
+    });
+
     it('a refused creation (name invalid) bumps nothing', async () => {
       const res = await request(app).post('/api/v1/servers').set('Authorization', `Bearer ${makeToken()}`).send({ name: '' });
       expect(res.status).toBe(400);

@@ -215,13 +215,16 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
     const channel = await prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR UPDATE`;
 
-      const [existing, memberCount] = await Promise.all([
-        tx.channelMember.findUnique({
-          where: { channelId_userId: { channelId, userId: targetUserId } },
-          select: { userId: true },
-        }),
-        tx.channelMember.count({ where: { channelId } }),
-      ]);
+      // One after the other, never Promise.all: Prisma gives a findUnique its
+      // own batch, so issued together these two ran at once on the
+      // transaction's ONE pg connection (pg 8 deprecates it, pg 9 removes
+      // it); under the row lock there is nothing to gain from overlapping.
+      // __tests__/utils/transactionRelationLoads.test.ts holds the rule.
+      const existing = await tx.channelMember.findUnique({
+        where: { channelId_userId: { channelId, userId: targetUserId } },
+        select: { userId: true },
+      });
+      const memberCount = await tx.channelMember.count({ where: { channelId } });
       if (existing) throw new BadRequestError('User is already a member of this channel');
       if (memberCount >= E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP) {
         throw new BadRequestError(
