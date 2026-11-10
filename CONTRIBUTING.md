@@ -73,6 +73,7 @@ Voxium/
 4. Run `pnpm test:e2e` if your changes affect user-facing behavior
 5. Open a PR against `develop` — PRs to `main` are only accepted from `develop`
 6. Fill in the pull request template, including the box that confirms the [contribution terms](#license-and-contributions)
+7. If the change resolves an issue, name it with `Closes #N` in a commit message (see [Commit Messages](#commit-messages)) — the issue then closes by itself when `develop` ships to `main`
 
 ### Code Conventions
 
@@ -99,6 +100,16 @@ Keep them concise and descriptive. Use the imperative mood:
 - `fix: resolve WebSocket reconnection race condition`
 - `feature: add message search with jump-to-message`
 - `refactor: extract reaction aggregation utility`
+
+When the change resolves an issue, say so with a closing keyword in the body of a commit, one keyword per issue:
+
+```
+fix: resolve WebSocket reconnection race condition
+
+Closes #123
+```
+
+GitHub accepts `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves` and `resolved`, followed by `#N` (or `owner/repo#N` for an issue in another repository). Put it in a commit, not only in the pull request description: pull requests here target `develop`, and GitHub acts on a description's keywords only when the pull request targets the default branch, `main`. A commit message travels: a merge into `develop` keeps your commit messages (a squash lists every one of them in its body by default), and the issue closes when the next release merges `develop` into `main`, not when your pull request is merged. Name the issue in the description as well (`Issue: #N`), so the reviewer sees it at once.
 
 ### What Makes a Good PR
 
