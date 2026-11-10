@@ -31,4 +31,5 @@ tauri-winrt-notification = "0.7"
 # and windows-core versions wry links, so the controller types are one type.
 webview2-com = "0.39"
 windows-core = "0.62"
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# Win32_System_Console: the debug build's Ctrl-C handler (src/dev_console.rs)
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }

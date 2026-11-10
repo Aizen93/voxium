@@ -7,8 +7,20 @@
  * Usage:
  *   npx tsx scripts/load-test-voice.ts [USERS_PER_CHANNEL] [NUM_SERVERS]
  *
- * Defaults: 50 users per channel, 4 servers.
+ * Defaults: 25 users per channel, 4 servers.
  * Requires the backend running on localhost:3001.
+ *
+ * It raises the rate limits it needs (admin overrides), joins every user with
+ * full media and HOLDS them until Ctrl+C (or SIGTERM), then disconnects them
+ * and restores the limits. Unattended runs set a hold time instead:
+ *
+ *   LOAD_TEST_HOLD_SECONDS=60 npx tsx scripts/load-test-voice.ts 10 2
+ *
+ * holds the clients 60 s after the last one joined, runs the same cleanup and
+ * exits by itself: 0, or 1 when a user failed to join with media. A signal
+ * still stops it earlier. A failure at any step also restores the limits.
+ * The hold is 1 to 86400 s (a day); each request of the cleanup gives up
+ * after 10 s, so a hung backend cannot keep the run alive.
  */
 
 import axios from 'axios';
@@ -43,6 +55,25 @@ const NUM_SERVERS = parseInt(process.argv[3] || '4', 10);
 const PASSWORD = 'password123';
 const SEED_EMAIL = 'alice@example.com';
 const BATCH = 10;
+
+// A day. setTimeout takes at most 2^31 - 1 ms (about 24.8 days) and fires at
+// once above it, so the bound also keeps the timer meaningful.
+const MAX_HOLD_SECONDS = 86_400;
+// Each call on the way out (the seed sign-in, every limit reset) is bounded:
+// a hung backend must not keep an unattended run alive
+const CLEANUP_REQUEST_TIMEOUT_MS = 10_000;
+
+/** Seconds to hold the clients before the automatic cleanup; null = until a signal. */
+function parseHoldSeconds(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === '') return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_HOLD_SECONDS) {
+    console.error(`LOAD_TEST_HOLD_SECONDS must be a whole number of seconds from 1 to ${MAX_HOLD_SECONDS}, got "${raw}"`);
+    process.exit(1);
+  }
+  return value;
+}
+const HOLD_SECONDS = parseHoldSeconds(process.env.LOAD_TEST_HOLD_SECONDS);
 
 interface TransportOptions {
   id: string;
@@ -81,21 +112,31 @@ const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemp
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-async function login(email: string): Promise<{ token: string; userId: string }> {
-  const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD });
+/** `timeoutMs` bounds each request (0, axios' default, waits forever). */
+async function login(email: string, timeoutMs = 0): Promise<{ token: string; userId: string }> {
+  const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD }, { timeout: timeoutMs });
   const r = data.data || data;
   // Accounts from runs before consent-at-signup existed are refused every
   // functional route and the socket until they accept (CNIL/GDPR gate) —
   // do what a real client does on its consent screen. Idempotent.
   if (r.user?.consentRequired) {
-    await axios.post(`${API}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, h(r.accessToken));
+    await axios.post(`${API}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, { ...h(r.accessToken), timeout: timeoutMs });
   }
   return { token: r.accessToken, userId: r.user.id };
 }
 
+function errorText(err: unknown): string {
+  if (axios.isAxiosError(err)) return err.response?.data?.error || err.message;
+  return err instanceof Error ? err.message : String(err);
+}
+
 async function raiseRateLimits(token: string): Promise<void> {
   for (const name of LIMITS_TO_RAISE) {
-    try { await axios.put(`${API}/admin/rate-limits/${name}`, { points: 99999, duration: 60, blockDuration: 0 }, h(token)); } catch { /* */ }
+    try {
+      await axios.put(`${API}/admin/rate-limits/${name}`, { points: 99999, duration: 60, blockDuration: 0 }, h(token));
+    } catch (err) {
+      console.warn(`  could not raise '${name}': ${errorText(err)}`);
+    }
   }
 }
 
@@ -104,7 +145,11 @@ async function resetRateLimits(token: string): Promise<void> {
   // by the restored admin bucket and would be swallowed, leaving overrides up
   const order = [...LIMITS_TO_RAISE.filter((n) => n !== 'admin' && n !== 'general'), 'general', 'admin'];
   for (const name of order) {
-    try { await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, h(token)); } catch { /* */ }
+    try {
+      await axios.post(`${API}/admin/rate-limits/${name}/reset`, {}, { ...h(token), timeout: CLEANUP_REQUEST_TIMEOUT_MS });
+    } catch (err) {
+      console.warn(`  could not restore '${name}' (reset it from the admin dashboard): ${errorText(err)}`);
+    }
   }
 }
 
@@ -258,6 +303,63 @@ function setupMedia(user: TestUser, channelId: string): Promise<void> {
   });
 }
 
+// ─── Cleanup (every way out: a signal, the hold elapsing, a failure) ─────────
+
+let seedToken: string | null = null;
+let limitsRaised = false;
+let stopping = false;
+
+function disconnectAll(): void {
+  for (const t of targets) {
+    for (const u of t.users) {
+      if ((u as any)._ltInterval) clearInterval((u as any)._ltInterval);
+      try { u.sendTransport?.close(); } catch (err) { console.warn(`  ${u.username}: closing the send transport failed: ${errorText(err)}`); }
+      try { u.recvTransport?.close(); } catch (err) { console.warn(`  ${u.username}: closing the recv transport failed: ${errorText(err)}`); }
+      if (u.socket) { u.socket.emit('voice:leave'); u.socket.disconnect(); }
+    }
+  }
+}
+
+async function restoreRateLimits(): Promise<void> {
+  if (!limitsRaised) return;
+  console.log('Restoring rate limits...');
+  // A fresh token: the one from the start may have expired during a long hold.
+  // Bounded like the resets; a timeout falls back to the first token.
+  let token = seedToken;
+  try {
+    token = (await login(SEED_EMAIL, CLEANUP_REQUEST_TIMEOUT_MS)).token;
+  } catch (err) {
+    console.warn(`  could not sign the seed user in again (${errorText(err)}); trying the first token`);
+  }
+  if (!token) {
+    console.warn('  no seed token: reset the overrides from the admin dashboard');
+    return;
+  }
+  await resetRateLimits(token);
+}
+
+/** Disconnect every client, restore the rate limits, exit. Runs once. */
+async function stop(code: number, reason: string): Promise<void> {
+  if (stopping) return;
+  stopping = true;
+  console.log(`\n${reason}: disconnecting...`);
+  disconnectAll();
+  await restoreRateLimits();
+  console.log('Done.');
+  process.exit(code);
+}
+
+function onSignal(signal: NodeJS.Signals): void {
+  if (stopping) {
+    console.warn(`\n${signal} again: exiting now; the rate limits may still be raised (reset them from the admin dashboard)`);
+    process.exit(1);
+  }
+  void stop(0, signal);
+}
+
+process.on('SIGINT', onSignal);
+process.on('SIGTERM', onSignal);
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function run() {
@@ -267,10 +369,12 @@ async function run() {
   // Step 1
   console.log('[1/5] Logging in as seed user...');
   const seed = await login(SEED_EMAIL);
+  seedToken = seed.token;
   console.log(`  OK`);
 
   // Step 2
   console.log('\n[2/5] Raising rate limits...');
+  limitsRaised = true; // before the calls: a partial raise is restored too
   await raiseRateLimits(seed.token);
   console.log('  Done');
 
@@ -364,33 +468,15 @@ async function run() {
   console.log(`Connected with media: ${connected}/${totalUsers}`);
   if (failed > 0) console.log(`Failed: ${failed}`);
   console.log(`\nCheck admin dashboard SFU stats — you should see producers + consumers.`);
-  console.log(`Press Ctrl+C to disconnect and restore rate limits.\n`);
-
-  async function cleanup() {
-    console.log('\nDisconnecting...');
-    for (const t of targets) {
-      for (const u of t.users) {
-        if ((u as any)._ltInterval) clearInterval((u as any)._ltInterval);
-        if (u.sendTransport) try { u.sendTransport.close(); } catch { /* */ }
-        if (u.recvTransport) try { u.recvTransport.close(); } catch { /* */ }
-        if (u.socket) { u.socket.emit('voice:leave'); u.socket.disconnect(); }
-      }
-    }
-    console.log('Restoring rate limits...');
-    try { await resetRateLimits(seed.token); } catch { /* */ }
-    console.log('Done.');
-    process.exit(0);
+  if (HOLD_SECONDS === null) {
+    console.log(`Press Ctrl+C to disconnect and restore rate limits.\n`);
+  } else {
+    console.log(`Holding for ${HOLD_SECONDS} s, then disconnecting and restoring rate limits (Ctrl+C stops earlier).\n`);
+    setTimeout(() => { void stop(failed > 0 ? 1 : 0, `${HOLD_SECONDS} s elapsed`); }, HOLD_SECONDS * 1000);
   }
-
-  process.on('SIGINT', () => { cleanup(); });
 }
 
-run().catch(async (err) => {
+run().catch((err) => {
   console.error('\nLoad test failed:', err.response?.data || err.message);
-  try {
-    const seed = await login(SEED_EMAIL);
-    await resetRateLimits(seed.token);
-    console.log('Rate limits restored.');
-  } catch { /* */ }
-  process.exit(1);
+  void stop(1, 'Load test failed');
 });
