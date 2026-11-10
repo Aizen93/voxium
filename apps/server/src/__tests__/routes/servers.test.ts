@@ -124,12 +124,18 @@ vi.mock('../../utils/prisma', () => ({
 // Socket.IO
 const mockEmit = vi.fn();
 const mockTo = vi.fn(() => ({ emit: mockEmit }));
-const mockIn = vi.fn(() => ({ fetchSockets: vi.fn().mockResolvedValue([]) }));
+// fetchSockets stays reachable on every operator so a regression to it is an
+// explicit assertion failure, not a TypeError
 const mockFetchSockets = vi.fn().mockResolvedValue([]);
+const mockSocketsLeave = vi.fn();
+const mockLocalSocketsLeave = vi.fn();
+const mockIn = vi.fn((_rooms: string | string[]) => ({ socketsLeave: mockSocketsLeave, fetchSockets: mockFetchSockets }));
+const mockLocalIn = vi.fn((_rooms: string | string[]) => ({ socketsLeave: mockLocalSocketsLeave, fetchSockets: mockFetchSockets }));
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: mockTo,
     in: mockIn,
+    local: { in: mockLocalIn },
     fetchSockets: mockFetchSockets,
   })),
 }));
@@ -921,6 +927,83 @@ describe('Server Routes', () => {
 
       expect(mockTo).toHaveBeenCalledWith('server:srv-1');
       expect(mockEmit).toHaveBeenCalledWith('server:deleted', { serverId: 'srv-1' });
+    });
+
+    describe('room cleanup', () => {
+      const ownedServer = { id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1' };
+      const allRooms = ['server:srv-1', 'channel:ch-text', 'channel:ch-voice', 'channel:ch-secure'];
+
+      beforeEach(() => {
+        prismaMock.server.findUnique.mockResolvedValue(ownedServer);
+        // Every channel, text, voice and secure alike: no visibility filter
+        prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-text' }, { id: 'ch-voice' }, { id: 'ch-secure' }]);
+        prismaMock.server.delete.mockResolvedValue({});
+      });
+
+      const deleteServer = () => request(app)
+        .delete('/api/v1/servers/srv-1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+
+      it('makes every socket in ANY of the rooms leave ALL of them, on this node and then cluster-wide', async () => {
+        const res = await deleteServer();
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.channel.findMany).toHaveBeenCalledWith({ where: { serverId: 'srv-1' }, select: { id: true } });
+        // Addressed to the union of the rooms, not server:{id} alone: a socket
+        // can sit in a channel room without the server room (a channel:join or
+        // voice:join handled before its connect setup joined the server rooms)
+        expect(mockLocalIn).toHaveBeenCalledTimes(1);
+        expect(mockLocalIn).toHaveBeenCalledWith(allRooms);
+        expect(mockLocalSocketsLeave).toHaveBeenCalledTimes(1);
+        expect(mockLocalSocketsLeave).toHaveBeenCalledWith(allRooms);
+        expect(mockIn).toHaveBeenCalledTimes(1);
+        expect(mockIn).toHaveBeenCalledWith(allRooms);
+        expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
+        expect(mockSocketsLeave).toHaveBeenCalledWith(allRooms);
+      });
+
+      it('applies the local form first: the Redis adapter applies the cluster form on this node only on its echo', async () => {
+        await deleteServer();
+
+        expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
+      });
+
+      it('leaves the rooms after the server:deleted notice and before the row is deleted', async () => {
+        await deleteServer();
+
+        const noticeOrder = mockEmit.mock.invocationCallOrder[mockEmit.mock.calls.findIndex(([event]) => event === 'server:deleted')];
+        expect(noticeOrder).toBeDefined();
+        expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
+        expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
+        expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+      });
+
+      it('leaves only the server room when the space has no channels', async () => {
+        prismaMock.channel.findMany.mockResolvedValue([]);
+
+        await deleteServer();
+
+        expect(mockLocalIn).toHaveBeenCalledWith(['server:srv-1']);
+        expect(mockLocalSocketsLeave).toHaveBeenCalledWith(['server:srv-1']);
+        expect(mockIn).toHaveBeenCalledWith(['server:srv-1']);
+        expect(mockSocketsLeave).toHaveBeenCalledWith(['server:srv-1']);
+      });
+
+      it('never fetches the sockets: a fetch waits on every node and throws when one peer is unresponsive', async () => {
+        // The incident: a stalled node on the same Redis made fetchSockets()
+        // throw after 5 s and the delete answered 500 after 5010 ms
+        mockFetchSockets.mockRejectedValue(new Error('timeout reached while waiting for fetchSockets response'));
+        try {
+          const res = await deleteServer();
+
+          expect(res.status).toBe(200);
+          expect(res.body.message).toBe('Server deleted');
+          expect(mockFetchSockets).not.toHaveBeenCalled();
+          expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        } finally {
+          mockFetchSockets.mockResolvedValue([]);
+        }
+      });
     });
   });
 

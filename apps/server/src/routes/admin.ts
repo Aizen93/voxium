@@ -40,11 +40,29 @@ function forceLogoutUser(userId: string, reason: string): void {
   revokeUserSessions(userId, { forceLogoutReason: reason });
 }
 
-/** Remove all sockets from a server room across all nodes. */
-async function clearServerRoom(serverId: string): Promise<void> {
+/**
+ * Make every socket in a space about to be deleted leave its rooms, on every
+ * node: the server room AND every channel room, the owner route's list
+ * (DELETE /servers/:serverId). Addressed to the union of the rooms, because a
+ * socket can be in a `channel:{id}` room without `server:{id}`.
+ *
+ * Adapter-wide room operations, never a `fetchSockets()` round trip: it waits
+ * for every node's reply and throws after 5 s when one peer is unresponsive,
+ * which failed the delete after the notice had gone out. Local form first,
+ * then cluster-wide (see utils/memberBroadcast.ts: the Redis adapter applies
+ * the cluster form on this node only when its own message comes back). The
+ * callers emit `server:deleted` first; the leave is published after it on the
+ * same Redis connection, so every peer delivers the notice before the leave.
+ */
+async function clearServerRooms(serverId: string): Promise<void> {
   const io = getIO();
-  const sockets = await io.in(`server:${serverId}`).fetchSockets();
-  for (const s of sockets) s.leave(`server:${serverId}`);
+  const channels = await prisma.channel.findMany({
+    where: { serverId },
+    select: { id: true },
+  });
+  const rooms = [`server:${serverId}`, ...channels.map((c) => `channel:${c.id}`)];
+  io.local.in(rooms).socketsLeave(rooms);
+  io.in(rooms).socketsLeave(rooms);
 }
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
@@ -768,15 +786,16 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           // fans out to every node; mediasoup objects are node-local)
           await broadcastServerVoiceCleanup(io, action.serverId);
           io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
-          await clearServerRoom(action.serverId);
+          await clearServerRooms(action.serverId);
           // Read the icon key BEFORE the row goes; delete the blob after, so a
           // failed delete never strands a live server without its icon. The
-          // user-facing DELETE /servers/:id already does exactly this.
+          // user-facing DELETE /servers/:id already does exactly this, and
+          // like it (and DELETE /admin/servers/:id) never waits on storage.
           const doomed = await prisma.server.findUnique({ where: { id: action.serverId }, select: { iconUrl: true } });
           await prisma.server.delete({ where: { id: action.serverId } });
           await bumpDiscoveryPageCache('admin server delete');
           if (doomed?.iconUrl) {
-            await deleteFromS3(doomed.iconUrl).catch((err) =>
+            deleteFromS3(doomed.iconUrl).catch((err) =>
               console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
           }
         }
@@ -1215,9 +1234,10 @@ adminRouter.delete('/webhooks/:webhookId', async (req: Request<{ webhookId: stri
 
 adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
+    // The icon key is read BEFORE the row goes, its blob deleted after
     const server = await prisma.server.findUnique({
       where: { id: req.params.serverId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, iconUrl: true },
     });
     if (!server) throw new NotFoundError('Server');
 
@@ -1229,13 +1249,21 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
     // Notify members
     io.to(`server:${server.id}`).emit('server:deleted', { serverId: server.id });
 
-    // Remove all sockets from the server room (works across all nodes)
-    await clearServerRoom(server.id);
+    // Remove all sockets from the server room and every channel room (all nodes)
+    await clearServerRooms(server.id);
 
     // Cascade delete
     await prisma.server.delete({ where: { id: server.id } });
     // A deleted space must not stay on a cached Explore page (never throws)
     await bumpDiscoveryPageCache('admin server delete');
+
+    // The icon blob goes AFTER the row, so a failed delete never strands a
+    // live space without its icon. Best-effort and never awaited, as on the
+    // owner's DELETE /servers/:serverId: the response does not wait on S3.
+    if (server.iconUrl) {
+      deleteFromS3(server.iconUrl).catch((err) =>
+        console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
+    }
 
     logAuditEvent({
       actorId: req.user!.userId,
