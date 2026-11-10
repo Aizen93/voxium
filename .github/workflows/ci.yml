@@ -225,11 +225,31 @@ jobs:
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
             bitnamilegacy/minio:2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
+          # A successful /minio/health/live was followed by a reset CreateBucket
+          # (2026-11-09), so the wait is on the readiness probe, and the step
+          # fails here, with the container's log, when it never answers: the
+          # loop used to fall through to the bucket call, which hid the cause.
+          ready=
           for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:9000/minio/health/live && break
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready; then ready=1; break; fi
             sleep 2
           done
-          aws --endpoint-url http://127.0.0.1:9000 s3 mb "s3://$S3_ASSETS_BUCKET"
+          if [ -z "$ready" ]; then
+            echo "MinIO did not become ready within 60 s"
+            docker logs minio
+            exit 1
+          fi
+          # A connection reset during CreateBucket makes the AWS CLI retry on
+          # its own: the first attempt had created the bucket, the retry was
+          # answered BucketAlreadyOwnedByYou, and `s3 mb` failed on a bucket
+          # that existed (develop 2026-10-09, twice; a PR branch 2026-11-09).
+          # An existing bucket is the state this step wants, so it is read as
+          # success: head-bucket first, create when missing, head-bucket again
+          # when the create call failed.
+          endpoint=http://127.0.0.1:9000
+          aws --endpoint-url "$endpoint" s3api head-bucket --bucket "$S3_ASSETS_BUCKET" 2>/dev/null \
+            || aws --endpoint-url "$endpoint" s3 mb "s3://$S3_ASSETS_BUCKET" \
+            || aws --endpoint-url "$endpoint" s3api head-bucket --bucket "$S3_ASSETS_BUCKET"
         env:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
