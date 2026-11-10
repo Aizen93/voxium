@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { E2EVault } from '../../services/e2e/vault';
 import type { PickleKeyProvider } from '../../services/e2e/vault';
 
@@ -49,6 +49,16 @@ describe('vault survives the browser closing its connection', () => {
     expect((await vault.getPlaintext('m2'))?.text).toBe('written after the connection died');
   });
 
+  it('reopens for the plaintext scan too (it used to bypass the reopen path)', async () => {
+    const vault = makeVault();
+    await vault.open();
+    await vault.putPlaintext('m5', { conversationId: 'c-scan', text: 'found by the scan' });
+    (vault as unknown as { db: IDBDatabase | null }).db!.close();
+
+    const found = await vault.listPlaintexts('c-scan');
+    expect(found.map((f) => f.entry.text)).toEqual(['found by the scan']);
+  });
+
   it('keeps working across repeated hide/restore cycles', async () => {
     // The reported symptom recurred every time the window was hidden, so once
     // is not enough — the recovery must not be a one-shot.
@@ -78,5 +88,109 @@ describe('vault survives the browser closing its connection', () => {
     // and the next access transparently reopens
     await vault.putPlaintext('m4', { conversationId: 'c1', text: 'after onclose' });
     expect((await vault.getPlaintext('m4'))?.text).toBe('after onclose');
+  });
+});
+
+describe('a vault closed on purpose stays closed', () => {
+  // close() is what disposing the E2E service does (logout, account switch,
+  // account deletion). Work still in flight must not bring the database back:
+  // after a deletion it would recreate the vault that was just dropped.
+  const internalsOf = (vault: E2EVault) => vault as unknown as { db: IDBDatabase | null };
+
+  it('refuses the next read and write instead of reopening', async () => {
+    const vault = makeVault();
+    await vault.open();
+    await vault.putPlaintext('m1', { conversationId: 'c1', text: 'before the logout' });
+    vault.close();
+
+    await expect(vault.getPlaintext('m1')).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+    await expect(
+      vault.putPlaintext('m2', { conversationId: 'c1', text: 'after the logout' })
+    ).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+    await expect(vault.open()).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+    expect(internalsOf(vault).db).toBeNull();
+  });
+
+  it('fails a request that was running when it closed, so its caller goes no further', async () => {
+    const vault = makeVault();
+    await vault.open();
+    await vault.putPlaintext('m1', { conversationId: 'c1', text: 'in flight' });
+
+    const reading = vault.getPlaintext('m1');
+    vault.close();
+    await expect(reading).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+  });
+
+  it('after stopReopening(), keeps the open connection but does not replace a dropped one', async () => {
+    // The stretch between a dispose and the close() after a key-share claim:
+    // an account deletion's deleteDatabase drops the connection, and opening
+    // another would recreate the database being deleted.
+    const vault = makeVault();
+    await vault.open();
+    vault.stopReopening();
+    await vault.putPlaintext('m1', { conversationId: 'c1', text: 'still writable' });
+    expect((await vault.getPlaintext('m1'))?.text).toBe('still writable');
+
+    const db = internalsOf(vault).db!;
+    db.close();
+    db.onclose!(new Event('close'));
+    await expect(vault.getPlaintext('m1')).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+    expect(internalsOf(vault).db).toBeNull();
+  });
+
+  it('keeps one connection for a late write of key shares, and for nothing else', async () => {
+    const vault = makeVault();
+    await vault.open();
+    vault.closeKeepingConnectionForPendingShares();
+    await expect(vault.getPlaintext('m1')).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+
+    const record = { share: { id: 's1' }, attempts: 0, receivedAt: 1 };
+    await vault.writePendingSharesLate([{ key: 'pks:2026|s1', record }]);
+    // used once, then released
+    await expect(vault.writePendingSharesLate([{ key: 'pks:2026|s2', record }])).rejects.toMatchObject({
+      name: 'E2EVaultClosedError',
+    });
+
+    const reader = new E2EVault(`user-${n}`, { load: async () => btoa(String.fromCharCode(...new Uint8Array(32).fill(7))), save: async () => {} }, `reopen-${n}`);
+    await reader.open();
+    expect((await reader.listPendingShares()).map((p) => p.key)).toEqual(['pks:2026|s1']);
+    reader.close();
+  });
+
+  it('lets a version change take the kept connection at once (an account deletion waits on it)', async () => {
+    const vault = makeVault();
+    await vault.open();
+    const db = internalsOf(vault).db!;
+    vault.closeKeepingConnectionForPendingShares();
+    db.onversionchange!(new Event('versionchange') as IDBVersionChangeEvent);
+    await expect(
+      vault.writePendingSharesLate([{ key: 'pks:2026|s1', record: { share: {}, attempts: 0, receivedAt: 1 } }])
+    ).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+  });
+
+  it('saves no fresh pickle key when it is closed while open() waits for the key store', async () => {
+    n++;
+    let answer!: (key: string | null) => void;
+    const answered = new Promise<string | null>((resolve) => (answer = resolve));
+    let asked!: () => void;
+    const loadReached = new Promise<void>((resolve) => (asked = resolve));
+    const save = vi.fn(async () => {});
+    const provider: PickleKeyProvider = {
+      load: async () => {
+        asked();
+        return answered;
+      },
+      save,
+    };
+    const vault = new E2EVault(`user-${n}`, provider, `reopen-${n}`);
+
+    const opening = vault.open();
+    await loadReached;
+    vault.close();
+    answer(null); // no key stored yet: a live open would mint and save one
+
+    await expect(opening).rejects.toMatchObject({ name: 'E2EVaultClosedError' });
+    expect(save).not.toHaveBeenCalled();
+    expect(internalsOf(vault).db).toBeNull();
   });
 });

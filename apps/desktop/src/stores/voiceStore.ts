@@ -42,6 +42,7 @@ import { optimizeOpusSDP } from '../services/sdpUtils';
 import i18n from '../i18n';
 import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared';
 import type { CallPeerDevice } from '../services/e2e/callCrypto';
+import { isE2ESessionEnded } from '../services/e2e/session';
 import { resolveStunUrl } from '../utils/stunUrl';
 
 /** Debug log — stripped in production builds by Vite tree-shaking */
@@ -479,6 +480,11 @@ function sendDMSignalEncrypted(to: string, signal: E2ECallSignal) {
         envelope = await crypto.encryptCallSignal(conversationId, peer, signal);
       }
     } catch (err) {
+      if (isE2ESessionEnded(err)) {
+        // logout disposed the E2E service and already left the call
+        debugLog('[DMVoice] Call signal not sealed: the session ended');
+        return;
+      }
       console.error('[DMVoice] Could not encrypt call signal — aborting call:', err);
       useVoiceStore.getState().abortDMCall(classifyCallCryptoError(crypto, err));
       return;
@@ -504,6 +510,11 @@ function receiveDMSignalEncrypted(from: string, payload: unknown) {
     try {
       plain = await crypto.decryptCallSignal(conversationId, peer, payload);
     } catch (err) {
+      if (isE2ESessionEnded(err)) {
+        // logout disposed the E2E service and already left the call
+        debugLog('[DMVoice] Inbound call signal not opened: the session ended');
+        return;
+      }
       console.error('[DMVoice] Inbound call signal failed security checks — aborting call:', err);
       useVoiceStore.getState().abortDMCall(classifyCallCryptoError(crypto, err));
       return;
@@ -2518,7 +2529,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         });
       }
     } catch (err) {
-      console.warn('[DMVoice] Device-list pre-warm setup failed:', err);
+      // the account signed out during the imports above: nothing to warm
+      if (isE2ESessionEnded(err)) console.debug('[DMVoice] Device-list pre-warm skipped: the session ended');
+      else console.warn('[DMVoice] Device-list pre-warm setup failed:', err);
     }
 
     if (generation !== voiceSessionGeneration) return; // superseded during the async imports

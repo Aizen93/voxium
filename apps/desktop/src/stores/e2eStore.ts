@@ -9,6 +9,32 @@ import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../s
 let unsubscribeDeviceListChanges: (() => void) | null = null;
 
 /**
+ * Advanced when a session's E2E watch ends (logout). Work an earlier session
+ * started — an initialize() still waiting on the server, a status read in
+ * flight — compares its generation and applies nothing to the next session's
+ * store.
+ */
+let sessionGeneration = 0;
+
+function unsubscribeDeviceList(): void {
+  if (unsubscribeDeviceListChanges) {
+    unsubscribeDeviceListChanges();
+    unsubscribeDeviceListChanges = null;
+  }
+}
+
+/**
+ * Taken when an action starts; answers whether the session that started it is
+ * still the current one. Every action checks it after each await before it
+ * writes to the store (or starts another action that would): one resuming
+ * after a logout would otherwise write into the next session's state.
+ */
+function sessionCheck(): () => boolean {
+  const generation = sessionGeneration;
+  return () => generation === sessionGeneration;
+}
+
+/**
  * The own-account slice of a device-list status, in one place: every caller
  * that recomputes it has to agree on which device is "this" one, or the badge
  * ends up warning about the device the user is sitting in front of (or worse,
@@ -46,10 +72,8 @@ export class E2ELinkingCodeUnknownError extends Error {
 
 /** Called by resetAccountStores on logout — the service itself is disposed there. */
 export function stopE2EDeviceListWatch(): void {
-  if (unsubscribeDeviceListChanges) {
-    unsubscribeDeviceListChanges();
-    unsubscribeDeviceListChanges = null;
-  }
+  sessionGeneration++;
+  unsubscribeDeviceList();
 }
 
 /** The device a linking code named: everything the user gets to check before approving. */
@@ -174,17 +198,24 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   initialize: async (userId: string) => {
     if (get().ready || get().initializing) return;
     set({ initializing: true, error: null });
+    // A logout while this runs ends the session that asked for it: from then on
+    // the store belongs to the next one, and nothing below may write to it.
+    const current = sessionCheck();
     try {
       const service = getE2EService(userId);
-      await service.initialize();
       // The send path refreshes device lists too (rotation decisions). Without
       // this subscription a device appearing mid-conversation would silently
       // receive session keys while the UI badge stayed green until remount.
-      if (unsubscribeDeviceListChanges) unsubscribeDeviceListChanges();
+      //
+      // Subscribed BEFORE initialize(): the service can read and record a list
+      // while it is still starting up, and an event nobody was listening for
+      // is a warning the badge never shows.
+      unsubscribeDeviceList();
       unsubscribeDeviceListChanges = service.onDeviceListChanged((changedUserId) => {
         void service
           .deviceListStatus(changedUserId)
           .then((status) => {
+            if (!current()) return;
             set((state) => {
               // Our own list: a device we did not add is as dangerous as an
               // injected peer device — it receives every session key we fan out.
@@ -207,6 +238,8 @@ export const useE2EStore = create<E2EState>((set, get) => ({
             console.warn('e2e: device-list status check failed:', err instanceof Error ? err.message : err);
           });
       });
+      await service.initialize();
+      if (!current()) return;
       set({
         ready: true,
         initializing: false,
@@ -224,6 +257,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
       void service
         .claimMasterTransfers()
         .then(() => {
+          if (!current()) return;
           set({ masterReady: service.hasMasterSecret(), canApprove: service.canApproveDevices() });
         })
         .catch((err) => {
@@ -236,6 +270,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
       void service
         .deviceListStatus(userId)
         .then((status) => {
+          if (!current()) return;
           set(ownStatusPatch(service, status));
         })
         .catch((err) => {
@@ -243,7 +278,15 @@ export const useE2EStore = create<E2EState>((set, get) => ({
         });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'E2E initialization failed';
+      if (!current()) {
+        // Usually E2EServiceDisposedError: the logout disposed the service this
+        // run was starting. Not the next session's failure to record.
+        console.warn('e2e: initialization ended with the session that started it:', message);
+        return;
+      }
       console.warn('e2e: initialization failed:', message);
+      // a service that never started has nothing to report; the retry subscribes again
+      unsubscribeDeviceList();
       set({ ready: false, initializing: false, error: message });
     }
   },
@@ -253,7 +296,9 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   },
 
   acceptNewIdentity: async (userId: string, peerUserId: string) => {
+    const live = sessionCheck();
     await getE2EService(userId).acceptNewIdentity(peerUserId);
+    if (!live()) return;
     set((state) => {
       const identityWarnings = { ...state.identityWarnings };
       delete identityWarnings[peerUserId];
@@ -268,19 +313,23 @@ export const useE2EStore = create<E2EState>((set, get) => ({
 
   /** Re-read a peer's device list and surface a warning if it grew/shrank. */
   refreshDeviceList: async (userId: string, peerUserId: string) => {
+    const live = sessionCheck();
     const service = getE2EService(userId);
     try {
       await service.fetchDeviceList(peerUserId);
     } catch (err) {
       if (err instanceof E2EIdentityChangedError) {
-        get().flagIdentityChanged(peerUserId);
+        if (live()) get().flagIdentityChanged(peerUserId);
         return;
       }
       console.warn('e2e: device list refresh failed:', err instanceof Error ? err.message : err);
       return;
     }
+    if (!live()) return;
     const status = await service.deviceListStatus(peerUserId);
+    if (!live()) return;
     const verified = await service.isAccountVerified(peerUserId);
+    if (!live()) return;
     set((state) => {
       const newDeviceWarnings = { ...state.newDeviceWarnings };
       if (status.changed) newDeviceWarnings[peerUserId] = status.newDeviceIds;
@@ -297,7 +346,9 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   },
 
   acknowledgeDeviceList: async (userId: string, peerUserId: string, seenDeviceIds?: string[]) => {
+    const live = sessionCheck();
     await getE2EService(userId).acknowledgeDeviceList(peerUserId, seenDeviceIds);
+    if (!live()) return;
     set((state) => {
       const newDeviceWarnings = { ...state.newDeviceWarnings };
       delete newDeviceWarnings[peerUserId];
@@ -311,26 +362,34 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    * until it is approved or revoked (spec §14, D8).
    */
   acknowledgeOwnDevices: async (userId: string, seenDeviceIds: string[]) => {
+    const live = sessionCheck();
     const service = getE2EService(userId);
     await service.acknowledgeDeviceList(userId, seenDeviceIds);
+    if (!live()) return;
     const status = await service.deviceListStatus(userId);
+    if (!live()) return;
     set(ownStatusPatch(service, status));
   },
 
   /** The user compared the peer's ACCOUNT safety number out of band (D9). */
   markAccountVerified: async (userId: string, peerUserId: string) => {
+    const live = sessionCheck();
     await getE2EService(userId).markIdentityVerified(peerUserId);
+    if (!live()) return;
     set((state) => ({ accountVerified: { ...state.accountVerified, [peerUserId]: true } }));
   },
 
   /** Device-manager UI: (re)load this account's registered devices. */
   loadOwnDevices: async (userId: string) => {
+    const live = sessionCheck();
     set({ ownDevicesLoading: true, ownDevicesError: false });
     try {
       const ownDevices = await getE2EService(userId).listOwnDevices();
+      if (!live()) return;
       set({ ownDevices, ownDevicesLoading: false, ownDevicesError: false });
     } catch (err) {
       console.warn('e2e: loading own devices failed:', err instanceof Error ? err.message : err);
+      if (!live()) return;
       // Leave any previously loaded list in place rather than blanking it — a
       // stale list is still true of some moment; an empty one is a claim.
       set({ ownDevicesLoading: false, ownDevicesError: true });
@@ -338,11 +397,15 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   },
 
   revokeDevice: async (userId: string, deviceId: string) => {
+    const live = sessionCheck();
     const service = getE2EService(userId);
     await service.revokeDevice(deviceId);
+    if (!live()) return;
     await get().loadOwnDevices(userId);
+    if (!live()) return;
     // the revoked device must stop being reported as unrecognised / unsigned
     const status = await service.deviceListStatus(userId);
+    if (!live()) return;
     set(ownStatusPatch(service, status));
   },
 
@@ -352,10 +415,14 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    * can approve the next device itself.
    */
   approveDevice: async (userId: string, deviceId: string, linkingCode?: string) => {
+    const live = sessionCheck();
     const service = getE2EService(userId);
     await service.approveDevice(deviceId, linkingCode);
+    if (!live()) return;
     await get().loadOwnDevices(userId);
+    if (!live()) return;
     const status = await service.deviceListStatus(userId);
+    if (!live()) return;
     set(ownStatusPatch(service, status));
   },
 
@@ -400,10 +467,14 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    * number change, which is the honest signal that trust has to be re-earned.
    */
   resetAccountIdentity: async (userId: string) => {
+    const live = sessionCheck();
     const service = getE2EService(userId);
     await service.resetAccountIdentity();
+    if (!live()) return;
     await get().loadOwnDevices(userId);
+    if (!live()) return;
     const status = await service.deviceListStatus(userId);
+    if (!live()) return;
     set(ownStatusPatch(service, status));
     // A reset that MINTED a new key drops the backup server-side (spec §15.5) —
     // the blob decrypts to a key this account no longer publishes. Re-read it
@@ -421,8 +492,10 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    * silently invalidating the recovery key the user already saved.
    */
   loadKeyBackup: async (userId: string) => {
+    const live = sessionCheck();
     try {
       const keyBackup = await getE2EService(userId).keyBackupInfo();
+      if (!live()) return;
       set({ keyBackup });
     } catch (err) {
       console.warn('e2e: reading key backup state failed:', err instanceof Error ? err.message : err);
@@ -440,7 +513,11 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    * if it had.
    */
   createKeyBackup: async (userId: string) => {
+    const live = sessionCheck();
     const recoveryKey = await getE2EService(userId).createKeyBackup();
+    // The key still goes back to the caller that asked for it; only the store
+    // belongs to the next session now.
+    if (!live()) return recoveryKey;
     // Optimistic before the re-read: the blob IS on the server now, so a failed
     // refresh must not leave the panel saying "no recovery set up" in the same
     // breath as we show the user their recovery key.
@@ -451,7 +528,9 @@ export const useE2EStore = create<E2EState>((set, get) => ({
 
   /** Forget the backup. The recovery key that opened it is useless from here. */
   deleteKeyBackup: async (userId: string) => {
+    const live = sessionCheck();
     await getE2EService(userId).deleteKeyBackup();
+    if (!live()) return;
     set({ keyBackup: { exists: false, updatedAt: null } });
   },
 
@@ -463,10 +542,14 @@ export const useE2EStore = create<E2EState>((set, get) => ({
    * reported as such, never absorbed into a UI that then looks restored.
    */
   restoreKeyBackup: async (userId: string, recoveryKey: string) => {
+    const live = sessionCheck();
     const service = getE2EService(userId);
     await service.restoreKeyBackup(recoveryKey);
+    if (!live()) return;
     await get().loadOwnDevices(userId);
+    if (!live()) return;
     const status = await service.deviceListStatus(userId);
+    if (!live()) return;
     set(ownStatusPatch(service, status));
   },
 }));

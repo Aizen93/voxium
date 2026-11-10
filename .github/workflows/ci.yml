@@ -284,10 +284,10 @@ jobs:
           echo "MEDIASOUP_LISTEN_IP=0.0.0.0" >> "$GITHUB_ENV"
           echo "mediasoup will announce $RUNNER_IP"
 
-      # Blocking gate. Excludes @quarantine — currently the e2e-encryption
-      # spec, which is intermittently red for a pre-existing crypto-engine
-      # init race (see the note at the top of that file). A merge gate that
-      # fails at random trains everyone to ignore it.
+      # Blocking gate. Excludes specs tagged @quarantine; none is tagged
+      # today. A spec that fails at random is tagged (with a note in the spec
+      # saying why) rather than left here: a merge gate that fails at random
+      # trains everyone to ignore it.
       #
       # NODE_OPTIONS reaches the servers through Playwright's webServer, which
       # passes its own environment on (the configs set no `env`): every node
@@ -309,15 +309,17 @@ jobs:
           PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
         run: npx playwright test secure-voice --config=playwright-firefox.config.ts --reporter=github,line
 
-      # Visible but non-blocking, so the quarantine cannot rot silently: the
-      # step goes red in the UI while the job still passes. Its overlap
-      # records go to a file of their own, reported as a warning only.
+      # Visible but non-blocking, so a quarantined spec cannot rot silently:
+      # the step goes red in the UI while the job still passes. With nothing
+      # tagged it matches no test, which --pass-with-no-tests reports as a pass
+      # (Playwright still starts the stack before it finds that out). Its
+      # overlap records go to a file of their own, reported as a warning only.
       - name: E2E quarantined specs (non-blocking)
         continue-on-error: true
         env:
           NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
           PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps-quarantine.jsonl
-        run: npx playwright test --grep @quarantine --reporter=github,line
+        run: npx playwright test --grep @quarantine --pass-with-no-tests --reporter=github,line
 
       # Two queries at once on one pg connection: pg 8 queues them (and warns
       # once per process, from the third), pg 9 removes the queueing. The

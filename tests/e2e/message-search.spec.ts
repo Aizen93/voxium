@@ -138,7 +138,7 @@ test.describe('message search jump', () => {
 
     await injectAuth(page, dataA);
     await page.getByText('Friends').first().click();
-    await page.getByText('All').click();
+    await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page.getByText(userB.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
     await page.locator('button[title="Message"]').first().click();
     await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });

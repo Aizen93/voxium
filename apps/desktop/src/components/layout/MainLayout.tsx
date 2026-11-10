@@ -170,6 +170,12 @@ export function MainLayout() {
     const isSecureChannelMessage = (message: Message): boolean =>
       isSecureChannelMessageIn(message, useServerStore.getState().channels);
 
+    // Who received the event. A handler that awaits a decrypt notes it first
+    // and drops the event when the decrypt settles as null (the E2E session
+    // ended under it) or someone else is signed in by then: the stores, the
+    // unread counts and the notifications belong to the next session.
+    const signedInUser = (): string | null => useAuthStore.getState().user?.id ?? null;
+
     // Store function references so cleanup actually works
     const handlers = {
       messageNew: async (message: Message & { serverId?: string; serverName?: string; channelName?: string }) => {
@@ -177,8 +183,11 @@ export function MainLayout() {
           // Decrypt BEFORE the store and BEFORE any notification — ciphertext
           // must never reach the DOM, and a desktop notification showing an
           // envelope (or worse, trusting a forged plaintext row) is a leak.
+          const session = signedInUser();
           const { decryptChannelMessageForDisplay } = await import('../../services/e2e/channelCrypto');
-          message = { ...(await decryptChannelMessageForDisplay(message)), serverId: message.serverId, serverName: message.serverName, channelName: message.channelName };
+          const shown = await decryptChannelMessageForDisplay(message);
+          if (!shown || signedInUser() !== session) return;
+          message = { ...shown, serverId: message.serverId, serverName: message.serverName, channelName: message.channelName };
         }
         if (isViewingChannel(message.channelId)) {
           useChatStore.getState().addMessage(message);
@@ -244,8 +253,11 @@ export function MainLayout() {
       messageUpdate: async (message: Message) => {
         if (message.channelId && isSecureChannelMessage(message)) {
           // A secure edit is a fresh ciphertext under the same id
+          const session = signedInUser();
           const { decryptChannelMessageForDisplay } = await import('../../services/e2e/channelCrypto');
-          message = await decryptChannelMessageForDisplay(message);
+          const shown = await decryptChannelMessageForDisplay(message);
+          if (!shown || signedInUser() !== session) return;
+          message = shown;
         }
         if (isViewingChannel(message.channelId)) {
           useChatStore.getState().updateMessage(message);
@@ -383,17 +395,20 @@ export function MainLayout() {
         }
       },
       dmMessageNew: async (message: Message) => {
-        const dmStore = useDMStore.getState();
-        const activeConvId = dmStore.activeConversationId;
-
         // Every DM goes through the decrypt gate before it touches any store,
         // preview or notification — never only the ones flagged encrypted. The
         // flag is the server's word: an `encrypted: false` user row is the
         // forgery the gate exists to refuse (only system notices are plaintext
         // since the 2.0 cutover), and skipping the gate on it was the leftover
         // plaintext branch.
+        const session = signedInUser();
         const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
-        message = await decryptMessageForDisplay(message);
+        const shown = await decryptMessageForDisplay(message);
+        if (!shown || signedInUser() !== session) return;
+        message = shown;
+        // read after the decrypt: the conversation on screen may have changed meanwhile
+        const dmStore = useDMStore.getState();
+        const activeConvId = dmStore.activeConversationId;
 
         // Update last message in conversation list
         if (message.conversationId) {
@@ -401,6 +416,8 @@ export function MainLayout() {
           const exists = dmStore.conversations.some((c) => c.id === message.conversationId);
           if (!exists) {
             await dmStore.fetchConversations();
+            // another await: the session may have ended during it too
+            if (signedInUser() !== session) return;
           } else {
             dmStore.updateLastMessage(message.conversationId, {
               id: message.id,
@@ -439,8 +456,11 @@ export function MainLayout() {
         // E2E edits arrive as fresh ciphertext — decrypt before the store
         // (the plaintext cache is versioned by editedAt). Same gate as a new
         // message, whatever the flag says.
+        const session = signedInUser();
         const { decryptMessageForDisplay } = await import('../../services/e2e/dmCrypto');
-        message = await decryptMessageForDisplay(message);
+        const shown = await decryptMessageForDisplay(message);
+        if (!shown || signedInUser() !== session) return;
+        message = shown;
         const activeConvId = useDMStore.getState().activeConversationId;
         if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().updateMessage(message);

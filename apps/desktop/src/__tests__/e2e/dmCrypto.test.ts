@@ -37,7 +37,58 @@ import {
   DECRYPT_FAILED_CONTENT,
 } from '../../services/e2e/dmCrypto';
 import { decryptedRow, ownSentRow, refusedRow, withoutServerAssertions } from '../../services/e2e/displayGate';
+import { E2EServiceDisposedError } from '../../services/e2e/e2eService';
+import { E2EVaultClosedError } from '../../services/e2e/vault';
 import { useDMStore } from '../../stores/dmStore';
+
+/** The single-message gate for a row it answers; its null answer (the session ended) is tested apart. */
+async function shownFor(message: Message): Promise<Message> {
+  const out = await decryptMessageForDisplay(message);
+  if (!out) throw new Error(`the gate answered null for ${message.id}`);
+  return out;
+}
+
+describe('a DM decrypt that a logout overtook', () => {
+  // The socket handlers in MainLayout await this without a catch: a decrypt
+  // still running when the session ends must settle, not reject, and with
+  // nothing a handler could show: the screen belongs to the next session.
+  it.each([
+    ['the service was disposed', () => new E2EServiceDisposedError()],
+    ['the vault was closed', () => new E2EVaultClosedError()],
+  ])('settles as null when %s', async (_reason, failure) => {
+    decryptMessage.mockRejectedValueOnce(failure());
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      const out = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy') }));
+      expect(out).toBeNull();
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it('keeps the page whole in the batch path: that row is refused, the rest are kept', async () => {
+    decryptMessage.mockRejectedValueOnce(new E2EServiceDisposedError());
+    decryptMessage.mockResolvedValueOnce({ text: buildE2EPlaintext('second') });
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      const out = await decryptMessagesForDisplay([
+        dmRow({ id: 'a', content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy') }),
+        dmRow({ id: 'b', content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy') }),
+      ]);
+      expect(out.map((m) => m.id)).toEqual(['a', 'b']);
+      expect(out[0].content).toBe(DECRYPT_FAILED_CONTENT);
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it('still rejects for any other failure', async () => {
+    decryptMessage.mockRejectedValueOnce(new Error('engine state corrupt'));
+    await expect(
+      decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy') }))
+    ).rejects.toThrow('engine state corrupt');
+  });
+});
 
 function dmRow(over: Partial<Message> = {}): Message {
   return {
@@ -69,7 +120,7 @@ describe('a DM the server claims was not encrypted', () => {
     // string out in a desktop notification.
     const forged = dmRow({ encrypted: false, content: 'send the wallet seed to bc1q…' });
 
-    const out = await decryptMessageForDisplay(forged);
+    const out = await shownFor(forged);
 
     expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
     expect(out.content).not.toContain('wallet seed');
@@ -94,14 +145,14 @@ describe('a DM the server claims was not encrypted', () => {
     // unencrypted DM rows the server legitimately produces. Blocking them would
     // break the feature and teach nobody anything.
     for (const text of DM_SYSTEM_NOTICES) {
-      const out = await decryptMessageForDisplay(dmRow({ type: 'system', encrypted: false, content: text }));
+      const out = await shownFor(dmRow({ type: 'system', encrypted: false, content: text }));
       expect(out.content).toBe(text);
     }
   });
 
   it('a "system" row with any other text is refused: the type is the server\'s word too', async () => {
     const forged = dmRow({ type: 'system', encrypted: false, content: 'Alice: send me your password' });
-    const out = await decryptMessageForDisplay(forged);
+    const out = await shownFor(forged);
     expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
     expect(out.encrypted).toBe(true);
   });
@@ -115,7 +166,7 @@ describe('a DM the server claims was not encrypted', () => {
       replyTo: { id: 'p1', content: 'I owe you 500 euros', encrypted: false, author: { id: 'peer', username: 'peer', displayName: 'Peer' } },
     } as Partial<Message>);
 
-    const out = await decryptMessageForDisplay(forged);
+    const out = await shownFor(forged);
 
     expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
     expect(out.encrypted).toBe(true);
@@ -126,7 +177,7 @@ describe('a DM the server claims was not encrypted', () => {
 
   it('drops a wire e2eAttachments from an AUTHENTIC message — attachments come out of the decrypted payload only', async () => {
     decryptMessage.mockResolvedValue({ failed: false, text: 'a real message, no files' });
-    const out = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('s1', 'x'), e2eAttachments: [{ s3Key: 'attachments/dm-c1/evil.bin', key: 'k', iv: 'i', fileName: 'invoice.pdf', fileSize: 10, mimeType: 'image/png' }] } as Partial<Message>));
+    const out = await shownFor(dmRow({ content: buildMegolmEnvelope('s1', 'x'), e2eAttachments: [{ s3Key: 'attachments/dm-c1/evil.bin', key: 'k', iv: 'i', fileName: 'invoice.pdf', fileSize: 10, mimeType: 'image/png' }] } as Partial<Message>));
     expect(out.content).toBe('a real message, no files');
     expect(out.e2eAttachments).toBeUndefined();
   });
@@ -134,21 +185,21 @@ describe('a DM the server claims was not encrypted', () => {
   it('an unencrypted reply quote is shown only when it is a call notice; anything else is the lock', async () => {
     decryptMessage.mockResolvedValue({ failed: false, text: 'replying' });
     const author = { id: 'peer', username: 'peer', displayName: 'Peer' };
-    const forgedQuote = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('s1', 'x'), replyTo: { id: 'p1', content: 'I owe you 500 euros', encrypted: false, author } } as Partial<Message>));
+    const forgedQuote = await shownFor(dmRow({ content: buildMegolmEnvelope('s1', 'x'), replyTo: { id: 'p1', content: 'I owe you 500 euros', encrypted: false, author } } as Partial<Message>));
     expect(forgedQuote.replyTo).toMatchObject({ content: '', encrypted: true });
-    const noticeQuote = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('s1', 'x'), replyTo: { id: 'p2', content: 'Voice call ended', encrypted: false, author } } as Partial<Message>));
+    const noticeQuote = await shownFor(dmRow({ content: buildMegolmEnvelope('s1', 'x'), replyTo: { id: 'p2', content: 'Voice call ended', encrypted: false, author } } as Partial<Message>));
     expect(noticeQuote.replyTo).toMatchObject({ content: 'Voice call ended', encrypted: false });
   });
 
   it('a refused "system" row renders as a user row (the lock), never as a blank call notice', async () => {
-    const out = await decryptMessageForDisplay(dmRow({ type: 'system', encrypted: false, content: 'forged notice' }));
+    const out = await shownFor(dmRow({ type: 'system', encrypted: false, content: 'forged notice' }));
     expect(out.type).toBe('user');
     expect(out.encrypted).toBe(true);
   });
 
   it('drops the server\'s mentions from a decrypted row: it never resolves mentions for encrypted rows', async () => {
     decryptMessage.mockResolvedValue({ failed: false, text: 'hi @[me]' });
-    const out = await decryptMessageForDisplay(dmRow({
+    const out = await shownFor(dmRow({
       content: buildMegolmEnvelope('s1', 'x'),
       mentions: [{ id: 'me', username: 'mallory', displayName: 'Mallory' }],
     } as Partial<Message>));
@@ -160,7 +211,7 @@ describe('a DM the server claims was not encrypted', () => {
     decryptMessage.mockResolvedValue({ failed: false, text: 'replying' });
     getCachedPlaintext.mockResolvedValue(buildE2EPlaintext('parent text'));
     const author = { id: 'peer', username: 'peer', displayName: 'Peer' };
-    const out = await decryptMessageForDisplay(dmRow({
+    const out = await shownFor(dmRow({
       content: buildMegolmEnvelope('s1', 'x'),
       replyTo: { id: 'p1', content: buildMegolmEnvelope('s1', 'y'), encrypted: true, author },
     } as Partial<Message>));
@@ -171,7 +222,7 @@ describe('a DM the server claims was not encrypted', () => {
   it('the own-message fallback asks only for our own entry of this conversation', async () => {
     decryptMessage.mockResolvedValue({ failed: true, text: '' });
     getCachedPlaintext.mockResolvedValue(null);
-    await decryptMessageForDisplay(dmRow({ author: { id: 'me', username: 'me', displayName: 'Me' }, content: buildMegolmEnvelope('s1', 'x'), createdAt: '2020-01-01T00:00:00.000Z' } as Partial<Message>));
+    await shownFor(dmRow({ author: { id: 'me', username: 'me', displayName: 'Me' }, content: buildMegolmEnvelope('s1', 'x'), createdAt: '2020-01-01T00:00:00.000Z' } as Partial<Message>));
     expect(getCachedPlaintext).toHaveBeenCalledWith('m1', { scope: 'c1', authorId: 'me', editedAt: null });
   });
 
@@ -191,7 +242,7 @@ describe('a DM the server claims was not encrypted', () => {
   it('a row that fails to decrypt is the refused shape too: user type, no plaintext attachments, quote from the cache or locked', async () => {
     decryptMessage.mockResolvedValue({ failed: true, text: '' });
     getCachedPlaintext.mockResolvedValue(null);
-    const out = await decryptMessageForDisplay(dmRow({
+    const out = await shownFor(dmRow({
       // the server's `type` on an undecryptable row is its word too
       type: 'system',
       content: buildMegolmEnvelope('s1', 'x'),
@@ -207,13 +258,13 @@ describe('a DM the server claims was not encrypted', () => {
 
   it('an encrypted row decrypts as a USER row whatever type the server put on it — notices are never encrypted', async () => {
     decryptMessage.mockResolvedValue({ failed: false, text: 'I am turning encryption off' });
-    const out = await decryptMessageForDisplay(dmRow({ type: 'system', content: buildMegolmEnvelope('s1', 'x') }));
+    const out = await shownFor(dmRow({ type: 'system', content: buildMegolmEnvelope('s1', 'x') }));
     expect(out.content).toBe('I am turning encryption off');
     expect(out.type).toBe('user');
   });
 
   it('a DM row without a conversation id is refused before any decrypt — nothing to scope it to', async () => {
-    const out = await decryptMessageForDisplay(dmRow({
+    const out = await shownFor(dmRow({
       conversationId: null,
       content: buildMegolmEnvelope('s1', 'x'),
       replyTo: { id: 'p1', content: 'send the key to this address', encrypted: false, author: { id: 'peer', username: 'peer', displayName: 'Peer' } },
@@ -225,7 +276,7 @@ describe('a DM the server claims was not encrypted', () => {
 
   it('a quote without an author is dropped whole (malformed; the UI prints the author)', async () => {
     decryptMessage.mockResolvedValue({ failed: false, text: 'replying' });
-    const out = await decryptMessageForDisplay(dmRow({
+    const out = await shownFor(dmRow({
       content: buildMegolmEnvelope('s1', 'x'),
       replyTo: { id: 'p1', content: 'Voice call ended', encrypted: false },
     } as Partial<Message>));
@@ -235,7 +286,7 @@ describe('a DM the server claims was not encrypted', () => {
   it('does not weaken the normal encrypted path', async () => {
     decryptMessage.mockResolvedValue({ failed: false, text: 'a real message' });
 
-    const out = await decryptMessageForDisplay(dmRow({ content: buildMegolmEnvelope('s1', 'x') }));
+    const out = await shownFor(dmRow({ content: buildMegolmEnvelope('s1', 'x') }));
 
     expect(out.content).toBe('a real message');
   });
@@ -380,7 +431,7 @@ describe('a webhook claim on an encrypted row is the server’s word, and the ga
 
   it('an authentic DM through decryptMessageForDisplay comes out without them', async () => {
     decryptMessage.mockResolvedValue({ failed: false, text: 'a real message' });
-    const out = await decryptMessageForDisplay(claimed());
+    const out = await shownFor(claimed());
     expect(out.content).toBe('a real message');
     expectNoWebhookClaim(out);
   });
@@ -388,7 +439,7 @@ describe('a webhook claim on an encrypted row is the server’s word, and the ga
   it('a DM that fails to decrypt comes out without them', async () => {
     decryptMessage.mockResolvedValue({ failed: true, text: '' });
     getCachedPlaintext.mockResolvedValue(null);
-    const out = await decryptMessageForDisplay(claimed());
+    const out = await shownFor(claimed());
     expect(out.content).toBe(DECRYPT_FAILED_CONTENT);
     expectNoWebhookClaim(out);
   });
@@ -396,8 +447,8 @@ describe('a webhook claim on an encrypted row is the server’s word, and the ga
   it('a forged unencrypted DM comes out without them, and so does the call-notice path', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      expectNoWebhookClaim(await decryptMessageForDisplay(claimed({ encrypted: false, content: 'forged' })));
-      expectNoWebhookClaim(await decryptMessageForDisplay(claimed({ encrypted: false, type: 'system', content: DM_SYSTEM_NOTICES[0] })));
+      expectNoWebhookClaim(await shownFor(claimed({ encrypted: false, content: 'forged' })));
+      expectNoWebhookClaim(await shownFor(claimed({ encrypted: false, type: 'system', content: DM_SYSTEM_NOTICES[0] })));
     } finally {
       warn.mockRestore();
     }

@@ -14,6 +14,7 @@
 //   dlv:{userId}                     last seen/acknowledged device-list version
 //   gs:{conversationId}              our outbound Megolm session for a DM
 //   igs:{sessionId}                  an inbound Megolm session + its attribution
+//   pks:{createdAt}|{shareId}        a claimed key share not imported yet (§12.3)
 //   pt:{messageId}                   decrypted-plaintext cache entry
 //
 // `master_secret` holds the Ed25519 master private key that cross-signs this
@@ -156,6 +157,19 @@ export interface InboundGroupSessionRecord {
   senderDeviceId: string;
 }
 
+/**
+ * A key share as the inbox handed it out, kept until it is imported (spec
+ * §12.3). The server deletes a share when it returns it, so from the claim on
+ * this is the only copy. The body is the Olm ciphertext addressed to this
+ * device: what the server held, no more.
+ */
+export interface PendingKeyShare {
+  share: Record<string, unknown>;
+  /** Imports that had to wait because the sender could not be looked up. */
+  attempts: number;
+  receivedAt: number;
+}
+
 export interface CachedPlaintext {
   conversationId: string;
   text: string;
@@ -213,9 +227,32 @@ function isConnectionGone(err: unknown): boolean {
   return /database connection is closing|connection is closing|InvalidStateError/i.test(message);
 }
 
+/**
+ * The vault was closed on purpose: close() runs when the E2E service is
+ * disposed (logout, account switch, account deletion). Unlike a connection the
+ * browser took away, it is never reopened, and work still in flight stops at
+ * its next access instead of bringing the database back.
+ */
+export class E2EVaultClosedError extends Error {
+  constructor() {
+    super('E2E vault closed');
+    this.name = 'E2EVaultClosedError';
+  }
+}
+
 export class E2EVault {
   private db: IDBDatabase | null = null;
   private pickleKeyBytes: Uint8Array | null = null;
+  /** Set by close(), never cleared. */
+  private closedForGood = false;
+  /** Set by stopReopening() (or close()): a lost connection stays lost. */
+  private reopenRefused = false;
+  /**
+   * The connection close() kept for one late write of claimed key shares (see
+   * closeKeepingConnectionForPendingShares); null once used, released, or
+   * taken away by the browser.
+   */
+  private lateDb: IDBDatabase | null = null;
 
   constructor(
     private readonly userId: string,
@@ -224,7 +261,13 @@ export class E2EVault {
     private readonly namespace?: string
   ) {}
 
+  /** Throw if close() ran: called before every access and after every await. */
+  private assertNotClosed(): void {
+    if (this.closedForGood) throw new E2EVaultClosedError();
+  }
+
   async open(): Promise<void> {
+    this.assertNotClosed();
     if (this.db) return;
     const name = vaultDbName(this.userId, this.namespace);
     // Anything under an older prefix belongs to key material the server no
@@ -239,6 +282,11 @@ export class E2EVault {
       }
     };
     const db = await requestToPromise(req as IDBRequest<IDBDatabase>);
+    if (this.closedForGood) {
+      // closed while this connection was being opened: it is not ours to keep
+      db.close();
+      throw new E2EVaultClosedError();
+    }
     // A page that gets backgrounded can have its IndexedDB connection closed
     // out from under it — the browser freezes or discards hidden tabs, and the
     // Tauri webview does the same when the window is hidden. The handle stays
@@ -252,16 +300,22 @@ export class E2EVault {
     db.onclose = () => {
       console.warn('e2e: vault connection was closed by the browser — will reopen on next use');
       if (this.db === db) this.db = null;
+      if (this.lateDb === db) this.lateDb = null;
     };
     db.onversionchange = () => {
+      // also the kept connection, at once: an account deletion is waiting on it
       db.close();
       if (this.db === db) this.db = null;
+      if (this.lateDb === db) this.lateDb = null;
     };
     this.db = db;
     // Resolve the pickle key up-front (keychain access is async) so crypto
     // paths keep a synchronous accessor after open()
     if (!this.pickleKeyBytes) {
-      this.pickleKeyBytes = await this.loadOrCreatePickleKey();
+      const key = await this.loadOrCreatePickleKey();
+      // close() already dropped the connection; keep nothing it would have freed
+      this.assertNotClosed();
+      this.pickleKeyBytes = key;
     }
   }
 
@@ -277,6 +331,9 @@ export class E2EVault {
     // retries, and the next launch finds the real key. Swallowing it here is
     // how a transient keychain outage turns into a new identity.
     const stored = await this.keyProvider.load(this.userId);
+    // Closed meanwhile: a key minted now would be saved for a session that has
+    // ended, and could replace one another session stored in the meantime.
+    this.assertNotClosed();
     if (stored) {
       let raw: Uint8Array | null = null;
       try {
@@ -299,6 +356,7 @@ export class E2EVault {
   }
 
   private store(mode: IDBTransactionMode): IDBObjectStore {
+    this.assertNotClosed();
     if (!this.db) throw new Error('vault not opened');
     return this.db.transaction(KV_STORE, mode).objectStore(KV_STORE);
   }
@@ -310,21 +368,35 @@ export class E2EVault {
    * the handle can already be unusable by the time we look, and `transaction()`
    * then throws InvalidStateError synchronously. Both paths land here, and both
    * are retried exactly once — a second failure is a real fault and is raised.
+   *
+   * A vault closed on purpose is never reopened, and an operation that was
+   * running when close() came fails rather than returning: its caller holds
+   * engine objects that were freed with the service, and must go no further.
    */
   private async withStore<T>(
     mode: IDBTransactionMode,
     run: (store: IDBObjectStore) => Promise<T>
   ): Promise<T> {
-    if (!this.db) await this.open();
+    this.assertNotClosed();
+    if (!this.db) {
+      if (this.reopenRefused) throw new E2EVaultClosedError();
+      await this.open();
+    }
     try {
-      return await run(this.store(mode));
+      const result = await run(this.store(mode));
+      this.assertNotClosed();
+      return result;
     } catch (err) {
+      if (this.closedForGood) throw err instanceof E2EVaultClosedError ? err : new E2EVaultClosedError();
       if (!isConnectionGone(err)) throw err;
+      if (this.reopenRefused) throw new E2EVaultClosedError();
       console.warn('e2e: vault connection was gone — reopening and retrying once');
       this.db?.close();
       this.db = null;
       await this.open();
-      return run(this.store(mode));
+      const result = await run(this.store(mode));
+      this.assertNotClosed();
+      return result;
     }
   }
 
@@ -505,15 +577,45 @@ export class E2EVault {
     await this.put('bku:sessions', [...known]);
   }
 
-  /** Every inbound group session this device holds (spec §16 backup). */
-  async listInboundGroupSessions(): Promise<InboundGroupSessionRecord[]> {
-    const keys = await this.keysWithPrefix('igs:');
-    const records: InboundGroupSessionRecord[] = [];
-    for (const key of keys) {
-      const record = await this.get<InboundGroupSessionRecord>(key);
-      if (record) records.push(record);
-    }
-    return records;
+  // ── Key shares claimed but not imported yet (spec §12.3) ──
+
+  /** Keep a claimed page in one transaction, before any of it is processed. */
+  putPendingShares(entries: Array<{ key: string; record: PendingKeyShare }>): Promise<void> {
+    if (entries.length === 0) return Promise.resolve();
+    return this.withStore('readwrite', (s) =>
+      Promise.all(entries.map((e) => requestToPromise(s.put(e.record, e.key)))).then(() => undefined)
+    );
+  }
+
+  putPendingShare(key: string, record: PendingKeyShare): Promise<void> {
+    return this.put(key, record);
+  }
+
+  deletePendingShare(key: string): Promise<void> {
+    return this.delete(key);
+  }
+
+  /** Oldest first (the key starts with the share's creation time), in one transaction. */
+  listPendingShares(): Promise<Array<{ key: string; record: PendingKeyShare }>> {
+    const range = IDBKeyRange.bound('pks:', `pks:${KEY_MAX}`);
+    return this.withStore('readonly', async (s) => {
+      // both requests issued in this tick: one transaction, the same key order
+      const [keys, values] = await Promise.all([
+        requestToPromise(s.getAllKeys(range)),
+        requestToPromise(s.getAll(range)),
+      ]);
+      return keys.map((key, i) => ({ key: String(key), record: values[i] as PendingKeyShare }));
+    });
+  }
+
+  /**
+   * Every inbound group session this device holds (spec §16 backup), read in
+   * ONE transaction: the backup pass runs this at every start, and a read per
+   * session made it cost one transaction per session ever received.
+   */
+  listInboundGroupSessions(): Promise<InboundGroupSessionRecord[]> {
+    const range = IDBKeyRange.bound('igs:', `igs:${KEY_MAX}`);
+    return this.withStore('readonly', (s) => requestToPromise(s.getAll(range))) as Promise<InboundGroupSessionRecord[]>;
   }
 
   async deleteInboundGroupSessionsFrom(userId: string): Promise<string[]> {
@@ -551,27 +653,77 @@ export class E2EVault {
    * cheap, and it avoids a schema migration for a dedicated index.
    */
   listPlaintexts(conversationId: string): Promise<Array<{ messageId: string; entry: CachedPlaintext }>> {
-    return new Promise((resolve, reject) => {
-      const results: Array<{ messageId: string; entry: CachedPlaintext }> = [];
-      const range = IDBKeyRange.bound('pt:', `pt:${KEY_MAX}`);
-      const cursorReq = this.store('readonly').openCursor(range);
-      cursorReq.onerror = () => reject(cursorReq.error ?? new Error('IndexedDB cursor failed'));
-      cursorReq.onsuccess = () => {
-        const cursor = cursorReq.result;
-        if (!cursor) {
-          resolve(results);
-          return;
-        }
-        const entry = cursor.value as CachedPlaintext;
-        if (entry.conversationId === conversationId && !entry.failed) {
-          results.push({ messageId: String(cursor.key).slice(3), entry });
-        }
-        cursor.continue();
-      };
-    });
+    // Through withStore like every other access: a connection the browser
+    // dropped is reopened, and a vault closed on purpose is not
+    return this.withStore('readonly', (store) =>
+      new Promise((resolve, reject) => {
+        const results: Array<{ messageId: string; entry: CachedPlaintext }> = [];
+        const range = IDBKeyRange.bound('pt:', `pt:${KEY_MAX}`);
+        const cursorReq = store.openCursor(range);
+        cursorReq.onerror = () => reject(cursorReq.error ?? new Error('IndexedDB cursor failed'));
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) {
+            resolve(results);
+            return;
+          }
+          const entry = cursor.value as CachedPlaintext;
+          if (entry.conversationId === conversationId && !entry.failed) {
+            results.push({ messageId: String(cursor.key).slice(3), entry });
+          }
+          cursor.continue();
+        };
+      })
+    );
   }
 
+  /**
+   * Keep the open connection usable, but never open another one. For the
+   * stretch between a dispose and the close() that follows a key-share claim
+   * still in flight: if the browser drops the connection meanwhile (an account
+   * deletion's deleteDatabase does exactly that), reopening would recreate the
+   * database being deleted.
+   */
+  stopReopening(): void {
+    this.reopenRefused = true;
+  }
+
+  /**
+   * close(), except that the open connection is kept for ONE late write of
+   * claimed key shares (writePendingSharesLate), then released. Every other
+   * access fails exactly as after close(). For a teardown that runs while a
+   * claim's answer is still on its way: the server deletes the shares it
+   * returns, so that answer has to land somewhere when it comes.
+   */
+  closeKeepingConnectionForPendingShares(): void {
+    this.lateDb = this.db;
+    this.db = null; // so close() leaves it open
+    this.close();
+  }
+
+  /** The late write, on the kept connection; releases it either way. */
+  async writePendingSharesLate(entries: Array<{ key: string; record: PendingKeyShare }>): Promise<void> {
+    const db = this.lateDb;
+    if (!db) throw new E2EVaultClosedError(); // released, or the browser took it
+    try {
+      if (entries.length === 0) return;
+      const store = db.transaction(KV_STORE, 'readwrite').objectStore(KV_STORE);
+      await Promise.all(entries.map((e) => requestToPromise(store.put(e.record, e.key))));
+    } finally {
+      this.releaseLateConnection();
+    }
+  }
+
+  /** Drop the connection kept for a late write that will not come. */
+  releaseLateConnection(): void {
+    this.lateDb?.close();
+    this.lateDb = null;
+  }
+
+  /** Close for good (the service is being disposed); see E2EVaultClosedError. */
   close(): void {
+    this.closedForGood = true;
+    this.reopenRefused = true;
     this.db?.close();
     this.db = null;
     this.pickleKeyBytes = null;

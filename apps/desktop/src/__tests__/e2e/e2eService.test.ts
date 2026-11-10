@@ -14,6 +14,7 @@ import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import {
   E2E_LIMITS,
   buildE2EEnvelope,
+  buildMegolmEnvelope,
   parseE2EEnvelope,
   buildVoiceKeyPlaintext,
   parseVoiceKeyPlaintext,
@@ -30,8 +31,8 @@ vi.mock('../../services/api', () => ({ api: {} }));
 
 import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
 import { generateRecoveryKey } from '../../services/e2e/engine';
-import { initEngine, EngineAccount, EngineMasterKey } from '../../services/e2e/engine';
-import type { PickleKeyProvider } from '../../services/e2e/vault';
+import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
+import { E2EVault, E2EVaultClosedError, type PickleKeyProvider } from '../../services/e2e/vault';
 
 const require = createRequire(import.meta.url);
 const wasmBytes = readFileSync(require.resolve('@voxium/crypto-engine/wasm'));
@@ -164,6 +165,10 @@ function createFakeServer() {
   let failKeyshareUploads = false;
   let failSignaturePublish = false;
   let failDeviceListReads = false;
+  let refuseDeviceListReads = false;
+  /** Shaped like the axios error the real client throws: the status on `response`. */
+  const httpError = (status: number, message: string) =>
+    Object.assign(new Error(`${status}: ${message}`), { response: { status } });
   const hiddenDevices = new Set<string>();
   const backups = new Map<string, { blob: string; updatedAt: string }>();
   interface StoredMessageKey {
@@ -180,6 +185,8 @@ function createFakeServer() {
   const forgedOwnKeys = new Map<string, { curve25519Key: string; ed25519Key: string }>();
   /** Secure-channel membership: channelId → member user ids (first = creator). */
   const channels = new Map<string, Set<string>>();
+  /** Users whose client has signed out: every request of theirs answers 401. */
+  const loggedOut = new Set<string>();
 
   const ok = (data: unknown) => ({ data: { success: true, data } });
   const userOf = (userId: string): StoredUser => {
@@ -209,9 +216,19 @@ function createFakeServer() {
     return [path, new URLSearchParams(query ?? '')];
   };
 
+  /**
+   * The real client loses its bearer at logout (authStore.logout clears the
+   * tokens BEFORE resetAccountStores disposes the service), so from then on
+   * every request it makes answers 401.
+   */
+  const assertSignedIn = (userId: string) => {
+    if (loggedOut.has(userId)) throw httpError(401, 'unauthorized');
+  };
+
   function apiFor(userId: string) {
     return {
       async get(url: string) {
+        assertSignedIn(userId);
         const [path, query] = split(url);
 
         if (path === '/e2e/master-transfers') {
@@ -308,7 +325,8 @@ function createFakeServer() {
 
         const deviceMatch = path.match(/^\/e2e\/devices\/(.+)$/);
         if (deviceMatch) {
-          if (failDeviceListReads) throw new Error('429: too many requests');
+          if (failDeviceListReads) throw httpError(429, 'too many requests');
+          if (refuseDeviceListReads) throw httpError(403, 'no shared context');
           const user = userOf(deviceMatch[1]);
           return ok({
             devices: [...user.devices.values()]
@@ -326,8 +344,17 @@ function createFakeServer() {
       },
 
       async put(url: string, payload: FakePutBody) {
+        assertSignedIn(userId);
         if (url === '/e2e/devices') {
           const body = payload as E2EDeviceRegistration;
+          // routes/e2e.ts: 1–OTK_UPLOAD_MAX keys per registration
+          if (
+            !Array.isArray(body.oneTimeKeys) ||
+            body.oneTimeKeys.length === 0 ||
+            body.oneTimeKeys.length > E2E_LIMITS.OTK_UPLOAD_MAX
+          ) {
+            throw new Error(`400: oneTimeKeys must contain 1–${E2E_LIMITS.OTK_UPLOAD_MAX} keys`);
+          }
           const user = userOf(userId);
           const existing = user.devices.get(body.deviceId);
           if (!existing && user.devices.size >= E2E_LIMITS.MAX_DEVICES) {
@@ -410,12 +437,20 @@ function createFakeServer() {
       },
 
       async post(url: string, payload?: FakePostBody) {
+        assertSignedIn(userId);
         const [path, query] = split(url);
 
         if (path === '/e2e/devices/me/keys') {
           const body = payload as DeviceKeysBody;
           const device = userOf(userId).devices.get(body.deviceId);
           if (!device) throw new Error('403: no device');
+          // routes/e2e.ts: 1–OTK_UPLOAD_MAX keys per upload, refused whole otherwise
+          if (
+            body.oneTimeKeys &&
+            (body.oneTimeKeys.length === 0 || body.oneTimeKeys.length > E2E_LIMITS.OTK_UPLOAD_MAX)
+          ) {
+            throw new Error(`400: oneTimeKeys must contain 1–${E2E_LIMITS.OTK_UPLOAD_MAX} keys`);
+          }
           if (body.oneTimeKeys) device.oneTimeKeys.push(...body.oneTimeKeys);
           if (body.fallbackKey) device.fallbackKey = body.fallbackKey;
           return ok({ oneTimeKeyCount: device.oneTimeKeys.length });
@@ -582,6 +617,7 @@ function createFakeServer() {
       },
 
       async delete(url: string) {
+        assertSignedIn(userId);
         if (url === '/e2e/backup') {
           return ok({ deleted: backups.delete(userId) });
         }
@@ -628,6 +664,8 @@ function createFakeServer() {
     setMasterKeyPublishFailure: (fail: boolean) => { failMasterKeyPublish = fail; },
     /** Rate limit / network blip on device-list reads. */
     setDeviceListReadFailure: (fail: boolean) => { failDeviceListReads = fail; },
+    /** A definitive refusal of device-list reads (403), as for a user one no longer shares a context with. */
+    setDeviceListReadRefusal: (refuse: boolean) => { refuseDeviceListReads = refuse; },
     /** Omit one device from every list response (a server can do this at will). */
     hideDevice: (u: string, d: string | null) => {
       if (d) hiddenDevices.add(`${u}/${d}`);
@@ -638,6 +676,11 @@ function createFakeServer() {
     /** Answer device-list reads with keys the server chose for someone's device. */
     forgeDeviceKeys: (u: string, d: string, keys: { curve25519Key: string; ed25519Key: string }) => {
       forgedOwnKeys.set(`${u}/${d}`, keys);
+    },
+    /** Sign a user's client out (its tokens are gone) or back in. */
+    setLoggedOut: (u: string, out: boolean) => {
+      if (out) loggedOut.add(u);
+      else loggedOut.delete(u);
     },
     /** Set a secure channel's member list (first member = creator). */
     setChannelMembers: (channelId: string, userIds: string[]) => {
@@ -3699,5 +3742,1068 @@ describe('E2EService — device-sealed payloads', () => {
     await expect(
       alice.service.encryptToDevice(bob.userId, bob.service.deviceId, 'must not send')
     ).rejects.toBeInstanceOf(E2EIdentityChangedError);
+  });
+});
+
+describe('E2EService — the first list that names a device or an account key is the baseline', () => {
+  // A peer who has never started the app publishes nothing, and the server
+  // answers their device list with an empty one. That answer names no identity,
+  // so it cannot be the trust-on-first-use baseline (spec §4.4): the first look
+  // that names a device or an account key is.
+
+  it("trusts a peer's first device on first use when we looked before they had one", async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+
+    // Alice opens the conversation before Bob ever started the app
+    expect((await alice.service.fetchDeviceList(bobId, true)).devices).toHaveLength(0);
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({
+      deviceIds: [bobPhone.service.deviceId],
+      newDeviceIds: [],
+      unsignedDeviceIds: [],
+      changed: false,
+    });
+  });
+
+  it('makes that first non-empty look a full baseline: a later unsigned device still warns', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true); // nothing published yet
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+
+    // an approved tablet is vouched for by the account key Alice just pinned…
+    const bobTablet = makeDevice(server, bobId);
+    await bobTablet.service.initialize();
+    await bobPhone.service.approveDevice(bobTablet.service.deviceId);
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({ newDeviceIds: [], changed: false });
+
+    // …a device the account key does not vouch for is reported as new AND unsigned
+    const rogue = makeDevice(server, bobId);
+    await rogue.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+    const status = await alice.service.deviceListStatus(bobId);
+    expect(status.changed).toBe(true);
+    expect(status.newDeviceIds).toEqual([rogue.service.deviceId]);
+    expect(status.unsignedDeviceIds).toEqual([rogue.service.deviceId]);
+  });
+
+  it('…also when the device is published before its account key', async () => {
+    // The real registration order: PUT /e2e/devices lands first, the master key
+    // and its signature over the device a round trip later.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true); // empty
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await flushQueue();
+    server.clearCrossSigning(bobId); // the device row is there, the account key not yet
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({ newDeviceIds: [], changed: false });
+
+    // the account key lands: the same install restarts and publishes it again
+    bobPhone.service.dispose();
+    const bobAgain = makeDevice(server, bobId, {
+      keyProvider: bobPhone.keyProvider,
+      vaultNamespace: bobPhone.vaultNamespace,
+    });
+    await bobAgain.service.initialize();
+    expect(server.userOf(bobId).masterKey).toBeTruthy();
+
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({
+      newDeviceIds: [],
+      unsignedDeviceIds: [],
+      changed: false,
+    });
+  });
+
+  it('treats a stored list that holds nothing as no baseline (what an earlier build wrote)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+
+    // The exact record the first look at an empty list used to leave behind
+    const vault = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
+    await vault.open();
+    await vault.putDeviceListState(bobId, {
+      version: 0,
+      deviceIds: [],
+      acknowledgedVersion: 0,
+      acknowledgedDeviceIds: [],
+      masterKey: null,
+      acknowledgedMasterKey: null,
+      crossSignedDeviceIds: [],
+    });
+    vault.close();
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({
+      deviceIds: [bobPhone.service.deviceId],
+      newDeviceIds: [],
+      changed: false,
+    });
+  });
+
+  it('keeps a baseline when the list names an account key but no device', async () => {
+    // An account key is an identity: pinning it is what lets a device it signs
+    // later be trusted, and what makes an unsigned arrival stand out.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    await alice.service.initialize();
+    await bobPhone.service.initialize();
+    await flushQueue();
+
+    server.hideDevice(bobId, bobPhone.service.deviceId);
+    const first = await alice.service.fetchDeviceList(bobId, true);
+    expect(first.devices).toHaveLength(0);
+    expect(first.masterKey).toBeTruthy();
+
+    // the phone comes back together with a device the account key never signed
+    const rogue = makeDevice(server, bobId);
+    await rogue.service.initialize();
+    server.hideDevice(bobId, null);
+    await alice.service.fetchDeviceList(bobId, true);
+
+    const status = await alice.service.deviceListStatus(bobId);
+    expect(status.newDeviceIds).toEqual([rogue.service.deviceId]);
+    expect(status.unsignedDeviceIds).toEqual([rogue.service.deviceId]);
+  });
+
+  it('applies the same rule to a secure-channel member who has no device yet', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const channelId = `ch-${uniq}`;
+    await alice.service.initialize();
+    server.setChannelMembers(channelId, [alice.userId, bobId]);
+
+    await alice.service.fetchChannelDeviceLists(channelId); // Bob: nothing published
+
+    const bobPhone = makeDevice(server, bobId);
+    await bobPhone.service.initialize();
+    await alice.service.fetchChannelDeviceLists(channelId);
+    expect(await alice.service.deviceListStatus(bobId)).toMatchObject({
+      deviceIds: [bobPhone.service.deviceId],
+      newDeviceIds: [],
+      changed: false,
+    });
+  });
+});
+
+describe('E2EService — device-list events', () => {
+  it('tells listeners about the first look at a list, not only about later changes', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    await alice.service.initialize();
+    await bobPhone.service.initialize();
+    await flushQueue();
+
+    const seen: string[] = [];
+    alice.service.onDeviceListChanged((userId) => seen.push(userId));
+
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(seen.filter((id) => id === bobId)).toEqual([bobId]);
+
+    // a look that changes nothing stays quiet
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(seen.filter((id) => id === bobId)).toEqual([bobId]);
+  });
+
+  it('says nothing about a look that recorded nothing (an empty list)', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    await alice.service.initialize();
+    await flushQueue();
+
+    const seen: string[] = [];
+    alice.service.onDeviceListChanged((userId) => seen.push(userId));
+    await alice.service.fetchDeviceList(bobId, true);
+    expect(seen).toEqual([]);
+  });
+
+  it('lets an unapproved second device learn it is unsigned from its own start-up', async () => {
+    // Nothing about the account changes during this device's first session, so
+    // the read its start-up makes is the only event there will be. It has to
+    // reach the store, or the badge reads as fine on the one device the account
+    // key does not vouch for.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    await phone.service.initialize();
+    await flushQueue();
+
+    const laptop = makeDevice(server, aliceId);
+    const seen: string[] = [];
+    laptop.service.onDeviceListChanged((userId) => seen.push(userId));
+    await laptop.service.initialize();
+    // queued behind the start-up claim, so that claim (and its list read) is done
+    await laptop.service.claimMasterTransfers();
+
+    expect(seen).toContain(aliceId);
+    expect((await laptop.service.deviceListStatus(aliceId)).unsignedDeviceIds).toContain(laptop.service.deviceId);
+  });
+});
+
+describe('E2EService — lifecycle', () => {
+  /**
+   * The fake server's client, with the first call that matches `hold` parked
+   * until `release()`: the moment a logout or account switch can land while
+   * initialize() waits on the network. Every write that reaches the client is
+   * recorded, held or not.
+   */
+  function holdingApi(
+    base: ReturnType<Server['apiFor']>,
+    hold: (verb: string, url: string) => boolean,
+    /** 'response': the server has answered (and acted) before the hold, as for a reply still in flight */
+    phase: 'request' | 'response' = 'request'
+  ) {
+    const writes: string[] = [];
+    const reads: string[] = [];
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const held = new Promise<void>((resolve) => (reached = resolve));
+    let holding = true;
+    const verb = (name: 'get' | 'put' | 'post' | 'delete') =>
+      async (url: string, body?: unknown) => {
+        (name === 'get' ? reads : writes).push(`${name.toUpperCase()} ${url.split('?')[0]}`);
+        const call = base[name] as (url: string, body?: unknown) => Promise<unknown>;
+        const parked = holding && hold(name, url);
+        if (parked) holding = false;
+        if (parked && phase === 'request') {
+          reached();
+          await released;
+        }
+        const answer = await call(url, body);
+        if (parked && phase === 'response') {
+          reached();
+          await released;
+        }
+        return answer;
+      };
+    return {
+      api: { get: verb('get'), put: verb('put'), post: verb('post'), delete: verb('delete') },
+      writes,
+      reads,
+      held,
+      release,
+    };
+  }
+
+  /** A service over `api`; pass an earlier device's key provider and vault to restart it. */
+  function serviceOver(
+    userId: string,
+    api: unknown,
+    opts: { keyProvider?: PickleKeyProvider; vaultNamespace?: string } = {}
+  ) {
+    return new E2EService(userId, {
+      api: api as E2EServiceOptions['api'],
+      keyProvider: opts.keyProvider ?? memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: opts.vaultNamespace ?? `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+  }
+
+  /** The fake's client with every call to `match` failing once, then working. */
+  function failingOnce(base: ReturnType<Server['apiFor']>, match: (verb: string, url: string) => boolean) {
+    let armed = false;
+    const verb = (name: 'get' | 'put' | 'post' | 'delete') =>
+      async (url: string, body?: unknown) => {
+        if (armed && match(name, url)) {
+          armed = false;
+          throw new Error('503: service unavailable');
+        }
+        const call = base[name] as (url: string, body?: unknown) => Promise<unknown>;
+        return call(url, body);
+      };
+    return {
+      api: { get: verb('get'), put: verb('put'), post: verb('post'), delete: verb('delete') },
+      arm: () => {
+        armed = true;
+      },
+    };
+  }
+
+  const nthGetOfOwnStatus = (n: number) => {
+    let seen = 0;
+    return (verb: string, url: string) => verb === 'get' && url.startsWith('/e2e/devices/me?') && ++seen === n;
+  };
+
+  it.each([
+    {
+      label: 'the registration status read',
+      hold: () => nthGetOfOwnStatus(1),
+      writes: [] as string[],
+    },
+    {
+      label: 'the device upload',
+      hold: () => (verb: string, url: string) => verb === 'put' && url === '/e2e/devices',
+      writes: ['PUT /e2e/devices'],
+    },
+    {
+      label: 'the cross-signing status read',
+      hold: () => nthGetOfOwnStatus(2),
+      writes: ['PUT /e2e/devices'],
+    },
+  ])('a dispose while initialize waits on $label aborts it and publishes nothing more', async ({ hold, writes }) => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const gate = holdingApi(server.apiFor(userId), hold());
+    const service = serviceOver(userId, gate.api);
+    const warn = vi.spyOn(console, 'warn');
+    const error = vi.spyOn(console, 'error');
+    try {
+      const init = service.initialize();
+      await gate.held;
+      service.dispose();
+      gate.release();
+
+      await expect(init).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      await flushQueue();
+      expect(gate.writes).toEqual(writes);
+      // a disposed service stays disposed
+      await expect(service.initialize()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      // and nothing touched a freed engine handle on the way out
+      const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+      expect(logged).not.toMatch(/null pointer/);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it('runs one initialization for concurrent callers: an empty vault yields one device', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = holdingApi(server.apiFor(userId), () => false);
+    const service = serviceOver(userId, recorder.api);
+
+    await Promise.all([service.initialize(), service.initialize()]);
+    await flushQueue();
+
+    // one device, registered once: a second run would mint a second identity
+    // and re-register the slot with it
+    expect([...server.userOf(userId).devices.keys()]).toEqual([service.deviceId]);
+    expect(recorder.writes.filter((w) => w === 'PUT /e2e/devices')).toHaveLength(1);
+    expect(recorder.writes.filter((w) => w === 'PUT /e2e/master-key')).toHaveLength(1);
+  });
+
+  it('logs what actually stopped a run a dispose overtook before reporting the dispose', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const flaky = failingOnce(server.apiFor(userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/devices/me?'));
+    const gate = holdingApi(flaky.api as unknown as ReturnType<Server['apiFor']>, nthGetOfOwnStatus(1));
+    const service = serviceOver(userId, gate.api);
+    flaky.arm(); // the held request then fails on its own as well
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      const init = service.initialize();
+      await gate.held;
+      void service.dispose();
+      gate.release();
+      await expect(init).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/503: service unavailable/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn about the start-up tasks a dispose stopped', async () => {
+    // A logout right after sign-in ends the claim, the replenishment and the
+    // backup pass on purpose: that is not something to warn about.
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      await alice.service.initialize();
+      await alice.service.dispose();
+      await flushQueue();
+      expect(warn.mock.calls.flat().map(String).join('\n')).not.toMatch(/E2E vault closed|E2E service disposed/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('lets a caller try again after an initialization that failed', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const base = server.apiFor(userId);
+    let failNext = true;
+    const api = {
+      ...base,
+      async get(url: string) {
+        if (failNext && url.startsWith('/e2e/devices/me?')) {
+          failNext = false;
+          throw new Error('503: service unavailable');
+        }
+        return base.get(url);
+      },
+    };
+    const service = serviceOver(userId, api);
+
+    await expect(service.initialize()).rejects.toThrow('503');
+    await service.initialize();
+    expect([...server.userOf(userId).devices.keys()]).toEqual([service.deviceId]);
+  });
+
+  it('refuses queued work on a disposed service instead of touching freed handles', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    await alice.service.initialize();
+    await flushQueue();
+    alice.service.dispose();
+
+    await expect(alice.service.replenishOneTimeKeys()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+  });
+
+  describe('one-time keys after an interrupted upload', () => {
+    const poolOf = (server: Server, userId: string, deviceId: string) => server.deviceOf(userId, deviceId).oneTimeKeys;
+
+    it('marks the keys of a registration the server took before a dispose cut it short', async () => {
+      // Otherwise the account keeps all of them as unpublished, the next
+      // replenish sends them again on top of a fresh batch, past
+      // OTK_UPLOAD_MAX, and the server refuses that upload every time: the
+      // pool drains to the fallback key.
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      const keyProvider = memoryKeyProvider();
+      const vaultNamespace = `v${++vaultSeq}`;
+      const gate = holdingApi(server.apiFor(userId), (verb, url) => verb === 'put' && url === '/e2e/devices');
+      const first = serviceOver(userId, gate.api, { keyProvider, vaultNamespace });
+      const init = first.initialize();
+      await gate.held;
+      first.dispose();
+      gate.release();
+      await expect(init).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+
+      // the server took the upload
+      const [deviceId] = [...server.userOf(userId).devices.keys()];
+      expect(poolOf(server, userId, deviceId)).toHaveLength(E2E_LIMITS.OTK_TARGET);
+
+      const restarted = makeDevice(server, userId, { keyProvider, vaultNamespace });
+      await restarted.service.initialize();
+      expect(restarted.service.deviceId).toBe(deviceId);
+
+      // peers claim keys until the pool is under the low-water mark
+      poolOf(server, userId, deviceId).splice(0, E2E_LIMITS.OTK_TARGET - 10);
+      await restarted.service.replenishOneTimeKeys();
+
+      const pool = poolOf(server, userId, deviceId);
+      expect(pool).toHaveLength(E2E_LIMITS.OTK_TARGET);
+      expect(new Set(pool.map((k) => k.keyId)).size).toBe(pool.length);
+    });
+
+    it('sends at most OTK_UPLOAD_MAX keys per replenish, an earlier unsent batch included', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      const flaky = failingOnce(server.apiFor(userId), (verb, url) => verb === 'post' && url === '/e2e/devices/me/keys');
+      const service = serviceOver(userId, flaky.api);
+      await service.initialize();
+      await flushQueue();
+      poolOf(server, userId, service.deviceId).splice(0, E2E_LIMITS.OTK_TARGET - 10);
+
+      // this batch is generated and kept, but never reaches the server
+      flaky.arm();
+      await expect(service.replenishOneTimeKeys()).rejects.toThrow('503');
+
+      await service.replenishOneTimeKeys();
+      expect(poolOf(server, userId, service.deviceId)).toHaveLength(E2E_LIMITS.OTK_TARGET);
+    });
+
+    it('registers with at most OTK_UPLOAD_MAX keys when the account holds more unpublished ones', async () => {
+      // The state an earlier build could leave behind; the server has since
+      // lost the device, so the next start registers it again.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      await alice.service.initialize();
+      await flushQueue();
+      const internals = alice.service as unknown as { account: EngineAccount; persistAccount(): Promise<void> };
+      internals.account.generateOneTimeKeys(E2E_LIMITS.OTK_UPLOAD_MAX + 10);
+      await internals.persistAccount();
+      alice.service.dispose();
+      server.userOf(alice.userId).devices.clear();
+
+      const restarted = makeDevice(server, alice.userId, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await restarted.service.initialize();
+      const pool = poolOf(server, alice.userId, restarted.service.deviceId);
+      expect(pool.length).toBeGreaterThan(0);
+      expect(pool.length).toBeLessThanOrEqual(E2E_LIMITS.OTK_UPLOAD_MAX);
+    });
+  });
+
+  describe('a retried initialization', () => {
+    it('frees the account a failed run left behind before replacing it', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      const flaky = failingOnce(server.apiFor(userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/devices/me?'));
+      const service = serviceOver(userId, flaky.api);
+
+      flaky.arm();
+      await expect(service.initialize()).rejects.toThrow('503');
+      const left = (service as unknown as { account: { free(): void } | null }).account;
+      expect(left).toBeTruthy();
+      const free = vi.spyOn(left!, 'free');
+
+      await service.initialize();
+      expect(free).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('key shares claimed around a logout', () => {
+    // GET /e2e/keyshares deletes what it returns, so a claim answered after a
+    // logout holds the only copy of those session keys. And logout clears the
+    // tokens before it disposes the service: from then on every request,
+    // including the look-up of a sender this device has never seen, is a 401.
+    type Party = { userId: string; keyProvider: PickleKeyProvider; vaultNamespace: string };
+    const sharesFor = (server: Server, userId: string) => server.shares.filter((s) => s.recipientUserId === userId);
+    const restart = (server: Server, party: Party) =>
+      makeDevice(server, party.userId, { keyProvider: party.keyProvider, vaultNamespace: party.vaultNamespace });
+    /** The key shares kept in a party's vault, read over a connection of its own. */
+    const pendingIn = async (party: Party) => {
+      const vault = new E2EVault(party.userId, party.keyProvider, party.vaultNamespace);
+      await vault.open();
+      try {
+        return await vault.listPendingShares();
+      } finally {
+        vault.close();
+      }
+    };
+
+    /** Alice was away while Bob wrote; her next start's claim is answered after she signed out. */
+    async function claimAnsweredAfterLogout(opts: { aliceKnowsBob: boolean }) {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      if (opts.aliceKnowsBob) await alice.service.fetchDeviceList(bob.userId, true);
+      await alice.service.dispose(); // the app is closed
+
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'sent while you were away');
+      expect(sharesFor(server, alice.userId)).toHaveLength(1);
+
+      const gate = holdingApi(
+        server.apiFor(alice.userId),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const restarted = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await restarted.initialize();
+      await gate.held;
+      expect(sharesFor(server, alice.userId)).toHaveLength(0); // deleted on read
+
+      server.setLoggedOut(alice.userId, true); // logout: the tokens go first…
+      const tornDown = restarted.dispose(); // …then the service
+      gate.release();
+      await tornDown;
+      server.setLoggedOut(alice.userId, false); // she signs in again later
+
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      return { server, alice, bob, message };
+    }
+
+    it("keeps a share whose sender it cannot look up at logout, and imports it at the next start", async () => {
+      const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      const kept = await pendingIn(alice);
+      expect(kept).toHaveLength(1);
+      // signed out is not a verdict on the sender: no attempt is counted
+      expect(kept[0].record.attempts).toBe(0);
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('sent while you were away');
+      expect(await pendingIn(alice)).toHaveLength(0);
+    });
+
+    it('imports a share from a sender it already knows before the teardown, without the network', async () => {
+      const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: true });
+      expect(await pendingIn(alice)).toHaveLength(0);
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('sent while you were away');
+    });
+
+    /** Decrypts of messages under sessions this device lacks: each one starts a claim run. */
+    const missOn = async (party: { service: E2EService }, bobId: string, sessionIds: string[]) => {
+      for (const sid of sessionIds) {
+        const miss = await party.service.decryptMessage({
+          id: `miss-${sid}`, conversationId: 'c1', authorId: bobId, content: buildMegolmEnvelope(sid, 'Y2lwaGVy'),
+        });
+        expect(miss.failed).toBe(true);
+      }
+    };
+
+    it('keeps a share through a burst of failed look-ups (429), however many claims they span', async () => {
+      // A page with several undecryptable messages starts one claim per
+      // missing session; one rate-limit answer must not spend the share.
+      const { server, alice, bob, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      server.setDeviceListReadFailure(true);
+      const again = restart(server, alice);
+      await again.service.initialize();
+      await missOn(again, bob.userId, ['bWlzczE', 'bWlzczI', 'bWlzczM']);
+      expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
+      await again.service.dispose();
+
+      server.setDeviceListReadFailure(false);
+      const later = restart(server, alice);
+      await later.service.initialize();
+      expect((await later.service.decryptMessage(message)).text).toBe('sent while you were away');
+    });
+
+    it('drops a share whose sender is refused after the fifth start, counting one attempt per start', async () => {
+      const { server, alice, bob, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      server.setDeviceListReadRefusal(true); // a definitive answer: 403
+      for (let start = 1; start <= 5; start++) {
+        const again = restart(server, alice);
+        await again.service.initialize();
+        await missOn(again, bob.userId, [`c3RhcnQ${start}a`, `c3RhcnQ${start}b`]); // more claims, same start
+        const kept = await pendingIn(alice);
+        if (start < 5) expect(kept.map((p) => p.record.attempts)).toEqual([start]);
+        else expect(kept).toHaveLength(0);
+        await again.service.dispose();
+      }
+
+      server.setDeviceListReadRefusal(false);
+      const last = restart(server, alice);
+      await last.service.initialize();
+      expect((await last.service.decryptMessage(message)).failed).toBe(true);
+    });
+
+    it('keeps a share re-decryptable when a run is cut between its Olm decrypt and its session import', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'survives a cut');
+
+      // the run stops right where the session would be written (a teardown,
+      // the window closing): the Olm message is decrypted, nothing is imported
+      const cut = restart(server, alice);
+      const cutVault = (cut.service as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(cutVault, 'putInboundGroupSession').mockRejectedValueOnce(new E2EVaultClosedError());
+      await cut.service.initialize();
+      await cut.service.claimMasterTransfers(); // queued behind the start-up claim
+      expect(await pendingIn(alice)).toHaveLength(1);
+      await cut.service.dispose();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      expect((await again.service.decryptMessage(message)).text).toBe('survives a cut');
+      expect(await pendingIn(alice)).toHaveLength(0);
+    });
+
+    /** The fake's client with the claimed pages rewritten on their way back. */
+    const mangledClaims = (base: ReturnType<Server['apiFor']>, rewrite: (res: { data: { data?: { shares?: unknown[] } } }) => unknown) => ({
+      ...base,
+      async get(url: string) {
+        const res = (await base.get(url)) as { data: { data?: { shares?: unknown[] } } };
+        return url.startsWith('/e2e/keyshares') && (res.data.data?.shares?.length ?? 0) > 0 ? rewrite(res) : res;
+      },
+    }) as unknown as ReturnType<Server['apiFor']>;
+    const withJunk = (res: { data: { data?: { shares?: unknown[] } } }) => {
+      res.data.data!.shares = [null, 42, ...(res.data.data!.shares ?? [])];
+      return res;
+    };
+
+    /** Alice was away while Bob wrote; returns what her next start needs. */
+    async function bobWroteWhileAliceWasAway(text: string) {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, text);
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      return { server, alice, bob, message };
+    }
+
+    it('skips a malformed element of a claimed page and imports the rest of it', async () => {
+      const { server, alice, message } = await bobWroteWhileAliceWasAway('next to junk');
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        const again = serviceOver(alice.userId, mangledClaims(server.apiFor(alice.userId), withJunk), {
+          keyProvider: alice.keyProvider,
+          vaultNamespace: alice.vaultNamespace,
+        });
+        await again.initialize();
+        expect((await again.decryptMessage(message)).text).toBe('next to junk');
+        expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/malformed key share/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it.each([
+      ['a malformed element', withJunk, 1],
+      ['no page at all', () => ({ data: {} }), 0],
+    ])('writes a late answer with %s as far as it goes, and releases the kept connection', async (_what, rewrite, kept) => {
+      const { server, alice, message } = await bobWroteWhileAliceWasAway('late and messy');
+      const gate = holdingApi(
+        mangledClaims(server.apiFor(alice.userId), rewrite),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const restarted = new E2EService(alice.userId, {
+        api: gate.api as unknown as E2EServiceOptions['api'],
+        keyProvider: alice.keyProvider,
+        wasmInput: wasmBytes,
+        vaultNamespace: alice.vaultNamespace,
+        deviceListCacheMs: 0,
+        teardownDeadlineMs: 50,
+      });
+      await restarted.initialize();
+      await gate.held;
+      await restarted.dispose();
+      gate.release();
+
+      const vault = (restarted as unknown as { vault: { lateDb: IDBDatabase | null } }).vault;
+      await vi.waitFor(() => expect(vault.lateDb).toBeNull());
+      expect(await pendingIn(alice)).toHaveLength(kept);
+      if (kept) {
+        const again = restart(server, alice);
+        await again.service.initialize();
+        expect((await again.service.decryptMessage(message)).text).toBe('late and messy');
+      }
+    });
+
+    it('keeps a share whose session could not be stored (a full disk), for the next start', async () => {
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept through a full disk');
+      const tight = restart(server, alice);
+      const tightVault = (tight.service as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(tightVault, 'putInboundGroupSession').mockRejectedValueOnce(
+        new DOMException('The quota has been exceeded.', 'QuotaExceededError')
+      );
+      await tight.service.initialize();
+      await tight.service.claimMasterTransfers(); // queued behind the start-up claim
+      expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
+      // a later claim of the same start leaves it alone: this start's Olm state already moved past it
+      await missOn(tight, bob.userId, ['cXVvdGE']);
+      expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
+      await tight.service.dispose();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('kept through a full disk');
+      expect(await pendingIn(alice)).toHaveLength(0);
+    });
+
+    it('drops a kept share once its session reached this device another way', async () => {
+      const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+      const [kept] = await pendingIn(alice);
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('sent while you were away');
+      await again.service.dispose();
+
+      // the same share turns up kept again (a copy left by a run that was cut short)
+      const vault = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
+      await vault.open();
+      await vault.putPendingShare(kept.key, kept.record);
+      vault.close();
+
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        const third = restart(server, alice);
+        await third.service.initialize();
+        await third.service.claimMasterTransfers();
+        expect(await pendingIn(alice)).toHaveLength(0);
+        // dropped for its session, not retried (its one-time key was spent)
+        expect(warn.mock.calls.flat().map(String).join('\n')).not.toMatch(/discarding an unusable key share/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('tears down at the deadline when a claim hangs, and keeps what it had not imported', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'sent before the hang');
+
+      // the claim is answered, the look-up of Bob's devices never is
+      const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url === `/e2e/devices/${bob.userId}`);
+      const restarted = new E2EService(alice.userId, {
+        api: gate.api as unknown as E2EServiceOptions['api'],
+        keyProvider: alice.keyProvider,
+        wasmInput: wasmBytes,
+        vaultNamespace: alice.vaultNamespace,
+        deviceListCacheMs: 0,
+        teardownDeadlineMs: 50,
+      });
+      await restarted.initialize();
+      await gate.held;
+
+      await restarted.dispose(); // resolves at the deadline, the look-up still hanging
+      expect((restarted as unknown as { tornDown: boolean }).tornDown).toBe(true);
+      gate.release();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      expect((await again.service.decryptMessage(message)).text).toBe('sent before the hang');
+    });
+
+    it('writes a claim answer that arrives after the deadline, raw, for the next start', async () => {
+      // The server deleted the page when it answered; the teardown has run.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'answered after the deadline');
+
+      const gate = holdingApi(
+        server.apiFor(alice.userId),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const restarted = new E2EService(alice.userId, {
+        api: gate.api as unknown as E2EServiceOptions['api'],
+        keyProvider: alice.keyProvider,
+        wasmInput: wasmBytes,
+        vaultNamespace: alice.vaultNamespace,
+        deviceListCacheMs: 0,
+        teardownDeadlineMs: 50,
+      });
+      await restarted.initialize();
+      await gate.held;
+      expect(sharesFor(server, alice.userId)).toHaveLength(0); // deleted on read
+      await restarted.dispose(); // the deadline passes with the answer still on its way
+      expect((restarted as unknown as { tornDown: boolean }).tornDown).toBe(true);
+      gate.release();
+      await vi.waitFor(async () => expect(await pendingIn(alice)).toHaveLength(1));
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+      expect((await again.service.decryptMessage(message)).text).toBe('answered after the deadline');
+    });
+
+    it('refuses initialize() once disposed, while a claim still holds the teardown back', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      await bob.service.encryptMessage('c1', alice.userId, 'in the inbox');
+
+      const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'));
+      const restarted = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await restarted.initialize();
+      await gate.held;
+      const tornDown = restarted.dispose();
+      await expect(restarted.initialize()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      gate.release();
+      await tornDown;
+    });
+
+    it('logs a teardown that fails after a claim, instead of leaving a rejection behind', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.dispose();
+      await bob.service.encryptMessage('c1', alice.userId, 'in the inbox');
+
+      const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'));
+      const restarted = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await restarted.initialize();
+      await gate.held;
+      const vault = (restarted as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(vault, 'close').mockImplementation(() => {
+        throw new Error('close failed');
+      });
+      const error = vi.spyOn(console, 'error');
+      try {
+        const tornDown = restarted.dispose();
+        gate.release();
+        await expect(tornDown).resolves.toBeUndefined();
+        expect(error.mock.calls.flat().map(String).join('\n')).toMatch(/teardown failed[\s\S]*close failed/);
+      } finally {
+        error.mockRestore();
+      }
+    });
+  });
+
+  describe('the message-key backup pass', () => {
+    type Internals = {
+      vault: E2EVault;
+      enqueue<T>(fn: () => Promise<T>): Promise<T>;
+      importInboundGroupSession(
+        key: string,
+        meta: { sessionId: string; conversationId: string; senderUserId: string; senderDeviceId: string }
+      ): Promise<boolean>;
+    };
+    const internalsOf = (service: E2EService) => service as unknown as Internals;
+
+    it('reads the sessions in one transaction, and does not wait on the queue when nothing is pending', async () => {
+      // It runs at every start; a wait behind the queue holds up the first
+      // send or decrypt, and one transaction per session made that wait long.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      await alice.service.initialize();
+      await flushQueue();
+
+      // a few hundred sessions, every one of them already backed up
+      const vault = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
+      await vault.open();
+      const ids = Array.from({ length: 300 }, (_, i) => `session-${i}`);
+      for (const sessionId of ids) {
+        await vault.putInboundGroupSession(sessionId, {
+          pickle: 'not read when nothing is pending',
+          sessionId,
+          conversationId: 'c1',
+          senderUserId: 'peer',
+          senderDeviceId: 'peer-device',
+        });
+      }
+      await vault.addBackedUpSessionIds(ids);
+      vault.close();
+
+      const internals = internalsOf(alice.service);
+      let unblock!: () => void;
+      const blocker = internals.enqueue(() => new Promise<void>((resolve) => (unblock = resolve)));
+      const db = (internals.vault as unknown as { db: IDBDatabase }).db;
+      const transaction = vi.spyOn(db, 'transaction');
+      try {
+        let stored: number | undefined;
+        void alice.service.backupMessageKeys().then((n) => (stored = n));
+        await vi.waitFor(() => expect(stored).toBe(0));
+        expect(transaction.mock.calls.length).toBeLessThanOrEqual(2);
+      } finally {
+        transaction.mockRestore();
+        unblock();
+        await blocker;
+      }
+    });
+
+    it('a master-key replacement during a backup pass waits for it instead of freeing the key it seals with', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      // the first upload of the pass is held: a second batch is still to seal
+      const gate = holdingApi(server.apiFor(userId), (verb, url) => verb === 'post' && url === '/e2e/message-keys');
+      const service = serviceOver(userId, gate.api);
+      await service.initialize();
+      await flushQueue();
+      const recoveryKey = await service.createKeyBackup();
+
+      const internals = internalsOf(service);
+      const count = E2E_LIMITS.MESSAGE_KEY_BATCH_MAX + 1;
+      for (let i = 0; i < count; i++) {
+        const outbound = new EngineGroupSession();
+        await internals.importInboundGroupSession(outbound.sessionKey(), {
+          sessionId: outbound.sessionId(),
+          conversationId: 'c1',
+          senderUserId: 'peer',
+          senderDeviceId: 'peer-device',
+        });
+        outbound.free();
+      }
+
+      const warn = vi.spyOn(console, 'warn');
+      const error = vi.spyOn(console, 'error');
+      try {
+        const backup = service.backupMessageKeys();
+        await gate.held;
+        // restoring the account key replaces (and frees) the one the pass holds
+        const restore = service.restoreKeyBackup(recoveryKey);
+        // a restore free to start would have sent its first request by now
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(gate.reads).not.toContain('GET /e2e/backup');
+        gate.release();
+
+        await expect(backup).resolves.toBe(count);
+        await expect(restore).resolves.toBeUndefined();
+        expect(server.messageKeys).toHaveLength(count);
+        const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+        expect(logged).not.toMatch(/null pointer/);
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
+    });
   });
 });

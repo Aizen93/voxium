@@ -20,7 +20,7 @@ const CALL_LOCK = '[data-testid="dm-call-e2e-lock"]';
 /** Open the DM with a user from the Friends list. */
 async function openDMWith(page: Page, username: string) {
   await page.getByText('Friends').first().click();
-  await page.getByRole('button', { name: 'All' }).click();
+  await page.getByRole('button', { name: 'All', exact: true }).click();
   await expect(page.getByText(username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
   await page.locator('button[title="Message"]').first().click();
   await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });

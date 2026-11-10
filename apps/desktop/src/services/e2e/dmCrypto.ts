@@ -16,6 +16,7 @@ import { buildE2EPlaintext, parseE2EPlaintext, isDMSystemNotice } from '@voxium/
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
 import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
+import { isE2ESessionEnded } from './session';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
@@ -52,8 +53,23 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * both participants (including our own sends), so the normal path handles them.
  * Own echoes can still race the send path's cache write, and legacy olm1 own
  * messages are cache-only, so own messages fall back to retrying the cache.
+ *
+ * A decrypt the session's end overtook (logout, account switch) settles as
+ * `null`: nothing about it may be shown, counted or notified, since the
+ * screen and the stores belong to whoever signs in next. Its callers include
+ * socket handlers that do not catch, so it never rejects for that.
  */
-export async function decryptMessageForDisplay(input: Message): Promise<Message> {
+export async function decryptMessageForDisplay(input: Message): Promise<Message | null> {
+  try {
+    return await decryptOneForDisplay(input);
+  } catch (err) {
+    if (!isE2ESessionEnded(err)) throw err;
+    console.debug(`e2e: decrypt of ${input.id} ended with the session:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+async function decryptOneForDisplay(input: Message): Promise<Message> {
   const message = withoutServerAssertions(input);
   if (!message.encrypted) {
     // After the always-on cutover there is no plaintext DM path: conversations
@@ -142,7 +158,8 @@ export async function decryptMessagesForDisplay(messages: Message[]): Promise<Me
   const out: Message[] = [];
   for (const m of messages) {
     try {
-      out.push(await decryptMessageForDisplay(m));
+      // a row the session's end overtook keeps the page's shape as a refused row
+      out.push((await decryptMessageForDisplay(m)) ?? refusedRow(withoutServerAssertions(m)));
     } catch (err) {
       // One message whose decrypt PIPELINE fails (vault IO, engine state —
       // not mere bad ciphertext, which degrades inside) must not abort the

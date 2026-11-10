@@ -150,6 +150,9 @@ vodozemac, which rejects pre-key messages not created by that identity.
 ### 4.4 Trust model
 
 Trust-on-first-use: the first identity seen for a peer is pinned in the vault.
+An empty answer (no device, no account key: an account that has not started
+the app yet) is not an identity, so it is never the baseline; the first device
+list that names a device or an account key is (§12.5).
 Safety-number comparison (§8) upgrades a pin to *verified*. Any later change
 is a hard error surfaced in the UI (shield-alert badge + warning modal) and
 requires explicit "Accept new keys". Accepting re-pins (unverified) and drops
@@ -199,16 +202,19 @@ send messages"), never a silent downgrade. It is now the only path.
 
 ## 7. Client persistence (vault)
 
-Per account, IndexedDB `voxium-e2e-{userId}` (`services/e2e/vault.ts`):
+Per account, IndexedDB `voxium-e2e-v2-{userId}` (`services/e2e/vault.ts`,
+`VAULT_DB_PREFIX`; a vault under the older `voxium-e2e-{userId}` name predates
+the always-on cutover and is dropped when the new one opens):
 
 | Key | Value |
 |---|---|
 | `account` | Olm account pickle (encrypted **inside vodozemac**, ChaCha20-Poly1305, pickle key) |
 | `session:{peerUserId}` | Olm session pickle (same encryption) |
 | `identity:{peerUserId}:{deviceId}` | pinned `{curve25519Key, ed25519Key, verified}`, per device |
-| `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5) |
+| `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5); first written by the first list that names a device or an account key |
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
 | `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
+| `pks:{createdAt}\|{shareId}` | a claimed key share not imported yet, as the inbox returned it (Olm ciphertext + routing fields, §12.3) |
 | `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 
@@ -459,6 +465,30 @@ And each message index of a session is bound, on this device, to the one
 in the vault, §7): an index served under another id or version, or below the
 newest version the id has shown in the same session, is refused (§9.1).
 
+Since the claim deletes, the client writes every claimed page to the vault
+(`pks:{createdAt}|{shareId}`, §7) before it processes any of it, and removes a
+share only once it is imported or found unusable. A malformed element of a
+page is logged and skipped; the rest of the page is kept. A share whose sender
+device is not pinned yet and whose device list cannot be read now (signed out,
+offline, refused; an identity change is not this case) is kept and retried by
+the next claim, at the latest at the next start of the account. Later shares
+from the same sender wait behind it, since they may need the Olm session it
+sets up; they are not counted while they wait, and once the first one is
+dropped each is counted on its own. A kept share is dropped once its session
+reached the device another way, or once the server has refused the look-up of
+its sender (403/404) in five starts of the client, one start counting once
+however many claims it makes. A failure that says nothing about the sender
+(401, 429, 5xx, offline) is never counted, so such a share stays kept until
+the look-up succeeds. A storage failure while its session is written (a full
+disk) keeps the share too, with the Olm state its message advanced left
+unwritten; it and its sender's later shares wait for the next start, where
+that message decrypts again from the state on disk. Disposing the service
+(logout, account switch) while a claim is in flight lets the claim finish
+the page it holds, for at most 10 s; whatever it had not processed by then
+stays kept, and a page whose answer only arrives after that is still written,
+raw, on the one vault connection the teardown keeps open for it (released at
+once on a version change, i.e. an account deletion).
+
 ### 12.4 Rotation
 
 A new outbound session is created when: none exists, either participant's
@@ -503,9 +533,21 @@ read.
 - **The device set — not `listVersion` — drives the new-device warning.** A
   hostile server can replay or roll back the version; it cannot make the set it
   serves match what the user acknowledged.
+- **The baseline is the first list that names an identity.** The first time a
+  user's list names a device or an account key, it is recorded as seen and
+  acknowledged (TOFU, §4.4), with that account key as the acknowledged one
+  (§14.3). A list naming neither (the answer for an account that has not
+  started the app) records nothing, and a stored state holding neither is
+  treated as absent, so the account's first device is never reported as one
+  added since. A list naming an account key but no device does record a
+  baseline: devices that key signs later are trusted, unsigned ones warn.
 - The service emits device-list change events (`onDeviceListChanged`), which the
   store subscribes to, so a device appearing mid-conversation raises the warning
-  immediately instead of at the next component mount.
+  immediately instead of at the next component mount. The first recorded list
+  emits one too: nothing in it is new, but an unsigned device (this device
+  itself, on an install nobody has approved yet) is reported from that first
+  look, which may be the only one of the session. The store subscribes before
+  the service's `initialize()` resolves.
 - **This applies to our OWN account too.** A server that registers a device
   under the local user's id would otherwise receive every session key we fan
   out with no signal at all — the mirror image of peer injection. Unrecognised

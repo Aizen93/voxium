@@ -17,6 +17,7 @@ import type { User, RegistrationConsent } from '@voxium/shared';
 import { PowExpiredError, PowAbortedError, SIGNUP, USERNAME_TAKEN_MESSAGE } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
 import { forgetLocalE2EState } from '../services/e2e/e2eService';
+import { registerE2ESessionUser } from '../services/e2e/session';
 import { activateSecurePins, deactivateSecurePins, forgetSecurePins } from '../utils/securePins';
 
 /** A registration the server accepted (202) and mailed a code for. No
@@ -749,3 +750,8 @@ useAuthStore.subscribe((state, prev) => {
   if (id) activateSecurePins(id);
   else deactivateSecurePins();
 });
+
+// getE2EService serves only the signed-in account: work that held a user id
+// across a logout gets E2EServiceDisposedError instead of a new service that
+// would reopen (after a deletion, recreate) that account's vault.
+registerE2ESessionUser(() => useAuthStore.getState().user?.id ?? null);

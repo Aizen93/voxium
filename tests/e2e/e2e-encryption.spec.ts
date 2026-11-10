@@ -6,9 +6,10 @@ import { getConversationServerState, getE2EDevices, getE2EKeyShareCount } from '
 import { clearRateLimits } from './helpers/rateLimits';
 
 // Live two-client smoke test of the full E2E DM flow (docs/e2e-dm-spec.md):
-// enable + badge, cross-client encrypt/decrypt, matching safety numbers,
-// encrypted edits, encrypted attachments — finishing with DB-level proof
-// that the server only ever stored ciphertext and opaque blobs.
+// the badge, cross-client encrypt/decrypt, matching safety numbers, encrypted
+// edits, encrypted attachments — finishing with DB-level proof that the server
+// only ever stored ciphertext and opaque blobs — then multi-device key shares
+// and revocation, and a peer's first device published after we looked.
 
 // 1x1 red PNG
 const TINY_PNG = Buffer.from(
@@ -24,7 +25,9 @@ const BADGE_UNSIGNED = 'button[title="A device is not signed by the account key 
 /** Open the DM with a user from the Friends list. */
 async function openDMWith(page: Page, username: string) {
   await page.getByText('Friends').first().click();
-  await page.getByText('All').click();
+  // By role, not text: getByText('All') also matches the signed-in user's own
+  // name whenever the random suffix puts "all" in it ("mda" + "llx5mf").
+  await page.getByRole('button', { name: 'All', exact: true }).click();
   await expect(page.getByText(username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
   await page.locator('button[title="Message"]').first().click();
   await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });
@@ -80,16 +83,11 @@ async function closeModal(page: Page) {
   }
 }
 
-// QUARANTINED (@quarantine) — runs in CI but does not block merges.
-// This spec is intermittently red on the E2E badge / crypto-engine init
-// ("initialization failed: null pointer passed to rust"), which leaves the
-// safety-number button absent and fails whichever assertion reaches it first.
-// It is NOT caused by the secure-voice work: `git diff 3ff4ae2..HEAD` touches
-// none of e2e-encryption.spec.ts, e2eService.ts, dmCrypto.ts or
-// channelCrypto.ts. Gating merges on it would block PRs at random, so it is
-// tagged out of the blocking run until the engine-init race is diagnosed.
-// Re-blocking it is a one-word change: drop the tag below.
-test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quarantine' }, () => {
+// Out of @quarantine since 2026-11-09. The flake was a peer's empty first device
+// list taken as the trust baseline (the third test forces that order) and a
+// strict-mode clash on the Friends "All" filter. The "null pointer passed to
+// rust" start-up error is covered by unit tests (e2eService "lifecycle").
+test.describe('E2E encrypted DMs — live two-client smoke test', () => {
   test('badge, safety numbers, edits, attachments, and ciphertext-only server state', async ({ page, request, browser }) => {
     test.setTimeout(180_000);
 
@@ -108,7 +106,7 @@ test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quara
 
     // A: open the DM via Friends → Message
     await page.getByText('Friends').first().click();
-    await page.getByText('All').click();
+    await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page.getByText(userB.username, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
     await page.locator('button[title="Message"]').first().click();
     await expect(page.locator('textarea')).toBeVisible({ timeout: 10_000 });
@@ -357,5 +355,78 @@ test.describe('E2E encrypted DMs — live two-client smoke test', { tag: '@quara
 
     await contextA2.close();
     await contextB.close();
+  });
+
+  test("a peer's first device, published after we looked, is trusted on first use", async ({ page, request, browser }) => {
+    test.setTimeout(120_000);
+
+    const userA = testUser('tofa');
+    const userB = testUser('tofb');
+    const dataA = await registerUser(request, userA);
+    const dataB = await registerUser(request, userB);
+    await sendFriendRequest(request, dataA.accessToken, userB.username);
+    await acceptFriendRequest(request, dataB.accessToken, dataA.user.id);
+
+    // B's very first device upload is parked until A has read B's device list,
+    // so A always sees it empty first: the ordering the tests above only reach
+    // when B's app happens to start slower than A's.
+    let releaseB!: () => void;
+    const bMayPublish = new Promise<void>((resolve) => (releaseB = resolve));
+    const contextB = await browser.newContext();
+    try {
+      await contextB.route('**/api/v1/e2e/devices', async (route) => {
+        if (route.request().method() === 'PUT') await bMayPublish;
+        await route.continue();
+      });
+      const pageB = await contextB.newPage();
+
+      // Settles either way, so a failure before it is awaited leaves no
+      // rejection behind; a timeout is rethrown where it is read.
+      const aReadsB = page
+        .waitForResponse(
+          (res) =>
+            res.request().method() === 'GET' &&
+            new URL(res.url()).pathname.endsWith(`/e2e/devices/${dataB.user.id}`),
+          { timeout: 30_000 }
+        )
+        .then(
+          (response) => ({ response }),
+          (error: unknown) => ({ error })
+        );
+      await injectAuth(page, dataA);
+      await injectAuth(pageB, dataB);
+      await openDMWith(page, userB.username);
+      await expect(page.locator(BADGE)).toBeVisible({ timeout: 20_000 });
+      const looked = await aReadsB;
+      if ('error' in looked) throw looked.error;
+      const firstLook = (await looked.response.json()) as { data: { devices: unknown[] } };
+      expect(firstLook.data.devices).toHaveLength(0);
+
+      releaseB();
+      await waitForPublishedDevice(request, dataA.accessToken, dataB.user.id);
+
+      // A's send re-reads B's list, which now names B's first device
+      const hello = `first contact ${Date.now()}`;
+      await sendMessage(page, hello);
+
+      await expect(pageB.getByText(userA.username, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
+      await pageB.getByText(userA.username, { exact: true }).first().click();
+      await expect(pageB.getByText(hello).first()).toBeVisible({ timeout: 15_000 });
+      const reply = `reply to first contact ${Date.now()}`;
+      await sendMessage(pageB, reply);
+      await expect(page.getByText(reply).first()).toBeVisible({ timeout: 15_000 });
+
+      // That first device is the baseline, not a device added since: the badge
+      // carries no warning, and the safety numbers agree.
+      await expect(page.locator(BADGE_NEW_DEVICE)).toHaveCount(0);
+      await expect(page.locator(BADGE)).toBeVisible();
+      const safetyA = await readSafetyNumber(page);
+      const safetyB = await readSafetyNumber(pageB);
+      expect(safetyA).toBe(safetyB);
+    } finally {
+      // a parked upload is let go before its context closes, failure or not
+      releaseB();
+      await contextB.close();
+    }
   });
 });
