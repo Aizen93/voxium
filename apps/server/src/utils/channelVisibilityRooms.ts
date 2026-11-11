@@ -28,6 +28,8 @@ const SEEN_IDS_MAX = 1024;
 /** How long a local pass waits for the one queued before it for the same
  *  server (see resyncLocalSockets). */
 export const LOCAL_PASS_MAX_WAIT_MS = 30_000;
+/** How long one count of the live nodes is reused (see expectedReceivers). */
+export const LIVE_NODES_MEMO_MS = 5000;
 
 /**
  * Re-sync `channel:{id}` room membership for connected members after a
@@ -75,9 +77,12 @@ export const LOCAL_PASS_MAX_WAIT_MS = 30_000;
  * client's offline queue and go out, in order, when it reconnects (until then
  * nothing this node emits reaches a peer either). A node that misses both
  * messages — its config and adapter subscribers both down for the whole
- * window — keeps its stale rooms until its sockets reconnect. A node killed
- * hard keeps its heartbeat for up to its 30 s TTL: a resync in that window is
- * unconfirmed and takes the fallback (logged), which is correct, only slower.
+ * window — keeps its stale rooms until its sockets reconnect. Two windows read
+ * as unconfirmed although no node with sockets missed anything: a node killed
+ * hard keeps its heartbeat for up to its 30 s TTL, and a booting node holds
+ * its heartbeat a few seconds before it subscribes (index.ts starts the
+ * heartbeat first, and no socket can connect to it before it listens). A
+ * resync in either window takes the fallback (logged): correct, only slower.
  *
  * Errors are logged, never thrown: a failed resync must not fail the
  * originating mutation, which fires and forgets it.
@@ -323,15 +328,51 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+let liveNodesMemo: { expected: number; at: number } | null = null;
+let liveNodesInFlight: Promise<number> | null = null;
+
+/**
+ * How many subscribers a publish should reach: every node with a live
+ * heartbeat, this one included. `liveNodeCounts()` SCANs the whole keyspace
+ * for the heartbeats, one round trip per 100 keys, so on a large Redis reading
+ * it on every attempt could alone outlast RESYNC_PUBLISH_TIMEOUT_MS and send a
+ * healthy resync to the fallback. One count is shared by the resyncs in flight
+ * (a slow scan an attempt gave up on is still the one the next attempt
+ * awaits) and reused for LIVE_NODES_MEMO_MS, shorter than the retry window, so
+ * the last attempts of a resync read a fresh count.
+ */
+function expectedReceivers(): Promise<number> {
+  if (liveNodesMemo && Date.now() - liveNodesMemo.at < LIVE_NODES_MEMO_MS) {
+    return Promise.resolve(liveNodesMemo.expected);
+  }
+  if (!liveNodesInFlight) {
+    liveNodesInFlight = liveNodeCounts()
+      .then(({ peers }) => {
+        liveNodesMemo = { expected: peers + 1, at: Date.now() };
+        return peers + 1;
+      })
+      .finally(() => {
+        liveNodesInFlight = null;
+      });
+  }
+  return liveNodesInFlight;
+}
+
+/** Forget the live-node count; the unit tests change it between cases. */
+export function _resetChannelVisibilityForTests(): void {
+  liveNodesMemo = null;
+  liveNodesInFlight = null;
+}
+
 /** One publish; resolves with how many subscribers received it and how many
- *  should have (every node with a live heartbeat, this one included). */
+ *  should have. */
 async function publishOnce(payload: string): Promise<{ received: number; expected: number }> {
   const { pub } = getRedisPubSub();
-  const [received, { peers }] = await Promise.all([
+  const [received, expected] = await Promise.all([
     pub.publish(VISIBILITY_RESYNC_CHANNEL, payload),
-    liveNodeCounts(),
+    expectedReceivers(),
   ]);
-  return { received: Number(received), expected: peers + 1 };
+  return { received: Number(received), expected };
 }
 
 /** Tell every other node to resync its sockets for `scope`; retried while

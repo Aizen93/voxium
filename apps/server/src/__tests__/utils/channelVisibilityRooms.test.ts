@@ -55,6 +55,8 @@ import {
   RESYNC_RETRY_DELAYS_MS,
   RESYNC_PUBLISH_TIMEOUT_MS,
   LOCAL_PASS_MAX_WAIT_MS,
+  LIVE_NODES_MEMO_MS,
+  _resetChannelVisibilityForTests,
 } from '../../utils/channelVisibilityRooms';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -73,6 +75,7 @@ function createMockSocket(userId: string, opts?: { voiceChannelId?: string; room
 function resetMocks() {
   // reset, not clear: a once-queue a test left unconsumed must not leak
   vi.resetAllMocks();
+  _resetChannelVisibilityForTests();
   m.getIO.mockReturnValue({ in: m.clusterIn, to: m.to, local: { in: m.localIn, to: m.localTo } });
   m.clusterIn.mockReturnValue({ fetchSockets: m.clusterFetch, except: m.clusterExcept });
   m.clusterExcept.mockReturnValue({ socketsLeave: m.clusterLeave });
@@ -548,6 +551,44 @@ describe('syncChannelVisibilityRooms — telling the other nodes', () => {
 
     expect(m.publish).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('attempt 1/4: scan failed'));
+  });
+
+  // ── The live-node count (a SCAN over the whole keyspace) ─────────────────
+
+  it('counts the live nodes once for the resyncs of a few seconds, and again after LIVE_NODES_MEMO_MS', async () => {
+    vi.useFakeTimers();
+
+    await syncChannelVisibilityRooms('server-1');
+    await syncChannelVisibilityRooms('server-1', { userId: 'user-9' });
+    expect(m.liveNodeCounts).toHaveBeenCalledTimes(1);
+    expect(m.publish).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(LIVE_NODES_MEMO_MS);
+    await syncChannelVisibilityRooms('server-1');
+    expect(m.liveNodeCounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('resyncs started together share one count', async () => {
+    await Promise.all([syncChannelVisibilityRooms('server-1'), syncChannelVisibilityRooms('server-2')]);
+
+    expect(m.liveNodeCounts).toHaveBeenCalledTimes(1);
+    expect(m.publish).toHaveBeenCalledTimes(2);
+  });
+
+  it('a slow count an attempt gave up on is the one the next attempt awaits, never a second scan', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    m.liveNodeCounts.mockImplementationOnce(() => new Promise((resolve) => {
+      setTimeout(() => resolve({ total: 1, peers: 0 }), RESYNC_PUBLISH_TIMEOUT_MS + RESYNC_RETRY_DELAYS_MS[0] + 100);
+    }));
+
+    const done = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(RESYNC_PUBLISH_TIMEOUT_MS + RESYNC_RETRY_DELAYS_MS[0] + 100);
+    await done;
+
+    expect(m.publish).toHaveBeenCalledTimes(2);
+    expect(m.liveNodeCounts).toHaveBeenCalledTimes(1);
+    expect(m.clusterIn).not.toHaveBeenCalled();
   });
 
   // ── The fail-closed fallback ─────────────────────────────────────────────
