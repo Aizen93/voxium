@@ -54,6 +54,8 @@ const prismaMock: Record<string, any> = {
   // resolve eagerly), so Promise.all faithfully models "everything in the
   // array ran in the txn". Callback form: the callback gets this client.
   $transaction: vi.fn((arg: any) => runTransaction(arg)),
+  // The account-row lock a ban transaction takes first
+  $queryRaw: vi.fn().mockResolvedValue([]),
   $queryRawUnsafe: vi.fn().mockResolvedValue([]),
 };
 
@@ -359,6 +361,7 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
 
     it('runs every write of the ban on the TRANSACTION client, with a budget a queued webhook purge cannot exhaust', async () => {
       const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([{ id: 'target-1' }]),
         webhook: { findMany: vi.fn().mockResolvedValue([{ serverId: 's-1' }]), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
         user: { update: vi.fn().mockResolvedValue({}) },
         ipBan: { createMany: vi.fn().mockResolvedValue({ count: 1 }) },
@@ -377,7 +380,13 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
       expect(tx.ipBan.createMany).toHaveBeenCalledTimes(1);
       expect(tx.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
       expect(tx.auditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'user.ban', targetId: 'target-1' }) });
-      // The webhook rows were disarmed FIRST, before the account row was taken
+      // The account row FIRST, FOR NO KEY UPDATE, before any webhook row: an
+      // account deletion takes that row first too, so neither waits crosswise
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+      const [sql, lockedId] = tx.$queryRaw.mock.calls[0] as [TemplateStringsArray, string];
+      expect(sql.join('?').replace(/\s+/g, ' ')).toBe('SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE');
+      expect(lockedId).toBe('target-1');
+      expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.webhook.findMany.mock.invocationCallOrder[0]);
       expect(tx.webhook.updateMany.mock.invocationCallOrder[0]).toBeLessThan(tx.user.update.mock.invocationCallOrder[0]);
       // Nothing the ban writes went through the top-level client
       expect(prismaMock.user.update).not.toHaveBeenCalled();

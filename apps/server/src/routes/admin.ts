@@ -28,6 +28,7 @@ import { logAuditEvent, auditLogData } from '../utils/auditLog';
 import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { serverSelect } from '../utils/serverSelect';
+import type { Prisma } from '../generated/prisma/client';
 import {
   webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhookRowsHeldBy,
 } from '../utils/webhookLifecycle';
@@ -42,13 +43,37 @@ function forceLogoutUser(userId: string, reason: string): void {
 }
 
 /**
- * Both ban transactions (the ban route, a report resolved with a ban). Their
- * first statement disarms the webhook rows the account holds, and a
+ * Both ban transactions (the ban route, a report resolved with a ban). Right
+ * after the account row they disarm the webhook rows the account holds, and a
  * delete-with-purge holds such a row under its own 60 s budget
  * (utils/webhookLifecycle.ts): the 5 s default would fail a ban queued
  * behind it, where the ban used to commit and disarm afterwards.
  */
 const BAN_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 };
+
+/**
+ * Lock the account rows a ban or a report resolution depends on, FIRST in
+ * its transaction and in one fixed order (sorted ids, so two of these never
+ * wait on each other crosswise). An account deletion (utils/accountDeletion.ts)
+ * deletes the account row first and only then reaches its webhooks (SetNull),
+ * reports and messages (Cascade) through the foreign keys; a transaction that
+ * held one of those rows and then waited on the account row closed a cycle,
+ * and when Postgres aborted the deletion its notices, revocations and purges
+ * had already run. Taking the account row first means both sides queue on
+ * the same row and nothing else.
+ *
+ * FOR NO KEY UPDATE, not FOR UPDATE: it conflicts with the deletion (and with
+ * any UPDATE of the row) but not with FOR KEY SHARE, which every insert of a
+ * row referencing the account takes, so a join, a message or a kick of that
+ * account (its webhook statement, then its ban row) never waits on a ban.
+ * A webhook purge-delete locks the webhook row and never the account's, so it
+ * cannot close a cycle with the webhook disarm that follows.
+ */
+async function lockAccountRows(tx: Prisma.TransactionClient, userIds: string[]): Promise<void> {
+  for (const id of [...new Set(userIds.filter(Boolean))].sort()) {
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR NO KEY UPDATE`;
+  }
+}
 
 /** A step after a committed ban failed: logged, never thrown (the ban holds). */
 function logBanFanOutFailure(userId: string, step: string, err: unknown): void {
@@ -502,9 +527,10 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
     // join requests withdrawn, and the audit row. The audit row commits with
     // the ban, so no later step's failure can leave a ban nobody recorded.
     const { ipsBanned, disarmedServerIds } = await prisma.$transaction(async (tx) => {
-      // FIRST, as on a kick (utils/removeMember.ts): a webhook purge-delete may
-      // hold one of these rows, and waiting for it must happen before this
-      // transaction takes the account row
+      // The account row FIRST (lockAccountRows): an account deletion takes it
+      // first too, then reaches the webhooks and reports through its foreign
+      // keys, so taking the webhook rows before it formed a cycle
+      await lockAccountRows(tx, [targetId]);
       const disarmed = await disarmWebhookRowsHeldBy(tx, targetId);
       await tx.user.update({
         where: { id: targetId },
@@ -2741,8 +2767,13 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
     // with the ban committed and neither `user.ban` nor `report.resolve`
     // recorded.
     const { messageDeleted, disarmedServerIds } = await prisma.$transaction(async (tx) => {
-      // FIRST, as on the ban route: a webhook purge-delete may hold one of
-      // these rows, and waiting for it must happen before the other rows
+      // The account rows FIRST (lockAccountRows), as on the ban route: the
+      // reported account's (the one banned, and the author whose deletion
+      // cascades to the message and the report) and the reporter's (whose
+      // deletion cascades to the report and, for a DM, to the message). An
+      // account deletion takes its row first, then reaches these rows through
+      // its foreign keys; taking them before the account row formed a cycle.
+      await lockAccountRows(tx, [report.reportedUserId, report.reporterId]);
       const disarmed = banTarget ? await disarmWebhookRowsHeldBy(tx, banTarget.id) : [];
       await tx.report.update({
         where: { id },

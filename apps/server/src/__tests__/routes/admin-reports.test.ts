@@ -47,6 +47,8 @@ const prismaMock: Record<string, any> = {
   },
   // The resolution is one interactive transaction; the callback gets this client
   $transaction: vi.fn((arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg))),
+  // The account-row locks a resolution takes first
+  $queryRaw: vi.fn().mockResolvedValue([]),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -337,9 +339,10 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     });
 
     it('runs every write of the resolution on the TRANSACTION client, with the ban route\'s budget', async () => {
-      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', messageId: 'msg-1' });
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: 'msg-1' });
       prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
       const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
         webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
         report: { update: vi.fn().mockResolvedValue({}) },
         message: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
@@ -359,6 +362,15 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       expect(tx.user.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'target-1' } }));
       expect(tx.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
       expect(tx.auditLog.create).toHaveBeenCalledTimes(2);
+      // The account rows FIRST, FOR NO KEY UPDATE, in sorted id order (the
+      // reporter's and the reported account's: either deletion cascades into
+      // the report), before the webhook, report and message rows
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
+      for (const [sql] of tx.$queryRaw.mock.calls as [TemplateStringsArray, string][]) {
+        expect(sql.join('?').replace(/\s+/g, ' ')).toBe('SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE');
+      }
+      expect(tx.$queryRaw.mock.calls.map((c: unknown[]) => c[1])).toEqual(['reporter-9', 'target-1']);
+      expect(tx.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(tx.webhook.findMany.mock.invocationCallOrder[0]);
       expect(tx.webhook.findMany.mock.invocationCallOrder[0]).toBeLessThan(tx.report.update.mock.invocationCallOrder[0]);
       for (const topLevel of [prismaMock.report.update, prismaMock.message.deleteMany, prismaMock.message.delete, prismaMock.user.update,
         prismaMock.serverJoinRequest.deleteMany, prismaMock.auditLog.create, prismaMock.webhook.findMany]) {
