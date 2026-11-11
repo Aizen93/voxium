@@ -3,7 +3,9 @@
 // fails CI (it used to be a step that could never fail), the tooling audit stays
 // informational, and the update bot never touches the crypto engine, whose
 // vodozemac pin is deliberate and watched by crypto-deps-watch.yml. The Tauri
-// family (crates, CLI, api, plugins) moves only by hand and at one minor.
+// family (crates, CLI, api, plugins) moves only by hand and at one minor. The
+// desktop shell's Cargo.lock is cargo-audited, and every advisory it ignores
+// carries its reason beside the entry.
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -88,5 +90,68 @@ describe('dependency audit policy', () => {
     expect(cli).toMatch(/^~\d+\.\d+\.\d+$/);
     const minor = (spec: string) => spec.slice(1).split('.').slice(0, 2).join('.');
     expect(minor(cli)).toBe(minor(api));
+  });
+});
+
+describe('desktop shell Cargo.lock audit', () => {
+  const workflow = read('.github/workflows/desktop-shell.yml');
+  const config = read('apps/desktop/src-tauri/.cargo/audit.toml');
+
+  /** The `ignore = [ ... ]` entries of audit.toml, each with the comment lines right above it. */
+  function ignores(): { id: string; comment: string }[] {
+    const start = config.indexOf('\nignore = [\n');
+    expect(start, 'ignore list').toBeGreaterThan(-1);
+    const lines = config.slice(start + '\nignore = [\n'.length, config.indexOf('\n]', start)).split('\n');
+    const found: { id: string; comment: string }[] = [];
+    let comment: string[] = [];
+    for (const line of lines) {
+      const entry = /^\s*"([^"]+)",?\s*$/.exec(line);
+      if (entry) {
+        found.push({ id: entry[1], comment: comment.join(' ') });
+        comment = [];
+      } else if (/^\s*#/.test(line)) {
+        comment.push(line.replace(/^\s*#\s?/, ''));
+      } else {
+        expect(line.trim(), `unexpected line in the ignore list: ${line}`).toBe('');
+        comment = [];
+      }
+    }
+    return found;
+  }
+
+  it('runs cargo audit in the shell directory on its changes and weekly, and its failure fails the job', () => {
+    expect(workflow).toMatch(/\n {2}schedule:\n {4}- cron: '[^']+'/);
+    const audit = step(workflow, 'RustSec advisory audit');
+    expect(audit).toContain('cargo install cargo-audit --locked');
+    expect(audit).toMatch(/\n {10}cargo audit\n?$/);
+    expect(audit).not.toContain('continue-on-error');
+    // The config file is the one place an advisory is ignored
+    expect(audit).not.toContain('--ignore');
+    const job = workflow.slice(workflow.indexOf('\n  audit:\n'));
+    expect(job).toContain('working-directory: apps/desktop/src-tauri');
+    expect(job).toMatch(/\n {4}timeout-minutes: \d+\n/);
+  });
+
+  it('fails on an unsound advisory, not only on a vulnerability', () => {
+    expect(config).toMatch(/^\[output\]\ndeny = \["unsound"\]$/m);
+  });
+
+  it('documents every ignored advisory right above its entry', () => {
+    const list = ignores();
+    expect(list.length).toBeGreaterThan(0);
+    for (const { id, comment } of list) {
+      expect(id, 'a RustSec id').toMatch(/^RUSTSEC-\d{4}-\d{4}$/);
+      // The id itself, and a reason long enough to say why and what lifts it
+      expect(comment, id).toContain(id);
+      expect(comment.length, `${id}: the reason`).toBeGreaterThan(120);
+    }
+  });
+
+  it('ignores glib 0.18 as upstream-blocked by the GTK3 bindings', () => {
+    const glib = ignores().find((i) => i.id === 'RUSTSEC-2024-0429');
+    expect(glib).toBeDefined();
+    expect(glib!.comment).toContain('GHSA-wrw7-89jp-8q8g');
+    expect(glib!.comment).toContain('glib 0.18.5');
+    expect(glib!.comment).toMatch(/Upstream-blocked until Tauri's Linux backend leaves the GTK3 bindings/);
   });
 });
