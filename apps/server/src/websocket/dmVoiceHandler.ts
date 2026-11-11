@@ -366,15 +366,19 @@ export async function leaveCurrentDMVoiceChannel(
   socket.data.dmCallConversationId = undefined;
 
   // DM calls are 1-on-1: always end the call when someone leaves.
-  // Clean up remaining users' state and socket rooms. socketsLeave is
-  // fire-and-forget across the cluster — fetchSockets here used to WAIT for
+  // Clean up remaining users' state, then make EVERY socket of the call leave
+  // its room, as endDMCall does: the remaining participant's, and the leaving
+  // user's own registered socket when another of its sockets forced the end
+  // (`socket` above is then the forcing one, and the registered socket would
+  // stay in the room, still relaying speaking events). socketsLeave is
+  // adapter-wide and fire-and-forget: fetchSockets here used to WAIT for
   // every node's reply, so one dead/unresponsive peer node made this throw
   // after 5s and the left/ended emits below never ran: the remaining
   // participant's client stayed "in a call" forever.
   for (const remaining of remainingUsers) {
     await removeDMVoiceUser(conversationId, remaining.id);
-    io.in(`user:${remaining.id}`).socketsLeave(`dm:voice:${conversationId}`);
   }
+  io.in(`dm:voice:${conversationId}`).socketsLeave(`dm:voice:${conversationId}`);
 
   clearCallTimeout(conversationId);
 

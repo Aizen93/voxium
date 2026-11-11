@@ -1599,11 +1599,12 @@ describe('dmVoiceHandler — leaveCurrentDMVoiceChannel', () => {
 
     await leaveCurrentDMVoiceChannel(io as any, socket as any, 'user-1');
 
-    // user-2's sockets leave the voice room via socketsLeave — adapter-wide
-    // and fire-and-forget. NEVER fetchSockets here: it waits for every
-    // cluster node's reply, so one dead peer node made this throw and the
-    // left/ended emits below never reached the remaining participant.
-    expect(io.in).toHaveBeenCalledWith('user:user-2');
+    // Every socket of the call (user-2's included) leaves the voice room via
+    // one room-addressed socketsLeave — adapter-wide and fire-and-forget.
+    // NEVER fetchSockets here: it waits for every cluster node's reply, so
+    // one dead peer node made this throw and the left/ended emits below never
+    // reached the remaining participant.
+    expect(io.in).toHaveBeenCalledWith('dm:voice:conv-1');
     expect(io._socketsLeave).toHaveBeenCalledWith('dm:voice:conv-1');
     expect(io._fetchSockets).not.toHaveBeenCalled();
 
@@ -1612,6 +1613,32 @@ describe('dmVoiceHandler — leaveCurrentDMVoiceChannel', () => {
       expect.any(String),
       { keys: ['dm:voice:users:conv-1', 'dm:voice:call:user-2', 'dm:voice:active'], arguments: ['user-2', 'conv-1'] },
     );
+  });
+
+  it('a force-end from ANOTHER socket of the same user empties the room, so the registered socket stops relaying speaking', async () => {
+    // user-1 is in the call on socket-1; their socket-NEW (a second device, a
+    // reconnect, a server voice join) forces the end
+    mockRedis.get.mockResolvedValueOnce('conv-1');
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+    });
+    const registered = createMockSocket('user-1', 'socket-1');
+    const forcing = createMockSocket('user-1', 'socket-NEW');
+    const io = createMockIO();
+    handleDMVoiceEvents(io as any, registered.socket as any);
+    registered.socket.data.dmCallConversationId = 'conv-1';
+    registered.socket.rooms.add('dm:voice:conv-1');
+    // The adapter-wide leave reaches the registered socket on its own node
+    io._socketsLeave.mockImplementation((room: string) => { registered.socket.rooms.delete(room); });
+
+    await leaveCurrentDMVoiceChannel(io as any, forcing.socket as any, 'user-1', { force: true });
+
+    expect(io.in).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(registered.socket.rooms.has('dm:voice:conv-1')).toBe(false);
+    io.to.mockClear();
+    io._emit.mockClear();
+    registered.handlers.get('dm:voice:speaking')!(true);
+    expect(io._emit).not.toHaveBeenCalledWith('dm:voice:speaking', expect.anything());
   });
 
   it('creates a system message for call ended', async () => {
