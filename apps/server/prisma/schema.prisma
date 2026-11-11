@@ -518,6 +518,11 @@ model MessageAttachment {
   @@unique([s3Key])
   @@index([messageId])
   @@index([createdAt])
+  // The live rows in id order (utils/attachmentBlobs.ts): expired rows are kept
+  // forever for the placeholder, so without it every read of the live files of
+  // a delete walked the table's whole history. Not a partial index: Prisma
+  // cannot express one and `migrate dev` would read it as drift.
+  @@index([expired, id])
   @@map("message_attachments")
 }
 

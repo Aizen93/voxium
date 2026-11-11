@@ -605,7 +605,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     prismaMock.messageAttachment.findMany.mockImplementation(async ({ where }: any) =>
       (where.message?.channel?.serverId === 'srv-owned'
         ? [{ id: 'att-1', s3Key: spaceKey }]
-        : where.message?.OR ? [{ id: 'att-2', s3Key: accountKey }] : []));
+        : where.message?.authorId === 'target-1' ? [{ id: 'att-2', s3Key: accountKey }] : []));
     mockDeleteMultipleFromS3.mockClear();
     try {
       const res = await deleteOwner();

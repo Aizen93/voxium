@@ -64,15 +64,17 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // The user delete cascades every message the account wrote, in every
   // channel, and both sides of every conversation it was in (Message.author
   // and both Conversation users are onDelete: Cascade), attachment rows
-  // included. Their keys are read now, in bounded batches, and the files
-  // deleted once the delete has committed. (The secure channels the account
-  // created were deleted just above, with their own files.)
-  const attachmentKeys = await collectAttachmentKeys({
-    OR: [
-      { authorId: userId },
-      { conversation: { OR: [{ user1Id: userId }, { user2Id: userId }] } },
-    ],
-  });
+  // included. Their keys are read now and the files deleted once the delete
+  // has committed. (The secure channels the account created were deleted
+  // just above, with their own files.) One read per indexed column, merged:
+  // an OR across messages and conversations starts from no index and walked
+  // the attachments of every message ever sent. A message the account wrote
+  // in its own conversation is found twice, hence the Set.
+  const attachmentKeys = [...new Set([
+    ...await collectAttachmentKeys({ authorId: userId }),
+    ...await collectAttachmentKeys({ conversation: { user1Id: userId } }),
+    ...await collectAttachmentKeys({ conversation: { user2Id: userId } }),
+  ])];
 
   // E2E key material has no FK to User (except the key backup), so it would
   // otherwise outlive the account it belongs to. One transaction with the

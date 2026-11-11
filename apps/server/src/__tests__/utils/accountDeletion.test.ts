@@ -78,7 +78,8 @@ describe('deleteUserAccount', () => {
     // only AFTER the row (a failed delete must not strand a live account
     // without its avatar)
     expect(order).toEqual([
-      'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect', 'secure', 'attachment-keys',
+      'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect', 'secure',
+      'attachment-keys', 'attachment-keys', 'attachment-keys',
       'txn:start', 'e2e', 'counts', 'delete', 'txn:end',
       'force:logout', 'disconnect:local', 'disconnect', 's3',
     ]);
@@ -173,33 +174,35 @@ describe('deleteUserAccount', () => {
     const OWN = 'attachments/ch-general/clmsg1-photo.png';
     const PEER = 'attachments/dm-conv1/clmsg2-blob.bin';
 
-    it('are read before the transaction, for the account\'s messages AND both sides of its conversations', async () => {
+    it('are read before the transaction, one read per indexed column: the account\'s messages and each side of its conversations', async () => {
       prismaMock.messageAttachment.findMany.mockImplementation(async () => {
         order.push('attachment-keys');
-        return [{ id: 'att-1', s3Key: OWN }, { id: 'att-2', s3Key: PEER }];
+        return [];
       });
 
       await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
 
-      expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: {
-          expired: false,
-          message: {
-            OR: [
-              { authorId: 'u-1' },
-              { conversation: { OR: [{ user1Id: 'u-1' }, { user2Id: 'u-1' }] } },
-            ],
-          },
-        },
-      }));
+      const shapes = prismaMock.messageAttachment.findMany.mock.calls.map(([args]: [any]) => args.where);
+      expect(shapes).toEqual([
+        { expired: false, message: { authorId: 'u-1' } },
+        { expired: false, message: { conversation: { user1Id: 'u-1' } } },
+        { expired: false, message: { conversation: { user2Id: 'u-1' } } },
+      ]);
+      // No OR across the joined tables: it started from no index
+      expect(JSON.stringify(shapes)).not.toContain('"OR"');
       // After the secure-channel purge (those channels delete their own
       // files), before the delete transaction takes the rows
       expect(order.indexOf('attachment-keys')).toBeGreaterThan(order.indexOf('secure'));
-      expect(order.indexOf('attachment-keys')).toBeLessThan(order.indexOf('txn:start'));
+      expect(order.lastIndexOf('attachment-keys')).toBeLessThan(order.indexOf('txn:start'));
     });
 
-    it('are deleted only after the delete committed', async () => {
-      prismaMock.messageAttachment.findMany.mockResolvedValue([{ id: 'att-1', s3Key: OWN }, { id: 'att-2', s3Key: PEER }]);
+    it('are deleted only after the delete committed, each file once though two reads found it', async () => {
+      // OWN was written by the account in its own conversation: the author
+      // read and the conversation read both return it
+      prismaMock.messageAttachment.findMany
+        .mockResolvedValueOnce([{ id: 'att-1', s3Key: OWN }])
+        .mockResolvedValueOnce([{ id: 'att-1', s3Key: OWN }, { id: 'att-2', s3Key: PEER }])
+        .mockResolvedValueOnce([]);
 
       await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
 

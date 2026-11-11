@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const findMany = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/prisma', () => ({ prisma: { messageAttachment: { findMany: (...a: unknown[]) => findMany(...a) } } }));
@@ -39,22 +41,71 @@ describe('collectAttachmentKeys', () => {
     });
   });
 
-  it('pages on an explicit id > last predicate until a short page', async () => {
-    findMany
-      .mockResolvedValueOnce(page(0, ATTACHMENT_KEY_BATCH))
-      .mockResolvedValueOnce(page(ATTACHMENT_KEY_BATCH, ATTACHMENT_KEY_BATCH))
-      .mockResolvedValueOnce(page(2 * ATTACHMENT_KEY_BATCH, 3));
+  describe('a shape with more live files than one batch', () => {
+    const lastId = (n: number) => `att-${String(n - 1).padStart(6, '0')}`;
 
-    const keys = await collectAttachmentKeys({ conversationId: 'conv1' });
+    it('never repeats the shape join: it walks the live files after the first batch and filters each batch by primary key', async () => {
+      const liveIds = (from: number, count: number) => page(from, count).map(({ id }) => ({ id }));
+      findMany
+        // 1. the shape, from its own indexes: a full batch
+        .mockResolvedValueOnce(page(0, ATTACHMENT_KEY_BATCH))
+        // 2. the next live files in id order: a full batch, of which 2 are the shape's
+        .mockResolvedValueOnce(liveIds(ATTACHMENT_KEY_BATCH, ATTACHMENT_KEY_BATCH))
+        .mockResolvedValueOnce([{ s3Key: key(1500) }, { s3Key: key(1600) }])
+        // 3. the last, short batch of live files: 1 of them the shape's
+        .mockResolvedValueOnce(liveIds(2 * ATTACHMENT_KEY_BATCH, 3))
+        .mockResolvedValueOnce([{ s3Key: key(2001) }]);
 
-    expect(keys).toHaveLength(2 * ATTACHMENT_KEY_BATCH + 3);
-    expect(findMany).toHaveBeenCalledTimes(3);
-    expect(findMany.mock.calls[1][0].where).toEqual({
-      expired: false, message: { conversationId: 'conv1' }, id: { gt: `att-${String(ATTACHMENT_KEY_BATCH - 1).padStart(6, '0')}` },
+      const keys = await collectAttachmentKeys({ conversationId: 'conv1' });
+
+      expect(keys).toHaveLength(ATTACHMENT_KEY_BATCH + 3);
+      expect(keys.slice(-3)).toEqual([key(1500), key(1600), key(2001)]);
+      expect(findMany).toHaveBeenCalledTimes(5);
+      // Only the first query joins the shape over its history
+      expect(findMany.mock.calls[0][0].where).toEqual({ expired: false, message: { conversationId: 'conv1' } });
+      // The walk: live rows only, after the last id seen, in id order, a batch at a time (the (expired, id) index)
+      expect(findMany.mock.calls[1][0]).toEqual({
+        where: { expired: false, id: { gt: lastId(ATTACHMENT_KEY_BATCH) } },
+        select: { id: true }, orderBy: { id: 'asc' }, take: ATTACHMENT_KEY_BATCH,
+      });
+      expect(findMany.mock.calls[3][0].where).toEqual({ expired: false, id: { gt: lastId(2 * ATTACHMENT_KEY_BATCH) } });
+      // The filter: by primary key, at most one batch of ids, and the shape
+      const filter = findMany.mock.calls[2][0];
+      expect(filter.where.id.in).toHaveLength(ATTACHMENT_KEY_BATCH);
+      expect(filter.where).toEqual({ id: { in: expect.any(Array) }, expired: false, message: { conversationId: 'conv1' } });
+      expect(filter.select).toEqual({ s3Key: true });
+      expect(findMany.mock.calls[4][0].where.id.in).toHaveLength(3);
+      // No query but the first carries the shape without an id list
+      for (const [args] of findMany.mock.calls.slice(1)) expect(args.where.id).toBeDefined();
     });
-    expect(findMany.mock.calls[2][0].where.id).toEqual({ gt: `att-${String(2 * ATTACHMENT_KEY_BATCH - 1).padStart(6, '0')}` });
-    // Never an id list
-    for (const [args] of findMany.mock.calls) expect(JSON.stringify(args)).not.toContain('"in"');
+
+    it('stops when the walk finds no live file left', async () => {
+      findMany
+        .mockResolvedValueOnce(page(0, ATTACHMENT_KEY_BATCH))
+        .mockResolvedValueOnce([]);
+
+      const keys = await collectAttachmentKeys({ channelId: 'chan1' });
+
+      expect(keys).toHaveLength(ATTACHMENT_KEY_BATCH);
+      expect(findMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('applies the key-shape check to the filtered batches too', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        findMany
+          .mockResolvedValueOnce(page(0, ATTACHMENT_KEY_BATCH))
+          .mockResolvedValueOnce([{ id: 'att-x' }])
+          .mockResolvedValueOnce([{ s3Key: 'avatars/user-1-1700000000000-0123456789ab.webp' }]);
+
+        const keys = await collectAttachmentKeys({ channelId: 'chan1' });
+
+        expect(keys).toHaveLength(ATTACHMENT_KEY_BATCH);
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   it('stops after one empty page', async () => {
@@ -81,6 +132,25 @@ describe('collectAttachmentKeys', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('the index the live-file reads rest on', () => {
+  const SERVER = resolve(__dirname, '../../..');
+
+  it('is declared on MessageAttachment, expired first, so the live rows are one range in id order', () => {
+    const schema = readFileSync(resolve(SERVER, 'prisma/schema.prisma'), 'utf8');
+    const model = schema.slice(schema.indexOf('model MessageAttachment {'));
+    expect(model.slice(0, model.indexOf('\n}'))).toContain('@@index([expired, id])');
+  });
+
+  it('is created by a migration, with the name Prisma derives for it (no drift for migrate)', () => {
+    const dir = resolve(SERVER, 'prisma/migrations');
+    const sql = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => readFileSync(resolve(dir, e.name, 'migration.sql'), 'utf8'))
+      .join('\n');
+    expect(sql).toContain('CREATE INDEX "message_attachments_expired_id_idx" ON "message_attachments"("expired", "id");');
   });
 });
 
