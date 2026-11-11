@@ -4196,6 +4196,132 @@ describe('E2EService — lifecycle', () => {
     await expect(alice.service.replenishOneTimeKeys()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
   });
 
+  describe('a dispose while background work waits on the server', () => {
+    /**
+     * Every access the vault makes from here on: they all go through
+     * withStore(), except deleteWithPrefix's write half, which follows a read
+     * through it.
+     */
+    const vaultAccessesFrom = (service: E2EService) => {
+      const vault = (service as unknown as { vault: E2EVault }).vault;
+      return vi.spyOn(vault as unknown as { withStore: (...args: unknown[]) => Promise<unknown> }, 'withStore');
+    };
+    const loggedNullPointer = (...spies: Array<{ mock: { calls: unknown[][] } }>) =>
+      spies.flatMap((spy) => spy.mock.calls).flat().map(String).join('\n').match(/null pointer/);
+
+    it.each([
+      {
+        label: 'its stock read',
+        hold: (verb: string, url: string) => verb === 'get' && url.startsWith('/e2e/devices/me?'),
+        uploads: 0,
+      },
+      {
+        label: 'its upload',
+        hold: (verb: string, url: string) => verb === 'post' && url === '/e2e/devices/me/keys',
+        uploads: 1,
+      },
+    ])('stops replenishOneTimeKeys at $label, before it touches the freed account', async ({ hold, uploads }) => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      const keyProvider = memoryKeyProvider();
+      const vaultNamespace = `v${++vaultSeq}`;
+      let armed = false;
+      const gate = holdingApi(server.apiFor(userId), (verb, url) => armed && hold(verb, url));
+      const service = serviceOver(userId, gate.api, { keyProvider, vaultNamespace });
+      await service.initialize();
+      await flushQueue();
+      // peers claimed keys until the stock is under the low-water mark: the
+      // replenishment has work to do, so it reaches the account after the read
+      server.deviceOf(userId, service.deviceId).oneTimeKeys.splice(0, E2E_LIMITS.OTK_TARGET - 10);
+      const uploadsBefore = gate.writes.filter((w) => w === 'POST /e2e/devices/me/keys').length;
+
+      const warn = vi.spyOn(console, 'warn');
+      const error = vi.spyOn(console, 'error');
+      try {
+        armed = true;
+        const replenish = service.replenishOneTimeKeys();
+        await gate.held;
+        void service.dispose(); // no claim in flight: the account is freed here
+        const accesses = vaultAccessesFrom(service);
+        gate.release();
+
+        await expect(replenish).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+        expect(gate.writes.filter((w) => w === 'POST /e2e/devices/me/keys').length - uploadsBefore).toBe(uploads);
+        expect(accesses).not.toHaveBeenCalled();
+        expect(loggedNullPointer(warn, error)).toBeNull();
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
+
+      // What the server took is marked at the next start, never sent again
+      const restarted = makeDevice(server, userId, { keyProvider, vaultNamespace });
+      await restarted.service.initialize();
+      await flushQueue();
+      const account = (restarted.service as unknown as { account: EngineAccount }).account;
+      expect(account.oneTimeKeys()).toHaveLength(0);
+      const pool = server.deviceOf(userId, restarted.service.deviceId).oneTimeKeys;
+      expect(new Set(pool.map((k) => k.keyId)).size).toBe(pool.length);
+    });
+
+    it('stops the backup pass at its upload, before it seals the next batch with the freed account key', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      let armed = false;
+      // the first upload of the pass is held: a second batch is still to seal
+      const gate = holdingApi(
+        server.apiFor(userId),
+        (verb, url) => armed && verb === 'post' && url === '/e2e/message-keys'
+      );
+      const service = serviceOver(userId, gate.api);
+      await service.initialize();
+      await flushQueue();
+      expect(service.hasMasterSecret()).toBe(true); // the first device minted the account key
+
+      const internals = service as unknown as {
+        importInboundGroupSession(
+          key: string,
+          meta: { sessionId: string; conversationId: string; senderUserId: string; senderDeviceId: string }
+        ): Promise<boolean>;
+      };
+      const count = E2E_LIMITS.MESSAGE_KEY_BATCH_MAX + 1;
+      for (let i = 0; i < count; i++) {
+        const outbound = new EngineGroupSession();
+        await internals.importInboundGroupSession(outbound.sessionKey(), {
+          sessionId: outbound.sessionId(),
+          conversationId: 'c1',
+          senderUserId: 'peer',
+          senderDeviceId: 'peer-device',
+        });
+        outbound.free();
+      }
+
+      const warn = vi.spyOn(console, 'warn');
+      const error = vi.spyOn(console, 'error');
+      try {
+        armed = true;
+        const backup = service.backupMessageKeys();
+        await gate.held;
+        void service.dispose(); // no claim in flight: the account key is freed here
+        const accesses = vaultAccessesFrom(service);
+        gate.release();
+
+        await expect(backup).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+        // the held batch reached the server; the second was never sealed or sent
+        expect(gate.writes.filter((w) => w === 'POST /e2e/message-keys')).toHaveLength(1);
+        expect(server.messageKeys).toHaveLength(E2E_LIMITS.MESSAGE_KEY_BATCH_MAX);
+        // and it stopped at the answer, not at the closed vault one step further
+        expect(accesses).not.toHaveBeenCalled();
+        expect(loggedNullPointer(warn, error)).toBeNull();
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
+    });
+  });
+
   describe('one-time keys after an interrupted upload', () => {
     const poolOf = (server: Server, userId: string, deviceId: string) => server.deviceOf(userId, deviceId).oneTimeKeys;
 
