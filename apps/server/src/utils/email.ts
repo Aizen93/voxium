@@ -70,8 +70,13 @@ const PRE_ENVELOPE_COMMAND_RE = /^(?:EHLO|HELO|LHLO|STARTTLS|AUTH(?: .+)?)$/;
 const PRE_ENVELOPE_CODES = new Set(['EDNS', 'ETLS', 'EAUTH']);
 /** nodemailer's timeoutType of the setup phases (a SOCKET_TIMEOUT can strike at any point, DATA included). */
 const SETUP_TIMEOUTS = new Set(['CONNECT_TIMEOUT', 'GREETING_TIMEOUT', 'UPGRADE_TIMEOUT']);
-/** System errors that mean no connection was ever established. */
-const NEVER_CONNECTED = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN']);
+/**
+ * System errors that mean no connection was ever established. Not
+ * EHOSTUNREACH or ENETUNREACH: an established session's socket can raise
+ * them too (a route lost mid-transfer, DATA included), and nodemailer gives
+ * that the same ESOCKET/CONN shape as a failed connect.
+ */
+const NEVER_CONNECTED = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
 
 /**
  * Whether a send failure PROVES no recipient was reached: the relay could not

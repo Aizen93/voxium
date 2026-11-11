@@ -151,6 +151,10 @@ describe('failedBeforeAnyRecipient — shapes with no server to produce them', (
     ['a refused login', { code: 'EAUTH', command: 'AUTH PLAIN', responseCode: 535 }, true],
     ['missing credentials', { code: 'EAUTH', command: 'API' }, true],
     ['a reset socket', { code: 'ESOCKET', command: 'CONN', originalCode: 'ECONNRESET' }, false],
+    // An established session can lose its route too, DATA included: same shape as a failed connect
+    ['an unreachable host', { code: 'ESOCKET', command: 'CONN', originalCode: 'EHOSTUNREACH' }, false],
+    ['an unreachable network', { code: 'ESOCKET', command: 'CONN', originalCode: 'ENETUNREACH' }, false],
+    ['an unresolved host on connect', { code: 'ESOCKET', command: 'CONN', originalCode: 'ENOTFOUND' }, true],
     ['a refused sender', { code: 'EENVELOPE', command: 'MAIL FROM', responseCode: 553 }, false],
     ['a timeout naming no phase', { code: 'ETIMEDOUT' }, false],
     ['no code, no command', {}, false],
