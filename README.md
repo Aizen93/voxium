@@ -323,18 +323,35 @@ NODE_ENV=production node dist/index.js
 ```
 
 ### Build the Desktop App
+
+`pnpm tauri:build` builds the desktop app for **your** server. The settings below are read at build time; nothing in the repository needs editing.
+
 ```bash
 cd apps/desktop
+VITE_API_URL=https://chat.example.org/api/v1 \
+VITE_WS_URL=https://chat.example.org \
+TAURI_ASSET_ORIGIN=https://storage.example.org \
 pnpm tauri:build
 ```
 
-Avatars and space icons load from your object storage, which the app's Content Security Policy must name. Set `TAURI_ASSET_ORIGIN` to that storage's origin (`https://host[:port]`) and build with the generated overlay instead:
+| Setting | Example | What it feeds |
+|---------|---------|---------------|
+| `VITE_API_URL` | `https://chat.example.org/api/v1` | **Required.** The API the app is compiled for. Its origin goes into the Content Security Policy's `connect-src` (requests) and `img-src` (avatars and icons are `<img>` loads from `/uploads/`). |
+| `VITE_WS_URL` | `https://chat.example.org` | **Required.** The socket server. `connect-src` gets its origin in both forms the client uses: `https://` (polling) and `wss://` (WebSocket); `http://` gives `http://` + `ws://`. |
+| `TAURI_ASSET_ORIGIN` | `https://storage.example.org` | Your object storage's origin (`https://host[:port]`, comma-separated for several). The server answers avatar and icon requests with a redirect there and uploads are sent straight to it, so it goes into `img-src` and `connect-src`. Without it, images and uploads work only if the storage answers on the API origin. |
+| `TAURI_UPDATER_ENDPOINTS` | `https://updates.example.org/voxium/latest.json` | Optional, with `TAURI_UPDATER_PUBKEY`: your own update feed (`https` only, comma-separated for several; Tauri's `{{target}}` / `{{arch}}` / `{{current_version}}` placeholders work). |
+| `TAURI_UPDATER_PUBKEY` | the `.pub` content `pnpm tauri signer generate` prints | Optional, with `TAURI_UPDATER_ENDPOINTS`: the public key your updates are signed with. |
+| `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) | the private key from `tauri signer generate` | Needed only with your own feed: `tauri build` signs the update artifacts with it. |
 
-```bash
-cd apps/desktop
-TAURI_ASSET_ORIGIN=https://objects.example.com node scripts/tauri-release-config.mjs > /tmp/tauri.release.json
-pnpm tauri build --config /tmp/tauri.release.json
-```
+The `VITE_*` values are read exactly as the frontend build reads them, through Vite (the environment first, then `apps/desktop/.env.production.local`, `.env.production`, `.env.local`, `.env`), so the policy always names the server the app talks to. The build stops with the reason when a URL is missing or malformed (no credentials, query or IPv6 literal), or when only one of the two updater settings is set.
+
+**Content Security Policy.** Before `tauri build`, `scripts/tauri-build-config.mjs` writes an overlay to `src-tauri/target/tauri.self-hosted.json` that the Tauri CLI merges over `tauri.conf.json` (`tauri build --config`). Its `connect-src` and `img-src` name `'self'` (plus `blob:` / `data:` for images) and the origins above, nothing else: none of the Voxium project's own hosts, and no localhost unless your URLs point there. Every other directive stays as `tauri.conf.json` has it. To check it before building, run `node scripts/tauri-build-config.mjs`, which prints the overlay.
+
+**Updater.** Without `TAURI_UPDATER_ENDPOINTS` / `TAURI_UPDATER_PUBKEY` the build has no updater: no update artifacts are produced, no signing key is asked for, and the app never checks for updates. To ship updates to your users, generate a key pair once (`pnpm tauri signer generate -w ~/.tauri/voxium.key`), keep the private key out of the repository, set the three settings above, and publish each release's `latest.json` and signed artifacts at your feed. When your feed announces a newer version, the app shows a mandatory "Update Required" dialog.
+
+**Do not reuse the project's feed or key.** `tauri.conf.json` holds the official release's settings: the Voxium project's domains in the policy, its update feed (`https://github.com/Aizen93/voxium/releases/…`) and its public key. A build pointed at that feed would replace your app with the official installer, compiled for another server, at the next upstream release; with that key, no update you sign could ever install. `pnpm tauri:build` refuses both. Do not build with a plain `pnpm tauri build` or `scripts/tauri-release-config.mjs` either: they produce the official configuration, which only the project's release workflow uses (and which stops at the signing step without the project's private key). In a CI of your own, write the overlay with `node scripts/tauri-build-config.mjs --out <file>` and pass `--config <file>` to `tauri build`.
+
+`pnpm tauri:dev` is not affected: the development build allows `localhost:3001` through `devCsp`.
 
 This creates platform-specific installers in `apps/desktop/src-tauri/target/release/bundle/`:
 - **Windows:** `.msi` and `.exe` installers
@@ -456,6 +473,8 @@ Point the Voxium desktop app (or web client) to your server by setting these in 
 VITE_API_URL=http://YOUR_SERVER_IP:3001/api/v1
 VITE_WS_URL=http://YOUR_SERVER_IP:3001
 ```
+
+The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
 
 > **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
 
@@ -579,6 +598,8 @@ curl http://localhost:3001/api/v1/servers \
 | `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
 | `VITE_STUN_URL` | `stun:<VITE_WS_URL host>:3478` | Optional STUN server for DM calls (`stun:`/`stuns:` only). Compiled into the build. |
+
+The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VITE_WS_URL`, and also reads `TAURI_ASSET_ORIGIN`, `TAURI_UPDATER_ENDPOINTS` and `TAURI_UPDATER_PUBKEY` from the environment: see [Build the Desktop App](#build-the-desktop-app).
 
 ### Admin Dashboard Environment Variables (`apps/admin/.env`)
 
