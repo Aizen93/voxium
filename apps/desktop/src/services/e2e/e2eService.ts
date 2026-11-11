@@ -346,6 +346,12 @@ function claimedPageEntries(res: unknown): {
   return { served: page.length, entries };
 }
 
+/** The sender device a kept share names, as `userId|deviceId` (fields as the inbox served them). */
+function keptShareSender(record: PendingKeyShare): string {
+  const { senderUserId, senderDeviceId } = record.share;
+  return `${typeof senderUserId === 'string' ? senderUserId : ''}|${typeof senderDeviceId === 'string' ? senderDeviceId : ''}`;
+}
+
 /** Client-generated, stable per install (D2): 22 chars of base64url randomness. */
 function generateDeviceId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -502,6 +508,15 @@ export class E2EService {
   private missingSessions = new Map<string, number>();
   /** Kept shares whose refused look-up was already counted in this start (see processPendingShares). */
   private deferralsCounted = new Set<string>();
+  /**
+   * The key shares the vault keeps (`pks:`), in memory: each one's vault key
+   * and its sender device (`userId|deviceId`), so a device-sealed decrypt
+   * from a device with none costs no vault read (importKeptSharesFrom). Null
+   * until a listing of the vault fills it, refilled by every listing, and kept
+   * in step by every write and delete of a kept share, all on the queue. It
+   * may still name a share that is gone, never miss one that is kept.
+   */
+  private keptShares: Map<string, string> | null = null;
   private deviceListListeners = new Set<(userId: string) => void>();
 
   constructor(
@@ -3118,7 +3133,7 @@ export class E2EService {
       // behind, since it may ride the Olm session an earlier one sets up.
       const deferredSenders = new Set<string>();
       // Kept shares first: they are older than anything still on the server.
-      let imported = await this.processPendingShares(await this.vault.listPendingShares(), deferredSenders, true);
+      let imported = await this.processPendingShares(await this.listKeptShares(), deferredSenders, true);
       // Drain every page: the inbox is oldest-first and capped per response, so
       // stopping at one page would let queued older shares delay a live one.
       for (let page = 0; page < MAX_CLAIM_PAGES; page++) {
@@ -3154,7 +3169,7 @@ export class E2EService {
         // The server has deleted these: written before anything else is done
         const { served, entries } = claimedPageEntries(res);
         if (served === 0) break;
-        await this.vault.putPendingShares(entries);
+        await this.keepShares(entries);
         imported += await this.processPendingShares(entries, deferredSenders, false);
         // the server's count, malformed elements included, decides whether more pages wait
         if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
@@ -3165,6 +3180,28 @@ export class E2EService {
     });
     this.claimInFlight = run;
     return run;
+  }
+
+  // Every read, write and delete of a kept share goes through these three, so
+  // keptShares stays in step with the vault. All of them run on the queue.
+
+  /** Every kept share, oldest first; refills keptShares from what the vault holds. */
+  private async listKeptShares(): Promise<Array<{ key: string; record: PendingKeyShare }>> {
+    const kept = await this.vault.listPendingShares();
+    this.keptShares = new Map(kept.map(({ key, record }) => [key, keptShareSender(record)]));
+    return kept;
+  }
+
+  /** Keep claimed shares (or rewrite kept ones); noted before the write, so a failed write only over-reports. */
+  private async keepShares(entries: Array<{ key: string; record: PendingKeyShare }>): Promise<void> {
+    for (const { key, record } of entries) this.keptShares?.set(key, keptShareSender(record));
+    await this.vault.putPendingShares(entries);
+  }
+
+  /** Drop one kept share; forgotten only once the vault has dropped it. */
+  private async forgetKeptShare(key: string): Promise<void> {
+    await this.vault.deletePendingShare(key);
+    this.keptShares?.delete(key);
   }
 
   /**
@@ -3184,7 +3221,7 @@ export class E2EService {
       const sender = typeof share.senderUserId === 'string' ? share.senderUserId : '';
       try {
         if (retry && typeof share.sessionId === 'string' && (await this.loadInbound(share.sessionId))) {
-          await this.vault.deletePendingShare(key);
+          await this.forgetKeptShare(key);
           continue;
         }
         if (deferredSenders.has(sender)) {
@@ -3196,7 +3233,7 @@ export class E2EService {
         // copy goes, and only then the Olm state its message advanced is
         // written. Cut before this point, the share is still kept and still
         // decrypts from the state on disk.
-        await this.vault.deletePendingShare(key);
+        await this.forgetKeptShare(key);
         try {
           await outcome.persistOlm();
         } catch (err) {
@@ -3215,9 +3252,9 @@ export class E2EService {
           const attempts = record.attempts + 1;
           if (attempts >= MAX_PENDING_SHARE_ATTEMPTS) {
             console.warn(`e2e: dropping a key share after ${attempts} refused look-ups of its sender:`, errText(err));
-            await this.vault.deletePendingShare(key);
+            await this.forgetKeptShare(key);
           } else {
-            await this.vault.putPendingShare(key, { ...record, attempts });
+            await this.keepShares([{ key, record: { ...record, attempts } }]);
           }
           continue;
         }
@@ -3234,7 +3271,7 @@ export class E2EService {
           continue;
         }
         console.warn('e2e: discarding an unusable key share:', errText(err));
-        await this.vault.deletePendingShare(key);
+        await this.forgetKeptShare(key);
       }
     }
     return imported;
@@ -3448,9 +3485,10 @@ export class E2EService {
    * asks the server nothing. Callers must hold the serial queue.
    */
   private async importKeptSharesFrom(userId: string, deviceId: string): Promise<void> {
-    const kept = (await this.vault.listPendingShares()).filter(
-      ({ record }) => record.share.senderUserId === userId && record.share.senderDeviceId === deviceId
-    );
+    const sender = `${userId}|${deviceId}`;
+    // nothing kept from this device: no vault read on the way to every call signal
+    if (this.keptShares && ![...this.keptShares.values()].includes(sender)) return;
+    const kept = (await this.listKeptShares()).filter(({ record }) => keptShareSender(record) === sender);
     if (kept.length > 0) await this.processPendingShares(kept, new Set(), true);
   }
 

@@ -4716,7 +4716,7 @@ describe('E2EService — lifecycle', () => {
     const refuseToStore = (service: E2EService, sessionIds: string[]) => {
       const vault = (service as unknown as { vault: E2EVault }).vault;
       const put = vault.putInboundGroupSession.bind(vault);
-      vi.spyOn(vault, 'putInboundGroupSession').mockImplementation((sessionId, record) =>
+      return vi.spyOn(vault, 'putInboundGroupSession').mockImplementation((sessionId, record) =>
         sessionIds.includes(sessionId)
           ? Promise.reject(new DOMException('The quota has been exceeded.', 'QuotaExceededError'))
           : put(sessionId, record)
@@ -4800,6 +4800,57 @@ describe('E2EService — lifecycle', () => {
 
       expect((await again.service.decryptMessage(message)).text).toBe('kept, then overtaken by a call');
       expect(await pendingIn(alice)).toHaveLength(0);
+    });
+
+    it('costs a call signal no vault read when its sender device has no kept share', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      const vault = (alice.service as unknown as { vault: E2EVault }).vault;
+      const scans = vi.spyOn(vault, 'listPendingShares');
+      const offer = await bob.service.encryptToDevice(alice.userId, alice.service.deviceId, 'an offer');
+      expect(await alice.service.decryptFromDevice(bob.userId, bob.service.deviceId, offer)).toBe('an offer');
+      expect(scans).not.toHaveBeenCalled();
+    });
+
+    it('never takes a sender device for one without kept shares while one is kept, across writes and deletes', async () => {
+      // Two shares of Bob's device are kept at Alice's start (his devices could
+      // not be looked up), and the disk refuses the second one's session.
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('the first share');
+      const second = await bob.service.encryptMessage('c2', alice.userId, 'the second share');
+      server.setDeviceListReadFailure(true);
+      const again = restart(server, alice);
+      const refused = refuseToStore(again.service, [sidOf(second.envelope)]);
+      await again.service.initialize();
+      await again.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+      expect(await pendingIn(alice)).toHaveLength(2);
+      server.setDeviceListReadFailure(false);
+
+      const vault = (again.service as unknown as { vault: E2EVault }).vault;
+      const scans = vi.spyOn(vault, 'listPendingShares');
+      const signal = async (n: number) => {
+        const sealed = await bob.service.encryptToDevice(alice.userId, again.service.deviceId, `signal ${n}`);
+        expect(await again.service.decryptFromDevice(bob.userId, bob.service.deviceId, sealed)).toBe(`signal ${n}`);
+        return scans.mock.calls.length;
+      };
+      // written by the start-up claim: the first signal looks, imports the first share, keeps the second
+      expect(await signal(1)).toBe(1);
+      expect(await pendingIn(alice)).toHaveLength(1);
+      // one of the device's two shares deleted: the other still counts
+      expect(await signal(2)).toBe(2);
+      refused.mockRestore();
+      expect(await signal(3)).toBe(3); // imports the second
+      expect(await pendingIn(alice)).toHaveLength(0);
+      // nothing kept any more: no read
+      expect(await signal(4)).toBe(3);
+
+      expect((await again.service.decryptMessage(message)).text).toBe('the first share');
+      const secondMessage = { id: 'm2', conversationId: 'c2', authorId: bob.userId, content: second.envelope };
+      expect((await again.service.decryptMessage(secondMessage)).text).toBe('the second share');
     });
 
     it('still decrypts a call signal when importing its sender’s kept shares first fails', async () => {
