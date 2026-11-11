@@ -431,7 +431,13 @@ export class E2EService {
   private readonly api: typeof defaultApi;
   /** The unguarded client: only for the key-share claim's GET (see claimKeyShares). */
   private readonly client: typeof defaultApi;
+  /**
+   * The vault itself: for the serial queue, start-up, and the key-share claim.
+   * Work off the queue goes through liveVault instead.
+   */
   private readonly vault: E2EVault;
+  /** The vault as work off the queue reaches it: refused once dispose() ran (see guardedVault). */
+  private readonly liveVault: E2EVault;
   private readonly wasmInput?: BufferSource;
   private readonly deviceListCacheMs: number;
   private readonly teardownDeadlineMs: number;
@@ -502,6 +508,7 @@ export class E2EService {
     this.client = opts.api ?? defaultApi;
     this.api = this.guardedApi(this.client);
     this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace);
+    this.liveVault = this.guardedVault(this.vault);
     this.wasmInput = opts.wasmInput;
     this.deviceListCacheMs = opts.deviceListCacheMs ?? DEVICE_LIST_CACHE_MS;
     this.teardownDeadlineMs = opts.teardownDeadlineMs ?? TEARDOWN_DEADLINE_MS;
@@ -509,43 +516,74 @@ export class E2EService {
 
   /**
    * Every request this service makes, checked against dispose() on both sides
-   * of its await. Together with the vault (which fails any access after it was
-   * closed), this is the liveness check after each await of every task: work
-   * that was waiting on the network when the service was torn down stops
-   * there, before it touches a freed engine object.
+   * of its await: none goes out once dispose() ran, and an answer that comes
+   * back after it is dropped. Together with the vault (which fails any access
+   * after it was closed) and liveVault, this is the liveness check after each
+   * await of every task: work that was waiting on the network when the service
+   * was disposed stops there, before it touches a freed engine object or
+   * writes anything.
    *
-   * Writes are refused as soon as dispose() runs: nothing is published for a
-   * session that has ended. Reads stay allowed until the teardown itself, which
-   * a key-share claim in flight postpones so it can finish importing.
+   * The one request that may still be answered after a dispose is a key-share
+   * claim's GET, already on its way (the server deletes what it hands out):
+   * it uses the unguarded client (claimKeyShares). Everything else the claim
+   * would ask the server afterwards, such as the look-up of a sender it does
+   * not know, is refused here: logout has dropped the tokens by then, and the
+   * client attaches whatever bearer is current, which after a new sign-in is
+   * the next account's. The share it was for is kept for the next start.
    */
   private guardedApi(client: typeof defaultApi): typeof defaultApi {
-    const read = async <R>(call: () => Promise<R>): Promise<R> => {
-      this.assertNotTornDown();
-      const res = await call();
-      this.assertNotTornDown();
-      return res;
-    };
-    const write = async <R>(call: () => Promise<R>): Promise<R> => {
+    const guard = async <R>(call: () => Promise<R>): Promise<R> => {
       this.assertLive();
       const res = await call();
-      this.assertNotTornDown();
+      this.assertLive();
       return res;
     };
     const guarded = {
-      get: (...args: Parameters<typeof client.get>) => read(() => client.get(...args)),
-      put: (...args: Parameters<typeof client.put>) => write(() => client.put(...args)),
-      post: (...args: Parameters<typeof client.post>) => write(() => client.post(...args)),
-      delete: (...args: Parameters<typeof client.delete>) => write(() => client.delete(...args)),
+      get: (...args: Parameters<typeof client.get>) => guard(() => client.get(...args)),
+      put: (...args: Parameters<typeof client.put>) => guard(() => client.put(...args)),
+      post: (...args: Parameters<typeof client.post>) => guard(() => client.post(...args)),
+      delete: (...args: Parameters<typeof client.delete>) => guard(() => client.delete(...args)),
     };
     // Only these four verbs are used here; the cast keeps the client's type.
     return guarded as unknown as typeof defaultApi;
   }
 
+  /**
+   * The vault, checked against dispose() on both sides of every call, like the
+   * guarded client: for every path that does not run on the serial queue (the
+   * UI's reads and marks, the device-list fetch, the cache reads in front of a
+   * decrypt).
+   *
+   * The vault refuses everything once it is closed, but a key-share claim in
+   * flight holds that back until the claim is done (dispose()). Until then the
+   * claim may still store and import the page it holds, through `vault`, and
+   * nothing else may read or write: the queue starts nothing for a disposed
+   * service and the claim is the only task still running on it, and every
+   * other path reaches the vault through here.
+   */
+  private guardedVault(vault: E2EVault): E2EVault {
+    return new Proxy(vault, {
+      get: (target, property) => {
+        const value: unknown = Reflect.get(target, property, target);
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]): unknown => {
+          this.assertLive();
+          const result: unknown = (value as (...callArgs: unknown[]) => unknown).apply(target, args);
+          if (!(result instanceof Promise)) return result;
+          return result.then((resolved: unknown) => {
+            this.assertLive();
+            return resolved;
+          });
+        };
+      },
+    });
+  }
+
   /** Serialize all crypto-state mutations (ratchet advance ⇒ pickle persist). */
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue.then(() => {
-      // Queued before a dispose, started after it: everything it would touch
-      // is freed or closed.
+      // Queued before a dispose, started after it: refused, whether or not the
+      // teardown has freed what it would touch yet (a claim can hold it back)
       this.assertLive();
       return fn();
     });
@@ -554,17 +592,14 @@ export class E2EService {
   }
 
   /**
-   * Throw if dispose() ran. Called after every await on the start-up path: the
+   * Throw if dispose() ran. Called after every await on the start-up path and
+   * at the start of every entry point that does not run on the queue: the
    * engine objects held across that await may have been freed meanwhile, and
-   * the next step would publish keys for a session that has ended.
+   * the next step would publish keys for a session that has ended, or read
+   * and write a vault that only the claim in flight may still use.
    */
   private assertLive(): void {
     if (this.disposed) throw new E2EServiceDisposedError();
-  }
-
-  /** Throw once the engine objects are freed (see tornDown). */
-  private assertNotTornDown(): void {
-    if (this.tornDown) throw new E2EServiceDisposedError();
   }
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
@@ -692,7 +727,11 @@ export class E2EService {
    * after this point holds the only copy of those session keys. The teardown
    * then waits for the claim to import them, or to keep the ones it cannot
    * (pks:, see claimKeyShares), where the next start of this account finds
-   * them; the claim reads no further page.
+   * them; the claim reads no further page and asks the server nothing more.
+   * Until the teardown, that claim is the only thing that touches the vault:
+   * the queue starts nothing, a decrypt that waited on the claim stops there,
+   * and every path off the queue is refused by the guarded client and
+   * liveVault from this call on.
    *
    * Resolves once the teardown has run.
    */
@@ -1586,6 +1625,7 @@ export class E2EService {
    * so a steady state costs nothing.
    */
   async backupMessageKeys(): Promise<number> {
+    this.assertLive();
     // The check runs off the queue and costs two reads; this runs at every
     // start, and nothing pending is the common case, which must not hold up
     // the first send or decrypt behind it.
@@ -1598,11 +1638,11 @@ export class E2EService {
     return this.enqueue(() => this.backupMessageKeysUnqueued());
   }
 
-  /** Session records not uploaded yet: two reads (one transaction each). */
+  /** Session records not uploaded yet: two reads (one transaction each), through liveVault for the check off the queue. */
   private async sessionsPendingBackup(): Promise<InboundGroupSessionRecord[]> {
     const [records, uploaded] = await Promise.all([
-      this.vault.listInboundGroupSessions(),
-      this.vault.getBackedUpSessionIds(),
+      this.liveVault.listInboundGroupSessions(),
+      this.liveVault.getBackedUpSessionIds(),
     ]);
     const done = new Set(uploaded);
     return records.filter((r) => !done.has(r.sessionId));
@@ -1711,7 +1751,7 @@ export class E2EService {
   /** Our own account master key (held or pinned), for safety numbers. */
   private async ownMasterKey(): Promise<string | null> {
     if (this.masterKey) return this.masterKey.publicKey();
-    const pinned = await this.vault.getMasterIdentity(this.userId);
+    const pinned = await this.liveVault.getMasterIdentity(this.userId);
     return pinned?.masterKey ?? null;
   }
 
@@ -1726,12 +1766,15 @@ export class E2EService {
    * Pin-or-compare one device identity (TOFU per device, D10). Throws
    * E2EIdentityChangedError when a device we already trust published different
    * keys — the user must re-accept before any session is built with it.
+   *
+   * Through liveVault: the device-list fetch that calls it runs off the queue
+   * (the bundle claim calls it on the queue, where that changes nothing).
    */
   private async pinDevice(
     userId: string,
     entry: { deviceId: string; curve25519Key: string; ed25519Key: string }
   ): Promise<PinnedIdentity> {
-    const pinned = await this.vault.getIdentity(userId, entry.deviceId);
+    const pinned = await this.liveVault.getIdentity(userId, entry.deviceId);
     if (pinned) {
       if (pinned.curve25519Key !== entry.curve25519Key || pinned.ed25519Key !== entry.ed25519Key) {
         throw new E2EIdentityChangedError(userId);
@@ -1740,7 +1783,7 @@ export class E2EService {
     }
     // Carry the verified flag over from the pre-multi-device pin when the keys
     // are literally the same account (the device just gained an id).
-    const legacy = await this.vault.getLegacyIdentity(userId);
+    const legacy = await this.liveVault.getLegacyIdentity(userId);
     const verified =
       !!legacy &&
       legacy.verified &&
@@ -1751,7 +1794,7 @@ export class E2EService {
       ed25519Key: entry.ed25519Key,
       verified,
     };
-    await this.vault.putIdentity(userId, entry.deviceId, fresh);
+    await this.liveVault.putIdentity(userId, entry.deviceId, fresh);
     return fresh;
   }
 
@@ -1759,11 +1802,17 @@ export class E2EService {
    * Fetch a user's published device list, verifying EVERY device's binding
    * signature (v2 canonical, D4) before it can be used. Devices with a broken
    * signature are dropped, never trusted — the server is untrusted storage.
+   *
+   * Refused once the service is disposed, cached answer included; so is the
+   * whole path behind it (the request, the pinning, the recorded state). That
+   * holds for a key-share claim still finishing after a dispose too: the
+   * sender it cannot look up any more keeps its share for the next start.
    */
   async fetchDeviceList(
     userId: string,
     freshness: boolean | number = false
   ): Promise<E2EPinnedDeviceList> {
+    this.assertLive();
     // `freshness`: false = normal cache, true = force a round trip, or a
     // max-age in ms. The send path passes a small max-age instead of forcing —
     // two uncached GETs per message would exhaust the per-user rate limit
@@ -1793,7 +1842,8 @@ export class E2EService {
    * Verify, pin and cache ONE user's device-list payload. Single source of
    * truth for device trust: the per-user GET and the secure-channel batch
    * endpoint both feed their responses through here, so a channel member's
-   * devices get exactly the verification a DM peer's would.
+   * devices get exactly the verification a DM peer's would. Reads and writes
+   * through liveVault: both are fetched off the queue.
    */
   private async processDeviceListPayload(
     userId: string,
@@ -1819,12 +1869,12 @@ export class E2EService {
     const crossSigningServed = data.crossSigning === true;
     if (crossSigningServed) this.crossSigningSeen = true;
     const rolloutGrace = !crossSigningServed && !this.crossSigningSeen;
-    const priorState = rolloutGrace ? await this.vault.getDeviceListState(userId) : null;
+    const priorState = rolloutGrace ? await this.liveVault.getDeviceListState(userId) : null;
     const priorCrossSigned = new Set(priorState?.crossSignedDeviceIds ?? []);
     const served = crossSigningServed
       ? this.verifiedMasterKey(userId, data.masterKey, data.masterSignature)
       : null;
-    const pinnedMaster = await this.vault.getMasterIdentity(userId);
+    const pinnedMaster = await this.liveVault.getMasterIdentity(userId);
     if (userId === this.userId) this.servedOwnMasterKey = served;
     if (pinnedMaster && served && pinnedMaster.masterKey !== served) {
       if (userId === this.userId) {
@@ -1844,7 +1894,7 @@ export class E2EService {
       this.masterKeyConflict = false;
     }
     if (!pinnedMaster && served) {
-      await this.vault.putMasterIdentity(userId, { masterKey: served, verified: false });
+      await this.liveVault.putMasterIdentity(userId, { masterKey: served, verified: false });
     }
     // Cross-signatures are checked against the PINNED key: a server that
     // withdraws the master key cannot strip trust from devices it already
@@ -1957,7 +2007,7 @@ export class E2EService {
   private async recordDeviceListState(userId: string, list: E2EPinnedDeviceList): Promise<void> {
     const deviceIds = list.devices.map((d) => d.deviceId);
     const crossSigned = new Set(list.devices.filter((d) => d.crossSigned).map((d) => d.deviceId));
-    const stored = await this.vault.getDeviceListState(userId);
+    const stored = await this.liveVault.getDeviceListState(userId);
     // A list that names no device and no account key names no identity: it is
     // what the server answers for someone who has not started the app yet.
     // Trust on first use pins the first identity SEEN (spec §4.4), so neither
@@ -1967,7 +2017,7 @@ export class E2EService {
     if (!state) {
       if (deviceIds.length === 0 && !list.masterKey) return;
       // First sight of this user's devices: nothing to warn about yet (TOFU).
-      await this.vault.putDeviceListState(userId, {
+      await this.liveVault.putDeviceListState(userId, {
         version: list.listVersion,
         deviceIds,
         acknowledgedVersion: list.listVersion,
@@ -1993,7 +2043,7 @@ export class E2EService {
     // the devices it signs proves nothing: a hostile server can mint one and
     // sign its own device with it. Seeing a key twice is not acknowledgement
     // either, so this compares against acknowledgedMasterKey, not masterKey.
-    const pinnedMaster = await this.vault.getMasterIdentity(userId);
+    const pinnedMaster = await this.liveVault.getMasterIdentity(userId);
     const masterTrusted =
       !!list.masterKey &&
       ((state.acknowledgedMasterKey ?? null) === list.masterKey || !!pinnedMaster?.verified);
@@ -2029,7 +2079,7 @@ export class E2EService {
     // Claim the version only when nothing is outstanding, so the arrival of a
     // cross-signed device does not leave `changed` stuck on the version alone.
     const settled = unacknowledged.size === 0 && deviceIds.every((id) => acknowledgedDeviceIds.includes(id));
-    await this.vault.putDeviceListState(userId, {
+    await this.liveVault.putDeviceListState(userId, {
       ...state,
       version: list.listVersion,
       deviceIds,
@@ -2057,7 +2107,7 @@ export class E2EService {
    * acknowledged, so the warning still fires.
    */
   async deviceListStatus(userId: string): Promise<E2EDeviceListStatus> {
-    const state = await this.vault.getDeviceListState(userId);
+    const state = await this.liveVault.getDeviceListState(userId);
     if (!state) return { version: 0, deviceIds: [], newDeviceIds: [], unsignedDeviceIds: [], changed: false };
     const crossSigned = new Set(state.crossSignedDeviceIds ?? []);
     // Only meaningful once the account HAS a master key: before cross-signing
@@ -2218,6 +2268,8 @@ export class E2EService {
       try {
         await this.fetchDeviceList(peerUserId, true);
       } catch (err) {
+        // disposed meanwhile: go no further (the acknowledgement would write)
+        if (isE2ESessionEnded(err)) throw err;
         console.warn(`e2e: could not re-read the device list of ${peerUserId} after acceptance:`, errText(err));
       }
       await this.acknowledgeDeviceListUnqueued(peerUserId);
@@ -2448,6 +2500,7 @@ export class E2EService {
         await this.fetchDeviceList(userId);
         pinned = await this.vault.listIdentities(userId);
       } catch (err) {
+        if (isE2ESessionEnded(err)) throw err;
         console.warn(`e2e: could not fetch devices of ${userId}:`, errText(err));
       }
     }
@@ -3266,7 +3319,8 @@ export class E2EService {
     // First contact with this sender device: verify + TOFU-pin its identity
     // via the device list (importKeyShare pattern) — inbound pre-key sessions
     // bind to the PINNED curve25519 key, so an unpinned device cannot decrypt.
-    if (!(await this.vault.getIdentity(userId, deviceId))) {
+    // Off the queue, hence liveVault.
+    if (!(await this.liveVault.getIdentity(userId, deviceId))) {
       await this.fetchDeviceList(userId, true);
     }
     return this.enqueue(async () => {
@@ -3355,7 +3409,7 @@ export class E2EService {
     messageId: string,
     expected: { scope: string; authorId?: string; editedAt?: string | null },
   ): Promise<string | null> {
-    const cached = await this.vault.getPlaintext(messageId);
+    const cached = await this.liveVault.getPlaintext(messageId);
     if (!cached || cached.failed) return null;
     return this.cacheEntryAnswers(cached, expected) ? cached.text : null;
   }
@@ -3365,6 +3419,10 @@ export class E2EService {
    * re-decryptable so this is only an optimization there, but it is the ONLY
    * way to read legacy olm1 history (one-shot ratchet keys). Failures return a
    * marker instead of throwing so one bad message can't break the timeline.
+   * The end of the session is not a failure of the message: a dispose before
+   * or during the decrypt rejects (E2EServiceDisposedError, or
+   * E2EVaultClosedError from the vault), which the display gate settles as
+   * nothing to show (decryptMessageForDisplay).
    */
   async decryptMessage(message: {
     id: string;
@@ -3375,7 +3433,8 @@ export class E2EService {
     createdAt?: string;
   }): Promise<DecryptResult> {
     const version = message.editedAt ?? null;
-    const cached = await this.vault.getPlaintext(message.id);
+    // off the queue: liveVault
+    const cached = await this.liveVault.getPlaintext(message.id);
     // Scope-checked: a cache entry only answers for the scope it was decrypted
     // under. Without this, a server that relabels a DM message id as a
     // secure-channel message (or vice versa) would have the cache serve the
@@ -3420,6 +3479,8 @@ export class E2EService {
         });
         return { text };
       } catch (err) {
+        // the session ended under this decrypt: said as such, never as a marker
+        if (isE2ESessionEnded(err)) throw err;
         console.warn(`e2e: failed to decrypt message ${message.id}:`, errText(err));
         return { text: '', failed: true };
       }
@@ -3458,11 +3519,11 @@ export class E2EService {
       if (lastAttempt === undefined || Date.now() - lastAttempt >= SHARE_CLAIM_RETRY_MS) {
         this.missingSessions.set(sessionId, Date.now());
         await this.claimKeyShares();
-        // The claim may be the one a dispose was waiting for, and the teardown
-        // runs as it settles: go no further on what it freed. (Today the
-        // claim's promise wrapper settles a tick before the teardown starts;
-        // this does not rely on it.)
-        this.assertNotTornDown();
+        // The claim may be the one a dispose was waiting for. What it stored
+        // is the next start's; this decrypt goes no further, neither into the
+        // vault (still open until the teardown, which runs as the claim
+        // settles) nor into the engine objects that teardown frees.
+        this.assertLive();
         entry = await this.loadInbound(sessionId);
       }
     }
@@ -3540,7 +3601,7 @@ export class E2EService {
     limit = 50
   ): Promise<Array<{ messageId: string; text: string; authorId?: string; createdAt?: string; editedAt?: string | null }>> {
     const needle = query.toLowerCase();
-    const all = await this.vault.listPlaintexts(conversationId);
+    const all = await this.liveVault.listPlaintexts(conversationId);
     return all
       .map(({ messageId, entry }) => {
         // entries hold raw plaintext — structured payloads carry text + metas
@@ -3584,7 +3645,7 @@ export class E2EService {
     // Judge against the pinned account key, never one served in this response:
     // this list is exactly where the user decides whether to revoke a device.
     const served = this.verifiedMasterKey(this.userId, data.masterKey, data.masterSignature);
-    const pinnedMaster = await this.vault.getMasterIdentity(this.userId);
+    const pinnedMaster = await this.liveVault.getMasterIdentity(this.userId);
     const masterKey = pinnedMaster?.masterKey ?? served;
     // Same rollout grace as fetchDeviceList, and for the same reason: if these
     // two disagreed about what "cross-signed" means, the device manager would
@@ -3592,7 +3653,7 @@ export class E2EService {
     // disagreement lands on the reset-identity affordance.
     const rolloutGrace = data.crossSigning !== true && !this.crossSigningSeen;
     const priorCrossSigned = new Set(
-      rolloutGrace ? ((await this.vault.getDeviceListState(this.userId))?.crossSignedDeviceIds ?? []) : []
+      rolloutGrace ? ((await this.liveVault.getDeviceListState(this.userId))?.crossSignedDeviceIds ?? []) : []
     );
     return {
       currentDeviceId: this.deviceId,
@@ -3653,19 +3714,24 @@ export class E2EService {
 
   /** One safety number per device of the peer (D10). */
   async perDeviceSafetyNumbers(peerUserId: string): Promise<E2EDeviceSafetyNumber[]> {
-    const account = this.requireAccount();
+    this.assertLive();
     let devices: E2EDeviceIdentity[];
     try {
       devices = (await this.fetchDeviceList(peerUserId)).devices;
     } catch (err) {
-      if (err instanceof E2EIdentityChangedError) throw err;
+      // a changed identity is the answer; a session that ended has no pins to fall back on
+      if (err instanceof E2EIdentityChangedError || isE2ESessionEnded(err)) throw err;
       console.warn(`e2e: falling back to pinned devices for ${peerUserId}:`, errText(err));
-      devices = (await this.vault.listIdentities(peerUserId)).map(({ deviceId, identity }) => ({
+      devices = (await this.liveVault.listIdentities(peerUserId)).map(({ deviceId, identity }) => ({
         deviceId,
         ...identity,
         crossSigned: false, // unknown offline — the list is what carries proof
       }));
     }
+    // Read after the awaits, never held across them: a dispose meanwhile frees
+    // the account (a cached list answers without any request to stop at).
+    this.assertLive();
+    const account = this.requireAccount();
     return devices.map((device) => ({
       deviceId: device.deviceId,
       crossSigned: device.crossSigned,
@@ -3688,16 +3754,17 @@ export class E2EService {
    * Null when either account has not bootstrapped cross-signing.
    */
   async accountSafetyNumber(peerUserId: string): Promise<E2EAccountSafetyNumber | null> {
+    this.assertLive();
     const own = await this.ownMasterKey();
     if (!own) return null;
     try {
       await this.fetchDeviceList(peerUserId);
     } catch (err) {
-      if (err instanceof E2EIdentityChangedError) throw err;
+      if (err instanceof E2EIdentityChangedError || isE2ESessionEnded(err)) throw err;
       // fall back to the pin: an offline client must still show the number
       console.warn(`e2e: falling back to the pinned master key of ${peerUserId}:`, errText(err));
     }
-    const pinned = await this.vault.getMasterIdentity(peerUserId);
+    const pinned = await this.liveVault.getMasterIdentity(peerUserId);
     if (!pinned) return null;
     return {
       digits: master_safety_number(this.userId, own, peerUserId, pinned.masterKey),
@@ -3707,14 +3774,14 @@ export class E2EService {
 
   /** Has the peer's ACCOUNT key been compared out of band (D9)? */
   async isAccountVerified(peerUserId: string): Promise<boolean> {
-    return (await this.vault.getMasterIdentity(peerUserId))?.verified ?? false;
+    return (await this.liveVault.getMasterIdentity(peerUserId))?.verified ?? false;
   }
 
   /** Mark ONE device of a peer as verified out of band. */
   async markDeviceVerified(peerUserId: string, deviceId: string): Promise<void> {
-    const identity = await this.vault.getIdentity(peerUserId, deviceId);
+    const identity = await this.liveVault.getIdentity(peerUserId, deviceId);
     if (!identity) return;
-    await this.vault.putIdentity(peerUserId, deviceId, { ...identity, verified: true });
+    await this.liveVault.putIdentity(peerUserId, deviceId, { ...identity, verified: true });
     this.deviceListCache.delete(peerUserId);
   }
 
@@ -3735,9 +3802,9 @@ export class E2EService {
    * individually so accounts without a master key (D11) keep working.
    */
   async markIdentityVerified(peerUserId: string): Promise<void> {
-    const master = await this.vault.getMasterIdentity(peerUserId);
+    const master = await this.liveVault.getMasterIdentity(peerUserId);
     if (master && !master.verified) {
-      await this.vault.putMasterIdentity(peerUserId, { ...master, verified: true });
+      await this.liveVault.putMasterIdentity(peerUserId, { ...master, verified: true });
     }
     // Comparing the account number says "this master key is really theirs" —
     // nothing more. Devices the key vouches for inherit that at read time
@@ -3746,13 +3813,13 @@ export class E2EService {
     // have no master key at all (D11, the pre-cross-signing behaviour). Marking
     // the rest would put "Verified" on precisely the device the account key
     // refuses to sign — the one thing this feature exists to expose.
-    const state = await this.vault.getDeviceListState(peerUserId);
+    const state = await this.liveVault.getDeviceListState(peerUserId);
     const accountHasMasterKey = !!(master?.masterKey ?? state?.masterKey);
     if (!accountHasMasterKey) {
-      const pinned = await this.vault.listIdentities(peerUserId);
+      const pinned = await this.liveVault.listIdentities(peerUserId);
       for (const { deviceId, identity } of pinned) {
         if (identity.verified) continue;
-        await this.vault.putIdentity(peerUserId, deviceId, { ...identity, verified: true });
+        await this.liveVault.putIdentity(peerUserId, deviceId, { ...identity, verified: true });
       }
     }
     this.deviceListCache.delete(peerUserId);

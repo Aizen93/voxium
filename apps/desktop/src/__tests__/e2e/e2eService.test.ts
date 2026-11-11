@@ -4830,6 +4830,169 @@ describe('E2EService — lifecycle', () => {
         error.mockRestore();
       }
     });
+
+    describe('while that claim holds the teardown back, nothing else touches the vault or the network', () => {
+      /** Every vault access from now on (see the backup test above for why withStore covers them). */
+      const spyOnVaultAccesses = (service: E2EService) =>
+        vi.spyOn(
+          (service as unknown as { vault: E2EVault }).vault as unknown as {
+            withStore: (...args: unknown[]) => Promise<unknown>;
+          },
+          'withStore'
+        );
+
+      /**
+       * Alice knows Bob (pinned devices, a recorded list, a cached plaintext),
+       * holds the account key, and was disposed while her start-up claim's
+       * request was on its way: the vault is still open for that claim.
+       */
+      async function disposedWhileClaiming() {
+        uniq++;
+        const server = createFakeServer();
+        const alice = makeParty(server, 'alice');
+        const bob = makeParty(server, 'bob');
+        await alice.service.initialize();
+        await bob.service.initialize();
+        await flushQueue();
+        const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'hello');
+        const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+        expect((await alice.service.decryptMessage(message)).text).toBe('hello');
+        const signal = await bob.service.encryptToDevice(alice.userId, alice.service.deviceId, 'a call signal');
+        await alice.service.dispose();
+
+        const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'));
+        const restarted = serviceOver(alice.userId, gate.api, {
+          keyProvider: alice.keyProvider,
+          vaultNamespace: alice.vaultNamespace,
+        });
+        await restarted.initialize();
+        await gate.held;
+        const tornDown = restarted.dispose();
+        expect((restarted as unknown as { tornDown: boolean }).tornDown).toBe(false);
+        const accesses = spyOnVaultAccesses(restarted);
+        const requests = gate.reads.length + gate.writes.length;
+        return { restarted, bob, message, signal, gate, tornDown, accesses, requests };
+      }
+
+      type Window = Awaited<ReturnType<typeof disposedWhileClaiming>>;
+      it.each<[string, (service: E2EService, w: Window) => Promise<unknown>]>([
+        ['fetchDeviceList', (s, w) => s.fetchDeviceList(w.bob.userId, true)],
+        ['fetchChannelDeviceLists', (s) => s.fetchChannelDeviceLists('ch-window')],
+        ['deviceListStatus', (s, w) => s.deviceListStatus(w.bob.userId)],
+        ['markDeviceVerified', (s, w) => s.markDeviceVerified(w.bob.userId, w.bob.service.deviceId)],
+        ['markIdentityVerified', (s, w) => s.markIdentityVerified(w.bob.userId)],
+        ['isAccountVerified', (s, w) => s.isAccountVerified(w.bob.userId)],
+        ['listOwnDevices', (s) => s.listOwnDevices()],
+        ['findLinkableDevice', (s) => s.findLinkableDevice('ABCD-EFGH')],
+        ['perDeviceSafetyNumbers', (s, w) => s.perDeviceSafetyNumbers(w.bob.userId)],
+        ['safetyNumber', (s, w) => s.safetyNumber(w.bob.userId)],
+        ['accountSafetyNumber', (s, w) => s.accountSafetyNumber(w.bob.userId)],
+        ['getCachedPlaintext', (s, w) => s.getCachedPlaintext(w.message.id, { scope: 'c1' })],
+        ['searchDecrypted', (s) => s.searchDecrypted('c1', 'hello')],
+        ['decryptMessage (its cache read)', (s, w) => s.decryptMessage(w.message)],
+        ['decryptFromDevice (its sender check)', (s, w) => s.decryptFromDevice(w.bob.userId, w.bob.service.deviceId, w.signal)],
+        ['backupMessageKeys (its check)', (s) => s.backupMessageKeys()],
+        ['keyBackupInfo', (s) => s.keyBackupInfo()],
+      ])('%s is refused before it reads or writes anything', async (_name, call) => {
+        const w = await disposedWhileClaiming();
+        const outcome = call(w.restarted, w);
+        outcome.catch(() => undefined); // settled below
+        // whatever the call would do, it has done by now (or is waiting on the queue)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(w.accesses).not.toHaveBeenCalled();
+        expect(w.gate.reads.length + w.gate.writes.length).toBe(w.requests);
+
+        w.gate.release();
+        await w.tornDown;
+        await expect(outcome).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      });
+
+      it('stops a decrypt that waited on the claim: the claim imports, the decrypt writes nothing', async () => {
+        uniq++;
+        const server = createFakeServer();
+        const aliceId = `alice-${uniq}`;
+        const keyProvider = memoryKeyProvider();
+        const vaultNamespace = `v${++vaultSeq}`;
+        let armed = false;
+        const gate = holdingApi(
+          server.apiFor(aliceId),
+          (verb, url) => armed && verb === 'get' && url.startsWith('/e2e/keyshares'),
+          'response'
+        );
+        const alice = serviceOver(aliceId, gate.api, { keyProvider, vaultNamespace });
+        const bob = makeParty(server, 'bob');
+        await alice.initialize();
+        await bob.service.initialize();
+        await flushQueue();
+        await alice.fetchDeviceList(bob.userId, true); // Bob is known: his share imports without the network
+        const { envelope } = await bob.service.encryptMessage('c1', aliceId, 'imported by the claim');
+        const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+
+        armed = true;
+        const decrypt = alice.decryptMessage(message); // misses, and claims
+        decrypt.catch(() => undefined); // settled below
+        await gate.held; // the server has answered, and deleted the share
+        const tornDown = alice.dispose();
+        const vault = (alice as unknown as { vault: E2EVault }).vault;
+        const sessionWrites = vi.spyOn(vault, 'putInboundGroupSession');
+        const plaintextWrites = vi.spyOn(vault, 'putPlaintext');
+        const positionReads = vi.spyOn(vault, 'getMessagePosition');
+        const positionWrites = vi.spyOn(vault, 'putMessagePosition');
+        gate.release();
+
+        await expect(decrypt).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+        await tornDown;
+        // the claim stored the session it was handed (once), the decrypt nothing
+        expect(sessionWrites).toHaveBeenCalledTimes(1);
+        expect(plaintextWrites).not.toHaveBeenCalled();
+        expect(positionReads).not.toHaveBeenCalled();
+        expect(positionWrites).not.toHaveBeenCalled();
+
+        // and the next start reads the message from what the claim stored
+        const again = makeDevice(server, aliceId, { keyProvider, vaultNamespace });
+        await again.service.initialize();
+        expect((await again.service.decryptMessage(message)).text).toBe('imported by the claim');
+      });
+
+      it('does not look up an unknown sender for the claim after the dispose: the share waits for the next start', async () => {
+        // Logout drops the tokens first, so this request would be a 401; after
+        // a sign-in on the same page it would carry the next account's bearer.
+        uniq++;
+        const server = createFakeServer();
+        const alice = makeParty(server, 'alice');
+        const bob = makeParty(server, 'bob');
+        await alice.service.initialize();
+        await bob.service.initialize();
+        await flushQueue();
+        await alice.service.dispose();
+        const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'from someone new');
+
+        const gate = holdingApi(
+          server.apiFor(alice.userId),
+          (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+          'response'
+        );
+        const restarted = serviceOver(alice.userId, gate.api, {
+          keyProvider: alice.keyProvider,
+          vaultNamespace: alice.vaultNamespace,
+        });
+        await restarted.initialize();
+        await gate.held;
+        const tornDown = restarted.dispose(); // signed in still: the look-up would succeed
+        const readsBefore = gate.reads.length;
+        gate.release();
+        await tornDown;
+
+        expect(gate.reads.slice(readsBefore)).not.toContain(`GET /e2e/devices/${bob.userId}`);
+        const kept = await pendingIn(alice);
+        expect(kept.map((p) => p.record.attempts)).toEqual([0]);
+
+        const again = restart(server, alice);
+        await again.service.initialize();
+        const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+        expect((await again.service.decryptMessage(message)).text).toBe('from someone new');
+      });
+    });
   });
 
   describe('the message-key backup pass', () => {
