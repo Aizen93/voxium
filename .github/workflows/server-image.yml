@@ -14,6 +14,8 @@ on:
       - package.json
       - packages/shared/package.json
       - apps/server/package.json
+      - apps/server/tsconfig.json
+      - packages/shared/tsconfig.json
       - apps/server/prisma/**
       - apps/server/prisma.config.ts
       - .github/workflows/server-image.yml
@@ -28,6 +30,8 @@ on:
       - package.json
       - packages/shared/package.json
       - apps/server/package.json
+      - apps/server/tsconfig.json
+      - packages/shared/tsconfig.json
       - apps/server/prisma/**
       - apps/server/prisma.config.ts
       - .github/workflows/server-image.yml

@@ -39,6 +39,10 @@ describe('server-image workflow', () => {
       'pnpm-workspace.yaml',
       'package.json',
       'apps/server/package.json',
+      // The image's tsc steps read these: an outDir or rootDir change moves
+      // the dist/index.js the entrypoint starts.
+      'apps/server/tsconfig.json',
+      'packages/shared/tsconfig.json',
       'apps/server/prisma/**',
       'apps/server/prisma.config.ts',
       '.github/workflows/server-image.yml',
