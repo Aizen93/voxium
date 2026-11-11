@@ -524,8 +524,19 @@ async function fanOutResync(scope: ResyncScope): Promise<void> {
  *
  * Cost, on this rare path only: a user-scoped resync is one recompute; a
  * server-wide or channel-scoped one reads the space's member ids (one query on
- * the `server_id` index), recomputes them USER_BATCH at a time, and publishes
- * one leave per channel per batch naming only the users that channel hides.
+ * the `server_id` index) and recomputes them USER_BATCH at a time (six
+ * queries each). Each batch publishes one leave per distinct set of hidden
+ * TEXT channels, plus one per VOICE channel hidden from someone, every leave
+ * naming only its users. Every leave reaches every node, so the volume
+ * matters: Redis drops a subscriber whose pub/sub output buffer passes 32 MB.
+ * Measured on 10 000 members (25-character ids), 180 text and 20 voice
+ * channels, 122 queries in every case, against the previous one leave per
+ * channel per batch:
+ *   - four role profiles (hiding 30, 15, 5 and 0 text channels, 5 and 2
+ *     voice ones): 160 messages, 1.6 MB (was 700 messages, 8.9 MB);
+ *   - the same plus 10 % of members who see nothing: 480, 2.2 MB (4000, 14.7 MB);
+ *   - every member sees nothing: 420, 7.1 MB (4000, 66.5 MB), the voice
+ *     leaves being 6.6 MB of it (they cannot be merged, see below).
  */
 async function revokeHiddenRoomsClusterWide(scope: ResyncScope): Promise<void> {
   const { serverId } = scope;
@@ -534,27 +545,52 @@ async function revokeHiddenRoomsClusterWide(scope: ResyncScope): Promise<void> {
     const channels = await prisma.channel.findMany({
       where: { serverId, ...(scope.channelId ? { id: scope.channelId } : {}) },
       // `secure` is load-bearing here too: a secure channel is decided by its
-      // membership alone, before the owner/ADMINISTRATOR fast paths
-      select: { id: true, secure: true },
+      // membership alone, before the owner/ADMINISTRATOR fast paths. `type`
+      // decides which leaves need the voice-room exception.
+      select: { id: true, secure: true, type: true },
     });
     if (channels.length === 0) return;
+    const textChannels = channels.filter((ch) => ch.type !== 'voice');
+    const voiceChannels = channels.filter((ch) => ch.type === 'voice');
 
     const userIds = scope.userId
       ? [scope.userId]
       : (await prisma.serverMember.findMany({ where: { serverId }, select: { userId: true } })).map((m) => m.userId);
 
-    let removals = 0;
+    let messages = 0;
     for (let i = 0; i < userIds.length; i += USER_BATCH) {
       const batch = userIds.slice(i, i + USER_BATCH);
       const visibleByUser = await filterVisibleChannelsForUsers(batch, serverId, channels);
-      for (const ch of channels) {
-        const hidden = batch.filter((uid) => visibleByUser.get(uid)?.has(ch.id) !== true);
+      const hides = (uid: string, channelId: string) => visibleByUser.get(uid)?.has(channelId) !== true;
+
+      // TEXT: one leave per set of hidden channels, naming the users who hide
+      // exactly that set. A space has few visibility profiles (its roles), so
+      // a batch takes a handful of messages whatever its channel count.
+      const groups = new Map<string, { rooms: string[]; users: string[] }>();
+      for (const uid of batch) {
+        const hidden = textChannels.filter((ch) => hides(uid, ch.id));
+        if (hidden.length === 0) continue;
+        const key = hidden.map((ch) => ch.id).join(',');
+        const group = groups.get(key) ?? { rooms: hidden.map((ch) => `channel:${ch.id}`), users: [] };
+        group.users.push(`user:${uid}`);
+        groups.set(key, group);
+      }
+      for (const { rooms, users } of groups.values()) {
+        io.in(users).socketsLeave(rooms);
+        messages++;
+      }
+
+      // VOICE: one leave per channel, each sparing its own `voice:{id}` room
+      // (a single `except` over several voice rooms would also spare a
+      // participant of one channel from leaving another it may not view)
+      for (const ch of voiceChannels) {
+        const hidden = batch.filter((uid) => hides(uid, ch.id));
         if (hidden.length === 0) continue;
         io.in(hidden.map((uid) => `user:${uid}`)).except(`voice:${ch.id}`).socketsLeave(`channel:${ch.id}`);
-        removals += hidden.length;
+        messages++;
       }
     }
-    console.warn(`[Visibility] Fail-closed fallback for server ${serverId}: ${removals} user/channel room removal(s) published; grants wait for each member's next connect`);
+    console.warn(`[Visibility] Fail-closed fallback for server ${serverId}: ${messages} leave message(s) published for ${userIds.length} member(s); grants wait for each member's next connect`);
   } catch (err) {
     console.error(`[Visibility] Fail-closed fallback for server ${serverId} failed; revoked members on unconfirmed nodes keep their rooms until they reconnect:`, err);
   }

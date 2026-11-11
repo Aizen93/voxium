@@ -9,6 +9,8 @@ const m = vi.hoisted(() => ({
   clusterFetch: vi.fn(),
   clusterExcept: vi.fn(),
   clusterLeave: vi.fn(),
+  // io.in(users).socketsLeave(rooms) — the grouped text-channel leave
+  clusterGroupLeave: vi.fn(),
   // io.local.in(...) — this node's sockets
   localIn: vi.fn(),
   localFetch: vi.fn(),
@@ -79,7 +81,7 @@ function resetMocks() {
   vi.resetAllMocks();
   _resetChannelVisibilityForTests();
   m.getIO.mockReturnValue({ in: m.clusterIn, to: m.to, local: { in: m.localIn, to: m.localTo } });
-  m.clusterIn.mockReturnValue({ fetchSockets: m.clusterFetch, except: m.clusterExcept });
+  m.clusterIn.mockReturnValue({ fetchSockets: m.clusterFetch, except: m.clusterExcept, socketsLeave: m.clusterGroupLeave });
   m.clusterExcept.mockReturnValue({ socketsLeave: m.clusterLeave });
   // A peer that never answers: anything that awaited this would hang
   m.clusterFetch.mockReturnValue(new Promise(() => {}));
@@ -717,12 +719,15 @@ describe('syncChannelVisibilityRooms — telling the other nodes', () => {
     await done;
   }
 
+  const text = (id: string) => ({ id, secure: false, type: 'text' });
+  const voice = (id: string) => ({ id, secure: false, type: 'voice' });
+
   it('still unconfirmed after every attempt: logged as an error, then every hidden room is left cluster-wide, voice participants spared', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-pub', secure: false }, { id: 'ch-priv', secure: false }]);
-    m.prisma.serverMember.findMany.mockResolvedValueOnce([{ userId: 'u-1' }, { userId: 'u-2' }, { userId: 'u-3' }]);
-    m.filterForUsers.mockResolvedValueOnce(visibility({ 'u-1': ['ch-pub', 'ch-priv'], 'u-2': ['ch-pub'], 'u-3': [] }));
+    m.prisma.channel.findMany.mockResolvedValue([text('ch-pub'), text('ch-priv'), voice('ch-v')]);
+    m.prisma.serverMember.findMany.mockResolvedValueOnce([{ userId: 'u-1' }, { userId: 'u-2' }, { userId: 'u-3' }, { userId: 'u-4' }]);
+    m.filterForUsers.mockResolvedValueOnce(visibility({ 'u-1': ['ch-pub', 'ch-priv', 'ch-v'], 'u-2': ['ch-pub', 'ch-v'], 'u-3': [], 'u-4': [] }));
 
     await runUnconfirmed();
 
@@ -732,42 +737,82 @@ describe('syncChannelVisibilityRooms — telling the other nodes', () => {
     // The member list comes from the database, never from a socket snapshot
     expect(m.prisma.serverMember.findMany).toHaveBeenCalledWith({ where: { serverId: 'server-1' }, select: { userId: true } });
     expect(m.clusterFetch).not.toHaveBeenCalled();
-    // One leave per channel, naming only the users it hides
-    expect(m.clusterIn).toHaveBeenCalledTimes(2);
-    expect(m.clusterIn).toHaveBeenCalledWith(['user:u-3']);
-    expect(m.clusterIn).toHaveBeenCalledWith(['user:u-2', 'user:u-3']);
-    expect(m.clusterExcept).toHaveBeenCalledWith('voice:ch-pub');
-    expect(m.clusterExcept).toHaveBeenCalledWith('voice:ch-priv');
-    expect(m.clusterLeave).toHaveBeenCalledWith('channel:ch-pub');
-    expect(m.clusterLeave).toHaveBeenCalledWith('channel:ch-priv');
-    const order = m.clusterIn.mock.invocationCallOrder;
-    expect(m.clusterExcept.mock.invocationCallOrder[0]).toBeGreaterThan(order[0]);
+    // TEXT: one leave per set of hidden channels, naming the users who hide exactly that set
+    expect(m.clusterIn).toHaveBeenCalledWith(['user:u-2']);
+    expect(m.clusterGroupLeave).toHaveBeenCalledWith(['channel:ch-priv']);
+    expect(m.clusterIn).toHaveBeenCalledWith(['user:u-3', 'user:u-4']);
+    expect(m.clusterGroupLeave).toHaveBeenCalledWith(['channel:ch-pub', 'channel:ch-priv']);
+    expect(m.clusterGroupLeave).toHaveBeenCalledTimes(2);
+    // VOICE: one leave per channel, sparing its own voice room
+    expect(m.clusterIn).toHaveBeenCalledWith(['user:u-3', 'user:u-4']);
+    expect(m.clusterExcept).toHaveBeenCalledTimes(1);
+    expect(m.clusterExcept).toHaveBeenCalledWith('voice:ch-v');
+    expect(m.clusterLeave).toHaveBeenCalledWith('channel:ch-v');
+    expect(m.clusterIn).toHaveBeenCalledTimes(3);
+  });
+
+  // Review of #71: one leave per channel per batch made a 10 000-member space
+  // with 200 channels publish up to 4000 messages, about 66 MB to every node,
+  // on the path taken when a node has just died.
+  it('the leave count follows the space\'s visibility profiles, not its channel count', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const textIds = ['t1', 't2', 't3', 't4', 't5', 't6'];
+    m.prisma.channel.findMany.mockResolvedValue([...textIds.map(text), voice('v1'), voice('v2')]);
+    m.prisma.serverMember.findMany.mockResolvedValueOnce(Array.from({ length: 1200 }, (_, i) => ({ userId: `u-${i}` })));
+    // Four profiles in every batch: sees all; hides t1, t2 and v1; hides t1; hides everything
+    const hiddenBy = [[], ['t1', 't2', 'v1'], ['t1'], [...textIds, 'v1', 'v2']];
+    const all = [...textIds, 'v1', 'v2'];
+    m.filterForUsers.mockImplementation(async (userIds: string[]) => visibility(Object.fromEntries(userIds.map((u) => {
+      const hidden = hiddenBy[Number(u.slice(2)) % 4];
+      return [u, all.filter((c) => !hidden.includes(c))];
+    }))));
+
+    await runUnconfirmed();
+
+    // Per batch of 500: 3 text sets + 2 voice channels hidden from someone =
+    // 5, times 3 batches. One leave per channel per batch would be 8 × 3 = 24.
+    expect(m.filterForUsers).toHaveBeenCalledTimes(3);
+    expect(m.clusterGroupLeave).toHaveBeenCalledTimes(9);
+    expect(m.clusterLeave).toHaveBeenCalledTimes(6);
+    expect(m.clusterIn).toHaveBeenCalledTimes(15);
+    expect(m.clusterGroupLeave).toHaveBeenCalledWith(textIds.map((id) => `channel:${id}`));
+    expect(m.clusterGroupLeave).toHaveBeenCalledWith(['channel:t1', 'channel:t2']);
+    expect(m.clusterGroupLeave).toHaveBeenCalledWith(['channel:t1']);
+    // Each leave names only its users: per batch the three text sets (125
+    // users each), then v1 (two profiles) and v2 (one); the last batch is 200
+    expect(m.clusterIn.mock.calls.map((c) => (c[0] as string[]).length)).toEqual([
+      125, 125, 125, 250, 125,
+      125, 125, 125, 250, 125,
+      50, 50, 50, 100, 50,
+    ]);
   });
 
   it('the fallback of a member-scoped resync recomputes that member alone', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-priv', secure: false }]);
+    m.prisma.channel.findMany.mockResolvedValue([text('ch-priv'), voice('ch-v')]);
     m.filterForUsers.mockResolvedValueOnce(visibility({ 'user-9': [] }));
 
     await runUnconfirmed({ userId: 'user-9' });
 
     expect(m.prisma.serverMember.findMany).not.toHaveBeenCalled();
-    expect(m.filterForUsers).toHaveBeenCalledWith(['user-9'], 'server-1', [{ id: 'ch-priv', secure: false }]);
+    expect(m.filterForUsers).toHaveBeenCalledWith(['user-9'], 'server-1', [text('ch-priv'), voice('ch-v')]);
     expect(m.clusterIn).toHaveBeenCalledWith(['user:user-9']);
-    expect(m.clusterExcept).toHaveBeenCalledWith('voice:ch-priv');
-    expect(m.clusterLeave).toHaveBeenCalledWith('channel:ch-priv');
+    expect(m.clusterGroupLeave).toHaveBeenCalledWith(['channel:ch-priv']);
+    expect(m.clusterExcept).toHaveBeenCalledWith('voice:ch-v');
+    expect(m.clusterLeave).toHaveBeenCalledWith('channel:ch-v');
   });
 
   it('the fallback of a channel-scoped resync reads only that channel, and leaves nothing a user may still view', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1', secure: false }]);
+    m.prisma.channel.findMany.mockResolvedValue([text('ch-1')]);
     m.prisma.serverMember.findMany.mockResolvedValueOnce([{ userId: 'u-1' }]);
 
     await runUnconfirmed({ channelId: 'ch-1' });
 
-    expect(m.prisma.channel.findMany).toHaveBeenLastCalledWith({ where: { serverId: 'server-1', id: 'ch-1' }, select: { id: true, secure: true } });
+    expect(m.prisma.channel.findMany).toHaveBeenLastCalledWith({ where: { serverId: 'server-1', id: 'ch-1' }, select: { id: true, secure: true, type: true } });
     // Default visibility: u-1 sees ch-1 — the fallback revokes, it never joins
     expect(m.clusterIn).not.toHaveBeenCalled();
   });
@@ -775,7 +820,7 @@ describe('syncChannelVisibilityRooms — telling the other nodes', () => {
   it('the fallback recomputes a big space in bounded batches', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1', secure: false }]);
+    m.prisma.channel.findMany.mockResolvedValue([text('ch-1')]);
     m.prisma.serverMember.findMany.mockResolvedValueOnce(Array.from({ length: 1200 }, (_, i) => ({ userId: `u-${i}` })));
     m.filterForUsers.mockImplementation(async (userIds: string[]) => visibility(Object.fromEntries(userIds.map((u) => [u, []]))));
 

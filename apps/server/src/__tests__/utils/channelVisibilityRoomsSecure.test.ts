@@ -12,6 +12,7 @@ const m = vi.hoisted(() => ({
   clusterIn: vi.fn(),
   clusterExcept: vi.fn(),
   clusterLeave: vi.fn(),
+  clusterGroupLeave: vi.fn(),
   localIn: vi.fn(),
   localFetch: vi.fn(),
   publish: vi.fn(),
@@ -56,7 +57,7 @@ function socketOf(userId: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  m.clusterIn.mockReturnValue({ except: m.clusterExcept });
+  m.clusterIn.mockReturnValue({ except: m.clusterExcept, socketsLeave: m.clusterGroupLeave });
   m.clusterExcept.mockReturnValue({ socketsLeave: m.clusterLeave });
   m.localIn.mockReturnValue({ fetchSockets: m.localFetch });
   m.publish.mockResolvedValue(1);
@@ -104,9 +105,10 @@ describe('syncChannelVisibilityRooms — secure channels with the real calculato
     await vi.advanceTimersByTimeAsync(RESYNC_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
     await done;
 
+    // Both hide the same text channels: one leave names them together
     expect(m.clusterIn).toHaveBeenCalledTimes(1);
     expect(m.clusterIn).toHaveBeenCalledWith(['user:owner', 'user:admin']);
-    expect(m.clusterExcept).toHaveBeenCalledWith('voice:ch-sec');
-    expect(m.clusterLeave).toHaveBeenCalledWith('channel:ch-sec');
+    expect(m.clusterGroupLeave).toHaveBeenCalledWith(['channel:ch-sec']);
+    expect(m.clusterExcept).not.toHaveBeenCalled();
   });
 });
