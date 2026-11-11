@@ -670,5 +670,42 @@ describe('Category Routes', () => {
 
       expect(res.status).toBe(401);
     });
+
+    // A creation places the new category after the highest position in the
+    // space, so a reorder must not write one near the column's ceiling, and a
+    // malformed entry is a 400, not a 500 from the database
+    it.each([
+      ['a negative position', [{ id: 'cat-1', position: -1 }]],
+      ['a fractional position', [{ id: 'cat-1', position: 0.5 }]],
+      ['a position past the bound', [{ id: 'cat-1', position: 1_000_001 }]],
+      ['a position given as a string', [{ id: 'cat-1', position: '0' }]],
+      ['no position', [{ id: 'cat-1' }]],
+      ['a numeric id', [{ id: 1, position: 0 }]],
+      ['an entry that is not an object', ['cat-1']],
+    ])('returns 400 for %s, before any read or write', async (_label, order) => {
+      const res = await request(app)
+        .put('/api/v1/servers/srv-1/categories/reorder')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ order });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Each order entry needs a category id and a whole-number position from 0 to 1000000');
+      expect(prismaMock.category.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('accepts 0 and the bound itself', async () => {
+      prismaMock.category.findMany
+        .mockResolvedValueOnce([{ id: 'cat-1' }, { id: 'cat-2' }])
+        .mockResolvedValueOnce([]);
+      prismaMock.$transaction.mockResolvedValue([]);
+
+      const res = await request(app)
+        .put('/api/v1/servers/srv-1/categories/reorder')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ order: [{ id: 'cat-1', position: 0 }, { id: 'cat-2', position: 1_000_000 }] });
+
+      expect(res.status).toBe(200);
+    });
   });
 });

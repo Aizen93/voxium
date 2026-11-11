@@ -9,10 +9,18 @@ import { sanitizeText } from '../utils/sanitize';
 import { rateLimitCategoryManage } from '../middleware/rateLimiter';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission } from '../utils/permissionCalculator';
+import { isSortPosition, MAX_SORT_POSITION } from '../utils/sortPosition';
 
 export const categoryRouter = Router({ mergeParams: true });
 
 categoryRouter.use(authenticate, requireVerifiedEmail, requireConsent);
+
+/** One entry of a reorder: a category id and its new position. */
+function isCategoryOrderEntry(entry: unknown): entry is { id: string; position: number } {
+  if (!entry || typeof entry !== 'object') return false;
+  const { id, position } = entry as Record<string, unknown>;
+  return typeof id === 'string' && isSortPosition(position);
+}
 
 // Bulk reorder categories
 categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -25,6 +33,9 @@ categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ se
     const { order } = req.body;
     if (!Array.isArray(order) || order.length === 0) {
       throw new BadRequestError('order must be a non-empty array');
+    }
+    if (!order.every(isCategoryOrderEntry)) {
+      throw new BadRequestError(`Each order entry needs a category id and a whole-number position from 0 to ${MAX_SORT_POSITION}`);
     }
 
     // Validate all IDs belong to this server

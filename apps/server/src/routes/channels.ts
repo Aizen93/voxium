@@ -12,6 +12,7 @@ import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
+import { isSortPosition, MAX_SORT_POSITION } from '../utils/sortPosition';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -89,6 +90,15 @@ async function visibilityRoomsForNewChannel(serverId: string): Promise<(string |
   return batches;
 }
 
+/** One entry of a reorder: a channel id, its new position and, optionally, its category (null: none). */
+function isChannelOrderEntry(entry: unknown): entry is { id: string; position: number; categoryId?: string | null } {
+  if (!entry || typeof entry !== 'object') return false;
+  const { id, position, categoryId } = entry as Record<string, unknown>;
+  return typeof id === 'string'
+    && isSortPosition(position)
+    && (categoryId === undefined || categoryId === null || typeof categoryId === 'string');
+}
+
 // Bulk reorder channels (with optional category reassignment)
 channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
@@ -100,6 +110,9 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
     const { order } = req.body;
     if (!Array.isArray(order) || order.length === 0) {
       throw new BadRequestError('order must be a non-empty array');
+    }
+    if (!order.every(isChannelOrderEntry)) {
+      throw new BadRequestError(`Each order entry needs a channel id and a whole-number position from 0 to ${MAX_SORT_POSITION}`);
     }
 
     // Validate all channel IDs belong to this server. Secure channels are

@@ -1358,4 +1358,54 @@ describe('Channel Routes', () => {
       expect(createArg.data.createdById).toBeUndefined();
     });
   });
+
+  // ── PUT /reorder: what an entry may carry ─────────────────────────────
+  //
+  // A creation places the new channel after the highest position in the
+  // space, so a reorder must not be able to write one near the column's
+  // ceiling (every later creation would fail), and an entry that is not a
+  // channel id and a whole number is a 400, not a 500 from the database.
+
+  describe('PUT /reorder: entry validation', () => {
+    const reorder = (order: unknown) => request(app)
+      .put('/api/v1/servers/srv-1/channels/reorder')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ order });
+
+    it.each([
+      ['a negative position', [{ id: 'ch-1', position: -1 }]],
+      ['a fractional position', [{ id: 'ch-1', position: 1.5 }]],
+      ['a position past the bound', [{ id: 'ch-1', position: 1_000_001 }]],
+      ['a position at the column ceiling', [{ id: 'ch-1', position: 2_147_483_647 }]],
+      ['a position given as a string', [{ id: 'ch-1', position: '3' }]],
+      ['no position', [{ id: 'ch-1' }]],
+      ['a numeric id', [{ id: 7, position: 0 }]],
+      ['an entry that is not an object', ['ch-1']],
+      ['a null entry', [null]],
+      ['a numeric categoryId', [{ id: 'ch-1', position: 0, categoryId: 4 }]],
+    ])('400 for %s, before any read or write', async (_label, order) => {
+      const res = await reorder(order);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Each order entry needs a channel id and a whole-number position from 0 to 1000000');
+      expect(prismaMock.channel.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('accepts 0 and the bound itself, with or without a category', async () => {
+      prismaMock.channel.findMany
+        .mockResolvedValueOnce([{ id: 'ch-1' }, { id: 'ch-2' }])
+        .mockResolvedValueOnce([]);
+      prismaMock.category.findMany.mockResolvedValueOnce([{ id: 'cat-1' }]);
+      prismaMock.$transaction.mockResolvedValue([]);
+
+      const res = await reorder([
+        { id: 'ch-1', position: 0, categoryId: null },
+        { id: 'ch-2', position: 1_000_000, categoryId: 'cat-1' },
+      ]);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    });
+  });
 });
