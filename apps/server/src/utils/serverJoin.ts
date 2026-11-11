@@ -29,7 +29,8 @@ export interface JoinServerOptions {
  * and nowhere else (docs/local/server-discovery-plan.html).
  *
  * Order: ban (403) → already a member (400) → member limit (400) → one
- * transaction (extra writes, membership row, memberCount + 1) → the room
+ * transaction (extra writes, any secure-channel row an earlier membership
+ * left, membership row, memberCount + 1) → the room
  * invariant (broadcastMemberJoined joins the sockets to `server:{id}` and the
  * visible `channel:{id}` rooms) → ChannelRead seeding for the server's
  * non-secure text channels so existing history does not show as unread.
@@ -82,6 +83,11 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
       // its single-row delete as an extra write: THAT one must fail when the
       // row is gone (double approval), this one is a sweep.
       prisma.serverJoinRequest.deleteMany({ where: { serverId, userId } }),
+      // A membership starts with no secure-channel row: access to a secure
+      // channel is derived from its ChannelMember rows alone, so one an
+      // earlier membership of this space left behind must not be honoured
+      // again. Every channel of the space (rows exist only for secure ones).
+      prisma.channelMember.deleteMany({ where: { userId, channel: { serverId } } }),
       prisma.serverMember.create({
         data: { userId, serverId },
       }),
@@ -112,6 +118,12 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
     await prisma.$transaction(async (tx) => {
       const { count } = await tx.serverMember.deleteMany({ where: { userId, serverId } });
       if (count > 0) {
+        // The membership was real for a moment: a secure-channel row written
+        // meanwhile (its writer locked the member row, the delete above waited
+        // for it) goes with it, and so does a secure channel created by the
+        // joiner, whose rows cascade
+        await tx.channel.deleteMany({ where: { serverId, createdById: userId, secure: true } });
+        await tx.channelMember.deleteMany({ where: { userId, channel: { serverId } } });
         await tx.server.updateMany({ where: { id: serverId, memberCount: { gt: 0 } }, data: { memberCount: { decrement: 1 } } });
       }
     });

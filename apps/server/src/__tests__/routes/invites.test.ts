@@ -70,6 +70,9 @@ const prismaMock: Record<string, any> = {
   channelRead: {
     createMany: vi.fn(),
   },
+  channelMember: {
+    deleteMany: vi.fn(),
+  },
   globalConfig: {
     findUnique: vi.fn(),
   },
@@ -462,8 +465,10 @@ describe('Invite Routes', () => {
       const REQ = { op: 'request.deleteMany' };
       const CREATE = { op: 'member.create' };
       const COUNT = { op: 'server.update' };
+      const RESET = { op: 'channelMember.deleteMany' };
       prismaMock.invite.delete.mockReturnValue(INVITE_DELETE);
       prismaMock.serverJoinRequest.deleteMany.mockReturnValue(REQ);
+      prismaMock.channelMember.deleteMany.mockReturnValue(RESET);
       prismaMock.serverMember.create.mockReturnValue(CREATE);
       prismaMock.server.update.mockReturnValue(COUNT);
       prismaMock.$transaction.mockResolvedValue([]);
@@ -475,7 +480,8 @@ describe('Invite Routes', () => {
 
       expect(res.status).toBe(200);
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      expect(prismaMock.$transaction).toHaveBeenCalledWith([INVITE_DELETE, REQ, CREATE, COUNT]);
+      // ...with the reset of any secure-channel row an earlier membership left
+      expect(prismaMock.$transaction).toHaveBeenCalledWith([INVITE_DELETE, REQ, RESET, CREATE, COUNT]);
       expect(prismaMock.invite.delete).toHaveBeenCalledWith({ where: { code: 'ATOMIC01' } });
       expect(prismaMock.serverMember.create).toHaveBeenCalledWith({ data: { userId: 'user-2', serverId: 'srv-1' } });
       expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-1' }, data: { memberCount: { increment: 1 } } });

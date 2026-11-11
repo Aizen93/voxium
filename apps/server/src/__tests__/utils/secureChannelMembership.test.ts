@@ -547,3 +547,43 @@ describe('a secure-channel row is written only for a current member of the space
     expect(res.body.error).toBe('Channel not found');
   });
 });
+
+// ─── Joining ────────────────────────────────────────────────────────────────
+
+describe('a membership starts with no secure-channel rows', () => {
+  it('a join removes any row left from an earlier membership of that space, and only of that space', async () => {
+    db.serverMembers = db.serverMembers.filter((m) => m.userId !== 'bob');
+    db.channelMembers.push({ channelId: C, userId: 'bob', isCreator: false, addedAt: new Date() });
+    db.channels.push({ id: 'sec-elsewhere', serverId: 'srv-2', secure: true, type: 'text', createdById: 'bob', name: 'x', position: 0, categoryId: null });
+    db.channelMembers.push({ channelId: 'sec-elsewhere', userId: 'bob', isCreator: true, addedAt: new Date() });
+
+    await joinServerMember('bob', S, { via: 'invite' });
+
+    expect(isMemberOf('bob', S)).toBe(true);
+    expect(rowsOf('bob').map((m) => m.channelId)).toEqual(['sec-elsewhere']);
+  });
+
+  it('a join undone by a ban that committed mid-join leaves no secure-channel row either', async () => {
+    db.serverMembers = db.serverMembers.filter((m) => m.userId !== 'bob');
+    // The ban lands right after the join's transaction; an invite slipped in
+    // between, while bob was briefly a member
+    let calls = 0;
+    const findBan = client.serverBan.findUnique;
+    client.serverBan.findUnique = async (args: any) => {
+      calls++;
+      if (calls === 2) {
+        db.channelMembers.push({ channelId: C, userId: 'bob', isCreator: false, addedAt: new Date() });
+        db.bans.push({ serverId: S, userId: 'bob' });
+      }
+      return findBan(args);
+    };
+    try {
+      await expect(joinServerMember('bob', S, { via: 'invite' })).rejects.toMatchObject({ statusCode: 403 });
+    } finally {
+      client.serverBan.findUnique = findBan;
+    }
+
+    expect(isMemberOf('bob', S)).toBe(false);
+    expect(rowsOf('bob')).toEqual([]);
+  });
+});

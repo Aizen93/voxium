@@ -10,7 +10,8 @@ const prismaMock = vi.hoisted(() => ({
   serverJoinRequest: { deleteMany: vi.fn(), findUnique: vi.fn() },
   serverMember: { findUnique: vi.fn(), count: vi.fn(), create: vi.fn(), deleteMany: vi.fn() },
   server: { update: vi.fn(), updateMany: vi.fn() },
-  channel: { findMany: vi.fn() },
+  channel: { findMany: vi.fn(), deleteMany: vi.fn() },
+  channelMember: { deleteMany: vi.fn() },
   channelRead: { createMany: vi.fn() },
   $transaction: vi.fn(),
 }));
@@ -31,6 +32,7 @@ const order: string[] = [];
 const REQ = { op: 'request.deleteMany' };
 const CREATE = { op: 'member.create' };
 const UPDATE = { op: 'server.update' };
+const RESET = { op: 'channelMember.deleteMany' };
 
 function unlimited() {
   getEffectiveLimits.mockResolvedValue({ maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0 });
@@ -50,6 +52,7 @@ beforeEach(() => {
   prismaMock.serverJoinRequest.deleteMany.mockReturnValue(REQ);
   prismaMock.serverMember.create.mockReturnValue(CREATE);
   prismaMock.server.update.mockReturnValue(UPDATE);
+  prismaMock.channelMember.deleteMany.mockReturnValue(RESET);
   prismaMock.$transaction.mockImplementation(async () => { order.push('txn'); return []; });
   broadcastMemberJoined.mockImplementation(async () => { order.push('broadcast'); });
   prismaMock.channel.findMany.mockImplementation(async () => { order.push('channels'); return [{ id: 'ch-1' }, { id: 'ch-2' }]; });
@@ -114,7 +117,7 @@ describe('joinServerMember', () => {
     await joinServerMember('u-1', 's-1', { via: 'invite', extraWrites: [INVITE_DELETE] as never });
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-    expect(prismaMock.$transaction).toHaveBeenCalledWith([INVITE_DELETE, REQ, CREATE, UPDATE]);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([INVITE_DELETE, REQ, RESET, CREATE, UPDATE]);
     // a membership replaces any request the joiner had open or declined
     expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 's-1', userId: 'u-1' } });
     expect(prismaMock.serverMember.create).toHaveBeenCalledWith({ data: { userId: 'u-1', serverId: 's-1' } });
@@ -126,7 +129,17 @@ describe('joinServerMember', () => {
 
   it('works without extra writes (direct discovery join): request sweep + membership + count', async () => {
     await joinServerMember('u-1', 's-1', { via: 'discovery' });
-    expect(prismaMock.$transaction).toHaveBeenCalledWith([REQ, CREATE, UPDATE]);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith([REQ, RESET, CREATE, UPDATE]);
+  });
+
+  it('removes, in the join transaction and before the membership row, every secure-channel row the joiner holds in this space', async () => {
+    await joinServerMember('u-1', 's-1', { via: 'approval', extraWrites: [{ op: 'request.delete' }] as never });
+
+    // Every channel of the space: a row an earlier membership left is never
+    // honoured again, whatever door the joiner came through
+    expect(prismaMock.channelMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1', channel: { serverId: 's-1' } } });
+    const ops = prismaMock.$transaction.mock.calls[0][0] as unknown[];
+    expect(ops.indexOf(RESET)).toBeLessThan(ops.indexOf(CREATE));
   });
 
   it('broadcasts member:joined exactly once, AFTER the transaction, then seeds reads for non-secure text channels', async () => {
@@ -196,13 +209,24 @@ describe('joinServerMember', () => {
     prismaMock.server.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.$transaction
       .mockImplementationOnce(async () => { order.push('txn'); return []; })
-      .mockImplementationOnce(async (fn: (tx: unknown) => Promise<void>) => { order.push('undo'); await fn({ serverMember: prismaMock.serverMember, server: prismaMock.server }); });
+      .mockImplementationOnce(async (fn: (tx: unknown) => Promise<void>) => { order.push('undo'); await fn(prismaMock); });
+    prismaMock.serverMember.deleteMany.mockImplementation(async () => { order.push('member'); return { count: 1 }; });
+    prismaMock.channel.deleteMany.mockImplementation(async () => { order.push('created-channels'); return { count: 0 }; });
+    // the join's own reset is built into its array first; the compensation's is awaited
+    prismaMock.channelMember.deleteMany
+      .mockReturnValueOnce(RESET)
+      .mockImplementation(async () => { order.push('rows'); return { count: 1 }; });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await expect(joinServerMember('u-1', 's-1', { via: 'invite' })).rejects.toMatchObject({ statusCode: 403 });
 
-    expect(order).toEqual(['txn', 'undo']);
+    expect(order).toEqual(['txn', 'undo', 'member', 'created-channels', 'rows']);
     expect(prismaMock.serverMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1', serverId: 's-1' } });
+    // The membership was real for a moment: a secure-channel row written
+    // meanwhile, or a secure channel the joiner created, goes with it, after
+    // the member row (its writer locked that row first)
+    expect(prismaMock.channel.deleteMany).toHaveBeenCalledWith({ where: { serverId: 's-1', createdById: 'u-1', secure: true } });
+    expect(prismaMock.channelMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1', channel: { serverId: 's-1' } } });
     expect(prismaMock.server.updateMany).toHaveBeenCalledWith({ where: { id: 's-1', memberCount: { gt: 0 } }, data: { memberCount: { decrement: 1 } } });
     expect(broadcastMemberJoined).not.toHaveBeenCalled();
     expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
@@ -214,10 +238,12 @@ describe('joinServerMember', () => {
     prismaMock.serverMember.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.$transaction
       .mockImplementationOnce(async () => [])
-      .mockImplementationOnce(async (fn: (tx: unknown) => Promise<void>) => { await fn({ serverMember: prismaMock.serverMember, server: prismaMock.server }); });
+      .mockImplementationOnce(async (fn: (tx: unknown) => Promise<void>) => { await fn(prismaMock); });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     await expect(joinServerMember('u-1', 's-1', { via: 'invite' })).rejects.toMatchObject({ statusCode: 403 });
     expect(prismaMock.server.updateMany).not.toHaveBeenCalled();
+    // the kick's own transaction removed the secure-channel rows with the membership
+    expect(prismaMock.channel.deleteMany).not.toHaveBeenCalled();
   });
 
   it('maps a concurrent duplicate join (P2002 on the composite key) to "already a member", not a 500', async () => {

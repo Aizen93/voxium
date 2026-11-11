@@ -101,6 +101,9 @@ const prismaMock: Record<string, any> = {
   channelRead: {
     upsert: vi.fn().mockResolvedValue({}),
   },
+  channelMember: {
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+  },
   serverBan: {
     deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
   },
@@ -524,6 +527,12 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expect(prismaMock.serverBan.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
     // ...and so does a request they had open on this server, settled as joined for the moderators
     expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
+    // the heir's membership starts with no secure-channel row an earlier one
+    // left, in the same transaction as the membership (built before it)
+    expect(prismaMock.channelMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'heir-1', channel: { serverId: 'srv-owned' } } });
+    expect(prismaMock.channelMember.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.serverMember.create.mock.invocationCallOrder[0]);
+    const heirTx = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg));
+    expect(heirTx![0]).toContain(prismaMock.channelMember.deleteMany.mock.results[0].value);
     expect(mockEmitToModerators).toHaveBeenCalledWith('srv-owned', 'server:join_request_resolved', { serverId: 'srv-owned', userId: 'heir-1', outcome: 'joined' });
     expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
     // the deleted account's own membership is decremented inside the delete transaction

@@ -808,6 +808,10 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
               // heir is an explicit unban, so the row (if any) goes with it.
               prisma.serverBan.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
               prisma.serverJoinRequest.deleteMany({ where: { serverId: action.serverId, userId: action.newOwnerId } }),
+              // The heir's membership starts with no secure-channel row, as
+              // every join's does (utils/serverJoin.ts): one left from an
+              // earlier membership of this space is never honoured again
+              prisma.channelMember.deleteMany({ where: { userId: action.newOwnerId, channel: { serverId: action.serverId } } }),
               prisma.serverMember.create({
                 data: { userId: action.newOwnerId, serverId: action.serverId, role: 'owner' },
               }),
