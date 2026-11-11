@@ -30,6 +30,9 @@ const SEEN_IDS_MAX = 1024;
 export const LOCAL_PASS_MAX_WAIT_MS = 30_000;
 /** How long one count of the live nodes is reused (see expectedReceivers). */
 export const LIVE_NODES_MEMO_MS = 5000;
+/** Waits before a failed local pass is queued again. A failure after the last
+ *  of them is the pass's last (see afterFailedPass). */
+export const LOCAL_PASS_RETRY_DELAYS_MS: readonly number[] = [1000, 5000];
 
 /**
  * Re-sync `channel:{id}` room membership for connected members after a
@@ -202,17 +205,78 @@ const localPassTail = new Map<string, Promise<void>>();
  * re-joined the member after the later member-scoped pass had removed them,
  * and the revocation was lost until the member reconnected. A pass that has
  * not finished after LOCAL_PASS_MAX_WAIT_MS (one stuck on a connection that
- * never answers) no longer holds the next one back. Never rejects.
+ * never answers) no longer holds the next one back.
+ *
+ * A pass that fails (the database refused one of its reads) is queued again,
+ * through this same queue, after each of LOCAL_PASS_RETRY_DELAYS_MS: the
+ * publish only proves the request was DELIVERED, so without this a node whose
+ * pool timed out once kept a revoked member in the room although every node
+ * had confirmed. A repeat is safe: every pass reads the database afresh, and
+ * the queue keeps it behind the passes already waiting. The promise resolves
+ * when the first run ends (a repeat is not awaited) and never rejects.
  */
-function resyncLocalSockets(scope: ResyncScope): Promise<void> {
+function resyncLocalSockets(scope: ResyncScope, attempt = 1): Promise<void> {
   const previous = localPassTail.get(scope.serverId);
-  const run = (previous ? waitAtMost(previous, scope.serverId) : Promise.resolve()).then(() => runLocalPass(scope));
+  const run = (previous ? waitAtMost(previous, scope.serverId) : Promise.resolve())
+    .then(() => runLocalPass(scope))
+    .then((applied) => {
+      if (!applied) afterFailedPass(scope, attempt);
+    });
   localPassTail.set(scope.serverId, run);
-  // runLocalPass never rejects, so neither does `run`
+  // runLocalPass never rejects and afterFailedPass never throws, so neither does `run`
   void run.then(() => {
     if (localPassTail.get(scope.serverId) === run) localPassTail.delete(scope.serverId);
   });
   return run;
+}
+
+/**
+ * What follows a failed local pass: queued again after the next delay, and
+ * after the last one, the decision below.
+ *
+ * The third failure means this node could not read the database three times
+ * in about six seconds. For ONE MEMBER's pass (a role taken away, a re-check
+ * after a join raced a resync) it fails closed: that member's sockets on this
+ * node are disconnected, except a socket in a voice room (cutting a call is
+ * worse than a late revocation, and its rooms are corrected by the next
+ * resync or reconnect). The client reopens a socket the server closed, and the
+ * connect path computes every room afresh — when the database answers again,
+ * since the handshake reads it too. For a pass over a whole space or a whole
+ * channel it gives up, logged as an error: disconnecting every member of a
+ * space on this node would send them all to reconnect against the database
+ * that has just failed three times, and end the session of members whose
+ * access did not change. Their rooms stay as they were until the next resync
+ * of the space reaches this node or they reconnect.
+ */
+function afterFailedPass(scope: ResyncScope, attempt: number): void {
+  const total = LOCAL_PASS_RETRY_DELAYS_MS.length + 1;
+  const delay = LOCAL_PASS_RETRY_DELAYS_MS[attempt - 1];
+  if (delay !== undefined) {
+    console.warn(`[Visibility] Resync of server ${scope.serverId} on this node failed (attempt ${attempt}/${total}); queued again in ${delay} ms`);
+    const timer = setTimeout(() => {
+      void resyncLocalSockets(scope, attempt + 1);
+    }, delay);
+    timer.unref?.();
+    return;
+  }
+  if (!scope.userId) {
+    console.error(`[Visibility] Resync of server ${scope.serverId} on this node failed ${total} times; giving up: this node's sockets of the space keep their channel rooms until the next resync of the space or their reconnect`);
+    return;
+  }
+  void disconnectOutsideVoice(scope.serverId, scope.userId, total);
+}
+
+/** The fail-closed end of a member's pass (see afterFailedPass). Never rejects. */
+async function disconnectOutsideVoice(serverId: string, userId: string, failures: number): Promise<void> {
+  try {
+    const sockets = await getIO().local.in(`user:${userId}`).fetchSockets();
+    const inCall = (s: { rooms?: Set<string> }) => [...(s.rooms ?? [])].some((room) => room.startsWith('voice:'));
+    const closing = sockets.filter((s) => !inCall(s));
+    for (const s of closing) s.disconnect(true);
+    console.error(`[Visibility] Resync of member ${userId} in server ${serverId} on this node failed ${failures} times: disconnected ${closing.length} of their socket(s) so the reconnect recomputes their rooms (fail closed); ${sockets.length - closing.length} in a voice call kept`);
+  } catch (err) {
+    console.error(`[Visibility] Could not disconnect member ${userId} after ${failures} failed resyncs of server ${serverId}; their sockets on this node keep their rooms until they reconnect:`, err);
+  }
 }
 
 /** Resolves when `previous` does, or after LOCAL_PASS_MAX_WAIT_MS (logged). */
@@ -229,7 +293,9 @@ async function waitAtMost(previous: Promise<void>, serverId: string): Promise<vo
   }
 }
 
-async function runLocalPass(scope: ResyncScope): Promise<void> {
+/** One pass over this node's sockets for `scope`. Resolves false when it
+ *  failed (logged), true otherwise; never rejects. */
+async function runLocalPass(scope: ResyncScope): Promise<boolean> {
   const { serverId } = scope;
   try {
     const io = getIO();
@@ -238,7 +304,7 @@ async function runLocalPass(scope: ResyncScope): Promise<void> {
     // asks a peer and cannot time out (the peers run their own pass). They are
     // the real sockets, so `rooms` is this node's live view of each one.
     const sockets = await io.local.in(room).fetchSockets();
-    if (sockets.length === 0) return;
+    if (sockets.length === 0) return true;
 
     const channels = await prisma.channel.findMany({
       where: { serverId, ...(scope.channelId ? { id: scope.channelId } : {}) },
@@ -246,7 +312,7 @@ async function runLocalPass(scope: ResyncScope): Promise<void> {
       // membership-only rule to channels it can recognize as secure
       select: { id: true, secure: true },
     });
-    if (channels.length === 0) return;
+    if (channels.length === 0) return true;
 
     // Visibility is per-user; users can have multiple sockets
     const socketsByUser = new Map<string, typeof sockets>();
@@ -309,8 +375,10 @@ async function runLocalPass(scope: ResyncScope): Promise<void> {
         }
       }
     }
+    return true;
   } catch (err) {
     console.error(`[Visibility] Failed to resync this node's channel rooms for server ${serverId}:`, err);
+    return false;
   }
 }
 

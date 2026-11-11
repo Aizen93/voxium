@@ -149,7 +149,9 @@ describe('fetchSockets() appears only where nothing waits on its answer', () => 
   // now resyncs its own sockets and the others are told over pub/sub, so the
   // cluster-wide form must never come back to that file.
   const LOCAL_ALLOWED: Record<string, number> = {
-    'utils/channelVisibilityRooms.ts': 1,
+    // The local pass, and the fail-closed disconnect of a member whose pass
+    // failed three times (both read this node's sockets only)
+    'utils/channelVisibilityRooms.ts': 2,
   };
 
   const files = sourceFiles();
