@@ -278,15 +278,22 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # The browser binaries only; the OS packages are the next step's, on
+      # both branches of the cache.
       - name: Install Playwright browsers
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium firefox
+        timeout-minutes: 10
+        run: npx playwright install chromium firefox
 
-      # OS libraries are not part of the cached path and must be present
-      # either way; this apt pass is ~30s.
-      - name: Install Playwright system deps (cache hit)
-        if: steps.pw-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium firefox
+      # OS libraries are not part of the cached path and are installed on every
+      # run: an apt pass of about 20 s. The script bounds and retries it, and
+      # when the package mirrors cannot be reached it lets the job go on only
+      # if both browsers start with what the runner image has. Unbounded, a
+      # mirror outage (2026-11-11) ended three runs at the job's 30-minute
+      # limit before a single test had started.
+      - name: Install Playwright system deps
+        timeout-minutes: 10
+        run: bash .github/scripts/playwright-system-deps.sh
 
       # Playwright's webServer block boots the server, desktop and admin apps
       # and waits on their health checks.
