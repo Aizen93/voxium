@@ -560,6 +560,13 @@ async function revokeHiddenRoomsClusterWide(scope: ResyncScope): Promise<void> {
     let messages = 0;
     for (let i = 0; i < userIds.length; i += USER_BATCH) {
       const batch = userIds.slice(i, i + USER_BATCH);
+      // ACCEPTED RACE: the leaves below apply what this read saw. A grant that
+      // commits between the read and the leave (and whose own resync joined
+      // the member first) is undone: the member loses that channel's live
+      // events until they open the channel (channel:join re-checks VIEW) or
+      // reconnect. It errs on the closed side, on a path already degraded, and
+      // closing it would mean holding the space's permission writes for the
+      // whole fallback.
       const visibleByUser = await filterVisibleChannelsForUsers(batch, serverId, channels);
       const hides = (uid: string, channelId: string) => visibleByUser.get(uid)?.has(channelId) !== true;
 
