@@ -132,6 +132,36 @@ describe('deleteUserAccount', () => {
     expect(deleteFromS3).not.toHaveBeenCalled();
   });
 
+  describe('a delete transaction PostgreSQL aborted to break a deadlock (a space delete or a transfer to this account)', () => {
+    const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+
+    it('is run again whole: the account is deleted, its notices sent once, the user not left signed out with the account intact', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { order.push('txn:aborted'); throw deadlock(); })
+        .mockImplementation(real);
+      try {
+        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
+
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(prismaMock.user.delete).toHaveBeenCalledTimes(1);
+        expect(announceSecure).toHaveBeenCalledTimes(1);
+        expect(order.indexOf('txn:aborted')).toBeLessThan(order.indexOf('txn:start'));
+        expect(warn).toHaveBeenCalledWith('[Accounts] The deletion of account u-1 was aborted by a deadlock or a serialization failure; retrying (1 of 2)');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('any other failure is not retried', async () => {
+      prismaMock.$transaction.mockRejectedValue(new Error('db gone'));
+
+      await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toThrow('db gone');
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('withdraws the account\'s pending join requests with it: each server\'s moderators hear it, after the delete committed', async () => {
     prismaMock.serverJoinRequest.findMany.mockResolvedValue([{ serverId: 's-7' }]);
     emitMods.mockImplementation(async () => { order.push('request-withdrawn'); });

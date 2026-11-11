@@ -1,7 +1,12 @@
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { purgeE2EMaterial } from './e2ePurge';
-import { announceSecureMembershipsRemoved, removeSecureMembershipsInTx } from './secureChannelLifecycle';
+import {
+  announceSecureMembershipsRemoved,
+  removeSecureMembershipsInTx,
+  type SecureMembershipRemoval,
+} from './secureChannelLifecycle';
+import { retryOnTransactionConflict } from './transactionRetry';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { deleteFromS3 } from './s3';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
@@ -84,41 +89,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     ...await readKeys({ channel: { createdById: userId, secure: true } }, 'the secure channels the account created'),
   ])];
 
-  // E2E key material has no FK to User (except the key backup), so it would
-  // otherwise outlive the account it belongs to. One transaction with the
-  // delete: purging a user who then survives strands every device they own.
-  const secure = await prisma.$transaction(async (tx) => {
-    await purgeE2EMaterial(userId, tx);
-    // The memberships first, explicitly (the cascade would take them with the
-    // row, last): every writer of a secure-channel row locks the member row
-    // before any channel or space row, so taking them in that order here too
-    // is what keeps a concurrent secure-channel creation from deadlocking
-    // against the member counts below.
-    await tx.serverMember.deleteMany({ where: { userId } });
-    // Then the secure-channel state, in the same transaction: the channels
-    // the account created (with every member's row), its rows in the others,
-    // the key shares addressed to it there. The notices go out after the commit.
-    const removal = await removeSecureMembershipsInTx(tx, userId);
-    // The inline member counts (server discovery) follow in the same
-    // transaction so the directory never shows a departed member until the
-    // nightly recount.
-    if (memberships.length > 0) {
-      await tx.server.updateMany({
-        where: { id: { in: memberships.map((m) => m.serverId) }, memberCount: { gt: 0 } },
-        data: { memberCount: { decrement: 1 } },
-      });
-    }
-    await tx.user.delete({ where: { id: userId } });
-    return removal;
-  }, {
-    // Deleting a user cascades across ~36 relations (messages, reactions,
-    // reads, conversations, reports, tickets, themes…) plus six E2E deletes.
-    // Prisma's default 5s interactive budget is a deadline these statements
-    // never had before they shared a transaction, and blowing it on a heavy
-    // account would roll the whole deletion back.
-    timeout: 60_000,
-    maxWait: 10_000,
-  });
+  const secure = await deleteAccountRows(userId, memberships.map((m) => m.serverId));
 
   // Again, now that the row is gone: a socket whose handshake landed while
   // the row still existed joined user:{id} after the first pass and passed
@@ -139,4 +110,58 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     await deleteFromS3(target.avatarUrl).catch((err) =>
       console.warn(`${opts.logPrefix} Avatar cleanup failed (the orphan sweep will reclaim it):`, err instanceof Error ? err.message : err));
   }
+}
+
+/**
+ * The delete transaction of `deleteUserAccount`: the account's E2E material,
+ * memberships, secure-channel state, member counts and the row itself, in
+ * one transaction, run again as a whole (retryOnTransactionConflict) when
+ * PostgreSQL aborts it to break a deadlock. Everything `deleteUserAccount`
+ * does before it (the member:left notices, the first session revocation, the
+ * key reads) is idempotent, so a retry needs nothing redone.
+ *
+ * Lock order: the member rows, then the secure channels (FOR UPDATE, in id
+ * order), then the space rows (the member counts), the order a removal and a
+ * secure-channel creation or invite take them in. Taking the space rows
+ * first instead (as this transaction once did), to match a space delete and
+ * an ownership transfer, would close a cycle with a removal: the removal
+ * holds a secure channel and waits for the space row last, this transaction
+ * would hold the space row and wait for that channel. Against a space delete
+ * or a transfer to this account (space row, then member rows) a deadlock
+ * stays possible either way; PostgreSQL aborts one side and both sides
+ * retry.
+ */
+export async function deleteAccountRows(userId: string, serverIds: string[]): Promise<SecureMembershipRemoval> {
+  // E2E key material has no FK to User (except the key backup), so it would
+  // otherwise outlive the account it belongs to. One transaction with the
+  // delete: purging a user who then survives strands every device they own.
+  return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+    await purgeE2EMaterial(userId, tx);
+    // The memberships first, explicitly (the cascade would take them with the
+    // row, last): see the lock order above.
+    await tx.serverMember.deleteMany({ where: { userId } });
+    // Then the secure-channel state, in the same transaction: the channels
+    // the account created (with every member's row), its rows in the others,
+    // the key shares addressed to it there. The notices go out after the commit.
+    const removal = await removeSecureMembershipsInTx(tx, userId);
+    // The inline member counts (server discovery) follow in the same
+    // transaction so the directory never shows a departed member until the
+    // nightly recount.
+    if (serverIds.length > 0) {
+      await tx.server.updateMany({
+        where: { id: { in: serverIds }, memberCount: { gt: 0 } },
+        data: { memberCount: { decrement: 1 } },
+      });
+    }
+    await tx.user.delete({ where: { id: userId } });
+    return removal;
+  }, {
+    // Deleting a user cascades across ~36 relations (messages, reactions,
+    // reads, conversations, reports, tickets, themes…) plus six E2E deletes.
+    // Prisma's default 5s interactive budget is a deadline these statements
+    // never had before they shared a transaction, and blowing it on a heavy
+    // account would roll the whole deletion back.
+    timeout: 60_000,
+    maxWait: 10_000,
+  }), `[Accounts] The deletion of account ${userId}`);
 }
