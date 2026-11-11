@@ -63,6 +63,7 @@ import {
   LOCAL_PASS_MAX_WAIT_MS,
   LIVE_NODES_MEMO_MS,
   LOCAL_PASS_RETRY_DELAYS_MS,
+  MEMBER_PASS_CHANNELS_MAX,
   REQUEST_SPACES_MAX,
   visibilityRequestMark,
   resyncAfterJoins,
@@ -1464,20 +1465,53 @@ describe('a local pass that fails is queued again', () => {
     ]);
   });
 
-  it('two channels of one member waiting together widen to the member\'s whole space', async () => {
+  /** Re-checks of `channels` for user-1, all waiting behind a held pass;
+   *  resolves once they have run (`fail`: every read after the held one fails). */
+  async function waitingRechecks(channels: string[], { fail = false } = {}) {
     m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
     m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    if (fail) m.filterForUsers.mockRejectedValue(poolTimeout());
     let releaseFirst!: (visible: Map<string, Set<string>>) => void;
     m.filterForUsers.mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = resolve; }));
-
     const mark = visibilityRequestMark();
     const first = syncChannelVisibilityRooms('server-1');
     await vi.advanceTimersByTimeAsync(0);
-    resyncAfterJoins(mark, 'user-1', ['server-1'], 'ch-a');
-    resyncAfterJoins(mark, 'user-1', ['server-1'], 'ch-b');
+    for (const channelId of channels) resyncAfterJoins(mark, 'user-1', ['server-1'], channelId);
     releaseFirst(visibility({ 'user-1': ['ch-1'] }));
     await first;
     await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it('re-checks of two channels of one member waiting together run as one pass over those two channels', async () => {
+    await waitingRechecks(['ch-a', 'ch-b']);
+
+    expect(m.prisma.channel.findMany).toHaveBeenCalledTimes(2);
+    expect(m.prisma.channel.findMany).toHaveBeenLastCalledWith({ where: { serverId: 'server-1', id: { in: ['ch-a', 'ch-b'] } }, select: { id: true, secure: true } });
+  });
+
+  // Review of #71: two re-checks of different channels widened to a pass over
+  // the member's whole space, whose last failure is the disconnect the
+  // re-checks were meant to avoid
+  it('the last failure of such a pass takes those channels\' rooms away, and disconnects nobody', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await waitingRechecks(['ch-a', 'ch-b'], { fail: true });
+    await vi.advanceTimersByTimeAsync(ALL_DELAYS);
+
+    expect(m.localFetch.mock.results.length).toBeGreaterThan(0);
+    for (const s of await Promise.all(m.localFetch.mock.results.map((r) => r.value as Promise<Array<{ disconnect: ReturnType<typeof vi.fn> }>>))) {
+      for (const socket of s) expect(socket.disconnect).not.toHaveBeenCalled();
+    }
+    expect(m.localLeave.mock.calls.map((c) => c[0]).sort()).toEqual(['channel:ch-a', 'channel:ch-b']);
+    expect(m.localIn).toHaveBeenCalledWith('user:user-1');
+    expect(error).not.toHaveBeenCalledWith(expect.stringContaining('disconnected'));
+  });
+
+  it(`past MEMBER_PASS_CHANNELS_MAX channels, the re-checks widen to the member's whole space (whose last failure is the disconnect)`, async () => {
+    const many = Array.from({ length: MEMBER_PASS_CHANNELS_MAX + 1 }, (_, i) => `ch-${i}`);
+
+    await waitingRechecks(many);
 
     expect(m.prisma.channel.findMany).toHaveBeenCalledTimes(2);
     expect(m.prisma.channel.findMany).toHaveBeenLastCalledWith({ where: { serverId: 'server-1' }, select: { id: true, secure: true } });

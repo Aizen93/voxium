@@ -103,7 +103,7 @@ export async function syncChannelVisibilityRooms(
   noteResyncRequest(serverId);
   // Independent halves, each catching its own errors: a database failure in
   // the local pass must not keep the peers from resyncing, nor the reverse
-  await Promise.all([resyncLocalSockets(scope), fanOutResync(scope)]);
+  await Promise.all([resyncLocalSockets(passScope(scope)), fanOutResync(scope)]);
 }
 
 // ─── Joins that raced a resync ──────────────────────────────────────────────
@@ -155,7 +155,7 @@ export function visibilityRequestMark(): number {
 export function resyncAfterJoins(mark: number, userId: string, serverIds: Iterable<string>, channelId?: string): void {
   if (requestSeq === mark) return;
   for (const serverId of serverIds) {
-    if (resyncRequestedSince(mark, serverId)) void resyncLocalSockets({ serverId, userId, ...(channelId ? { channelId } : {}) });
+    if (resyncRequestedSince(mark, serverId)) void resyncLocalSockets(passScope({ serverId, userId, channelId }));
   }
 }
 
@@ -212,6 +212,24 @@ interface ResyncScope {
   userId?: string;
 }
 
+/** The scope of a local pass: `channelIds` names the channels it covers
+ *  (absent: every channel of the space). A request names one channel at
+ *  most; a member pass absorbing re-checks of several channels names them
+ *  all, up to MEMBER_PASS_CHANNELS_MAX (see resyncLocalSockets). */
+interface PassScope {
+  serverId: string;
+  userId?: string;
+  channelIds?: string[];
+}
+
+/** The local pass of a request's scope. */
+function passScope({ serverId, userId, channelId }: ResyncScope): PassScope {
+  return { serverId, ...(userId ? { userId } : {}), ...(channelId ? { channelIds: [channelId] } : {}) };
+}
+
+/** Channels a waiting member pass remembers before it widens to the space. */
+export const MEMBER_PASS_CHANNELS_MAX = 8;
+
 interface ResyncMessage extends ResyncScope {
   /** One id per resync request; its retries reuse it. */
   id: string;
@@ -263,7 +281,7 @@ function handleResyncMessage(raw: string): void {
   // A retry of a request this node already applied
   if (!firstSighting(message.id)) return;
   noteResyncRequest(message.serverId);
-  void resyncLocalSockets({ serverId: message.serverId, channelId: message.channelId, userId: message.userId });
+  void resyncLocalSockets(passScope({ serverId: message.serverId, channelId: message.channelId, userId: message.userId }));
 }
 
 // ─── The local pass ─────────────────────────────────────────────────────────
@@ -307,9 +325,10 @@ const localPassTail = new Map<string, LocalPass>();
 const livePasses = new Map<string, LocalPass[]>();
 
 /** Does a pass of scope `outer` recompute everything a pass of `inner` does? */
-function covers(outer: ResyncScope, inner: ResyncScope): boolean {
+function covers(outer: PassScope, inner: PassScope): boolean {
   return (outer.userId === undefined || outer.userId === inner.userId)
-    && (outer.channelId === undefined || outer.channelId === inner.channelId);
+    && (outer.channelIds === undefined
+      || (inner.channelIds !== undefined && inner.channelIds.every((id) => outer.channelIds!.includes(id))));
 }
 
 /**
@@ -349,21 +368,27 @@ function laterPassWillApply(pass: LocalPass): boolean {
  * A pass over ONE MEMBER that has not started yet absorbs the next one for
  * the same member and space (it will read the database after that request
  * too): a reconnect storm, every socket re-checking after its joins, queues
- * one pass per member per space, not one per socket. Two different channels,
- * or a channel and the member's whole space, widen it to the whole space.
+ * one pass per member per space, not one per socket. Re-checks of different
+ * channels add up (the pass covers them all, and its fail-closed end stays
+ * those channels' leaves, see afterFailedPass); past MEMBER_PASS_CHANNELS_MAX
+ * channels, or with a pass over the member's whole space, it widens to the
+ * whole space.
  */
-function resyncLocalSockets(scope: ResyncScope, attempt = 1): Promise<void> {
-  if (!scope.userId) return enqueuePass({ scope: { ...scope }, attempt });
+function resyncLocalSockets(scope: PassScope, attempt = 1): Promise<void> {
+  if (!scope.userId) return enqueuePass({ scope: copyScope(scope), attempt });
   const key = `${scope.serverId}|${scope.userId}`;
   const pending = pendingMemberPasses.get(key);
   if (pending) {
-    if (pending.job.scope.channelId !== undefined && pending.job.scope.channelId !== scope.channelId) {
-      delete pending.job.scope.channelId;
+    const held = pending.job.scope;
+    if (held.channelIds !== undefined) {
+      const union = scope.channelIds === undefined ? null : [...new Set([...held.channelIds, ...scope.channelIds])];
+      if (union === null || union.length > MEMBER_PASS_CHANNELS_MAX) delete held.channelIds;
+      else held.channelIds = union;
     }
     pending.job.attempt = Math.max(pending.job.attempt, attempt);
     return pending.run;
   }
-  const entry = { job: { scope: { ...scope }, attempt }, run: Promise.resolve() };
+  const entry = { job: { scope: copyScope(scope), attempt }, run: Promise.resolve() };
   pendingMemberPasses.set(key, entry);
   entry.run = enqueuePass(entry.job, () => {
     if (pendingMemberPasses.get(key) === entry) pendingMemberPasses.delete(key);
@@ -374,8 +399,13 @@ function resyncLocalSockets(scope: ResyncScope, attempt = 1): Promise<void> {
 /** A local pass to run. Its scope and attempt are read when it starts, so a
  *  member pass still waiting can absorb another (see resyncLocalSockets). */
 interface PassJob {
-  scope: ResyncScope;
+  scope: PassScope;
   attempt: number;
+}
+
+/** A scope a queued job can change without touching the caller's. */
+function copyScope(scope: PassScope): PassScope {
+  return { ...scope, ...(scope.channelIds ? { channelIds: [...scope.channelIds] } : {}) };
 }
 
 /** Member passes queued and not started yet, by `${serverId}|${userId}`. */
@@ -409,7 +439,7 @@ function enqueuePass(job: PassJob, onStart?: () => void): Promise<void> {
         // anyway, and requeueing then made a space whose passes all outlast
         // the 30 s bound requeue itself forever (each overtaken by the next).
         console.warn(`[Visibility] An overtaken resync of server ${serverId} on this node finished late; a fresh pass of its scope is queued`);
-        void resyncLocalSockets({ ...job.scope });
+        void resyncLocalSockets(copyScope(job.scope));
       }
     });
   localPassTail.set(serverId, pass);
@@ -431,9 +461,10 @@ function enqueuePass(job: PassJob, onStart?: () => void): Promise<void> {
  * LOCAL_PASS_RETRY_DELAYS_MS, and after the last, by scope (the database has
  * refused this node for about 2.6 minutes, so nothing below reads it):
  *
- *  - ONE CHANNEL OF ONE MEMBER (a re-check after a channel:join): that
- *    member's sockets on this node leave the channel's room, a socket in its
- *    voice room kept. Exact, and nothing else of the member changes.
+ *  - ONE CHANNEL OF ONE MEMBER (a re-check after a channel:join), or the few
+ *    channels such re-checks added up to: that member's sockets on this node
+ *    leave each channel's room, a socket in its voice room kept. Exact, and
+ *    nothing else of the member changes.
  *  - ONE CHANNEL (an override change): every socket of the space on this node
  *    leaves the channel's room, the channel's voice participants kept. They
  *    get it back by opening the channel or reconnecting.
@@ -450,7 +481,7 @@ function enqueuePass(job: PassJob, onStart?: () => void): Promise<void> {
  *    of members whose access did not change; their rooms stay as they were
  *    until the next resync of the space reaches this node or they reconnect.
  */
-function afterFailedPass(scope: ResyncScope, attempt: number): void {
+function afterFailedPass(scope: PassScope, attempt: number): void {
   const total = LOCAL_PASS_RETRY_DELAYS_MS.length + 1;
   const delay = LOCAL_PASS_RETRY_DELAYS_MS[attempt - 1];
   if (delay !== undefined) {
@@ -461,9 +492,11 @@ function afterFailedPass(scope: ResyncScope, attempt: number): void {
     timer.unref?.();
     return;
   }
-  const { serverId, channelId, userId } = scope;
-  if (channelId) {
-    leaveChannelLocally(serverId, channelId, userId, total);
+  const { serverId, channelIds, userId } = scope;
+  if (channelIds) {
+    // Every channel the pass covered: one, or a member's re-checks that
+    // added up (never their whole space, which would be the disconnect)
+    for (const channelId of channelIds) leaveChannelLocally(serverId, channelId, userId, total);
     return;
   }
   if (userId) {
@@ -547,7 +580,7 @@ async function waitAtMost(previous: LocalPass, serverId: string): Promise<void> 
 
 /** One pass over this node's sockets for `scope`. Resolves false when it
  *  failed (logged), true otherwise; never rejects. */
-async function runLocalPass(scope: ResyncScope, pass: Pick<LocalPass, 'overtaken' | 'applying'>): Promise<boolean> {
+async function runLocalPass(scope: PassScope, pass: Pick<LocalPass, 'overtaken' | 'applying'>): Promise<boolean> {
   const { serverId } = scope;
   try {
     const io = getIO();
@@ -558,8 +591,9 @@ async function runLocalPass(scope: ResyncScope, pass: Pick<LocalPass, 'overtaken
     const sockets = await io.local.in(room).fetchSockets();
     if (sockets.length === 0) return true;
 
+    const ids = scope.channelIds;
     const channels = await prisma.channel.findMany({
-      where: { serverId, ...(scope.channelId ? { id: scope.channelId } : {}) },
+      where: { serverId, ...(ids ? { id: ids.length === 1 ? ids[0] : { in: ids } } : {}) },
       // `secure` is load-bearing: filterVisibleChannels can only apply the
       // membership-only rule to channels it can recognize as secure
       select: { id: true, secure: true },
