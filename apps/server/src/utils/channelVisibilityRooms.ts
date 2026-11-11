@@ -99,9 +99,64 @@ export async function syncChannelVisibilityRooms(
   opts?: { channelId?: string; userId?: string },
 ): Promise<void> {
   const scope: ResyncScope = { serverId, channelId: opts?.channelId, userId: opts?.userId };
+  noteResyncRequest(serverId);
   // Independent halves, each catching its own errors: a database failure in
   // the local pass must not keep the peers from resyncing, nor the reverse
   await Promise.all([resyncLocalSockets(scope), fanOutResync(scope)]);
+}
+
+// ─── Joins that raced a resync ──────────────────────────────────────────────
+
+/** Resync requests this node has seen, in order, and the last one per space. */
+let requestSeq = 0;
+const lastRequestBySpace = new Map<string, number>();
+/** Spaces remembered; past it the oldest are forgotten (see noteResyncRequest). */
+export const REQUEST_SPACES_MAX = 10_000;
+/** The newest position forgotten that way. */
+let forgottenUpTo = 0;
+
+/** Called for every resync request this node sees: its own, and a peer's
+ *  first copy. */
+function noteResyncRequest(serverId: string): void {
+  requestSeq++;
+  // delete-then-set keeps the Map in order of last request
+  lastRequestBySpace.delete(serverId);
+  lastRequestBySpace.set(serverId, requestSeq);
+  if (lastRequestBySpace.size > REQUEST_SPACES_MAX) {
+    const [oldest, seq] = lastRequestBySpace.entries().next().value as [string, number];
+    lastRequestBySpace.delete(oldest);
+    // A space no longer listed reads as requested at this position: at worst
+    // a re-check for a join that started before it, never a missed one
+    forgottenUpTo = seq;
+  }
+}
+
+/**
+ * Code that reads visibility and then joins `channel:` rooms OUTSIDE the
+ * per-space queue — the connection handler and `channel:join` — races the
+ * resync: a pass that runs between that read and the join finds nothing to
+ * remove, and the join then applies the read the revocation had made stale,
+ * leaving the member in the room until the next resync. Such code takes a
+ * mark before its read and, after its joins, calls resyncAfterJoins.
+ */
+export function visibilityRequestMark(): number {
+  return requestSeq;
+}
+
+/**
+ * Queue a pass over `userId`'s sockets on this node for every space of
+ * `serverIds` whose resync request this node saw since `mark` (one channel
+ * only when `channelId` is given). The pass runs in the space's queue, behind
+ * the pass of that request, and reads the database afresh, so it corrects
+ * whatever the stale join put in. In the normal case nothing was seen since
+ * the mark and this is one comparison: no query, no per-space loop.
+ */
+export function resyncAfterJoins(mark: number, userId: string, serverIds: Iterable<string>, channelId?: string): void {
+  if (requestSeq === mark) return;
+  for (const serverId of serverIds) {
+    const last = lastRequestBySpace.get(serverId) ?? forgottenUpTo;
+    if (last > mark) void resyncLocalSockets({ serverId, userId, ...(channelId ? { channelId } : {}) });
+  }
 }
 
 /**
@@ -172,6 +227,7 @@ function handleResyncMessage(raw: string): void {
   if (message.fromNode === NODE_ID()) return;
   // A retry of a request this node already applied
   if (!firstSighting(message.id)) return;
+  noteResyncRequest(message.serverId);
   void resyncLocalSockets({ serverId: message.serverId, channelId: message.channelId, userId: message.userId });
 }
 
@@ -455,10 +511,14 @@ function expectedReceivers({ fresh = false }: { fresh?: boolean } = {}): Promise
   return liveNodesInFlight;
 }
 
-/** Forget the live-node count; the unit tests change it between cases. */
+/** Forget the live-node count and the requests seen; the unit tests change
+ *  them between cases. */
 export function _resetChannelVisibilityForTests(): void {
   liveNodesMemo = null;
   liveNodesInFlight = null;
+  requestSeq = 0;
+  lastRequestBySpace.clear();
+  forgottenUpTo = 0;
 }
 
 /** One publish; resolves with how many subscribers received it and how many

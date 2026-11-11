@@ -59,6 +59,9 @@ import {
   LOCAL_PASS_MAX_WAIT_MS,
   LIVE_NODES_MEMO_MS,
   LOCAL_PASS_RETRY_DELAYS_MS,
+  REQUEST_SPACES_MAX,
+  visibilityRequestMark,
+  resyncAfterJoins,
   _resetChannelVisibilityForTests,
 } from '../../utils/channelVisibilityRooms';
 
@@ -942,6 +945,104 @@ describe('a node receiving a peer\'s resync request', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ─── A join that raced a resync ─────────────────────────────────────────────
+
+describe('a join that raced a resync (connection handler, channel:join)', () => {
+  beforeEach(resetMocks);
+  afterEach(() => vi.restoreAllMocks());
+
+  it('with no resync request since the mark, nothing is queued: one comparison, no query', async () => {
+    const mark = visibilityRequestMark();
+
+    resyncAfterJoins(mark, 'user-1', ['server-1', 'server-2']);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(m.localIn).not.toHaveBeenCalled();
+    expect(m.prisma.channel.findMany).not.toHaveBeenCalled();
+  });
+
+  // The race of the review: the joining code read visibility, the revocation
+  // committed and its pass ran BEFORE the join (nothing to remove yet), then
+  // the join applied the stale read and the member stayed in the room.
+  it('the revocation whose pass ran between the read and the join is applied again after the join', async () => {
+    const socket = createMockSocket('user-1');
+    m.localFetch.mockResolvedValue([socket]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-priv' }]);
+    m.filterForUsers.mockResolvedValue(visibility({ 'user-1': [] }));
+
+    const mark = visibilityRequestMark();                         // before the joining code's read
+    await syncChannelVisibilityRooms('server-1', { userId: 'user-1' }); // the revocation's pass
+    socket.join('channel:ch-priv');                               // the stale join
+    resyncAfterJoins(mark, 'user-1', ['server-1', 'server-2']);
+    await vi.waitFor(() => expect(m.filterForUsers).toHaveBeenCalledTimes(2));
+
+    const leaves = socket.leave.mock.invocationCallOrder;
+    expect(leaves).toHaveLength(2);
+    expect(leaves[1]).toBeGreaterThan(socket.join.mock.invocationCallOrder[0]);
+    expect(m.localIn).toHaveBeenLastCalledWith('user:user-1');
+    // Only the space that had a request is re-checked
+    expect(m.filterForUsers.mock.calls.map((c) => c[1])).toEqual(['server-1', 'server-1']);
+  });
+
+  it('a peer\'s request counts like this node\'s own', async () => {
+    await initChannelVisibilitySync();
+    const deliver = m.subscribe.mock.calls[0][1] as (raw: string) => void;
+    const mark = visibilityRequestMark();
+    deliver(JSON.stringify({ id: 'raced-1', fromNode: 'node-b', serverId: 'server-1' }));
+    await vi.waitFor(() => expect(m.localIn).toHaveBeenCalledWith('server:server-1'));
+
+    resyncAfterJoins(mark, 'user-1', ['server-1']);
+
+    await vi.waitFor(() => expect(m.localIn).toHaveBeenCalledWith('user:user-1'));
+  });
+
+  it('after a channel:join, the re-check covers that channel only', async () => {
+    m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-new' }]);
+    const mark = visibilityRequestMark();
+    await syncChannelVisibilityRooms('server-1');
+
+    resyncAfterJoins(mark, 'user-1', ['server-1'], 'ch-new');
+
+    await vi.waitFor(() => expect(m.prisma.channel.findMany).toHaveBeenLastCalledWith({ where: { serverId: 'server-1', id: 'ch-new' }, select: { id: true, secure: true } }));
+    expect(m.localIn).toHaveBeenLastCalledWith('user:user-1');
+  });
+
+  it('a request for another space is no reason to re-check this one, and a mark taken after the request is no reason either', async () => {
+    const before = visibilityRequestMark();
+    await syncChannelVisibilityRooms('server-9');
+    const after = visibilityRequestMark();
+    m.localIn.mockClear();
+
+    resyncAfterJoins(before, 'user-1', ['server-1']);
+    resyncAfterJoins(after, 'user-1', ['server-9']);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(m.localIn).not.toHaveBeenCalled();
+  });
+
+  it('a space forgotten past REQUEST_SPACES_MAX reads as requested to a mark older than it was forgotten', async () => {
+    await initChannelVisibilitySync();
+    const deliver = m.subscribe.mock.calls[0][1] as (raw: string) => void;
+    const old = visibilityRequestMark();
+    for (let i = 0; i <= REQUEST_SPACES_MAX; i++) {
+      deliver(JSON.stringify({ id: `many-${i}`, fromNode: 'node-b', serverId: `sp-${i}` }));
+    }
+    const recent = visibilityRequestMark();
+    await vi.waitFor(() => expect(m.localIn).toHaveBeenCalledTimes(REQUEST_SPACES_MAX + 1));
+    m.localIn.mockClear();
+
+    // sp-0 is no longer listed: a mark from before it must still re-check it
+    resyncAfterJoins(old, 'user-1', ['sp-0']);
+    resyncAfterJoins(recent, 'user-1', ['sp-0']);
+    await vi.waitFor(() => expect(m.localIn).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(m.localIn).toHaveBeenCalledTimes(1);
+    expect(m.localIn).toHaveBeenCalledWith('user:user-1');
   });
 });
 
