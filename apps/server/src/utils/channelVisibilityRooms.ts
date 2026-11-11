@@ -154,9 +154,27 @@ export function visibilityRequestMark(): number {
 export function resyncAfterJoins(mark: number, userId: string, serverIds: Iterable<string>, channelId?: string): void {
   if (requestSeq === mark) return;
   for (const serverId of serverIds) {
-    const last = lastRequestBySpace.get(serverId) ?? forgottenUpTo;
-    if (last > mark) void resyncLocalSockets({ serverId, userId, ...(channelId ? { channelId } : {}) });
+    if (resyncRequestedSince(mark, serverId)) void resyncLocalSockets({ serverId, userId, ...(channelId ? { channelId } : {}) });
   }
+}
+
+/**
+ * Did this node see a resync request for `serverId` since `mark`? For code
+ * whose join is ADAPTER-WIDE (a new member's rooms, a new channel's audience):
+ * a local re-check would repair only this node, so such code answers a true
+ * with syncChannelVisibilityRooms, which resyncs every node.
+ *
+ * The gap that remains: a request only a PEER had seen at that moment (its
+ * publish not yet here) re-checks nothing, and the join may then land on that
+ * peer after its pass. It bites both ways — a revoked member put back in a
+ * room, a granted one left out of it — until the next resync of the space or
+ * the member's reconnect. The full remedy is to stop joining channel rooms
+ * across nodes and publish a member resync instead, which every node applies
+ * to its own sockets in its queue.
+ */
+export function resyncRequestedSince(mark: number, serverId: string): boolean {
+  if (requestSeq === mark) return false;
+  return (lastRequestBySpace.get(serverId) ?? forgottenUpTo) > mark;
 }
 
 /**

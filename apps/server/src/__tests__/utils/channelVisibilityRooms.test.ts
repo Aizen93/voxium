@@ -62,6 +62,7 @@ import {
   REQUEST_SPACES_MAX,
   visibilityRequestMark,
   resyncAfterJoins,
+  resyncRequestedSince,
   _resetChannelVisibilityForTests,
 } from '../../utils/channelVisibilityRooms';
 
@@ -1053,6 +1054,17 @@ describe('a join that raced a resync (connection handler, channel:join)', () => 
     await new Promise((r) => setTimeout(r, 0));
 
     expect(m.localIn).not.toHaveBeenCalled();
+  });
+
+  it('resyncRequestedSince answers, per space, whether a request came in since the mark (for adapter-wide joins)', async () => {
+    const before = visibilityRequestMark();
+    expect(resyncRequestedSince(before, 'server-1')).toBe(false);
+    await syncChannelVisibilityRooms('server-1');
+    const after = visibilityRequestMark();
+
+    expect(resyncRequestedSince(before, 'server-1')).toBe(true);
+    expect(resyncRequestedSince(before, 'server-2')).toBe(false);
+    expect(resyncRequestedSince(after, 'server-1')).toBe(false);
   });
 
   it('a space forgotten past REQUEST_SPACES_MAX reads as requested to a mark older than it was forgotten', async () => {
