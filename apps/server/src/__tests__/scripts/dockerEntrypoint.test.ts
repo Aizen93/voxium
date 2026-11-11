@@ -342,6 +342,24 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.deploys).toBe(0);
   }, TIMEOUT);
 
+  it.each([
+    ['has no count line', ''],
+    ['has a count the shell cannot compare', '9999999999999999999999 migrations found in prisma/migrations\n'],
+  ])('reads a status that %s as unreadable, and prints no shell error', (_label, countLine) => {
+    // Synthetic: the cutover listed as pending, the count line missing or
+    // absurd. `[ -eq ]` on such a count printed "Illegal number" (dash) or
+    // "integer expression expected" (bash).
+    const status: Status = {
+      output: `${countLine}Following migrations have not yet been applied:\n${CUTOVER}\n`,
+      exit: 1,
+    };
+    const run = runEntrypoint([status]);
+    expect(run.out).not.toMatch(/Illegal number|integer expression|\[: /);
+    expect(run.out).toContain('FATAL: could not read the migration status');
+    expect(run.statusReads).toBe(MAX_ATTEMPTS);
+    expect(run.deploys).toBe(0);
+  }, TIMEOUT);
+
   it('skips the gate with VOXIUM_ALLOW_CUTOVER=1', () => {
     const run = runEntrypoint([captured('cutover-pending')], { allowCutover: '1' });
     expect(run.statusReads).toBe(0);

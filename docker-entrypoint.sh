@@ -67,15 +67,18 @@ CUTOVER_MIGRATION="20260801140000_e2e_always_on"
 #   existing    an existing database with the cutover pending
 #   applied     the cutover is not pending
 status_state() {
+  found=$(found_count)
   if printf '%s\n' "$STATUS_LINES" | grep -q '^Error: P1003'; then
     echo missing
   elif printf '%s\n' "$STATUS_LINES" | grep -q '^Error'; then
     echo unreadable
-  elif ! printf '%s\n' "$STATUS_LINES" | grep -q '^[0-9][0-9]* migrations\{0,1\} found in '; then
+  elif ! is_count "$found"; then
+    # No "N migrations found" line, or no number a shell compares: the
+    # status never compared anything this gate can rely on.
     echo unreadable
   elif ! listed_as_pending "$CUTOVER_MIGRATION"; then
     echo applied
-  elif [ "$(pending_count)" -eq "$(found_count)" ]; then
+  elif [ "$(pending_count)" -eq "$found" ]; then
     # Every migration pending, not merely the oldest: a migration ever added
     # with an earlier date would be pending on every existing database.
     echo empty
@@ -121,9 +124,17 @@ redact_urls() {
       -e 's#VOXIUM_PRISLY_LINK/#https://pris.ly/#g'
 }
 
-# N in "N migrations found in prisma/migrations".
+# N in "N migrations found in prisma/migrations"; empty when there is none.
 found_count() {
   printf '%s\n' "$STATUS_LINES" | sed -n 's/^\([0-9][0-9]*\) migrations\{0,1\} found in .*/\1/p' | head -n 1
+}
+
+# A count `[ -eq ]` takes without printing an error: 1 to 6 digits.
+is_count() {
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 6 ]
 }
 
 if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
