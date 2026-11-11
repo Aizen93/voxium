@@ -971,7 +971,7 @@ sequenceDiagram
 | Room Pattern | Purpose | When Joined |
 |-------------|---------|-------------|
 | `server:{id}` | Server-wide events (member join/leave, presence, space/channel/role/webhook changes). Voice presence is NOT sent here; it goes to `channel:{id}` | On socket connect (all memberships) + dynamically on server create/join via `memberBroadcast.ts` |
-| `channel:{id}` | The VIEW_CHANNEL boundary: messages, typing, voice presence and screen share events for text and voice channels | Auto-joined on socket connect for every text and voice channel the user can view (not only channels they are a member of). Client also emits `channel:join` when selecting a channel (needed for channels created after connect); the server re-checks VIEW_CHANNEL. Permission changes re-sync the rooms via `syncChannelVisibilityRooms()`. **Never left** — the socket stays subscribed for the connection's lifetime so `message:new` events reach the client for unread tracking. |
+| `channel:{id}` | The VIEW_CHANNEL boundary: messages, typing, voice presence and screen share events for text and voice channels | Auto-joined on socket connect for every text and voice channel the user can view (not only channels they are a member of). Client also emits `channel:join` when selecting a channel (needed for channels created after connect); the server re-checks VIEW_CHANNEL. Permission changes re-sync the rooms on every node via `syncChannelVisibilityRooms()` (each node its own sockets). **Never left** — the socket stays subscribed for the connection's lifetime so `message:new` events reach the client for unread tracking. |
 | `voice:{id}` | Voice channel (voice state, signaling) | Client emits `voice:join` when joining voice |
 | `dm:{id}` | DM messages, typing, reactions | Auto-joined on socket connect for all conversations; `dm:join` emitted for new conversations. Authorization verified via DB query before joining. |
 | `dm:voice:{id}` | DM call signaling | Joined on `dm:voice:join`, left on call end |
@@ -1803,13 +1803,14 @@ graph TD
     N1 & N2 & N3 --> PG[("PostgreSQL<br/>one shared DATABASE_URL")]
 ```
 
-What the code supports (validated live: 35/35 cross-node scenarios in `scripts/test-multi-node.ts`, including real RTP and hard owner-crash takeover):
+What the code supports (validated live: 43/43 cross-node scenarios in `scripts/test-multi-node.ts`, including real RTP, hard owner-crash takeover and live visibility revocations with one peer silent):
 - Socket.IO Redis adapter for cross-node event distribution (4 Redis clients: data, pub, sub, configSub)
 - Presence, DM-call, and voice-channel metadata fully in Redis; mediasoup objects stay node-local
 - **Channel-affinity voice relay:** each voice channel's mediasoup Router lives on exactly ONE node (claimed atomically via `SET NX`); participants whose sockets live on other nodes are relayed over Redis pub/sub and represented on the owner node by shims. Clients send RTP straight to the owning node's announced IP — media bypasses the HTTP proxy
 - **Node heartbeats + takeover:** `node:alive:{id}` keys (30s TTL) gate boot cleanups; a 60s reaper takes over channels owned by crashed peers
 - **Presence reconciliation and scheduled jobs under cluster locks:** the 60s presence reaper and the scheduled jobs (cleanups, discovery stats, key-share retention) take a Redis cluster lock (`withClusterLock`, or an idempotent mutex of their own), so each runs once per interval across the cluster, not once per node; feature flags and rate-limit overrides propagate to every node over Redis pub/sub
 - Cross-cluster room operations only (`socketsJoin`/`socketsLeave`/`io.in(room)`) — `fetchSockets()` is banned in hot paths (it waits on every node and throws when a peer is dead)
+- **Visibility resyncs per node:** a change of who may view a channel resyncs the changing node's own sockets (`io.local`, which waits on no peer) and asks every other node over Redis pub/sub (`visibility:resync`) to resync theirs. The publish is confirmed against the live heartbeats and retried; still unconfirmed, it fails closed: the users the database says may not view a channel leave its room on every node through adapter-wide `socketsLeave`, voice participants of that channel spared
 
 What a multi-node deployment must provide:
 - **Sticky sessions** on the load balancer: the client opens Socket.IO with HTTP long-polling first and upgrades to WebSocket, so every request of the polling phase (and the upgrade) must reach the same node
