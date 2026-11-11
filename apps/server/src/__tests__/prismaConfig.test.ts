@@ -42,4 +42,13 @@ describe('the Prisma CLI update check is off', () => {
       expect(env).toBeLessThan(firstRun);
     }
   });
+
+  it('db:generate runs without the post-generate survey, which CHECKPOINT_DISABLE does not stop', () => {
+    // In an interactive terminal (not CI, not a container), from the day
+    // after the CLI first ran, `prisma generate` fetches a survey timeframe
+    // from a Prisma-owned bucket before it asks anything. Only --no-hints
+    // skips it.
+    const pkg = JSON.parse(readFileSync(resolve(REPO, 'apps/server/package.json'), 'utf8'));
+    expect(pkg.scripts['db:generate']).toBe('prisma generate --no-hints');
+  });
 });
