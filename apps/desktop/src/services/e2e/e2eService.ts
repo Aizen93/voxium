@@ -1782,17 +1782,21 @@ export class E2EService {
    * replacement (only another restore: a reset keeps a key the device holds)
    * or a dispose from freeing that key under it; between two steps the queue
    * serves whatever else waits (a send, a decrypt, a call signal), so a long
-   * history does not hold them up. A step
-   * that finds the key replaced since the pull began stops the pull: the
-   * replacement brought its own (restoreKeyBackup), and the old key opens
-   * nothing the account publishes any more. At most MAX_RESTORE_PAGES pages.
+   * history does not hold them up. A step that finds the key replaced since
+   * the pull began stops the pull: the replacement brought its own
+   * (restoreKeyBackup), and the old key opens nothing the account publishes
+   * any more.
    *
    * A pull that does not reach its end (the app closed, a dispose, a failed
-   * request, the page cap) resumes at the next start where it stopped
-   * (resumeHistoryPull): the vault keeps the account key it read under and the
-   * cursor of its next page (`history_pull`), written before each page and
-   * dropped at the end. A newer pull supersedes a running one: it reads the
-   * history from its own start, and owns that record from then on.
+   * request) resumes at the next start where it stopped (resumeHistoryPull):
+   * before each page request the vault records the account key it reads
+   * under, that page's cursor and the number of page requests made so far,
+   * this one included (`history_pull`); the record is dropped at the end. The
+   * count carries across starts, so MAX_RESTORE_PAGES bounds every request
+   * the pull makes, however many starts it spans and whatever fails: once it
+   * is reached the record is dropped and the pull stops for good. A newer
+   * pull supersedes a running one: it reads the history from its own start,
+   * and owns that record from then on.
    */
   async restoreMessageKeys(): Promise<number> {
     return this.pullHistory(null);
@@ -1803,11 +1807,13 @@ export class E2EService {
     const pull = ++this.historyPull;
     let master: EngineMasterKey | null = null;
     let cursor: string | null = resume?.cursor ?? null;
+    // page requests this pull has made, across starts: the cap bounds them all
+    let requested = resume && Number.isInteger(resume.pages) && resume.pages > 0 ? resume.pages : 0;
     let imported = 0;
-    for (let page = 0; page < MAX_RESTORE_PAGES; page++) {
+    for (let first = true; ; first = false) {
       const step = await this.enqueue(async () => {
         if (pull !== this.historyPull) return null; // a newer pull reads it all
-        if (page === 0) {
+        if (first) {
           master = this.masterKey;
           if (resume && master?.publicKey() !== resume.masterKey) {
             // left by a pull under another account key: nothing this one reads
@@ -1820,20 +1826,25 @@ export class E2EService {
         }
         const key = master;
         if (!key) throw new Error('This device does not hold the account key');
-        // where this pull stands, for the next start should it stop here
-        if (page === 0) await this.vault.putHistoryPull({ masterKey: key.publicKey(), cursor });
+        if (requested >= MAX_RESTORE_PAGES) {
+          console.warn(`e2e: the history pull asked for ${MAX_RESTORE_PAGES} pages without reaching the end; it stops for good`);
+          await this.vault.deleteHistoryPull();
+          return null;
+        }
+        // Counted before it is sent: a page that fails, or a start that ends
+        // here, leaves this page for the next start to ask for once more, and
+        // no start or failure takes the pull past the cap.
+        await this.vault.putHistoryPull({ masterKey: key.publicKey(), cursor, pages: requested + 1 });
+        requested += 1;
         const result = await this.restoreMessageKeyPage(key, cursor);
-        if (result.next) await this.vault.putHistoryPull({ masterKey: key.publicKey(), cursor: result.next });
-        else await this.vault.deleteHistoryPull();
+        if (!result.next) await this.vault.deleteHistoryPull();
         return result;
       });
-      if (!step) return imported; // superseded, or the key was replaced: not the page cap
+      if (!step) return imported; // superseded, the key replaced, or the cap reached
       imported += step.imported;
       cursor = step.next;
       if (!cursor) return imported;
     }
-    if (cursor) console.warn(`e2e: stopped the history pull after ${MAX_RESTORE_PAGES} pages (the next start goes on)`);
-    return imported;
   }
 
   /**

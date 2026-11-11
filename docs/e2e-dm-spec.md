@@ -215,7 +215,7 @@ the always-on cutover and is dropped when the new one opens):
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
 | `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
 | `pks:{createdAt}\|{shareId}` | a claimed key share not imported yet, as the inbox returned it (Olm ciphertext + routing fields, §12.3) |
-| `history_pull` | an unfinished message-key history pull: the account key's public half and the cursor of the next page (§16.3) |
+| `history_pull` | an unfinished message-key history pull: the account key's public half, the cursor of the next page and the page requests made so far (§16.3) |
 | `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 
@@ -1104,18 +1104,21 @@ whole session rather than only the part the uploading device happened to see.
   pull began (only another restore can: a reset keeps a key the device
   holds, and a pull runs only under a held key) stops the pull, and so does a
   dispose.
-  The pull reads at most as many pages as the server can store for one
+  The pull asks for at most as many pages as the server can store for one
   account plus two (`MESSAGE_KEY_STORE_CAP / MESSAGE_KEY_PAGE_MAX + 2`, 102:
   the server's cap is checked before an insert without a lock, so two devices
-  backing up at once can leave an account slightly over it), so a server that
-  never ends its cursor cannot keep it going.
+  backing up at once can leave an account slightly over it), counting every
+  request it makes across starts, failed ones included; at that count it stops
+  for good, so a server that never ends its cursor, or fails its last page,
+  cannot keep it going.
 - A pull that stops before its end (the app closed, a dispose, a failed
-  request, the page cap) goes on at the next start of the account from the
-  page it had not read, as long as the device still holds the same account
-  key: before each page the vault records that key's public half and the
-  page's cursor (`history_pull`, §7), and the record is dropped once the pull
-  reaches the end. A record left under another account key is dropped
-  unread. A newer pull supersedes a running one: it reads from its own start
+  request) goes on at the next start of the account from the page it had not
+  read, as long as the device still holds the same account key: before each
+  page request the vault records that key's public half, the page's cursor
+  and the number of requests made so far, this one included (`history_pull`,
+  §7), and the record is dropped once the pull reaches the end or the cap. A
+  page that failed is the first, and only, request of the next start until it
+  answers. A record left under another account key is dropped unread. A newer pull supersedes a running one: it reads from its own start
   and owns the record from then on.
 - Only a device holding the master secret can seal or open, which is the same
   condition as being able to approve devices.

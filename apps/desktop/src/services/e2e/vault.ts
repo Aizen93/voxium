@@ -173,12 +173,15 @@ export interface PendingKeyShare {
 
 /**
  * A message-key history pull that has not reached its end (spec §16.3): the
- * account key it reads under (public half only) and the cursor of the page
- * it reads next (null: from the start). Public material and a row id.
+ * account key it reads under (public half only), the cursor of the page it
+ * reads next (null: from the start), and how many page requests it has made
+ * so far, across starts (the page cap bounds them all). Public material, a
+ * row id and a count.
  */
 export interface HistoryPullMarker {
   masterKey: string;
   cursor: string | null;
+  pages: number;
 }
 
 export interface CachedPlaintext {

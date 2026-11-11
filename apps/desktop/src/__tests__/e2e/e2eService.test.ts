@@ -5616,7 +5616,7 @@ describe('E2EService — lifecycle', () => {
     it('drops an unfinished history pull of another account key instead of resuming it', async () => {
       const { server, phone } = await backedUpAccount(1);
       await phone.service.dispose();
-      await readVault(phone, (vault) => vault.putHistoryPull({ masterKey: 'a key this device does not hold', cursor: '0' }));
+      await readVault(phone, (vault) => vault.putHistoryPull({ masterKey: 'a key this device does not hold', cursor: '0', pages: 1 }));
 
       const urls: string[] = [];
       const again = serviceOver(phone.userId, recordingPages(server.apiFor(phone.userId), urls), phone);
@@ -5688,10 +5688,14 @@ describe('E2EService — lifecycle', () => {
       expect(gate.reads.filter((r) => r === 'GET /e2e/message-keys')).toHaveLength(3);
     });
 
-    it('stops a history pull the server would page forever', async () => {
+    it.each([
+      ['always names another page', false],
+      ['answers the last page the cap allows with an error', true],
+    ])('stops for good, across starts, a history pull whose server %s', async (_label, failAtCap) => {
       uniq++;
       const server = createFakeServer();
       const userId = `alice-${uniq}`;
+      const device = { keyProvider: memoryKeyProvider(), vaultNamespace: `v${++vaultSeq}` };
       const base = server.apiFor(userId);
       let pages = 0;
       // the server holds at most this many pages, and an account can end up slightly over it (two pages of slack)
@@ -5702,18 +5706,29 @@ describe('E2EService — lifecycle', () => {
           if (!url.startsWith('/e2e/message-keys')) return base.get(url);
           await new Promise((resolve) => setTimeout(resolve, 0));
           // fail rather than hang a client that never stops
-          if (++pages > pageCap + 5) throw new Error('the pull did not stop');
+          if (++pages > 2 * pageCap + 5) throw new Error('the pull did not stop');
+          if (failAtCap && pages >= pageCap) throw new Error('503: service unavailable');
           return { data: { success: true, data: { keys: [], nextCursor: `page-${pages}` } } };
         },
       };
-      const service = serviceOver(userId, api);
+      const service = serviceOver(userId, api, device);
       await service.initialize();
       await flushQueue();
       const warn = vi.spyOn(console, 'warn');
       try {
-        await expect(service.restoreMessageKeys()).resolves.toBe(0);
+        if (failAtCap) await expect(service.restoreMessageKeys()).rejects.toThrow('503');
+        else await expect(service.restoreMessageKeys()).resolves.toBe(0);
         expect(pages).toBe(pageCap);
-        expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/stopped the history pull/);
+        await service.dispose();
+
+        // the next start asks for nothing more: the cap counts every request, whatever start it came from
+        const again = serviceOver(userId, api, device);
+        await again.initialize();
+        await flushQueue();
+        await again.claimMasterTransfers(); // queued behind what the start-up queued
+        await flushQueue();
+        expect(pages).toBe(pageCap);
+        expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/asked for \d+ pages without reaching the end/);
       } finally {
         warn.mockRestore();
       }
@@ -5766,7 +5781,7 @@ describe('E2EService — lifecycle', () => {
         const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
         expect(logged).not.toMatch(/null pointer|unusable backed-up session key/);
         // stopped for the replaced key, not at the page cap
-        expect(logged).not.toMatch(/stopped the history pull after/);
+        expect(logged).not.toMatch(/without reaching the end/);
       } finally {
         warn.mockRestore();
         error.mockRestore();
