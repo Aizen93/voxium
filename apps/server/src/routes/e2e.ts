@@ -1166,6 +1166,18 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
   }
 });
 
+/**
+ * A claimed page oldest first, ties by id, as the inbox is scanned. RETURNING
+ * keeps no order (the outer statement joins the subquery's ids, it does not
+ * follow its ORDER BY), and the client imports a page in the order it is
+ * given: a sender's later share must not come before the earlier one whose Olm
+ * message sets up the pairwise session it rides.
+ */
+function oldestFirst<T extends { id: string; created_at: Date }>(rows: T[]): T[] {
+  const at = (row: T) => new Date(row.created_at).getTime();
+  return [...rows].sort((a, b) => at(a) - at(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
 e2eRouter.get('/keyshares', rateLimitE2EShares, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
@@ -1205,7 +1217,7 @@ e2eRouter.get('/keyshares', rateLimitE2EShares, async (req: Request, res: Respon
     res.json({
       success: true,
       data: {
-        shares: rows.map((r) => ({
+        shares: oldestFirst(rows).map((r) => ({
           id: r.id,
           senderUserId: r.sender_user_id,
           senderDeviceId: r.sender_device_id,

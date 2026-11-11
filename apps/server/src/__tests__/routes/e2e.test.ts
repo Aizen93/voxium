@@ -1013,6 +1013,32 @@ describe('E2E routes — GET /keyshares', () => {
     expect(res.body.data.shares).toEqual([]);
   });
 
+  it('answers the page oldest first, whatever order the statement returned it in', async () => {
+    // RETURNING guarantees no order, and the client imports a page in the
+    // order it is given: a sender's later share must not come before the
+    // earlier one whose Olm message sets up the session it rides.
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    const row = (id: string, at: string) => ({
+      id,
+      sender_user_id: 'user-2',
+      sender_device_id: DEVICE_B,
+      conversation_id: 'conv-1',
+      session_id: 'c2Vzc2lvbklk',
+      body: shareBody,
+      created_at: new Date(at),
+    });
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([
+      row('ks-3', '2026-07-25T10:00:02Z'),
+      row('ks-1b', '2026-07-25T10:00:00Z'),
+      row('ks-2', '2026-07-25T10:00:01Z'),
+      row('ks-1a', '2026-07-25T10:00:00Z'),
+    ]);
+    const res = await request(createApp()).get(`/api/v1/e2e/keyshares?deviceId=${DEVICE_A}`);
+    expect(res.status).toBe(200);
+    // ties on the creation time broken by id, as the inbox is scanned
+    expect(res.body.data.shares.map((s: { id: string }) => s.id)).toEqual(['ks-1a', 'ks-1b', 'ks-2', 'ks-3']);
+  });
+
   it('refuses to drain an inbox for a device the caller does not own', async () => {
     vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
     const res = await request(createApp()).get(`/api/v1/e2e/keyshares?deviceId=${DEVICE_B}`);
