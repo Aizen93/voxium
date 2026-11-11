@@ -64,8 +64,9 @@ export const LOCAL_PASS_RETRY_DELAYS_MS: readonly number[] = [1000, 5000];
  *
  * FAILURE PATH. The publish is confirmed by Redis's receiver count: every live
  * node (heartbeat, this one included) holds one subscription to the channel,
- * so fewer receivers than live nodes means a node missed it (its subscriber
- * was reconnecting, or it runs a build without the subscription). Pub/sub is
+ * so any other number of receivers than live nodes means a node may have
+ * missed it (its subscriber was reconnecting, or it runs a build without the
+ * subscription; fanOutResync says what the count cannot tell). Pub/sub is
  * at most once, so an unconfirmed publish is retried (RESYNC_PUBLISH_ATTEMPTS,
  * RESYNC_RETRY_DELAYS_MS, each attempt logged), and when it is still
  * unconfirmed the resync FAILS CLOSED: `revokeHiddenRoomsClusterWide` derives
@@ -80,12 +81,15 @@ export const LOCAL_PASS_RETRY_DELAYS_MS: readonly number[] = [1000, 5000];
  * client's offline queue and go out, in order, when it reconnects (until then
  * nothing this node emits reaches a peer either). A node that misses both
  * messages — its config and adapter subscribers both down for the whole
- * window — keeps its stale rooms until its sockets reconnect. Two windows read
- * as unconfirmed although no node with sockets missed anything: a node killed
- * hard keeps its heartbeat for up to its 30 s TTL, and a booting node holds
+ * window — keeps its stale rooms until its sockets reconnect. Three windows
+ * read as unconfirmed although no node with sockets missed anything: a node
+ * killed hard keeps its heartbeat for up to its 30 s TTL; a booting node holds
  * its heartbeat a few seconds before it subscribes (index.ts starts the
- * heartbeat first, and no socket can connect to it before it listens). A
- * resync in either window takes the fallback (logged): correct, only slower.
+ * heartbeat first, and no socket can connect to it before it listens); and a
+ * node shutting down has deleted its heartbeat while its subscriber still
+ * receives (one receiver too many, usually gone before the retries end). A
+ * resync in any of them retries, then takes the fallback (logged): correct,
+ * only slower.
  *
  * Errors are logged, never thrown: a failed resync must not fail the
  * originating mutation, which fires and forgets it.
@@ -407,10 +411,11 @@ let liveNodesInFlight: Promise<number> | null = null;
  * healthy resync to the fallback. One count is shared by the resyncs in flight
  * (a slow scan an attempt gave up on is still the one the next attempt
  * awaits) and reused for LIVE_NODES_MEMO_MS, shorter than the retry window, so
- * the last attempts of a resync read a fresh count.
+ * the last attempts of a resync read a fresh count. `fresh` skips the reuse
+ * (a scan already in flight is still shared: it is newer than the cache).
  */
-function expectedReceivers(): Promise<number> {
-  if (liveNodesMemo && Date.now() - liveNodesMemo.at < LIVE_NODES_MEMO_MS) {
+function expectedReceivers({ fresh = false }: { fresh?: boolean } = {}): Promise<number> {
+  if (!fresh && liveNodesMemo && Date.now() - liveNodesMemo.at < LIVE_NODES_MEMO_MS) {
     return Promise.resolve(liveNodesMemo.expected);
   }
   if (!liveNodesInFlight) {
@@ -443,8 +448,25 @@ async function publishOnce(payload: string): Promise<{ received: number; expecte
   return { received: Number(received), expected };
 }
 
-/** Tell every other node to resync its sockets for `scope`; retried while
- *  unconfirmed, then the fail-closed fallback (see the header). */
+/**
+ * Tell every other node to resync its sockets for `scope`; retried while
+ * unconfirmed, then the fail-closed fallback (see the header).
+ *
+ * Confirmed only when the receivers EQUAL the live nodes. More receivers than
+ * heartbeats is not "everyone and then some": a node that is shutting down
+ * deletes its heartbeat before its subscriber leaves, and a node that booted
+ * within the cached count is not in it yet, so a surplus can hide a node that
+ * missed the message. Any mismatch is judged again against a count read
+ * afresh, which also spares the fallback to a resync published right after a
+ * node stopped cleanly (heartbeat gone, one receiver fewer).
+ *
+ * What the totals still cannot tell: a missing node offset by an extra
+ * subscriber the heartbeats do not count (a node between deleting its
+ * heartbeat and exiting, or any other client subscribed to the channel). A
+ * restart of one node while another's subscriber is reconnecting reads 2 of 2
+ * and is confirmed although the reconnecting node missed it; it keeps its
+ * stale rooms until the next resync of the space or its sockets reconnect.
+ */
 async function fanOutResync(scope: ResyncScope): Promise<void> {
   const message: ResyncMessage = { id: randomUUID(), fromNode: NODE_ID(), ...scope };
   const payload = JSON.stringify(message);
@@ -452,8 +474,10 @@ async function fanOutResync(scope: ResyncScope): Promise<void> {
   for (let attempt = 1; attempt <= RESYNC_PUBLISH_ATTEMPTS; attempt++) {
     try {
       const { received, expected } = await withTimeout(publishOnce(payload), RESYNC_PUBLISH_TIMEOUT_MS);
-      if (received >= expected) return;
-      failure = `${received} subscriber(s) received it, ${expected} node(s) are live`;
+      if (received === expected) return;
+      const live = await withTimeout(expectedReceivers({ fresh: true }), RESYNC_PUBLISH_TIMEOUT_MS);
+      if (received === live) return;
+      failure = `${received} subscriber(s) received it, ${live} node(s) are live`;
     } catch (err) {
       failure = err instanceof Error ? err.message : String(err);
     }

@@ -562,6 +562,78 @@ describe('syncChannelVisibilityRooms — telling the other nodes', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('attempt 1/4: scan failed'));
   });
 
+  // ── What counts as confirmed ─────────────────────────────────────────────
+
+  /** One confirmed resync, which leaves `expected` in the count's cache. */
+  async function primeCount(peers: number) {
+    m.liveNodeCounts.mockResolvedValueOnce({ total: peers + 1, peers });
+    m.publish.mockResolvedValueOnce(peers + 1);
+    await syncChannelVisibilityRooms('server-0');
+    vi.clearAllMocks();
+    m.liveNodeCounts.mockResolvedValue({ total: peers + 1, peers });
+    m.publish.mockResolvedValue(peers + 1);
+  }
+
+  // Review of #71: `received >= expected` read a surplus as "everyone and
+  // then some". A node booted inside the cached count (or shutting down after
+  // deleting its heartbeat) receives too, and can hide a node that missed it.
+  it('more receivers than the cached count is checked against a fresh count, and retried when a node is still missing', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await primeCount(1); // cached: 2 nodes
+    // Now 4 nodes are live; 3 received it (one subscriber reconnecting)
+    m.liveNodeCounts.mockResolvedValue({ total: 4, peers: 3 });
+    m.publish.mockResolvedValueOnce(3).mockResolvedValueOnce(4);
+
+    const done = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(RESYNC_RETRY_DELAYS_MS[0]);
+    await done;
+
+    expect(m.publish).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('attempt 1/4: 3 subscriber(s) received it, 4 node(s) are live'));
+  });
+
+  it('a surplus the fresh count explains (a node that just booted) is confirmed at once', async () => {
+    await primeCount(1); // cached: 2 nodes
+    m.liveNodeCounts.mockResolvedValue({ total: 3, peers: 2 });
+    m.publish.mockResolvedValueOnce(3);
+
+    await syncChannelVisibilityRooms('server-1');
+
+    expect(m.publish).toHaveBeenCalledTimes(1);
+    expect(m.liveNodeCounts).toHaveBeenCalledTimes(1);
+    expect(m.clusterIn).not.toHaveBeenCalled();
+  });
+
+  it('more receivers than even the fresh count (a node shutting down, heartbeat already deleted) is retried', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    m.liveNodeCounts.mockResolvedValue({ total: 2, peers: 1 });
+    m.publish.mockResolvedValueOnce(3).mockResolvedValueOnce(2);
+
+    const done = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(RESYNC_RETRY_DELAYS_MS[0]);
+    await done;
+
+    expect(m.publish).toHaveBeenCalledTimes(2);
+  });
+
+  it('one receiver fewer right after a node stopped cleanly is confirmed by the fresh count, with no retry and no fallback', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await primeCount(1); // cached: 2 nodes
+    // The peer stopped and deleted its heartbeat: one node, one receiver
+    m.liveNodeCounts.mockResolvedValue({ total: 1, peers: 0 });
+    m.publish.mockResolvedValue(1);
+
+    const done = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(RESYNC_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
+    await done;
+
+    expect(m.publish).toHaveBeenCalledTimes(1);
+    expect(m.clusterIn).not.toHaveBeenCalled();
+  });
+
   // ── The live-node count (a SCAN over the whole keyspace) ─────────────────
 
   it('counts the live nodes once for the resyncs of a few seconds, and again after LIVE_NODES_MEMO_MS', async () => {
