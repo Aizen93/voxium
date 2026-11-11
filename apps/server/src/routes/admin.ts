@@ -62,16 +62,37 @@ const BAN_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 };
  * had already run. Taking the account row first means both sides queue on
  * the same row and nothing else.
  *
- * FOR NO KEY UPDATE, not FOR UPDATE: it conflicts with the deletion (and with
- * any UPDATE of the row) but not with FOR KEY SHARE, which every insert of a
- * row referencing the account takes, so a join, a message or a kick of that
- * account (its webhook statement, then its ban row) never waits on a ban.
+ * Two strengths, each the weakest that still makes a deletion wait:
+ *  - 'update', the account this transaction writes (the one banned): FOR NO
+ *    KEY UPDATE, not FOR UPDATE. It conflicts with the deletion and with any
+ *    other UPDATE of the row, but not with FOR KEY SHARE, which every insert
+ *    of a row referencing the account takes, so a join, a message or a kick
+ *    of that account (its webhook statement, then its ban row) never waits
+ *    on a ban.
+ *  - 'keep', an account this transaction only needs to still exist (a
+ *    report's reporter, a reported account not being banned): FOR KEY SHARE.
+ *    A DELETE still waits for it; an ordinary column update (the presence
+ *    write of a reporter who connects while the disarm waits on a webhook
+ *    purge) does not.
  * A webhook purge-delete locks the webhook row and never the account's, so it
  * cannot close a cycle with the webhook disarm that follows.
  */
-async function lockAccountRows(tx: Prisma.TransactionClient, userIds: string[]): Promise<void> {
-  for (const id of [...new Set(userIds.filter(Boolean))].sort()) {
-    await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR NO KEY UPDATE`;
+async function lockAccountRows(
+  tx: Prisma.TransactionClient,
+  rows: { id: string | null | undefined; mode: 'update' | 'keep' }[],
+): Promise<void> {
+  // One lock per account, the stronger when it is asked for twice
+  const modes = new Map<string, 'update' | 'keep'>();
+  for (const { id, mode } of rows) {
+    if (!id) continue;
+    if (modes.get(id) !== 'update') modes.set(id, mode);
+  }
+  for (const id of [...modes.keys()].sort()) {
+    if (modes.get(id) === 'update') {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR NO KEY UPDATE`;
+    } else {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR KEY SHARE`;
+    }
   }
 }
 
@@ -542,7 +563,7 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       // The account row FIRST (lockAccountRows): an account deletion takes it
       // first too, then reaches the webhooks and reports through its foreign
       // keys, so taking the webhook rows before it formed a cycle
-      await lockAccountRows(tx, [targetId]);
+      await lockAccountRows(tx, [{ id: targetId, mode: 'update' }]);
       const disarmed = await disarmWebhookRowsHeldBy(tx, targetId);
       await tx.user.update({
         where: { id: targetId },
@@ -2785,7 +2806,13 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       // deletion cascades to the report and, for a DM, to the message). An
       // account deletion takes its row first, then reaches these rows through
       // its foreign keys; taking them before the account row formed a cycle.
-      await lockAccountRows(tx, [report.reportedUserId, report.reporterId]);
+      // Only the account being banned is written ('update'); the reporter,
+      // and a reported account this resolution does not ban, only have to
+      // outlive it ('keep'), so their own writes (presence) never wait here.
+      await lockAccountRows(tx, [
+        { id: report.reportedUserId, mode: banTarget ? 'update' : 'keep' },
+        { id: report.reporterId, mode: 'keep' },
+      ]);
       const disarmed = banTarget ? await disarmWebhookRowsHeldBy(tx, banTarget.id) : [];
       // Only from pending, re-checked by the write itself: a second resolve or
       // a dismiss that committed since the read above leaves nothing to

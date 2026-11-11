@@ -363,14 +363,17 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       expect(tx.user.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'target-1' } }));
       expect(tx.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
       expect(tx.auditLog.create).toHaveBeenCalledTimes(2);
-      // The account rows FIRST, FOR NO KEY UPDATE, in sorted id order (the
-      // reporter's and the reported account's: either deletion cascades into
-      // the report), before the webhook, report and message rows
-      expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
-      for (const [sql] of tx.$queryRaw.mock.calls as [TemplateStringsArray, string][]) {
-        expect(sql.join('?').replace(/\s+/g, ' ')).toBe('SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE');
-      }
-      expect(tx.$queryRaw.mock.calls.map((c: unknown[]) => c[1])).toEqual(['reporter-9', 'target-1']);
+      // The account rows FIRST, in sorted id order (the reporter's and the
+      // reported account's: either deletion cascades into the report), before
+      // the webhook, report and message rows. The banned account FOR NO KEY
+      // UPDATE; the innocent reporter only FOR KEY SHARE, so its presence
+      // write never waits behind a disarm queued on a webhook purge
+      const locks = (tx.$queryRaw.mock.calls as [TemplateStringsArray, string][])
+        .map(([sql, id]) => [sql.join('?').replace(/\s+/g, ' '), id]);
+      expect(locks).toEqual([
+        ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'reporter-9'],
+        ['SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE', 'target-1'],
+      ]);
       expect(tx.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(tx.webhook.findMany.mock.invocationCallOrder[0]);
       expect(tx.webhook.findMany.mock.invocationCallOrder[0]).toBeLessThan(tx.report.updateMany.mock.invocationCallOrder[0]);
       for (const topLevel of [prismaMock.report.updateMany, prismaMock.message.deleteMany, prismaMock.message.delete, prismaMock.user.update,
@@ -380,6 +383,21 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       // The second disarm pass runs after the commit, on the top-level client
       expect(prismaMock.webhook.findMany).toHaveBeenCalledTimes(1);
       expect(prismaMock.webhook.findMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.auditLog.create.mock.invocationCallOrder[1]);
+    });
+
+    it('a resolution without a ban writes no account: both rows are only kept from deletion (FOR KEY SHARE)', async () => {
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: null });
+      prismaMock.$queryRaw.mockClear();
+
+      const res = await resolve({ resolution: 'Not actionable' });
+
+      expect(res.status).toBe(200);
+      const locks = (prismaMock.$queryRaw.mock.calls as [TemplateStringsArray, string][])
+        .map(([sql, id]) => [sql.join('?').replace(/\s+/g, ' '), id]);
+      expect(locks).toEqual([
+        ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'reporter-9'],
+        ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'target-1'],
+      ]);
     });
 
     it('a report resolved with a ban runs the second disarm pass too', async () => {
