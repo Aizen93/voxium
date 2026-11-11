@@ -86,20 +86,40 @@ export async function deleteSecureChannel(channelId: string): Promise<boolean> {
   // throws below must not skip it. Never awaited, never throws.
   deleteAttachmentBlobs(s3Keys, '[SecureChannel]', `deleted channel ${channelId}`);
 
+  // The row is gone: each step below is best effort and on its own, so one
+  // that throws neither skips the others (the voice teardown above all) nor
+  // reports a channel that no longer exists as not deleted.
   const io = getIO();
-  for (const userId of memberIds) {
-    io.to(`user:${userId}`).emit(WS_EVENTS.CHANNEL_DELETED, {
-      channelId,
-      serverId: channel.serverId,
-    });
+  try {
+    for (const userId of memberIds) {
+      io.to(`user:${userId}`).emit(WS_EVENTS.CHANNEL_DELETED, {
+        channelId,
+        serverId: channel.serverId,
+      });
+    }
+  } catch (err) {
+    logSecureDeleteFanOutFailure(channelId, 'the channel:deleted notices', err);
   }
-  io.in(`channel:${channelId}`).socketsLeave(`channel:${channelId}`);
+  try {
+    io.in(`channel:${channelId}`).socketsLeave(`channel:${channelId}`);
+  } catch (err) {
+    logSecureDeleteFanOutFailure(channelId, 'the room leave', err);
+  }
 
   // Live voice in a deleted secure VOICE channel must die with it, on every
   // node (spec §21) — mediasoup handles are node-local, hence the fan-out.
-  await broadcastChannelVoiceCleanup(io, channelId);
+  try {
+    await broadcastChannelVoiceCleanup(io, channelId);
+  } catch (err) {
+    logSecureDeleteFanOutFailure(channelId, 'the voice cleanup', err);
+  }
 
   return true;
+}
+
+/** A step after a secure channel's row delete committed failed: logged, never thrown. */
+function logSecureDeleteFanOutFailure(channelId: string, step: string, err: unknown): void {
+  console.error(`[SecureChannel] Channel ${channelId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
 }
 
 /**

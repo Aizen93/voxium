@@ -21,6 +21,11 @@ channelRouter.use(authenticate, requireVerifiedEmail, requireConsent);
  *  size of a single adapter message on a large staff-gated server. */
 const ROOM_FANOUT_BATCH = 500;
 
+/** A step after a channel's row delete committed failed: logged, never thrown. */
+function logChannelDeleteFanOutFailure(channelId: string, step: string, err: unknown): void {
+  console.error(`[Channels] Channel ${channelId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
+}
+
 /**
  * The rooms to announce a BRAND-NEW channel to. A new channel has no overrides
  * yet, so visibility is exactly base VIEW_CHANNEL — no per-user recompute
@@ -416,15 +421,34 @@ channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request
     await prisma.channel.delete({ where: { id: channelId } });
     deleteAttachmentBlobs(attachmentKeys, '[Channels]', `channel ${channelId}`);
 
+    // The row is gone: every step below is best effort, each on its own, so
+    // one that throws is logged and never answers 500 for a delete that
+    // happened (the client would keep a channel that no longer exists).
+    const io = getIO();
+
     // Same audience as every other lifecycle event for this channel: the people
     // who could see it. Nobody else has it in their sidebar to remove.
-    getIO().to(`channel:${channelId}`).emit('channel:deleted', { channelId, serverId });
-    if (webhooks > 0) emitWebhookChanged(serverId);
+    try {
+      io.to(`channel:${channelId}`).emit('channel:deleted', { channelId, serverId });
+    } catch (err) {
+      logChannelDeleteFanOutFailure(channelId, 'the channel:deleted notice', err);
+    }
+    if (webhooks > 0) {
+      try {
+        emitWebhookChanged(serverId);
+      } catch (err) {
+        logChannelDeleteFanOutFailure(channelId, 'the webhook:changed notice', err);
+      }
+    }
 
     // Live voice must die with the channel on every node — participants used
     // to keep their transports (and the Redis mirror entry) until they left
     // manually. (deleteSecureChannel does the same for the secure branch.)
-    await broadcastChannelVoiceCleanup(getIO(), channelId);
+    try {
+      await broadcastChannelVoiceCleanup(io, channelId);
+    } catch (err) {
+      logChannelDeleteFanOutFailure(channelId, 'the voice cleanup', err);
+    }
 
     res.json({ success: true, message: 'Channel deleted' });
   } catch (err) {

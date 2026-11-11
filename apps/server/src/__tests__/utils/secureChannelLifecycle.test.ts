@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WS_EVENTS } from '@voxium/shared';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
@@ -117,11 +117,69 @@ describe('secureChannelLifecycle', () => {
       prismaMock.channel.findUnique.mockResolvedValue({ id: 'sec-1', secure: true, serverId: 'srv-1', members: [{ userId: 'u1' }] });
       prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: 'attachments/ch-sec-1/aaaa-encrypted.bin' }]);
       prismaMock.channel.delete.mockResolvedValue({});
-      mockBroadcastChannelVoiceCleanup.mockRejectedValueOnce(new Error('voice cleanup failed'));
+      mockEmit.mockImplementationOnce(() => { throw new Error('adapter publish failed'); });
+      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await deleteSecureChannel('sec-1');
 
-      await expect(deleteSecureChannel('sec-1')).rejects.toThrow('voice cleanup failed');
+        expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith(['attachments/ch-sec-1/aaaa-encrypted.bin']);
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
 
-      expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith(['attachments/ch-sec-1/aaaa-encrypted.bin']);
+    describe('the steps after the row delete are best effort', () => {
+      let errorLog: ReturnType<typeof vi.spyOn>;
+
+      beforeEach(() => {
+        prismaMock.channel.findUnique.mockResolvedValue({ id: 'sec-1', secure: true, serverId: 'srv-1', members: [{ userId: 'u1' }] });
+        prismaMock.channel.delete.mockResolvedValue({});
+        errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      });
+
+      afterEach(() => {
+        errorLog.mockRestore();
+        mockEmit.mockReset();
+        mockSocketsLeave.mockReset();
+      });
+
+      it('a notice that throws still empties the room and still tears the live voice down (spec §21)', async () => {
+        mockEmit.mockImplementationOnce(() => { throw new Error('adapter publish failed'); });
+
+        await expect(deleteSecureChannel('sec-1')).resolves.toBe(true);
+
+        expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-1');
+        expect(mockBroadcastChannelVoiceCleanup).toHaveBeenCalledWith(expect.anything(), 'sec-1');
+        expect(errorLog).toHaveBeenCalledWith('[SecureChannel] Channel sec-1 deleted, but the channel:deleted notices failed:', 'adapter publish failed');
+      });
+
+      it('a room leave that throws still tears the live voice down', async () => {
+        mockSocketsLeave.mockImplementationOnce(() => { throw new Error('adapter failed'); });
+
+        await expect(deleteSecureChannel('sec-1')).resolves.toBe(true);
+
+        expect(mockBroadcastChannelVoiceCleanup).toHaveBeenCalledWith(expect.anything(), 'sec-1');
+        expect(errorLog).toHaveBeenCalledWith('[SecureChannel] Channel sec-1 deleted, but the room leave failed:', 'adapter failed');
+      });
+
+      it('a voice cleanup that rejects still reports the channel as deleted', async () => {
+        mockBroadcastChannelVoiceCleanup.mockRejectedValueOnce(new Error('voice cleanup failed'));
+
+        await expect(deleteSecureChannel('sec-1')).resolves.toBe(true);
+
+        expect(errorLog).toHaveBeenCalledWith('[SecureChannel] Channel sec-1 deleted, but the voice cleanup failed:', 'voice cleanup failed');
+      });
+
+      it('a row delete that fails announces nothing and tears nothing down', async () => {
+        prismaMock.channel.delete.mockRejectedValueOnce(new Error('db gone'));
+
+        await expect(deleteSecureChannel('sec-1')).rejects.toThrow('db gone');
+
+        expect(mockEmit).not.toHaveBeenCalled();
+        expect(mockSocketsLeave).not.toHaveBeenCalled();
+        expect(mockBroadcastChannelVoiceCleanup).not.toHaveBeenCalled();
+        expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      });
     });
 
     it('REFUSES to delete a plaintext channel (returns false, touches nothing)', async () => {

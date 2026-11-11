@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -1024,6 +1024,63 @@ describe('Channel Routes', () => {
         } finally {
           errorLog.mockRestore();
         }
+      });
+    });
+
+    describe('the steps after the row delete are best effort', () => {
+      let errorLog: ReturnType<typeof vi.spyOn>;
+
+      beforeEach(() => {
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'owner' });
+        prismaMock.channel.findFirst.mockResolvedValue({ id: 'ch-1', name: 'general', type: 'voice', serverId: 'srv-1', secure: false });
+        prismaMock.channel.delete.mockReset().mockResolvedValue({});
+        prismaMock.webhook.count.mockResolvedValue(1);
+        prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
+        mockBroadcastChannelVoiceCleanup.mockReset().mockResolvedValue(undefined);
+        errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      });
+
+      afterEach(() => {
+        errorLog.mockRestore();
+        mockEmit.mockReset();
+        prismaMock.webhook.count.mockReset();
+      });
+
+      const deleteChannel = () => request(app)
+        .delete('/api/v1/servers/srv-1/channels/ch-1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+
+      it('a voice cleanup that rejects answers 200 for the delete that happened, after the notices went out', async () => {
+        mockBroadcastChannelVoiceCleanup.mockRejectedValueOnce(new Error('voice cleanup failed'));
+
+        const res = await deleteChannel();
+
+        expect(res.status).toBe(200);
+        expect(res.body.message).toBe('Channel deleted');
+        expect(mockEmit).toHaveBeenCalledWith('channel:deleted', { channelId: 'ch-1', serverId: 'srv-1' });
+        expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 'srv-1' });
+        expect(errorLog).toHaveBeenCalledWith('[Channels] Channel ch-1 deleted, but the voice cleanup failed:', 'voice cleanup failed');
+      });
+
+      it('a notice that throws still tears the live voice down and answers 200', async () => {
+        mockEmit.mockImplementation(() => { throw new Error('adapter publish failed'); });
+
+        const res = await deleteChannel();
+
+        expect(res.status).toBe(200);
+        expect(mockBroadcastChannelVoiceCleanup).toHaveBeenCalledWith(expect.anything(), 'ch-1');
+        expect(errorLog).toHaveBeenCalledWith('[Channels] Channel ch-1 deleted, but the channel:deleted notice failed:', 'adapter publish failed');
+        expect(errorLog).toHaveBeenCalledWith('[Channels] Channel ch-1 deleted, but the webhook:changed notice failed:', 'adapter publish failed');
+      });
+
+      it('a row delete that fails announces nothing and tears nothing down', async () => {
+        prismaMock.channel.delete.mockRejectedValueOnce(new Error('db gone'));
+
+        const res = await deleteChannel();
+
+        expect(res.status).toBe(500);
+        expect(mockEmit).not.toHaveBeenCalled();
+        expect(mockBroadcastChannelVoiceCleanup).not.toHaveBeenCalled();
       });
     });
   });
