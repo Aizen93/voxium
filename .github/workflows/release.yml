@@ -30,17 +30,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # About 30 s normally. Each apt attempt is bounded and retried twice
+      # (.github/scripts/apt-install.sh): the build cannot go on without these
+      # packages, so when every attempt fails the step fails, with the reason,
+      # long before the job limit. 15 minutes covers the script's worst case.
       - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            librsvg2-dev \
-            patchelf \
-            libssl-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev
+        timeout-minutes: 15
+        run: >-
+          bash .github/scripts/apt-install.sh
+          libwebkit2gtk-4.1-dev
+          librsvg2-dev
+          patchelf
+          libssl-dev
+          libgtk-3-dev
+          libayatana-appindicator3-dev
 
       - name: Read pnpm version from package.json
         id: pnpm-ver
