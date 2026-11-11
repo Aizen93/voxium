@@ -80,20 +80,23 @@ const BAN_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 };
 async function lockAccountRows(
   tx: Prisma.TransactionClient,
   rows: { id: string | null | undefined; mode: 'update' | 'keep' }[],
-): Promise<void> {
+): Promise<Set<string>> {
   // One lock per account, the stronger when it is asked for twice
   const modes = new Map<string, 'update' | 'keep'>();
   for (const { id, mode } of rows) {
     if (!id) continue;
     if (modes.get(id) !== 'update') modes.set(id, mode);
   }
+  // The accounts that still exist, now held: one deleted since the caller
+  // read it locks nothing, and the caller answers as for a missing one
+  const locked = new Set<string>();
   for (const id of [...modes.keys()].sort()) {
-    if (modes.get(id) === 'update') {
-      await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR NO KEY UPDATE`;
-    } else {
-      await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR KEY SHARE`;
-    }
+    const found = modes.get(id) === 'update'
+      ? await tx.$queryRaw<{ id: string }[]>`SELECT id FROM users WHERE id = ${id} FOR NO KEY UPDATE`
+      : await tx.$queryRaw<{ id: string }[]>`SELECT id FROM users WHERE id = ${id} FOR KEY SHARE`;
+    if (found.length > 0) locked.add(id);
   }
+  return locked;
 }
 
 /** A step after a committed ban failed: logged, never thrown (the ban holds). */
@@ -563,7 +566,10 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       // The account row FIRST (lockAccountRows): an account deletion takes it
       // first too, then reaches the webhooks and reports through its foreign
       // keys, so taking the webhook rows before it formed a cycle
-      await lockAccountRows(tx, [{ id: targetId, mode: 'update' }]);
+      // An account deleted since the read above locks nothing: the same 404
+      // as an unknown id, never the 500 its update's P2025 used to answer
+      const locked = await lockAccountRows(tx, [{ id: targetId, mode: 'update' }]);
+      if (!locked.has(targetId)) throw new NotFoundError('User');
       const disarmed = await disarmWebhookRowsHeldBy(tx, targetId);
       await tx.user.update({
         where: { id: targetId },
@@ -2809,10 +2815,14 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       // Only the account being banned is written ('update'); the reporter,
       // and a reported account this resolution does not ban, only have to
       // outlive it ('keep'), so their own writes (presence) never wait here.
-      await lockAccountRows(tx, [
+      const locked = await lockAccountRows(tx, [
         { id: report.reportedUserId, mode: banTarget ? 'update' : 'keep' },
         { id: report.reporterId, mode: 'keep' },
       ]);
+      // Either account deleted since the read above took this report with it
+      // (both foreign keys cascade): the route's not-found, never a 500 from
+      // the writes below
+      if ([report.reportedUserId, report.reporterId].some((uid) => uid && !locked.has(uid))) throw new NotFoundError('Report');
       const disarmed = banTarget ? await disarmWebhookRowsHeldBy(tx, banTarget.id) : [];
       // The reported message's row BEFORE the report's, in the order its
       // author's own delete takes them (the message row, then the report

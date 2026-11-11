@@ -55,7 +55,8 @@ const prismaMock: Record<string, any> = {
   // array ran in the txn". Callback form: the callback gets this client.
   $transaction: vi.fn((arg: any) => runTransaction(arg)),
   // The account-row lock a ban transaction takes first
-  $queryRaw: vi.fn().mockResolvedValue([]),
+  // The row locks: the row is there unless a test says it is gone
+  $queryRaw: vi.fn((_sql: TemplateStringsArray, id: string) => Promise.resolve([{ id }])),
   $queryRawUnsafe: vi.fn().mockResolvedValue([]),
 };
 
@@ -442,6 +443,20 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
         expect(res.status).toBe(200);
         expect(consoleSpy).toHaveBeenCalledWith('[Admin] User target-1 banned, but the second webhook disarm failed:', 'db gone');
       });
+    });
+
+    it('an account deleted between the read and the lock answers 404 like an unknown one, and writes nothing', async () => {
+      // The lock finds no row: the deletion committed first
+      prismaMock.$queryRaw.mockResolvedValueOnce([]);
+
+      const res = await ban();
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ success: false, error: 'User not found' });
+      expect(prismaMock.user.update).not.toHaveBeenCalled();
+      expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+      expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
     });
 
     it('writes no audit row and signs nobody out when the transaction fails (no ban)', async () => {

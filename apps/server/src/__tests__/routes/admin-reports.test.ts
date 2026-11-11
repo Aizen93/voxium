@@ -49,7 +49,8 @@ const prismaMock: Record<string, any> = {
   // The resolution is one interactive transaction; the callback gets this client
   $transaction: vi.fn((arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg))),
   // The account-row locks a resolution takes first
-  $queryRaw: vi.fn().mockResolvedValue([]),
+  // The row locks: the row is there unless a test says it is gone
+  $queryRaw: vi.fn((_sql: TemplateStringsArray, id: string) => Promise.resolve([{ id }])),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -343,7 +344,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: 'msg-1' });
       prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
       const tx = {
-        $queryRaw: vi.fn().mockResolvedValue([]),
+        $queryRaw: vi.fn((_sql: TemplateStringsArray, id: string) => Promise.resolve([{ id }])),
         webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
         report: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
         message: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
@@ -403,6 +404,26 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
         ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'reporter-9'],
         ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'target-1'],
       ]);
+    });
+
+    it.each([
+      ['the reported account', 'target-1'],
+      ['the reporter', 'reporter-9'],
+    ])('%s deleted between the read and the lock took the report with it: 404, nothing written', async (_who, goneId) => {
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: null });
+      prismaMock.$queryRaw.mockImplementation((_sql: TemplateStringsArray, id: string) => Promise.resolve(id === goneId ? [] : [{ id }]));
+      try {
+        const res = await resolve();
+
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ success: false, error: 'Report not found' });
+        expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
+        expect(prismaMock.user.update).not.toHaveBeenCalled();
+        expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+      } finally {
+        prismaMock.$queryRaw.mockImplementation((_sql: TemplateStringsArray, id: string) => Promise.resolve([{ id }]));
+      }
     });
 
     it('a report resolved with a ban runs the second disarm pass too', async () => {
