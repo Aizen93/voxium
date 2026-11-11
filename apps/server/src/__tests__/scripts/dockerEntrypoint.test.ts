@@ -275,6 +275,29 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.serverStarted).toBe(false);
   }, TIMEOUT);
 
+  it('says on each retry why the status did not count', () => {
+    const run = runEntrypoint([captured('unreachable'), SILENT_CRASH, captured('cutover-pending')]);
+    expect(run.out).toContain(
+      "[Voxium] Could not read the migration status (attempt 1/10): Error: P1001: Can't reach database server at `postgres:5432`"
+    );
+    expect(run.out).toContain('[Voxium] Could not read the migration status (attempt 2/10): no output');
+    expect(run.deploys).toBe(0);
+  }, TIMEOUT);
+
+  it('never prints a connection string, on a retry line or in the final output', () => {
+    // Synthetic: an error that quotes the database URL, password included.
+    const leaky: Status = {
+      output: 'Error: P1013: The provided database string is invalid: postgresql://voxium:s3cret@postgres:5432/voxium\n',
+      exit: 1,
+    };
+    const run = runEntrypoint([leaky]);
+    expect(run.code).toBe(1);
+    expect(run.out).toContain('FATAL: could not read the migration status');
+    expect(run.out).toContain('(attempt 1/10): Error: P1013: The provided database string is invalid: <redacted URL>');
+    expect(run.out).not.toContain('s3cret');
+    expect(run.deploys).toBe(0);
+  }, TIMEOUT);
+
   it('skips the gate with VOXIUM_ALLOW_CUTOVER=1', () => {
     const run = runEntrypoint([captured('cutover-pending')], { allowCutover: '1' });
     expect(run.statusReads).toBe(0);

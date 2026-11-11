@@ -100,6 +100,23 @@ pending_count() {
   echo "$count"
 }
 
+# Why the last status did not count, for the retry log: its first error line.
+status_reason() {
+  reason=$(printf '%s\n' "$STATUS_LINES" | sed -n '/^Error/{p;q;}')
+  if [ -n "$reason" ]; then
+    printf '%s\n' "$reason" | redact_urls
+  elif [ -z "$(printf '%s' "$STATUS_LINES" | tr -d '[:space:]')" ]; then
+    echo "no output"
+  else
+    echo "no migration count in the output"
+  fi
+}
+
+# A connection string carries the password: no URL is ever printed.
+redact_urls() {
+  sed 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]*#<redacted URL>#g'
+}
+
 # N in "N migrations found in prisma/migrations".
 found_count() {
   printf '%s\n' "$STATUS_LINES" | sed -n 's/^\([0-9][0-9]*\) migrations\{0,1\} found in .*/\1/p' | head -n 1
@@ -118,15 +135,15 @@ if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
     if [ "$STATE" != "unreadable" ] || [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
       break
     fi
-    echo "[Voxium] Could not read the migration status (attempt $ATTEMPT/$MAX_ATTEMPTS), retrying in ${RETRY_DELAY_SECONDS}s..."
+    echo "[Voxium] Could not read the migration status (attempt $ATTEMPT/$MAX_ATTEMPTS): $(status_reason). Retrying in ${RETRY_DELAY_SECONDS}s..."
     ATTEMPT=$((ATTEMPT + 1))
     sleep "$RETRY_DELAY_SECONDS"
   done
 
   case "$STATE" in
     unreadable)
-      printf '%s\n' "$STATUS"
-      echo "[Voxium] FATAL: could not read the migration status after $MAX_ATTEMPTS attempts."
+      printf '%s\n' "$STATUS_LINES" | redact_urls
+      echo "[Voxium] FATAL: could not read the migration status after $MAX_ATTEMPTS attempts ($(status_reason))."
       echo "[Voxium] Not migrating a database whose state is unknown. Check DATABASE_URL and that the database accepts connections."
       exit 1
       ;;
