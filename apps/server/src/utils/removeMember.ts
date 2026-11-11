@@ -9,6 +9,7 @@ import {
   type SecureMembershipRemoval,
 } from './secureChannelLifecycle';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
+import { retryOnTransactionConflict } from './transactionRetry';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { emitWebhookChanged } from './webhookLifecycle';
 
@@ -54,18 +55,24 @@ export interface RemoveMemberOptions {
  *    c'. with a ban, the ServerBan upsert, AFTER (c): its foreign key locks
  *       the space row (KEY SHARE) on a first ban;
  *    d. THEN the member's secure-channel state (removeSecureMembershipsInTx):
- *       the secure channels they created deleted (a creator never stays the
- *       manager of a channel in a space they left; if the delete fails, the
- *       departure fails), their rows in the others and the key shares
- *       addressed to them there removed. After (c), so it also removes a row
- *       an invite wrote while (c) waited for it;
- *    e. their ChannelRead rows in the space;
- *    f. memberCount − 1 (never below zero), LAST, so the space row, which
+ *       every secure channel they created or belong to locked FOR UPDATE in
+ *       id order before anything is deleted, then the ones they created
+ *       deleted (a creator never stays the manager of a channel in a space
+ *       they left; if the delete fails, the departure fails), their rows in
+ *       the others and the key shares addressed to them there removed. After
+ *       (c), so it also removes a row an invite wrote while (c) waited for it;
+ *    e. memberCount − 1 (never below zero), LAST, so the space row, which
  *       every join and secure-channel creation also takes, is held for the
  *       shortest time.
- * 3. After the commit, best effort: the attachment files of the deleted
- *    channels, the secure-channel notices (removed member, remaining members,
- *    voice eviction per channel, the deleted channels' rooms emptied).
+ *    The whole transaction is run again (twice at most) when PostgreSQL
+ *    aborts it to break a deadlock (retryOnTransactionConflict): a net for a
+ *    lock order nobody foresaw, never for any other error.
+ * 3. After the commit, best effort: their ChannelRead rows in the space (they
+ *    grant nothing, and outside the transaction they are not one more lock a
+ *    channel delete's cascade takes in another order), the attachment files
+ *    of the deleted channels, the secure-channel notices (removed member,
+ *    remaining members, voice eviction per channel, the deleted channels'
+ *    rooms emptied).
  * 4. The room invariant's other half: sockets leave `server:{id}` and every
  *    `channel:{id}` room, remaining members get member:left.
  * 5. When step 2a disabled any webhook: the `webhook:changed` refetch hint to
@@ -100,7 +107,7 @@ export async function removeMemberFromServer(
 
   let outcome: { disabledWebhooks: number; secure: SecureMembershipRemoval };
   try {
-    outcome = await prisma.$transaction(async (tx) => {
+    outcome = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // One statement after the other: they share the transaction's one
       // connection, and the order is the one documented above.
       let disabled = 0;
@@ -132,7 +139,6 @@ export async function removeMemberFromServer(
         });
       }
       const removal = await removeSecureMembershipsInTx(tx, userId, serverId);
-      await tx.channelRead.deleteMany({ where: { userId, channel: { serverId } } });
       // Guarded so inline drift can never push the count negative; the
       // nightly recount is what makes it exact again.
       await tx.server.updateMany({
@@ -147,7 +153,7 @@ export async function removeMemberFromServer(
       // merely slow.
       timeout: 60_000,
       maxWait: 10_000,
-    });
+    }), `[Servers] The removal of ${userId} from ${serverId}`);
   } catch (err) {
     // The member left (or was removed) between the caller's membership check
     // and this transaction: serverMember.delete is the only statement here
@@ -158,6 +164,12 @@ export async function removeMemberFromServer(
     throw err;
   }
   const { disabledWebhooks, secure } = outcome;
+
+  try {
+    await prisma.channelRead.deleteMany({ where: { userId, channel: { serverId } } });
+  } catch (err) {
+    console.warn(`[Servers] Member ${userId} removed from ${serverId}, but their read markers were not deleted:`, err instanceof Error ? err.message : err);
+  }
 
   if (secure.deleted.length > 0) deleteAttachmentBlobs(attachmentKeys, '[Servers]', 'the secure channels of a departed member');
   await announceSecureMembershipsRemoved(secure);

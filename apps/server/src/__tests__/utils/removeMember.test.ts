@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // removeMemberFromServer — the kick route's teardown lifted out, plus the ban
 // upsert, the join-request delete, the member's secure-channel state, the read
@@ -15,12 +15,13 @@ const tx = vi.hoisted(() => ({
   serverBan: { upsert: vi.fn() },
   serverJoinRequest: { deleteMany: vi.fn() },
   serverMember: { delete: vi.fn() },
-  channelRead: { deleteMany: vi.fn() },
   server: { updateMany: vi.fn() },
 }));
 
 const prismaMock = vi.hoisted(() => ({
   messageAttachment: { findMany: vi.fn() },
+  // The read markers go after the commit, on the plain client
+  channelRead: { deleteMany: vi.fn() },
   $transaction: vi.fn(),
 }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
@@ -73,7 +74,7 @@ beforeEach(() => {
   tx.serverJoinRequest.deleteMany.mockImplementation(async () => { order.push('request'); return { count: 0 }; });
   tx.serverMember.delete.mockImplementation(async () => { order.push('member'); return {}; });
   removeSecure.mockImplementation(async () => { order.push('secure'); return NO_SECURE; });
-  tx.channelRead.deleteMany.mockImplementation(async () => { order.push('reads'); return { count: 2 }; });
+  prismaMock.channelRead.deleteMany.mockImplementation(async () => { order.push('reads'); return { count: 2 }; });
   tx.server.updateMany.mockImplementation(async () => { order.push('count'); return { count: 1 }; });
   prismaMock.$transaction.mockImplementation(async (fn: (client: typeof tx) => Promise<unknown>) => {
     order.push('txn:start');
@@ -87,7 +88,7 @@ beforeEach(() => {
 });
 
 describe('removeMemberFromServer', () => {
-  it('keeps the teardown order: voice → one transaction (request, member, secure state, read markers, count) → secure notices → member:left', async () => {
+  it('keeps the teardown order: voice → one transaction (request, member, secure state, count) → read markers → secure notices → member:left', async () => {
     redisGet.mockImplementation(async (key: string) =>
       key === 'voice:user:u-1' ? 'vc-1' : key === 'voice:channel:server:vc-1' ? 's-1' : null);
 
@@ -95,8 +96,8 @@ describe('removeMemberFromServer', () => {
 
     expect(order).toEqual([
       'voice', 'attachment-keys',
-      'txn:start', 'request', 'member', 'secure', 'reads', 'count', 'txn:end',
-      'secure:notices', 'left',
+      'txn:start', 'request', 'member', 'secure', 'count', 'txn:end',
+      'reads', 'secure:notices', 'left',
     ]);
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(memberLeft).toHaveBeenCalledWith('u-1', 's-1');
@@ -152,9 +153,77 @@ describe('removeMemberFromServer', () => {
     expect(deleteBlobs).not.toHaveBeenCalled();
   });
 
-  it('removes the read markers of every channel of the space, in the transaction', async () => {
+  it('removes the read markers of every channel of the space AFTER the commit, outside the transaction', async () => {
     await removeMemberFromServer('u-1', 's-1');
-    expect(tx.channelRead.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1', channel: { serverId: 's-1' } } });
+
+    // They grant nothing, and inside the transaction they were one more row
+    // locked in an order a channel delete's cascade does not share
+    expect(prismaMock.channelRead.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1', channel: { serverId: 's-1' } } });
+    expect((tx as Record<string, unknown>).channelRead).toBeUndefined();
+    expect(order.indexOf('reads')).toBeGreaterThan(order.indexOf('txn:end'));
+  });
+
+  it('a read-marker delete that fails is logged and the removal still completes', async () => {
+    prismaMock.channelRead.deleteMany.mockRejectedValue(new Error('db hiccup'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(removeMemberFromServer('u-1', 's-1')).resolves.toBeUndefined();
+
+      expect(warn).toHaveBeenCalledWith('[Servers] Member u-1 removed from s-1, but their read markers were not deleted:', 'db hiccup');
+      expect(announceSecure).toHaveBeenCalled();
+      expect(memberLeft).toHaveBeenCalledWith('u-1', 's-1');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  describe('a transaction PostgreSQL aborted to break a deadlock', () => {
+    const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock. Please retry your transaction'), { code: 'P2034' });
+    const rawDeadlock = () => Object.assign(new Error('Raw query failed. Code: `40P01`. Message: `deadlock detected`'), {
+      code: 'P2010', meta: { driverAdapterError: { cause: { kind: 'postgres', originalCode: '40P01' } } },
+    });
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => { warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+    afterEach(() => { warn.mockRestore(); });
+
+    it('is run again whole, and the removal completes once, with one set of notices', async () => {
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { order.push('txn:aborted'); throw deadlock(); })
+        .mockImplementationOnce(async () => { order.push('txn:aborted'); throw rawDeadlock(); })
+        .mockImplementation(real);
+
+      await removeMemberFromServer('u-1', 's-1');
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(3);
+      expect(order.filter((o) => o === 'txn:aborted')).toHaveLength(2);
+      expect(announceSecure).toHaveBeenCalledTimes(1);
+      expect(memberLeft).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('was aborted by a deadlock or a serialization failure; retrying (1 of 2)'));
+    });
+
+    it('is retried twice at most, then the error is the answer and nothing is announced', async () => {
+      prismaMock.$transaction.mockImplementation(async () => { throw deadlock(); });
+
+      await expect(removeMemberFromServer('u-1', 's-1')).rejects.toMatchObject({ code: 'P2034' });
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(3);
+      expect(announceSecure).not.toHaveBeenCalled();
+      expect(memberLeft).not.toHaveBeenCalled();
+    });
+
+    it('any other error is never retried: a member already gone is the 404 at once', async () => {
+      tx.serverMember.delete.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+
+      await expect(removeMemberFromServer('u-1', 's-1')).rejects.toMatchObject({ statusCode: 404 });
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+
+      prismaMock.$transaction.mockRejectedValue(Object.assign(new Error('Raw query failed. Code: `23503`.'), {
+        code: 'P2010', meta: { driverAdapterError: { cause: { originalCode: '23503' } } },
+      }));
+      await expect(removeMemberFromServer('u-1', 's-1')).rejects.toMatchObject({ code: 'P2010' });
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('without a ban: request, membership, secure state, read markers and the guarded decrement, no ban, no webhook statement', async () => {
@@ -183,7 +252,7 @@ describe('removeMemberFromServer', () => {
     // through its foreign key, and a secure-channel creation takes the member
     // rows before the space row; the reverse order could deadlock with it
     expect(order.slice(0, order.indexOf('txn:end') + 1)).toEqual([
-      'attachment-keys', 'txn:start', 'webhooks.disable', 'request', 'member', 'ban', 'secure', 'reads', 'count', 'txn:end',
+      'attachment-keys', 'txn:start', 'webhooks.disable', 'request', 'member', 'ban', 'secure', 'count', 'txn:end',
     ]);
     expect(tx.serverBan.upsert).toHaveBeenCalledWith({
       where: { serverId_userId: { serverId: 's-1', userId: 'u-1' } },

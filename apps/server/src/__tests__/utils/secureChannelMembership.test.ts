@@ -314,11 +314,16 @@ const client: Record<string, any> = {
       return db.serverMembers.filter((m) => m.serverId === serverId && userIds.includes(m.userId)).map((m) => ({ user_id: m.userId }));
     }
     if (/FROM servers/.test(sql)) return db.servers.has(values[0] as string) ? [{ id: values[0] }] : [];
-    if (/FROM channels/.test(sql) && /created_by_id/.test(sql)) {
-      const [userId, serverId] = values as string[];
+    if (/FROM channels c/.test(sql) && /created_by_id/.test(sql)) {
+      // The removal's lock: every secure channel the user created or is a
+      // member of (in the space, when one is named), in id order
+      const scoped = /c\.server_id = \?/.test(sql);
+      const [serverId, userId] = scoped ? values as string[] : [undefined, values[0] as string];
       return db.channels
-        .filter((c) => c.secure && c.createdById === userId && (serverId === undefined || c.serverId === serverId))
-        .map((c) => ({ id: c.id, server_id: c.serverId }));
+        .filter((c) => c.secure && (serverId === undefined || c.serverId === serverId))
+        .filter((c) => c.createdById === userId || db.channelMembers.some((m) => m.channelId === c.id && m.userId === userId))
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((c) => ({ id: c.id, server_id: c.serverId, created_by_id: c.createdById }));
     }
     if (/FROM channels/.test(sql)) return db.channels.filter((c) => c.id === values[0]).map((c) => ({ id: c.id }));
     throw new Error(`unmodelled raw query: ${sql}`);

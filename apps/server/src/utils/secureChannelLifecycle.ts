@@ -62,17 +62,26 @@ export interface SecureMembershipRemoval {
  * omitted, for an account deletion). Throws with the transaction, so a
  * removal commits with its rows gone or not at all.
  *
+ *  - FIRST, before anything is deleted, every secure channel the user
+ *    created or is a member of is locked, FOR UPDATE, in id order. Every
+ *    other transaction that deletes in those channels takes the channel row
+ *    first too (a channel delete, another departure, an invite), so they
+ *    queue on it in one order instead of each holding a row the other needs.
+ *    It also freezes the member lists read for the notices: an invite into
+ *    one of them holds that lock and is waited for. It runs AFTER the member
+ *    row delete: every writer of a row locks that member row first
+ *    (`lockServerMemberRows`), the delete waits for one in progress, and this
+ *    later statement sees what it wrote; no writer can start after it.
  *  - The channels the user created are deleted, which cascades every
  *    member's row (the creator is the channel's only manager: it does not
  *    outlive their membership, and a delete that fails fails the departure).
- *    They are locked first, FOR UPDATE, so the member list read for the
- *    notices is the one deleted: an invite into one of them holds that lock
- *    and is waited for.
  *  - The user's rows in every other channel of the space go, with the key
- *    shares addressed to them in those channels' scopes. They are deleted
- *    AFTER the member row: every writer of a row locks that member row first
- *    (`lockServerMemberRows`), the delete waits for one in progress, and this
- *    later statement then sees what it wrote; no writer can start after it.
+ *    shares addressed to them in those channels' scopes.
+ *
+ * The read markers are not touched here (they grant nothing): the removal
+ * deletes them after its commit, outside the transaction, so that their rows
+ * are not one more lock taken in an order a channel delete's cascade does
+ * not share.
  *
  * Statements one after the other, never in a Promise.all: they share the
  * transaction's one connection.
@@ -82,17 +91,23 @@ export async function removeSecureMembershipsInTx(
   userId: string,
   serverId?: string,
 ): Promise<SecureMembershipRemoval> {
-  const created = serverId === undefined
-    ? await tx.$queryRaw<Array<{ id: string; server_id: string }>>`
-        SELECT id, server_id FROM channels
-        WHERE created_by_id = ${userId} AND secure = true
-        ORDER BY id
-        FOR UPDATE`
-    : await tx.$queryRaw<Array<{ id: string; server_id: string }>>`
-        SELECT id, server_id FROM channels
-        WHERE created_by_id = ${userId} AND server_id = ${serverId} AND secure = true
-        ORDER BY id
-        FOR UPDATE`;
+  type Locked = { id: string; server_id: string; created_by_id: string | null };
+  const locked = serverId === undefined
+    ? await tx.$queryRaw<Locked[]>`
+        SELECT c.id, c.server_id, c.created_by_id FROM channels c
+        WHERE c.secure = true
+          AND (c.created_by_id = ${userId}
+               OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = ${userId}))
+        ORDER BY c.id
+        FOR UPDATE OF c`
+    : await tx.$queryRaw<Locked[]>`
+        SELECT c.id, c.server_id, c.created_by_id FROM channels c
+        WHERE c.secure = true AND c.server_id = ${serverId}
+          AND (c.created_by_id = ${userId}
+               OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = ${userId}))
+        ORDER BY c.id
+        FOR UPDATE OF c`;
+  const created = locked.filter((c) => c.created_by_id === userId);
   const createdIds = created.map((c) => c.id);
 
   const deleted: SecureMembershipRemoval['deleted'] = [];
@@ -111,14 +126,14 @@ export async function removeSecureMembershipsInTx(
     }
   }
 
-  // Every channel of the space, not only the secure ones: rows exist only
-  // for secure channels, and none may survive the membership
+  // The channels left: the locked ones the user did not create (each holds a
+  // row of theirs). The delete covers every channel of the space, not only
+  // the secure ones: rows exist only for secure channels, and none may
+  // survive the membership.
+  const left = locked
+    .filter((c) => c.created_by_id !== userId)
+    .map((c) => ({ channelId: c.id, serverId: c.server_id }));
   const where: Prisma.ChannelMemberWhereInput = serverId === undefined ? { userId } : { userId, channel: { serverId } };
-  const rows = await tx.channelMember.findMany({
-    where,
-    select: { channelId: true, channel: { select: { serverId: true } } },
-  });
-  const left = rows.map((r) => ({ channelId: r.channelId, serverId: r.channel.serverId }));
   await tx.channelMember.deleteMany({ where });
 
   const scopes = [...createdIds, ...left.map((l) => l.channelId)].map(e2eChannelScope);

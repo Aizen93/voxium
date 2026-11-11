@@ -304,32 +304,45 @@ describe('secureChannelLifecycle', () => {
       order.length = 0;
       tx = {
         $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
-          order.push(`lock:${strings.join('?').includes('server_id =') ? 'space' : 'account'}`);
-          return [{ id: 'sec-own', server_id: 'srv-1' }];
+          order.push(`lock:${strings.join('?').includes('c.server_id = ?') ? 'space' : 'account'}`);
+          // one channel the user created, one they were invited to, id order
+          return [
+            { id: 'sec-other', server_id: 'srv-1', created_by_id: 'u5' },
+            { id: 'sec-own', server_id: 'srv-1', created_by_id: 'u1' },
+          ];
         }),
         channelMember: {
-          findMany: vi.fn(async ({ where }: any) => {
-            if (where.channelId) {
-              order.push('read:created-members');
-              return [{ channelId: 'sec-own', userId: 'u1' }, { channelId: 'sec-own', userId: 'u9' }];
-            }
-            order.push('read:rows');
-            return [{ channelId: 'sec-other', channel: { serverId: 'srv-1' } }];
+          findMany: vi.fn(async () => {
+            order.push('read:created-members');
+            return [{ channelId: 'sec-own', userId: 'u1' }, { channelId: 'sec-own', userId: 'u9' }];
           }),
           deleteMany: vi.fn(async () => { order.push('delete:rows'); return { count: 1 }; }),
         },
         channel: { deleteMany: vi.fn(async () => { order.push('delete:created'); return { count: 1 }; }) },
         e2EKeyShare: { deleteMany: vi.fn(async () => { order.push('delete:shares'); return { count: 0 }; }) },
+        channelRead: { deleteMany: vi.fn() },
       };
     });
 
-    it('locks the channels the user created in the space, reads their members, deletes them, then removes every other row and the key shares', async () => {
+    it('locks EVERY secure channel the user created or belongs to, in id order, before deleting anything', async () => {
+      await removeSecureMembershipsInTx(tx as any, 'u1', 'srv-1');
+
+      // The lock is the first statement: a channel delete, another departure
+      // and an invite all take the channel row first too, so they queue on it
+      // in one order instead of each holding a row the other needs
+      expect(order[0]).toBe('lock:space');
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+      const lockSql = (tx.$queryRaw.mock.calls[0][0] as string[]).join('?');
+      expect(lockSql).toMatch(/c\.secure = true AND c\.server_id = \?/);
+      expect(lockSql).toMatch(/c\.created_by_id = \?\s+OR EXISTS \(SELECT 1 FROM channel_members cm WHERE cm\.channel_id = c\.id AND cm\.user_id = \?\)/);
+      expect(lockSql).toMatch(/ORDER BY c\.id\s+FOR UPDATE OF c$/);
+      expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['srv-1', 'u1', 'u1']);
+    });
+
+    it('then deletes the channels the user created, their rows in the others and the key shares; the read markers are not its business', async () => {
       const removal = await removeSecureMembershipsInTx(tx as any, 'u1', 'srv-1');
 
-      expect(order).toEqual(['lock:space', 'read:created-members', 'delete:created', 'read:rows', 'delete:rows', 'delete:shares']);
-      const lockSql = (tx.$queryRaw.mock.calls[0][0] as string[]).join('?');
-      expect(lockSql).toMatch(/created_by_id = \? AND server_id = \? AND secure = true[\s\S]*FOR UPDATE/);
-      expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['u1', 'srv-1']);
+      expect(order).toEqual(['lock:space', 'read:created-members', 'delete:created', 'delete:rows', 'delete:shares']);
       expect(tx.channel.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['sec-own'] }, secure: true } });
       // Every channel of the space, not only the secure ones: no row may
       // survive the membership
@@ -337,6 +350,9 @@ describe('secureChannelLifecycle', () => {
       expect(tx.e2EKeyShare.deleteMany).toHaveBeenCalledWith({
         where: { recipientUserId: 'u1', conversationId: { in: ['ch:sec-own', 'ch:sec-other'] } },
       });
+      // A read marker grants nothing; deleting it here would be one more row
+      // locked in an order a channel delete's cascade does not share
+      expect(tx.channelRead.deleteMany).not.toHaveBeenCalled();
       expect(removal).toEqual({
         userId: 'u1',
         deleted: [{ channelId: 'sec-own', serverId: 'srv-1', memberIds: ['u1', 'u9'] }],
@@ -348,13 +364,12 @@ describe('secureChannelLifecycle', () => {
       await removeSecureMembershipsInTx(tx as any, 'u1');
 
       expect(order[0]).toBe('lock:account');
-      expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['u1']);
+      expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['u1', 'u1']);
       expect(tx.channelMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } });
     });
 
     it('a user who created nothing and belongs to no secure channel: no channel delete, no key-share statement', async () => {
       tx.$queryRaw.mockResolvedValue([]);
-      tx.channelMember.findMany.mockResolvedValue([]);
 
       const removal = await removeSecureMembershipsInTx(tx as any, 'u1', 'srv-1');
 
