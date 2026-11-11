@@ -947,12 +947,24 @@ const ADAPTER_REQUEST_CHANNEL = 'socket.io-request#/#';
 async function testVisibilityResyncCrossNode(redis: any, ownerToken: string, memberToken: string, serverId: string) {
   console.log('\n── Test: Visibility Resync Across Nodes, One Peer Silent ──');
 
+  const requestSubscribers = async (): Promise<number> =>
+    Number(((await redis.sendCommand(['PUBSUB', 'NUMSUB', ADAPTER_REQUEST_CHANNEL])) as [string, number])[1]);
+  const before = await requestSubscribers();
   const silentPeer = redis.duplicate();
-  await silentPeer.connect();
-  await silentPeer.subscribe(ADAPTER_REQUEST_CHANNEL, () => { /* never answers */ });
 
   let member: Socket | null = null;
   try {
+    await silentPeer.connect();
+    await silentPeer.subscribe(ADAPTER_REQUEST_CHANNEL, () => { /* never answers */ });
+    // Without this the checks below pass vacuously: a renamed adapter channel
+    // would leave the silent peer counted by nobody
+    const after = await requestSubscribers();
+    assert(
+      before >= 2 && after === before + 1,
+      'The silent peer counts as a node on the adapter\'s request channel',
+      `subscribers before=${before} after=${after}`,
+    );
+
     const memberId: string = (await axios.get(`${API2}/auth/me`, auth(memberToken))).data.data.id;
     const channels = (await axios.get(`${API1}/servers/${serverId}/channels`, auth(ownerToken))).data.data as Array<{ id: string; type: string }>;
     const publicChannel = channels.find((c) => c.type === 'text');
