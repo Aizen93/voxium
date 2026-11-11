@@ -295,9 +295,12 @@ const MAX_SHARE_RETRIES = 10;
 const MAX_CLAIM_PAGES = 20;
 /**
  * Hard stop for the message-key history pull (guards a hostile server's
- * endless cursor): as many pages as the server can hold for one account.
+ * endless cursor): as many pages as the server holds for one account, plus
+ * two. The server checks its cap before it inserts, without a lock, so two
+ * devices backing up at once can leave an account a little over it, and
+ * those last rows would otherwise never be read.
  */
-const MAX_RESTORE_PAGES = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMITS.MESSAGE_KEY_PAGE_MAX);
+const MAX_RESTORE_PAGES = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMITS.MESSAGE_KEY_PAGE_MAX) + 2;
 /**
  * A kept key share whose sender's look-up the server has refused (403/404) in
  * this many starts is dropped: its sender rotates on a later send, and a share

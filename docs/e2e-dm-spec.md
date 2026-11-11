@@ -1096,8 +1096,10 @@ whole session rather than only the part the uploading device happened to see.
   for the whole pull. A page that finds the account key replaced since the
   pull began (another restore, a reset) stops the pull, and so does a dispose.
   The pull reads at most as many pages as the server can store for one
-  account (`MESSAGE_KEY_STORE_CAP / MESSAGE_KEY_PAGE_MAX`, 100), so a server
-  that never ends its cursor cannot keep it going.
+  account plus two (`MESSAGE_KEY_STORE_CAP / MESSAGE_KEY_PAGE_MAX + 2`, 102:
+  the server's cap is checked before an insert without a lock, so two devices
+  backing up at once can leave an account slightly over it), so a server that
+  never ends its cursor cannot keep it going.
 - Only a device holding the master secret can seal or open, which is the same
   condition as being able to approve devices.
 

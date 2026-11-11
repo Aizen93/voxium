@@ -5626,7 +5626,8 @@ describe('E2EService — lifecycle', () => {
       const userId = `alice-${uniq}`;
       const base = server.apiFor(userId);
       let pages = 0;
-      const pageCap = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMITS.MESSAGE_KEY_PAGE_MAX);
+      // the server holds at most this many pages, and an account can end up slightly over it (two pages of slack)
+      const pageCap = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMITS.MESSAGE_KEY_PAGE_MAX) + 2;
       const api = {
         ...base,
         async get(url: string) {
