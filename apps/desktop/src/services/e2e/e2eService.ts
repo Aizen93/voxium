@@ -324,6 +324,15 @@ const noop = (): void => {};
 const pendingTeardowns = new Map<string, Promise<void>>();
 
 /**
+ * Late raw pages written so far, by vault database name: a torn-down service
+ * whose claim was answered after the teardown deadline writes that page beside
+ * whatever newer service now uses the vault. A newer service's kept-share
+ * index (keptShares) is unknown again once this moved past the count it was
+ * filled at, so its next device-sealed decrypt lists the vault again.
+ */
+const lateShareWrites = new Map<string, number>();
+
+/**
  * Vault key of a claimed key share: its creation time first, so a listing
  * returns shares oldest first (the order their Olm messages were sent in).
  */
@@ -530,11 +539,13 @@ export class E2EService {
    * from a device with none costs no vault read (importKeptSharesFrom). Null
    * until a listing of the vault fills it, refilled by every listing, and kept
    * in step by every write and delete of a kept share, all on the queue. It
-   * may still name a share that is gone, never miss one that is kept, with
-   * one exception that the next claim's listing closes: a page an earlier
-   * service on this vault writes late, raw, after this one started (dispose()).
+   * may still name a share that is gone, never miss one that is kept: a page
+   * an earlier service on this vault writes late, raw, after this one listed
+   * (dispose()), makes the index unknown again (lateShareWrites).
    */
   private keptShares: Map<string, string> | null = null;
+  /** lateShareWrites of this vault when keptShares was last filled. */
+  private keptSharesLateWrites = 0;
   private deviceListListeners = new Set<(userId: string) => void>();
 
   constructor(
@@ -3197,6 +3208,8 @@ export class E2EService {
             await this.vault.writePendingSharesLate(claimedPageEntries(res).entries);
           } finally {
             this.vault.releaseLateConnection();
+            // a newer service on this vault has not listed these (lateShareWrites)
+            lateShareWrites.set(this.vaultName, (lateShareWrites.get(this.vaultName) ?? 0) + 1);
           }
           throw new E2EServiceDisposedError();
         }
@@ -3221,8 +3234,11 @@ export class E2EService {
 
   /** Every kept share, oldest first; refills keptShares from what the vault holds. */
   private async listKeptShares(): Promise<Array<{ key: string; record: PendingKeyShare }>> {
+    // read before the listing: a late page landing during it moves the count again
+    const lateWrites = lateShareWrites.get(this.vaultName) ?? 0;
     const kept = await this.vault.listPendingShares();
     this.keptShares = new Map(kept.map(({ key, record }) => [key, keptShareSender(record)]));
+    this.keptSharesLateWrites = lateWrites;
     return kept;
   }
 
@@ -3521,7 +3537,10 @@ export class E2EService {
   private async importKeptSharesFrom(userId: string, deviceId: string): Promise<void> {
     const sender = `${userId}|${deviceId}`;
     // nothing kept from this device: no vault read on the way to every call signal
-    if (this.keptShares && ![...this.keptShares.values()].includes(sender)) return;
+    // (an index an earlier service's late page outdated counts as unknown)
+    const index = this.keptShares;
+    const current = this.keptSharesLateWrites === (lateShareWrites.get(this.vaultName) ?? 0);
+    if (index && current && ![...index.values()].includes(sender)) return;
     const kept = (await this.listKeptShares()).filter(({ record }) => keptShareSender(record) === sender);
     if (kept.length > 0) await this.processPendingShares(kept, new Set(), true);
   }

@@ -4906,6 +4906,41 @@ describe('E2EService — lifecycle', () => {
       expect(await signal(2)).toBe(1); // and no longer named
     });
 
+    it('looks for a page an earlier service on the vault wrote late before the next signal of its sender', async () => {
+      // Alice's claim is answered after the teardown deadline, while she has
+      // already signed in again: the page is written raw by the old service,
+      // after the new one listed what was kept.
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('written late by the old service');
+      const gate = holdingApi(
+        server.apiFor(alice.userId),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const old = new E2EService(alice.userId, {
+        api: gate.api as unknown as E2EServiceOptions['api'],
+        keyProvider: alice.keyProvider,
+        wasmInput: wasmBytes,
+        vaultNamespace: alice.vaultNamespace,
+        deviceListCacheMs: 0,
+        teardownDeadlineMs: 50,
+      });
+      await old.initialize();
+      await gate.held;
+      await old.dispose(); // the deadline passes with the answer still on its way
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      await again.service.claimMasterTransfers(); // its start-up claim has listed (nothing kept)
+      gate.release();
+      await vi.waitFor(async () => expect(await pendingIn(alice)).toHaveLength(1));
+
+      const sealed = await bob.service.encryptToDevice(alice.userId, again.service.deviceId, 'an offer');
+      expect(await again.service.decryptFromDevice(bob.userId, bob.service.deviceId, sealed)).toBe('an offer');
+      // imported ahead of the signal, not left for the signals to overtake
+      expect(await pendingIn(alice)).toHaveLength(0);
+      expect((await again.service.decryptMessage(message)).text).toBe('written late by the old service');
+    });
+
     it('still decrypts a call signal when importing its sender’s kept shares first fails', async () => {
       const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept across a failed import');
       server.setDeviceListReadFailure(true);
