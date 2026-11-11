@@ -320,8 +320,8 @@ function resyncLocalSockets(scope: ResyncScope, attempt = 1): Promise<void> {
  * in about six seconds. For ONE MEMBER's pass (a role taken away, a re-check
  * after a join raced a resync) it fails closed: that member's sockets on this
  * node are disconnected, except a socket in a voice room (cutting a call is
- * worse than a late revocation, and its rooms are corrected by the next
- * resync or reconnect). The client reopens a socket the server closed, and the
+ * worse than a late revocation), which keeps only its call's channel room
+ * (see disconnectOutsideVoice). The client reopens a socket the server closed, and the
  * connect path computes every room afresh — when the database answers again,
  * since the handshake reads it too. For a pass over a whole space or a whole
  * channel it gives up, logged as an error: disconnecting every member of a
@@ -348,14 +348,33 @@ function afterFailedPass(scope: ResyncScope, attempt: number): void {
   void disconnectOutsideVoice(scope.serverId, scope.userId, total);
 }
 
-/** The fail-closed end of a member's pass (see afterFailedPass). Never rejects. */
+/**
+ * The fail-closed end of a member's pass (see afterFailedPass). A socket in a
+ * call is kept connected, but it is not kept as it was: without the database
+ * the pass cannot tell which rooms the member lost, so the socket leaves every
+ * `channel:` room except the one of each voice channel it is in (the call's
+ * presence events). It gets the others back when the member opens a channel
+ * (channel:join re-checks VIEW) or reconnects. Never rejects.
+ */
 async function disconnectOutsideVoice(serverId: string, userId: string, failures: number): Promise<void> {
   try {
     const sockets = await getIO().local.in(`user:${userId}`).fetchSockets();
-    const inCall = (s: { rooms?: Set<string> }) => [...(s.rooms ?? [])].some((room) => room.startsWith('voice:'));
-    const closing = sockets.filter((s) => !inCall(s));
-    for (const s of closing) s.disconnect(true);
-    console.error(`[Visibility] Resync of member ${userId} in server ${serverId} on this node failed ${failures} times: disconnected ${closing.length} of their socket(s) so the reconnect recomputes their rooms (fail closed); ${sockets.length - closing.length} in a voice call kept`);
+    let closed = 0;
+    let trimmed = 0;
+    for (const s of sockets) {
+      const rooms = [...(s.rooms ?? [])];
+      const callRooms = new Set(rooms.filter((room) => room.startsWith('voice:')).map((room) => `channel:${room.slice('voice:'.length)}`));
+      if (callRooms.size === 0) {
+        s.disconnect(true);
+        closed++;
+        continue;
+      }
+      for (const room of rooms) {
+        if (room.startsWith('channel:') && !callRooms.has(room)) s.leave(room);
+      }
+      trimmed++;
+    }
+    console.error(`[Visibility] Resync of member ${userId} in server ${serverId} on this node failed ${failures} times: disconnected ${closed} of their socket(s) so the reconnect recomputes their rooms (fail closed); ${trimmed} in a call kept, with only their call's channel room`);
   } catch (err) {
     console.error(`[Visibility] Could not disconnect member ${userId} after ${failures} failed resyncs of server ${serverId}; their sockets on this node keep their rooms until they reconnect:`, err);
   }

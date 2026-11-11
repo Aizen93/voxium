@@ -1182,6 +1182,23 @@ describe('a local pass that fails is queued again', () => {
     expect(m.filterForUsers).toHaveBeenCalledTimes(3);
   });
 
+  // Review of #71: the socket spared for its call kept EVERY room, so a
+  // member who lost #staff while in a call kept receiving #staff.
+  it('a socket kept for its voice call keeps only its call\'s channel room', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const inCall = createMockSocket('user-1', { rooms: ['inCall-socket', 'user:user-1', 'server:server-1', 'voice:ch-v', 'channel:ch-v', 'channel:ch-staff', 'channel:ch-other-space', 'dm:conv-1'] });
+    m.localFetch.mockResolvedValue([inCall]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-staff' }]);
+    m.filterForUsers.mockRejectedValue(poolTimeout());
+
+    await syncChannelVisibilityRooms('server-1', { userId: 'user-1' });
+    await vi.advanceTimersByTimeAsync(LOCAL_PASS_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
+
+    expect(inCall.disconnect).not.toHaveBeenCalled();
+    expect(inCall.leave.mock.calls.map((c) => c[0]).sort()).toEqual(['channel:ch-other-space', 'channel:ch-staff']);
+  });
+
   it('the third failure of a space-wide pass gives up, logged as an error, disconnecting nobody', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
