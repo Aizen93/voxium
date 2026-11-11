@@ -94,6 +94,28 @@ describe('parseAssetOrigins', () => {
       expect(() => parseAssetOrigins(bad), bad).toThrow(/TAURI_ASSET_ORIGIN must hold origins like https:\/\/host\[:port\]/);
     }
   });
+
+  // The webview drops a source it cannot parse with nothing but a console
+  // warning: the build would ship without the storage origin, silently
+  it('refuses a port or a host no CSP source can name (out-of-range port, empty label, IPv6 literal, wildcard)', () => {
+    for (const bad of [
+      'https://storage.example.org:0',
+      'https://storage.example.org:65536',
+      'https://storage.example.org:99999',
+      'https://storage..example.org',
+      'https://.storage.example.org',
+      'https://[::1]:9000',
+      'https://*.example.org',
+      'https://storage_example.org',
+    ]) {
+      expect(() => parseAssetOrigins(bad), bad).toThrow(/TAURI_ASSET_ORIGIN must hold origins like https:\/\/host\[:port\]/);
+    }
+  });
+
+  it('keeps every origin it accepts as written (ports 1 and 65535, an IPv4 address, a final dot, upper case)', () => {
+    const good = ['https://storage.example.org:1', 'http://10.0.0.5:65535', 'https://storage.example.org.', 'https://Storage.Example.org'];
+    expect(parseAssetOrigins(good.join(','))).toEqual(good);
+  });
 });
 
 describe('withAssetOrigins', () => {

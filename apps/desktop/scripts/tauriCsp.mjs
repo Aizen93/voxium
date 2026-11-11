@@ -10,14 +10,31 @@
 // Pure functions here, so the desktop test suite can pin them; the CLI is
 // tauri-release-config.mjs.
 
-const ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/i;
+// A host the policy can name: dot-separated labels, none empty (an optional
+// final dot is still a valid DNS name and CSP host). Anything else, an IPv6
+// literal included, is not a CSP host-source: the webview drops such a source
+// with a console warning and the policy silently loses it.
+const HOST_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?$/i;
+const ORIGIN_RE = /^https?:\/\/([^/:?#]+)(?::(\d{1,5}))?$/i;
 const DIRECTIVES = ['img-src', 'connect-src'];
+
+/** Whether `host` is a hostname a CSP host-source can name. */
+export function isCspHost(host) {
+  return typeof host === 'string' && HOST_RE.test(host);
+}
+
+/** Whether `port` (digits) is a TCP port, 1..65535. */
+export function isTcpPort(port) {
+  const n = Number(port);
+  return Number.isInteger(n) && n >= 1 && n <= 65535;
+}
 
 /** Split `TAURI_ASSET_ORIGIN` ("https://a.example, https://b.example") into origins, refusing anything that is not a bare scheme://host[:port]. */
 export function parseAssetOrigins(value) {
   const parts = (value ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   for (const p of parts) {
-    if (!ORIGIN_RE.test(p)) {
+    const m = ORIGIN_RE.exec(p);
+    if (!m || !isCspHost(m[1]) || (m[2] !== undefined && !isTcpPort(m[2]))) {
       throw new Error(`TAURI_ASSET_ORIGIN must hold origins like https://host[:port], got "${p}"`);
     }
   }
