@@ -50,12 +50,15 @@ interface LoggableError {
 /**
  * Prisma errors whose message (and so the first lines of the stack) prints
  * the call: its arguments verbatim, `where` values, `data` values (a password
- * hash, an e-mail address) and the source lines around the call.
+ * hash, an e-mail address) and the source lines around the call. A panic's
+ * message comes from a renderer nobody here has traced, so it is treated the
+ * same way: name only, never its text.
  */
 const PRISMA_ARGUMENT_ERRORS = new Set([
   'PrismaClientValidationError',
   'PrismaClientKnownRequestError',
   'PrismaClientUnknownRequestError',
+  'PrismaClientRustPanicError',
 ]);
 
 /**

@@ -421,6 +421,31 @@ describe('errorHandler middleware — a Prisma error is logged without the argum
     });
   }
 
+  it.each([
+    ['an unknown request error', () => new Prisma.PrismaClientUnknownRequestError(
+      `\nInvalid \`prisma.user.update()\` invocation:\n\n{ where: { email: "${SECRET_EMAIL}" }, data: { password: "${SECRET_HASH}" } }\n\nError occurred during query execution`,
+      { clientVersion: '7.0.0' },
+    ), 'PrismaClientUnknownRequestError', 'user.update() failed (arguments not logged)'],
+    ['a panic', () => new Prisma.PrismaClientRustPanicError(
+      `PANIC: called \`Option::unwrap()\` on a \`None\` value while rendering { email: "${SECRET_EMAIL}", password: "${SECRET_HASH}" }`,
+      '7.0.0',
+    ), 'PrismaClientRustPanicError', 'Prisma query failed (arguments not logged)'],
+  ])('%s is logged by its name, never its message or the stack lines that repeat it', async (_what, make, name, message) => {
+    for (const mode of ['development', 'production']) {
+      process.env.NODE_ENV = mode;
+      errorSpy.mockClear();
+      const error = make();
+
+      await request(buildApp(error)).get('/test');
+
+      const logged = errorSpy.mock.calls[0].join(' ');
+      expect(logged).toContain(name);
+      expect(logged).toContain(message);
+      expect(logged).not.toContain(SECRET_EMAIL);
+      expect(logged).not.toContain(SECRET_HASH);
+    }
+  });
+
   it('a known request error is logged by its name, its code and its model, never its message', async () => {
     process.env.NODE_ENV = 'production';
     const error = new Prisma.PrismaClientKnownRequestError(
