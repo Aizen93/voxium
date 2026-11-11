@@ -4653,7 +4653,7 @@ describe('E2EService — lifecycle', () => {
       }
     });
 
-    it('keeps a share whose session could not be stored (a full disk), for the next start', async () => {
+    it('keeps a share whose session could not be stored (a full disk), and retries it at the next claim', async () => {
       const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept through a full disk');
       const tight = restart(server, alice);
       const tightVault = (tight.service as unknown as { vault: E2EVault }).vault;
@@ -4663,14 +4663,52 @@ describe('E2EService — lifecycle', () => {
       await tight.service.initialize();
       await tight.service.claimMasterTransfers(); // queued behind the start-up claim
       expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
-      // a later claim of the same start leaves it alone: this start's Olm state already moved past it
+      // a later claim of the same start, the disk writable again, imports it
       await missOn(tight, bob.userId, ['cXVvdGE']);
-      expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
+      expect(await pendingIn(alice)).toHaveLength(0);
+      expect((await tight.service.decryptMessage(message)).text).toBe('kept through a full disk');
       await tight.service.dispose();
 
       const again = restart(server, alice);
       await again.service.initialize();
       expect((await again.service.decryptMessage(message)).text).toBe('kept through a full disk');
+    });
+
+    it.each([
+      ['a share from another sender, imported right after it (the account is written)', 'other-sender'],
+      ['a reply to its sender (their pairwise session is written)', 'reply'],
+    ])('a share whose session could not be stored still decrypts at the next start after %s', async (_label, later) => {
+      // The disk refuses this one session for the whole start. The Olm decrypt
+      // that read the share must not have moved the live state on, or the next
+      // write of that state puts the message's one-time key (or message key)
+      // out of reach, and the kept share is discarded as unusable later. Nor
+      // may the later claim of this start take the session for imported from
+      // a copy that only lived in memory, and drop the share.
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept through a whole start');
+      const carol = makeParty(server, 'carol');
+      await carol.service.initialize();
+      await flushQueue();
+      if (later === 'other-sender') await carol.service.encryptMessage('c-carol', alice.userId, 'read right after');
+
+      const tight = restart(server, alice);
+      const tightVault = (tight.service as unknown as { vault: E2EVault }).vault;
+      const put = tightVault.putInboundGroupSession.bind(tightVault);
+      const refused = sidOf(message.content);
+      vi.spyOn(tightVault, 'putInboundGroupSession').mockImplementation((sessionId, record) =>
+        sessionId === refused
+          ? Promise.reject(new DOMException('The quota has been exceeded.', 'QuotaExceededError'))
+          : put(sessionId, record)
+      );
+      await tight.service.initialize();
+      await tight.service.claimMasterTransfers(); // queued behind the start-up claim
+      if (later === 'reply') await tight.service.encryptMessage('c1', bob.userId, 'a reply');
+      await missOn(tight, bob.userId, ['bGF0ZXI']); // one more claim of this start
+      expect(await pendingIn(alice)).toHaveLength(1);
+      await tight.service.dispose();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('kept through a whole start');
       expect(await pendingIn(alice)).toHaveLength(0);
     });
 

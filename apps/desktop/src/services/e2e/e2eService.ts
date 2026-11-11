@@ -497,8 +497,6 @@ export class E2EService {
   private missingSessions = new Map<string, number>();
   /** Kept shares whose refused look-up was already counted in this start (see processPendingShares). */
   private deferralsCounted = new Set<string>();
-  /** Senders whose shares wait for the next start after a storage failure (see processPendingShares). */
-  private sendersHeldUntilRestart = new Set<string>();
   private deviceListListeners = new Set<(userId: string) => void>();
 
   constructor(
@@ -2418,32 +2416,54 @@ export class E2EService {
   ): Promise<string | null> {
     const staged = await this.olmDecryptStaged(userId, deviceId, envelope);
     if (!staged) return null;
-    await staged.persist();
+    await staged.commit()();
     return staged.text;
   }
 
   /**
-   * The Olm decrypt, with the writes of the state it advanced handed back
-   * instead of done. A caller that stores what the message carried (a key
-   * share's group session) writes that FIRST: a run cut in between then leaves
-   * the old Olm state on disk, under which the same message decrypts again.
-   * Persisting first left the reverse: a kept share whose message key, or
-   * one-time key, was already spent.
+   * The Olm decrypt, made on a COPY of the state it would advance (the
+   * session, or the account for a new inbound session), so the live state
+   * moves past the message only once the caller commits it. `commit()`
+   * repeats the decrypt on the live objects (the same state gives the same
+   * result) and hands back the writes of what it advanced.
+   *
+   * A key share is committed once its group session is stored (importKeyShare).
+   * Until then the live Olm state still holds the message's key, so a share
+   * kept because that store failed loses nothing to whatever else this session
+   * writes meanwhile: the account (another sender's pre-key share, a
+   * replenishment) or this pairwise session (a reply, a call signal). Its
+   * writes come after the group session's, so a run cut in between leaves the
+   * old Olm state on disk, under which the same message decrypts again.
    */
   private async olmDecryptStaged(
     userId: string,
     deviceId: string,
     envelope: E2EOlmEnvelope
-  ): Promise<{ text: string; persist: () => Promise<void> } | null> {
+  ): Promise<{ text: string; commit: () => () => Promise<void> } | null> {
     const identity = await this.vault.getIdentity(userId, deviceId);
     if (!identity) return null;
-    const account = this.requireAccount();
     const key = shareKey(userId, deviceId);
     const session = await this.loadOlmSession(userId, deviceId);
-    const staged = (text: string, ...writes: Array<() => Promise<void>>) => ({
-      text,
-      persist: async () => {
-        for (const write of writes) await write();
+    const pickleKey = this.vault.pickleKey();
+    const decryptOnCopy = (live: EngineSession): string => {
+      const copy = EngineSession.fromPickle(live.pickle(pickleKey), pickleKey);
+      try {
+        return copy.decrypt(envelope.t, envelope.b);
+      } finally {
+        copy.free();
+      }
+    };
+    const liveObjects = () => {
+      // committed right after an await of the caller's: never on what a teardown freed
+      if (this.tornDown) throw new E2EServiceDisposedError();
+    };
+    /** A message one existing session decrypts: committing advances that session. */
+    const onSession = (live: EngineSession, persist: () => Promise<void>) => ({
+      text: decryptOnCopy(live),
+      commit: () => {
+        liveObjects();
+        live.decrypt(envelope.t, envelope.b);
+        return persist;
       },
     });
 
@@ -2453,51 +2473,67 @@ export class E2EService {
       // identity — vodozemac rejects a mismatch).
       const incomingSessionId = prekey_message_session_id(envelope.b);
       if (session && incomingSessionId === session.sessionId()) {
-        const text = session.decrypt(envelope.t, envelope.b);
-        return staged(text, () => this.persistOlmSession(userId, deviceId, session));
+        return onSession(session, () => this.persistOlmSession(userId, deviceId, session));
       }
       const fallback = await this.loadOlmFallbackSession(userId, deviceId);
       if (fallback && incomingSessionId === fallback.sessionId()) {
-        const text = fallback.decrypt(envelope.t, envelope.b);
-        return staged(text, () => this.persistOlmFallbackSession(userId, deviceId, fallback));
+        return onSession(fallback, () => this.persistOlmFallbackSession(userId, deviceId, fallback));
       }
-      const inbound = account.createInboundSession(identity.curve25519Key, envelope.b);
-      const text = inbound.plaintext;
-      const fresh = inbound.takeSession();
-      const writes: Array<() => Promise<void>> = [];
-      if (session) {
-        // GLARE: our own outbound session crossed the peer's prekey message
-        // in flight (both sides of a call establish simultaneously). DEMOTE
-        // it instead of discarding — the peer keeps decrypting our sends
-        // through their copy of it, and we decrypt theirs through this new
-        // inbound. Discarding deafened BOTH directions on every call.
-        fallback?.free();
-        this.olmFallbackSessions.set(key, session);
-        writes.push(() => this.persistOlmFallbackSession(userId, deviceId, session));
+      // A new inbound session consumes a one-time key of the account: tried on
+      // a copy of the account, then made for real on commit.
+      const scratch = EngineAccount.fromPickle(this.requireAccount().pickle(pickleKey), pickleKey);
+      let text: string;
+      try {
+        const probe = scratch.createInboundSession(identity.curve25519Key, envelope.b);
+        text = probe.plaintext;
+        probe.takeSession().free();
+        probe.free();
+      } finally {
+        scratch.free();
       }
-      this.olmSessions.set(key, fresh);
-      writes.push(() => this.persistOlmSession(userId, deviceId, fresh));
-      writes.push(() => this.persistAccount()); // the used one-time key was consumed
-      return staged(text, ...writes);
+      return {
+        text,
+        commit: () => {
+          liveObjects();
+          const inbound = this.requireAccount().createInboundSession(identity.curve25519Key, envelope.b);
+          const fresh = inbound.takeSession();
+          inbound.free();
+          const writes: Array<() => Promise<void>> = [];
+          if (session) {
+            // GLARE: our own outbound session crossed the peer's prekey message
+            // in flight (both sides of a call establish simultaneously). DEMOTE
+            // it instead of discarding — the peer keeps decrypting our sends
+            // through their copy of it, and we decrypt theirs through this new
+            // inbound. Discarding deafened BOTH directions on every call.
+            fallback?.free();
+            this.olmFallbackSessions.set(key, session);
+            writes.push(() => this.persistOlmFallbackSession(userId, deviceId, session));
+          }
+          this.olmSessions.set(key, fresh);
+          writes.push(() => this.persistOlmSession(userId, deviceId, fresh));
+          writes.push(() => this.persistAccount()); // the used one-time key was consumed
+          return async () => {
+            for (const write of writes) await write();
+          };
+        },
+      };
     }
 
     // Normal message: try the active session, then the glare fallback —
     // after crossed establishment each side sends on its own session.
     if (session) {
       try {
-        const text = session.decrypt(envelope.t, envelope.b);
-        return staged(text, () => this.persistOlmSession(userId, deviceId, session));
+        return onSession(session, () => this.persistOlmSession(userId, deviceId, session));
       } catch (primaryErr) {
         const fallback = await this.loadOlmFallbackSession(userId, deviceId);
         if (!fallback) throw primaryErr;
-        const text = fallback.decrypt(envelope.t, envelope.b); // both failing throws to the caller
-        return staged(text, () => this.persistOlmFallbackSession(userId, deviceId, fallback));
+        // both failing throws to the caller
+        return onSession(fallback, () => this.persistOlmFallbackSession(userId, deviceId, fallback));
       }
     }
     const fallback = await this.loadOlmFallbackSession(userId, deviceId);
     if (!fallback) return null;
-    const text = fallback.decrypt(envelope.t, envelope.b);
-    return staged(text, () => this.persistOlmFallbackSession(userId, deviceId, fallback));
+    return onSession(fallback, () => this.persistOlmFallbackSession(userId, deviceId, fallback));
   }
 
   /**
@@ -2637,8 +2673,16 @@ export class E2EService {
       senderUserId: meta.senderUserId,
       senderDeviceId: meta.senderDeviceId,
     };
+    // Held in memory only once it is stored. A copy that lived only here
+    // would read as "already imported" to the retry of the key share that
+    // carried it, which would then drop the one copy the next start needs.
+    try {
+      await this.vault.putInboundGroupSession(meta.sessionId, record);
+    } catch (err) {
+      session.free();
+      throw err;
+    }
     this.inbound.set(meta.sessionId, { session, record });
-    await this.vault.putInboundGroupSession(meta.sessionId, record);
     this.pinSecureScope(meta.conversationId);
     return true;
   }
@@ -3025,7 +3069,18 @@ export class E2EService {
    * unusable: a run cut short (a logout, the teardown deadline, a closed
    * window) leaves the rest there, and the next run starts with them. So does
    * a share whose sender cannot be looked up right now (see
-   * E2EShareDeferredError), up to MAX_PENDING_SHARE_ATTEMPTS runs.
+   * E2EShareDeferredError), up to MAX_PENDING_SHARE_ATTEMPTS runs, and one
+   * whose session could not be stored (its Olm decrypt is not committed, see
+   * olmDecryptStaged).
+   *
+   * Known residual (docs/e2e-dm-spec.md §12.3): a share kept undecrypted
+   * because its sender was not pinned can be overtaken by later Olm messages
+   * of that device decrypted meanwhile (decryptFromDevice: call signals,
+   * secure-voice keys). It then decrypts only through vodozemac's skipped
+   * message keys (40 per receiving chain, 5 chains per session), and past
+   * those bounds it is discarded as unusable at its next claim. Closing that
+   * would mean decrypting a pre-key message before its sender is pinned,
+   * which the trust rules do not allow.
    *
    * Callers must already hold the serial queue (this mutates Olm state).
    */
@@ -3102,10 +3157,6 @@ export class E2EService {
     for (const { key, record } of entries) {
       const { share } = record;
       const sender = typeof share.senderUserId === 'string' ? share.senderUserId : '';
-      // Held since a storage failure this start: the Olm state in memory has
-      // moved past their messages, which decrypt again only from the state on
-      // disk, at the next start. Kept as they are, nothing counted.
-      if (this.sendersHeldUntilRestart.has(sender)) continue;
       try {
         if (retry && typeof share.sessionId === 'string' && (await this.loadInbound(share.sessionId))) {
           await this.vault.deletePendingShare(key);
@@ -3116,9 +3167,10 @@ export class E2EService {
         }
         const outcome = await this.importKeyShare(share);
         if (outcome.imported) imported++;
-        // The group session is stored: the kept copy goes, and only then the
-        // Olm state its message advanced is written. Cut before this point,
-        // the share is still kept and still decrypts.
+        // The group session is stored and the decrypt committed: the kept
+        // copy goes, and only then the Olm state its message advanced is
+        // written. Cut before this point, the share is still kept and still
+        // decrypts from the state on disk.
         await this.vault.deletePendingShare(key);
         try {
           await outcome.persistOlm();
@@ -3149,10 +3201,11 @@ export class E2EService {
           throw err;
         }
         if (isStorageFailure(err)) {
-          // Nothing wrong with the share, only with the disk: kept with its
-          // Olm state unwritten, and its sender's shares held behind it.
-          this.sendersHeldUntilRestart.add(sender);
-          console.warn('e2e: keeping a key share whose session could not be stored (retried at the next start):', errText(err));
+          // Nothing wrong with the share, only with the disk. Its Olm decrypt
+          // was not committed (importKeyShare), so it is kept as it is and
+          // retried by the next claim, its sender's later shares behind it.
+          deferredSenders.add(sender);
+          console.warn('e2e: keeping a key share whose session could not be stored (retried by the next claim):', errText(err));
           continue;
         }
         console.warn('e2e: discarding an unusable key share:', errText(err));
@@ -3202,8 +3255,9 @@ export class E2EService {
     }
     if (!identity) throw new Error(`unknown sender device ${senderUserId}/${senderDeviceId}`);
 
-    // Decrypted in memory; the advanced Olm state is written by the caller once
-    // the group session is stored and the kept copy removed (olmDecryptStaged)
+    // Decrypted on a copy of the Olm state; the live state moves past the
+    // message once the group session is stored, and is written by the caller
+    // after the kept copy is removed (olmDecryptStaged)
     const staged = await this.olmDecryptStaged(senderUserId, senderDeviceId, envelope);
     if (staged === null) throw new Error('no Olm session for this key share');
 
@@ -3228,15 +3282,16 @@ export class E2EService {
         senderUserId,
         senderDeviceId,
       });
-      return { imported, persistOlm: staged.persist };
+      // stored: only now does the live Olm state move past this message
+      return { imported, persistOlm: staged.commit() };
     } catch (err) {
-      // An unusable share is discarded, so the Olm state its message advanced
-      // is saved now. A run cut short (the service went away) or a storage
-      // failure saves nothing: the share stays kept, and its message must
-      // still decrypt from the state on disk next time.
+      // An unusable share is discarded, so its message is consumed and the
+      // Olm state it advanced saved now. A run cut short (the service went
+      // away) or a storage failure commits nothing: the share stays kept, and
+      // its message still decrypts, in this session as from the state on disk.
       const keptForLater =
         this.tornDown || err instanceof E2EServiceDisposedError || err instanceof E2EVaultClosedError || isStorageFailure(err);
-      if (!keptForLater) await staged.persist();
+      if (!keptForLater) await staged.commit()();
       throw err;
     }
   }
