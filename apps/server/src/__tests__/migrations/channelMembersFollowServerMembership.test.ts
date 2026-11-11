@@ -57,6 +57,14 @@ describe('the channel_members migration', () => {
     );
   });
 
+  it('says what its time predicate rests on: the application\'s clock, one instance, and what a clock step costs', () => {
+    const comments = commentLines.join('\n');
+    expect(comments).toMatch(/APPLICATION's clock/);
+    expect(comments).toMatch(/single-instance deployment/);
+    expect(comments).toMatch(/clock\s+--\s+stepped backwards|clock stepped backwards/);
+    expect(comments).toMatch(/only ever removes access/);
+  });
+
   it('is idempotent: its only conditions are the state it produces, so a second run matches nothing', () => {
     // No time window relative to now, no id list, no flag a run would flip
     expect(statements.join('\n')).not.toMatch(/\b(now\(\)|interval|IN \(')/i);

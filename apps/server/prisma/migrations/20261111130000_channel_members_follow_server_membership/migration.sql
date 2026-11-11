@@ -19,10 +19,17 @@
 -- 1. The rows no membership of the channel's space backs: the user is not a
 --    member of the space, or their current membership began AFTER the row
 --    was written (a row from an earlier membership, honoured again after a
---    rejoin). Both timestamps are written when the rows are inserted, and a
---    row is written only after its user's membership row committed (the
---    writer locks that row first), so a row of the current membership is
---    never older than it; an equal timestamp is kept.
+--    rejoin). A row is written only after its user's membership row
+--    committed (the writer locks that row first), so a row of the current
+--    membership is not older than it; an equal timestamp is kept.
+--    Both columns are filled by the APPLICATION's clock, not the database's
+--    (Prisma writes `@default(now())` itself), so the comparison is only as
+--    good as that clock. It is safe here because the migration runs once,
+--    against data written by a single-instance deployment, one clock. A clock
+--    stepped backwards between a join and a later invite could make a
+--    legitimate row look older than its membership: that row would be
+--    deleted, its member losing access until invited again. Nothing is
+--    exposed either way: the predicate only ever removes access.
 DELETE FROM "channel_members" cm
 USING "channels" c
 WHERE c."id" = cm."channel_id"
