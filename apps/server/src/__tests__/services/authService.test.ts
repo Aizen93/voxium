@@ -16,10 +16,12 @@ vi.mock('../../utils/prisma', () => ({
   },
 }));
 
-vi.mock('../../utils/email', () => ({
+vi.mock('../../utils/email', async (importOriginal) => ({
   sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   describeEmailError: vi.fn((e: unknown) => String(e)),
+  // The real classifier: which send failures prove no recipient was reached
+  failedBeforeAnyRecipient: (await importOriginal<typeof import('../../utils/email')>()).failedBeforeAnyRecipient,
   // A real class: the service tells it apart with instanceof
   MailSuppressedError: class MailSuppressedError extends Error {
     constructor() { super('Mail to this address is blocked'); this.name = 'MailSuppressedError'; }
@@ -659,6 +661,149 @@ describe('authService — requestPasswordReset', () => {
       expect.anything(),
     );
     error.mockRestore();
+  });
+});
+
+describe('authService — a password-reset mail that provably reached nobody refunds the mailbox', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  const smtpError = (fields: Record<string, unknown>) => Object.assign(new Error('send failed'), fields);
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    vi.mocked(prisma.user.findUnique).mockReset();
+    vi.mocked(prisma.user.update).mockReset().mockResolvedValue({} as any);
+    vi.mocked(prisma.user.updateMany).mockClear();
+    mailCap.mockReset().mockResolvedValue(true);
+    refund.mockReset().mockResolvedValue(undefined);
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    vi.mocked(sendPasswordResetEmail).mockReset().mockResolvedValue(undefined);
+    errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorLog.mockRestore();
+  });
+
+  const resetWithSendFailure = async (err: unknown) => {
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(err);
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'j.doe@gmail.com' } as any);
+    await expect(requestPasswordReset('J.Doe@gmail.com')).resolves.toBeUndefined();
+    await flush();
+    await flush();
+  };
+
+  it.each([
+    ['the connection', { code: 'ECONNECTION', command: 'CONN' }],
+    ['a connect timeout', { code: 'ETIMEDOUT', command: 'CONN' }],
+    ['the greeting', { code: 'EPROTOCOL', command: 'EHLO' }],
+    ['TLS', { code: 'ETLS', command: 'STARTTLS' }],
+    ['the login', { code: 'EAUTH', command: 'AUTH PLAIN' }],
+    ['a DNS failure, no command', { code: 'EDNS' }],
+    ['a refused login, no command', { code: 'EAUTH' }],
+    ['a refused connection, no command', { code: 'ECONNECTION' }],
+  ])('refunds the point after a failure at %s, keyed on the canonical inbox the consume used', async (_what, fields) => {
+    await resetWithSendFailure(smtpError(fields));
+
+    expect(mailCap).toHaveBeenCalledWith('resetMail', 'jdoe@gmail.com');
+    expect(refund).toHaveBeenCalledTimes(1);
+    expect(refund).toHaveBeenCalledWith('resetMail', 'jdoe@gmail.com');
+  });
+
+  it.each([
+    ['a refused recipient', { code: 'EENVELOPE', command: 'RCPT TO', responseCode: 550 }],
+    ['a refused sender', { code: 'EENVELOPE', command: 'MAIL FROM', responseCode: 553 }],
+    ['a timeout during DATA', { code: 'ETIMEDOUT', command: 'DATA' }],
+    ['a dropped connection during DATA', { code: 'ECONNECTION', command: 'DATA' }],
+    ['a failure after the message', { code: 'EMESSAGE', command: 'MESSAGE' }],
+    ['a timeout naming no command', { code: 'ETIMEDOUT' }],
+    ['an error with neither code nor command', {}],
+  ])('keeps the point after %s: no proof that nobody got the mail', async (_what, fields) => {
+    await resetWithSendFailure(smtpError(fields));
+
+    expect(refund).not.toHaveBeenCalled();
+  });
+
+  it('never restores the previous reset token, whatever the failure', async () => {
+    await resetWithSendFailure(smtpError({ code: 'ECONNECTION', command: 'CONN' }));
+
+    // The one write is the new token; nothing writes an older one back
+    expect(prisma.user.update).toHaveBeenCalledTimes(1);
+    expect((vi.mocked(prisma.user.update).mock.calls[0][0] as any).data.resetToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a token write that fails sends nothing and refunds the point', async () => {
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    vi.mocked(prisma.user.update).mockRejectedValueOnce(new Error('db gone'));
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'j.doe@gmail.com' } as any);
+
+    await requestPasswordReset('j.doe@gmail.com');
+    await flush();
+
+    expect(sendPasswordResetEmail).not.toHaveBeenCalled();
+    expect(refund).toHaveBeenCalledWith('resetMail', 'jdoe@gmail.com');
+  });
+
+  it('a mailbox that blocked Voxium mail keeps the point (the cap does not matter to a mailbox that gets nothing)', async () => {
+    const { MailSuppressedError } = await import('../../utils/email');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await resetWithSendFailure(new MailSuppressedError());
+
+      expect(refund).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('answers before the send settles, so neither the failure nor the refund can move the response', async () => {
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    let fail: (err: unknown) => void = () => {};
+    vi.mocked(sendPasswordResetEmail).mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { fail = reject; }));
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'j.doe@gmail.com' } as any);
+
+    // Resolves with the send still pending: nothing after it is on the response path
+    await expect(requestPasswordReset('j.doe@gmail.com')).resolves.toBeUndefined();
+    await flush();
+    expect(sendPasswordResetEmail).toHaveBeenCalled();
+    expect(refund).not.toHaveBeenCalled();
+
+    fail(smtpError({ code: 'ECONNECTION', command: 'CONN' }));
+    await flush();
+    await flush();
+    expect(refund).toHaveBeenCalledWith('resetMail', 'jdoe@gmail.com');
+  });
+
+  it('every branch resolves the same way after the same awaited work: unknown, sent, provably unsent', async () => {
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    const awaitedBeforeAnswer = async (arrange: () => void) => {
+      vi.mocked(prisma.user.findUnique).mockClear();
+      mailCap.mockClear();
+      arrange();
+      const answer = await requestPasswordReset('j.doe@gmail.com');
+      // What the call awaited before answering: one lookup, one cap consume
+      return { answer, lookups: vi.mocked(prisma.user.findUnique).mock.calls.length, consumes: mailCap.mock.calls.length, refundsYet: refund.mock.calls.length };
+    };
+
+    const unknown = await awaitedBeforeAnswer(() => {
+      vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
+    });
+    const sent = await awaitedBeforeAnswer(() => {
+      vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'j.doe@gmail.com' } as any);
+    });
+    const unsent = await awaitedBeforeAnswer(() => {
+      vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'j.doe@gmail.com' } as any);
+      vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(smtpError({ code: 'ECONNECTION', command: 'CONN' }));
+    });
+
+    expect(unknown).toEqual({ answer: undefined, lookups: 1, consumes: 1, refundsYet: 0 });
+    expect(sent).toEqual(unknown);
+    expect(unsent).toEqual(unknown);
+    await flush();
+    await flush();
+    // The refund came after the answer, on the provably unsent branch only
+    expect(refund).toHaveBeenCalledTimes(1);
   });
 });
 

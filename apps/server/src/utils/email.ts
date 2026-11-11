@@ -64,6 +64,26 @@ export function describeEmailError(err: unknown): string {
   return String(err);
 }
 
+/** nodemailer's `command` before any recipient is named: the connection, the greeting, TLS, the login. */
+const PRE_RECIPIENT_COMMAND_RE = /^(?:CONN|EHLO|HELO|LHLO|STARTTLS|AUTH(?: .*)?)$/;
+/** nodemailer's codes for a failure to reach or log in to the relay at all. */
+const PRE_RECIPIENT_CODES = new Set(['EDNS', 'EAUTH', 'ECONNECTION']);
+
+/**
+ * Whether a send failure PROVES no recipient was reached: the relay could not
+ * be resolved, connected to, greeted, secured or logged in to. When the error
+ * names the SMTP command it failed on, the command decides (a connection drop
+ * during DATA may still have delivered); only without one does the code. A
+ * refused recipient (RCPT TO, EENVELOPE), anything during or after DATA, and
+ * an error carrying neither are not proof.
+ */
+export function failedBeforeAnyRecipient(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const { code, command } = err as { code?: unknown; command?: unknown };
+  if (typeof command === 'string') return PRE_RECIPIENT_COMMAND_RE.test(command);
+  return typeof code === 'string' && PRE_RECIPIENT_CODES.has(code);
+}
+
 export interface CleanupReport {
   startedAt: Date;
   finishedAt: Date;

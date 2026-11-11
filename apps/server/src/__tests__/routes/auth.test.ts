@@ -88,10 +88,11 @@ vi.mock('../../utils/redis', () => ({
 }));
 
 // Mock email
-vi.mock('../../utils/email', () => ({
+vi.mock('../../utils/email', async (importOriginal) => ({
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
   describeEmailError: vi.fn((err: unknown) => (err instanceof Error ? err.message : String(err))),
+  failedBeforeAnyRecipient: (await importOriginal<typeof import('../../utils/email')>()).failedBeforeAnyRecipient,
   MailSuppressedError: class MailSuppressedError extends Error {},
 }));
 
@@ -1392,6 +1393,41 @@ describe('POST /api/v1/auth/forgot-password', () => {
     // requestPasswordReset calls prisma.user.findUnique with lowercased email
     const findCall = mockPrismaUser.findUnique.mock.calls[0]?.[0];
     expect(findCall?.where?.email).toBe('test@example.com');
+  });
+
+  it('answers byte for byte the same whether the address is unknown, the mail went out, provably reached nobody, or was refused', async () => {
+    const { sendPasswordResetEmail } = await import('../../utils/email');
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const answers: { status: number; body: string; type: string | undefined }[] = [];
+    const ask = async () => {
+      const res = await request(app).post('/api/v1/auth/forgot-password').send({ email: 'test@example.com' });
+      answers.push({ status: res.status, body: res.text, type: res.headers['content-type'] });
+    };
+    try {
+      mockPrismaUser.update.mockResolvedValue({});
+
+      mockPrismaUser.findUnique.mockResolvedValueOnce(null);
+      await ask();
+      mockPrismaUser.findUnique.mockResolvedValueOnce({ id: MOCK_USER.id, email: 'test@example.com' });
+      await ask();
+      mockPrismaUser.findUnique.mockResolvedValueOnce({ id: MOCK_USER.id, email: 'test@example.com' });
+      vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNECTION', command: 'CONN' }));
+      await ask();
+      mockPrismaUser.findUnique.mockResolvedValueOnce({ id: MOCK_USER.id, email: 'test@example.com' });
+      vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(Object.assign(new Error('550 <test@example.com> rejected'), { code: 'EENVELOPE', command: 'RCPT TO', responseCode: 550 }));
+      await ask();
+      await new Promise((r) => setImmediate(r));
+
+      expect(answers).toHaveLength(4);
+      for (const answer of answers) expect(answer).toEqual(answers[0]);
+      expect(answers[0].status).toBe(200);
+      // Only the provably unsent one gave the mailbox its point back, after its answer
+      const { refundRateLimit } = await import('../../middleware/rateLimiter');
+      expect(refundRateLimit).toHaveBeenCalledTimes(1);
+      expect(refundRateLimit).toHaveBeenCalledWith('resetMail', 'test@example.com');
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 });
 

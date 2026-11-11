@@ -7,7 +7,7 @@ import type { AuthPayload } from '../middleware/auth';
 import type { UserRole, RegistrationConsent } from '@voxium/shared';
 import { AppError, BadRequestError, ConflictError, ForbiddenError, ServiceUnavailableError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, canonicalizeEmail, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
-import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError, MailSuppressedError } from '../utils/email';
+import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError, failedBeforeAnyRecipient, MailSuppressedError } from '../utils/email';
 import { isMailSuppressed } from '../utils/mailSuppression';
 import { isJwtVerifyError } from '../utils/jwtErrors';
 import { consumeMailCap, refundRateLimit, normalizeIp } from '../middleware/rateLimiter';
@@ -280,7 +280,8 @@ export async function requestPasswordReset(email: string) {
   // branch used to return before this round trip while the known-email one
   // paid it, which is a timing difference the wording defence cannot hide.
   // Charging an inbox that does not exist costs nothing and sends nothing.
-  const underCap = await consumeMailCap('resetMail', canonicalizeEmail(email));
+  const inbox = canonicalizeEmail(email);
+  const underCap = await consumeMailCap('resetMail', inbox);
 
   if (!user) return; // Silent return — same response, same work, as a real reset
 
@@ -308,10 +309,13 @@ export async function requestPasswordReset(email: string) {
       });
     } catch (err) {
       console.error('[Auth] Failed to store password reset token:', err instanceof Error ? err.message : err);
-      return; // no token in the DB — a link would be dead on arrival
+      // No token in the DB, so no mail: a link would be dead on arrival. The
+      // mailbox gets back the point this request spent
+      await refundRateLimit('resetMail', inbox);
+      return;
     }
     await sendPasswordResetEmail(user.email, rawToken)
-      .catch((err) => {
+      .catch(async (err) => {
         // The mailbox blocked Voxium mail (utils/mailSuppression.ts): the
         // sender refused before the transport, the token stored above is
         // unusable without the mail, and the response was already sent.
@@ -320,6 +324,13 @@ export async function requestPasswordReset(email: string) {
           return;
         }
         console.error('[Auth] Failed to send password reset email:', describeEmailError(err));
+        // A failure that proves no recipient was reached (the relay could not
+        // be resolved, connected to, greeted, secured or logged in to) gives
+        // the mailbox its point back, in the background like the rest. The
+        // previous token is NOT restored: it is a bearer link, and the mail
+        // that carried it may have reached someone. A refused recipient or a
+        // failure during or after DATA is no such proof and keeps the point.
+        if (failedBeforeAnyRecipient(err)) await refundRateLimit('resetMail', inbox);
       });
   })();
 }
