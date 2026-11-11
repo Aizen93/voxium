@@ -198,8 +198,15 @@ function inVoiceChannel(s: { rooms?: Set<string>; data: { voiceChannelId?: strin
   return s.rooms?.has(`voice:${channelId}`) === true || s.data.voiceChannelId === channelId;
 }
 
+/** One queued local pass. `overtaken` is set when the pass queued after it
+ *  stopped waiting for it (see waitAtMost). */
+interface LocalPass {
+  run: Promise<void>;
+  overtaken: boolean;
+}
+
 /** The tail of the local passes queued for each server on this node. */
-const localPassTail = new Map<string, Promise<void>>();
+const localPassTail = new Map<string, LocalPass>();
 
 /**
  * Resync THIS node's sockets for `scope`, after the passes already queued on
@@ -209,7 +216,11 @@ const localPassTail = new Map<string, Promise<void>>();
  * re-joined the member after the later member-scoped pass had removed them,
  * and the revocation was lost until the member reconnected. A pass that has
  * not finished after LOCAL_PASS_MAX_WAIT_MS (one stuck on a connection that
- * never answers) no longer holds the next one back.
+ * never answers) no longer holds the next one back, and from then on it
+ * applies its LEAVES ONLY: it read the database before the passes that ran
+ * past it, so a join of its own could undo a later revocation, while a leave
+ * at worst removes a room the next resync or the member's next channel open
+ * gives back.
  *
  * A pass that fails (the database refused one of its reads) is queued again,
  * through this same queue, after each of LOCAL_PASS_RETRY_DELAYS_MS: the
@@ -221,17 +232,18 @@ const localPassTail = new Map<string, Promise<void>>();
  */
 function resyncLocalSockets(scope: ResyncScope, attempt = 1): Promise<void> {
   const previous = localPassTail.get(scope.serverId);
-  const run = (previous ? waitAtMost(previous, scope.serverId) : Promise.resolve())
-    .then(() => runLocalPass(scope))
+  const pass: LocalPass = { run: Promise.resolve(), overtaken: false };
+  pass.run = (previous ? waitAtMost(previous, scope.serverId) : Promise.resolve())
+    .then(() => runLocalPass(scope, pass))
     .then((applied) => {
       if (!applied) afterFailedPass(scope, attempt);
     });
-  localPassTail.set(scope.serverId, run);
+  localPassTail.set(scope.serverId, pass);
   // runLocalPass never rejects and afterFailedPass never throws, so neither does `run`
-  void run.then(() => {
-    if (localPassTail.get(scope.serverId) === run) localPassTail.delete(scope.serverId);
+  void pass.run.then(() => {
+    if (localPassTail.get(scope.serverId) === pass) localPassTail.delete(scope.serverId);
   });
-  return run;
+  return pass.run;
 }
 
 /**
@@ -283,23 +295,25 @@ async function disconnectOutsideVoice(serverId: string, userId: string, failures
   }
 }
 
-/** Resolves when `previous` does, or after LOCAL_PASS_MAX_WAIT_MS (logged). */
-async function waitAtMost(previous: Promise<void>, serverId: string): Promise<void> {
+/** Resolves when `previous` does, or after LOCAL_PASS_MAX_WAIT_MS (logged),
+ *  marking `previous` overtaken. */
+async function waitAtMost(previous: LocalPass, serverId: string): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<'late'>((resolve) => {
     timer = setTimeout(() => resolve('late'), LOCAL_PASS_MAX_WAIT_MS);
     timer.unref?.();
   });
-  const outcome = await Promise.race([previous.then(() => 'done' as const), late]);
+  const outcome = await Promise.race([previous.run.then(() => 'done' as const), late]);
   clearTimeout(timer);
   if (outcome === 'late') {
-    console.warn(`[Visibility] The previous resync of server ${serverId} on this node is still running after ${LOCAL_PASS_MAX_WAIT_MS} ms; the next one runs without waiting for it`);
+    previous.overtaken = true;
+    console.warn(`[Visibility] The previous resync of server ${serverId} on this node is still running after ${LOCAL_PASS_MAX_WAIT_MS} ms; the next one runs without waiting for it, and the late one will apply its leaves only`);
   }
 }
 
 /** One pass over this node's sockets for `scope`. Resolves false when it
  *  failed (logged), true otherwise; never rejects. */
-async function runLocalPass(scope: ResyncScope): Promise<boolean> {
+async function runLocalPass(scope: ResyncScope, pass: Pick<LocalPass, 'overtaken'>): Promise<boolean> {
   const { serverId } = scope;
   try {
     const io = getIO();
@@ -350,6 +364,7 @@ async function runLocalPass(scope: ResyncScope): Promise<boolean> {
     }
 
     const uids = [...socketsByUser.keys()];
+    let joinsSkipped = 0;
     for (let i = 0; i < uids.length; i += USER_BATCH) {
       const batch = uids.slice(i, i + USER_BATCH);
       const visibleByUser = await filterVisibleChannelsForUsers(batch, serverId, channels);
@@ -360,6 +375,12 @@ async function runLocalPass(scope: ResyncScope): Promise<boolean> {
         for (const ch of channels) {
           for (const s of userSockets) {
             if (visibleIds.has(ch.id)) {
+              // Read at every join: the flag is set by the next pass's timer,
+              // which can only run while this one awaits
+              if (pass.overtaken) {
+                joinsSkipped++;
+                continue;
+              }
               if (occupied.has(ch.id) && s.rooms?.has(`channel:${ch.id}`) !== true) gained.add(ch.id);
               s.join(`channel:${ch.id}`);
             } else if (!inVoiceChannel(s, ch.id)) {
@@ -378,6 +399,9 @@ async function runLocalPass(scope: ResyncScope): Promise<boolean> {
           }
         }
       }
+    }
+    if (joinsSkipped > 0) {
+      console.warn(`[Visibility] A resync of server ${serverId} overtaken on this node applied its leaves only (${joinsSkipped} join(s) skipped)`);
     }
     return true;
   } catch (err) {

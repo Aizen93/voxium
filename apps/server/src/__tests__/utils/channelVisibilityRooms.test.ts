@@ -374,6 +374,40 @@ describe('syncChannelVisibilityRooms — this node\'s sockets', () => {
     }
   });
 
+  // Review of #71: the waited-out pass read the database before the one that
+  // ran past it, and its late joins undid that pass's revocation.
+  it('a pass that was waited out applies its leaves only when it finally finishes', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const socket = createMockSocket('user-1', { rooms: ['user:user-1', 'channel:ch-a', 'channel:ch-b'] });
+      m.localFetch.mockResolvedValue([socket]);
+      m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-a' }, { id: 'ch-b' }]);
+      let releaseStale!: (visible: Map<string, Set<string>>) => void;
+      m.filterForUsers
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseStale = resolve; }))
+        .mockResolvedValueOnce(visibility({ 'user-1': [] }));
+
+      const stale = syncChannelVisibilityRooms('server-stuck-c');
+      await vi.advanceTimersByTimeAsync(0);
+      const fresh = syncChannelVisibilityRooms('server-stuck-c', { userId: 'user-1' });
+      await vi.advanceTimersByTimeAsync(LOCAL_PASS_MAX_WAIT_MS);
+      await fresh;
+      expect(socket.leave).toHaveBeenCalledWith('channel:ch-a');
+
+      // The stale read: ch-a still visible, ch-b hidden
+      releaseStale(visibility({ 'user-1': ['ch-a'] }));
+      await stale;
+
+      expect(socket.join).not.toHaveBeenCalled();
+      expect(socket.leave).toHaveBeenCalledWith('channel:ch-b');
+      expect(warn).toHaveBeenCalledWith('[Visibility] A resync of server server-stuck-c overtaken on this node applied its leaves only (1 join(s) skipped)');
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
+  });
+
   // ── Voice occupancy replay on a gained room ──────────────────────────────
   //
   // A socket that ENTERS a channel room here missed every voice event in it,
