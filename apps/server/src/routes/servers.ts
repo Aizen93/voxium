@@ -23,6 +23,7 @@ import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { removeMemberFromServer, OWNER_CANNOT_LEAVE_MESSAGE, KICK_OUTRANKED_MESSAGE } from '../utils/removeMember';
+import { retryOnTransactionConflict } from '../utils/transactionRetry';
 import { recomputeListed } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
@@ -1263,17 +1264,40 @@ serverRouter.post(
       const targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { bannedAt: true } });
       if (targetUser?.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
 
-      await prisma.$transaction([
-        prisma.server.update({ where: { id: serverId }, data: { ownerId: targetUserId } }),
-        prisma.serverMember.update({
-          where: { userId_serverId: { userId: targetUserId, serverId } },
-          data: { role: 'owner' },
-        }),
-        prisma.serverMember.update({
-          where: { userId_serverId: { userId: req.user!.userId, serverId } },
-          data: { role: 'admin' },
-        }),
-      ]);
+      // The space row, then the two member rows: the reverse of a removal or
+      // an account deletion of the heir, so PostgreSQL may abort the batch to
+      // break a deadlock; it then runs again. The checks above are carried by
+      // the statements themselves, so they hold on every attempt: the space
+      // row only while the actor still owns it, the actor's row only while it
+      // is the owner's, the heir's row only while they are a member (P2025
+      // otherwise, or P2003 when the heir's account is gone).
+      const actorId = req.user!.userId;
+      try {
+        await retryOnTransactionConflict(() => prisma.$transaction([
+          prisma.server.update({ where: { id: serverId, ownerId: actorId }, data: { ownerId: targetUserId } }),
+          prisma.serverMember.update({
+            where: { userId_serverId: { userId: targetUserId, serverId } },
+            data: { role: 'owner' },
+          }),
+          prisma.serverMember.update({
+            where: { userId_serverId: { userId: actorId, serverId }, role: 'owner' },
+            data: { role: 'admin' },
+          }),
+        ]), `[Servers] The transfer of space ${serverId}`);
+      } catch (err) {
+        const code = (err as { code?: unknown })?.code;
+        if (code !== 'P2025' && code !== 'P2003') throw err;
+        // Something the checks above saw changed before this attempt: answer
+        // what they would answer now
+        const [space, heir] = await Promise.all([
+          prisma.server.findUnique({ where: { id: serverId }, select: { ownerId: true } }),
+          prisma.serverMember.findUnique({ where: { userId_serverId: { userId: targetUserId, serverId } }, select: { userId: true } }),
+        ]);
+        if (!space) throw new NotFoundError('Server');
+        if (space.ownerId !== actorId) throw new ForbiddenError('Only the server owner can transfer ownership');
+        if (!heir) throw new NotFoundError('Target member');
+        throw err;
+      }
 
       // ownerId decides WHOSE ban state is one of the listing column's four
       // inputs — recompute after the commit (never throws).

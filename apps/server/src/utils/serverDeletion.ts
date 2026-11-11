@@ -5,6 +5,7 @@ import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs'
 import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { getIO } from '../websocket/socketServer';
 import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
+import { retryOnTransactionConflict } from './transactionRetry';
 
 /** A step after the committing write failed: logged, never thrown (the space is gone either way). */
 function logFanOutFailure(logPrefix: string, step: string, serverId: string, err: unknown): void {
@@ -62,8 +63,14 @@ export async function deleteServerAndAnnounce(
   const attachmentKeys = await collectAttachmentKeys({ channel: { serverId } });
 
   // The cascade takes channels, members, messages, attachments, reactions,
-  // reads, categories, invites, roles and webhooks with the row.
-  await prisma.server.delete({ where: { id: serverId } });
+  // reads, categories, invites, roles and webhooks with the row. It takes the
+  // space row first and the member and channel rows after it, the reverse of
+  // a removal or an account deletion: when PostgreSQL breaks the deadlock by
+  // aborting this delete, it runs again (one statement, nothing done yet).
+  await retryOnTransactionConflict(
+    () => prisma.server.delete({ where: { id: serverId } }),
+    `${opts.logPrefix} The delete of space ${serverId}`,
+  );
 
   await bumpDiscoveryPageCache(opts.cacheReason);
 

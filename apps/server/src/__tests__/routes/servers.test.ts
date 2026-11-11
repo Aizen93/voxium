@@ -931,6 +931,27 @@ describe('Server Routes', () => {
       expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
     });
 
+    it('a delete PostgreSQL aborted to break a deadlock (a removal or an account deletion in the space) runs again instead of answering 500', async () => {
+      const token = makeToken();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1' });
+      prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+      prismaMock.server.delete
+        .mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }))
+        .mockResolvedValueOnce({});
+      try {
+        const res = await request(app)
+          .delete('/api/v1/servers/srv-1')
+          .set('Authorization', `Bearer ${token}`);
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.server.delete).toHaveBeenCalledTimes(2);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('The delete of space srv-1 was aborted by a deadlock'));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('returns 403 for non-owner', async () => {
       const token = makeToken({ userId: 'user-2' });
       prismaMock.server.findUnique.mockResolvedValue({
@@ -2328,6 +2349,80 @@ describe('Server Routes', () => {
       // would recompute against the OLD owner
       expect(order[0]).toBe('txn');
       expect(order).toEqual(expect.arrayContaining(['sync:user-2', 'sync:user-1']));
+    });
+
+    describe('the transfer batch', () => {
+      const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+      beforeEach(() => {
+        prismaMock.serverMember.findUnique.mockImplementation(({ where }: any) =>
+          Promise.resolve(where.userId_serverId.userId === 'user-1'
+            ? { userId: 'user-1', serverId: 'srv-1', role: 'owner' }
+            : { userId: 'user-2', serverId: 'srv-1', role: 'member' }));
+        prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: null, invitesLocked: false, ownerId: 'user-2', createdAt: new Date(), description: null, tags: [], discoverable: true, joinMode: 'approval' });
+      });
+      const transfer = () => request(app)
+        .post('/api/v1/servers/srv-1/transfer-ownership')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ targetUserId: 'user-2' });
+
+      it('carries the route\'s checks in its statements: the space only while the actor owns it, the actor\'s row only while it is the owner\'s', async () => {
+        prismaMock.$transaction.mockResolvedValue([]);
+
+        expect((await transfer()).status).toBe(200);
+
+        expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-1', ownerId: 'user-1' }, data: { ownerId: 'user-2' } });
+        expect(prismaMock.serverMember.update).toHaveBeenCalledWith({
+          where: { userId_serverId: { userId: 'user-1', serverId: 'srv-1' }, role: 'owner' },
+          data: { role: 'admin' },
+        });
+      });
+
+      it('a batch PostgreSQL aborted to break a deadlock runs again instead of answering 500', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.$transaction.mockRejectedValueOnce(deadlock()).mockResolvedValueOnce([]);
+        try {
+          expect((await transfer()).status).toBe(200);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('a retry that finds the heir gone (left, or their account deleted) answers 404 Target member, not a 500', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.$transaction
+          .mockRejectedValueOnce(deadlock())
+          .mockRejectedValueOnce(Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' }));
+        // the heir's row went with the transaction that won
+        prismaMock.serverMember.findUnique.mockImplementation(({ where }: any) =>
+          Promise.resolve(where.userId_serverId.userId === 'user-1' ? { userId: 'user-1', serverId: 'srv-1', role: 'owner' } : null));
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'user-1' });
+        // the route's own pre-checks saw the heir before the race
+        prismaMock.serverMember.findUnique
+          .mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'owner' })
+          .mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+        try {
+          const res = await transfer();
+          expect(res.status).toBe(404);
+          expect(res.body.error).toBe('Target member not found');
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('a batch that finds the actor no longer the owner answers 403, and one that finds the space gone 404', async () => {
+        prismaMock.$transaction.mockRejectedValue(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
+
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'user-3' });
+        let res = await transfer();
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe('Only the server owner can transfer ownership');
+
+        prismaMock.server.findUnique.mockResolvedValue(null);
+        res = await transfer();
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Server not found');
+      });
     });
 
     it('recomputes the directory listing column AFTER the transfer commits (ownerId decides whose ban state counts)', async () => {
