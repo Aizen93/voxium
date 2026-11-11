@@ -55,6 +55,7 @@ import { clearDMVoiceState } from './websocket/dmVoiceHandler';
 import { initVoiceCluster, stopVoiceCluster } from './websocket/voiceCluster';
 import { initVoiceRelay } from './websocket/voiceRelay';
 import { startPresenceReaper, stopPresenceReaper } from './utils/presenceReaper';
+import { initChannelVisibilitySync } from './utils/channelVisibilityRooms';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -173,6 +174,12 @@ async function main() {
   // Cross-node voice coordination: server-deletion fan-out + dead-node reaper
   await initVoiceCluster(io);
   console.log('[VoiceCluster] Initialized');
+
+  // Visibility resyncs: a node that changes who may view a channel resyncs
+  // its own sockets and asks every other node, through this channel, to
+  // resync theirs (no node waits on another's reply)
+  await initChannelVisibilitySync();
+  console.log('[Visibility] Resync channel subscribed');
 
   // Presence reconciliation: every minute, users whose last socket is gone
   // cluster-wide without a disconnect having unregistered it (a node killed
