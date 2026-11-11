@@ -1777,7 +1777,7 @@ export class E2EService {
         if (!key) throw new Error('This device does not hold the account key');
         return this.restoreMessageKeyPage(key, cursor);
       });
-      if (!step) break;
+      if (!step) return imported; // the key was replaced: not the page cap
       imported += step.imported;
       cursor = step.next;
       if (!cursor) return imported;

@@ -5567,6 +5567,8 @@ describe('E2EService — lifecycle', () => {
         await expect(second).resolves.toBeUndefined();
         const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
         expect(logged).not.toMatch(/null pointer|unusable backed-up session key/);
+        // stopped for the replaced key, not at the page cap
+        expect(logged).not.toMatch(/stopped the history pull after/);
       } finally {
         warn.mockRestore();
         error.mockRestore();
