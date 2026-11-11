@@ -167,9 +167,13 @@ export async function removeSecureMembershipsInTx(
   const scopes = [...createdIds, ...left.map((l) => l.channelId)].map(e2eChannelScope);
   if (scopes.length > 0) {
     // Unclaimed key shares addressed to the user in those channels die with
-    // the membership: they can only carry sessions of the time they were a
-    // member (the in-transaction key-share gate refuses new ones), but a share
-    // left claimable outlives the row it was meant for.
+    // the membership. This is not a closed door: the key-share gate
+    // (routes/e2e.ts POST /keyshares) reads the membership inside its own
+    // transaction but takes no lock, so a share whose transaction read it
+    // before this one committed can still be stored after this delete. Such
+    // a share carries the session its sender held at the removal, at most
+    // one in flight, never a later one: the next send after the member list
+    // changes rotates to a session the removed member is never given.
     await tx.e2EKeyShare.deleteMany({
       where: { recipientUserId: userId, conversationId: { in: scopes } },
     });
@@ -338,10 +342,10 @@ export async function removeSecureMember(channelId: string, serverId: string, us
     prisma.channelMember.deleteMany({ where: { channelId, userId } }),
     prisma.channelRead.deleteMany({ where: { channelId, userId } }),
     // Hygiene: unclaimed key shares addressed to the removed member for this
-    // channel's scope die with the membership. They could only ever carry the
-    // OLD session (the in-tx keyshare gate refuses new ones once the row is
-    // gone), but leaving them claimable is inbox litter and a wider window
-    // than necessary.
+    // channel's scope die with the membership. A share stored concurrently
+    // can still land after this delete (the key-share gate reads the row in
+    // its transaction without a lock): it carries the session its sender held
+    // at the removal, at most one in flight, never a later one.
     prisma.e2EKeyShare.deleteMany({
       where: { recipientUserId: userId, conversationId: e2eChannelScope(channelId) },
     }),

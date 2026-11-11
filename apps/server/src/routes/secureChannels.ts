@@ -46,8 +46,9 @@ async function getSecureChannelForMemberOrThrow(channelId: string, serverId: str
       where: { channelId_userId: { channelId, userId } },
       select: { isCreator: true },
     }),
-    // Defense in depth against a stale ChannelMember row (a purge that failed
-    // mid-leave): someone no longer in the SERVER gets nothing here either
+    // A ChannelMember row counts only with the space membership behind it.
+    // A departure removes both in one transaction and a join starts with no
+    // row, so they agree; this read keeps the rule here on its own too
     prisma.serverMember.findUnique({
       where: { userId_serverId: { userId, serverId } },
       select: { userId: true },

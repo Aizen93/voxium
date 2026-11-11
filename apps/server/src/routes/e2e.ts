@@ -507,10 +507,12 @@ e2eRouter.get('/channels/:channelId/devices', rateLimitE2EStatus, async (req: Re
       orderBy: { addedAt: 'asc' },
       select: { userId: true, isCreator: true },
     });
-    // Cross-check against ServerMember: a stale ChannelMember row (a purge
-    // that failed mid-leave/kick) must not keep receiving session keys, and
-    // must not keep READING this list either — the response is what senders
-    // fan keys out to. This also covers the caller themselves.
+    // Cross-check against ServerMember: a ChannelMember row counts only with
+    // the space membership behind it (a departure removes both in one
+    // transaction and a join starts with no row, so they agree; this read
+    // keeps the rule here on its own). A row without one must neither receive
+    // session keys nor READ this list — the response is what senders fan
+    // keys out to. This also covers the caller themselves.
     const serverMemberships = await prisma.serverMember.findMany({
       where: { serverId: channel.serverId, userId: { in: rawMembers.map((m) => m.userId) } },
       select: { userId: true },
