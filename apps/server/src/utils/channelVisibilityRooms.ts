@@ -25,6 +25,9 @@ export const RESYNC_RETRY_DELAYS_MS: readonly number[] = [500, 2000, 5000];
 export const RESYNC_PUBLISH_TIMEOUT_MS = 2000;
 /** Message ids a node remembers, so a retried publish runs once per node. */
 const SEEN_IDS_MAX = 1024;
+/** How long a local pass waits for the one queued before it for the same
+ *  server (see resyncLocalSockets). */
+export const LOCAL_PASS_MAX_WAIT_MS = 30_000;
 
 /**
  * Re-sync `channel:{id}` room membership for connected members after a
@@ -183,8 +186,45 @@ function inVoiceChannel(s: { rooms?: Set<string>; data: { voiceChannelId?: strin
   return s.rooms?.has(`voice:${channelId}`) === true || s.data.voiceChannelId === channelId;
 }
 
-/** Resync THIS node's sockets for `scope`. Never rejects. */
-async function resyncLocalSockets(scope: ResyncScope): Promise<void> {
+/** The tail of the local passes queued for each server on this node. */
+const localPassTail = new Map<string, Promise<void>>();
+
+/**
+ * Resync THIS node's sockets for `scope`, after the passes already queued on
+ * this node for the same server. Two passes that overlap otherwise finish in
+ * any order, each applying what it read from the database when it started: a
+ * slow space-wide pass that read a member's roles before they were taken away
+ * re-joined the member after the later member-scoped pass had removed them,
+ * and the revocation was lost until the member reconnected. A pass that has
+ * not finished after LOCAL_PASS_MAX_WAIT_MS (one stuck on a connection that
+ * never answers) no longer holds the next one back. Never rejects.
+ */
+function resyncLocalSockets(scope: ResyncScope): Promise<void> {
+  const previous = localPassTail.get(scope.serverId);
+  const run = (previous ? waitAtMost(previous, scope.serverId) : Promise.resolve()).then(() => runLocalPass(scope));
+  localPassTail.set(scope.serverId, run);
+  // runLocalPass never rejects, so neither does `run`
+  void run.then(() => {
+    if (localPassTail.get(scope.serverId) === run) localPassTail.delete(scope.serverId);
+  });
+  return run;
+}
+
+/** Resolves when `previous` does, or after LOCAL_PASS_MAX_WAIT_MS (logged). */
+async function waitAtMost(previous: Promise<void>, serverId: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<'late'>((resolve) => {
+    timer = setTimeout(() => resolve('late'), LOCAL_PASS_MAX_WAIT_MS);
+    timer.unref?.();
+  });
+  const outcome = await Promise.race([previous.then(() => 'done' as const), late]);
+  clearTimeout(timer);
+  if (outcome === 'late') {
+    console.warn(`[Visibility] The previous resync of server ${serverId} on this node is still running after ${LOCAL_PASS_MAX_WAIT_MS} ms; the next one runs without waiting for it`);
+  }
+}
+
+async function runLocalPass(scope: ResyncScope): Promise<void> {
   const { serverId } = scope;
   try {
     const io = getIO();

@@ -54,6 +54,7 @@ import {
   RESYNC_PUBLISH_ATTEMPTS,
   RESYNC_RETRY_DELAYS_MS,
   RESYNC_PUBLISH_TIMEOUT_MS,
+  LOCAL_PASS_MAX_WAIT_MS,
 } from '../../utils/channelVisibilityRooms';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -293,6 +294,72 @@ describe('syncChannelVisibilityRooms — this node\'s sockets', () => {
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('[Visibility] Failed to resync this node\'s channel rooms for server server-1'), expect.any(Error));
     expect(m.publish).toHaveBeenCalledTimes(1);
     consoleSpy.mockRestore();
+  });
+
+  // ── Ordering of overlapping passes on one node ───────────────────────────
+
+  it('runs one server\'s passes on this node one after another: a slow earlier pass cannot re-join a member a later pass removed', async () => {
+    const socket = createMockSocket('user-1', { rooms: ['user:user-1', 'channel:ch-priv'] });
+    m.localFetch.mockResolvedValue([socket]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-priv' }]);
+    // The space-wide pass read the member's roles before they were taken away, and is slow
+    let releaseFirst!: (visible: Map<string, Set<string>>) => void;
+    m.filterForUsers
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = resolve; }))
+      .mockResolvedValueOnce(visibility({ 'user-1': [] }));
+
+    const first = syncChannelVisibilityRooms('server-order');
+    const second = syncChannelVisibilityRooms('server-order', { userId: 'user-1' });
+    await vi.waitFor(() => expect(m.filterForUsers).toHaveBeenCalledTimes(1));
+    // The later pass has not even looked at this node's sockets yet
+    expect(m.localFetch).toHaveBeenCalledTimes(1);
+
+    releaseFirst(visibility({ 'user-1': ['ch-priv'] }));
+    await Promise.all([first, second]);
+
+    expect(m.localFetch).toHaveBeenCalledTimes(2);
+    expect(socket.join).toHaveBeenCalledWith('channel:ch-priv');
+    expect(socket.leave).toHaveBeenCalledWith('channel:ch-priv');
+    // The later pass has the last word: the revocation stands
+    expect(socket.leave.mock.invocationCallOrder[0]).toBeGreaterThan(socket.join.mock.invocationCallOrder[0]);
+  });
+
+  it('a pass for another server is not held behind a slow one', async () => {
+    m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    m.filterForUsers.mockImplementationOnce(() => new Promise(() => {}));
+
+    void syncChannelVisibilityRooms('server-stuck-a');
+    await vi.waitFor(() => expect(m.filterForUsers).toHaveBeenCalledTimes(1));
+    await syncChannelVisibilityRooms('server-free');
+
+    expect(m.filterForUsers).toHaveBeenCalledTimes(2);
+    expect(m.filterForUsers).toHaveBeenLastCalledWith(['user-1'], 'server-free', [{ id: 'ch-1' }]);
+  });
+
+  it('a pass stuck for LOCAL_PASS_MAX_WAIT_MS no longer holds the next one for its server (logged)', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+      m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+      m.filterForUsers.mockImplementationOnce(() => new Promise(() => {}));
+
+      void syncChannelVisibilityRooms('server-stuck-b');
+      await vi.advanceTimersByTimeAsync(0);
+      const next = syncChannelVisibilityRooms('server-stuck-b');
+      await vi.advanceTimersByTimeAsync(LOCAL_PASS_MAX_WAIT_MS - 1);
+      expect(m.filterForUsers).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await next;
+
+      expect(m.filterForUsers).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`previous resync of server server-stuck-b on this node is still running after ${LOCAL_PASS_MAX_WAIT_MS} ms`));
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
   });
 
   // ── Voice occupancy replay on a gained room ──────────────────────────────
