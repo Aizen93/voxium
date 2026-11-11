@@ -1145,6 +1145,7 @@ describe('Channel Routes', () => {
         id: 'creator-9', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
       });
       prismaMock.channel.findFirst.mockResolvedValue(secureCh);
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'creator-9' });
 
       const res = await request(app)
         .delete('/api/v1/servers/srv-1/channels/sec-1')
@@ -1152,8 +1153,33 @@ describe('Channel Routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockDeleteSecureChannel).toHaveBeenCalledWith('sec-1');
+      expect(prismaMock.serverMember.findUnique).toHaveBeenCalledWith({
+        where: { userId_serverId: { userId: 'creator-9', serverId: 'srv-1' } },
+        select: { userId: true },
+      });
       // The plaintext delete path (raw prisma delete + server-room event) must not run
       expect(prismaMock.channel.delete).not.toHaveBeenCalled();
+    });
+
+    it('DELETE: a creator who is no longer a member of the space has no lever over the channel', async () => {
+      const token = makeToken({ userId: 'creator-9' });
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: 'creator-9', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+      });
+      prismaMock.channel.findFirst.mockResolvedValue(secureCh);
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      // a non-member holds no permission in the space
+      mockHasServerPermission.mockResolvedValue(false);
+      mockComputeServerPermissions.mockResolvedValue(0n);
+
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1/channels/sec-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      // what this caller gets for an id that does not exist
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('You do not have permission to delete channels');
+      expect(mockDeleteSecureChannel).not.toHaveBeenCalled();
     });
 
     it('DELETE: the server owner can delete-by-id (opaque moderation lever)', async () => {

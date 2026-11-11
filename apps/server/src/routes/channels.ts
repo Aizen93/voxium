@@ -376,9 +376,16 @@ channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request
       // creator, or — the single opaque-moderation lever — the server owner /
       // an ADMINISTRATOR acting on a channel id learned from an abuse report.
       // Content stays unreadable either way; deletion is the only power.
-      const isCreator = channel.createdById === userId;
-      const isOwner = channel.server.ownerId === userId;
-      let allowed = isCreator || isOwner;
+      let allowed = channel.server.ownerId === userId;
+      if (!allowed && channel.createdById === userId) {
+        // The creator's lever holds while they are a member of the space: a
+        // departure deletes the creator's channels with it, and a channel
+        // that outlived one gives its former member no say over it
+        allowed = !!(await prisma.serverMember.findUnique({
+          where: { userId_serverId: { userId, serverId } },
+          select: { userId: true },
+        }));
+      }
       if (!allowed) {
         const perms = await computeServerPermissions(userId, serverId);
         allowed = (perms & Permissions.ADMINISTRATOR) === Permissions.ADMINISTRATOR;
