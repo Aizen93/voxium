@@ -373,9 +373,14 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       expect(locks).toEqual([
         ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'reporter-9'],
         ['SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE', 'target-1'],
+        ['SELECT id FROM messages WHERE id = ? FOR UPDATE', 'msg-1'],
       ]);
       expect(tx.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(tx.webhook.findMany.mock.invocationCallOrder[0]);
       expect(tx.webhook.findMany.mock.invocationCallOrder[0]).toBeLessThan(tx.report.updateMany.mock.invocationCallOrder[0]);
+      // The message row BEFORE the report's (its author's delete takes them in
+      // that order), the delete itself only after the pending check
+      expect(tx.$queryRaw.mock.invocationCallOrder[2]).toBeLessThan(tx.report.updateMany.mock.invocationCallOrder[0]);
+      expect(tx.message.deleteMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.report.updateMany.mock.invocationCallOrder[0]);
       for (const topLevel of [prismaMock.report.updateMany, prismaMock.message.deleteMany, prismaMock.message.delete, prismaMock.user.update,
         prismaMock.serverJoinRequest.deleteMany, prismaMock.auditLog.create]) {
         expect(topLevel).not.toHaveBeenCalled();

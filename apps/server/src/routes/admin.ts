@@ -2814,6 +2814,13 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         { id: report.reporterId, mode: 'keep' },
       ]);
       const disarmed = banTarget ? await disarmWebhookRowsHeldBy(tx, banTarget.id) : [];
+      // The reported message's row BEFORE the report's, in the order its
+      // author's own delete takes them (the message row, then the report
+      // through the foreign key's SET NULL): taking the report first and the
+      // message second closed a cycle with that delete. Only locked here, the
+      // same lock its DELETE takes: the pending check below still decides
+      // before anything is deleted.
+      if (message) await tx.$queryRaw`SELECT id FROM messages WHERE id = ${message.id} FOR UPDATE`;
       // Only from pending, re-checked by the write itself: a second resolve or
       // a dismiss that committed since the read above leaves nothing to
       // transition, and this whole resolution rolls back (ban included) with
