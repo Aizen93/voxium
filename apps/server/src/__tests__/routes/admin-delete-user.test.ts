@@ -599,19 +599,26 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     expect(errorLog).toHaveBeenCalledWith('[Admin] Space srv-owned deleted, but the server:deleted notice failed:', 'adapter publish failed');
   });
 
-  it('deletes the owned space\'s attachment files after its row', async () => {
+  it('deletes the owned space\'s attachment files after its row, and the account\'s after the account', async () => {
     const spaceKey = 'attachments/ch-text/clmsg1-photo.png';
+    const accountKey = 'attachments/dm-conv1/clmsg2-blob.bin';
     prismaMock.messageAttachment.findMany.mockImplementation(async ({ where }: any) =>
-      (where.message?.channel?.serverId === 'srv-owned' ? [{ id: 'att-1', s3Key: spaceKey }] : []));
+      (where.message?.channel?.serverId === 'srv-owned'
+        ? [{ id: 'att-1', s3Key: spaceKey }]
+        : where.message?.OR ? [{ id: 'att-2', s3Key: accountKey }] : []));
     mockDeleteMultipleFromS3.mockClear();
     try {
       const res = await deleteOwner();
 
       expect(res.status).toBe(200);
       expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([spaceKey]);
+      expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([accountKey]);
       const spaceCall = mockDeleteMultipleFromS3.mock.calls.findIndex(([keys]) => keys[0] === spaceKey);
+      const accountCall = mockDeleteMultipleFromS3.mock.calls.findIndex(([keys]) => keys[0] === accountKey);
       expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[spaceCall])
         .toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+      expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[accountCall])
+        .toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
     } finally {
       prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
     }

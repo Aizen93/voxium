@@ -11,6 +11,7 @@ import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
 import { deleteServerAndAnnounce } from '../utils/serverDeletion';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
 import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
@@ -2676,7 +2677,11 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
     if (deleteMessage && report.messageId) {
       const message = await prisma.message.findUnique({ where: { id: report.messageId }, select: { id: true, channelId: true, conversationId: true } });
       if (message) {
+        // Its attachment rows go with it (cascade): the keys are read first,
+        // the files deleted once the row is gone, as on the author's own delete
+        const attachmentKeys = await collectAttachmentKeys({ id: message.id });
         await prisma.message.delete({ where: { id: message.id } });
+        deleteAttachmentBlobs(attachmentKeys, '[Admin]', `reported message ${message.id}`);
         const io = getIO();
         if (message.channelId) {
           io.to(`channel:${message.channelId}`).emit(WS_EVENTS.MESSAGE_DELETE, { messageId: message.id, channelId: message.channelId });

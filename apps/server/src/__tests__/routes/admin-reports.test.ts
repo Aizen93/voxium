@@ -35,6 +35,9 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
     delete: vi.fn(),
   },
+  messageAttachment: {
+    findMany: vi.fn().mockResolvedValue([]),
+  },
   serverMember: {
     findMany: vi.fn().mockResolvedValue([]),
   },
@@ -119,11 +122,13 @@ vi.mock('../../utils/memberBroadcast', () => ({
 }));
 
 // S3
+const mockDeleteMultipleFromS3 = vi.fn(async (keys: string[]) => keys.length);
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,
   VALID_ATTACHMENT_KEY_RE: /^attachments\//,
   listAllS3Objects: vi.fn().mockResolvedValue([]),
   deleteFromS3: vi.fn().mockResolvedValue(undefined),
+  deleteMultipleFromS3: (keys: string[]) => mockDeleteMultipleFromS3(keys),
 }));
 
 // Audit log
@@ -366,6 +371,65 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       .send({ action: 'ban' });
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe('POST /admin/reports/:id/resolve — deleting the reported message', () => {
+  const KEY = 'attachments/ch-chan1/clmsg1-photo.png';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.report.update.mockResolvedValue({});
+    prismaMock.report.count.mockResolvedValue(0);
+    prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', messageId: 'msg-1' });
+    prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
+    prismaMock.message.delete.mockReset().mockResolvedValue({});
+    prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
+    mockDeleteMultipleFromS3.mockReset().mockImplementation(async (keys: string[]) => keys.length);
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+  });
+
+  const resolve = () => request(createApp())
+    .post('/api/v1/admin/reports/rep-1/resolve')
+    .set('Authorization', `Bearer ${makeToken()}`)
+    .send({ resolution: 'Removed', deleteMessage: true });
+
+  it('reads its attachment keys before the row and deletes the files after it', async () => {
+    prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+
+    const res = await resolve();
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.message.delete).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+    expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { expired: false, message: { id: 'msg-1' } },
+    }));
+    expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([KEY]);
+    const deleteOrder = prismaMock.message.delete.mock.invocationCallOrder[0];
+    expect(prismaMock.messageAttachment.findMany.mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
+    expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+    expect(mockEmit).toHaveBeenCalledWith('message:delete', { messageId: 'msg-1', channelId: 'chan1' });
+  });
+
+  it('touches storage not at all for a message without attachments', async () => {
+    const res = await resolve();
+
+    expect(res.status).toBe(200);
+    expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+  });
+
+  it('a message delete that fails deletes no file', async () => {
+    prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+    prismaMock.message.delete.mockRejectedValueOnce(new Error('db gone'));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await resolve();
+
+      expect(res.status).toBe(500);
+      expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 });
 
