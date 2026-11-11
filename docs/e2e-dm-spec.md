@@ -479,15 +479,54 @@ reached the device another way, or once the server has refused the look-up of
 its sender (403/404) in five starts of the client, one start counting once
 however many claims it makes. A failure that says nothing about the sender
 (401, 429, 5xx, offline) is never counted, so such a share stays kept until
-the look-up succeeds. A storage failure while its session is written (a full
-disk) keeps the share too, with the Olm state its message advanced left
-unwritten; it and its sender's later shares wait for the next start, where
-that message decrypts again from the state on disk. Disposing the service
-(logout, account switch) while a claim is in flight lets the claim finish
-the page it holds, for at most 10 s; whatever it had not processed by then
-stays kept, and a page whose answer only arrives after that is still written,
-raw, on the one vault connection the teardown keeps open for it (released at
-once on a version change, i.e. an account deletion).
+the look-up succeeds. The Olm layer of a share is decrypted first on a copy of
+the state it would advance (the pairwise session, or the account for a
+pre-key message that opens one), and the live state moves past the message
+only once the group session it carries is stored. A storage failure while
+that session is written (a full disk) therefore keeps the share with nothing
+consumed: whatever else is written meanwhile, the account (another sender's
+pre-key share, a replenishment) or that pairwise session (a reply, a call
+signal), the message still decrypts, and the next claim retries it, its
+sender's later shares behind it. Disposing the service (logout, account
+switch) while a claim is in flight lets the claim finish the page it holds,
+for at most 10 s, and nothing else: from the dispose on no other request goes
+out, nothing else reads or writes the vault, and the claim itself asks the
+server nothing more, so a share whose sender it would still have to look up
+stays kept, uncounted (logout has dropped the tokens by then, and after a new
+sign-in on the same page the request would carry the next account's bearer).
+Whatever the claim had not processed by then stays kept, and a page whose
+answer only arrives after that is still written, raw, on the one vault
+connection the teardown keeps open for it (released at once on a version
+change, i.e. an account deletion).
+
+**Residual: a kept share is lost when its sender's Olm session moves on
+without it.** A share is kept undecrypted while its sender device is not
+pinned (its look-up failed). Other Olm messages from that device can be
+decrypted first in the meantime: a DM call's signals and a secure-voice key
+arrive over the socket and are decrypted as they come, and their own sender
+check pins the device. The kept share then decrypts only from what vodozemac
+(0.11.2) keeps for skipped messages: at most 40 message keys per receiving
+chain, none for a message more than 40 behind the one that opened the gap, and
+5 receiving chains per session. A share behind more than 40 later messages of
+its chain, or behind five ratchet turns of the sender (each a reply of ours
+followed by one of theirs), no longer decrypts and is discarded as unusable at
+its next claim. The same holds for a share still waiting in the inbox while a
+call goes on, since the inbox and the socket are separate paths; keeping the
+share only stretches that wait to the next claim or start. Decrypting the Olm
+layer at claim time and leaving only the sender check pending would close it,
+but not within this protocol: a session opened by a pre-key message is created
+against the pinned identity of its sender (§4.3), and one created before that
+check would sit in the device's slot, where every later send to that device
+reuses it unchecked; the decrypted payload is a raw Megolm session key, which
+the vault keeps only inside a pickle (§7), so holding it pending means an
+inbound session that every reader must refuse until the check passes, a new
+trust state; and the engine exposes no identity key of a pre-key message to
+check against later. Also lost, by design: a kept share sent under an identity
+the user then accepts as replaced (`acceptNewIdentity` re-pins and drops the
+old sessions), one that continues a pairwise session that is reset, and in
+principle one whose one-time key vodozemac has evicted (it keeps the newest
+5,000) or whose fallback key was replaced twice (it keeps the current and the
+previous one).
 
 ### 12.4 Rotation
 
