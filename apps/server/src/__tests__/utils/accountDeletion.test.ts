@@ -211,6 +211,42 @@ describe('deleteUserAccount', () => {
       expect(order.indexOf('s3:attachments')).toBeGreaterThan(order.indexOf('txn:end'));
     });
 
+    it('a key read that fails is logged and the erasure goes on, deleting the files the other reads found', async () => {
+      prismaMock.messageAttachment.findMany
+        .mockRejectedValueOnce(new Error('db gone'))
+        .mockResolvedValueOnce([{ id: 'att-2', s3Key: PEER }])
+        .mockResolvedValueOnce([]);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
+
+        // The sessions were revoked and the secure channels purged before the
+        // read: stopping there would leave the account half erased
+        expect(prismaMock.user.delete).toHaveBeenCalledWith({ where: { id: 'u-1' } });
+        expect(order.lastIndexOf('disconnect')).toBeGreaterThan(order.indexOf('txn:end'));
+        expect(deleteFromS3).toHaveBeenCalledWith('avatars/u-1.webp');
+        expect(deleteMultipleFromS3).toHaveBeenCalledWith([PEER]);
+        expect(error).toHaveBeenCalledWith(
+          "[T] Reading the attachment keys of the account's messages failed (the orphan sweep will reclaim those files):", 'db gone');
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it('every key read failing still erases the account, with no file delete', async () => {
+      prismaMock.messageAttachment.findMany.mockRejectedValue(new Error('db gone'));
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
+
+        expect(prismaMock.user.delete).toHaveBeenCalled();
+        expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+        expect(error).toHaveBeenCalledTimes(3);
+      } finally {
+        error.mockRestore();
+      }
+    });
+
     it('stay when the delete fails (the account and its messages survive)', async () => {
       prismaMock.messageAttachment.findMany.mockResolvedValue([{ id: 'att-1', s3Key: OWN }]);
       prismaMock.$transaction.mockRejectedValue(new Error('db gone'));

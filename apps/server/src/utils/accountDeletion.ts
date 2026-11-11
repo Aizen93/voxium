@@ -1,3 +1,4 @@
+import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { purgeE2EMaterial } from './e2ePurge';
 import { purgeSecureChannelStateForAccount } from './secureChannelLifecycle';
@@ -69,11 +70,22 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // just above, with their own files.) One read per indexed column, merged:
   // an OR across messages and conversations starts from no index and walked
   // the attachments of every message ever sent. A message the account wrote
-  // in its own conversation is found twice, hence the Set.
+  // in its own conversation is found twice, hence the Set. A read that fails
+  // must not stop the erasure: the sessions are already revoked and the
+  // secure channels already gone, so it is logged, those files are left to
+  // the nightly orphan sweep, and the deletion goes on.
+  const readKeys = async (messages: Prisma.MessageWhereInput, what: string): Promise<string[]> => {
+    try {
+      return await collectAttachmentKeys(messages);
+    } catch (err) {
+      console.error(`${opts.logPrefix} Reading the attachment keys of ${what} failed (the orphan sweep will reclaim those files):`, err instanceof Error ? err.message : err);
+      return [];
+    }
+  };
   const attachmentKeys = [...new Set([
-    ...await collectAttachmentKeys({ authorId: userId }),
-    ...await collectAttachmentKeys({ conversation: { user1Id: userId } }),
-    ...await collectAttachmentKeys({ conversation: { user2Id: userId } }),
+    ...await readKeys({ authorId: userId }, "the account's messages"),
+    ...await readKeys({ conversation: { user1Id: userId } }, "the account's conversations (first side)"),
+    ...await readKeys({ conversation: { user2Id: userId } }, "the account's conversations (second side)"),
   ])];
 
   // E2E key material has no FK to User (except the key backup), so it would
