@@ -52,10 +52,13 @@ function formatDuration(ms: number): string {
  */
 export function describeEmailError(err: unknown): string {
   if (err && typeof err === 'object') {
-    const e = err as { code?: unknown; responseCode?: unknown };
+    const e = err as { code?: unknown; responseCode?: unknown; command?: unknown };
     if (typeof e.code === 'string') {
       return typeof e.responseCode === 'number' ? `${e.code} (SMTP ${e.responseCode})` : e.code;
     }
+    // An SMTP reply without a code still quotes the server, address included
+    if (typeof e.responseCode === 'number') return `SMTP ${e.responseCode}`;
+    if (typeof e.command === 'string') return `SMTP error (${e.command})`;
     if (err instanceof Error) return err.message;
   }
   return String(err);

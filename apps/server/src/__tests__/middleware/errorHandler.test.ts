@@ -243,10 +243,13 @@ describe('errorHandler middleware', () => {
 // ─── What an unexpected error is logged with ────────────────────────────────
 
 /** What nodemailer rejects with when the relay refuses a recipient: the
- *  recipient address rides on the error object, outside its message. */
+ *  recipient address rides on the error object AND in its message, which
+ *  quotes the server's reply. */
 function mailTransportError(): Error {
-  return Object.assign(new Error('Can\'t send mail - all recipients were rejected'), {
+  return Object.assign(new Error('Can\'t send mail - all recipients were rejected: 550 5.1.1 <someone.private@example.org>: Recipient address rejected'), {
     code: 'EENVELOPE',
+    command: 'RCPT TO',
+    responseCode: 550,
     envelope: { from: 'noreply@voxium.example', to: ['someone.private@example.org'] },
     rejected: ['someone.private@example.org'],
     response: '550 5.1.1 <someone.private@example.org>: Recipient address rejected',
@@ -275,22 +278,71 @@ describe('errorHandler middleware — an unexpected error is logged as its messa
 
       expect(res.status).toBe(500);
       expect(errorSpy).toHaveBeenCalledTimes(1);
-      // Printing the object prints `.envelope`, `.rejected` and `.response`
+      // Printing the object prints `.envelope`, `.rejected` and `.response`;
+      // the message and the stack's first line quote the refused address
       for (const arg of errorSpy.mock.calls[0]) expect(typeof arg).toBe('string');
       const logged = errorSpy.mock.calls[0].join(' ');
       expect(logged).not.toContain('someone.private@example.org');
-      expect(logged).toContain('all recipients were rejected');
+      expect(logged).not.toContain('all recipients were rejected');
+      // What is left: the name, the code, describeEmailError's codes, the frames
+      expect(logged).toContain('EENVELOPE (SMTP 550)');
+      expect(logged).toContain('Error');
       expect(logged).toContain(error.stack!.split('\n')[1].trim());
     });
   }
 
-  it('outside production, the line is the label, the message and the stack', async () => {
+  it('outside production, the line is the label, name and message, then the stack', async () => {
     process.env.NODE_ENV = 'development';
     const error = new Error('Something broke internally');
 
     await request(buildApp(error)).get('/test');
 
-    expect(errorSpy.mock.calls[0]).toEqual(['[Error]', 'Something broke internally', error.stack]);
+    expect(errorSpy.mock.calls[0]).toEqual(['[Error]', 'Error: Something broke internally', error.stack]);
+  });
+
+  it('keeps the error\'s name and a string code, in both modes', async () => {
+    const error = Object.assign(new TypeError('connect ECONNREFUSED 127.0.0.1:6379'), { code: 'ECONNREFUSED', errno: -111 });
+
+    process.env.NODE_ENV = 'development';
+    await request(buildApp(error)).get('/test');
+    expect(errorSpy.mock.calls[0]).toEqual(['[Error]', 'TypeError [ECONNREFUSED]: connect ECONNREFUSED 127.0.0.1:6379', error.stack]);
+
+    process.env.NODE_ENV = 'production';
+    await request(buildApp(error)).get('/test');
+    const line = JSON.parse(errorSpy.mock.calls[1][0] as string);
+    expect(line).toMatchObject({ level: 'error', name: 'TypeError', code: 'ECONNREFUSED', message: 'connect ECONNREFUSED 127.0.0.1:6379', stack: error.stack });
+  });
+
+  it('a code that is not a string is left out, never printed as a value', async () => {
+    process.env.NODE_ENV = 'production';
+    const error = Object.assign(new Error('boom'), { code: { detail: 'someone.private@example.org' } });
+
+    await request(buildApp(error)).get('/test');
+
+    const line = JSON.parse(errorSpy.mock.calls[0][0] as string);
+    expect(line.code).toBeUndefined();
+    expect(errorSpy.mock.calls[0][0]).not.toContain('someone.private@example.org');
+  });
+
+  it('in production an SMTP error is described by its codes, and its stack keeps only the frames', async () => {
+    process.env.NODE_ENV = 'production';
+    const error = mailTransportError();
+
+    await request(buildApp(error)).get('/test');
+
+    const line = JSON.parse(errorSpy.mock.calls[0][0] as string);
+    expect(line).toMatchObject({ name: 'Error', code: 'EENVELOPE', message: 'EENVELOPE (SMTP 550)' });
+    expect(line.stack.split('\n').every((l: string) => /^\s+at /.test(l))).toBe(true);
+    expect(errorSpy.mock.calls[0][0]).not.toContain('someone.private@example.org');
+  });
+
+  it('an error carrying only responseCode is treated as an SMTP error too', async () => {
+    process.env.NODE_ENV = 'development';
+    const error = Object.assign(new Error('Invalid login: 535 5.7.8 <someone.private@example.org> rejected'), { responseCode: 535 });
+
+    await request(buildApp(error)).get('/test');
+
+    expect(errorSpy.mock.calls[0].join(' ')).not.toContain('someone.private@example.org');
   });
 
   it('a thrown value that is not an error is named by its type, never printed', async () => {
@@ -304,7 +356,7 @@ describe('errorHandler middleware — an unexpected error is logged as its messa
     const res = await request(app).get('/test');
 
     expect(res.status).toBe(500);
-    expect(errorSpy.mock.calls[0]).toEqual(['[Error]', 'Non-error value thrown (object)', '']);
+    expect(errorSpy.mock.calls[0]).toEqual(['[Error]', 'Error: Non-error value thrown (object)', '']);
   });
 });
 

@@ -118,6 +118,15 @@ describe('utils/email — describeEmailError', () => {
     expect(describeEmailError(connErr)).toBe('ECONNECTION');
   });
 
+  it('an SMTP reply without a code is described by its response code or command, never its message', async () => {
+    const { describeEmailError } = await import('../../utils/email');
+
+    const replyErr = Object.assign(new Error('Invalid login: 535 5.7.8 <victim@example.com> rejected'), { responseCode: 535 });
+    expect(describeEmailError(replyErr)).toBe('SMTP 535');
+    const commandErr = Object.assign(new Error('Recipient <victim@example.com> refused'), { command: 'RCPT TO' });
+    expect(describeEmailError(commandErr)).toBe('SMTP error (RCPT TO)');
+  });
+
   it('falls back to the message for plain errors without a code', async () => {
     const { describeEmailError } = await import('../../utils/email');
 

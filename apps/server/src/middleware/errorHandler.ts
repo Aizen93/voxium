@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { AppError } from '../utils/errors';
 import { redactedPath } from '../utils/redactUrl';
+import { describeEmailError } from '../utils/email';
 
 /**
  * The client-error shape body-parser (via http-errors) throws: a numeric
@@ -39,13 +40,41 @@ const EXPOSED_ERROR_MESSAGES = new Map<string, string>([
   ['encoding.unsupported', 'Unsupported request encoding'],
 ]);
 
-/** The two strings an unexpected error is logged with, read without touching anything else on it. */
-function loggableError(err: unknown): { message: string; stack: string | undefined } {
-  const fields = typeof err === 'object' && err !== null ? err as { message?: unknown; stack?: unknown } : {};
+interface LoggableError {
+  name: string | undefined;
+  code: string | undefined;
+  message: string;
+  stack: string | undefined;
+}
+
+/**
+ * The strings an unexpected error is logged with, read without touching
+ * anything else on it: its name, a string `code` (ECONNREFUSED, P2025…), its
+ * message and its stack. An SMTP error (nodemailer sets `command` or
+ * `responseCode`) quotes the server's reply in its message, and a refused
+ * recipient's reply names the address (`550 … <addr>`): it is described by
+ * describeEmailError (its codes) instead, and its stack keeps only the frames,
+ * whose first line would repeat that message.
+ */
+function loggableError(err: unknown): LoggableError {
+  const fields = typeof err === 'object' && err !== null
+    ? err as { name?: unknown; code?: unknown; message?: unknown; stack?: unknown; command?: unknown; responseCode?: unknown }
+    : {};
+  const name = typeof fields.name === 'string' ? fields.name : undefined;
+  const code = typeof fields.code === 'string' ? fields.code : undefined;
+  const stack = typeof fields.stack === 'string' ? fields.stack : undefined;
+  if (fields.command !== undefined || fields.responseCode !== undefined) {
+    return {
+      name,
+      code,
+      message: describeEmailError(err),
+      stack: stack?.split('\n').filter((line) => /^\s+at /.test(line)).join('\n'),
+    };
+  }
   const message = typeof fields.message === 'string'
     ? fields.message
     : typeof err === 'string' ? err : `Non-error value thrown (${err === null ? 'null' : typeof err})`;
-  return { message, stack: typeof fields.stack === 'string' ? fields.stack : undefined };
+  return { name, code, message, stack };
 }
 
 export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
@@ -82,15 +111,16 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
     });
   }
 
-  // The message and the stack, never the object: printing an error prints its
-  // own properties too, and some carry personal data (a nodemailer error holds
-  // the recipient address in `.envelope`). Strings only, in both modes; a
+  // Name, code, message and stack, never the object: printing an error prints
+  // its own properties too, and some carry personal data (a nodemailer error
+  // holds the recipient address in `.envelope`). Strings only, in both modes; a
   // value thrown that is not an error is named by its type, never printed.
-  const { message, stack } = loggableError(err);
+  const { name, code, message, stack } = loggableError(err);
   if (process.env.NODE_ENV === 'production') {
-    console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', message, stack }));
+    console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', name, code, message, stack }));
   } else {
-    console.error('[Error]', message, stack ?? '');
+    const label = `${name ?? 'Error'}${code ? ` [${code}]` : ''}`;
+    console.error('[Error]', `${label}: ${message}`, stack ?? '');
   }
 
   return res.status(500).json({
