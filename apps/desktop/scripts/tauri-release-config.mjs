@@ -9,7 +9,8 @@
 //     node scripts/tauri-release-config.mjs > "$RUNNER_TEMP/tauri.release.json"
 //   pnpm tauri build --config "$RUNNER_TEMP/tauri.release.json"
 //
-// The same works for `pnpm tauri dev --config …` when a dev store is remote.
+// It changes `csp` only: `tauri dev` runs under `devCsp`, the same policy
+// plus the dev server's localhost:3001, which no release build names.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

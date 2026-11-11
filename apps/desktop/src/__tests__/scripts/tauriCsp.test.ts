@@ -16,7 +16,7 @@ import { parseAssetOrigins, withAssetOrigins, releaseConfig } from '../../../scr
 // the page's http URL, not a file URL
 const CONF_PATH = resolve(__dirname, '../../../src-tauri/tauri.conf.json');
 const CLI_PATH = resolve(__dirname, '../../../scripts/tauri-release-config.mjs');
-const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as { app: { security: { csp: string } } };
+const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as { app: { security: { csp: string; devCsp?: string } } };
 const BASE = conf.app.security.csp;
 const ORIGIN = 'https://assets.example.com';
 
@@ -25,6 +25,57 @@ function directive(csp: string, name: string): string[] {
   if (!found) throw new Error(`no ${name} directive`);
   return found.split(/\s+/).slice(1);
 }
+
+function directives(csp: string): string[] {
+  return csp.split(';').map((d) => d.trim()).filter(Boolean);
+}
+
+// The policy 2.1.1 shipped in tauri.conf.json, frozen here so the official
+// release is compared with what it was, not with the file it is built from.
+const CSP_2_1_1 =
+  "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' http://localhost:3001 ws://localhost:3001 https://voxium.app https://*.voxium.app wss://voxium.app wss://*.voxium.app; img-src 'self' blob: data: http://localhost:3001 https://voxium.app https://*.voxium.app; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:";
+// The only sources the release policy drops: the dev server's, which no
+// installed app talks to
+const LOCALHOST_SOURCES = ['http://localhost:3001', 'ws://localhost:3001'];
+
+describe('the official release policy (tauri.conf.json + the release overlay)', () => {
+  // What 2.1.1's release step produced for a storage origin, with the
+  // localhost sources taken out and nothing else touched: same directives,
+  // same order, the storage origin appended where it always was
+  const expectedRelease = (assetOrigins: string[]) =>
+    directives(CSP_2_1_1)
+      .map((d) => {
+        const [name, ...sources] = d.split(/\s+/);
+        const kept = sources.filter((s) => !LOCALHOST_SOURCES.includes(s));
+        const added = name === 'img-src' || name === 'connect-src' ? assetOrigins : [];
+        return [name, ...kept, ...added].join(' ');
+      })
+      .join('; ');
+
+  it('the base policy is 2.1.1 minus the localhost sources, byte for byte', () => {
+    expect(BASE).toBe(expectedRelease([]));
+    expect(BASE).toBe(
+      "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://voxium.app https://*.voxium.app wss://voxium.app wss://*.voxium.app; img-src 'self' blob: data: https://voxium.app https://*.voxium.app; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:",
+    );
+    for (const s of LOCALHOST_SOURCES) expect(BASE).not.toContain(s);
+    expect(BASE).not.toMatch(/localhost|127\.0\.0\.1/);
+  });
+
+  it('the release overlay for a storage origin is 2.1.1 minus the localhost sources, every directive in order', () => {
+    const storage = 'https://storage.example.org';
+    const overlay = releaseConfig(conf, storage)!;
+    const expected = expectedRelease([storage]);
+    expect(directives(overlay.app.security.csp)).toEqual(directives(expected));
+    expect(overlay.app.security.csp).toBe(expected);
+    expect(overlay.app.security.csp).not.toMatch(/localhost/);
+  });
+
+  it('the development policy is the one 2.1.1 used everywhere, so `tauri dev` still reaches localhost:3001', () => {
+    expect(conf.app.security.devCsp).toBe(CSP_2_1_1);
+    expect(directive(conf.app.security.devCsp!, 'connect-src')).toEqual(expect.arrayContaining(LOCALHOST_SOURCES));
+    expect(directive(conf.app.security.devCsp!, 'img-src')).toContain('http://localhost:3001');
+  });
+});
 
 describe('parseAssetOrigins', () => {
   it('unset or blank means no origins', () => {
@@ -114,6 +165,13 @@ describe('tauri-release-config.mjs (the CLI the release workflow runs)', () => {
     expect(directive(printed.app.security.csp, 'img-src')).toContain(ORIGIN);
     expect(directive(printed.app.security.csp, 'connect-src')).toContain(ORIGIN);
     expect(printed.app.security.csp).toBe(withAssetOrigins(BASE, [ORIGIN]));
+  });
+
+  it('prints only the policy: the release keeps tauri.conf.json\'s updater and bundle settings as they are', () => {
+    const printed = JSON.parse(run({ TAURI_ASSET_ORIGIN: 'https://storage.example.org' })) as Record<string, unknown>;
+    expect(Object.keys(printed)).toEqual(['app']);
+    expect(printed.app).toEqual({ security: { csp: expect.any(String) } });
+    expect(JSON.stringify(printed)).not.toMatch(/localhost/);
   });
 
   it('fails the build on a malformed variable instead of shipping the base policy silently', () => {
