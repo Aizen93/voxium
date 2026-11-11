@@ -1284,6 +1284,7 @@ describe('dmVoiceHandler — dm:voice:speaking', () => {
 
   it('emits speaking event to DM room', () => {
     socket.data.dmCallConversationId = 'conv-1';
+    socket.rooms.add('dm:voice:conv-1');
     const handler = handlers.get('dm:voice:speaking')!;
     handler(true);
 
@@ -1297,6 +1298,7 @@ describe('dmVoiceHandler — dm:voice:speaking', () => {
 
   it('emits not-speaking event', () => {
     socket.data.dmCallConversationId = 'conv-1';
+    socket.rooms.add('dm:voice:conv-1');
     const handler = handlers.get('dm:voice:speaking')!;
     handler(false);
 
@@ -1305,6 +1307,44 @@ describe('dmVoiceHandler — dm:voice:speaking', () => {
       userId: 'user-1',
       speaking: false,
     });
+  });
+
+  it('says nothing for a call that ended from elsewhere: the socket left the call room, its data did not', () => {
+    // endDMCall (a decline, a deleted conversation) makes every socket leave
+    // dm:voice:{id} adapter-wide, but cannot reach socket.data on another node
+    socket.data.dmCallConversationId = 'conv-1';
+    const handler = handlers.get('dm:voice:speaking')!;
+
+    handler(true);
+
+    expect(io.to).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalled();
+    // ...and the stale pointer is dropped, so the next one is a plain early return
+    expect(socket.data.dmCallConversationId).toBeUndefined();
+  });
+
+  it('end to end: after a decline ends the call, the caller\'s speaking events stop', async () => {
+    // The caller is in the call on this socket
+    socket.data.dmCallConversationId = 'conv-1';
+    socket.rooms.add('dm:voice:conv-1');
+    // The adapter-wide room leave reaches this socket on its own node
+    io._socketsLeave.mockImplementation((room: string) => { socket.rooms.delete(room); });
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({ 'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }) });
+    vi.mocked(prisma.message.create).mockResolvedValueOnce({
+      id: 'msg-1', content: 'call_ended', type: 'system', channelId: null, conversationId: 'conv-1', authorId: 'user-1',
+      author: mockUser, createdAt: new Date(), editedAt: null,
+    } as any);
+    vi.mocked(prisma.conversation.update).mockResolvedValueOnce({} as any);
+    const callee = createMockSocket('user-2', 'socket-2');
+    handleDMVoiceEvents(io as any, callee.socket as any);
+    await callee.handlers.get('dm:voice:decline')!('conv-1');
+    io.to.mockClear();
+    io._emit.mockClear();
+
+    handlers.get('dm:voice:speaking')!(true);
+
+    expect(io._emit).not.toHaveBeenCalledWith('dm:voice:speaking', expect.anything());
   });
 });
 

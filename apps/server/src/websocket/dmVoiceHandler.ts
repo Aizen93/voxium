@@ -692,6 +692,15 @@ export function handleDMVoiceEvents(
     // Hot path — use socket.data for zero-latency local lookup
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
+    // socket.data outlives a call ended from elsewhere (endDMCall: a decline,
+    // a deleted conversation; the other side hanging up): it cannot reach a
+    // socket on another node. The call ROOM can, every ending makes the
+    // sockets leave it adapter-wide, and socket.rooms is this socket's own
+    // node's view of that: still local, still free, and right on every node.
+    if (!socket.rooms.has(`dm:voice:${conversationId}`)) {
+      socket.data.dmCallConversationId = undefined;
+      return;
+    }
 
     io.to(`dm:${conversationId}`).emit('dm:voice:speaking', {
       conversationId,
