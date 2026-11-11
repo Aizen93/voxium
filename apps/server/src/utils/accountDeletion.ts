@@ -1,7 +1,7 @@
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { purgeE2EMaterial } from './e2ePurge';
-import { purgeSecureChannelStateForAccount } from './secureChannelLifecycle';
+import { announceSecureMembershipsRemoved, removeSecureMembershipsInTx } from './secureChannelLifecycle';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { deleteFromS3 } from './s3';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
@@ -57,23 +57,18 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // after the delete commits is the guarantee (below).
   revokeUserSessions(userId, { forceLogoutReason: opts.reason });
 
-  // Secure channels: the DB cascade would silently reap the rows, but the
-  // members deserve events (created channels vanish from their sidebars,
-  // membership lists refresh). Best-effort, before the delete.
-  await purgeSecureChannelStateForAccount(userId);
-
   // The user delete cascades every message the account wrote, in every
   // channel, and both sides of every conversation it was in (Message.author
   // and both Conversation users are onDelete: Cascade), attachment rows
-  // included. Their keys are read now and the files deleted once the delete
-  // has committed. (The secure channels the account created were deleted
-  // just above, with their own files.) One read per indexed column, merged:
-  // an OR across messages and conversations starts from no index and walked
-  // the attachments of every message ever sent. A message the account wrote
-  // in its own conversation is found twice, hence the Set. A read that fails
-  // must not stop the erasure: the sessions are already revoked and the
-  // secure channels already gone, so it is logged, those files are left to
-  // the nightly orphan sweep, and the deletion goes on.
+  // included, and the transaction below deletes the secure channels the
+  // account created with every message in them. Their keys are read now and
+  // the files deleted once the delete has committed. One read per indexed
+  // column, merged: an OR across messages and conversations starts from no
+  // index and walked the attachments of every message ever sent. A message
+  // the account wrote in its own conversation (or in its own secure channel)
+  // is found twice, hence the Set. A read that fails must not stop the
+  // erasure: the sessions are already revoked, so it is logged, those files
+  // are left to the nightly orphan sweep, and the deletion goes on.
   const readKeys = async (messages: Prisma.MessageWhereInput, what: string): Promise<string[]> => {
     try {
       return await collectAttachmentKeys(messages);
@@ -86,16 +81,27 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     ...await readKeys({ authorId: userId }, "the account's messages"),
     ...await readKeys({ conversation: { user1Id: userId } }, "the account's conversations (first side)"),
     ...await readKeys({ conversation: { user2Id: userId } }, "the account's conversations (second side)"),
+    ...await readKeys({ channel: { createdById: userId, secure: true } }, 'the secure channels the account created'),
   ])];
 
   // E2E key material has no FK to User (except the key backup), so it would
   // otherwise outlive the account it belongs to. One transaction with the
   // delete: purging a user who then survives strands every device they own.
-  await prisma.$transaction(async (tx) => {
+  const secure = await prisma.$transaction(async (tx) => {
     await purgeE2EMaterial(userId, tx);
-    // The cascade takes this account's memberships with the row; the inline
-    // member counts (server discovery) follow in the same transaction so the
-    // directory never shows a departed member until the nightly recount.
+    // The memberships first, explicitly (the cascade would take them with the
+    // row, last): every writer of a secure-channel row locks the member row
+    // before any channel or space row, so taking them in that order here too
+    // is what keeps a concurrent secure-channel creation from deadlocking
+    // against the member counts below.
+    await tx.serverMember.deleteMany({ where: { userId } });
+    // Then the secure-channel state, in the same transaction: the channels
+    // the account created (with every member's row), its rows in the others,
+    // the key shares addressed to it there. The notices go out after the commit.
+    const removal = await removeSecureMembershipsInTx(tx, userId);
+    // The inline member counts (server discovery) follow in the same
+    // transaction so the directory never shows a departed member until the
+    // nightly recount.
     if (memberships.length > 0) {
       await tx.server.updateMany({
         where: { id: { in: memberships.map((m) => m.serverId) }, memberCount: { gt: 0 } },
@@ -103,6 +109,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
       });
     }
     await tx.user.delete({ where: { id: userId } });
+    return removal;
   }, {
     // Deleting a user cascades across ~36 relations (messages, reactions,
     // reads, conversations, reports, tickets, themes…) plus six E2E deletes.
@@ -119,6 +126,10 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   revokeUserSessions(userId, { forceLogoutReason: opts.reason });
 
   deleteAttachmentBlobs(attachmentKeys, opts.logPrefix, 'a deleted account');
+
+  // The members of its secure channels hear it (created channels vanish
+  // from their sidebars, member lists refresh, live voice ends). Never throws.
+  await announceSecureMembershipsRemoved(secure);
 
   for (const { serverId } of pendingRequests) {
     await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'cancelled' });

@@ -1166,6 +1166,11 @@ machinery above, not a second protocol. The crypto engine is unchanged.
 - Members can leave; only the creator invites/removes/renames/deletes. A
   creator leaving the server (kick, leave, account deletion) deletes their
   channels, with member-scoped events and S3 blob cleanup.
+- A `ChannelMember` row exists only while its user is a member of the
+  channel's server. Every end of a server membership removes that user's rows
+  in the server (and deletes the channels they created) in the SAME
+  transaction as the membership row, so the departure commits whole or not at
+  all; the events, the voice eviction and the blob cleanup follow the commit.
 
 ### 19.2 Scopes
 

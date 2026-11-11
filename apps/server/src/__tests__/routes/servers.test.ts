@@ -175,11 +175,11 @@ vi.mock('../../utils/channelVisibilityRooms', () => ({
   syncChannelVisibilityRooms: (...args: any[]) => mockSyncVisibilityRooms(...args),
 }));
 
-// Secure-channel lifecycle (leave/kick purge their secure state first)
-const mockPurgeSecureChannelState = vi.fn().mockResolvedValue(undefined);
+// Secure-channel lifecycle (the removal and the account deletion remove the
+// secure state in their transactions; utils/removeMember.ts is mocked below)
 vi.mock('../../utils/secureChannelLifecycle', () => ({
-  purgeSecureChannelState: (...args: any[]) => mockPurgeSecureChannelState(...args),
-  purgeSecureChannelStateForAccount: vi.fn().mockResolvedValue(undefined),
+  removeSecureMembershipsInTx: vi.fn().mockResolvedValue({ userId: '', deleted: [], left: [] }),
+  announceSecureMembershipsRemoved: vi.fn().mockResolvedValue(undefined),
   deleteSecureChannel: vi.fn().mockResolvedValue(true),
 }));
 

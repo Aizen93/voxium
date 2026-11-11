@@ -380,7 +380,9 @@ model Channel {
   server   Server       @relation(fields: [serverId], references: [id], onDelete: Cascade)
   category Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   // Cascade is the DB backstop only: app code deletes a creator's secure
-  // channels explicitly (events + S3 cleanup) before removing the user.
+  // channels explicitly, in the transaction that ends the membership or
+  // removes the user (removeSecureMembershipsInTx), with the events and the
+  // S3 cleanup after its commit.
   createdBy User?       @relation("SecureChannelCreator", fields: [createdById], references: [id], onDelete: Cascade)
   messages Message[]
   reads    ChannelRead[]

@@ -52,6 +52,10 @@ function makeTxMock() {
     server: {
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
+    // The memberships go first, explicitly, ahead of the secure-channel state
+    serverMember: {
+      deleteMany: vi.fn(async () => ({ count: 0 })),
+    },
     // The E2E tables purgeE2EMaterial touches — present so the REAL purge can
     // be driven against this client, not just the observing mock.
     e2EKeyShare: { deleteMany: deleteMany() },
@@ -203,11 +207,13 @@ vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
 }));
 
-// Secure-channel lifecycle (account deletion purges secure state for events)
-const mockPurgeSecureForAccount = vi.fn().mockResolvedValue(undefined);
+// Secure-channel lifecycle: the account's secure-channel state goes in the
+// delete transaction, the notices after it
+const mockRemoveSecureInTx = vi.fn(async (_tx: unknown, userId: string) => ({ userId, deleted: [], left: [] }));
+const mockAnnounceSecureRemoved = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../utils/secureChannelLifecycle', () => ({
-  purgeSecureChannelState: vi.fn().mockResolvedValue(undefined),
-  purgeSecureChannelStateForAccount: (...args: any[]) => mockPurgeSecureForAccount(...args),
+  removeSecureMembershipsInTx: (tx: unknown, userId: string) => mockRemoveSecureInTx(tx, userId),
+  announceSecureMembershipsRemoved: (...args: any[]) => mockAnnounceSecureRemoved(...args),
   deleteSecureChannel: vi.fn().mockResolvedValue(true),
 }));
 
@@ -303,6 +309,15 @@ function expectAtomicPurgeAndDelete(targetId: string) {
   expect(purgedId).toBe(targetId);
   expect(client).toBe(txMock);
   expect(client).not.toBe(prisma);
+
+  // The secure-channel rows go in the same transaction, on its client, after
+  // the memberships and before the row; the notices only after the commit
+  expect(mockRemoveSecureInTx).toHaveBeenCalledWith(txMock, targetId);
+  expect(txMock.serverMember.deleteMany).toHaveBeenCalledWith({ where: { userId: targetId } });
+  expect(txMock.serverMember.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(mockRemoveSecureInTx.mock.invocationCallOrder[0]);
+  expect(mockRemoveSecureInTx.mock.invocationCallOrder[0]).toBeLessThan(txMock.user.delete.mock.invocationCallOrder[0]);
+  expect(mockAnnounceSecureRemoved).toHaveBeenCalledWith({ userId: targetId, deleted: [], left: [] });
+  expect(mockAnnounceSecureRemoved.mock.invocationCallOrder[0]).toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
 
   // Purge FIRST: a delete that lands first can commit alone if the purge then
   // throws under a driver that does not roll back the way we assume.

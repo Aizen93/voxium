@@ -1,3 +1,4 @@
+import type { Prisma } from '../generated/prisma/client';
 import { getIO } from '../websocket/socketServer';
 import { prisma } from './prisma';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
@@ -8,6 +9,10 @@ import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websoc
  * Lifecycle helpers for SECURE channels (invite-only, E2E-encrypted).
  *
  * Invariants these helpers exist to uphold:
+ *  - A ChannelMember row exists only while its user is a member of the
+ *    channel's space. Access is derived from the row alone, so the rows go in
+ *    the transaction that ends the space membership
+ *    (`removeSecureMembershipsInTx`).
  *  - Secure-channel events are NEVER emitted to `server:{id}` — non-members
  *    must learn nothing, so every emit targets member `user:{id}` rooms or the
  *    `channel:{id}` room (whose membership is already the member set).
@@ -16,6 +21,130 @@ import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websoc
  *  - Attachment blobs are cleaned from S3 on channel deletion (they are
  *    ciphertext, but ciphertext nobody can ever read again is still storage).
  */
+
+/** What `removeSecureMembershipsInTx` removed, for the notices after the commit. */
+export interface SecureMembershipRemoval {
+  userId: string;
+  /** The secure channels the user created: deleted with the membership (spec §19.1). */
+  deleted: Array<{ channelId: string; serverId: string; memberIds: string[] }>;
+  /** The secure channels the user was invited to and is no longer a member of. */
+  left: Array<{ channelId: string; serverId: string }>;
+}
+
+/**
+ * Inside the transaction that ends a space membership, AFTER that
+ * transaction deleted the `server_members` row(s): removes every
+ * secure-channel row the user holds in `serverId` (every space when it is
+ * omitted, for an account deletion). Throws with the transaction, so a
+ * removal commits with its rows gone or not at all.
+ *
+ *  - The channels the user created are deleted, which cascades every
+ *    member's row (the creator is the channel's only manager: it does not
+ *    outlive their membership, and a delete that fails fails the departure).
+ *    They are locked first, FOR UPDATE, so the member list read for the
+ *    notices is the one deleted: an invite into one of them holds that lock
+ *    and is waited for.
+ *  - The user's rows in every other channel of the space go, with the key
+ *    shares addressed to them in those channels' scopes. They are deleted
+ *    AFTER the member row: a writer that holds a lock on that row is waited
+ *    for by its delete, and this later statement then sees what it wrote.
+ *
+ * Statements one after the other, never in a Promise.all: they share the
+ * transaction's one connection.
+ */
+export async function removeSecureMembershipsInTx(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  serverId?: string,
+): Promise<SecureMembershipRemoval> {
+  const created = serverId === undefined
+    ? await tx.$queryRaw<Array<{ id: string; server_id: string }>>`
+        SELECT id, server_id FROM channels
+        WHERE created_by_id = ${userId} AND secure = true
+        ORDER BY id
+        FOR UPDATE`
+    : await tx.$queryRaw<Array<{ id: string; server_id: string }>>`
+        SELECT id, server_id FROM channels
+        WHERE created_by_id = ${userId} AND server_id = ${serverId} AND secure = true
+        ORDER BY id
+        FOR UPDATE`;
+  const createdIds = created.map((c) => c.id);
+
+  const deleted: SecureMembershipRemoval['deleted'] = [];
+  if (createdIds.length > 0) {
+    const members = await tx.channelMember.findMany({
+      where: { channelId: { in: createdIds } },
+      select: { channelId: true, userId: true },
+    });
+    await tx.channel.deleteMany({ where: { id: { in: createdIds }, secure: true } });
+    for (const c of created) {
+      deleted.push({
+        channelId: c.id,
+        serverId: c.server_id,
+        memberIds: members.filter((m) => m.channelId === c.id).map((m) => m.userId),
+      });
+    }
+  }
+
+  // Every channel of the space, not only the secure ones: rows exist only
+  // for secure channels, and none may survive the membership
+  const where: Prisma.ChannelMemberWhereInput = serverId === undefined ? { userId } : { userId, channel: { serverId } };
+  const rows = await tx.channelMember.findMany({
+    where,
+    select: { channelId: true, channel: { select: { serverId: true } } },
+  });
+  const left = rows.map((r) => ({ channelId: r.channelId, serverId: r.channel.serverId }));
+  await tx.channelMember.deleteMany({ where });
+
+  const scopes = [...createdIds, ...left.map((l) => l.channelId)].map(e2eChannelScope);
+  if (scopes.length > 0) {
+    // Unclaimed key shares addressed to the user in those channels die with
+    // the membership: they can only carry sessions of the time they were a
+    // member (the in-transaction key-share gate refuses new ones), but a share
+    // left claimable outlives the row it was meant for.
+    await tx.e2EKeyShare.deleteMany({
+      where: { recipientUserId: userId, conversationId: { in: scopes } },
+    });
+  }
+
+  return { userId, deleted, left };
+}
+
+/**
+ * After the commit of a `removeSecureMembershipsInTx`: the notices, room
+ * operations and voice teardown, every step best effort and on its own
+ * (logged, never thrown — the rows are already gone).
+ *
+ * Deleted channels: `channel:deleted` to every member, the room emptied, live
+ * voice torn down on every node. Channels left: `channel:deleted` to the user,
+ * their sockets out of the room, their live voice session ended (spec §21:
+ * the others re-key on the membership change) and the refreshed member list
+ * to the members who remain.
+ */
+export async function announceSecureMembershipsRemoved(removal: SecureMembershipRemoval): Promise<void> {
+  const io = getIO();
+  for (const ch of removal.deleted) {
+    await announceSecureChannelDeleted(ch.channelId, ch.serverId, ch.memberIds);
+  }
+  for (const { channelId, serverId } of removal.left) {
+    try {
+      io.to(`user:${removal.userId}`).emit(WS_EVENTS.CHANNEL_DELETED, { channelId, serverId });
+      io.in(`user:${removal.userId}`).socketsLeave(`channel:${channelId}`);
+    } catch (err) {
+      logRemovedMemberNoticeFailure(channelId, 'the notice to the removed member', err);
+    }
+    try {
+      await broadcastVoiceEvictUser(io, channelId, removal.userId);
+    } catch (err) {
+      logRemovedMemberNoticeFailure(channelId, 'the voice eviction', err);
+    }
+    await broadcastSecureMembersUpdated(channelId, serverId);
+  }
+}
+
+function logRemovedMemberNoticeFailure(channelId: string, step: string, err: unknown): void {
+  console.error(`[SecureChannel] Member removed from ${channelId}, but ${step} failed:`, err instanceof Error ? err.message : err);
+}
 
 /** Member-list payload for CHANNEL_MEMBERS_UPDATED (bounded by the member cap). */
 export async function getSecureChannelMembersPayload(channelId: string) {
@@ -86,16 +215,22 @@ export async function deleteSecureChannel(channelId: string): Promise<boolean> {
   // throws below must not skip it. Never awaited, never throws.
   deleteAttachmentBlobs(s3Keys, '[SecureChannel]', `deleted channel ${channelId}`);
 
-  // The row is gone: each step below is best effort and on its own, so one
-  // that throws neither skips the others (the voice teardown above all) nor
-  // reports a channel that no longer exists as not deleted.
+  await announceSecureChannelDeleted(channelId, channel.serverId, memberIds);
+  return true;
+}
+
+/**
+ * After a secure channel's row delete committed: `channel:deleted` to every
+ * member, the room emptied, live voice torn down on every node. Each step is
+ * best effort and on its own, so one that throws neither skips the others
+ * (the voice teardown above all) nor reports a channel that no longer exists
+ * as not deleted. Never throws.
+ */
+async function announceSecureChannelDeleted(channelId: string, serverId: string, memberIds: string[]): Promise<void> {
   const io = getIO();
   try {
     for (const userId of memberIds) {
-      io.to(`user:${userId}`).emit(WS_EVENTS.CHANNEL_DELETED, {
-        channelId,
-        serverId: channel.serverId,
-      });
+      io.to(`user:${userId}`).emit(WS_EVENTS.CHANNEL_DELETED, { channelId, serverId });
     }
   } catch (err) {
     logSecureDeleteFanOutFailure(channelId, 'the channel:deleted notices', err);
@@ -113,33 +248,11 @@ export async function deleteSecureChannel(channelId: string): Promise<boolean> {
   } catch (err) {
     logSecureDeleteFanOutFailure(channelId, 'the voice cleanup', err);
   }
-
-  return true;
 }
 
 /** A step after a secure channel's row delete committed failed: logged, never thrown. */
 function logSecureDeleteFanOutFailure(channelId: string, step: string, err: unknown): void {
   console.error(`[SecureChannel] Channel ${channelId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
-}
-
-/**
- * Delete every secure channel a user created (optionally scoped to one
- * server). Called BEFORE removing the user's ServerMember row (leave/kick) or
- * the user itself (account deletion) — the creator is the only membership
- * manager, so their channels do not outlive them.
- */
-export async function deleteSecureChannelsOwnedBy(userId: string, serverId?: string): Promise<void> {
-  const channels = await prisma.channel.findMany({
-    where: { createdById: userId, secure: true, ...(serverId ? { serverId } : {}) },
-    select: { id: true },
-  });
-  for (const ch of channels) {
-    try {
-      await deleteSecureChannel(ch.id);
-    } catch (err) {
-      console.error(`[SecureChannel] Failed to delete creator-owned channel ${ch.id}:`, err);
-    }
-  }
 }
 
 /**
@@ -171,55 +284,4 @@ export async function removeSecureMember(channelId: string, serverId: string, us
   await broadcastVoiceEvictUser(io, channelId, userId);
 
   await broadcastSecureMembersUpdated(channelId, serverId);
-}
-
-/**
- * Remove a departing server member from every secure channel in that server:
- * channels they created are deleted outright; channels they were invited to
- * just lose them as a member. Called from leave/kick BEFORE the ServerMember
- * row is removed.
- */
-export async function purgeSecureChannelState(userId: string, serverId: string): Promise<void> {
-  await deleteSecureChannelsOwnedBy(userId, serverId);
-
-  // Channels the user CREATED are excluded here: they were handled above, and
-  // if one of those deletes failed, stripping the creator's membership row now
-  // would leave an orphan channel nobody can manage. Keeping the row costs
-  // nothing — the permission calculator cross-checks ServerMember, so the
-  // departed creator still computes to 0n everywhere.
-  const memberships = await prisma.channelMember.findMany({
-    where: { userId, channel: { serverId, secure: true, createdById: { not: userId } } },
-    select: { channelId: true },
-  });
-  for (const m of memberships) {
-    try {
-      await removeSecureMember(m.channelId, serverId, userId);
-    } catch (err) {
-      console.error(`[SecureChannel] Failed to remove departing member from ${m.channelId}:`, err);
-    }
-  }
-}
-
-/**
- * Account-deletion variant: every server at once. The DB cascade would clean
- * the rows anyway — this exists for the EVENTS (created channels announce
- * their deletion to their members; remaining members of other channels get a
- * members-update so their UI refreshes). Called before the user delete.
- */
-export async function purgeSecureChannelStateForAccount(userId: string): Promise<void> {
-  await deleteSecureChannelsOwnedBy(userId);
-
-  // Created channels excluded for the same orphan-channel reason as
-  // purgeSecureChannelState (here the user-delete cascade is the backstop)
-  const memberships = await prisma.channelMember.findMany({
-    where: { userId, channel: { secure: true, createdById: { not: userId } } },
-    select: { channelId: true, channel: { select: { serverId: true } } },
-  });
-  for (const m of memberships) {
-    try {
-      await removeSecureMember(m.channelId, m.channel.serverId, userId);
-    } catch (err) {
-      console.error(`[SecureChannel] Failed to remove deleted account from ${m.channelId}:`, err);
-    }
-  }
 }
