@@ -12,7 +12,8 @@ import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
-import { isSortPosition, MAX_SORT_POSITION } from '../utils/sortPosition';
+import { isSortPosition, MAX_SORT_POSITION, positionAfter } from '../utils/sortPosition';
+import { retryOnTransactionConflict } from '../utils/transactionRetry';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -238,25 +239,44 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
       if (!category) throw new BadRequestError('Category not found in this server');
     }
 
-    // Secure channels count against their own limit (secureChannels.ts); the
-    // total only places the new channel last. One grouped count gives both.
-    const [countsBySecure, limits] = await Promise.all([
-      prisma.channel.groupBy({ by: ['secure'], where: { serverId }, _count: { _all: true } }),
-      getEffectiveLimits(serverId),
-    ]);
-    let channelCount = 0;
-    let regularCount = 0;
-    for (const row of countsBySecure) {
-      channelCount += row._count._all;
-      if (!row.secure) regularCount += row._count._all;
-    }
-    if (regularCount >= limits.maxChannelsPerServer) {
-      throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
-    }
+    const limits = await getEffectiveLimits(serverId);
 
-    const channel = await prisma.channel.create({
-      data: { name, type, serverId, position: channelCount, categoryId: categoryId || null },
-    });
+    // Count, place and insert under the space row lock (FOR UPDATE, the lock
+    // a secure-channel or webhook creation takes too), so concurrent
+    // creations in one space run one after the other: each counts, and
+    // places itself after, the channels committed before it (each statement
+    // reads afresh under READ COMMITTED). Two creations at the limit can no
+    // longer both pass it, nor two creations take one position. Past the
+    // space row, the insert only key-shares the category row through its
+    // foreign key, and the one writer that locks a category row (its delete)
+    // never takes a space row. Run again when PostgreSQL aborts it to break a
+    // deadlock.
+    const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      // A space deleted since the permission check answers as one
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
+      // Secure channels count against their own limit (secureChannels.ts);
+      // every channel, secure ones included, holds a position. One grouped
+      // read gives the count and the highest position.
+      const bySecure = await tx.channel.groupBy({
+        by: ['secure'],
+        where: { serverId },
+        _count: { _all: true },
+        _max: { position: true },
+      });
+      let regularCount = 0;
+      let highest: number | null = null;
+      for (const row of bySecure) {
+        if (!row.secure) regularCount += row._count._all;
+        if (row._max.position !== null && (highest === null || row._max.position > highest)) highest = row._max.position;
+      }
+      if (regularCount >= limits.maxChannelsPerServer) {
+        throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
+      }
+      return tx.channel.create({
+        data: { name, type, serverId, position: positionAfter(highest), categoryId: categoryId || null },
+      });
+    }), '[Channels] A channel creation');
 
     // Announce to — and subscribe — exactly the members who can VIEW the new
     // channel, and nobody else. The old code did both server-wide on the

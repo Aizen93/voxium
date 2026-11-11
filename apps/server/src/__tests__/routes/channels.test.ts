@@ -102,6 +102,8 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
   },
   $transaction: vi.fn(),
+  // The space row lock the create takes in its transaction
+  $queryRaw: vi.fn(),
 };
 
 // Object storage: the files of a deleted channel's attachments
@@ -157,13 +159,20 @@ vi.mock('../../utils/serverLimits', () => ({
   }),
 }));
 
-/** The `groupBy({ by: ['secure'] })` rows the create route counts from. */
-function channelCounts(regular: number, secure = 0) {
-  const rows: { secure: boolean; _count: { _all: number } }[] = [];
-  if (regular > 0) rows.push({ secure: false, _count: { _all: regular } });
-  if (secure > 0) rows.push({ secure: true, _count: { _all: secure } });
+/**
+ * The `groupBy({ by: ['secure'] })` rows the create route counts and places
+ * from. Positions default to 0..n-1 with the secure channels after the
+ * regular ones; `highest` overrides the highest position of each group.
+ */
+function channelCounts(regular: number, secure = 0, highest: { regular?: number; secure?: number } = {}) {
+  const rows: { secure: boolean; _count: { _all: number }; _max: { position: number | null } }[] = [];
+  if (regular > 0) rows.push({ secure: false, _count: { _all: regular }, _max: { position: highest.regular ?? regular - 1 } });
+  if (secure > 0) rows.push({ secure: true, _count: { _all: secure }, _max: { position: highest.secure ?? regular + secure - 1 } });
   return rows;
 }
+
+/** Set while a `$transaction` callback runs, so a mock can tell where it was called. */
+let inTransaction = false;
 
 // ─── App setup ──────────────────────────────────────────────────────────────
 
@@ -219,6 +228,20 @@ describe('Channel Routes', () => {
     prismaMock.role.findMany.mockResolvedValue([]);
     prismaMock.memberRole.findMany.mockResolvedValue([]);
     prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'owner-1' });
+    // An interactive transaction runs its callback on the same mocks; an
+    // array one (the reorder) awaits its statements
+    inTransaction = false;
+    prismaMock.$transaction.mockImplementation(async (arg: any) => {
+      if (Array.isArray(arg)) return Promise.all(arg);
+      inTransaction = true;
+      try {
+        return await arg(new Proxy({} as any, { get: (_t, prop) => prismaMock[prop as string] }));
+      } finally {
+        inTransaction = false;
+      }
+    });
+    // The space row lock finds the space
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'srv-1' }]);
   });
 
   // ── GET /api/v1/servers/:serverId/channels ──────────────────────────────
@@ -543,6 +566,133 @@ describe('Channel Routes', () => {
       expect(res.status).toBe(500);
       expect(prismaMock.channel.create).not.toHaveBeenCalled();
       errSpy.mockRestore();
+    });
+
+    // ── The limit and the position, under the space row lock ─────────────
+
+    it('locks the space row, then counts and places, then inserts, all inside ONE transaction', async () => {
+      const token = makeToken();
+      const order: string[] = [];
+      const where = () => (inTransaction ? 'tx' : 'outside');
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        order.push(`lock:${where()}`);
+        expect(strings.join('?')).toBe('SELECT id FROM servers WHERE id = ? FOR UPDATE');
+        expect(values).toEqual(['srv-1']);
+        return [{ id: 'srv-1' }];
+      });
+      prismaMock.channel.groupBy.mockImplementation(async () => { order.push(`count:${where()}`); return channelCounts(3); });
+      prismaMock.channel.create.mockImplementation(async ({ data }: any) => {
+        order.push(`create:${where()}`);
+        return { id: 'ch-new', categoryId: null, ...data };
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'new-channel', type: 'text' });
+
+      expect(res.status).toBe(201);
+      expect(order).toEqual(['lock:tx', 'count:tx', 'create:tx']);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      // one grouped read: the count per kind and the highest position
+      expect(prismaMock.channel.groupBy).toHaveBeenCalledWith({
+        by: ['secure'],
+        where: { serverId: 'srv-1' },
+        _count: { _all: true },
+        _max: { position: true },
+      });
+    });
+
+    it('places the channel after the highest position, so a gap a delete left never gives a second channel the same one', async () => {
+      // Three regular channels at positions 0, 4 and 9 (one between them was
+      // deleted): the count (3) is a position a channel already holds
+      const token = makeToken();
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(3, 0, { regular: 9 }));
+      prismaMock.channel.create.mockImplementation(async ({ data }: any) => ({ id: 'ch-new', categoryId: null, ...data }));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'new-channel', type: 'text' });
+
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenCalledWith({
+        data: { name: 'new-channel', type: 'text', serverId: 'srv-1', position: 10, categoryId: null },
+      });
+    });
+
+    it('places a channel after a secure channel that holds the highest position', async () => {
+      const token = makeToken();
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(2, 1, { regular: 1, secure: 7 }));
+      prismaMock.channel.create.mockImplementation(async ({ data }: any) => ({ id: 'ch-new', categoryId: null, ...data }));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'new-channel', type: 'text' });
+
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 8 }),
+      }));
+    });
+
+    it('a limit of 0 freezes channel creation', async () => {
+      const token = makeToken();
+      prismaMock.channel.groupBy.mockResolvedValue([]);
+      (getEffectiveLimits as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        maxChannelsPerServer: 0, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 0,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'new-channel', type: 'text' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Server can have at most 0 channels');
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+    });
+
+    it('404 Server when the space was deleted since the permission check, creating and announcing nothing', async () => {
+      const token = makeToken();
+      prismaMock.$queryRaw.mockResolvedValue([]);
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'new-channel', type: 'text' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
+      expect(prismaMock.channel.groupBy).not.toHaveBeenCalled();
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('a creation PostgreSQL aborted to break a deadlock is run again and succeeds', async () => {
+      const token = makeToken();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => {
+          throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+        })
+        .mockImplementation(real);
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(1));
+      prismaMock.channel.create.mockImplementation(async ({ data }: any) => ({ id: 'ch-new', categoryId: null, ...data }));
+      try {
+        const res = await request(app)
+          .post('/api/v1/servers/srv-1/channels')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ name: 'new-channel', type: 'text' });
+
+        expect(res.status).toBe(201);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(prismaMock.channel.create).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('validates categoryId belongs to server', async () => {
