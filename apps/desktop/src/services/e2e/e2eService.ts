@@ -294,6 +294,11 @@ const MAX_SHARE_RETRIES = 10;
 /** Hard stop when draining the key-share inbox (guards a hostile server). */
 const MAX_CLAIM_PAGES = 20;
 /**
+ * Hard stop for the message-key history pull (guards a hostile server's
+ * endless cursor): as many pages as the server can hold for one account.
+ */
+const MAX_RESTORE_PAGES = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMITS.MESSAGE_KEY_PAGE_MAX);
+/**
  * A kept key share whose sender's look-up the server has refused (403/404) in
  * this many starts is dropped: its sender rotates on a later send, and a share
  * that can never be checked must not be kept forever. A failure that says
@@ -693,7 +698,7 @@ export class E2EService {
     this.enqueue(() => this.claimKeyShares()).catch((err) => {
       this.logStartupTaskFailure('initial key-share claim', err);
     });
-    this.enqueue(() => this.claimMasterTransfersUnqueued()).catch((err) => {
+    this.claimMasterTransfers().catch((err) => {
       this.logStartupTaskFailure('initial master-transfer claim', err);
     });
     this.replenishOneTimeKeys().catch((err) => {
@@ -1308,7 +1313,20 @@ export class E2EService {
    * one was accepted — after which this device can approve others.
    */
   async claimMasterTransfers(): Promise<boolean> {
-    return this.enqueue(() => this.claimMasterTransfersUnqueued());
+    const imported = await this.enqueue(() => this.claimMasterTransfersUnqueued());
+    if (imported) {
+      // Linking is the PRIMARY way a device joins an account, so it has to pull
+      // history the same way recovery does. Without this, message-key backup
+      // only ever worked for someone who had lost every device — the rarer
+      // path — and a freshly linked one showed empty conversations. After the
+      // queued part: the pull takes the queue one page at a time.
+      try {
+        await this.restoreMessageKeys();
+      } catch (err) {
+        console.warn('e2e: linked device has the account key but not its history yet:', errText(err));
+      }
+    }
+    return imported;
   }
 
   /** Callers must already hold the serial queue (this advances Olm state). */
@@ -1360,18 +1378,6 @@ export class E2EService {
         // mailbox is capped per device and swept.
         if (typeof id === 'string' && err instanceof E2EUnusableTransferError) done.push(id);
         console.warn('e2e: master-secret transfer not imported:', errText(err));
-      }
-    }
-    if (imported) {
-      // Linking is the PRIMARY way a device joins an account, so it has to pull
-      // history the same way recovery does. Without this, message-key backup
-      // only ever worked for someone who had lost every device — the rarer
-      // path — and a freshly linked one showed empty conversations.
-      try {
-        // already on the queue: the queued entry point would wait for this very task
-        await this.restoreMessageKeysUnqueued();
-      } catch (err) {
-        console.warn('e2e: linked device has the account key but not its history yet:', errText(err));
       }
     }
     if (done.length > 0) {
@@ -1697,65 +1703,86 @@ export class E2EService {
    * Run after linking or recovery — it is what turns a blank new device into
    * one that shows the account's history.
    *
-   * On the queue, like the backup pass and for the same reason: it holds the
-   * master key across every page it reads, and only the queue keeps a
-   * master-key replacement (another restore, a reset, a transfer) or a
-   * dispose from freeing that key under it. It also imports inbound sessions,
-   * which the queue serialises with the claim and the decrypts.
+   * One page per step of the serial queue. Each step holds the account key
+   * across its request and its imports, and the queue keeps a master-key
+   * replacement (another restore, a reset) or a dispose from freeing that key
+   * under it; between two steps the queue serves whatever else waits (a send,
+   * a decrypt, a call signal), so a long history does not hold them up. A step
+   * that finds the key replaced since the pull began stops the pull: the
+   * replacement brought its own (restoreKeyBackup), and the old key opens
+   * nothing the account publishes any more. At most MAX_RESTORE_PAGES pages.
    */
   async restoreMessageKeys(): Promise<number> {
-    return this.enqueue(() => this.restoreMessageKeysUnqueued());
-  }
-
-  /** Callers must already hold the serial queue (see restoreMessageKeys). */
-  private async restoreMessageKeysUnqueued(): Promise<number> {
-    const master = this.masterKey;
-    if (!master) throw new Error('This device does not hold the account key');
-
+    let master: EngineMasterKey | null = null;
     let cursor: string | null = null;
     let imported = 0;
-    do {
-      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
-      const res = await this.api.get(`/e2e/message-keys${query}`);
-      const data = res.data.data as {
-        keys?: Array<{ conversationId?: unknown; sessionId?: unknown; blob?: unknown }>;
-        nextCursor?: string | null;
-      };
-      for (const row of data.keys ?? []) {
-        const { conversationId, sessionId, blob } = row;
-        if (typeof conversationId !== 'string' || typeof sessionId !== 'string' || typeof blob !== 'string') {
-          console.warn('e2e: dropping a malformed message-key backup row');
-          continue;
+    for (let page = 0; page < MAX_RESTORE_PAGES; page++) {
+      const step = await this.enqueue(async () => {
+        if (page === 0) {
+          master = this.masterKey;
+        } else if (this.masterKey !== master) {
+          console.debug('e2e: the account key was replaced during the history pull; the pull stops here');
+          return null;
         }
-        try {
-          const opened = master.openSessionKey(blob, `${conversationId}|${sessionId}`);
-          const payload = JSON.parse(opened) as { k?: unknown; u?: unknown; d?: unknown };
-          if (
-            typeof payload.k !== 'string' ||
-            typeof payload.u !== 'string' ||
-            typeof payload.d !== 'string'
-          ) {
-            throw new Error('malformed backed-up session payload');
-          }
-          // Same import path as a key share, so the session-id check that
-          // stops a mislabelled key applies here too.
-          const added = await this.importInboundGroupSession(payload.k, {
-            sessionId,
-            conversationId,
-            senderUserId: payload.u,
-            senderDeviceId: payload.d,
-            keyType: 'exported',
-          });
-          if (added) imported += 1;
-        } catch (err) {
-          // One unreadable row must not abandon the rest of someone's history.
-          console.warn(`e2e: skipping an unusable backed-up session key:`, errText(err));
-        }
-      }
-      cursor = data.nextCursor ?? null;
-    } while (cursor);
-
+        const key = master;
+        if (!key) throw new Error('This device does not hold the account key');
+        return this.restoreMessageKeyPage(key, cursor);
+      });
+      if (!step) break;
+      imported += step.imported;
+      cursor = step.next;
+      if (!cursor) return imported;
+    }
+    if (cursor) console.warn(`e2e: stopped the history pull after ${MAX_RESTORE_PAGES} pages`);
     return imported;
+  }
+
+  /** One page of restoreMessageKeys. Callers must hold the serial queue. */
+  private async restoreMessageKeyPage(
+    master: EngineMasterKey,
+    cursor: string | null
+  ): Promise<{ imported: number; next: string | null }> {
+    let imported = 0;
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    const res = await this.api.get(`/e2e/message-keys${query}`);
+    const data = res.data.data as {
+      keys?: Array<{ conversationId?: unknown; sessionId?: unknown; blob?: unknown }>;
+      nextCursor?: string | null;
+    };
+    for (const row of data.keys ?? []) {
+      const { conversationId, sessionId, blob } = row;
+      if (typeof conversationId !== 'string' || typeof sessionId !== 'string' || typeof blob !== 'string') {
+        console.warn('e2e: dropping a malformed message-key backup row');
+        continue;
+      }
+      try {
+        const opened = master.openSessionKey(blob, `${conversationId}|${sessionId}`);
+        const payload = JSON.parse(opened) as { k?: unknown; u?: unknown; d?: unknown };
+        if (
+          typeof payload.k !== 'string' ||
+          typeof payload.u !== 'string' ||
+          typeof payload.d !== 'string'
+        ) {
+          throw new Error('malformed backed-up session payload');
+        }
+        // Same import path as a key share, so the session-id check that
+        // stops a mislabelled key applies here too.
+        const added = await this.importInboundGroupSession(payload.k, {
+          sessionId,
+          conversationId,
+          senderUserId: payload.u,
+          senderDeviceId: payload.d,
+          keyType: 'exported',
+        });
+        if (added) imported += 1;
+      } catch (err) {
+        // the session ended (a dispose closed the vault): not a bad row, and the rest would fail alike
+        if (isE2ESessionEnded(err)) throw err;
+        // One unreadable row must not abandon the rest of someone's history.
+        console.warn(`e2e: skipping an unusable backed-up session key:`, errText(err));
+      }
+    }
+    return { imported, next: typeof data.nextCursor === 'string' && data.nextCursor ? data.nextCursor : null };
   }
 
   /** Our own account master key (held or pinned), for safety numbers. */

@@ -5158,7 +5158,77 @@ describe('E2EService — lifecycle', () => {
       }
     });
 
-    it('a master-key replacement during the history pull of a restore waits for it instead of freeing the key it opens with', async () => {
+    it('lets queued work run between the pages of a history pull', async () => {
+      // A long history must not hold a send, a decrypt or a call signal up for
+      // the whole pull: the pull takes the queue one page at a time.
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      let armed = false;
+      const gate = holdingApi(
+        server.apiFor(userId),
+        (verb, url) => armed && verb === 'get' && url.startsWith('/e2e/message-keys')
+      );
+      const service = serviceOver(userId, gate.api);
+      await service.initialize();
+      await flushQueue();
+      const internals = internalsOf(service);
+      for (let i = 0; i < 5; i++) {
+        const outbound = new EngineGroupSession();
+        await internals.importInboundGroupSession(outbound.sessionKey(), {
+          sessionId: outbound.sessionId(),
+          conversationId: 'c1',
+          senderUserId: 'peer',
+          senderDeviceId: 'peer-device',
+        });
+        outbound.free();
+      }
+      expect(await service.backupMessageKeys()).toBe(5); // three pages of the fake's two
+
+      armed = true;
+      const settled: string[] = [];
+      const pull = service.restoreMessageKeys().then(() => settled.push('pull'));
+      await gate.held; // the first page is on its way
+      const queued = service
+        .cachePlaintext('m-queued', 'c1', 'queued during the pull')
+        .then(() => settled.push('queued'));
+      gate.release();
+      await Promise.all([pull, queued]);
+      expect(settled).toEqual(['queued', 'pull']);
+      expect(gate.reads.filter((r) => r === 'GET /e2e/message-keys')).toHaveLength(3);
+    });
+
+    it('stops a history pull the server would page forever', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      const base = server.apiFor(userId);
+      let pages = 0;
+      const pageCap = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMITS.MESSAGE_KEY_PAGE_MAX);
+      const api = {
+        ...base,
+        async get(url: string) {
+          if (!url.startsWith('/e2e/message-keys')) return base.get(url);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          // fail rather than hang a client that never stops
+          if (++pages > pageCap + 5) throw new Error('the pull did not stop');
+          return { data: { success: true, data: { keys: [], nextCursor: `page-${pages}` } } };
+        },
+      };
+      const service = serviceOver(userId, api);
+      await service.initialize();
+      await flushQueue();
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        await expect(service.restoreMessageKeys()).resolves.toBe(0);
+        expect(pages).toBe(pageCap);
+        expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/stopped the history pull/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a master-key replacement during the history pull of a restore waits for the page in flight, and the pull stops instead of opening the next with a freed key', async () => {
       uniq++;
       const server = createFakeServer();
       const userId = `alice-${uniq}`;

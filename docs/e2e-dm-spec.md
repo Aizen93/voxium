@@ -1084,7 +1084,14 @@ whole session rather than only the part the uploading device happened to see.
 - `restoreMessageKeys()` pages through every stored key and imports what is
   missing, through the same path a key share takes — so the session-id check
   that rejects a mislabelled key applies here too. One unreadable row is skipped
-  rather than abandoning the rest of someone's history.
+  rather than abandoning the rest of someone's history. Each page is one step
+  of the client's serial crypto queue: sends, decrypts and call signals run
+  between two pages, so restoring thousands of sessions holds none of them up
+  for the whole pull. A page that finds the account key replaced since the
+  pull began (another restore, a reset) stops the pull, and so does a dispose.
+  The pull reads at most as many pages as the server can store for one
+  account (`MESSAGE_KEY_STORE_CAP / MESSAGE_KEY_PAGE_MAX`, 100), so a server
+  that never ends its cursor cannot keep it going.
 - Only a device holding the master secret can seal or open, which is the same
   condition as being able to approve devices.
 
