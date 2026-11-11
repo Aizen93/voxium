@@ -1206,7 +1206,7 @@ members × `MAX_DEVICES` = 125 shares worst case — inside the key-share caps).
   membership row is gone.
 - `assertSharesE2EContext` extends the bundle-claim/device-list guard: sharing
   a secure channel is an E2E context, so co-members can build Olm sessions
-  without ever opening a DM.
+  without ever opening a DM — while both are members of the channel's server.
 
 ### 19.4 Rotation and the product guarantees
 

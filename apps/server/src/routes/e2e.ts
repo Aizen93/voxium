@@ -105,7 +105,9 @@ function verifyPreKeySignature(
  * Key material may only be fetched for users the requester shares an E2E
  * context with: a DM conversation, or membership of the same secure channel.
  * (Without the channel arm, two secure-channel members who never opened a DM
- * could not claim each other's prekey bundles to deliver session keys.)
+ * could not claim each other's prekey bundles to deliver session keys.) A
+ * secure channel counts only while BOTH are members of its space: a
+ * ChannelMember row no space membership backs grants nothing.
  */
 async function assertSharesE2EContext(requesterId: string, targetUserId: string): Promise<void> {
   const [user1Id, user2Id] = requesterId < targetUserId ? [requesterId, targetUserId] : [targetUserId, requesterId];
@@ -118,7 +120,16 @@ async function assertSharesE2EContext(requesterId: string, targetUserId: string)
   const sharedChannel = await prisma.channelMember.findFirst({
     where: {
       userId: requesterId,
-      channel: { secure: true, members: { some: { userId: targetUserId } } },
+      channel: {
+        secure: true,
+        members: { some: { userId: targetUserId } },
+        server: {
+          AND: [
+            { members: { some: { userId: requesterId } } },
+            { members: { some: { userId: targetUserId } } },
+          ],
+        },
+      },
     },
     select: { channelId: true },
   });
