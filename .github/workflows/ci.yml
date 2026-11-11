@@ -337,16 +337,22 @@ jobs:
         run: npx playwright test secure-voice --config=playwright-firefox.config.ts --reporter=github,line
 
       # Visible but non-blocking, so a quarantined spec cannot rot silently:
-      # the step goes red in the UI while the job still passes. With nothing
-      # tagged it matches no test, which --pass-with-no-tests reports as a pass
-      # (Playwright still starts the stack before it finds that out). Its
-      # overlap records go to a file of their own, reported as a warning only.
+      # the step goes red in the UI while the job still passes. The script
+      # lists the tagged specs first and, when there is none, ends without
+      # starting the stack (Playwright would boot all three apps to find
+      # nothing); a listing it cannot read runs them as before. Its overlap
+      # records go to a file of their own, reported as a warning only, and it
+      # tells the next step whether it ran (`ran`). The limit keeps a hung
+      # quarantined run from spending the rest of the job's 30 minutes, which
+      # would fail the job: past it the step fails, and stays non-blocking.
       - name: E2E quarantined specs (non-blocking)
+        id: quarantine
         continue-on-error: true
+        timeout-minutes: 10
         env:
           NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
           PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps-quarantine.jsonl
-        run: npx playwright test --grep @quarantine --pass-with-no-tests --reporter=github,line
+        run: bash .github/scripts/e2e-quarantine.sh --reporter=github,line
 
       # Two queries at once on one pg connection: pg 8 queues them (and warns
       # once per process, from the third), pg 9 removes the queueing. The
@@ -356,15 +362,21 @@ jobs:
         env:
           REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
           QUARANTINE_REPORT: ${{ runner.temp }}/pg-overlaps-quarantine.jsonl
+          # 'false' only when no spec was tagged and the stack never started
+          QUARANTINE_RAN: ${{ steps.quarantine.outputs.ran }}
         run: |
           # An empty report proves nothing unless the guard armed in the
           # server itself: each arming process leaves a line in <report>.armed
-          if ! grep -qs 'apps/server/src/index.ts' "$QUARANTINE_REPORT.armed"; then
-            echo "::warning::the pg overlap guard did not arm in the server during the quarantined specs"
-          fi
-          if [ -s "$QUARANTINE_REPORT" ]; then
-            echo "::warning::$(wc -l < "$QUARANTINE_REPORT") pg queries issued on a busy client during the quarantined specs"
-            cat "$QUARANTINE_REPORT"
+          if [ "$QUARANTINE_RAN" = "false" ]; then
+            echo "No spec is tagged @quarantine: no quarantined run to check."
+          else
+            if ! grep -qs 'apps/server/src/index.ts' "$QUARANTINE_REPORT.armed"; then
+              echo "::warning::the pg overlap guard did not arm in the server during the quarantined specs"
+            fi
+            if [ -s "$QUARANTINE_REPORT" ]; then
+              echo "::warning::$(wc -l < "$QUARANTINE_REPORT") pg queries issued on a busy client during the quarantined specs"
+              cat "$QUARANTINE_REPORT"
+            fi
           fi
           if ! grep -qs 'apps/server/src/index.ts' "$REPORT.armed"; then
             echo "::error::the pg overlap guard never armed in the server process (no apps/server/src/index.ts line in $REPORT.armed), so an empty report would prove nothing. Is @prisma/adapter-pg still resolvable from apps/server?"
