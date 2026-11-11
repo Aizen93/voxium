@@ -52,8 +52,6 @@ export interface RemoveMemberOptions {
  *       Before any statement that locks the space row: a secure-channel
  *       creation locks the member rows and then the space row, and taking
  *       them in the other order here could deadlock with it;
- *    c'. with a ban, the ServerBan upsert, AFTER (c): its foreign key locks
- *       the space row (KEY SHARE) on a first ban;
  *    d. THEN the member's secure-channel state (removeSecureMembershipsInTx):
  *       every secure channel they created or belong to locked FOR UPDATE in
  *       id order before anything is deleted, then the ones they created
@@ -61,9 +59,11 @@ export interface RemoveMemberOptions {
  *       they left; if the delete fails, the departure fails), their rows in
  *       the others and the key shares addressed to them there removed. After
  *       (c), so it also removes a row an invite wrote while (c) waited for it;
- *    e. memberCount − 1 (never below zero), LAST, so the space row, which
- *       every join and secure-channel creation also takes, is held for the
- *       shortest time.
+ *    e. with a ban, the ServerBan upsert, and memberCount − 1 (never below
+ *       zero), LAST: both lock the space row (the ban's foreign key takes a
+ *       key-share lock on it), which every join, secure-channel creation and
+ *       webhook creation also takes, so it is held for the shortest time,
+ *       never across the cascade of a departing creator's channels.
  *    The whole transaction is run again (twice at most) when PostgreSQL
  *    aborts it to break a deadlock (retryOnTransactionConflict): a net for a
  *    lock order nobody foresaw, never for any other error.
@@ -127,9 +127,10 @@ export async function removeMemberFromServer(
       await tx.serverMember.delete({
         where: { userId_serverId: { userId, serverId } },
       });
+      const removal = await removeSecureMembershipsInTx(tx, userId, serverId);
       if (opts.ban) {
-        // After the member row: inserting a ban locks the space row through
-        // its foreign key
+        // Next to the count, after the channel cascade: inserting a ban locks
+        // the space row through its foreign key
         await tx.serverBan.upsert({
           where: { serverId_userId: { serverId, userId } },
           create: { serverId, userId, bannedById: opts.ban.by, reason: opts.ban.reason },
@@ -138,7 +139,6 @@ export async function removeMemberFromServer(
           update: { bannedById: opts.ban.by, reason: opts.ban.reason, createdAt: new Date() },
         });
       }
-      const removal = await removeSecureMembershipsInTx(tx, userId, serverId);
       // Guarded so inline drift can never push the count negative; the
       // nightly recount is what makes it exact again.
       await tx.server.updateMany({

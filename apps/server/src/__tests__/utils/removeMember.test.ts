@@ -245,14 +245,15 @@ describe('removeMemberFromServer', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
   });
 
-  it('with a ban: the ServerBan upsert rides in the same transaction, after the member row, carrying who and why', async () => {
+  it('with a ban: the ServerBan upsert rides in the same transaction, right before the count, carrying who and why', async () => {
     await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: 'spam' } });
 
-    // The member row before the ban: inserting a ban locks the space row
-    // through its foreign key, and a secure-channel creation takes the member
-    // rows before the space row; the reverse order could deadlock with it
+    // Inserting a ban locks the space row through its foreign key, and every
+    // secure-channel and webhook creation waits for that row: taken right
+    // before the count (which locks it anyway), after the member row and the
+    // secure-channel cascade, it is held for the shortest time
     expect(order.slice(0, order.indexOf('txn:end') + 1)).toEqual([
-      'attachment-keys', 'txn:start', 'webhooks.disable', 'request', 'member', 'ban', 'secure', 'count', 'txn:end',
+      'attachment-keys', 'txn:start', 'webhooks.disable', 'request', 'member', 'secure', 'ban', 'count', 'txn:end',
     ]);
     expect(tx.serverBan.upsert).toHaveBeenCalledWith({
       where: { serverId_userId: { serverId: 's-1', userId: 'u-1' } },
