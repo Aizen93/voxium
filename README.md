@@ -510,6 +510,8 @@ Demo seed creates:
 
 > **Note:** usernames are kept case-insensitively unique by a functional index Prisma cannot express, so `prisma migrate dev` reports it as drift and may offer to reset the database or drop it. Do not accept — keep the index.
 
+> **No update check:** the Prisma CLI reports to `checkpoint.prisma.io` on every run unless `CHECKPOINT_DISABLE` is set. `apps/server/prisma.config.ts` sets it, so every Prisma command run from `apps/server` (the ones above, CI, the Docker entrypoint) skips the check, and the Docker image sets it for both of its stages.
+
 ---
 
 ## Testing the API

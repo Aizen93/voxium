@@ -4,6 +4,11 @@ set -e
 # Node.js production memory tuning
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}"
 
+# The Prisma CLI reports to checkpoint.prisma.io (its update check) on every
+# run unless this is set, and Voxium uses no third-party service. The image
+# (Dockerfile ENV) and apps/server/prisma.config.ts set it as well.
+export CHECKPOINT_DISABLE=1
+
 # Every Prisma CLI run starts from apps/server, where prisma.config.ts lives.
 prisma_cli() {
   (cd apps/server && node ../../node_modules/prisma/build/index.js "$@")

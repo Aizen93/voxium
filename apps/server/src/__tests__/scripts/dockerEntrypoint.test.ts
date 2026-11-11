@@ -262,4 +262,10 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.deploys).toBe(1);
     expect(run.code).toBe(0);
   }, TIMEOUT);
+
+  it('runs every Prisma CLI call with the update check off', () => {
+    const run = runEntrypoint([captured('unreachable'), captured('empty-database')]);
+    expect(run.checkpointSwitch).toHaveLength(3);
+    expect(run.checkpointSwitch.every((value) => value === '1')).toBe(true);
+  }, TIMEOUT);
 });
