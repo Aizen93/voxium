@@ -1,5 +1,5 @@
 import { prisma } from './prisma';
-import { NotFoundError } from './errors';
+import { ForbiddenError, NotFoundError } from './errors';
 import { getRedis } from './redis';
 import { getIO } from '../websocket/socketServer';
 import { broadcastVoiceEvictUser } from '../websocket/voiceCluster';
@@ -23,12 +23,27 @@ async function spaceExists(serverId: string): Promise<boolean> {
   }
 }
 
+/** What the leave route answers for the space's owner; the removal answers it too. */
+export const OWNER_CANNOT_LEAVE_MESSAGE = 'Server owner cannot leave. Transfer ownership first.';
+/** What the kick route answers for a target who outranks the actor (the owner always does). */
+export const KICK_OUTRANKED_MESSAGE = 'Cannot kick a member with an equal or higher role';
+
+/** The membership row was already gone when the transaction looked for it. */
+class MembershipGone extends Error {}
+
 export interface RemoveMemberOptions {
   /**
    * Write a ServerBan row in the same transaction as the membership delete.
    * Kick passes it (every removal is a ban); a voluntary leave does not.
    */
   ban?: { by: string; reason: string | null };
+  /**
+   * The caller's precondition (a kick's permission and role hierarchy), run
+   * INSIDE the transaction, before the membership row is deleted, on EVERY
+   * attempt: a removal the transaction retry runs again must not act on a
+   * check an earlier attempt passed. Throws the route's own refusal.
+   */
+  authorize?: () => Promise<void>;
 }
 
 /**
@@ -39,8 +54,10 @@ export interface RemoveMemberOptions {
  * (docs/local/server-discovery-plan.html).
  *
  * The caller has already verified the membership exists (and whatever
- * permission or hierarchy rule applies); `serverMember.delete` throws if it
- * does not. Order is load-bearing:
+ * permission or hierarchy rule applies) for a fast answer; the transaction
+ * holds the rules again on every attempt: the owner's row is never deleted
+ * (the delete matches only a row whose role is not owner) and `authorize`
+ * re-runs the caller's own check. Order is load-bearing:
  *
  * 1. Voice eviction — a departed member must not keep a live media session.
  *    Cross-node via the Redis reverse lookup + the cluster eviction fan-out
@@ -134,9 +151,23 @@ export async function removeMemberFromServer(
         }));
       }
       await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
-      await tx.serverMember.delete({
-        where: { userId_serverId: { userId, serverId } },
+      // The caller's precondition, read again on this attempt
+      if (opts.authorize) await opts.authorize();
+      // The owner is never removed, whatever the caller checked before the
+      // transaction: the precondition is in the delete itself, so it holds on
+      // every attempt (a transfer to this member may have committed between
+      // two of them). Zero rows: the owner, or a member already gone.
+      const { count } = await tx.serverMember.deleteMany({
+        where: { userId, serverId, role: { not: 'owner' } },
       });
+      if (count === 0) {
+        const held = await tx.serverMember.findUnique({
+          where: { userId_serverId: { userId, serverId } },
+          select: { role: true },
+        });
+        if (held) throw new ForbiddenError(opts.ban ? KICK_OUTRANKED_MESSAGE : OWNER_CANNOT_LEAVE_MESSAGE);
+        throw new MembershipGone();
+      }
       const removal = await removeSecureMembershipsInTx(tx, userId, serverId);
       if (opts.ban) {
         // Next to the count, after the channel cascade: inserting a ban locks
@@ -165,7 +196,7 @@ export async function removeMemberFromServer(
       maxWait: 10_000,
     }), `[Servers] The removal of ${userId} from ${serverId}`);
   } catch (err) {
-    const missing = (err as { code?: unknown })?.code === 'P2025';
+    const missing = err instanceof MembershipGone;
     // A space deleted meanwhile (its delete takes the space row, then the
     // member rows, and wins a deadlock or simply commits first): the removal
     // has nothing left to remove, and answers that the space is gone.
@@ -173,10 +204,8 @@ export async function removeMemberFromServer(
       throw new NotFoundError('Server');
     }
     // The member left (or was removed) between the caller's membership check
-    // and this transaction: serverMember.delete is the only statement here
-    // that can raise P2025 (every other one is an updateMany, a deleteMany or
-    // an upsert). Same answer the pre-check gives — not a 500 that rolls back
-    // the ban the moderator asked for and tells them nothing.
+    // and this transaction. Same answer the pre-check gives — not a 500 that
+    // rolls back the ban the moderator asked for and tells them nothing.
     if (missing) throw new NotFoundError('Member');
     throw err;
   }

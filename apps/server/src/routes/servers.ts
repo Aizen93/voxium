@@ -22,7 +22,7 @@ import { deleteServerAndAnnounce } from '../utils/serverDeletion';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
-import { removeMemberFromServer } from '../utils/removeMember';
+import { removeMemberFromServer, OWNER_CANNOT_LEAVE_MESSAGE, KICK_OUTRANKED_MESSAGE } from '../utils/removeMember';
 import { recomputeListed } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
@@ -572,7 +572,9 @@ serverRouter.post('/:serverId/leave', rateLimitMemberManage, async (req: Request
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
     });
     if (!membership) throw new NotFoundError('Server membership');
-    if (membership.role === 'owner') throw new ForbiddenError('Server owner cannot leave. Transfer ownership first.');
+    // A fast answer; the removal holds the same rule in its own delete, on
+    // every attempt (a transfer to this member can commit in between)
+    if (membership.role === 'owner') throw new ForbiddenError(OWNER_CANNOT_LEAVE_MESSAGE);
 
     // The teardown (voice eviction, secure-channel purge, read markers, the
     // membership + count transaction, member:left) is removeMemberFromServer's.
@@ -789,7 +791,17 @@ serverRouter.post(
         reason = sanitized.length > 0 ? sanitized : null;
       }
 
-      const canKick = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      const actorId = req.user!.userId;
+      const assertMayKick = async () => {
+        const canKick = await hasServerPermission(actorId, serverId, Permissions.KICK_MEMBERS);
+        if (!canKick) throw new ForbiddenError('You do not have permission to kick members');
+        // Role hierarchy check: actor must outrank target
+        const actorHighest = await getHighestRolePosition(actorId, serverId);
+        const targetHighest = await getHighestRolePosition(memberId, serverId);
+        if (actorHighest <= targetHighest) throw new ForbiddenError(KICK_OUTRANKED_MESSAGE);
+      };
+
+      const canKick = await hasServerPermission(actorId, serverId, Permissions.KICK_MEMBERS);
       if (!canKick) throw new ForbiddenError('You do not have permission to kick members');
 
       const targetMembership = await prisma.serverMember.findUnique({
@@ -797,18 +809,16 @@ serverRouter.post(
       });
       if (!targetMembership) throw new NotFoundError('Member');
 
-      // Role hierarchy check: actor must outrank target
-      const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
-      const targetHighest = await getHighestRolePosition(memberId, serverId);
-      if (actorHighest <= targetHighest) {
-        throw new ForbiddenError('Cannot kick a member with an equal or higher role');
-      }
+      await assertMayKick();
 
-      // The teardown — voice eviction, secure-channel purge, read markers,
+      // The teardown — voice eviction, secure-channel state, read markers,
       // and one transaction with the ban row, the join-request delete, the
       // membership delete and the member count — lives in
-      // removeMemberFromServer, nowhere else.
-      await removeMemberFromServer(memberId, serverId, { ban: { by: req.user!.userId, reason } });
+      // removeMemberFromServer, nowhere else. The permission and the
+      // hierarchy are checked again inside its transaction, on every attempt
+      // (`authorize`): a retried removal must not act on a check made before
+      // a role change committed.
+      await removeMemberFromServer(memberId, serverId, { ban: { by: actorId, reason }, authorize: assertMayKick });
 
       // Emit member:kicked directly to the kicked user's per-user room
       // (they're already out of the server room)

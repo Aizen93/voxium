@@ -23,7 +23,7 @@ interface ChannelRow { id: string; serverId: string; secure: boolean; type: stri
 interface ChannelMemberRow { channelId: string; userId: string; isCreator: boolean; addedAt: Date }
 interface Store {
   users: Map<string, { id: string; username: string; displayName: string; avatarUrl: string | null }>;
-  serverMembers: Array<{ userId: string; serverId: string }>;
+  serverMembers: Array<{ userId: string; serverId: string; role?: string }>;
   servers: Map<string, { id: string; memberCount: number; ownerId: string }>;
   channels: ChannelRow[];
   channelMembers: ChannelMemberRow[];
@@ -162,6 +162,8 @@ type HookPoint = 'serverMember.delete' | 'transaction.start';
 let hooks: Array<{ at: HookPoint; run: () => Promise<void> }> = [];
 /** Statements the test makes fail, by name. */
 let failing = new Set<string>();
+/** The next transaction loses a deadlock: this runs (the other side commits), then it throws P2034. */
+let abortNextTransaction: (() => Promise<void>) | null = null;
 
 async function fire(at: HookPoint): Promise<void> {
   const due = hooks.filter((h) => h.at === at);
@@ -331,6 +333,12 @@ const client: Record<string, any> = {
   },
   $transaction: async (arg: any, _opts?: unknown) => {
     await fire('transaction.start');
+    if (abortNextTransaction) {
+      const winner = abortNextTransaction;
+      abortNextTransaction = null;
+      await winner();
+      throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+    }
     const snapshot = cloneStore(db);
     try {
       return Array.isArray(arg) ? await Promise.all(arg) : await arg(client);
@@ -407,7 +415,7 @@ function seed(): void {
   db = freshStore();
   for (const id of ['owner', 'alice', 'bob']) {
     db.users.set(id, { id, username: id, displayName: id, avatarUrl: null });
-    db.serverMembers.push({ userId: id, serverId: S });
+    db.serverMembers.push({ userId: id, serverId: S, role: id === 'owner' ? 'owner' : 'member' });
   }
   db.servers.set(S, { id: S, memberCount: 3, ownerId: 'owner' });
   db.channels.push(
@@ -436,6 +444,7 @@ beforeEach(() => {
   seed();
   hooks = [];
   failing = new Set();
+  abortNextTransaction = null;
   emitted.length = 0;
   roomOps.length = 0;
   voiceEvictions.length = 0;
@@ -476,6 +485,26 @@ describe('ending a space membership removes the secure-channel rows with it', ()
 
     expect(isMemberOf('bob', S)).toBe(false);
     expect(rowsOf('bob')).toEqual([]);
+  });
+
+  it('a leave retried after a transfer made the member the owner refuses, and the space keeps its owner as a member', async () => {
+    db.channelMembers.push({ channelId: C, userId: 'bob', isCreator: false, addedAt: new Date() });
+    vi.mocked(console.warn).mockImplementation(() => {});
+    // The leave's first attempt loses a deadlock to a transfer to bob
+    abortNextTransaction = async () => {
+      db.servers.get(S)!.ownerId = 'bob';
+      for (const m of db.serverMembers) {
+        if (m.userId === 'bob') m.role = 'owner';
+        if (m.userId === 'owner') m.role = 'admin';
+      }
+    };
+
+    await expect(removeMemberFromServer('bob', S))
+      .rejects.toMatchObject({ statusCode: 403, message: 'Server owner cannot leave. Transfer ownership first.' });
+
+    expect(db.servers.get(S)!.ownerId).toBe('bob');
+    expect(isMemberOf('bob', S)).toBe(true);
+    expect(rowsOf('bob').map((m) => m.channelId)).toEqual([C]);
   });
 
   it('a removal whose secure-channel step fails removes nothing: the member stays a member of the space and of the channel', async () => {

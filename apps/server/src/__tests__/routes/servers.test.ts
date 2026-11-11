@@ -190,6 +190,8 @@ vi.mock('../../utils/secureChannelLifecycle', () => ({
 const mockRemoveMemberFromServer = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../utils/removeMember', () => ({
   removeMemberFromServer: (...args: any[]) => mockRemoveMemberFromServer(...args),
+  OWNER_CANNOT_LEAVE_MESSAGE: 'Server owner cannot leave. Transfer ownership first.',
+  KICK_OUTRANKED_MESSAGE: 'Cannot kick a member with an equal or higher role',
 }));
 
 // Directory listing column recompute (invites-lock is one of its inputs)
@@ -1390,12 +1392,36 @@ describe('Server Routes', () => {
       expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
       expect(mockRemoveMemberFromServer).toHaveBeenCalledTimes(1);
       // sanitizeText'd: tags stripped, trimmed
-      expect(mockRemoveMemberFromServer).toHaveBeenCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: 'spam in every channel' } });
+      expect(mockRemoveMemberFromServer).toHaveBeenCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: 'spam in every channel' }, authorize: expect.any(Function) });
       // member:kicked goes to the removed user's own room (they are already out of server:{id})
       expect(mockTo).toHaveBeenCalledWith('user:user-2');
       expect(mockEmit).toHaveBeenCalledWith('member:kicked', { serverId: 'srv-1', userId: 'user-2' });
       // No route-level membership writes remain
       expect(prismaMock.serverMember.delete).not.toHaveBeenCalled();
+    });
+
+    it('hands the removal its permission and hierarchy check, which reads them again when the transaction runs it', async () => {
+      const token = makeToken();
+      mockTarget();
+
+      await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`)
+        .send({});
+      const { authorize } = mockRemoveMemberFromServer.mock.calls[0][2];
+
+      // Between the route's check and an attempt of the transaction, the
+      // target was promoted to the actor's level: the attempt refuses
+      mockGetHighestRolePosition.mockImplementation(async () => 10);
+      await expect(authorize()).rejects.toMatchObject({ statusCode: 403, message: 'Cannot kick a member with an equal or higher role' });
+
+      // ...or the actor lost the permission
+      mockGetHighestRolePosition.mockImplementation(async (userId: string) => (userId === 'user-1' ? 10 : 1));
+      mockHasServerPermission.mockResolvedValueOnce(false);
+      await expect(authorize()).rejects.toMatchObject({ statusCode: 403, message: 'You do not have permission to kick members' });
+
+      // and when nothing changed it lets the removal go on
+      await expect(authorize()).resolves.toBeUndefined();
     });
 
     it('bans with a null reason when the body is empty (the client sends none today) or the reason is blank', async () => {
@@ -1406,14 +1432,14 @@ describe('Server Routes', () => {
         .post('/api/v1/servers/srv-1/members/user-2/kick')
         .set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(200);
-      expect(mockRemoveMemberFromServer).toHaveBeenLastCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: null } });
+      expect(mockRemoveMemberFromServer).toHaveBeenLastCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: null }, authorize: expect.any(Function) });
 
       res = await request(app)
         .post('/api/v1/servers/srv-1/members/user-2/kick')
         .set('Authorization', `Bearer ${token}`)
         .send({ reason: '   ' });
       expect(res.status).toBe(200);
-      expect(mockRemoveMemberFromServer).toHaveBeenLastCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: null } });
+      expect(mockRemoveMemberFromServer).toHaveBeenLastCalledWith('user-2', 'srv-1', { ban: { by: 'user-1', reason: null }, authorize: expect.any(Function) });
     });
 
     it('rejects a non-string or over-long reason BEFORE any permission work, removing nobody', async () => {

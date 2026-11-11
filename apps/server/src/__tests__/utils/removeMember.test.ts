@@ -14,7 +14,7 @@ const tx = vi.hoisted(() => ({
   webhook: { updateMany: vi.fn() },
   serverBan: { upsert: vi.fn() },
   serverJoinRequest: { deleteMany: vi.fn() },
-  serverMember: { delete: vi.fn() },
+  serverMember: { deleteMany: vi.fn(), findUnique: vi.fn() },
   server: { updateMany: vi.fn() },
 }));
 
@@ -74,7 +74,8 @@ beforeEach(() => {
   webhooksDisabled(0);
   tx.serverBan.upsert.mockImplementation(async () => { order.push('ban'); return {}; });
   tx.serverJoinRequest.deleteMany.mockImplementation(async () => { order.push('request'); return { count: 0 }; });
-  tx.serverMember.delete.mockImplementation(async () => { order.push('member'); return {}; });
+  tx.serverMember.deleteMany.mockImplementation(async () => { order.push('member'); return { count: 1 }; });
+  tx.serverMember.findUnique.mockResolvedValue(null);
   removeSecure.mockImplementation(async () => { order.push('secure'); return NO_SECURE; });
   prismaMock.channelRead.deleteMany.mockImplementation(async () => { order.push('reads'); return { count: 2 }; });
   prismaMock.server.findUnique.mockResolvedValue({ id: 's-1' });
@@ -216,7 +217,7 @@ describe('removeMemberFromServer', () => {
     });
 
     it('any other error is never retried: a member already gone is the 404 at once', async () => {
-      tx.serverMember.delete.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+      tx.serverMember.deleteMany.mockResolvedValue({ count: 0 });
 
       await expect(removeMemberFromServer('u-1', 's-1')).rejects.toMatchObject({ statusCode: 404 });
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
@@ -235,7 +236,8 @@ describe('removeMemberFromServer', () => {
     expect(tx.serverBan.upsert).not.toHaveBeenCalled();
     expect(tx.webhook.updateMany).not.toHaveBeenCalled();
     expect(tx.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 's-1', userId: 'u-1' } });
-    expect(tx.serverMember.delete).toHaveBeenCalledWith({ where: { userId_serverId: { userId: 'u-1', serverId: 's-1' } } });
+    // never the owner's row, whatever the caller checked before the transaction
+    expect(tx.serverMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1', serverId: 's-1', role: { not: 'owner' } } });
     // Never below zero: inline drift must not produce a negative count on a card
     expect(tx.server.updateMany).toHaveBeenCalledWith({
       where: { id: 's-1', memberCount: { gt: 0 } },
@@ -305,7 +307,7 @@ describe('removeMemberFromServer', () => {
   });
 
   it('a member who left between the caller\'s check and the transaction answers 404 Member, not a 500', async () => {
-    tx.serverMember.delete.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+    tx.serverMember.deleteMany.mockResolvedValue({ count: 0 });
 
     await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: 'spam' } }))
       .rejects.toMatchObject({ statusCode: 404, message: 'Member not found' });
@@ -313,11 +315,96 @@ describe('removeMemberFromServer', () => {
     expect(memberLeft).not.toHaveBeenCalled();
   });
 
+  describe('the precondition holds on every attempt of the transaction', () => {
+    const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+
+    it('never deletes the owner\'s row: a member who became the owner answers what the leave route answers for the owner', async () => {
+      tx.serverMember.deleteMany.mockResolvedValue({ count: 0 });
+      tx.serverMember.findUnique.mockResolvedValue({ role: 'owner' });
+
+      await expect(removeMemberFromServer('u-1', 's-1'))
+        .rejects.toMatchObject({ statusCode: 403, message: 'Server owner cannot leave. Transfer ownership first.' });
+      expect(removeSecure).not.toHaveBeenCalled();
+      expect(tx.server.updateMany).not.toHaveBeenCalled();
+      expect(announceSecure).not.toHaveBeenCalled();
+      expect(memberLeft).not.toHaveBeenCalled();
+    });
+
+    it('a kick of a member who became the owner answers what the kick route answers for an outranking target', async () => {
+      tx.serverMember.deleteMany.mockResolvedValue({ count: 0 });
+      tx.serverMember.findUnique.mockResolvedValue({ role: 'owner' });
+
+      await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null } }))
+        .rejects.toMatchObject({ statusCode: 403, message: 'Cannot kick a member with an equal or higher role' });
+      expect(tx.serverBan.upsert).not.toHaveBeenCalled();
+    });
+
+    it('a retried attempt meets the owner a transfer made of the member meanwhile, and refuses instead of removing them', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => {
+          // the first attempt loses a deadlock to a transfer to this member,
+          // which then commits
+          tx.serverMember.deleteMany.mockResolvedValue({ count: 0 });
+          tx.serverMember.findUnique.mockResolvedValue({ role: 'owner' });
+          throw deadlock();
+        })
+        .mockImplementation(real);
+      try {
+        await expect(removeMemberFromServer('u-1', 's-1'))
+          .rejects.toMatchObject({ statusCode: 403, message: 'Server owner cannot leave. Transfer ownership first.' });
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(memberLeft).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('runs the caller\'s check inside the transaction, before the member delete, on every attempt', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const authorize = vi.fn(async () => { order.push('authorize'); });
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async (fn: (client: typeof tx) => Promise<unknown>) => { await fn(tx); throw deadlock(); })
+        .mockImplementation(real);
+      try {
+        await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize });
+
+        expect(authorize).toHaveBeenCalledTimes(2);
+        const lastAttempt = order.slice(order.lastIndexOf('txn:start'));
+        expect(lastAttempt.indexOf('authorize')).toBeLessThan(lastAttempt.indexOf('member'));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a check that refuses on a retried attempt is the answer: nothing is removed', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const refusal = Object.assign(new Error('Cannot kick a member with an equal or higher role'), { statusCode: 403 });
+      const authorize = vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(refusal);
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { await authorize(); throw deadlock(); })
+        .mockImplementation(real);
+      try {
+        await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize }))
+          .rejects.toBe(refusal);
+        expect(tx.serverMember.deleteMany).not.toHaveBeenCalled();
+        expect(memberLeft).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
   describe('a space deleted while the removal ran', () => {
     beforeEach(() => { prismaMock.server.findUnique.mockResolvedValue(null); });
 
     it('answers 404 Server when its delete committed first (the member row is already gone), not 404 Member', async () => {
-      tx.serverMember.delete.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+      tx.serverMember.deleteMany.mockResolvedValue({ count: 0 });
 
       await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null } }))
         .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
@@ -341,7 +428,7 @@ describe('removeMemberFromServer', () => {
     it('a space lookup that fails keeps the answer the error had (it is not read as "gone")', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       prismaMock.server.findUnique.mockRejectedValue(new Error('db hiccup'));
-      tx.serverMember.delete.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+      tx.serverMember.deleteMany.mockResolvedValue({ count: 0 });
       try {
         await expect(removeMemberFromServer('u-1', 's-1'))
           .rejects.toMatchObject({ statusCode: 404, message: 'Member not found' });
@@ -423,7 +510,7 @@ describe('removeMemberFromServer: a kick disables the removed creator\'s webhook
 
   it('a failed or raced transaction disables nothing it reports, and sends no event', async () => {
     webhooksDisabled(2);
-    tx.serverMember.delete.mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+    tx.serverMember.deleteMany.mockResolvedValueOnce({ count: 0 });
     await expect(removeMemberFromServer('u-1', 's-1', KICK)).rejects.toMatchObject({ statusCode: 404 });
     expect(webhookChanged).not.toHaveBeenCalled();
 
