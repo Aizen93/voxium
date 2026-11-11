@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -478,8 +478,9 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     const arrayTxns = prismaMock.$transaction.mock.calls.filter(
       ([arg]: [unknown]) => Array.isArray(arg));
     expect(arrayTxns).toHaveLength(1);
+    // only while the departing account still owns the space
     expect(prismaMock.server.update).toHaveBeenCalledWith({
-      where: { id: 'srv-owned' },
+      where: { id: 'srv-owned', ownerId: 'target-1' },
       data: { ownerId: 'heir-1' },
     });
     // …and the purge+delete are still atomic on their own.
@@ -519,7 +520,7 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
       data: { userId: 'heir-1', serverId: 'srv-owned', role: 'owner' },
     });
     expect(prismaMock.server.update).toHaveBeenCalledWith({
-      where: { id: 'srv-owned' },
+      where: { id: 'srv-owned', ownerId: 'target-1' },
       data: { ownerId: 'heir-1', memberCount: { increment: 1 } },
     });
     // an admin-chosen heir is an explicit unban — this path creates a member
@@ -1134,7 +1135,82 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
     expect(res.status).toBe(200);
     expect(prismaMock.server.delete).toHaveBeenCalledTimes(1);
     expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-a' } });
-    expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-b' }, data: { ownerId: 'heir-1' } });
+    expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-b', ownerId: 'target-1' }, data: { ownerId: 'heir-1' } });
     expectAtomicPurgeAndDelete('target-1');
+  });
+
+  describe('a transfer batch PostgreSQL aborted, or whose check went stale', () => {
+    const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-b', name: 'B' }]);
+    });
+    afterEach(() => { warn.mockRestore(); });
+    const transferToHeir = () => del().send({ serverActions: [{ serverId: 'srv-b', action: 'transfer', newOwnerId: 'heir-1' }] });
+
+    it('runs the whole attempt again, the heir\'s membership read included, so a retry picks its branch from what is true now', async () => {
+      // The heir was not a member when the first attempt read it; by the
+      // retry they are one (a join committed meanwhile)
+      prismaMock.serverMember.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ userId: 'heir-1' });
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { throw deadlock(); });
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.serverMember.findUnique).toHaveBeenCalledTimes(2);
+      // the retried attempt took the member branch: no second membership
+      expect(prismaMock.serverMember.create).toHaveBeenCalledTimes(1);
+      expect(prismaMock.serverMember.update).toHaveBeenLastCalledWith({
+        where: { userId_serverId: { userId: 'heir-1', serverId: 'srv-b' } },
+        data: { role: 'owner' },
+      });
+      expect(warn).toHaveBeenCalledWith('[Admin] The transfer of space srv-b was aborted by a deadlock or a serialization failure; retrying (1 of 2)');
+      expectAtomicPurgeAndDelete('target-1');
+    });
+
+    it('a batch that finds the space no longer the departing account\'s refuses, and the account is not deleted', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      prismaMock.$transaction.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Record to update not found.'), { code: 'P2025' });
+      });
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'someone-else' });
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Server "srv-b" is not owned by this user');
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('a batch that finds the heir\'s account gone answers 404 Transfer target user, not a 500', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      prismaMock.$transaction.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' });
+      });
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'target-1' });
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Transfer target user not found');
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('a batch that finds the space gone answers 404 Server', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      prismaMock.$transaction.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Record to update not found.'), { code: 'P2025' });
+      });
+      prismaMock.server.findUnique.mockResolvedValue(null);
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
+    });
   });
 });
