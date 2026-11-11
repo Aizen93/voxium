@@ -5405,6 +5405,52 @@ describe('E2EService — lifecycle', () => {
       }
     });
 
+    /** A first device holding the account key, `count` sessions backed up, and the recovery key. */
+    async function backedUpAccount(count: number) {
+      uniq++;
+      const server = createFakeServer();
+      const phone = makeParty(server, 'alice');
+      await phone.service.initialize();
+      await flushQueue();
+      const recoveryKey = await phone.service.createKeyBackup();
+      const internals = internalsOf(phone.service);
+      for (let i = 0; i < count; i++) {
+        const outbound = new EngineGroupSession();
+        await internals.importInboundGroupSession(outbound.sessionKey(), {
+          sessionId: outbound.sessionId(),
+          conversationId: 'c1',
+          senderUserId: 'peer',
+          senderDeviceId: 'peer-device',
+        });
+        outbound.free();
+      }
+      expect(await phone.service.backupMessageKeys()).toBe(count);
+      return { server, phone, recoveryKey };
+    }
+
+    it('stops a history pull the session ended under, instead of opening the next row with the freed key', async () => {
+      const { server, phone, recoveryKey } = await backedUpAccount(3);
+      const laptop = makeDevice(server, phone.userId);
+      await laptop.service.initialize();
+      await flushQueue();
+      const vault = (laptop.service as unknown as { vault: E2EVault }).vault;
+      const put = vault.putInboundGroupSession.bind(vault);
+      vi.spyOn(vault, 'putInboundGroupSession').mockImplementationOnce((sessionId, record) => {
+        void laptop.service.dispose(); // a logout while the pull writes its first row
+        return put(sessionId, record);
+      });
+      const warn = vi.spyOn(console, 'warn');
+      const error = vi.spyOn(console, 'error');
+      try {
+        await laptop.service.restoreKeyBackup(recoveryKey);
+        const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+        expect(logged).not.toMatch(/null pointer|skipping an unusable backed-up session key/);
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
+    });
+
     it('lets queued work run between the pages of a history pull', async () => {
       // A long history must not hold a send, a decrypt or a call signal up for
       // the whole pull: the pull takes the queue one page at a time.
