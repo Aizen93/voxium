@@ -83,6 +83,8 @@ let node1: ChildProcess | null = null;
 let node2: ChildProcess | null = null;
 /** The space this run created, deleted by cleanup() as its owner. */
 let testSpace: { id: string; ownerToken: string } | null = null;
+/** Everything each node printed so far, by node id (see startServer). */
+const nodeOutput: Record<string, string> = {};
 let passed = 0;
 let failed = 0;
 const results: Array<{ name: string; pass: boolean; detail?: string }> = [];
@@ -145,14 +147,18 @@ function startServer(port: number, nodeId: string, mediasoupMinPort: number, med
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  // Prefix output with node ID
+  // Prefix output with node ID, and keep it for the tests that read it
+  // (nodeOutput): one string per node, both streams, chunks as they came
+  nodeOutput[nodeId] = '';
   child.stdout?.on('data', (data: Buffer) => {
+    nodeOutput[nodeId] += data.toString();
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       if (line.trim()) console.log(`    [${nodeId}] ${line}`);
     }
   });
   child.stderr?.on('data', (data: Buffer) => {
+    nodeOutput[nodeId] += data.toString();
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       if (line.trim()) console.log(`    [${nodeId}:err] ${line}`);
@@ -952,6 +958,12 @@ async function testVisibilityResyncCrossNode(redis: any, ownerToken: string, mem
   const before = await requestSubscribers();
   const silentPeer = redis.duplicate();
 
+  // Where each node's output stood when the test began: every resync below
+  // must be CONFIRMED by both nodes. A peer applies the first publish
+  // whatever its count, so the checks on message:new alone cannot tell a
+  // confirmed fan-out from one that went through every retry to the fallback.
+  const outputMark = Object.fromEntries(Object.entries(nodeOutput).map(([id, out]) => [id, out.length]));
+
   let member: Socket | null = null;
   try {
     await silentPeer.connect();
@@ -1046,10 +1058,28 @@ async function testVisibilityResyncCrossNode(redis: any, ownerToken: string, mem
       'The member\'s socket was never reconnected',
       `connected=${sock.connected} sameId=${sock.id === socketId} disconnects=${disconnects}`,
     );
+
+    // A first attempt that timed out would log within the publish bound (2 s)
+    await sleep(2500);
+    const unconfirmed = Object.entries(nodeOutput).flatMap(([id, out]) =>
+      out.slice(outputMark[id] ?? 0).split('\n')
+        .filter((line) => /\[Visibility\].*not confirmed/.test(line))
+        .map((line) => `${id}: ${line.trim()}`));
+    assert(
+      unconfirmed.length === 0,
+      'Every resync of the test was confirmed by both nodes at the first publish (no retry, no fallback)',
+      unconfirmed.slice(0, 3).join(' | '),
+    );
   } finally {
     member?.disconnect();
+    // Each step on its own: a failed unsubscribe must not leave the
+    // connection open (it would keep this process alive and the peer counted)
     try {
       await silentPeer.unsubscribe(ADAPTER_REQUEST_CHANNEL);
+    } catch (err: any) {
+      console.warn('Could not unsubscribe the silent peer:', err?.message ?? err);
+    }
+    try {
       await silentPeer.quit();
     } catch (err: any) {
       console.warn('Could not close the silent peer\'s Redis connection:', err?.message ?? err);
