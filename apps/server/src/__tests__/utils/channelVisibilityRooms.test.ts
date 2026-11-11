@@ -1434,6 +1434,36 @@ describe('a local pass that fails is queued again', () => {
     expect(m.localIn.mock.calls.map((c) => c[0])).toEqual(['server:server-1', 'user:user-1', 'user:user-2']);
   });
 
+  // Review of #71: the attempts merge was untested (a minimum passed). A
+  // fresh re-check absorbed by a waiting retry must not restart its count.
+  it('a waiting retry that absorbs a fresh re-check keeps its own attempt count', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    let releaseSlow!: (visible: Map<string, Set<string>>) => void;
+    m.filterForUsers
+      .mockRejectedValueOnce(poolTimeout())                                              // the member pass, attempt 1
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseSlow = resolve; })) // a slow pass holding the queue
+      .mockRejectedValueOnce(poolTimeout());                                             // the merged pass
+
+    await syncChannelVisibilityRooms('server-1', { userId: 'user-1' });
+    const mark = visibilityRequestMark();
+    const slow = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(LOCAL_PASS_RETRY_DELAYS_MS[0]); // the retry (attempt 2) now waits behind it
+    resyncAfterJoins(mark, 'user-1', ['server-1']);                   // a fresh re-check (attempt 1) joins it
+    releaseSlow(visibility({ 'user-1': ['ch-1'] }));
+    await slow;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(m.filterForUsers).toHaveBeenCalledTimes(3);
+    const retries = warn.mock.calls.map((c) => String(c[0])).filter((line) => line.includes('queued again'));
+    expect(retries).toEqual([
+      `[Visibility] Resync of server server-1 on this node failed (attempt 1/${ATTEMPTS}); queued again in ${LOCAL_PASS_RETRY_DELAYS_MS[0]} ms`,
+      `[Visibility] Resync of server server-1 on this node failed (attempt 2/${ATTEMPTS}); queued again in ${LOCAL_PASS_RETRY_DELAYS_MS[1]} ms`,
+    ]);
+  });
+
   it('two channels of one member waiting together widen to the member\'s whole space', async () => {
     m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
     m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
