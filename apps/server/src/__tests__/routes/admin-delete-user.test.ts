@@ -560,15 +560,50 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
   });
 
-  it('leaves the rooms after the server:deleted notice and before the space row is deleted', async () => {
+  it('leaves the rooms after the space row is deleted and after the server:deleted notice', async () => {
     await deleteOwner();
 
     const noticeIndex = mockEmit.mock.calls.findIndex(([event]: [string]) => event === 'server:deleted');
     expect(noticeIndex).toBeGreaterThanOrEqual(0);
     const noticeOrder = mockEmit.mock.invocationCallOrder[noticeIndex];
+    expect(noticeOrder).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
     expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
     expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
-    expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    // The channel ids are read while the rows still exist
+    expect(prismaMock.channel.findMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+  });
+
+  it('a rejecting voice cleanup and a throwing notice still delete the space AND the account', async () => {
+    const { broadcastServerVoiceCleanup } = await import('../../websocket/voiceCluster');
+    vi.mocked(broadcastServerVoiceCleanup).mockRejectedValueOnce(new Error('mediasoup router close failed'));
+    mockEmit.mockImplementationOnce(() => { throw new Error('adapter publish failed'); });
+    // console.error is silenced for the whole file (beforeAll)
+    const errorLog = vi.mocked(console.error);
+
+    const res = await deleteOwner();
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+    expect(vi.mocked(broadcastServerVoiceCleanup).mock.invocationCallOrder[0])
+      .toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(mockSocketsLeave).toHaveBeenCalledWith(rooms);
+    // The account deletion after the loop still ran
+    expectAtomicPurgeAndDelete('target-1');
+    expect(errorLog).toHaveBeenCalledWith('[Admin] Space srv-owned deleted, but the voice cleanup failed:', 'mediasoup router close failed');
+    expect(errorLog).toHaveBeenCalledWith('[Admin] Space srv-owned deleted, but the server:deleted notice failed:', 'adapter publish failed');
+  });
+
+  it('a space row delete that fails stops the deletion before any notice, with the account untouched', async () => {
+    prismaMock.server.delete.mockRejectedValueOnce(new Error('db gone'));
+    const { broadcastServerVoiceCleanup } = await import('../../websocket/voiceCluster');
+
+    const res = await deleteOwner();
+
+    expect(res.status).toBe(500);
+    expect(broadcastServerVoiceCleanup).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalledWith('server:deleted', expect.anything());
+    expect(mockSocketsLeave).not.toHaveBeenCalled();
+    expect(txMock.user.delete).not.toHaveBeenCalled();
   });
 
   it('leaves only the server room when the space has no channels', async () => {

@@ -18,7 +18,7 @@ import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { adoptImageAssetUpload } from '../utils/uploadVerification';
 import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
-import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
+import { deleteServerAndAnnounce } from '../utils/serverDeletion';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
@@ -707,47 +707,11 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
     if (!server) throw new NotFoundError('Server');
     if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can delete it');
 
-    const io = getIO();
-
-    // 1. Silently eject all users from voice channels (no voice:user_left events — clients handle via server:deleted).
-    //    Broadcast: mediasoup objects are node-local, every node must reap its own.
-    await broadcastServerVoiceCleanup(io, serverId);
-
-    // 2. Notify all members before removing them from rooms
-    io.to(`server:${serverId}`).emit(WS_EVENTS.SERVER_DELETED, { serverId });
-
-    // 3. Remove all sockets from server room and channel rooms.
-    //    Adapter-wide room operations, never a `fetchSockets()` round trip: it
-    //    waits for every node's reply and throws after 5 s when one peer is
-    //    unresponsive, which answered the whole delete with a 500.
-    //    Addressed to the UNION of the rooms, not the server room alone: a
-    //    socket can be in a `channel:{id}` room without `server:{id}` (a
-    //    `channel:join` or `voice:join` handled before its connect setup joined
-    //    the server rooms, or a setup whose membership query failed followed by
-    //    a `user:{id}`-targeted channel join), and it must leave too.
-    //    Twice on purpose, local form first (see utils/memberBroadcast.ts): the
-    //    Redis adapter only publishes the cluster-wide form and applies it on
-    //    this node when its own message comes back. It goes out after the
-    //    server:deleted broadcast on the same Redis connection, so every peer
-    //    delivers the notice before it applies the leave.
-    const channels = await prisma.channel.findMany({
-      where: { serverId },
-      select: { id: true },
-    });
-
-    const roomsToLeave = [`server:${serverId}`, ...channels.map((c) => `channel:${c.id}`)];
-    io.local.in(roomsToLeave).socketsLeave(roomsToLeave);
-    io.in(roomsToLeave).socketsLeave(roomsToLeave);
-
-    // 4. Delete from DB (Prisma cascade handles channels, members, messages, reactions, reads, categories, invites)
-    await prisma.server.delete({ where: { id: serverId } });
-    // A deleted space must not stay on a cached Explore page (never throws)
-    await bumpDiscoveryPageCache('server delete');
-
-    // 5. Clean up S3 icon if exists
-    if (server.iconUrl) {
-      deleteFromS3(server.iconUrl).catch((err) => console.warn('[S3] Failed to delete old asset:', err));
-    }
+    // The row first, then voice, the notice, the room leaves and the icon
+    // blob, each best effort (utils/serverDeletion.ts, shared with the admin
+    // deletes): a fan-out step that throws no longer leaves members told the
+    // space is gone while it is still there.
+    await deleteServerAndAnnounce(server, { cacheReason: 'server delete', logPrefix: '[Servers]' });
 
     res.json({ success: true, message: 'Server deleted' });
   } catch (err) {

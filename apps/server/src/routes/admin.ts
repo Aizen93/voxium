@@ -10,7 +10,7 @@ import { revokeUserSessions } from '../utils/sessionRevocation';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
-import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
+import { deleteServerAndAnnounce } from '../utils/serverDeletion';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
 import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
@@ -38,31 +38,6 @@ adminRouter.use(authenticate, requireAdmin, rateLimitAdmin);
 /** Force-logout and disconnect a user across all nodes. */
 function forceLogoutUser(userId: string, reason: string): void {
   revokeUserSessions(userId, { forceLogoutReason: reason });
-}
-
-/**
- * Make every socket in a space about to be deleted leave its rooms, on every
- * node: the server room AND every channel room, the owner route's list
- * (DELETE /servers/:serverId). Addressed to the union of the rooms, because a
- * socket can be in a `channel:{id}` room without `server:{id}`.
- *
- * Adapter-wide room operations, never a `fetchSockets()` round trip: it waits
- * for every node's reply and throws after 5 s when one peer is unresponsive,
- * which failed the delete after the notice had gone out. Local form first,
- * then cluster-wide (see utils/memberBroadcast.ts: the Redis adapter applies
- * the cluster form on this node only when its own message comes back). The
- * callers emit `server:deleted` first; the leave is published after it on the
- * same Redis connection, so every peer delivers the notice before the leave.
- */
-async function clearServerRooms(serverId: string): Promise<void> {
-  const io = getIO();
-  const channels = await prisma.channel.findMany({
-    where: { serverId },
-    select: { id: true },
-  });
-  const rooms = [`server:${serverId}`, ...channels.map((c) => `channel:${c.id}`)];
-  io.local.in(rooms).socketsLeave(rooms);
-  io.in(rooms).socketsLeave(rooms);
 }
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
@@ -782,22 +757,18 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           // (member:left for the transferred server is broadcast by
           // deleteUserAccount, which re-reads the surviving memberships.)
         } else {
-          // action === 'delete' — clean up and delete the server (voice cleanup
-          // fans out to every node; mediasoup objects are node-local)
-          await broadcastServerVoiceCleanup(io, action.serverId);
-          io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
-          await clearServerRooms(action.serverId);
-          // Read the icon key BEFORE the row goes; delete the blob after, so a
-          // failed delete never strands a live server without its icon. The
-          // user-facing DELETE /servers/:id already does exactly this, and
-          // like it (and DELETE /admin/servers/:id) never waits on storage.
+          // action === 'delete' — the owner route's sequence
+          // (utils/serverDeletion.ts): the row first, then voice on every
+          // node, the notice, the room leaves and the icon blob, each best
+          // effort. A failed fan-out step no longer stops this loop with the
+          // space announced as gone, the space still there and the account
+          // half processed; a failed row delete still does, before any notice.
+          // The icon key is read BEFORE the row goes, its blob deleted after.
           const doomed = await prisma.server.findUnique({ where: { id: action.serverId }, select: { iconUrl: true } });
-          await prisma.server.delete({ where: { id: action.serverId } });
-          await bumpDiscoveryPageCache('admin server delete');
-          if (doomed?.iconUrl) {
-            deleteFromS3(doomed.iconUrl).catch((err) =>
-              console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
-          }
+          await deleteServerAndAnnounce(
+            { id: action.serverId, iconUrl: doomed?.iconUrl ?? null },
+            { cacheReason: 'admin server delete', logPrefix: '[Admin]' },
+          );
         }
       }
 
@@ -1241,29 +1212,11 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
     });
     if (!server) throw new NotFoundError('Server');
 
-    const io = getIO();
-
-    // Clean up voice state on every node (mediasoup objects are node-local)
-    await broadcastServerVoiceCleanup(io, server.id);
-
-    // Notify members
-    io.to(`server:${server.id}`).emit('server:deleted', { serverId: server.id });
-
-    // Remove all sockets from the server room and every channel room (all nodes)
-    await clearServerRooms(server.id);
-
-    // Cascade delete
-    await prisma.server.delete({ where: { id: server.id } });
-    // A deleted space must not stay on a cached Explore page (never throws)
-    await bumpDiscoveryPageCache('admin server delete');
-
-    // The icon blob goes AFTER the row, so a failed delete never strands a
-    // live space without its icon. Best-effort and never awaited, as on the
-    // owner's DELETE /servers/:serverId: the response does not wait on S3.
-    if (server.iconUrl) {
-      deleteFromS3(server.iconUrl).catch((err) =>
-        console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
-    }
+    // The owner route's sequence (utils/serverDeletion.ts): the row first,
+    // then voice on every node, the notice, the room leaves and the icon blob
+    // (after the row, never awaited), each best effort, so a fan-out step that
+    // throws cannot leave a space announced as deleted but still present.
+    await deleteServerAndAnnounce(server, { cacheReason: 'admin server delete', logPrefix: '[Admin]' });
 
     logAuditEvent({
       actorId: req.user!.userId,
