@@ -587,3 +587,17 @@ describe('a membership starts with no secure-channel rows', () => {
     expect(rowsOf('bob')).toEqual([]);
   });
 });
+
+// ─── Readers ────────────────────────────────────────────────────────────────
+
+describe('a row whose user left the space grants nothing', () => {
+  it('the member list leaves out a row whose user is no longer in the space', async () => {
+    db.channelMembers.push({ channelId: C, userId: 'bob', isCreator: false, addedAt: new Date() });
+    db.serverMembers = db.serverMembers.filter((m) => m.userId !== 'bob');
+
+    const res = await request(app).get(`/api/v1/servers/${S}/secure-channels/${C}/members`).set('x-test-user', 'alice');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((m: { userId: string }) => m.userId)).toEqual(['alice']);
+  });
+});

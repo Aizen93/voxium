@@ -184,7 +184,7 @@ secureChannelRouter.get('/:channelId/members', async (req: Request<{ serverId: s
     const { serverId, channelId } = req.params;
     await getSecureChannelForMemberOrThrow(channelId, serverId, req.user!.userId);
 
-    const members = await getSecureChannelMembersPayload(channelId);
+    const members = await getSecureChannelMembersPayload(channelId, serverId);
     res.json({ success: true, data: members });
   } catch (err) {
     next(err);
@@ -276,7 +276,7 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
 
     await broadcastSecureMembersUpdated(channelId, serverId);
 
-    res.status(201).json({ success: true, data: await getSecureChannelMembersPayload(channelId) });
+    res.status(201).json({ success: true, data: await getSecureChannelMembersPayload(channelId, serverId) });
   } catch (err) {
     next(err);
   }

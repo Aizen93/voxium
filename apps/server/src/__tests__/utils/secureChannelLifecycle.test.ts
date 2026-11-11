@@ -47,6 +47,7 @@ import {
   removeSecureMember,
   removeSecureMembershipsInTx,
   announceSecureMembershipsRemoved,
+  getSecureChannelMembersPayload,
 } from '../../utils/secureChannelLifecycle';
 
 describe('secureChannelLifecycle', () => {
@@ -257,6 +258,23 @@ describe('secureChannelLifecycle', () => {
         WS_EVENTS.CHANNEL_MEMBERS_UPDATED,
         expect.objectContaining({ channelId: 'sec-1', serverId: 'srv-1' }),
       );
+    });
+  });
+
+  describe('getSecureChannelMembersPayload', () => {
+    it('lists only the rows whose user is a member of the channel\'s space', async () => {
+      await getSecureChannelMembersPayload('sec-1', 'srv-1');
+
+      expect(prismaMock.channelMember.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { channelId: 'sec-1', user: { memberships: { some: { serverId: 'srv-1' } } } },
+      }));
+    });
+
+    it('the members-updated broadcast reads the list of the space it names', async () => {
+      await removeSecureMember('sec-1', 'srv-1', 'u2');
+
+      const listRead = prismaMock.channelMember.findMany.mock.calls.at(-1)[0];
+      expect(listRead.where).toEqual({ channelId: 'sec-1', user: { memberships: { some: { serverId: 'srv-1' } } } });
     });
   });
 

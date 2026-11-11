@@ -168,10 +168,15 @@ function logRemovedMemberNoticeFailure(channelId: string, step: string, err: unk
   console.error(`[SecureChannel] Member removed from ${channelId}, but ${step} failed:`, err instanceof Error ? err.message : err);
 }
 
-/** Member-list payload for CHANNEL_MEMBERS_UPDATED (bounded by the member cap). */
-export async function getSecureChannelMembersPayload(channelId: string) {
+/**
+ * Member-list payload for CHANNEL_MEMBERS_UPDATED and the member-list route
+ * (bounded by the member cap). Only rows whose user is a member of the space:
+ * the list is what the members read as the channel's audience, and a row no
+ * membership backs grants nothing.
+ */
+export async function getSecureChannelMembersPayload(channelId: string, serverId: string) {
   const members = await prisma.channelMember.findMany({
-    where: { channelId },
+    where: { channelId, user: { memberships: { some: { serverId } } } },
     orderBy: { addedAt: 'asc' },
     select: {
       userId: true,
@@ -196,7 +201,7 @@ export async function getSecureChannelMembersPayload(channelId: string) {
  */
 export async function broadcastSecureMembersUpdated(channelId: string, serverId: string): Promise<void> {
   try {
-    const members = await getSecureChannelMembersPayload(channelId);
+    const members = await getSecureChannelMembersPayload(channelId, serverId);
     getIO().to(`channel:${channelId}`).emit(WS_EVENTS.CHANNEL_MEMBERS_UPDATED, {
       channelId,
       serverId,
