@@ -33,8 +33,12 @@ RETRY_DELAY_SECONDS=3
 # database, where no migration was ever applied, or one that does not exist
 # yet (`migrate deploy` creates it), holds nothing to lose, and the
 # migration's own SQL gate lets it through: a first start migrates it with no
-# override. A database that has tables but no migration history reads the
-# same way here; `migrate deploy` refuses it (P3005) before writing anything.
+# override. A database that has tables but no migration recorded reads the
+# same way here, and nothing it holds is touched either: without a
+# `_prisma_migrations` table `migrate deploy` refuses it (P3005) before
+# writing anything; with that table present but its rows deleted, the first
+# migration fails on a table that exists (42P07) and leaves a failed-migration
+# record to resolve.
 #
 # It decides only on a status that reached the database. `migrate status`
 # exits non-zero both when migrations are pending and when it cannot connect,
@@ -53,12 +57,13 @@ CUTOVER_MIGRATION="20260801140000_e2e_always_on"
 
 # Prints what the last `migrate status` output ($STATUS_LINES) says:
 #   unreadable  the status did not reach the database
-#   empty       nothing applied yet, or no database yet: nothing to lose
+#   missing     the database does not exist yet
+#   empty       no migration recorded: every migration is pending
 #   existing    an existing database with the cutover pending
 #   applied     the cutover is not pending
 status_state() {
   if printf '%s\n' "$STATUS_LINES" | grep -q '^Error: P1003'; then
-    echo empty
+    echo missing
   elif printf '%s\n' "$STATUS_LINES" | grep -q '^Error'; then
     echo unreadable
   elif ! printf '%s\n' "$STATUS_LINES" | grep -q '^[0-9][0-9]* migrations\{0,1\} found in '; then
@@ -137,8 +142,11 @@ if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
       echo "[Voxium]   node ../../node_modules/prisma/build/index.js migrate resolve --rolled-back <name>"
       exit 1
       ;;
+    missing)
+      echo "[Voxium] The database does not exist yet: migrate deploy creates it."
+      ;;
     empty)
-      echo "[Voxium] New database: every migration will be applied."
+      echo "[Voxium] No migration is recorded in this database: every migration is pending."
       ;;
   esac
 fi

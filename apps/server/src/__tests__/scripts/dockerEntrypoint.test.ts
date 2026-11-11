@@ -170,8 +170,20 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.code).toBe(0);
   }, TIMEOUT);
 
+  it('logs only what the status shows when no migration is recorded', () => {
+    // A new database, and one whose _prisma_migrations rows were deleted
+    // while its tables stayed, print the same status (both captured: byte for
+    // byte equal). The second one's deploy then fails on its first migration
+    // (42P07), so the log must not promise that the migrations will apply.
+    const run = runEntrypoint([captured('empty-database')]);
+    expect(run.out).toContain('[Voxium] No migration is recorded in this database: every migration is pending.');
+    expect(run.out).not.toContain('New database');
+    expect(run.deploys).toBe(1);
+  }, TIMEOUT);
+
   it('migrates and starts when the database does not exist yet (migrate deploy creates it)', () => {
     const run = runEntrypoint([captured('missing-database')]);
+    expect(run.out).toContain('[Voxium] The database does not exist yet: migrate deploy creates it.');
     expect(run.deploys).toBe(1);
     expect(run.serverStarted).toBe(true);
     expect(run.code).toBe(0);

@@ -62,7 +62,10 @@ describe('server-image workflow', () => {
 
   it('boots the empty database with no override, and refuses the existing one', () => {
     expect(workflow).not.toContain('VOXIUM_ALLOW_CUTOVER');
-    expect(workflow).toContain('[Voxium] New database: every migration will be applied.');
+    // The empty-database line, exactly as the entrypoint prints it.
+    const emptyLine = '[Voxium] No migration is recorded in this database: every migration is pending.';
+    expect(workflow).toContain(emptyLine);
+    expect(read('docker-entrypoint.sh')).toContain(`echo "${emptyLine}"`);
     expect(workflow).toContain('FATAL: the always-on E2E cutover ($CUTOVER) has not been applied.');
     expect(workflow).toMatch(/migration_name = '\$CUTOVER'/);
   });

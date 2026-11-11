@@ -118,7 +118,7 @@ jobs:
           docker run -d --name server --network "$NET" -p 3001:3001 \
             --env-file "$RUNNER_TEMP/server.env" -e DATABASE_URL="$PG/voxium" "$IMAGE"
           sh "$RUNNER_TEMP/wait-health.sh" server
-          docker logs server 2>&1 | grep -F '[Voxium] New database: every migration will be applied.'
+          docker logs server 2>&1 | grep -F '[Voxium] No migration is recorded in this database: every migration is pending.'
           # No Prisma CLI run reported to checkpoint.prisma.io: it leaves a cache behind.
           if docker exec server sh -c 'ls -A "$HOME/.cache/checkpoint-nodejs"' 2>/dev/null; then
             echo "::error::the Prisma update check ran in the image"; exit 1
