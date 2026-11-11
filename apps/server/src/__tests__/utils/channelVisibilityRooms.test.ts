@@ -14,6 +14,9 @@ const m = vi.hoisted(() => ({
   // io.local.in(...) — this node's sockets
   localIn: vi.fn(),
   localFetch: vi.fn(),
+  // io.local.in(...).except(...).socketsLeave(...) — the fail-closed end of a channel's pass
+  localExcept: vi.fn(),
+  localLeave: vi.fn(),
   localTo: vi.fn(),
   to: vi.fn(),
   getIO: vi.fn(),
@@ -89,7 +92,8 @@ function resetMocks() {
   m.clusterExcept.mockReturnValue({ socketsLeave: m.clusterLeave });
   // A peer that never answers: anything that awaited this would hang
   m.clusterFetch.mockReturnValue(new Promise(() => {}));
-  m.localIn.mockReturnValue({ fetchSockets: m.localFetch });
+  m.localIn.mockReturnValue({ fetchSockets: m.localFetch, except: m.localExcept });
+  m.localExcept.mockReturnValue({ socketsLeave: m.localLeave });
   m.localTo.mockImplementation((room: string) => ({ room, local: true, emit: vi.fn() }));
   m.to.mockImplementation((room: string) => ({ room, emit: vi.fn() }));
   m.localFetch.mockResolvedValue([]);
@@ -1102,6 +1106,29 @@ describe('a local pass that fails is queued again', () => {
   });
 
   const poolTimeout = () => new Error('Timed out fetching a new connection from the connection pool');
+  const ATTEMPTS = LOCAL_PASS_RETRY_DELAYS_MS.length + 1;
+  const ALL_DELAYS = LOCAL_PASS_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+
+  // Review of #71 (owner's decision): seconds for a pool timeout, minutes for
+  // a database restart, then each scope's own end
+  it('is queued again after 1 s, 5 s, 30 s and 2 min, each failure logged', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    revokedMember();
+    m.filterForUsers.mockRejectedValue(poolTimeout());
+
+    await syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(ALL_DELAYS);
+
+    expect(LOCAL_PASS_RETRY_DELAYS_MS).toEqual([1000, 5000, 30_000, 120_000]);
+    expect(m.filterForUsers).toHaveBeenCalledTimes(5);
+    expect(warn.mock.calls.map((c) => c[0]).filter((line) => String(line).includes('queued again'))).toEqual([
+      '[Visibility] Resync of server server-1 on this node failed (attempt 1/5); queued again in 1000 ms',
+      '[Visibility] Resync of server server-1 on this node failed (attempt 2/5); queued again in 5000 ms',
+      '[Visibility] Resync of server server-1 on this node failed (attempt 3/5); queued again in 30000 ms',
+      '[Visibility] Resync of server server-1 on this node failed (attempt 4/5); queued again in 120000 ms',
+    ]);
+  });
 
   /** A member who lost the private channel, still in its room on this node. */
   function revokedMember() {
@@ -1122,7 +1149,7 @@ describe('a local pass that fails is queued again', () => {
 
     await syncChannelVisibilityRooms('server-1', { userId: 'user-1' });
     expect(socket.leave).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledWith(`[Visibility] Resync of server server-1 on this node failed (attempt 1/3); queued again in ${LOCAL_PASS_RETRY_DELAYS_MS[0]} ms`);
+    expect(warn).toHaveBeenCalledWith(`[Visibility] Resync of server server-1 on this node failed (attempt 1/${ATTEMPTS}); queued again in ${LOCAL_PASS_RETRY_DELAYS_MS[0]} ms`);
 
     await vi.advanceTimersByTimeAsync(LOCAL_PASS_RETRY_DELAYS_MS[0] - 1);
     expect(m.filterForUsers).toHaveBeenCalledTimes(1);
@@ -1162,7 +1189,7 @@ describe('a local pass that fails is queued again', () => {
     await syncChannelVisibilityRooms('server-1');
     await vi.advanceTimersByTimeAsync(LOCAL_PASS_RETRY_DELAYS_MS[0]);
     expect(m.filterForUsers).toHaveBeenCalledTimes(2);
-    expect(warn).toHaveBeenCalledWith(`[Visibility] Resync of server server-1 on this node failed (attempt 2/3); queued again in ${LOCAL_PASS_RETRY_DELAYS_MS[1]} ms`);
+    expect(warn).toHaveBeenCalledWith(`[Visibility] Resync of server server-1 on this node failed (attempt 2/${ATTEMPTS}); queued again in ${LOCAL_PASS_RETRY_DELAYS_MS[1]} ms`);
     await vi.advanceTimersByTimeAsync(LOCAL_PASS_RETRY_DELAYS_MS[1] - 1);
     expect(m.filterForUsers).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
@@ -1171,7 +1198,7 @@ describe('a local pass that fails is queued again', () => {
     expect(socket.leave).toHaveBeenCalledWith('channel:ch-priv');
   });
 
-  it('the third failure of ONE MEMBER\'s pass disconnects their sockets on this node, except one in a voice call (fail closed)', async () => {
+  it('the last failure of ONE MEMBER\'s pass disconnects their sockets on this node, except one in a voice call (fail closed)', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const idle = createMockSocket('user-1', { rooms: ['user:user-1', 'channel:ch-priv'] });
@@ -1181,17 +1208,93 @@ describe('a local pass that fails is queued again', () => {
     m.filterForUsers.mockRejectedValue(poolTimeout());
 
     await syncChannelVisibilityRooms('server-1', { userId: 'user-1' });
-    await vi.advanceTimersByTimeAsync(LOCAL_PASS_RETRY_DELAYS_MS[0] + LOCAL_PASS_RETRY_DELAYS_MS[1]);
+    await vi.advanceTimersByTimeAsync(ALL_DELAYS);
 
-    expect(m.filterForUsers).toHaveBeenCalledTimes(3);
+    expect(m.filterForUsers).toHaveBeenCalledTimes(ATTEMPTS);
     expect(idle.disconnect).toHaveBeenCalledWith(true);
     expect(inCall.disconnect).not.toHaveBeenCalled();
     expect(m.localIn).toHaveBeenLastCalledWith('user:user-1');
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('Resync of member user-1 in server server-1 on this node failed 3 times: disconnected 1 of their socket(s)'));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(`Resync of member user-1 in server server-1 on this node failed ${ATTEMPTS} times: disconnected 1 of their socket(s)`));
 
     // And it stops there
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(m.filterForUsers).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(m.filterForUsers).toHaveBeenCalledTimes(ATTEMPTS);
+  });
+
+  // Review of #71: a re-check after a channel:join (one channel of one member)
+  // ended in the member-wide disconnect, so an unrelated request plus a
+  // database blip disconnected a member whose access had never changed.
+  it('the last failure of a re-check of one member\'s channel takes that one room away, disconnecting nobody', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const socket = revokedMember();
+    m.filterForUsers.mockRejectedValue(poolTimeout());
+    const mark = visibilityRequestMark();
+    await syncChannelVisibilityRooms('server-1', { channelId: 'ch-other' }); // an unrelated request
+
+    resyncAfterJoins(mark, 'user-1', ['server-1'], 'ch-priv');
+    await vi.advanceTimersByTimeAsync(ALL_DELAYS);
+
+    expect(socket.disconnect).not.toHaveBeenCalled();
+    expect(m.localIn).toHaveBeenCalledWith('user:user-1');
+    expect(m.localExcept).toHaveBeenCalledWith('voice:ch-priv');
+    expect(m.localLeave).toHaveBeenCalledWith('channel:ch-priv');
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(`Resync of channel ch-priv in server server-1 on this node failed ${ATTEMPTS} times: member user-1's sockets on this node left its room`));
+  });
+
+  it('the last failure of a channel\'s pass takes the channel\'s room from every socket of the space on this node, its voice participants kept', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const socket = revokedMember();
+    m.filterForUsers.mockRejectedValue(poolTimeout());
+
+    await syncChannelVisibilityRooms('server-1', { channelId: 'ch-priv' });
+    await vi.advanceTimersByTimeAsync(ALL_DELAYS);
+
+    expect(socket.disconnect).not.toHaveBeenCalled();
+    expect(m.localIn).toHaveBeenLastCalledWith('server:server-1');
+    expect(m.localExcept).toHaveBeenCalledWith('voice:ch-priv');
+    expect(m.localLeave).toHaveBeenCalledWith('channel:ch-priv');
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(`Resync of channel ch-priv in server server-1 on this node failed ${ATTEMPTS} times: every socket of the space on this node left its room`));
+  });
+
+  // Review of #71: every socket of a reconnect storm queued its own re-check
+  it('a member pass that has not started absorbs the next ones for that member and space: one pass, not one per socket', async () => {
+    const socket = createMockSocket('user-1');
+    m.localFetch.mockResolvedValue([socket]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    let releaseFirst!: (visible: Map<string, Set<string>>) => void;
+    m.filterForUsers.mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = resolve; }));
+
+    const mark = visibilityRequestMark();
+    const first = syncChannelVisibilityRooms('server-1'); // runs, and holds the queue
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 5; i++) resyncAfterJoins(mark, 'user-1', ['server-1']);
+    resyncAfterJoins(mark, 'user-2', ['server-1']); // another member: a pass of its own
+    releaseFirst(visibility({ 'user-1': ['ch-1'] }));
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(m.localIn.mock.calls.map((c) => c[0])).toEqual(['server:server-1', 'user:user-1', 'user:user-2']);
+  });
+
+  it('two channels of one member waiting together widen to the member\'s whole space', async () => {
+    m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    let releaseFirst!: (visible: Map<string, Set<string>>) => void;
+    m.filterForUsers.mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = resolve; }));
+
+    const mark = visibilityRequestMark();
+    const first = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(0);
+    resyncAfterJoins(mark, 'user-1', ['server-1'], 'ch-a');
+    resyncAfterJoins(mark, 'user-1', ['server-1'], 'ch-b');
+    releaseFirst(visibility({ 'user-1': ['ch-1'] }));
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(m.prisma.channel.findMany).toHaveBeenCalledTimes(2);
+    expect(m.prisma.channel.findMany).toHaveBeenLastCalledWith({ where: { serverId: 'server-1' }, select: { id: true, secure: true } });
   });
 
   // Review of #71: the socket spared for its call kept EVERY room, so a
@@ -1228,18 +1331,19 @@ describe('a local pass that fails is queued again', () => {
     expect(inDmCall.leave.mock.calls.map((c) => c[0]).sort()).toEqual(['channel:ch-pub', 'channel:ch-staff']);
   });
 
-  it('the third failure of a space-wide pass gives up, logged as an error, disconnecting nobody', async () => {
+  it('the last failure of a space-wide pass gives up, logged as an error, disconnecting nobody', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const socket = revokedMember();
     m.filterForUsers.mockRejectedValue(poolTimeout());
 
     await syncChannelVisibilityRooms('server-1');
-    await vi.advanceTimersByTimeAsync(LOCAL_PASS_RETRY_DELAYS_MS[0] + LOCAL_PASS_RETRY_DELAYS_MS[1] + 60_000);
+    await vi.advanceTimersByTimeAsync(ALL_DELAYS + 600_000);
 
-    expect(m.filterForUsers).toHaveBeenCalledTimes(3);
+    expect(m.filterForUsers).toHaveBeenCalledTimes(ATTEMPTS);
     expect(socket.disconnect).not.toHaveBeenCalled();
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('Resync of server server-1 on this node failed 3 times; giving up'));
+    expect(m.localLeave).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(`Resync of server server-1 on this node failed ${ATTEMPTS} times; giving up`));
   });
 
   it('a pass that applied is never repeated', async () => {

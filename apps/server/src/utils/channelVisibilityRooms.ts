@@ -30,9 +30,10 @@ const SEEN_IDS_MAX = 1024;
 export const LOCAL_PASS_MAX_WAIT_MS = 30_000;
 /** How long one count of the live nodes is reused (see expectedReceivers). */
 export const LIVE_NODES_MEMO_MS = 5000;
-/** Waits before a failed local pass is queued again. A failure after the last
- *  of them is the pass's last (see afterFailedPass). */
-export const LOCAL_PASS_RETRY_DELAYS_MS: readonly number[] = [1000, 5000];
+/** Waits before a failed local pass is queued again: a pool timeout clears in
+ *  seconds, a database restart in minutes. A failure after the last of them is
+ *  the pass's last (see afterFailedPass). */
+export const LOCAL_PASS_RETRY_DELAYS_MS: readonly number[] = [1000, 5000, 30_000, 120_000];
 
 /**
  * Re-sync `channel:{id}` room membership for connected members after a
@@ -305,49 +306,91 @@ const localPassTail = new Map<string, LocalPass>();
  * had confirmed. A repeat is safe: every pass reads the database afresh, and
  * the queue keeps it behind the passes already waiting. The promise resolves
  * when the first run ends (a repeat is not awaited) and never rejects.
+ *
+ * A pass over ONE MEMBER that has not started yet absorbs the next one for
+ * the same member and space (it will read the database after that request
+ * too): a reconnect storm, every socket re-checking after its joins, queues
+ * one pass per member per space, not one per socket. Two different channels,
+ * or a channel and the member's whole space, widen it to the whole space.
  */
 function resyncLocalSockets(scope: ResyncScope, attempt = 1): Promise<void> {
-  const previous = localPassTail.get(scope.serverId);
+  if (!scope.userId) return enqueuePass({ scope: { ...scope }, attempt });
+  const key = `${scope.serverId}|${scope.userId}`;
+  const pending = pendingMemberPasses.get(key);
+  if (pending) {
+    if (pending.job.scope.channelId !== undefined && pending.job.scope.channelId !== scope.channelId) {
+      delete pending.job.scope.channelId;
+    }
+    pending.job.attempt = Math.max(pending.job.attempt, attempt);
+    return pending.run;
+  }
+  const entry = { job: { scope: { ...scope }, attempt }, run: Promise.resolve() };
+  pendingMemberPasses.set(key, entry);
+  entry.run = enqueuePass(entry.job, () => {
+    if (pendingMemberPasses.get(key) === entry) pendingMemberPasses.delete(key);
+  });
+  return entry.run;
+}
+
+/** A local pass to run. Its scope and attempt are read when it starts, so a
+ *  member pass still waiting can absorb another (see resyncLocalSockets). */
+interface PassJob {
+  scope: ResyncScope;
+  attempt: number;
+}
+
+/** Member passes queued and not started yet, by `${serverId}|${userId}`. */
+const pendingMemberPasses = new Map<string, { job: PassJob; run: Promise<void> }>();
+
+function enqueuePass(job: PassJob, onStart?: () => void): Promise<void> {
+  const { serverId } = job.scope;
+  const previous = localPassTail.get(serverId);
   let markStarted!: () => void;
   const pass: LocalPass = {
     run: Promise.resolve(),
     started: new Promise<void>((resolve) => { markStarted = resolve; }),
     overtaken: false,
   };
-  pass.run = (previous ? waitAtMost(previous, scope.serverId) : Promise.resolve())
+  pass.run = (previous ? waitAtMost(previous, serverId) : Promise.resolve())
     .then(() => {
       markStarted();
-      return runLocalPass(scope, pass);
+      onStart?.();
+      return runLocalPass(job.scope, pass);
     })
     .then((applied) => {
-      if (!applied) afterFailedPass(scope, attempt);
+      if (!applied) afterFailedPass(job.scope, job.attempt);
     });
-  localPassTail.set(scope.serverId, pass);
+  localPassTail.set(serverId, pass);
   // runLocalPass never rejects and afterFailedPass never throws, so neither does `run`
   void pass.run.then(() => {
-    if (localPassTail.get(scope.serverId) === pass) localPassTail.delete(scope.serverId);
+    if (localPassTail.get(serverId) === pass) localPassTail.delete(serverId);
   });
   return pass.run;
 }
 
 /**
- * What follows a failed local pass: queued again after the next delay, and
- * after the last one, the decision below.
+ * What follows a failed local pass: queued again after each delay of
+ * LOCAL_PASS_RETRY_DELAYS_MS, and after the last, by scope (the database has
+ * refused this node for about 2.6 minutes, so nothing below reads it):
  *
- * The third failure means this node could not read the database three times
- * in about six seconds. For ONE MEMBER's pass (a role taken away, a re-check
- * after a join raced a resync) it fails closed: that member's sockets on this
- * node are disconnected, except a socket in a call, a space voice channel's or
- * a DM's (cutting a call is worse than a late revocation), which keeps only
- * its call's channel room
- * (see disconnectOutsideVoice). The client reopens a socket the server closed, and the
- * connect path computes every room afresh — when the database answers again,
- * since the handshake reads it too. For a pass over a whole space or a whole
- * channel it gives up, logged as an error: disconnecting every member of a
- * space on this node would send them all to reconnect against the database
- * that has just failed three times, and end the session of members whose
- * access did not change. Their rooms stay as they were until the next resync
- * of the space reaches this node or they reconnect.
+ *  - ONE CHANNEL OF ONE MEMBER (a re-check after a channel:join): that
+ *    member's sockets on this node leave the channel's room, a socket in its
+ *    voice room kept. Exact, and nothing else of the member changes.
+ *  - ONE CHANNEL (an override change): every socket of the space on this node
+ *    leaves the channel's room, the channel's voice participants kept. They
+ *    get it back by opening the channel or reconnecting.
+ *  - ONE MEMBER (a role taken away, a re-check after a connect): that
+ *    member's sockets on this node are disconnected, except a socket in a
+ *    call, a space voice channel's or a DM's (cutting a call is worse than a
+ *    late revocation), which keeps only its call's channel room (see
+ *    disconnectOutsideVoice). The client reopens a socket the server closed,
+ *    and the connect path computes every room afresh — when the database
+ *    answers again, since the handshake reads it too.
+ *  - THE WHOLE SPACE (a role permission edit or delete): an error log, nothing
+ *    else. Disconnecting every member of the space on this node would send
+ *    them all to reconnect against the failing database and end the sessions
+ *    of members whose access did not change; their rooms stay as they were
+ *    until the next resync of the space reaches this node or they reconnect.
  */
 function afterFailedPass(scope: ResyncScope, attempt: number): void {
   const total = LOCAL_PASS_RETRY_DELAYS_MS.length + 1;
@@ -360,11 +403,29 @@ function afterFailedPass(scope: ResyncScope, attempt: number): void {
     timer.unref?.();
     return;
   }
-  if (!scope.userId) {
-    console.error(`[Visibility] Resync of server ${scope.serverId} on this node failed ${total} times; giving up: this node's sockets of the space keep their channel rooms until the next resync of the space or their reconnect`);
+  const { serverId, channelId, userId } = scope;
+  if (channelId) {
+    leaveChannelLocally(serverId, channelId, userId, total);
     return;
   }
-  void disconnectOutsideVoice(scope.serverId, scope.userId, total);
+  if (userId) {
+    void disconnectOutsideVoice(serverId, userId, total);
+    return;
+  }
+  console.error(`[Visibility] Resync of server ${serverId} on this node failed ${total} times; giving up: this node's sockets of the space keep their channel rooms until the next resync of the space or their reconnect`);
+}
+
+/** The fail-closed end of a channel's pass (see afterFailedPass): one member's
+ *  sockets, or the whole space's, leave the channel's room on this node, its
+ *  voice participants kept. Never throws. */
+function leaveChannelLocally(serverId: string, channelId: string, userId: string | undefined, failures: number): void {
+  const from = userId ? `user:${userId}` : `server:${serverId}`;
+  try {
+    getIO().local.in(from).except(`voice:${channelId}`).socketsLeave(`channel:${channelId}`);
+    console.error(`[Visibility] Resync of channel ${channelId} in server ${serverId} on this node failed ${failures} times: ${userId ? `member ${userId}'s sockets` : 'every socket of the space'} on this node left its room (fail closed), its voice participants kept`);
+  } catch (err) {
+    console.error(`[Visibility] Could not take channel ${channelId} of server ${serverId} away after ${failures} failed resyncs; this node's sockets keep its room until they reconnect:`, err);
+  }
 }
 
 /**
@@ -578,6 +639,7 @@ export function _resetChannelVisibilityForTests(): void {
   requestSeq = 0;
   lastRequestBySpace.clear();
   forgottenUpTo = 0;
+  pendingMemberPasses.clear();
 }
 
 /** One publish; resolves with how many subscribers received it and how many
