@@ -56,6 +56,10 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
     findMany: vi.fn(),
   },
+  // The secure-channel creator's row, read by the creator's delete lever
+  channelMember: {
+    findUnique: vi.fn(),
+  },
   channel: {
     findMany: vi.fn(),
     findFirst: vi.fn(),
@@ -1146,6 +1150,7 @@ describe('Channel Routes', () => {
       });
       prismaMock.channel.findFirst.mockResolvedValue(secureCh);
       prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'creator-9' });
+      prismaMock.channelMember.findUnique.mockResolvedValue({ isCreator: true });
 
       const res = await request(app)
         .delete('/api/v1/servers/srv-1/channels/sec-1')
@@ -1157,8 +1162,33 @@ describe('Channel Routes', () => {
         where: { userId_serverId: { userId: 'creator-9', serverId: 'srv-1' } },
         select: { userId: true },
       });
+      expect(prismaMock.channelMember.findUnique).toHaveBeenCalledWith({
+        where: { channelId_userId: { channelId: 'sec-1', userId: 'creator-9' } },
+        select: { isCreator: true },
+      });
       // The plaintext delete path (raw prisma delete + server-room event) must not run
       expect(prismaMock.channel.delete).not.toHaveBeenCalled();
+    });
+
+    it('DELETE: a former creator who joined the space again, without their creator row, has no lever over the channel', async () => {
+      const token = makeToken({ userId: 'creator-9' });
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: 'creator-9', bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+      });
+      prismaMock.channel.findFirst.mockResolvedValue(secureCh);
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'creator-9' });
+      prismaMock.channelMember.findUnique.mockResolvedValue(null);
+      // a plain member of the space: no ADMINISTRATOR, no MANAGE_CHANNELS
+      mockHasServerPermission.mockResolvedValue(false);
+      mockComputeServerPermissions.mockResolvedValue(Permissions.VIEW_CHANNEL);
+
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1/channels/sec-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('You do not have permission to delete channels');
+      expect(mockDeleteSecureChannel).not.toHaveBeenCalled();
     });
 
     it('DELETE: a creator who is no longer a member of the space has no lever over the channel', async () => {

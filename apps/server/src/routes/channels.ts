@@ -378,13 +378,22 @@ channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request
       // Content stays unreadable either way; deletion is the only power.
       let allowed = channel.server.ownerId === userId;
       if (!allowed && channel.createdById === userId) {
-        // The creator's lever holds while they are a member of the space: a
-        // departure deletes the creator's channels with it, and a channel
-        // that outlived one gives its former member no say over it
-        allowed = !!(await prisma.serverMember.findUnique({
-          where: { userId_serverId: { userId, serverId } },
-          select: { userId: true },
-        }));
+        // The creator's lever holds while they are a member of the space AND
+        // still the channel's creator member: a departure deletes the
+        // creator's channels with it, and a channel that outlived one (its
+        // creator's row removed by the channel_members migration) gives its
+        // former creator no say over it, even after they join again
+        const [spaceMember, creatorRow] = await Promise.all([
+          prisma.serverMember.findUnique({
+            where: { userId_serverId: { userId, serverId } },
+            select: { userId: true },
+          }),
+          prisma.channelMember.findUnique({
+            where: { channelId_userId: { channelId, userId } },
+            select: { isCreator: true },
+          }),
+        ]);
+        allowed = !!spaceMember && creatorRow?.isCreator === true;
       }
       if (!allowed) {
         const perms = await computeServerPermissions(userId, serverId);
