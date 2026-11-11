@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { inspect } from 'util';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient, Prisma } from '../../generated/prisma/client';
 import { errorHandler } from '../../middleware/errorHandler';
 import {
   AppError,
@@ -357,6 +359,85 @@ describe('errorHandler middleware — an unexpected error is logged as its messa
 
     expect(res.status).toBe(500);
     expect(errorSpy.mock.calls[0]).toEqual(['[Error]', 'Error: Non-error value thrown (object)', '']);
+  });
+});
+
+// ─── Prisma errors print the call's arguments ────────────────────────────────
+
+describe('errorHandler middleware — a Prisma error is logged without the arguments of the call', () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const SECRET_EMAIL = 'someone.private@example.org';
+  const SECRET_HASH = '$2a$12$abcdefghijklmnopqrstuuvwxyz0123456789ABCDEFGHIJKLMNO';
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  /** A REAL validation error: the generated client refuses the call before any connection is made. */
+  async function realValidationError(): Promise<Error> {
+    const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: 'postgresql://nobody:nothing@127.0.0.1:1/none' }) });
+    try {
+      await prisma.user.update({
+        where: { email: SECRET_EMAIL },
+        data: { password: SECRET_HASH, notAColumn: true } as never,
+      });
+      throw new Error('expected a validation error');
+    } catch (err) {
+      return err as Error;
+    } finally {
+      await prisma.$disconnect();
+    }
+  }
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    process.env.NODE_ENV = originalNodeEnv;
+    vi.restoreAllMocks();
+  });
+
+  it('the real error does carry the secrets, in its message and its stack (the premise)', async () => {
+    const error = await realValidationError();
+
+    expect(error).toBeInstanceOf(Prisma.PrismaClientValidationError);
+    expect(error.message).toContain(SECRET_EMAIL);
+    expect(error.stack).toContain(SECRET_HASH);
+  });
+
+  for (const mode of ['development', 'production']) {
+    it(`${mode}: logs its name and the operation, never the message or the stack lines that quote the arguments`, async () => {
+      process.env.NODE_ENV = mode;
+      const error = await realValidationError();
+
+      const res = await request(buildApp(error)).get('/test');
+
+      expect(res.status).toBe(500);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const logged = errorSpy.mock.calls[0].join(' ');
+      expect(logged).not.toContain(SECRET_EMAIL);
+      expect(logged).not.toContain(SECRET_HASH);
+      expect(logged).not.toContain('notAColumn');
+      expect(logged).toContain('PrismaClientValidationError');
+      expect(logged).toContain('user.update() failed (arguments not logged)');
+    });
+  }
+
+  it('a known request error is logged by its name, its code and its model, never its message', async () => {
+    process.env.NODE_ENV = 'production';
+    const error = new Prisma.PrismaClientKnownRequestError(
+      `\nInvalid \`prisma.user.create()\` invocation:\n\n{ data: { email: "${SECRET_EMAIL}", password: "${SECRET_HASH}" } }\n\nUnique constraint failed on the fields: (\`email\`)`,
+      { code: 'P2002', clientVersion: '7.0.0', meta: { modelName: 'User', target: ['email'] } },
+    );
+
+    await request(buildApp(error)).get('/test');
+
+    const line = JSON.parse(errorSpy.mock.calls[0][0] as string);
+    expect(line).toMatchObject({
+      name: 'PrismaClientKnownRequestError',
+      code: 'P2002',
+      message: 'user.create(), model User failed (arguments not logged)',
+    });
+    expect(errorSpy.mock.calls[0][0]).not.toContain(SECRET_EMAIL);
+    expect(errorSpy.mock.calls[0][0]).not.toContain(SECRET_HASH);
   });
 });
 
