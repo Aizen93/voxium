@@ -17,6 +17,13 @@ function makeToken(overrides: Record<string, unknown> = {}) {
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
+/** Both $transaction forms against this file's mock client. */
+function runTransaction(arg: unknown): Promise<unknown> {
+  return typeof arg === 'function'
+    ? (arg as (tx: unknown) => Promise<unknown>)(prismaMock)
+    : Promise.all(arg as Promise<unknown>[]);
+}
+
 const prismaMock: Record<string, any> = {
   // the platform-ban disarm (utils/webhookLifecycle.ts): holds none unless a test says so
   webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
@@ -43,9 +50,10 @@ const prismaMock: Record<string, any> = {
   auditLog: {
     create: vi.fn().mockResolvedValue({}),
   },
-  // Ops are already in-flight promises (the model mocks resolve eagerly), so
-  // Promise.all faithfully models "everything in the array ran in the txn".
-  $transaction: vi.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
+  // Array form: the ops are already in-flight promises (the model mocks
+  // resolve eagerly), so Promise.all faithfully models "everything in the
+  // array ran in the txn". Callback form: the callback gets this client.
+  $transaction: vi.fn((arg: any) => runTransaction(arg)),
   $queryRawUnsafe: vi.fn().mockResolvedValue([]),
 };
 
@@ -141,7 +149,9 @@ vi.mock('../../utils/s3', () => ({
 }));
 
 // Audit log
-vi.mock('../../utils/auditLog', () => ({
+// The fire-and-forget writer is observed; the row a ban commits with is the real shape
+vi.mock('../../utils/auditLog', async (importOriginal) => ({
+  auditLogData: (await importOriginal<typeof import('../../utils/auditLog')>()).auditLogData,
   logAuditEvent: vi.fn(),
 }));
 
@@ -205,7 +215,12 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     prismaMock.ipBan.createMany.mockResolvedValue({ count: 0 });
     prismaMock.webhook.findMany.mockResolvedValue([]);
     prismaMock.webhook.updateMany.mockResolvedValue({ count: 0 });
-    prismaMock.$transaction.mockImplementation((ops: Promise<unknown>[]) => Promise.all(ops));
+    prismaMock.serverJoinRequest.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.auditLog.create.mockResolvedValue({});
+    prismaMock.$transaction.mockImplementation((arg: unknown) => runTransaction(arg));
+    mockRecomputeListedForOwner.mockResolvedValue(0);
+    mockBroadcastMemberLeft.mockResolvedValue(undefined);
+    mockEmitToModerators.mockResolvedValue(undefined);
     app = createApp();
   });
 
@@ -267,11 +282,11 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     mockDisconnectSockets.mockReset();
   });
 
-  it('signs the banned account out right after the ban commits, even when the fan-out after it fails', async () => {
+  it('signs the banned account out right after the ban commits, and a fan-out that fails after it still answers 200', async () => {
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
     const order: string[] = [];
-    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => {
-      const results = await Promise.all(ops);
+    prismaMock.$transaction.mockImplementation(async (arg: unknown) => {
+      const results = await runTransaction(arg);
       order.push('commit');
       return results;
     });
@@ -286,15 +301,104 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ reason: 'spam' });
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, message: 'User banned' });
     expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
     expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
     expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
     expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('commit'));
     expect(order.indexOf('disconnect')).toBeGreaterThan(order.indexOf('force:logout'));
+    expect(consoleSpy).toHaveBeenCalledWith('[Admin] User target-1 banned, but the member:left broadcast to s-1 failed:', 'adapter gone');
     consoleSpy.mockRestore();
     mockEmit.mockReset();
     mockDisconnectSockets.mockReset();
+  });
+
+  describe('the audit row commits with the ban', () => {
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+      consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleSpy.mockRestore();
+    });
+
+    const ban = (body: Record<string, unknown> = { reason: 'spam' }) => request(app)
+      .post('/api/v1/admin/users/target-1/ban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send(body);
+
+    it('writes the user.ban row INSIDE the ban transaction, with the counts the transaction produced', async () => {
+      const order: string[] = [];
+      prismaMock.$transaction.mockImplementation(async (arg: unknown) => {
+        order.push('tx:start');
+        const r = await runTransaction(arg);
+        order.push('tx:end');
+        return r;
+      });
+      prismaMock.auditLog.create.mockImplementation(async () => { order.push('audit'); return {}; });
+      prismaMock.user.update.mockImplementation(async () => { order.push('ban'); return {}; });
+      prismaMock.ipRecord.findMany.mockResolvedValue([{ ip: '1.1.1.1' }]);
+      prismaMock.ipBan.createMany.mockResolvedValue({ count: 1 });
+      prismaMock.webhook.findMany.mockResolvedValue([{ serverId: 's-1' }]);
+
+      const res = await ban({ reason: 'spam', banIps: true });
+
+      expect(res.status).toBe(200);
+      expect(order).toEqual(['tx:start', 'ban', 'audit', 'tx:end']);
+      expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'admin-1', action: 'user.ban', targetType: 'user', targetId: 'target-1',
+          metadata: { reason: 'spam', banIps: true, ipsBanned: 1, knownIps: 1, webhooksDisarmed: 1 },
+        },
+      });
+    });
+
+    it('writes no audit row and signs nobody out when the transaction fails (no ban)', async () => {
+      prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+
+      const res = await ban();
+
+      expect(res.status).toBe(500);
+      expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+      expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the directory recompute', () => mockRecomputeListedForOwner.mockRejectedValueOnce(new Error('step failed'))],
+      ['the membership read', () => prismaMock.serverMember.findMany.mockRejectedValueOnce(new Error('step failed'))],
+      ['the join-request withdrawal notice to s-9', () => {
+        prismaMock.serverJoinRequest.findMany.mockResolvedValueOnce([{ serverId: 's-9' }]);
+        mockEmitToModerators.mockRejectedValueOnce(new Error('step failed'));
+      }],
+    ])('a rejecting step after the commit (%s) is logged, the others still run, and the ban answers 200', async (step, arrange) => {
+      prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's-1' }]);
+      arrange();
+
+      const res = await ban();
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'user.ban' }) }));
+      expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+      expect(consoleSpy).toHaveBeenCalledWith(`[Admin] User target-1 banned, but ${step} failed:`, 'step failed');
+      if (step !== 'the membership read') expect(mockBroadcastMemberLeft).toHaveBeenCalledWith('target-1', 's-1');
+    });
+
+    it('a webhook:changed hint that throws still lets the rest of the fan-out run', async () => {
+      prismaMock.webhook.findMany.mockResolvedValue([{ serverId: 's-1' }]);
+      prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's-2' }]);
+      mockEmit.mockImplementation((ev: string) => { if (ev === 'webhook:changed') throw new Error('adapter gone'); });
+
+      const res = await ban();
+
+      expect(res.status).toBe(200);
+      expect(mockBroadcastMemberLeft).toHaveBeenCalledWith('target-1', 's-2');
+      expect(consoleSpy).toHaveBeenCalledWith('[Admin] User target-1 banned, but the webhook:changed hint to s-1 failed:', 'adapter gone');
+      mockEmit.mockReset();
+    });
   });
 
   it('signs nobody out when the ban transaction fails', async () => {
@@ -329,13 +433,10 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     // ipsBanned in the message comes from createMany's { count }
     expect(res.body.message).toContain('2 IP(s)');
 
-    // Exactly one transaction, holding the three statements (user update + IP bans + the join-request withdrawal)
+    // Exactly one transaction: the statements below all ran on its client
+    // (the mock hands the callback this file's client)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-    const txnOps = prismaMock.$transaction.mock.calls[0][0];
-    expect(Array.isArray(txnOps)).toBe(true);
-    expect(txnOps).toHaveLength(3);
-
-    // Both statements were built for the transaction (invoked before $transaction resolved)
+    expect(typeof prismaMock.$transaction.mock.calls[0][0]).toBe('function');
     expect(prismaMock.user.update).toHaveBeenCalledWith({
       where: { id: 'target-1' },
       data: expect.objectContaining({
@@ -363,14 +464,17 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
     expect(res.status).toBe(200);
     expect(prismaMock.serverJoinRequest.findMany).toHaveBeenCalledWith({ where: { userId: 'target-1', status: 'pending' }, select: { serverId: true } });
     expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
-    expect(prismaMock.$transaction.mock.calls[0][0]).toContain(prismaMock.serverJoinRequest.deleteMany.mock.results[0].value);
+    // Inside the ban transaction: the delete ran while the callback did
+    const txOrder = vi.mocked(prismaMock.$transaction).mock.invocationCallOrder[0];
+    expect(prismaMock.serverJoinRequest.deleteMany.mock.invocationCallOrder[0]).toBeGreaterThan(txOrder);
+    expect(prismaMock.serverJoinRequest.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.auditLog.create.mock.invocationCallOrder[0]);
     expect(mockEmitToModerators).toHaveBeenCalledWith('s-9', 'server:join_request_resolved', { serverId: 's-9', userId: 'target-1', outcome: 'cancelled' });
   });
 
   it('hides every server the banned user owns from the directory, after the ban committed', async () => {
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
     const order: string[] = [];
-    prismaMock.$transaction.mockImplementation(async (ops: Promise<unknown>[]) => { order.push('txn'); return Promise.all(ops); });
+    prismaMock.$transaction.mockImplementation(async (arg: unknown) => { order.push('txn'); return runTransaction(arg); });
     mockRecomputeListedForOwner.mockImplementation(async () => { order.push('recompute'); return 2; });
 
     const res = await request(app)

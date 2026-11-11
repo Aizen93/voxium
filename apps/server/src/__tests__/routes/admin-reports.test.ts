@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -34,6 +34,7 @@ const prismaMock: Record<string, any> = {
   message: {
     findUnique: vi.fn(),
     delete: vi.fn(),
+    deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   messageAttachment: {
     findMany: vi.fn().mockResolvedValue([]),
@@ -44,6 +45,8 @@ const prismaMock: Record<string, any> = {
   auditLog: {
     create: vi.fn().mockResolvedValue({}),
   },
+  // The resolution is one interactive transaction; the callback gets this client
+  $transaction: vi.fn((arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg))),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -132,7 +135,9 @@ vi.mock('../../utils/s3', () => ({
 }));
 
 // Audit log
-vi.mock('../../utils/auditLog', () => ({
+// The fire-and-forget writer is observed; the row a ban commits with is the real shape
+vi.mock('../../utils/auditLog', async (importOriginal) => ({
+  auditLogData: (await importOriginal<typeof import('../../utils/auditLog')>()).auditLogData,
   logAuditEvent: vi.fn(),
 }));
 
@@ -241,11 +246,16 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     expect(mockFetchSockets).not.toHaveBeenCalled();
   });
 
-  it('signs the banned account out right after the ban is written, even when the fan-out after it fails', async () => {
+  it('signs the banned account out right after the ban commits, and a fan-out that fails after it still answers 200', async () => {
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
     mockPendingReport('target-1');
     const order: string[] = [];
     prismaMock.user.update.mockImplementation(async () => { order.push('ban'); return {}; });
+    prismaMock.$transaction.mockImplementation(async (arg: any) => {
+      const r = await arg(prismaMock);
+      order.push('commit');
+      return r;
+    });
     mockEmit.mockImplementation((ev: string) => { order.push(ev); });
     mockDisconnectSockets.mockImplementation(() => { order.push('disconnect'); });
     prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's1' }]);
@@ -257,15 +267,111 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ resolution: 'Spam confirmed', action: 'ban' });
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, message: 'Report resolved' });
     expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
     expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
     expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
-    expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('ban'));
+    expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('commit'));
+    expect(order.indexOf('commit')).toBeGreaterThan(order.indexOf('ban'));
     expect(order.indexOf('disconnect')).toBeGreaterThan(order.indexOf('force:logout'));
+    expect(consoleSpy).toHaveBeenCalledWith('[Admin] User target-1 banned, but the member:left broadcast to s1 failed:', 'adapter gone');
+    // The pending-report count still went out after the failed step
+    expect(order).toContain('report:new');
     consoleSpy.mockRestore();
     mockEmit.mockReset();
     mockDisconnectSockets.mockReset();
+    prismaMock.$transaction.mockImplementation((arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg)));
+  });
+
+  describe('the audit rows commit with the resolution', () => {
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+      mockPendingReport('target-1');
+      prismaMock.auditLog.create.mockReset().mockResolvedValue({});
+      consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleSpy.mockRestore();
+      prismaMock.$transaction.mockImplementation((arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg)));
+      mockRecomputeListedForOwner.mockReset().mockResolvedValue(0);
+    });
+
+    const resolve = (body: Record<string, unknown> = { resolution: 'Spam confirmed', action: 'ban' }) => request(app)
+      .post('/api/v1/admin/reports/rep-1/resolve')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send(body);
+
+    it('writes user.ban and report.resolve INSIDE the transaction that resolves the report and bans the account', async () => {
+      const order: string[] = [];
+      prismaMock.$transaction.mockImplementation(async (arg: any) => {
+        order.push('tx:start');
+        const r = await arg(prismaMock);
+        order.push('tx:end');
+        return r;
+      });
+      prismaMock.report.update.mockImplementation(async () => { order.push('report'); return {}; });
+      prismaMock.user.update.mockImplementation(async () => { order.push('ban'); return {}; });
+      prismaMock.auditLog.create.mockImplementation(async ({ data }: any) => { order.push(`audit:${data.action}`); return {}; });
+      prismaMock.webhook.findMany.mockResolvedValueOnce([{ serverId: 's-1' }]);
+
+      const res = await resolve();
+
+      expect(res.status).toBe(200);
+      expect(order).toEqual(['tx:start', 'report', 'ban', 'audit:user.ban', 'audit:report.resolve', 'tx:end']);
+      expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'admin-1', action: 'user.ban', targetType: 'user', targetId: 'target-1',
+          metadata: { reason: 'Report resolved: Spam confirmed', webhooksDisarmed: 1 },
+        },
+      });
+      expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'admin-1', action: 'report.resolve', targetType: 'report', targetId: 'rep-1',
+          metadata: { resolution: 'Spam confirmed', action: 'ban', messageDeleted: false },
+        },
+      });
+    });
+
+    it('a resolution whose transaction fails records nothing, bans nobody and signs nobody out', async () => {
+      prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+
+      const res = await resolve();
+
+      expect(res.status).toBe(500);
+      expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+      expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the directory recompute', () => mockRecomputeListedForOwner.mockRejectedValueOnce(new Error('step failed'))],
+      ['the join-request withdrawal notice to s-9', () => {
+        prismaMock.serverJoinRequest.findMany.mockResolvedValueOnce([{ serverId: 's-9' }]);
+        mockEmitToModerators.mockRejectedValueOnce(new Error('step failed'));
+      }],
+      ['the membership read', () => prismaMock.serverMember.findMany.mockRejectedValueOnce(new Error('step failed'))],
+    ])('a rejecting step after the commit (%s) is logged and the resolution still answers 200', async (step, arrange) => {
+      arrange();
+
+      const res = await resolve();
+
+      expect(res.status).toBe(200);
+      expect(consoleSpy).toHaveBeenCalledWith(`[Admin] User target-1 banned, but ${step} failed:`, 'step failed');
+      expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+      expect(mockEmit).toHaveBeenCalledWith('report:new', { total: 0 });
+    });
+
+    it('a pending-report count that fails is logged and the resolution still answers 200', async () => {
+      prismaMock.report.count.mockRejectedValueOnce(new Error('db gone'));
+
+      const res = await resolve({ resolution: 'Not actionable' });
+
+      expect(res.status).toBe(200);
+      expect(consoleSpy).toHaveBeenCalledWith('[Admin] Report rep-1 resolved, but the pending-report count update failed:', 'db gone');
+    });
   });
 
   it('resolving WITHOUT a ban leaves the directory alone', async () => {
@@ -383,7 +489,7 @@ describe('POST /admin/reports/:id/resolve — deleting the reported message', ()
     prismaMock.report.count.mockResolvedValue(0);
     prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', messageId: 'msg-1' });
     prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
-    prismaMock.message.delete.mockReset().mockResolvedValue({});
+    prismaMock.message.deleteMany.mockReset().mockResolvedValue({ count: 1 });
     prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
     mockDeleteMultipleFromS3.mockReset().mockImplementation(async (keys: string[]) => keys.length);
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
@@ -400,12 +506,12 @@ describe('POST /admin/reports/:id/resolve — deleting the reported message', ()
     const res = await resolve();
 
     expect(res.status).toBe(200);
-    expect(prismaMock.message.delete).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+    expect(prismaMock.message.deleteMany).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
     expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { expired: false, message: { id: 'msg-1' } },
     }));
     expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([KEY]);
-    const deleteOrder = prismaMock.message.delete.mock.invocationCallOrder[0];
+    const deleteOrder = prismaMock.message.deleteMany.mock.invocationCallOrder[0];
     expect(prismaMock.messageAttachment.findMany.mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
     expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
     expect(mockEmit).toHaveBeenCalledWith('message:delete', { messageId: 'msg-1', channelId: 'chan1' });
@@ -418,17 +524,45 @@ describe('POST /admin/reports/:id/resolve — deleting the reported message', ()
     expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
   });
 
-  it('a message delete that fails deletes no file', async () => {
+  it('a resolution whose transaction fails deletes no file and announces no delete', async () => {
     prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
-    prismaMock.message.delete.mockRejectedValueOnce(new Error('db gone'));
+    prismaMock.message.deleteMany.mockRejectedValueOnce(new Error('db gone'));
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const res = await resolve();
 
       expect(res.status).toBe(500);
       expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
     } finally {
       errorLog.mockRestore();
+    }
+  });
+
+  it('a message its author deleted meanwhile still resolves the report, with nothing to announce', async () => {
+    prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+    prismaMock.message.deleteMany.mockResolvedValueOnce({ count: 0 });
+
+    const res = await resolve();
+
+    expect(res.status).toBe(200);
+    expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
+  });
+
+  it('a delete notice that throws still answers 200 and the files still go', async () => {
+    prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+    mockEmit.mockImplementationOnce(() => { throw new Error('adapter gone'); });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await resolve();
+
+      expect(res.status).toBe(200);
+      expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([KEY]);
+      expect(errorLog).toHaveBeenCalledWith('[Admin] Report rep-1 resolved, but the message delete notice failed:', 'adapter gone');
+    } finally {
+      errorLog.mockRestore();
+      mockEmit.mockReset();
     }
   });
 });
