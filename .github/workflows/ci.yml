@@ -48,10 +48,21 @@ jobs:
           [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
           npm install -g "pnpm@$PNPM_VERSION"
 
+      # The store is where pnpm puts it by default (~/.local/share/pnpm/store
+      # on Linux, under LOCALAPPDATA on Windows), never ~/.pnpm-store: that path
+      # never existed, so this cache saved nothing ("Path Validation Error").
+      - name: Locate the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: |
+          dir=$(pnpm store path --silent)
+          [ -n "$dir" ] || { echo "::error::pnpm named no store path"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - name: Cache pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.pnpm-store
+          path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
@@ -197,10 +208,21 @@ jobs:
           [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
           npm install -g "pnpm@$PNPM_VERSION"
 
+      # The store is where pnpm puts it by default (~/.local/share/pnpm/store
+      # on Linux, under LOCALAPPDATA on Windows), never ~/.pnpm-store: that path
+      # never existed, so this cache saved nothing ("Path Validation Error").
+      - name: Locate the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: |
+          dir=$(pnpm store path --silent)
+          [ -n "$dir" ] || { echo "::error::pnpm named no store path"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - name: Cache pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.pnpm-store
+          path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
@@ -458,10 +480,21 @@ jobs:
           [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
           npm install -g "pnpm@$PNPM_VERSION"
 
+      # The store is where pnpm puts it by default (~/.local/share/pnpm/store
+      # on Linux, under LOCALAPPDATA on Windows), never ~/.pnpm-store: that path
+      # never existed, so this cache saved nothing ("Path Validation Error").
+      - name: Locate the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: |
+          dir=$(pnpm store path --silent)
+          [ -n "$dir" ] || { echo "::error::pnpm named no store path"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - name: Cache pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.pnpm-store
+          path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
