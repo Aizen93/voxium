@@ -16,9 +16,12 @@ import { registerUser, createServer, createChannel } from './helpers/api';
  * the anonymous per-address budget, so five such sessions still fit behind
  * one address even unsigned.
  *
- * The fixed waits ARE the measurement: idle periods during which a well
- * behaved client sends nothing, so they are not replaced by waits on an
- * observable.
+ * The fixed waits ARE the measurement: the windows and the pacing over which
+ * the requests are counted (an idle login page, the first screen, a user
+ * dwelling on each space and channel, a reload). No observable can replace
+ * them: what is measured is how much is sent in a stretch of real time, so
+ * each one is marked "Measurement" where it stands: the one kind of fixed
+ * wait the end-to-end specs keep.
  */
 const BUSIEST_MINUTE_CEILING = 200;
 
@@ -42,10 +45,12 @@ test('one ordinary session stays far inside the per-address budget and sees no 4
 
   // The login page itself asks the API for nothing
   await page.goto('/login');
+  // Measurement window (see the header): an idle login page, counted
   await page.waitForTimeout(3_000);
   expect(responses, 'the login page fired API requests before anything was typed').toHaveLength(0);
 
   await loginViaUI(page, user);
+  // Measurement window: everything the first screen sends after sign-in
   await page.waitForTimeout(8_000);
 
   // Every click must land: a channel that is not there would silently shrink
@@ -53,16 +58,19 @@ test('one ordinary session stays far inside the per-address budget and sees no 4
   for (const s of servers) {
     await page.getByRole('button', { name: s.name }).first().click();
     await expect(page.getByText('general', { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+    // Measurement pacing: a user dwelling on the space; its requests are counted
     await page.waitForTimeout(1_000);
     for (const ch of ['general', 'random', 'dev']) {
       const channel = page.getByText(ch, { exact: true }).first();
       await expect(channel).toBeVisible({ timeout: 10_000 });
       await channel.click();
+      // Measurement pacing: a user reading the channel; its requests are counted
       await page.waitForTimeout(800);
     }
   }
 
   await page.reload();
+  // Measurement window: everything a reload sends
   await page.waitForTimeout(8_000);
 
   const refused = responses.filter((r) => r.status === 429);
