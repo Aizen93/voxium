@@ -91,6 +91,17 @@ async function visibilityRoomsForNewChannel(serverId: string): Promise<(string |
   return batches;
 }
 
+/**
+ * A creation's foreign-key violation (P2003). With the space row locked and
+ * found, the one key that can fail is the category's: deleted between the
+ * check before the transaction and the insert. Answered as that check
+ * answers, never a 500.
+ */
+function categoryGoneAsMissing(err: unknown): never {
+  if ((err as { code?: unknown } | null)?.code === 'P2003') throw new BadRequestError('Category not found in this server');
+  throw err;
+}
+
 /** One entry of a reorder: a channel id, its new position and, optionally, its category (null: none). */
 function isChannelOrderEntry(entry: unknown): entry is { id: string; position: number; categoryId?: string | null } {
   if (!entry || typeof entry !== 'object') return false;
@@ -276,7 +287,7 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
       return tx.channel.create({
         data: { name, type, serverId, position: positionAfter(highest), categoryId: categoryId || null },
       });
-    }), '[Channels] A channel creation');
+    }), '[Channels] A channel creation').catch(categoryGoneAsMissing);
 
     // Announce to — and subscribe — exactly the members who can VIEW the new
     // channel, and nobody else. The old code did both server-wide on the

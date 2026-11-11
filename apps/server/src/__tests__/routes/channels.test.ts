@@ -713,6 +713,38 @@ describe('Channel Routes', () => {
       expect(res.body.error).toContain('Category not found');
     });
 
+    it('answers like a missing category, not 500, when the category is deleted between the check and the insert', async () => {
+      const token = makeToken();
+      prismaMock.category.findFirst.mockResolvedValue({ id: 'cat-1', serverId: 'srv-1' });
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(1));
+      // The insert's foreign key on category_id: the row is gone
+      prismaMock.channel.create.mockRejectedValue(Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' }));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'valid-name', type: 'text', categoryId: 'cat-1' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Category not found in this server');
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('still answers 500 for any other failure of the insert', async () => {
+      const token = makeToken();
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(1));
+      prismaMock.channel.create.mockRejectedValue(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'valid-name', type: 'text' });
+
+      expect(res.status).toBe(500);
+      errSpy.mockRestore();
+    });
+
     it('does NOT seed ChannelRead rows and auto-joins server sockets to the new channel room (MED-15)', async () => {
       const token = makeToken();
       prismaMock.serverMember.findUnique.mockResolvedValue({
