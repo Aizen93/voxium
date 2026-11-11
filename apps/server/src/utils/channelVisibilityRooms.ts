@@ -254,10 +254,12 @@ function inVoiceChannel(s: { rooms?: Set<string>; data: { voiceChannelId?: strin
   return s.rooms?.has(`voice:${channelId}`) === true || s.data.voiceChannelId === channelId;
 }
 
-/** One queued local pass. `overtaken` is set when the pass queued after it
- *  stopped waiting for it (see waitAtMost). */
+/** One queued local pass. `started` resolves when it begins to run (its own
+ *  wait is over); `overtaken` is set when the pass queued after it stopped
+ *  waiting for it (see waitAtMost). */
 interface LocalPass {
   run: Promise<void>;
+  started: Promise<void>;
   overtaken: boolean;
 }
 
@@ -288,9 +290,17 @@ const localPassTail = new Map<string, LocalPass>();
  */
 function resyncLocalSockets(scope: ResyncScope, attempt = 1): Promise<void> {
   const previous = localPassTail.get(scope.serverId);
-  const pass: LocalPass = { run: Promise.resolve(), overtaken: false };
+  let markStarted!: () => void;
+  const pass: LocalPass = {
+    run: Promise.resolve(),
+    started: new Promise<void>((resolve) => { markStarted = resolve; }),
+    overtaken: false,
+  };
   pass.run = (previous ? waitAtMost(previous, scope.serverId) : Promise.resolve())
-    .then(() => runLocalPass(scope, pass))
+    .then(() => {
+      markStarted();
+      return runLocalPass(scope, pass);
+    })
     .then((applied) => {
       if (!applied) afterFailedPass(scope, attempt);
     });
@@ -351,9 +361,16 @@ async function disconnectOutsideVoice(serverId: string, userId: string, failures
   }
 }
 
-/** Resolves when `previous` does, or after LOCAL_PASS_MAX_WAIT_MS (logged),
- *  marking `previous` overtaken. */
+/**
+ * Resolves when `previous` does, or LOCAL_PASS_MAX_WAIT_MS after `previous`
+ * STARTED (logged), marking it overtaken. The clock starts with the pass, not
+ * with the wait: counted from the moment this one was queued, a backlog of
+ * healthy passes made a later one give up on a predecessor that had only just
+ * begun, and dropped that predecessor's joins. Each link of the queue is
+ * bounded in turn, so a stuck pass delays the next by the bound and no more.
+ */
 async function waitAtMost(previous: LocalPass, serverId: string): Promise<void> {
+  await previous.started;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<'late'>((resolve) => {
     timer = setTimeout(() => resolve('late'), LOCAL_PASS_MAX_WAIT_MS);

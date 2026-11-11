@@ -381,6 +381,37 @@ describe('syncChannelVisibilityRooms — this node\'s sockets', () => {
 
   // Review of #71: the waited-out pass read the database before the one that
   // ran past it, and its late joins undid that pass's revocation.
+  // The bound used to run from the moment a pass was QUEUED: behind two
+  // healthy 20 s passes, the third gave up at 30 s on the second, which had
+  // started at 20 s, and that pass's joins were dropped as "overtaken".
+  it('a backlog of healthy passes runs in order: the bound counts from the predecessor\'s start, not from the queueing', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const socket = createMockSocket('user-1');
+      m.localFetch.mockResolvedValue([socket]);
+      m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+      const startedAt: number[] = [];
+      m.filterForUsers.mockImplementation(() => {
+        startedAt.push(Date.now());
+        return new Promise((resolve) => setTimeout(() => resolve(visibility({ 'user-1': ['ch-1'] })), 20_000));
+      });
+      const t0 = Date.now();
+
+      const runs = [syncChannelVisibilityRooms('server-busy'), syncChannelVisibilityRooms('server-busy'), syncChannelVisibilityRooms('server-busy')];
+      await vi.advanceTimersByTimeAsync(70_000);
+      await Promise.all(runs);
+
+      expect(startedAt.map((at) => at - t0)).toEqual([0, 20_000, 40_000]);
+      expect(socket.join).toHaveBeenCalledTimes(3);
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('still running'));
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('applied its leaves only'));
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
+  });
+
   it('a pass that was waited out applies its leaves only when it finally finishes', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
