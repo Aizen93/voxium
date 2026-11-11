@@ -4737,6 +4737,34 @@ describe('E2EService — lifecycle', () => {
       expect(await pendingIn(alice)).toHaveLength(0);
     });
 
+    it('still decrypts a call signal when importing its sender’s kept shares first fails', async () => {
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept across a failed import');
+      server.setDeviceListReadFailure(true);
+      const again = restart(server, alice);
+      await again.service.initialize();
+      await again.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+      expect(await pendingIn(alice)).toHaveLength(1);
+      server.setDeviceListReadFailure(false);
+
+      const vault = (again.service as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(vault, 'listPendingShares').mockRejectedValueOnce(new Error('transient read failure'));
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        const offer = await bob.service.encryptToDevice(alice.userId, again.service.deviceId, 'an offer');
+        expect(await again.service.decryptFromDevice(bob.userId, bob.service.deviceId, offer)).toBe('an offer');
+        expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(
+          /could not import the kept key shares[\s\S]*transient read failure/
+        );
+      } finally {
+        warn.mockRestore();
+      }
+      // the share stayed kept, and the next signal imports it
+      expect(await pendingIn(alice)).toHaveLength(1);
+      const next = await bob.service.encryptToDevice(alice.userId, again.service.deviceId, 'another');
+      expect(await again.service.decryptFromDevice(bob.userId, bob.service.deviceId, next)).toBe('another');
+      expect((await again.service.decryptMessage(message)).text).toBe('kept across a failed import');
+    });
+
     it('drops a kept share once its session reached this device another way', async () => {
       const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
       const [kept] = await pendingIn(alice);

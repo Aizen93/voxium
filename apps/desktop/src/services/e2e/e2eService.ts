@@ -3418,7 +3418,17 @@ export class E2EService {
     return this.enqueue(async () => {
       try {
         // older messages of this device first (see importKeptSharesFrom)
-        await this.importKeptSharesFrom(userId, deviceId);
+        try {
+          await this.importKeptSharesFrom(userId, deviceId);
+        } catch (err) {
+          if (isE2ESessionEnded(err)) throw err;
+          // The shares stay kept for the next claim; the message given here
+          // is decrypted anyway (a dropped call signal stalls the call).
+          console.warn(
+            `e2e: could not import the kept key shares of ${userId}/${deviceId} before its message:`,
+            errText(err)
+          );
+        }
         return await this.olmDecryptFromDevice(userId, deviceId, envelope as E2EOlmEnvelope);
       } catch (err) {
         console.warn(`e2e: device-sealed decrypt from ${userId}/${deviceId} failed:`, errText(err));
