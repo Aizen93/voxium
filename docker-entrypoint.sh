@@ -29,10 +29,12 @@ RETRY_DELAY_SECONDS=3
 # means the node declines to start without touching the database at all.
 #
 # The gate refuses an EXISTING database only: one where migrations have been
-# applied (the oldest one is no longer pending) and the cutover has not. A
-# database where nothing was ever applied, or one that does not exist yet
-# (`migrate deploy` creates it), holds nothing to lose, and the migration's
-# own SQL gate lets it through: a first start migrates it with no override.
+# applied (the oldest one is no longer pending) and the cutover has not. A new
+# database, where no migration was ever applied, or one that does not exist
+# yet (`migrate deploy` creates it), holds nothing to lose, and the
+# migration's own SQL gate lets it through: a first start migrates it with no
+# override. A database that has tables but no migration history reads the
+# same way here; `migrate deploy` refuses it (P3005) before writing anything.
 #
 # It decides only on a status that reached the database. `migrate status`
 # exits non-zero both when migrations are pending and when it cannot connect,
@@ -44,7 +46,7 @@ RETRY_DELAY_SECONDS=3
 # (P1003) is the one error that is an answer. Anything else is read again,
 # and after the last attempt the container exits without `migrate deploy`.
 #
-# A FAILED cutover record does not show in Prisma 7's `migrate status` at all
+# A FAILED cutover record does not show in Prisma 7.10's `migrate status` at all
 # (the output equals the applied one); `migrate deploy` itself stops on it
 # (P3009) before applying anything.
 CUTOVER_MIGRATION="20260801140000_e2e_always_on"
