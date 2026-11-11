@@ -1047,6 +1047,70 @@
     "join": "Join {{name}}"
   },
   "landing": {
+    "publicPages": {
+      "architecture": "Architecture",
+      "contributors": "Contributors",
+      "supporters": "Supporters",
+      "contributorsAndSupporters": "Contributors & supporters",
+      "architecturePage": {
+        "title": "How Voxium",
+        "highlight": "works.",
+        "intro": "Follow a message, join a voice channel, or make a private call. See what stays on your device and what travels through Voxium's infrastructure.",
+        "mapTitle": "Follow the connection",
+        "mapIntro": "Choose an action to trace its path through Voxium.",
+        "mapLabel": "System map",
+        "controlLabel": "Highlight a connection",
+        "docs": "Read the architecture docs",
+        "device": "Your Voxium app",
+        "deviceDetail": "Web or desktop. Encryption runs on your device.",
+        "columns": {
+          "client": "Client",
+          "connection": "Connection",
+          "destination": "Destination",
+          "storage": "Storage & state"
+        },
+        "routes": {
+          "api": { "connection": "HTTPS", "transport": "Via nginx", "destination": "Express API", "detail": "Sign-in, permissions, and message writes" },
+          "events": { "connection": "Live events", "transport": "WebSocket via nginx", "destination": "Socket.IO", "detail": "Live updates and call signaling" },
+          "media": { "connection": "Group media", "transport": "WebRTC to media ports", "destination": "mediasoup", "detail": "Forwards group audio and screen shares" },
+          "peer": { "connection": "Private audio", "transport": "Peer-to-peer WebRTC", "destination": "The other person's app", "detail": "Receives private-call audio directly" }
+        },
+        "storage": {
+          "postgres": { "title": "PostgreSQL", "detail": "Accounts and messages" },
+          "redis": { "title": "Redis", "detail": "Presence and voice state" },
+          "objects": { "title": "Object storage", "detail": "Attachments and images" }
+        },
+        "flows": {
+          "overview": { "label": "Overview", "detail": "HTTPS carries requests, Socket.IO delivers live updates, and WebRTC carries audio and screen shares." },
+          "message": { "label": "Send a message", "detail": "The API checks access and stores the message in PostgreSQL. Socket.IO delivers it to authorized recipients." },
+          "voice": { "label": "Join group voice", "detail": "Socket.IO coordinates the join and Redis tracks voice state. Your app sends audio directly to mediasoup, which forwards it to the channel." },
+          "private": { "label": "Make a private call", "detail": "Socket.IO carries call signaling. Once connected, the two apps exchange private audio directly over WebRTC." }
+        },
+        "notes": {
+          "encryption": { "title": "Where encryption starts", "detail": "Direct messages and secure channels are end-to-end encrypted. Your device encrypts message content before sending it." },
+          "stun": { "title": "How private calls connect", "detail": "Voxium's self-hosted STUN service helps the two apps establish a direct connection for audio." }
+        }
+      },
+      "contributorsPage": {
+        "eyebrow": "Community",
+        "title": "The people",
+        "highlight": "behind Voxium.",
+        "intro": "Thank you to everyone who builds Voxium and helps keep it running.",
+        "githubContributors": "View GitHub contributors",
+        "founderRole": "Founder and maintainer",
+        "profile": "GitHub profile",
+        "profileLabel": "@{{username}} on GitHub",
+        "credits": {
+          "founder": "Started Voxium and built its core real-time voice, messaging, and desktop experience.",
+          "pins": "Tightened permissions for pinning and unpinning messages.",
+          "nickname": "Made failed nickname saves visible and prevented duplicate save requests."
+        },
+        "anonymous": "Anonymous supporter",
+        "supporterPrivacy": "We list supporters by name when they choose to be credited. Thank you to everyone who gives privately.",
+        "thanks": "Thank you for supporting Voxium",
+        "supporterImpact": "Donations help cover the infrastructure that keeps Voxium online."
+      }
+    },
     "nav": {
       "signIn": "Sign In",
       "getStarted": "Get Started",

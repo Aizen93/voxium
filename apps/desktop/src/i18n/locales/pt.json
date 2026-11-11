@@ -1047,6 +1047,117 @@
     "join": "Entrar em {{name}}"
   },
   "landing": {
+    "publicPages": {
+      "architecture": "Arquitetura",
+      "contributors": "Colaboradores",
+      "supporters": "Apoiadores",
+      "contributorsAndSupporters": "Colaboradores e apoiadores",
+      "architecturePage": {
+        "title": "Como o Voxium",
+        "highlight": "funciona.",
+        "intro": "Acompanhe uma mensagem, entre em um canal de voz ou faça uma chamada privada. Veja o que fica no seu dispositivo e o que passa por um servidor Voxium.",
+        "mapTitle": "Acompanhe a conexão",
+        "mapIntro": "Escolha uma ação para acompanhar seu percurso no Voxium.",
+        "mapLabel": "Mapa do sistema",
+        "controlLabel": "Destacar uma conexão",
+        "docs": "Ler a documentação de arquitetura",
+        "device": "Seu aplicativo Voxium",
+        "deviceDetail": "Web ou desktop. A criptografia é feita no seu dispositivo.",
+        "columns": {
+          "client": "Cliente",
+          "connection": "Conexão",
+          "destination": "Destino",
+          "storage": "Armazenamento e estado"
+        },
+        "routes": {
+          "api": {
+            "connection": "HTTPS",
+            "transport": "Via nginx",
+            "destination": "API Express",
+            "detail": "Login, permissões e gravação de mensagens"
+          },
+          "events": {
+            "connection": "Eventos em tempo real",
+            "transport": "WebSocket via nginx",
+            "destination": "Socket.IO",
+            "detail": "Atualizações em tempo real e sinalização de chamadas"
+          },
+          "media": {
+            "connection": "Mídia de grupo",
+            "transport": "WebRTC para as portas de mídia",
+            "destination": "mediasoup",
+            "detail": "Encaminha áudio de grupo e compartilhamentos de tela"
+          },
+          "peer": {
+            "connection": "Áudio privado",
+            "transport": "WebRTC ponto a ponto",
+            "destination": "O aplicativo da outra pessoa",
+            "detail": "Recebe diretamente o áudio da chamada privada"
+          }
+        },
+        "storage": {
+          "postgres": {
+            "title": "PostgreSQL",
+            "detail": "Contas e mensagens"
+          },
+          "redis": {
+            "title": "Redis",
+            "detail": "Presença e estado de voz"
+          },
+          "objects": {
+            "title": "Armazenamento de objetos",
+            "detail": "Anexos e imagens"
+          }
+        },
+        "flows": {
+          "overview": {
+            "label": "Visão geral",
+            "detail": "HTTPS transporta solicitações, Socket.IO entrega atualizações e WebRTC transporta áudio e compartilhamentos de tela."
+          },
+          "message": {
+            "label": "Enviar uma mensagem",
+            "detail": "A API verifica o acesso e grava a mensagem no PostgreSQL. Socket.IO a entrega aos destinatários autorizados."
+          },
+          "voice": {
+            "label": "Entrar em um canal de voz",
+            "detail": "Socket.IO coordena a entrada e Redis acompanha o estado de voz. O aplicativo envia áudio diretamente ao mediasoup, que o encaminha para o canal."
+          },
+          "private": {
+            "label": "Fazer uma chamada privada",
+            "detail": "Socket.IO transporta a sinalização. Após a conexão, os dois aplicativos trocam áudio privado diretamente via WebRTC."
+          }
+        },
+        "notes": {
+          "encryption": {
+            "title": "Onde começa a criptografia",
+            "detail": "Mensagens diretas e canais seguros são criptografados de ponta a ponta. Seu dispositivo criptografa o conteúdo da mensagem antes do envio."
+          },
+          "stun": {
+            "title": "Como as chamadas privadas se conectam",
+            "detail": "O serviço STUN hospedado pelo Voxium ajuda os dois aplicativos a estabelecer uma conexão direta de áudio."
+          }
+        }
+      },
+      "contributorsPage": {
+        "eyebrow": "Comunidade",
+        "title": "As pessoas",
+        "highlight": "por trás do Voxium.",
+        "intro": "Obrigado a todas as pessoas que desenvolvem o Voxium e ajudam a mantê-lo no ar.",
+        "githubContributors": "Ver colaboradores no GitHub",
+        "founderRole": "Fundador e mantenedor",
+        "profile": "Perfil no GitHub",
+        "profileLabel": "@{{username}} no GitHub",
+        "credits": {
+          "founder": "Criou o Voxium e desenvolveu a base da voz em tempo real, das mensagens e do aplicativo para desktop.",
+          "pins": "Reforçou as permissões para fixar e desafixar mensagens.",
+          "nickname": "Tornou visíveis as falhas ao salvar apelidos e impediu solicitações duplicadas."
+        },
+        "anonymous": "Apoiador anônimo",
+        "supporterPrivacy": "Citamos os apoiadores que escolhem aparecer pelo nome. Obrigado a todas as pessoas que doam em privado.",
+        "thanks": "Obrigado por apoiar o Voxium",
+        "supporterImpact": "As doações ajudam a pagar a infraestrutura que mantém o Voxium no ar."
+      }
+    },
     "nav": {
       "signIn": "Entrar",
       "getStarted": "Começar",

@@ -121,6 +121,8 @@ export function App({ onReady }: { onReady?: () => void }) {
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/cookies" element={<CookiePolicyPage />} />
+          <Route path="/architecture" element={<LandingPage page="architecture" />} />
+          <Route path="/contributors" element={<LandingPage page="contributors" />} />
           <Route
             path="/"
             element={

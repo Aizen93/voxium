@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Mic2,
@@ -28,6 +28,8 @@ import { APP_VERSION } from '@voxium/shared';
 import { SoundWaveCanvas } from '../components/landing/SoundWaveCanvas';
 import { HeroAppMock } from '../components/landing/HeroAppMock';
 import { SUPPORTED_LANGUAGES } from '../i18n';
+import { ArchitectureContent, ContributorsContent } from '../components/landing/PublicPageContent';
+import { GITHUB_PROJECT_URL, GITHUB_SPONSORS_URL } from '../components/landing/publicPageLinks';
 
 /* ─── Animated SVG Illustrations ─── */
 
@@ -199,7 +201,7 @@ function ShieldSvg({ className }: { className?: string }) {
 
 /** The release this site and the installers were built from: APP_VERSION reads
  *  the shared package's manifest, which the release bump sets with the others. */
-export const RELEASE_URL = `https://github.com/Aizen93/voxium/releases/tag/v${APP_VERSION}`;
+export const RELEASE_URL = `${GITHUB_PROJECT_URL}/releases/tag/v${APP_VERSION}`;
 
 /** The running version, shown next to the download buttons and in the footer (owner, 2026-11-08). */
 export function VersionBadge({ className = '' }: { className?: string }) {
@@ -219,10 +221,10 @@ export function VersionBadge({ className = '' }: { className?: string }) {
 /* ─── Download URLs ─── */
 
 const DOWNLOAD_URLS = {
-  windows: `https://github.com/Aizen93/voxium/releases/latest/download/Voxium_${APP_VERSION}_x64-setup.exe`,
-  macos: `https://github.com/Aizen93/voxium/releases/latest/download/Voxium_${APP_VERSION}_aarch64.dmg`,
-  linux: `https://github.com/Aizen93/voxium/releases/latest/download/Voxium_${APP_VERSION}_amd64.deb`,
-  releases: 'https://github.com/Aizen93/voxium/releases',
+  windows: `${GITHUB_PROJECT_URL}/releases/latest/download/Voxium_${APP_VERSION}_x64-setup.exe`,
+  macos: `${GITHUB_PROJECT_URL}/releases/latest/download/Voxium_${APP_VERSION}_aarch64.dmg`,
+  linux: `${GITHUB_PROJECT_URL}/releases/latest/download/Voxium_${APP_VERSION}_amd64.deb`,
+  releases: `${GITHUB_PROJECT_URL}/releases`,
 };
 
 /* ─── Landing Design System ───
@@ -303,6 +305,7 @@ function LandingStyles() {
       }
 
       @media (prefers-reduced-motion: reduce) {
+        html.landing-scroll { scroll-behavior: auto; }
         .lp-reveal { transition: none; transform: none; opacity: 1; }
         .lp-card-in { animation: none; }
         .lp-card-hidden { opacity: 1; }
@@ -346,38 +349,56 @@ function Reveal({ children, delay = 0, className = '' }: { children: ReactNode; 
 
 /* ─── Section Components ─── */
 
-function Navbar() {
+function PublicPageLinks({ onNavigate }: { onNavigate?: () => void }) {
+  const { t } = useTranslation();
+
+  return (
+    <>
+      <NavLink to="/architecture" end className="lp-public-nav-link" onClick={onNavigate}>
+        {t('landing.publicPages.architecture')}
+      </NavLink>
+      <NavLink to="/contributors" end className="lp-public-nav-link" onClick={onNavigate}>
+        {t('landing.publicPages.contributors')}
+      </NavLink>
+    </>
+  );
+}
+
+function LandingLanguageSelect({ className }: { className: string }) {
   const { t, i18n } = useTranslation();
+
+  return (
+    <select
+      aria-label={t('settings.tabs.language')}
+      value={i18n.language}
+      onChange={(event) => { void i18n.changeLanguage(event.target.value); }}
+      className={className}
+    >
+      {SUPPORTED_LANGUAGES.map(({ code, nativeName }) => (
+        <option key={code} value={code} className="bg-vox-bg-primary text-vox-text-primary">
+          {nativeName}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function Navbar({ home }: { home: boolean }) {
+  const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
-
-  const changeLanguage = (lang: string) => {
-    i18n.changeLanguage(lang);
-    localStorage.setItem('voxium_language', lang);
-  };
-
-  const languageOptions = SUPPORTED_LANGUAGES.map((lang) => (
-    <option key={lang.code} value={lang.code} className="bg-vox-bg-primary text-vox-text-primary">
-      {lang.nativeName}
-    </option>
-  ));
 
   return (
     <nav className="fixed top-3 sm:top-4 left-0 right-0 z-50 px-3 sm:px-6">
       <div className="lp-nav max-w-7xl mx-auto h-14 px-4 sm:px-5 flex items-center justify-between">
-        <a href="#hero" className="flex items-center gap-2.5" onClick={() => setMenuOpen(false)}>
-          <img src="/logo.svg" alt="Voxium" className="h-8 w-8 rounded-lg" />
+        <Link to="/#hero" className="flex items-center gap-2.5" onClick={() => setMenuOpen(false)}>
+          <img src="/logo.svg" alt="" className="h-8 w-8 rounded-lg" />
           <span className="text-lg font-bold tracking-tight text-vox-text-primary">Voxium</span>
-        </a>
+        </Link>
 
         {/* Desktop controls */}
-        <div className="hidden sm:flex items-center gap-3">
-          <select
-            value={i18n.language}
-            onChange={(e) => changeLanguage(e.target.value)}
-            className="bg-transparent border border-white/10 rounded-full px-2.5 py-1 text-xs text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer"
-          >
-            {languageOptions}
-          </select>
+        <div className="hidden md:flex items-center gap-3">
+          <PublicPageLinks />
+          <LandingLanguageSelect className="bg-transparent border border-white/10 rounded-full px-2.5 py-1 text-xs text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer" />
           <Link to="/login" className="btn-ghost text-sm rounded-full">
             {t('landing.nav.signIn')}
           </Link>
@@ -389,7 +410,7 @@ function Navbar() {
         {/* Mobile burger toggle */}
         <button
           type="button"
-          className="sm:hidden flex items-center justify-center h-9 w-9 rounded-full border border-white/10 text-vox-text-primary hover:bg-white/[0.06] transition-colors"
+          className="md:hidden flex items-center justify-center h-9 w-9 rounded-full border border-white/10 text-vox-text-primary hover:bg-white/[0.06] transition-colors"
           aria-label={t('landing.nav.menu')}
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((o) => !o)}
@@ -399,15 +420,15 @@ function Navbar() {
       </div>
 
       {/* Mobile menu panel */}
+      {!home && (
+        <div className="md:hidden max-w-7xl mx-auto mt-2 flex w-fit gap-1 rounded-full border border-white/10 bg-[#151529] px-1 py-0.5">
+          <PublicPageLinks onNavigate={() => setMenuOpen(false)} />
+        </div>
+      )}
       {menuOpen && (
-        <div className="lp-nav sm:hidden max-w-7xl mx-auto mt-2 p-3 flex flex-col gap-2 animate-fade-in">
-          <select
-            value={i18n.language}
-            onChange={(e) => changeLanguage(e.target.value)}
-            className="w-full bg-transparent border border-white/10 rounded-xl px-3 py-2.5 text-sm text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer"
-          >
-            {languageOptions}
-          </select>
+        <div className="lp-nav md:hidden max-w-7xl mx-auto mt-2 p-3 flex flex-col gap-2 motion-safe:animate-fade-in">
+          {home && <PublicPageLinks onNavigate={() => setMenuOpen(false)} />}
+          <LandingLanguageSelect className="w-full bg-transparent border border-white/10 rounded-xl px-3 py-2.5 text-sm text-vox-text-secondary focus:outline-none focus:border-vox-accent-primary cursor-pointer" />
           <Link
             to="/login"
             className="btn-ghost text-sm rounded-xl w-full py-2.5"
@@ -1417,7 +1438,7 @@ function CommunityFunding() {
 
             <div className="mt-8 flex flex-wrap gap-4">
               <a
-                href="https://github.com/sponsors/Aizen93"
+                href={GITHUB_SPONSORS_URL}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="group relative btn-primary px-8 py-3 text-base inline-flex items-center gap-2
@@ -1531,8 +1552,9 @@ function Footer() {
           <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.product')}</h4>
             <ul className="space-y-2">
-              <li><a href="#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.download')}</a></li>
-              <li><a href="https://github.com/Aizen93/voxium/releases" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.changelog')}</a></li>
+              <li><Link to="/#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.download')}</Link></li>
+              <li><a href={DOWNLOAD_URLS.releases} target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.changelog')}</a></li>
+              <li><Link to="/architecture" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.publicPages.architecture')}</Link></li>
               {/* Status page: uncomment once Uptime Kuma is deployed
               <li><a href="https://status.voxium.app" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.status')}</a></li>
               */}
@@ -1553,8 +1575,9 @@ function Footer() {
           <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.community')}</h4>
             <ul className="space-y-2">
-              <li><a href="https://github.com/Aizen93/voxium" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
-              <li><a href="https://github.com/Aizen93/voxium?tab=contributing-ov-file" target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.contributing')}</a></li>
+              <li><Link to="/contributors" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.publicPages.contributorsAndSupporters')}</Link></li>
+              <li><a href={GITHUB_PROJECT_URL} target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
+              <li><a href={`${GITHUB_PROJECT_URL}?tab=contributing-ov-file`} target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.contributing')}</a></li>
             </ul>
           </div>
         </div>
@@ -1576,8 +1599,14 @@ function Footer() {
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
 
-export function LandingPage() {
+type PublicPage = 'home' | 'architecture' | 'contributors';
+
+export function LandingPage({ page = 'home' }: { page?: PublicPage }) {
   const [showFunding, setShowFunding] = useState(false);
+  const { hash, pathname } = useLocation();
+  const { t } = useTranslation();
+  const pageTitle = page === 'home' ? undefined : t(`landing.publicPages.${page}`);
+  const hasFundingSection = page !== 'architecture';
 
   useEffect(() => {
     document.documentElement.classList.add('landing-scroll');
@@ -1589,33 +1618,61 @@ export function LandingPage() {
 
     return () => {
       document.documentElement.classList.remove('landing-scroll');
-      if (previousTheme) {
-        document.documentElement.setAttribute('data-theme', previousTheme);
-      }
+      if (previousTheme === null) document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.setAttribute('data-theme', previousTheme);
     };
   }, []);
 
   useEffect(() => {
-    fetch(`${API_BASE}/feature-flags/public`)
-      .then((r) => r.json())
-      .then((res) => {
-        if (res.success && res.data.community_funding) setShowFunding(true);
+    if (!pageTitle) return;
+    const previousTitle = document.title;
+    document.title = `${pageTitle} | Voxium`;
+    return () => { document.title = previousTitle; };
+  }, [pageTitle]);
+
+  useEffect(() => {
+    const anchor = hash && document.getElementById(hash.slice(1));
+    if (anchor) anchor.scrollIntoView?.();
+    else if (pathname !== '/') window.scrollTo({ top: 0, behavior: 'instant' });
+  }, [hash, pathname]);
+
+  useEffect(() => {
+    if (!hasFundingSection) return;
+    const controller = new AbortController();
+    fetch(`${API_BASE}/feature-flags/public`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Feature flags request failed (${response.status})`);
+        return response.json();
       })
-      .catch((err) => { console.warn('[Landing] Failed to fetch feature flags:', err); });
-  }, []);
+      .then((res) => {
+        if (!controller.signal.aborted) setShowFunding(res?.success === true && res.data?.community_funding === true);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        setShowFunding(false);
+        console.warn('[Landing] Failed to fetch feature flags:', err);
+      });
+    return () => controller.abort();
+  }, [hasFundingSection]);
 
   return (
     <div className="lp-root text-vox-text-primary">
       <LandingStyles />
-      <Navbar />
-      <Hero />
-      <StatsSection />
-      <Features />
-      <Showcase />
-      <WhyVoxium />
-      <ComparisonTable />
-      {showFunding && <CommunityFunding />}
-      <FinalCTA />
+      <Navbar home={page === 'home'} />
+      {page === 'home' && (
+        <>
+          <Hero />
+          <StatsSection />
+          <Features />
+          <Showcase />
+          <WhyVoxium />
+          <ComparisonTable />
+          {showFunding && <CommunityFunding />}
+          <FinalCTA />
+        </>
+      )}
+      {page === 'architecture' && <ArchitectureContent />}
+      {page === 'contributors' && <ContributorsContent showFunding={showFunding} />}
       <Footer />
     </div>
   );
