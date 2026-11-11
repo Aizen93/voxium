@@ -241,6 +241,34 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.out).toContain('migrate resolve --rolled-back');
   }, TIMEOUT);
 
+  it('keeps the destructive advice under "never served users", and says what a refused cutover means', () => {
+    // Live: on a database holding a DM, the override alone let the cutover
+    // run, its SQL gate refused, and every start since stops on P3009 naming
+    // the cutover. Recreating that database would delete what the gate saved.
+    const run = runEntrypoint([captured('cutover-pending')]);
+    const lines = run.out.split('\n').map((l) => l.replace(/\r$/, ''));
+    const at = (text: string) => lines.findIndex((l) => l.includes(text));
+    expect(run.out).toContain('VOXIUM_ALLOW_CUTOVER=1 alone is not enough');
+    expect(run.out).toContain('e2e_cutover_authorised');
+
+    const neverServed = at('If this database never served users:');
+    const recreate = at('recreate the database empty');
+    const cutoverRefused = at(`P3009 naming ${CUTOVER}`);
+    expect(neverServed).toBeGreaterThan(-1);
+    // Inside the bullet: after its heading, indented as part of it.
+    expect(recreate).toBeGreaterThan(neverServed);
+    expect(lines[recreate]).toMatch(/^\[Voxium\] {4}\S/);
+    // Then a paragraph of its own, outside the list, that never offers it.
+    expect(cutoverRefused).toBeGreaterThan(recreate);
+    expect(lines[cutoverRefused]).toMatch(/^\[Voxium\] \S/);
+    const refusedAdvice = lines.slice(cutoverRefused).join('\n');
+    expect(refusedAdvice).toContain('this database served users');
+    expect(refusedAdvice).toContain('Never recreate it');
+    expect(refusedAdvice).toContain(`migrate resolve --rolled-back ${CUTOVER}`);
+    expect(refusedAdvice).toContain('docs/e2e-always-on-plan.md 7.7');
+    expect(refusedAdvice.replace('Never recreate it', '')).not.toMatch(/recreate/i);
+  }, TIMEOUT);
+
   it('retries a status that did not reach the database, then refuses once an existing database answers', () => {
     // Defect 2 of the old gate: P1001 does not name the cutover, so it passed,
     // and the deploy that followed met the cutover on this existing database.

@@ -127,6 +127,14 @@ describe('always-on cutover — the entrypoint will not apply it on a restart', 
     expect(entrypoint).toMatch(/exit 1/);
   });
 
+  it('the README does not present the override as enough on a database with data', () => {
+    // VOXIUM_ALLOW_CUTOVER=1 alone runs the migration into its SQL gate,
+    // which refuses without the sentinel table and leaves a P3009 record.
+    const readme = readFileSync(resolve(REPO, 'README.md'), 'utf8');
+    const note = readme.slice(readme.indexOf('**`VOXIUM_ALLOW_CUTOVER`:**'));
+    expect(note).toMatch(/^\*\*`VOXIUM_ALLOW_CUTOVER`:\*\*.*is not enough on its own.*e2e_cutover_authorised.*never cleared by recreating the database/);
+  });
+
   it('defaults the override to off', () => {
     // `${VOXIUM_ALLOW_CUTOVER:-0}` — an unset variable must mean "do not cut
     // over", not "unspecified, go ahead".
