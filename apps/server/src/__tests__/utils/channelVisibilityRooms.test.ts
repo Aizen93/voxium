@@ -25,6 +25,7 @@ const m = vi.hoisted(() => ({
   replay: vi.fn(),
   publish: vi.fn(),
   subscribe: vi.fn(),
+  unsubscribe: vi.fn(),
   liveNodeCounts: vi.fn(),
   prisma: {
     channel: { findMany: vi.fn() },
@@ -47,7 +48,7 @@ vi.mock('../../utils/permissionCalculator', () => ({
 
 vi.mock('../../utils/redis', () => ({
   getRedisPubSub: () => ({ pub: { publish: m.publish } }),
-  getRedisConfigSub: () => ({ subscribe: m.subscribe }),
+  getRedisConfigSub: () => ({ subscribe: m.subscribe, unsubscribe: m.unsubscribe }),
   liveNodeCounts: m.liveNodeCounts,
   NODE_ID: () => 'node-a',
 }));
@@ -67,7 +68,10 @@ import {
   resyncAfterJoins,
   resyncRequestedSince,
   _resetChannelVisibilityForTests,
+  stopChannelVisibilitySync,
 } from '../../utils/channelVisibilityRooms';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -942,6 +946,33 @@ describe('a node receiving a peer\'s resync request', () => {
 
   it('subscribes to the resync channel', () => {
     expect(m.subscribe).toHaveBeenCalledWith(VISIBILITY_RESYNC_CHANNEL, expect.any(Function));
+  });
+
+  // Review of #71: a stopping node deleted its heartbeat and kept receiving
+  // until exit, so every peer's resync in that window mismatched, retried
+  // and took the fallback, about 7.5 s each
+  it('leaves the resync channel at shutdown; a failing unsubscribe is logged, never thrown', async () => {
+    m.unsubscribe.mockResolvedValueOnce(undefined);
+    await stopChannelVisibilitySync();
+    expect(m.unsubscribe).toHaveBeenCalledWith(VISIBILITY_RESYNC_CHANNEL);
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    m.unsubscribe.mockRejectedValueOnce(new Error('connection closed'));
+    await expect(stopChannelVisibilitySync()).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Could not leave the resync channel at shutdown'), 'connection closed');
+  });
+
+  it('the shutdown leaves the resync channel right after deleting the heartbeat, before hanging up its sockets', () => {
+    const index = readFileSync(resolve(__dirname, '../../index.ts'), 'utf8');
+    const shutdown = index.slice(index.indexOf('const shutdown = async'));
+    const heartbeat = shutdown.indexOf('await stopNodeHeartbeat()');
+    const leave = shutdown.indexOf('await stopChannelVisibilitySync()');
+    const hangUp = shutdown.indexOf('io.local.disconnectSockets(true)');
+    expect(heartbeat).toBeGreaterThan(-1);
+    expect(leave).toBeGreaterThan(heartbeat);
+    expect(hangUp).toBeGreaterThan(leave);
+    // Nothing else awaited in between
+    expect(shutdown.slice(heartbeat, leave).match(/await /g)).toHaveLength(1);
   });
 
   it.each([

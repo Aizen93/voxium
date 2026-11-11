@@ -55,7 +55,7 @@ import { clearDMVoiceState } from './websocket/dmVoiceHandler';
 import { initVoiceCluster, stopVoiceCluster } from './websocket/voiceCluster';
 import { initVoiceRelay } from './websocket/voiceRelay';
 import { startPresenceReaper, stopPresenceReaper } from './utils/presenceReaper';
-import { initChannelVisibilitySync } from './utils/channelVisibilityRooms';
+import { initChannelVisibilitySync, stopChannelVisibilitySync } from './utils/channelVisibilityRooms';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -242,6 +242,10 @@ async function main() {
     // Drop our liveness key FIRST so peer reapers promptly clean up any voice
     // state this node owned, instead of waiting out the heartbeat TTL.
     await stopNodeHeartbeat().catch((err) => console.warn('[Shutdown] Heartbeat cleanup failed:', err));
+    // Right after the heartbeat: a subscriber that outlives it is one receiver
+    // more than the heartbeats, and every peer's resync until exit would
+    // retry and take the fail-closed fallback
+    await stopChannelVisibilitySync();
     // Gracefully disconnect all Socket.IO clients before closing HTTP server
     // .local: the adapter's disconnectSockets publishes a REMOTE_DISCONNECT
     // with an empty room filter, which every peer (and this node) applies to

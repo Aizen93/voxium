@@ -188,6 +188,22 @@ export async function initChannelVisibilitySync(): Promise<void> {
   });
 }
 
+/**
+ * Leave the resync channel. Call on a graceful stop right after the heartbeat
+ * is deleted: until the process exits its subscriber would still receive,
+ * one receiver more than the live heartbeats, and every peer's resync in that
+ * window would mismatch, retry and take the fallback (about 7.5 s). Its
+ * sockets are disconnected next, so it has nothing left to resync. Never
+ * rejects.
+ */
+export async function stopChannelVisibilitySync(): Promise<void> {
+  try {
+    await getRedisConfigSub().unsubscribe(VISIBILITY_RESYNC_CHANNEL);
+  } catch (err) {
+    console.warn('[Visibility] Could not leave the resync channel at shutdown (peers may retry their resyncs until this process exits):', err instanceof Error ? err.message : err);
+  }
+}
+
 // ─── Scope and wire format ──────────────────────────────────────────────────
 
 interface ResyncScope {
