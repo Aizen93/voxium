@@ -1199,6 +1199,23 @@ describe('a local pass that fails is queued again', () => {
     expect(inCall.leave.mock.calls.map((c) => c[0]).sort()).toEqual(['channel:ch-other-space', 'channel:ch-staff']);
   });
 
+  // Review of #71: `dm:voice:{id}` does not start with `voice:`, so a socket
+  // in a DM call was disconnected, and its `disconnecting` handler ended the call.
+  it('a socket in a DM call is kept too, and keeps no channel room', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const inDmCall = createMockSocket('user-1', { rooms: ['user:user-1', 'dm:conv-1', 'dm:voice:conv-1', 'channel:ch-staff', 'channel:ch-pub'] });
+    m.localFetch.mockResolvedValue([inDmCall]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-staff' }]);
+    m.filterForUsers.mockRejectedValue(poolTimeout());
+
+    await syncChannelVisibilityRooms('server-1', { userId: 'user-1' });
+    await vi.advanceTimersByTimeAsync(LOCAL_PASS_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
+
+    expect(inDmCall.disconnect).not.toHaveBeenCalled();
+    expect(inDmCall.leave.mock.calls.map((c) => c[0]).sort()).toEqual(['channel:ch-pub', 'channel:ch-staff']);
+  });
+
   it('the third failure of a space-wide pass gives up, logged as an error, disconnecting nobody', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});

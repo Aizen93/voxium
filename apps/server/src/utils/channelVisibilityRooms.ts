@@ -319,8 +319,9 @@ function resyncLocalSockets(scope: ResyncScope, attempt = 1): Promise<void> {
  * The third failure means this node could not read the database three times
  * in about six seconds. For ONE MEMBER's pass (a role taken away, a re-check
  * after a join raced a resync) it fails closed: that member's sockets on this
- * node are disconnected, except a socket in a voice room (cutting a call is
- * worse than a late revocation), which keeps only its call's channel room
+ * node are disconnected, except a socket in a call, a space voice channel's or
+ * a DM's (cutting a call is worse than a late revocation), which keeps only
+ * its call's channel room
  * (see disconnectOutsideVoice). The client reopens a socket the server closed, and the
  * connect path computes every room afresh — when the database answers again,
  * since the handshake reads it too. For a pass over a whole space or a whole
@@ -364,7 +365,11 @@ async function disconnectOutsideVoice(serverId: string, userId: string, failures
     for (const s of sockets) {
       const rooms = [...(s.rooms ?? [])];
       const callRooms = new Set(rooms.filter((room) => room.startsWith('voice:')).map((room) => `channel:${room.slice('voice:'.length)}`));
-      if (callRooms.size === 0) {
+      // A DM call (`dm:voice:{conversationId}`) is a call too: a disconnect
+      // ends it (dmVoiceHandler's `disconnecting`). It holds no channel room
+      // of its own, so the socket keeps none.
+      const inDmCall = rooms.some((room) => room.startsWith('dm:voice:'));
+      if (callRooms.size === 0 && !inDmCall) {
         s.disconnect(true);
         closed++;
         continue;
