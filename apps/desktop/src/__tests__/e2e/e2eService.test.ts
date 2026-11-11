@@ -4712,6 +4712,71 @@ describe('E2EService — lifecycle', () => {
       expect(await pendingIn(alice)).toHaveLength(0);
     });
 
+    /** Refuse to store one group session for the whole life of a service, as a full disk would. */
+    const refuseToStore = (service: E2EService, sessionIds: string[]) => {
+      const vault = (service as unknown as { vault: E2EVault }).vault;
+      const put = vault.putInboundGroupSession.bind(vault);
+      vi.spyOn(vault, 'putInboundGroupSession').mockImplementation((sessionId, record) =>
+        sessionIds.includes(sessionId)
+          ? Promise.reject(new DOMException('The quota has been exceeded.', 'QuotaExceededError'))
+          : put(sessionId, record)
+      );
+    };
+
+    it('a share on an established pairwise session whose session could not be stored still decrypts after a reply', async () => {
+      // Not a pre-key message: the session both devices already use. Its
+      // message key must still be there when a reply writes that session.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      const first = await bob.service.encryptMessage('c1', alice.userId, 'first');
+      expect((await alice.service.decryptMessage({ id: 'm0', conversationId: 'c1', authorId: bob.userId, content: first.envelope })).text).toBe('first');
+      const back = await alice.service.encryptMessage('c1', bob.userId, 'back');
+      expect((await bob.service.decryptMessage({ id: 'm-back', conversationId: 'c1', authorId: alice.userId, content: back.envelope })).text).toBe('back');
+      await alice.service.dispose();
+
+      const { envelope } = await bob.service.encryptMessage('c2', alice.userId, 'on an established session');
+      const share = server.shares.find((s) => s.recipientUserId === alice.userId && s.conversationId === 'c2');
+      // a normal Olm message, not a pre-key one
+      expect(parseE2EEnvelope(share!.body)).toMatchObject({ e: 'olm1', t: 1 });
+
+      const tight = restart(server, alice);
+      refuseToStore(tight.service, [sidOf(envelope)]);
+      await tight.service.initialize();
+      await tight.service.claimMasterTransfers(); // queued behind the start-up claim
+      expect(await pendingIn(alice)).toHaveLength(1);
+      await tight.service.encryptMessage('c-reply', bob.userId, 'a reply'); // writes that pairwise session
+      await tight.service.dispose();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      const message = { id: 'm1', conversationId: 'c2', authorId: bob.userId, content: envelope };
+      expect((await again.service.decryptMessage(message)).text).toBe('on an established session');
+    });
+
+    it('keeps the later shares of a sender behind one whose session could not be stored', async () => {
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('the earlier one');
+      const later = await bob.service.encryptMessage('c2', alice.userId, 'the later one');
+
+      const tight = restart(server, alice);
+      refuseToStore(tight.service, [sidOf(message.content)]);
+      await tight.service.initialize();
+      await tight.service.claimMasterTransfers(); // queued behind the start-up claim
+      // both kept, in order: the later one waits for the earlier one
+      expect((await pendingIn(alice)).map((p) => p.record.share.conversationId)).toEqual(['c1', 'c2']);
+      await tight.service.dispose();
+
+      const again = restart(server, alice);
+      await again.service.initialize();
+      expect((await again.service.decryptMessage(message)).text).toBe('the earlier one');
+      const laterMessage = { id: 'm2', conversationId: 'c2', authorId: bob.userId, content: later.envelope };
+      expect((await again.service.decryptMessage(laterMessage)).text).toBe('the later one');
+    });
+
     it('imports a kept share before a newer Olm message of its sender, so a call cannot ratchet past it', async () => {
       // Bob's share is kept: his devices could not be looked up at Alice's
       // start. Then they call. The signals ride the same pairwise session as
