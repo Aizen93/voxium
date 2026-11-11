@@ -257,7 +257,9 @@ export async function requestPasswordReset(email: string) {
   const emailErr = validateEmail(email);
   if (emailErr) throw new BadRequestError(emailErr);
 
-  const user = await prisma.user.findUnique({ where: { email } });
+  // The two fields the reset uses, never the row: it holds the password hash
+  // and the two-factor secret (auth queries select what they need)
+  const user = await prisma.user.findUnique({ where: { email }, select: { id: true, email: true } });
 
   // Generate the token regardless of whether the user exists, so the two
   // branches do the same in-process work before answering.

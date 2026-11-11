@@ -558,6 +558,16 @@ describe('authService — requestPasswordReset', () => {
     await expect(requestPasswordReset('nobody@example.com')).resolves.toBeUndefined();
   });
 
+  it('reads only the two fields it uses, never the password hash or the two-factor secret (#105)', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'test@example.com' } as any);
+    vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
+
+    await requestPasswordReset('test@example.com');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledTimes(1);
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { email: 'test@example.com' }, select: { id: true, email: true } });
+  });
+
   it('normalizes email to lowercase', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
 
