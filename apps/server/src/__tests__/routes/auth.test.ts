@@ -210,6 +210,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitE2EBundle: passthroughMiddleware,
   rateLimitE2EStatus: passthroughMiddleware,
   rateLimitE2EShares: passthroughMiddleware,
+  rateLimitE2EShareAck: passthroughMiddleware,
   rateLimitE2EApprove: passthroughMiddleware,
   rateLimitWebhookExecuteIp: passthroughMiddleware,
   rateLimitWebhookExecute: passthroughMiddleware,

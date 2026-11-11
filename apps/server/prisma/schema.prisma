@@ -1001,7 +1001,8 @@ model E2EMasterKey {
 
 /// A pending master-secret handoff between two devices of the SAME account
 /// (device approval, spec §14). `body` is an opaque olm1 envelope — the server
-/// never sees the master secret. Claim-and-delete, like key shares.
+/// never sees the master secret. Read, then acknowledged (POST
+/// /e2e/master-transfers/ack): a read never consumes it (§14.6).
 model E2EMasterTransfer {
   id                String   @id @default(cuid())
   userId            String   @map("user_id") // owner: both sender and recipient

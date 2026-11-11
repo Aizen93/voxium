@@ -6,9 +6,11 @@ import {
   rateLimitE2EBundle,
   rateLimitE2EStatus,
   rateLimitE2EShares,
+  rateLimitE2EShareAck,
   rateLimitE2EApprove,
 } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
+import { acknowledgeKeyShares, claimAndDeleteKeyShares, leaseKeyShares } from '../utils/keyShareInbox';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import {
   E2E_KEY_B64_RE,
@@ -1167,21 +1169,23 @@ e2eRouter.post('/keyshares', rateLimitE2EShares, async (req: Request, res: Respo
 });
 
 /**
- * A claimed page oldest first, ties by id, as the inbox is scanned. RETURNING
- * keeps no order (the outer statement joins the subquery's ids, it does not
- * follow its ORDER BY), and the client imports a page in the order it is
- * given: a sender's later share must not come before the earlier one whose Olm
- * message sets up the pairwise session it rides.
+ * Which claim a request asked for: `lease=1` (the leasing claim, docs/e2e-dm-
+ * spec.md §12.3) or nothing (the legacy claim of desktop 2.1.x, which deletes
+ * on read). Asked for explicitly, never guessed from the client: anything else
+ * is refused rather than read as either.
  */
-function oldestFirst<T extends { id: string; created_at: Date }>(rows: T[]): T[] {
-  const at = (row: T) => new Date(row.created_at).getTime();
-  return [...rows].sort((a, b) => at(a) - at(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+function readLeaseFlag(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (value === '1') return true;
+  throw new BadRequestError('Invalid lease');
 }
 
+/** Claim a page of this device's inbox (spec §12.3; the statements: utils/keyShareInbox.ts). */
 e2eRouter.get('/keyshares', rateLimitE2EShares, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
     const deviceId = validateDeviceId(req.query.deviceId);
+    const lease = readLeaseFlag(req.query.lease);
 
     // A device inbox may only be drained by the account that owns the device.
     const device = await prisma.e2EDevice.findUnique({
@@ -1190,34 +1194,18 @@ e2eRouter.get('/keyshares', rateLimitE2EShares, async (req: Request, res: Respon
     });
     if (!device) throw new ForbiddenError('Unknown device');
 
-    // Claim-and-delete in one statement: Olm pre-key bodies are one-shot, so a
-    // share handed to two concurrent pollers would decrypt at most once.
-    const rows = await prisma.$queryRaw<
-      Array<{
-        id: string;
-        sender_user_id: string;
-        sender_device_id: string;
-        conversation_id: string;
-        session_id: string;
-        body: string;
-        created_at: Date;
-      }>
-    >`
-      DELETE FROM e2e_key_shares
-      WHERE id IN (
-        SELECT id FROM e2e_key_shares
-        WHERE recipient_user_id = ${userId} AND recipient_device_id = ${deviceId}
-        ORDER BY created_at, id
-        LIMIT ${E2E_LIMITS.KEYSHARE_CLAIM_MAX}
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING id, sender_user_id, sender_device_id, conversation_id, session_id, body, created_at
-    `;
+    // One statement either way, so no two claims hold one share at once (Olm
+    // pre-key bodies are one-shot). The leasing claim deletes nothing: the
+    // device acknowledges what it is done with (POST /keyshares/ack), and a
+    // share left unacknowledged is handed out again once its lease passes.
+    const rows = lease
+      ? await leaseKeyShares(prisma, userId, deviceId)
+      : await claimAndDeleteKeyShares(prisma, userId, deviceId);
 
     res.json({
       success: true,
       data: {
-        shares: oldestFirst(rows).map((r) => ({
+        shares: rows.map((r) => ({
           id: r.id,
           senderUserId: r.sender_user_id,
           senderDeviceId: r.sender_device_id,
@@ -1226,8 +1214,45 @@ e2eRouter.get('/keyshares', rateLimitE2EShares, async (req: Request, res: Respon
           body: r.body,
           createdAt: new Date(r.created_at).toISOString(),
         })),
+        // what tells the client its answer was leased, and is to be acknowledged
+        ...(lease ? { leaseMs: E2E_LIMITS.KEYSHARE_LEASE_MS } : {}),
       },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Delete the claimed shares this device is done with: imported, found
+ * imported already, or unusable for good (spec §12.3). Scoped to the caller's
+ * account and its own device, so it can only ever delete rows addressed to
+ * that device, and ids naming anything else are not counted, exactly like ids
+ * naming nothing. A share's lease does not matter: an acknowledgement after it
+ * passed still deletes. Its own budget (rateLimitE2EShareAck), never the share
+ * uploads' one.
+ */
+e2eRouter.post('/keyshares/ack', rateLimitE2EShareAck, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const { deviceId: rawDeviceId, ids } = (req.body ?? {}) as { deviceId?: unknown; ids?: unknown };
+    const deviceId = validateDeviceId(rawDeviceId);
+
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > E2E_LIMITS.KEYSHARE_ACK_MAX) {
+      throw new BadRequestError(`ids must contain 1–${E2E_LIMITS.KEYSHARE_ACK_MAX} entries`);
+    }
+    if (!ids.every((id) => typeof id === 'string' && ROW_ID_RE.test(id))) {
+      throw new BadRequestError('Invalid key share id');
+    }
+
+    const device = await prisma.e2EDevice.findUnique({
+      where: { userId_deviceId: { userId, deviceId } },
+      select: { id: true },
+    });
+    if (!device) throw new ForbiddenError('Unknown device');
+
+    const cleared = await acknowledgeKeyShares(prisma, userId, deviceId, ids as string[]);
+    res.json({ success: true, data: { cleared } });
   } catch (err) {
     next(err);
   }
