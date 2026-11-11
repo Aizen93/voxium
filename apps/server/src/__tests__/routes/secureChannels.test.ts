@@ -20,6 +20,7 @@ const prismaMock: Record<string, any> = {
     update: vi.fn(),
     delete: vi.fn(),
     count: vi.fn(),
+    aggregate: vi.fn(),
   },
   channelMember: {
     findUnique: vi.fn(),
@@ -210,6 +211,8 @@ describe('Secure Channel Routes', () => {
   describe('POST / (create)', () => {
     beforeEach(() => {
       prismaMock.channel.count.mockResolvedValue(3);
+      // The highest position in the space, read under the space row lock
+      prismaMock.channel.aggregate.mockResolvedValue({ _max: { position: 2 } });
       prismaMock.serverMember.findMany.mockResolvedValue([
         { userId: 'user-2' }, { userId: 'user-3' },
       ]);
@@ -410,14 +413,16 @@ describe('Secure Channel Routes', () => {
       }
     });
 
-    /** `total` answers the all-channels count, `secure` the secure-only one. */
-    function counts(total: number, secure: number): void {
-      prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) =>
-        (where.secure === true ? secure : total));
+    /** The space's secure-channel count (the only count the route reads). */
+    function secureCount(secure: number): void {
+      prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) => {
+        if (where.secure !== true) throw new Error('the route counts secure channels only');
+        return secure;
+      });
     }
 
     it('400 at the secure-channel limit (5 by default), creating nothing', async () => {
-      counts(8, 5);
+      secureCount(5);
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels')
@@ -429,43 +434,78 @@ describe('Secure Channel Routes', () => {
     });
 
     it('counts secure channels apart: a space at its regular channel limit still gets one', async () => {
-      counts(24, 4);  // 20 regular channels (the channel limit) + 4 secure
+      secureCount(4);  // beside 20 regular channels (the channel limit)
+      prismaMock.channel.aggregate.mockResolvedValue({ _max: { position: 23 } });
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels')
         .send({ name: 'covert-ops' });
 
       expect(res.status).toBe(201);
+      expect(prismaMock.channel.count).toHaveBeenCalledTimes(1);
       expect(prismaMock.channel.count).toHaveBeenCalledWith({ where: { serverId: 'srv-1', secure: true } });
-      // the total still places the new channel last
+      // placed after the highest position held by any channel of the space
+      expect(prismaMock.channel.aggregate).toHaveBeenCalledWith({ where: { serverId: 'srv-1' }, _max: { position: true } });
       expect(prismaMock.channel.create).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ position: 24, secure: true }),
       }));
     });
 
-    it('counts under the space row lock, inside the transaction', async () => {
+    it('places the channel after the highest position, not after the count, and at 0 in an empty space', async () => {
+      secureCount(1);
+      prismaMock.channel.aggregate.mockResolvedValueOnce({ _max: { position: 41 } });
+      let res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops' });
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenLastCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 42 }),
+      }));
+
+      secureCount(0);
+      prismaMock.channel.aggregate.mockResolvedValueOnce({ _max: { position: null } });
+      res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops' });
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenLastCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 0 }),
+      }));
+    });
+
+    it('counts under the space row lock, inside the transaction, and places the channel there too: nothing is read before it', async () => {
       const order: string[] = [];
+      let inTransaction = false;
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction.mockImplementation(async (arg: any) => {
+        inTransaction = true;
+        try { return await real(arg); } finally { inTransaction = false; }
+      });
       prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
         const sql = strings.join('?');
         order.push(sql.includes('FROM servers') ? 'lock-server' : sql.includes('FROM server_members') ? 'lock-members' : 'lock-other');
         return rowLocks(strings, ...values);
       });
       prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) => {
-        if (where.secure === true) order.push('count-secure');
-        return where.secure === true ? 1 : 3;
+        order.push(`count-${where.secure === true ? 'secure' : 'all'}${inTransaction ? '' : ' (outside)'}`);
+        return 1;
       });
-      prismaMock.channel.create.mockImplementation(async () => { order.push('create'); return { ...CH, type: 'text', position: 3 }; });
+      prismaMock.channel.aggregate.mockImplementation(async () => {
+        order.push(`place${inTransaction ? '' : ' (outside)'}`);
+        return { _max: { position: 6 } };
+      });
+      prismaMock.channel.create.mockImplementation(async () => { order.push('create'); return { ...CH, type: 'text', position: 7 }; });
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels')
         .send({ name: 'covert-ops' });
 
       expect(res.status).toBe(201);
-      expect(order.slice(0, 4)).toEqual(['lock-members', 'lock-server', 'count-secure', 'create']);
+      expect(order).toEqual(['lock-members', 'lock-server', 'count-secure', 'place', 'create']);
     });
 
     it('a limit of 0 freezes secure-channel creation', async () => {
-      counts(0, 0);
+      secureCount(0);
       (getEffectiveLimits as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         maxChannelsPerServer: 20,
         maxVoiceUsersPerChannel: 12,

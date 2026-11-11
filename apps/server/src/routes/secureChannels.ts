@@ -9,6 +9,7 @@ import { rateLimitSecureChannelManage, rateLimitMemberManage } from '../middlewa
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import { positionAfter } from '../utils/sortPosition';
 import { hasServerPermission } from '../utils/permissionCalculator';
 import {
   broadcastSecureMembersUpdated,
@@ -109,11 +110,8 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
     }
 
     // Secure channels have their own limit (maxSecureChannelsPerServer), apart
-    // from maxChannelsPerServer. The total only places the new channel last.
-    const [channelCount, limits] = await Promise.all([
-      prisma.channel.count({ where: { serverId } }),
-      getEffectiveLimits(serverId),
-    ]);
+    // from maxChannelsPerServer
+    const limits = await getEffectiveLimits(serverId);
 
     const now = new Date();
     const allMemberIds = [userId, ...memberIds];
@@ -127,9 +125,9 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
       // it wrote, or committed before and the row is gone) and before the
       // space row, the order a removal takes them in.
       const members = await lockServerMemberRows(tx, serverId, allMemberIds);
-      // Count and insert under the space row lock, so two concurrent creations
-      // cannot both pass the limit. A space deleted since the permission check
-      // answers as one: not found.
+      // Count, place and insert under the space row lock, so two concurrent
+      // creations can neither both pass the limit nor take one position. A
+      // space deleted since the permission check answers as one: not found.
       const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
       if (space.length === 0) throw new NotFoundError('Server');
       if (!members.has(userId)) {
@@ -142,6 +140,9 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
       if (secureCount >= limits.maxSecureChannelsPerServer) {
         throw new BadRequestError(`Server can have at most ${limits.maxSecureChannelsPerServer} secure channels`);
       }
+      // After every channel of the space, read under the same lock: a
+      // concurrent creation, secure or not, never takes the same position
+      const { _max } = await tx.channel.aggregate({ where: { serverId }, _max: { position: true } });
       const ch = await tx.channel.create({
         data: {
           name,
@@ -149,7 +150,7 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
           secure: true,
           createdById: userId,
           serverId,
-          position: channelCount,
+          position: positionAfter(_max.position),
           categoryId: null,
         },
       });

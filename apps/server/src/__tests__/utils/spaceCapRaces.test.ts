@@ -370,11 +370,13 @@ vi.mock('../../middleware/auth', () => ({
 }));
 
 import { channelRouter } from '../../routes/channels';
+import { secureChannelRouter } from '../../routes/secureChannels';
 import { errorHandler } from '../../middleware/errorHandler';
 
 const app = express();
 app.use(express.json());
 app.use('/api/v1/servers/:serverId/channels', channelRouter);
+app.use('/api/v1/servers/:serverId/secure-channels', secureChannelRouter);
 app.use(errorHandler);
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -404,6 +406,7 @@ function seedChannels(n: number, opts: { secure?: boolean } = {}): void {
 }
 
 const createChannel = (name: string) => request(app).post(`/api/v1/servers/${S}/channels`).send({ name, type: 'text' });
+const createSecureChannel = (name: string) => request(app).post(`/api/v1/servers/${S}/secure-channels`).send({ name, type: 'text' });
 
 beforeEach(() => {
   seed();
@@ -446,5 +449,41 @@ describe('two concurrent channel creations in one space', () => {
 
     expect([a.status, b.status].sort()).toEqual([201, 400]);
     expect((a.status === 201 ? a : b).body.data.position).toBe(3);
+  });
+});
+
+// ─── Secure channels (their limit was already counted under the lock) ──────
+
+describe('concurrent secure-channel creations in one space', () => {
+  it('one below the secure-channel limit: exactly one is created, the other gets the limit answer', async () => {
+    limits.maxSecureChannelsPerServer = 2;
+    seedChannels(1, { secure: true });
+    armRace(2);
+
+    const [a, b] = await Promise.all([createSecureChannel('alpha'), createSecureChannel('beta')]);
+
+    expect([a.status, b.status].sort()).toEqual([201, 400]);
+    expect((a.status === 400 ? a : b).body.error).toBe('Server can have at most 2 secure channels');
+    expect(committed.channels.filter((c) => c.secure)).toHaveLength(2);
+  });
+
+  it('below the limit: two different positions after every existing channel', async () => {
+    seedChannels(3);
+    armRace(2);
+
+    const [a, b] = await Promise.all([createSecureChannel('alpha'), createSecureChannel('beta')]);
+
+    expect([a.status, b.status]).toEqual([201, 201]);
+    expect([a.body.data.position, b.body.data.position].sort()).toEqual([3, 4]);
+  });
+
+  it('a secure and a regular creation at once take two different positions', async () => {
+    seedChannels(3);
+    armRace(2);
+
+    const [regular, secure] = await Promise.all([createChannel('alpha'), createSecureChannel('beta')]);
+
+    expect([regular.status, secure.status]).toEqual([201, 201]);
+    expect([regular.body.data.position, secure.body.data.position].sort()).toEqual([3, 4]);
   });
 });
