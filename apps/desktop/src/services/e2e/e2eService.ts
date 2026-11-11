@@ -312,6 +312,18 @@ const TEARDOWN_DEADLINE_MS = 10_000;
 const noop = (): void => {};
 
 /**
+ * Teardowns still to run, by vault database name: a disposed service whose
+ * key-share claim holds its teardown back may still write that vault (what
+ * the claim imports, the account pickle among it). A service for the same
+ * account opens the vault only after that teardown, which the teardown
+ * deadline bounds. Otherwise a sign-in back to the same account within that
+ * window loads the account, the old service saves the one its claim
+ * advanced, and the new one's next save brings back the one-time key the
+ * claim used.
+ */
+const pendingTeardowns = new Map<string, Promise<void>>();
+
+/**
  * Vault key of a claimed key share: its creation time first, so a listing
  * returns shares oldest first (the order their Olm messages were sent in).
  */
@@ -449,6 +461,10 @@ export class E2EService {
   private readonly vault: E2EVault;
   /** The vault as work off the queue reaches it: refused once dispose() ran (see guardedVault). */
   private readonly liveVault: E2EVault;
+  /** The vault's database name: the key of pendingTeardowns. */
+  private readonly vaultName: string;
+  /** This service's deferred teardown, while a claim holds it back (see dispose()). */
+  private teardownDone: Promise<void> | null = null;
   private readonly wasmInput?: BufferSource;
   private readonly deviceListCacheMs: number;
   private readonly teardownDeadlineMs: number;
@@ -514,7 +530,9 @@ export class E2EService {
    * from a device with none costs no vault read (importKeptSharesFrom). Null
    * until a listing of the vault fills it, refilled by every listing, and kept
    * in step by every write and delete of a kept share, all on the queue. It
-   * may still name a share that is gone, never miss one that is kept.
+   * may still name a share that is gone, never miss one that is kept, with
+   * one exception that the next claim's listing closes: a page an earlier
+   * service on this vault writes late, raw, after this one started (dispose()).
    */
   private keptShares: Map<string, string> | null = null;
   private deviceListListeners = new Set<(userId: string) => void>();
@@ -525,7 +543,12 @@ export class E2EService {
   ) {
     this.client = opts.api ?? defaultApi;
     this.api = this.guardedApi(this.client);
-    this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace);
+    this.vaultName = vaultDbName(userId, opts.vaultNamespace);
+    this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace, () => {
+      // an earlier service's teardown on this vault, never this one's own
+      const pending = pendingTeardowns.get(this.vaultName);
+      return pending && pending !== this.teardownDone ? pending : undefined;
+    });
     this.liveVault = this.guardedVault(this.vault);
     this.wasmInput = opts.wasmInput;
     this.deviceListCacheMs = opts.deviceListCacheMs ?? DEVICE_LIST_CACHE_MS;
@@ -747,15 +770,19 @@ export class E2EService {
    * (pks:, see claimKeyShares), where the next start of this account finds
    * them; the claim reads no further page and asks the server nothing more.
    * Until the teardown, that claim is the only thing that touches the vault:
-   * the queue starts nothing, a decrypt that waited on the claim stops there,
-   * and every path off the queue is refused by the guarded client and
-   * liveVault from this call on.
+   * in this service the queue starts nothing, a decrypt that waited on the
+   * claim stops there, and every path off the queue is refused by the guarded
+   * client and liveVault from this call on; a new service for the same
+   * account (a sign-in back) opens the vault only after the teardown
+   * (pendingTeardowns). The one write that can still come later is a page
+   * answered after the deadline, raw, of kept shares only.
    *
    * Resolves once the teardown has run.
    */
   dispose(): Promise<void> {
     // First, so work resuming after this point sees it before any freed handle
     this.disposed = true;
+    if (this.teardownDone) return this.teardownDone;
     const claim = this.claimInFlight;
     if (!claim) {
       this.teardownLogged();
@@ -770,10 +797,17 @@ export class E2EService {
     const deadline = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, this.teardownDeadlineMs);
     });
-    return Promise.race([claim.then(noop, noop), deadline]).then(() => {
+    const done = Promise.race([claim.then(noop, noop), deadline]).then(() => {
       clearTimeout(timer);
       this.teardownLogged();
     });
+    // A service for the same account opens this vault only after it (pendingTeardowns)
+    this.teardownDone = done;
+    pendingTeardowns.set(this.vaultName, done);
+    void done.then(() => {
+      if (pendingTeardowns.get(this.vaultName) === done) pendingTeardowns.delete(this.vaultName);
+    });
+    return done;
   }
 
   /**
@@ -3655,7 +3689,8 @@ export class E2EService {
    */
   private pinSecureScope(scope: string): void {
     const parsed = parseE2EScope(scope);
-    if (parsed.kind === 'channel') pinSecure(parsed.channelId);
+    // for this service's account: a claim finishing after a logout must not pin for the next one
+    if (parsed.kind === 'channel') pinSecure(parsed.channelId, this.userId);
   }
 
   /**

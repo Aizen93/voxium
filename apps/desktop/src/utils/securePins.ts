@@ -93,9 +93,23 @@ export function deactivateSecurePins(): void {
 }
 
 /** Pin a channel the device has seen as secure. Returns true when the pin is
- *  new. A no-op before activation (there is no account to pin it to). */
-export function pinSecure(channelId: string): boolean {
-  if (!activeUserId || !activePins || !isChannelId(channelId)) return false;
+ *  new. A no-op before activation (there is no account to pin it to).
+ *
+ *  `userId` names the account the sighting belongs to, active or not: work of
+ *  an account that has since signed out (a key-share claim finishing after a
+ *  logout) pins for that account, never for whoever is signed in now. */
+export function pinSecure(channelId: string, userId?: string): boolean {
+  if (!isChannelId(channelId)) return false;
+  if (userId !== undefined && userId !== activeUserId) {
+    // the same Set an activation of that account merges in (memory)
+    const pins = memory.get(userId) ?? loadPins(userId);
+    memory.set(userId, pins);
+    if (pins.has(channelId)) return false;
+    pins.add(channelId);
+    savePins(userId, pins);
+    return true;
+  }
+  if (!activeUserId || !activePins) return false;
   if (activePins.has(channelId)) return false;
   activePins.add(channelId);
   savePins(activeUserId, activePins);

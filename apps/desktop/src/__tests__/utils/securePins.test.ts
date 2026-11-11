@@ -50,6 +50,21 @@ describe('securePins', () => {
     expect(stored('alice')).toEqual(['ch-a']);
   });
 
+  it('pins for the account named, whichever is active (work of an account that signed out)', () => {
+    activateSecurePins('bob');
+    expect(pinSecure('ch-alice', 'alice')).toBe(true);
+    expect(isPinnedSecure('ch-alice')).toBe(false); // not Bob's
+    expect(stored('alice')).toEqual(['ch-alice']);
+    expect(stored('bob')).toBeNull();
+    expect(pinSecure('ch-bob', 'bob')).toBe(true); // the active one, as without a name
+    expect(isPinnedSecure('ch-bob')).toBe(true);
+    deactivateSecurePins();
+    expect(pinSecure('ch-alice-2', 'alice')).toBe(true); // nobody active
+    activateSecurePins('alice');
+    expect(isPinnedSecure('ch-alice')).toBe(true);
+    expect(isPinnedSecure('ch-alice-2')).toBe(true);
+  });
+
   it('survives deactivate/activate (logout keeps the pins)', () => {
     activateSecurePins('alice');
     pinSecure('ch-1');

@@ -5038,6 +5038,109 @@ describe('E2EService — lifecycle', () => {
       }
     });
 
+    it('a service for the same account opens the vault only after the disposed one has torn down', async () => {
+      // Signing back in within the teardown window: the disposed service may
+      // still write what its claim imports, the account pickle among it. A
+      // second service that loaded the account before that write and saved
+      // its own after would bring back the one-time key the claim used.
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.fetchDeviceList(bob.userId, true); // Bob is known: his share imports without the network
+      await alice.service.dispose();
+      await bob.service.encryptMessage('c1', alice.userId, 'claimed at logout');
+      const [share] = sharesFor(server, alice.userId);
+      const prekey = parseE2EEnvelope(share.body) as { t: number; b: string };
+      expect(prekey.t).toBe(0); // opens a session with one of Alice's one-time keys
+
+      const gate = holdingApi(
+        server.apiFor(alice.userId),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const first = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      await first.initialize();
+      await gate.held;
+      const order: string[] = [];
+      const tornDown = first.dispose().then(() => order.push('teardown'));
+
+      // the same account signs in again on this page
+      const second = restart(server, alice);
+      const secondVault = (second.service as unknown as { vault: E2EVault }).vault;
+      const load = secondVault.getAccountPickle.bind(secondVault);
+      vi.spyOn(secondVault, 'getAccountPickle').mockImplementation(() => {
+        order.push('account read');
+        return load();
+      });
+      const starting = second.service.initialize();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      gate.release();
+      await tornDown;
+      await starting;
+      await flushQueue();
+      expect(order).toEqual(['teardown', 'account read']);
+      // the second service saves its account: the key the claim used stays spent
+      await (second.service as unknown as { persistAccount(): Promise<void> }).persistAccount();
+      await second.service.dispose();
+
+      const third = restart(server, alice);
+      await third.service.initialize();
+      const account = (third.service as unknown as { account: EngineAccount }).account;
+      const bobIdentity = server.deviceOf(bob.userId, bob.service.deviceId).curve25519Key;
+      expect(() => account.createInboundSession(bobIdentity, prekey.b)).toThrow(/one-time key/);
+    });
+
+    it('pins a secure channel that a late claim imports for the account that claimed it, not the one signed in since', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      const carolId = `carol-${uniq}`;
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.fetchDeviceList(bob.userId, true);
+      const channelId = `chan-late-${uniq}`;
+      server.setChannelMembers(channelId, [bob.userId, alice.userId]);
+      await alice.service.dispose();
+      await bob.service.encryptChannelMessage(channelId, 'in a secure channel');
+
+      const gate = holdingApi(
+        server.apiFor(alice.userId),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const restarted = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      activateSecurePins(alice.userId);
+      try {
+        await restarted.initialize();
+        await gate.held;
+        const tornDown = restarted.dispose();
+        deactivateSecurePins(); // logout…
+        activateSecurePins(carolId); // …and Carol signs in on the same page
+        gate.release();
+        await tornDown;
+        expect(await pendingIn(alice)).toHaveLength(0); // the claim imported the channel's session
+        expect(isPinnedSecure(channelId)).toBe(false);
+        activateSecurePins(alice.userId);
+        expect(isPinnedSecure(channelId)).toBe(true);
+      } finally {
+        deactivateSecurePins();
+        forgetSecurePins(alice.userId);
+        forgetSecurePins(carolId);
+      }
+    });
+
     describe('while that claim holds the teardown back, nothing else touches the vault or the network', () => {
       /** Every vault access from now on (see the backup test above for why withStore covers them). */
       const spyOnVaultAccesses = (service: E2EService) =>

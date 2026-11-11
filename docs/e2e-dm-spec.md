@@ -489,15 +489,21 @@ pre-key share, a replenishment) or that pairwise session (a reply, a call
 signal), the message still decrypts, and the next claim retries it, its
 sender's later shares behind it. Disposing the service (logout, account
 switch) while a claim is in flight lets the claim finish the page it holds,
-for at most 10 s, and nothing else: from the dispose on no other request goes
-out, nothing else reads or writes the vault, and the claim itself asks the
-server nothing more, so a share whose sender it would still have to look up
-stays kept, uncounted (logout has dropped the tokens by then, and after a new
-sign-in on the same page the request would carry the next account's bearer).
-Whatever the claim had not processed by then stays kept, and a page whose
-answer only arrives after that is still written, raw, on the one vault
-connection the teardown keeps open for it (released at once on a version
-change, i.e. an account deletion).
+for at most 10 s, and nothing else: from the dispose on no other request of
+that service goes out, nothing else in it reads or writes the vault, and the
+claim itself asks the server nothing more, so a share whose sender it would
+still have to look up stays kept, uncounted (logout has dropped the tokens by
+then, and after a new sign-in on the same page the request would carry the
+next account's bearer). A service started meanwhile for the same account on
+this device (signing back in) opens the vault only once that teardown has run,
+so it never loads an account the claim is still advancing. Whatever the claim
+had not processed by then stays kept, and a page whose answer only arrives
+after that is still written, raw, on the one vault connection the teardown
+keeps open for it (released at once on a version change, i.e. an account
+deletion): the one write that can still land beside a newer service, only of
+kept shares, which that service's next claim lists. A secure channel that the
+claim's sessions reveal is pinned (§19.7) for the account that claimed them,
+never for whoever has signed in since.
 
 A key share and the later Olm messages of the same sender device ride one
 pairwise session but travel apart: the share through the inbox, a DM call's

@@ -258,7 +258,12 @@ export class E2EVault {
     private readonly userId: string,
     private readonly keyProvider: PickleKeyProvider = defaultPickleKeyProvider(),
     /** Isolates two vaults for the same account in one process (tests / multi-instance). */
-    private readonly namespace?: string
+    private readonly namespace?: string,
+    /**
+     * What a connection must wait for before it opens the database: the
+     * teardown of an earlier service on the same vault (see E2EService).
+     */
+    private readonly openAfter?: () => Promise<void> | undefined
   ) {}
 
   /** Throw if close() ran: called before every access and after every await. */
@@ -269,6 +274,12 @@ export class E2EVault {
   async open(): Promise<void> {
     this.assertNotClosed();
     if (this.db) return;
+    const before = this.openAfter?.();
+    if (before) {
+      await before;
+      this.assertNotClosed();
+      if (this.db) return;
+    }
     const name = vaultDbName(this.userId, this.namespace);
     // Anything under an older prefix belongs to key material the server no
     // longer has (the always-on cutover truncated it), so it can only produce
