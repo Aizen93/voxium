@@ -307,8 +307,8 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
 
     // Count-then-create under a row lock on the SERVER, so concurrent creates
     // for one server run one after the other and each counts the ones before
-    // it: the cap holds exactly (a cap of 0 freezes creation). The channel
-    // and secure-channel creations take the same lock for theirs.
+    // it: the cap holds exactly (a cap of 0 freezes creation). The channel,
+    // secure-channel and category creations take the same lock for theirs.
     const row = await prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
       const count = await tx.webhook.count({ where: { serverId } });

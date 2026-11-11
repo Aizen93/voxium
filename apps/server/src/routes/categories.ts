@@ -9,7 +9,8 @@ import { sanitizeText } from '../utils/sanitize';
 import { rateLimitCategoryManage } from '../middleware/rateLimiter';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission } from '../utils/permissionCalculator';
-import { isSortPosition, MAX_SORT_POSITION } from '../utils/sortPosition';
+import { isSortPosition, MAX_SORT_POSITION, positionAfter } from '../utils/sortPosition';
+import { retryOnTransactionConflict } from '../utils/transactionRetry';
 
 export const categoryRouter = Router({ mergeParams: true });
 
@@ -82,17 +83,30 @@ categoryRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId
     const nameErr = validateCategoryName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
-    const [categoryCount, limits] = await Promise.all([
-      prisma.category.count({ where: { serverId } }),
-      getEffectiveLimits(serverId),
-    ]);
-    if (categoryCount >= limits.maxCategoriesPerServer) {
-      throw new BadRequestError(`Server can have at most ${limits.maxCategoriesPerServer} categories`);
-    }
+    const limits = await getEffectiveLimits(serverId);
 
-    const category = await prisma.category.create({
-      data: { name, serverId, position: categoryCount },
-    });
+    // Count, place and insert under the space row lock (FOR UPDATE, as a
+    // channel creation takes it), so concurrent creations in one space run
+    // one after the other: each counts, and places itself after, the
+    // categories committed before it. The space row is the only existing row
+    // this transaction locks. Run again when PostgreSQL aborts it to break a
+    // deadlock.
+    const category = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      // A space deleted since the permission check answers as one
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
+      const { _count, _max } = await tx.category.aggregate({
+        where: { serverId },
+        _count: { _all: true },
+        _max: { position: true },
+      });
+      if (_count._all >= limits.maxCategoriesPerServer) {
+        throw new BadRequestError(`Server can have at most ${limits.maxCategoriesPerServer} categories`);
+      }
+      return tx.category.create({
+        data: { name, serverId, position: positionAfter(_max.position) },
+      });
+    }), '[Categories] A category creation');
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_CREATED, category as unknown as Category);
 
