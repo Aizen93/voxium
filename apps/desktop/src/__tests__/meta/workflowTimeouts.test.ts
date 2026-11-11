@@ -38,6 +38,13 @@ describe('workflow time limits', () => {
     }
   });
 
+  it.each(files)('%s: every curl call has a time limit of its own', (file) => {
+    const yml = readFileSync(WORKFLOWS + file, 'utf8').replace(/\r\n/g, '\n');
+    // A call continued on the next line is read with its continuation
+    const calls = [...yml.replace(/\\\n\s*/g, ' ').matchAll(/(?:^|[\s($|])curl\s[^\n]*/g)].map((m) => m[0]);
+    for (const call of calls) expect(call, `${file}: ${call.trim()}`).toMatch(/\s(?:--max-time|-m)\s+\d+/);
+  });
+
   it('bounds the image pull of the end-to-end job inside the job limit', () => {
     const ci = readFileSync(WORKFLOWS + 'ci.yml', 'utf8').replace(/\r\n/g, '\n');
     const start = ci.indexOf('      - name: Start MinIO and create the assets bucket\n');

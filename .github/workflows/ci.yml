@@ -236,7 +236,7 @@ jobs:
           # loop used to fall through to the bucket call, which hid the cause.
           ready=
           for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready; then ready=1; break; fi
+            if curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:9000/minio/health/ready; then ready=1; break; fi
             sleep 2
           done
           if [ -z "$ready" ]; then
