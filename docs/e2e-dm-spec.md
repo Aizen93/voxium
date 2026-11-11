@@ -499,34 +499,38 @@ answer only arrives after that is still written, raw, on the one vault
 connection the teardown keeps open for it (released at once on a version
 change, i.e. an account deletion).
 
-**Residual: a kept share is lost when its sender's Olm session moves on
-without it.** A share is kept undecrypted while its sender device is not
-pinned (its look-up failed). Other Olm messages from that device can be
-decrypted first in the meantime: a DM call's signals and a secure-voice key
-arrive over the socket and are decrypted as they come, and their own sender
-check pins the device. The kept share then decrypts only from what vodozemac
-(0.11.2) keeps for skipped messages: at most 40 message keys per receiving
-chain, none for a message more than 40 behind the one that opened the gap, and
-5 receiving chains per session. A share behind more than 40 later messages of
-its chain, or behind five ratchet turns of the sender (each a reply of ours
-followed by one of theirs), no longer decrypts and is discarded as unusable at
-its next claim. The same holds for a share still waiting in the inbox while a
-call goes on, since the inbox and the socket are separate paths; keeping the
-share only stretches that wait to the next claim or start. Decrypting the Olm
-layer at claim time and leaving only the sender check pending would close it,
-but not within this protocol: a session opened by a pre-key message is created
-against the pinned identity of its sender (§4.3), and one created before that
-check would sit in the device's slot, where every later send to that device
-reuses it unchecked; the decrypted payload is a raw Megolm session key, which
-the vault keeps only inside a pickle (§7), so holding it pending means an
-inbound session that every reader must refuse until the check passes, a new
-trust state; and the engine exposes no identity key of a pre-key message to
-check against later. Also lost, by design: a kept share sent under an identity
-the user then accepts as replaced (`acceptNewIdentity` re-pins and drops the
-old sessions), one that continues a pairwise session that is reset, and in
-principle one whose one-time key vodozemac has evicted (it keeps the newest
-5,000) or whose fallback key was replaced twice (it keeps the current and the
-previous one).
+A key share and the later Olm messages of the same sender device ride one
+pairwise session but travel apart: the share through the inbox, a DM call's
+signals and a secure-voice key over the socket, decrypted as they arrive. A
+newer message decrypted first leaves the share's message only to what
+vodozemac (0.11.2) keeps for skipped messages: at most 40 message keys per
+receiving chain, none for a message more than 40 behind the one that opened
+the gap, and 5 receiving chains per session, so five ratchet turns of the
+sender (each a reply of ours followed by one of theirs) put it out of reach.
+A kept share is therefore imported before any newer Olm message of its device
+is decrypted: the device-sealed decrypt imports that device's kept shares
+first, its sender pinned by then.
+
+**Residual: a share overtaken while it is still in the inbox, or while its
+session cannot be stored.** Nothing orders a share the client has not claimed
+yet against a signal that arrives over the socket first, short of claiming
+before every device-sealed decrypt (a request per call signal); a share whose
+session store keeps failing is retried, but the signals are decrypted
+meanwhile. Either is discarded as unusable at its claim once overtaken beyond
+the bounds above. Decrypting a share's Olm layer before its sender is pinned,
+and leaving only the sender check pending, is not a way out within this
+protocol: a session opened by a pre-key message is created against the pinned
+identity of its sender (§4.3), and one created before that check would sit in
+the device's slot, where every later send to that device reuses it unchecked;
+the decrypted payload is a raw Megolm session key, which the vault keeps only
+inside a pickle (§7), so holding it pending means an inbound session that
+every reader must refuse until the check passes, a new trust state; and the
+engine exposes no identity key of a pre-key message to check against later.
+Also lost, by design: a kept share sent under an identity the user then
+accepts as replaced (`acceptNewIdentity` re-pins and drops the old sessions),
+one that continues a pairwise session that is reset, and in principle one
+whose one-time key vodozemac has evicted (it keeps the newest 5,000) or whose
+fallback key was replaced twice (it keeps the current and the previous one).
 
 ### 12.4 Rotation
 

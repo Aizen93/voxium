@@ -3073,14 +3073,12 @@ export class E2EService {
    * whose session could not be stored (its Olm decrypt is not committed, see
    * olmDecryptStaged).
    *
-   * Known residual (docs/e2e-dm-spec.md §12.3): a share kept undecrypted
-   * because its sender was not pinned can be overtaken by later Olm messages
-   * of that device decrypted meanwhile (decryptFromDevice: call signals,
-   * secure-voice keys). It then decrypts only through vodozemac's skipped
-   * message keys (40 per receiving chain, 5 chains per session), and past
-   * those bounds it is discarded as unusable at its next claim. Closing that
-   * would mean decrypting a pre-key message before its sender is pinned,
-   * which the trust rules do not allow.
+   * A kept share is imported before any newer Olm message of its sender
+   * device (importKeptSharesFrom). Known residual (docs/e2e-dm-spec.md
+   * §12.3): a share still in the inbox has no such guard. A call signal or a
+   * voice key of that device decrypted ahead of it leaves its message only to
+   * vodozemac's skipped message keys (40 per receiving chain, 5 chains per
+   * session), and past those bounds it is discarded as unusable once claimed.
    *
    * Callers must already hold the serial queue (this mutates Olm state).
    */
@@ -3392,12 +3390,31 @@ export class E2EService {
     }
     return this.enqueue(async () => {
       try {
+        // older messages of this device first (see importKeptSharesFrom)
+        await this.importKeptSharesFrom(userId, deviceId);
         return await this.olmDecryptFromDevice(userId, deviceId, envelope as E2EOlmEnvelope);
       } catch (err) {
         console.warn(`e2e: device-sealed decrypt from ${userId}/${deviceId} failed:`, errText(err));
         return null;
       }
     });
+  }
+
+  /**
+   * Import the key shares of one sender device still kept from a claim (its
+   * look-up failed then), oldest first, before a newer Olm message of that
+   * device is decrypted. They ride the same pairwise session, and the socket
+   * brings a call's signals or a voice key ahead of them: decrypted first,
+   * those would leave a kept share's message only to vodozemac's skipped
+   * message keys, whose receiving chains a few turns of a call push out
+   * (spec §12.3). The device is pinned by now (decryptFromDevice), so this
+   * asks the server nothing. Callers must hold the serial queue.
+   */
+  private async importKeptSharesFrom(userId: string, deviceId: string): Promise<void> {
+    const kept = (await this.vault.listPendingShares()).filter(
+      ({ record }) => record.share.senderUserId === userId && record.share.senderDeviceId === deviceId
+    );
+    if (kept.length > 0) await this.processPendingShares(kept, new Set(), true);
   }
 
   /**

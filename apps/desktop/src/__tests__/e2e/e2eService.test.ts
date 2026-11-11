@@ -4712,6 +4712,31 @@ describe('E2EService — lifecycle', () => {
       expect(await pendingIn(alice)).toHaveLength(0);
     });
 
+    it('imports a kept share before a newer Olm message of its sender, so a call cannot ratchet past it', async () => {
+      // Bob's share is kept: his devices could not be looked up at Alice's
+      // start. Then they call. The signals ride the same pairwise session as
+      // the share, and the socket brings them first: decrypted ahead of it,
+      // they would leave the share's message only to vodozemac's skipped keys,
+      // whose receiving chains (5) a few turns of signalling push out.
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept, then overtaken by a call');
+      server.setDeviceListReadFailure(true);
+      const again = restart(server, alice);
+      await again.service.initialize();
+      await again.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+      expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]);
+      server.setDeviceListReadFailure(false);
+
+      for (let turn = 0; turn < 6; turn++) {
+        const signal = await bob.service.encryptToDevice(alice.userId, again.service.deviceId, `offer ${turn}`);
+        expect(await again.service.decryptFromDevice(bob.userId, bob.service.deviceId, signal)).toBe(`offer ${turn}`);
+        const answer = await again.service.encryptToDevice(bob.userId, bob.service.deviceId, `answer ${turn}`);
+        expect(await bob.service.decryptFromDevice(alice.userId, again.service.deviceId, answer)).toBe(`answer ${turn}`);
+      }
+
+      expect((await again.service.decryptMessage(message)).text).toBe('kept, then overtaken by a call');
+      expect(await pendingIn(alice)).toHaveLength(0);
+    });
+
     it('drops a kept share once its session reached this device another way', async () => {
       const { server, alice, message } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
       const [kept] = await pendingIn(alice);
