@@ -49,6 +49,7 @@ import {
   announceSecureMembershipsRemoved,
   getSecureChannelMembersPayload,
   lockServerMemberRows,
+  undoRoomJoinsOfRemovedMembers,
 } from '../../utils/secureChannelLifecycle';
 
 describe('secureChannelLifecycle', () => {
@@ -276,6 +277,39 @@ describe('secureChannelLifecycle', () => {
       expect(sql).not.toMatch(/FOR SHARE/);
       expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['srv-1', ['u3', 'u1', 'u2']]);
       expect(members).toEqual(new Set(['u1', 'u3']));
+    });
+  });
+
+  describe('undoRoomJoinsOfRemovedMembers', () => {
+    it('re-reads the rows of the users just joined and takes those without one back out of the room', async () => {
+      prismaMock.channelMember.findMany.mockResolvedValue([{ userId: 'u1' }]);
+
+      const still = await undoRoomJoinsOfRemovedMembers('sec-1', ['u1', 'u2']);
+
+      expect(prismaMock.channelMember.findMany).toHaveBeenCalledWith({
+        where: { channelId: 'sec-1', userId: { in: ['u1', 'u2'] } },
+        select: { userId: true },
+      });
+      // by user room, adapter-wide
+      expect(mockIn).toHaveBeenCalledTimes(1);
+      expect(mockIn).toHaveBeenCalledWith('user:u2');
+      expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-1');
+      expect(still).toEqual(new Set(['u1']));
+    });
+
+    it('a failed re-read is logged and touches no room', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.channelMember.findMany.mockRejectedValue(new Error('db hiccup'));
+      try {
+        const still = await undoRoomJoinsOfRemovedMembers('sec-1', ['u1']);
+
+        expect(still).toEqual(new Set(['u1']));
+        expect(mockSocketsLeave).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith('[SecureChannel] Could not re-check the members joined to channel:sec-1:', 'db hiccup');
+      } finally {
+        warn.mockRestore();
+        prismaMock.channelMember.findMany.mockReset().mockResolvedValue([]);
+      }
     });
   });
 

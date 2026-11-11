@@ -148,6 +148,8 @@ function mockCallerMembership(isCreator: boolean | null) {
 
 /** The space's members, as the in-transaction member-row lock reads them. */
 let spaceMembers = new Set<string>();
+/** Users a concurrent removal took out of the channel after the write committed. */
+let removedSinceCommit = new Set<string>();
 
 /**
  * The transactions' row locks, answered by table: the member rows (FOR
@@ -189,7 +191,12 @@ describe('Secure Channel Routes', () => {
       if (Array.isArray(arg)) return Promise.all(arg);
       return arg(new Proxy({} as any, { get: (_t, prop) => prismaMock[prop as string] }));
     });
-    prismaMock.channelMember.findMany.mockResolvedValue(membersPayloadRows());
+    // The member-list payload (it selects the user), or the re-read after a
+    // room join (the ids still members, minus `removedSinceCommit`)
+    removedSinceCommit = new Set();
+    prismaMock.channelMember.findMany.mockImplementation(async (args: any) => (args?.select?.user
+      ? membersPayloadRows()
+      : ((args?.where?.userId?.in ?? []) as string[]).filter((id) => !removedSinceCommit.has(id)).map((userId) => ({ userId }))));
     // Caller gate cross-checks ServerMember (stale-row defense); the create
     // and invite transactions lock the member rows, then the space or the
     // channel row, via $queryRaw before their in-tx checks
@@ -342,6 +349,28 @@ describe('Secure Channel Routes', () => {
       expect(res.body.error).toBe('You do not have permission to create secure channels');
       expect(prismaMock.channel.create).not.toHaveBeenCalled();
       expect(prismaMock.channelMember.createMany).not.toHaveBeenCalled();
+    });
+
+    it('takes back out of the room a member a removal took out of the channel between the commit and the room join', async () => {
+      removedSinceCommit = new Set(['user-3']);
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops', memberIds: ['user-2', 'user-3'] });
+
+      expect(res.status).toBe(201);
+      // Re-read after the joins: the rows of the users just joined
+      expect(prismaMock.channelMember.findMany).toHaveBeenCalledWith({
+        where: { channelId: CH.id, userId: { in: ['user-1', 'user-2', 'user-3'] } },
+        select: { userId: true },
+      });
+      // One leave, for the removed member only (the room op is addressed by
+      // their user room, the last one taken)
+      expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
+      expect(mockSocketsLeave).toHaveBeenCalledWith(`channel:${CH.id}`);
+      expect(mockIn).toHaveBeenLastCalledWith('user:user-3');
+      // ...after its join, so the leave is the last word for that member
+      expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(Math.max(...mockSocketsJoin.mock.invocationCallOrder));
     });
 
     it('404 Server when the space was deleted since the permission check, creating nothing (not a foreign-key 500)', async () => {
@@ -662,6 +691,20 @@ describe('Secure Channel Routes', () => {
       } finally {
         warn.mockRestore();
       }
+    });
+
+    it('takes an invitee a removal took out between the commit and the room join back out of the room, and replays them nothing', async () => {
+      removedSinceCommit = new Set(['user-9']);
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(201);
+      expect(mockSocketsJoin).toHaveBeenCalledWith('channel:sec-1');
+      expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-1');
+      expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(mockSocketsJoin.mock.invocationCallOrder[0]);
+      expect(mockReplayVoiceState).not.toHaveBeenCalled();
     });
 
     it('a failing occupancy replay is logged and the invitation still succeeds', async () => {

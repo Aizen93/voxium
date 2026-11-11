@@ -15,6 +15,7 @@ import {
   getSecureChannelMembersPayload,
   lockServerMemberRows,
   removeSecureMember,
+  undoRoomJoinsOfRemovedMembers,
 } from '../utils/secureChannelLifecycle';
 
 /**
@@ -176,6 +177,9 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
       io.to(`user:${uid}`).emit(WS_EVENTS.CHANNEL_CREATED, channel as unknown as Channel);
       io.in(`user:${uid}`).socketsJoin(`channel:${channel.id}`);
     }
+    // A member removed since the commit got their room leave before this
+    // join: take them back out
+    await undoRoomJoinsOfRemovedMembers(channel.id, allMemberIds);
 
     res.status(201).json({ success: true, data: channel });
   } catch (err) {
@@ -272,14 +276,19 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
     const io = getIO();
     io.to(`user:${targetUserId}`).emit(WS_EVENTS.CHANNEL_CREATED, channel as unknown as Channel);
     io.in(`user:${targetUserId}`).socketsJoin(`channel:${channelId}`);
+    // An invitee removed since the commit got their room leave before this
+    // join: take them back out, and replay them nothing
+    const stillMember = (await undoRoomJoinsOfRemovedMembers(channelId, [targetUserId])).has(targetUserId);
     // Every voice event in that room happened before their sockets were in
     // it: replay the occupants, as the connect path does, or a call already
     // in progress reads empty to the invitee until someone moves. Best
     // effort — the invitation stands either way.
-    try {
-      await replayVoiceState(io.to(`user:${targetUserId}`), [serverId], new Set([channelId]), { source: 'connect' });
-    } catch (err) {
-      console.warn('[SecureChannels] Could not replay voice occupancy to the invitee:', err instanceof Error ? err.message : err);
+    if (stillMember) {
+      try {
+        await replayVoiceState(io.to(`user:${targetUserId}`), [serverId], new Set([channelId]), { source: 'connect' });
+      } catch (err) {
+        console.warn('[SecureChannels] Could not replay voice occupancy to the invitee:', err instanceof Error ? err.message : err);
+      }
     }
 
     await broadcastSecureMembersUpdated(channelId, serverId);

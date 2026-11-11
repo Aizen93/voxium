@@ -46,6 +46,34 @@ export async function lockServerMemberRows(tx: Prisma.TransactionClient, serverI
   return new Set(rows.map((r) => r.user_id));
 }
 
+/**
+ * After a creation's or an invite's commit and its `socketsJoin` of
+ * `channel:{id}` for `userIds`: read their rows again and take back out of
+ * the room every user whose row is gone. A removal that committed between
+ * the write and the join already sent its room leave, and the join, applied
+ * after it, would have put the departed member's sockets back in the room
+ * until they reconnect. Room operations by `user:{id}`, adapter-wide, never
+ * `fetchSockets()`. Answers the users still members; never throws (a failed
+ * read is logged and leaves the rooms as they are).
+ */
+export async function undoRoomJoinsOfRemovedMembers(channelId: string, userIds: string[]): Promise<Set<string>> {
+  try {
+    const rows = await prisma.channelMember.findMany({
+      where: { channelId, userId: { in: userIds } },
+      select: { userId: true },
+    });
+    const still = new Set(rows.map((r) => r.userId));
+    const io = getIO();
+    for (const uid of userIds) {
+      if (!still.has(uid)) io.in(`user:${uid}`).socketsLeave(`channel:${channelId}`);
+    }
+    return still;
+  } catch (err) {
+    console.warn(`[SecureChannel] Could not re-check the members joined to channel:${channelId}:`, err instanceof Error ? err.message : err);
+    return new Set(userIds);
+  }
+}
+
 /** What `removeSecureMembershipsInTx` removed, for the notices after the commit. */
 export interface SecureMembershipRemoval {
   userId: string;
