@@ -4,6 +4,15 @@ import { Download, RotateCw, CheckCircle, AlertCircle } from 'lucide-react';
 
 const TAURI_AVAILABLE = '__TAURI_INTERNALS__' in window;
 
+// What the updater plugin answers check() with when the build has no feed (a
+// self-hosted build without TAURI_UPDATER_ENDPOINTS: scripts/tauriSelfHosted.mjs).
+// It asks no server and there is nothing to update to: no dialog, an info line.
+const NO_FEED_ERROR = 'does not have any endpoints set';
+
+function hasNoUpdateFeed(e: unknown): boolean {
+  return (e instanceof Error ? e.message : String(e)).includes(NO_FEED_ERROR);
+}
+
 type UpdatePhase =
   | { step: 'available'; version: string; doUpdate: () => void }
   | { step: 'downloading'; progress: number; total: number }
@@ -74,6 +83,10 @@ export function UpdateChecker() {
           doUpdate: startUpdate,
         });
       } catch (e) {
+        if (hasNoUpdateFeed(e)) {
+          console.info('[Updater] This build has no update feed: no update check');
+          return;
+        }
         console.warn('[Updater] Check failed:', e);
       }
     })();
