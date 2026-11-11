@@ -12,7 +12,9 @@ import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websoc
  *  - A ChannelMember row exists only while its user is a member of the
  *    channel's space. Access is derived from the row alone, so the rows go in
  *    the transaction that ends the space membership
- *    (`removeSecureMembershipsInTx`).
+ *    (`removeSecureMembershipsInTx`), and every write of a row checks the
+ *    space membership inside its own transaction under a row lock
+ *    (`lockServerMemberRows`).
  *  - Secure-channel events are NEVER emitted to `server:{id}` — non-members
  *    must learn nothing, so every emit targets member `user:{id}` rooms or the
  *    `channel:{id}` room (whose membership is already the member set).
@@ -21,6 +23,25 @@ import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websoc
  *  - Attachment blobs are cleaned from S3 on channel deletion (they are
  *    ciphertext, but ciphertext nobody can ever read again is still storage).
  */
+
+/**
+ * Lock the `server_members` rows of `userIds` in `serverId` FOR SHARE and
+ * return the ids that are members. Called first in every transaction that
+ * writes a ChannelMember row, which then writes rows only for ids returned:
+ * a removal deletes the membership row, so it waits for this transaction and
+ * then deletes the rows written here, or it committed first and the row is
+ * not there to lock. FOR SHARE, so two writers never wait for each other.
+ * Taken BEFORE any channel or space row, the order the removal takes them
+ * in, so the two never deadlock.
+ */
+export async function lockServerMemberRows(tx: Prisma.TransactionClient, serverId: string, userIds: string[]): Promise<Set<string>> {
+  const rows = await tx.$queryRaw<Array<{ user_id: string }>>`
+    SELECT user_id FROM server_members
+    WHERE server_id = ${serverId} AND user_id = ANY(${userIds}::text[])
+    ORDER BY user_id
+    FOR SHARE`;
+  return new Set(rows.map((r) => r.user_id));
+}
 
 /** What `removeSecureMembershipsInTx` removed, for the notices after the commit. */
 export interface SecureMembershipRemoval {
@@ -46,8 +67,9 @@ export interface SecureMembershipRemoval {
  *    and is waited for.
  *  - The user's rows in every other channel of the space go, with the key
  *    shares addressed to them in those channels' scopes. They are deleted
- *    AFTER the member row: a writer that holds a lock on that row is waited
- *    for by its delete, and this later statement then sees what it wrote.
+ *    AFTER the member row: every writer of a row locks that member row first
+ *    (`lockServerMemberRows`), the delete waits for one in progress, and this
+ *    later statement then sees what it wrote; no writer can start after it.
  *
  * Statements one after the other, never in a Promise.all: they share the
  * transaction's one connection.

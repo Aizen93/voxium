@@ -1171,6 +1171,9 @@ machinery above, not a second protocol. The crypto engine is unchanged.
   in the server (and deletes the channels they created) in the SAME
   transaction as the membership row, so the departure commits whole or not at
   all; the events, the voice eviction and the blob cleanup follow the commit.
+  Every write of a row (creation, invitation) checks its user's server
+  membership inside the writing transaction, under a `FOR SHARE` lock on the
+  membership row, so a concurrent removal is ordered before or after it.
 
 ### 19.2 Scopes
 

@@ -500,3 +500,50 @@ describe('ending a space membership removes the secure-channel rows with it', ()
     expect(emitted.filter((e) => e.event === 'channel:deleted')).toEqual([]);
   });
 });
+
+// ─── Adding ─────────────────────────────────────────────────────────────────
+
+describe('a secure-channel row is written only for a current member of the space', () => {
+  it('an invite whose transaction starts after the target\'s removal committed is refused and writes nothing', async () => {
+    hooks.push({ at: 'transaction.start', run: () => removeMemberFromServer('bob', S) });
+
+    const res = await invite('bob');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('User is not a member of this server');
+    expect(isMemberOf('bob', S)).toBe(false);
+    expect(rowsOf('bob')).toEqual([]);
+  });
+
+  it('a creation whose transaction starts after an invitee\'s removal committed is refused and writes nothing', async () => {
+    hooks.push({ at: 'transaction.start', run: () => removeMemberFromServer('bob', S) });
+
+    const res = await request(app).post(`/api/v1/servers/${S}/secure-channels`).set('x-test-user', 'alice')
+      .send({ name: 'plans', memberIds: ['bob'] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('All invited users must be members of this server');
+    expect(db.channels.filter((c) => c.name === 'plans')).toEqual([]);
+    expect(rowsOf('bob')).toEqual([]);
+  });
+
+  it('a creation whose transaction starts after the CREATOR\'s removal committed is refused and writes nothing', async () => {
+    hooks.push({ at: 'transaction.start', run: () => removeMemberFromServer('bob', S) });
+
+    const res = await request(app).post(`/api/v1/servers/${S}/secure-channels`).set('x-test-user', 'bob')
+      .send({ name: 'plans', memberIds: ['alice'] });
+
+    expect(res.status).toBe(403);
+    expect(db.channels.filter((c) => c.name === 'plans')).toEqual([]);
+    expect(rowsOf('bob')).toEqual([]);
+  });
+
+  it('an invite into a channel deleted meanwhile answers 404 Channel, not a 500', async () => {
+    hooks.push({ at: 'transaction.start', run: async () => { db.channels = db.channels.filter((c) => c.id !== C); db.channelMembers = db.channelMembers.filter((m) => m.channelId !== C); } });
+
+    const res = await invite('bob');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Channel not found');
+  });
+});
