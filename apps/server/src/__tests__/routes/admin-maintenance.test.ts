@@ -392,11 +392,56 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
       expect(prismaMock.user.update).not.toHaveBeenCalled();
       expect(prismaMock.ipBan.createMany).not.toHaveBeenCalled();
       expect(prismaMock.serverJoinRequest.deleteMany).not.toHaveBeenCalled();
-      expect(prismaMock.webhook.findMany).not.toHaveBeenCalled();
       expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
       expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+      // The one top-level webhook read is the second disarm pass, after the commit
+      expect(prismaMock.webhook.findMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.webhook.findMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.auditLog.create.mock.invocationCallOrder[0]);
       // ...and the disarmed server still hears about it, after the commit
       expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 's-1' });
+    });
+
+    describe('a second disarm pass after the commit', () => {
+      const HELD = { OR: [{ lastRotatedById: 'target-1' }, { lastRotatedAt: null, createdById: 'target-1' }] };
+
+      it('disarms a webhook the account created or rotated after the transaction\'s disarm, and hints its server once', async () => {
+        const order: string[] = [];
+        prismaMock.$transaction.mockImplementation(async (arg: unknown) => {
+          const r = await runTransaction(arg);
+          order.push('commit');
+          return r;
+        });
+        // In the transaction: one held webhook, in s-1. After the commit: the
+        // same one, plus one created meanwhile in s-late
+        prismaMock.webhook.findMany
+          .mockResolvedValueOnce([{ serverId: 's-1' }])
+          .mockResolvedValueOnce([{ serverId: 's-1' }, { serverId: 's-late' }]);
+        prismaMock.webhook.updateMany.mockImplementation(async () => { order.push('disarm'); return { count: 1 }; });
+        mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+
+        const res = await ban();
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(2);
+        expect(prismaMock.webhook.updateMany).toHaveBeenLastCalledWith({ where: HELD, data: { enabled: false, creatorRemovedAt: expect.any(Date) } });
+        expect(order.filter((e) => e === 'disarm' || e === 'commit')).toEqual(['disarm', 'commit', 'disarm']);
+        // After the sessions were revoked
+        expect(order.lastIndexOf('disarm')).toBeGreaterThan(order.indexOf('force:logout'));
+        const hints = mockEmit.mock.calls.filter(([ev]: [string]) => ev === 'webhook:changed').map(([, p]: [string, { serverId: string }]) => p.serverId);
+        expect(hints.sort()).toEqual(['s-1', 's-late']);
+        mockEmit.mockReset();
+      });
+
+      it('a second pass that fails is logged and the ban still answers 200', async () => {
+        prismaMock.webhook.findMany
+          .mockResolvedValueOnce([])
+          .mockRejectedValueOnce(new Error('db gone'));
+
+        const res = await ban();
+
+        expect(res.status).toBe(200);
+        expect(consoleSpy).toHaveBeenCalledWith('[Admin] User target-1 banned, but the second webhook disarm failed:', 'db gone');
+      });
     });
 
     it('writes no audit row and signs nobody out when the transaction fails (no ban)', async () => {

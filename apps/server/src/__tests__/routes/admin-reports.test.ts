@@ -373,9 +373,25 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       expect(tx.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(tx.webhook.findMany.mock.invocationCallOrder[0]);
       expect(tx.webhook.findMany.mock.invocationCallOrder[0]).toBeLessThan(tx.report.update.mock.invocationCallOrder[0]);
       for (const topLevel of [prismaMock.report.update, prismaMock.message.deleteMany, prismaMock.message.delete, prismaMock.user.update,
-        prismaMock.serverJoinRequest.deleteMany, prismaMock.auditLog.create, prismaMock.webhook.findMany]) {
+        prismaMock.serverJoinRequest.deleteMany, prismaMock.auditLog.create]) {
         expect(topLevel).not.toHaveBeenCalled();
       }
+      // The second disarm pass runs after the commit, on the top-level client
+      expect(prismaMock.webhook.findMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.webhook.findMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.auditLog.create.mock.invocationCallOrder[1]);
+    });
+
+    it('a report resolved with a ban runs the second disarm pass too', async () => {
+      prismaMock.webhook.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ serverId: 's-late' }]);
+      prismaMock.webhook.updateMany.mockResolvedValue({ count: 1 });
+
+      const res = await resolve();
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+      expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 's-late' });
     });
 
     it('signs the banned account out right after the commit, before any notice', async () => {

@@ -101,8 +101,20 @@ async function announceCommittedBan(
     logBanFanOutFailure(userId, 'the directory recompute', err);
   }
 
+  // A second disarm pass, now that the ban has committed and the sessions are
+  // revoked: a webhook the account created or rotated after the transaction's
+  // disarm statement (its request had passed authentication before the ban),
+  // or a rotate that waited on a disarmed row and cleared its mark on commit,
+  // is held again and the first pass could not see it
+  let lateServerIds: string[] = [];
+  try {
+    lateServerIds = await disarmWebhookRowsHeldBy(prisma, userId);
+  } catch (err) {
+    logBanFanOutFailure(userId, 'the second webhook disarm', err);
+  }
+
   // The servers whose webhooks were disarmed refetch their Integrations tab
-  for (const serverId of disarmedServerIds) {
+  for (const serverId of new Set([...disarmedServerIds, ...lateServerIds])) {
     try {
       emitWebhookChanged(serverId);
     } catch (err) {
