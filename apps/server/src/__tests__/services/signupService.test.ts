@@ -527,6 +527,8 @@ describe('startRegistration — the mail is fire-and-forget', () => {
 describe('resendRegistrationCode', () => {
   const ID = 'pend-resend-1';
   const answer = { pendingId: ID, resendAfterSeconds: SIGNUP.RESEND_AFTER_SECONDS };
+  // The columns the resend reads: never the password's hash nor the code's
+  const RESEND_SELECT = { email: true, lastSentAt: true, expiresAt: true, resends: true, attempts: true };
   const row = (over: Record<string, unknown> = {}) => ({
     id: ID,
     email: 'new@example.com',
@@ -564,7 +566,7 @@ describe('resendRegistrationCode', () => {
     h.prisma.pendingRegistration.findUnique.mockResolvedValueOnce(make());
     await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
     await flush();
-    expect(prisma.pendingRegistration.findUnique).toHaveBeenCalledWith({ where: { id: ID } });
+    expect(prisma.pendingRegistration.findUnique).toHaveBeenCalledWith({ where: { id: ID }, select: RESEND_SELECT });
     nothingHappened();
   });
 
@@ -627,6 +629,8 @@ describe('resendRegistrationCode', () => {
 
     const update = h.prisma.pendingRegistration.update.mock.calls[0][0];
     expect(update.where).toEqual({ id: ID });
+    // The write returns the id, not the row with both hashes
+    expect(update.select).toEqual({ id: true });
     expect(update.data.codeHash).toBe(signupCodeHash(ID, code));
     expect(update.data.codeExpiresAt.getTime() - before).toBeGreaterThanOrEqual(SIGNUP.CODE_TTL_MINUTES * MINUTE - 1000);
     expect(update.data.codeExpiresAt.getTime() - before).toBeLessThanOrEqual(SIGNUP.CODE_TTL_MINUTES * MINUTE + 5000);
@@ -644,7 +648,7 @@ describe('resendRegistrationCode', () => {
   it('answers before the lookup does: a lookup that never returns still gets the answer', async () => {
     h.prisma.pendingRegistration.findUnique.mockReturnValueOnce(new Promise(() => {}));
     await expect(resendRegistrationCode(ID)).resolves.toEqual(answer);
-    expect(prisma.pendingRegistration.findUnique).toHaveBeenCalledWith({ where: { id: ID } });
+    expect(prisma.pendingRegistration.findUnique).toHaveBeenCalledWith({ where: { id: ID }, select: RESEND_SELECT });
     nothingHappened();
   });
 

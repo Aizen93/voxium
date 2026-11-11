@@ -1264,7 +1264,7 @@ describe('POST /api/v1/auth/reset-password', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(mockPrismaUser.findUnique).toHaveBeenCalledWith({ where: { resetToken: HASHED } });
+    expect(mockPrismaUser.findUnique).toHaveBeenCalledWith({ where: { resetToken: HASHED }, select: { id: true, resetTokenExpiresAt: true } });
     expect(mockPrismaUser.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: MOCK_USER.id },
       data: expect.objectContaining({ resetToken: null, resetTokenExpiresAt: null, tokenVersion: { increment: 1 } }),
@@ -1298,7 +1298,7 @@ describe('POST /api/v1/auth/reset-password', () => {
       .send({ token: RAW_TOKEN, password: 'brandnewpassword1' });
 
     expect(res.status).toBe(400);
-    expect(mockPrismaUser.update).toHaveBeenCalledWith({ where: { id: MOCK_USER.id }, data: { resetToken: null, resetTokenExpiresAt: null } });
+    expect(mockPrismaUser.update).toHaveBeenCalledWith({ where: { id: MOCK_USER.id }, data: { resetToken: null, resetTokenExpiresAt: null }, select: { id: true } });
     expect(revokeUserSessionsMock).not.toHaveBeenCalled();
   });
 

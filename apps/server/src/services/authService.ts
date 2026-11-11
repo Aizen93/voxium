@@ -306,6 +306,7 @@ export async function requestPasswordReset(email: string) {
           resetToken: hashedToken,
           resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
         },
+        select: { id: true },
       });
     } catch (err) {
       console.error('[Auth] Failed to store password reset token:', err instanceof Error ? err.message : err);
@@ -344,8 +345,11 @@ export async function resetPassword(token: string, newPassword: string): Promise
 
   const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
+  // Every query here selects what it uses: without a select a read, or the
+  // row an update returns, carries the password hash and the two-factor secret
   const user = await prisma.user.findUnique({
     where: { resetToken: hashedToken },
+    select: { id: true, resetTokenExpiresAt: true },
   });
 
   if (!user) throw new BadRequestError('Invalid or expired reset token');
@@ -355,6 +359,7 @@ export async function resetPassword(token: string, newPassword: string): Promise
     await prisma.user.update({
       where: { id: user.id },
       data: { resetToken: null, resetTokenExpiresAt: null },
+      select: { id: true },
     });
     throw new BadRequestError('Invalid or expired reset token');
   }
@@ -369,6 +374,7 @@ export async function resetPassword(token: string, newPassword: string): Promise
       resetTokenExpiresAt: null,
       tokenVersion: { increment: 1 },
     },
+    select: { id: true },
   });
   return { userId: user.id };
 }
@@ -377,7 +383,8 @@ export async function changePassword(userId: string, currentPassword: string, ne
   const passwordErr = validatePassword(newPassword);
   if (passwordErr) throw new BadRequestError(passwordErr);
 
-  const user = await prisma.user.findUnique({ where: { id: userId } });
+  // The hash is the one column this needs (to compare); not the two-factor secret, not the rest of the row
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, password: true } });
   if (!user) throw new UnauthorizedError('User not found');
 
   const valid = await bcrypt.compare(currentPassword, user.password);
@@ -414,6 +421,7 @@ export async function verifyEmail(token: string) {
     await prisma.user.update({
       where: { id: user.id },
       data: { emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
+      select: { id: true },
     });
     throw new BadRequestError('Invalid or expired verification link');
   }
@@ -426,6 +434,7 @@ export async function verifyEmail(token: string) {
       emailVerificationToken: null,
       emailVerificationTokenExpiresAt: null,
     },
+    select: { id: true },
   });
 }
 
@@ -480,6 +489,7 @@ export async function resendVerificationEmail(userId: string) {
         emailVerificationToken: hashedToken,
         emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       },
+      select: { id: true },
     });
   } catch (err) {
     await refundRateLimit('verifyMail', inbox);

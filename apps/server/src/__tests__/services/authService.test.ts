@@ -813,6 +813,95 @@ describe('authService — a password-reset mail that provably reached nobody ref
   });
 });
 
+describe('authService — no reset, password or verification query loads a whole row', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  const SECRET_COLUMNS = ['password', 'totpSecret', 'totpBackupCodes', 'resetToken', 'emailVerificationToken'];
+
+  beforeEach(async () => {
+    vi.mocked(prisma.user.findUnique).mockReset();
+    vi.mocked(prisma.user.update).mockReset().mockResolvedValue({ id: 'u-1', username: 'u', role: 'user', tokenVersion: 1 } as any);
+    mailCap.mockReset().mockResolvedValue(true);
+    mailSuppressed.mockReset().mockResolvedValue(false);
+    const { sendVerificationEmail, sendPasswordResetEmail } = await import('../../utils/email');
+    vi.mocked(sendVerificationEmail).mockReset().mockResolvedValue(undefined);
+    vi.mocked(sendPasswordResetEmail).mockReset().mockResolvedValue(undefined);
+  });
+
+  /** Every read and write the flows made: each names its columns, none the secrets (but the hash where it must be compared). */
+  const expectNarrow = (allowed: string[] = []) => {
+    const calls = [...vi.mocked(prisma.user.findUnique).mock.calls, ...vi.mocked(prisma.user.update).mock.calls];
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [args] of calls as [{ select?: Record<string, unknown> }][]) {
+      expect(args.select).toBeDefined();
+      for (const column of SECRET_COLUMNS) {
+        if (!allowed.includes(column)) expect(args.select).not.toHaveProperty(column);
+      }
+    }
+  };
+
+  it('resetPassword, a live token: the lookup reads the id and expiry, the write returns the id', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', resetTokenExpiresAt: new Date(Date.now() + 60_000) } as any);
+
+    await expect(resetPassword('a'.repeat(64), 'NewPassword123')).resolves.toEqual({ userId: 'u-1' });
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith(expect.objectContaining({ select: { id: true, resetTokenExpiresAt: true } }));
+    expect(prisma.user.update).toHaveBeenCalledWith(expect.objectContaining({ select: { id: true } }));
+    expectNarrow();
+  });
+
+  it('resetPassword, an expired token: the clearing write returns the id only', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', resetTokenExpiresAt: new Date(Date.now() - 60_000) } as any);
+
+    await expect(resetPassword('a'.repeat(64), 'NewPassword123')).rejects.toThrow('Invalid or expired reset token');
+
+    expect(prisma.user.update).toHaveBeenCalledWith(expect.objectContaining({ data: { resetToken: null, resetTokenExpiresAt: null }, select: { id: true } }));
+    expectNarrow();
+  });
+
+  it('changePassword reads the hash it compares and nothing else of the row', async () => {
+    const bcrypt = await import('bcryptjs');
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', password: await bcrypt.hash('OldPassword123', 4) } as any);
+
+    await changePassword('u-1', 'OldPassword123', 'NewPassword123');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { id: 'u-1' }, select: { id: true, password: true } });
+    expectNarrow(['password']);
+  });
+
+  it('verifyEmail, a live and an expired link: both writes return the id only', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', emailVerificationTokenExpiresAt: new Date(Date.now() + 60_000) } as any);
+    await verifyEmail('a'.repeat(64));
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', emailVerificationTokenExpiresAt: new Date(Date.now() - 60_000) } as any);
+    await expect(verifyEmail('b'.repeat(64))).rejects.toThrow('Invalid or expired verification link');
+
+    expect(vi.mocked(prisma.user.update).mock.calls).toHaveLength(2);
+    for (const [args] of vi.mocked(prisma.user.update).mock.calls) expect((args as any).select).toEqual({ id: true });
+    expectNarrow();
+  });
+
+  it('resendVerificationEmail: the token write returns the id only', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
+      id: 'u-1', email: 'someone@example.com', emailVerified: false, emailVerificationToken: null, emailVerificationTokenExpiresAt: null,
+    } as any);
+
+    await resendVerificationEmail('u-1');
+
+    expect(prisma.user.update).toHaveBeenCalledWith(expect.objectContaining({ select: { id: true } }));
+    // Its read keeps the previous token's digest to restore it: allowed, it never leaves the function
+    expectNarrow(['emailVerificationToken']);
+  });
+
+  it('requestPasswordReset: the background token write returns the id only', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'someone@example.com' } as any);
+
+    await requestPasswordReset('someone@example.com');
+    await flush();
+
+    expect(prisma.user.update).toHaveBeenCalledWith(expect.objectContaining({ select: { id: true } }));
+    expectNarrow();
+  });
+});
+
 describe('authService — verifyEmail', () => {
   it('rejects empty token', async () => {
     await expect(verifyEmail('')).rejects.toThrow(/Verification token is required/);
