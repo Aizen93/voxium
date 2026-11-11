@@ -60,7 +60,9 @@ test.describe('chat scroll behavior', () => {
     await page.locator('textarea').fill('my own message must land in view');
     await page.keyboard.press('Enter');
 
-    await expect(page.getByText('my own message must land in view')).toBeVisible({ timeout: 10_000 });
+    // The row, not the text: until the composer clears, the textarea holds
+    // the same words and a page-wide getByText matches both (strict mode)
+    await expect(page.locator('[data-message-id]', { hasText: 'my own message must land in view' })).toBeVisible({ timeout: 10_000 });
     // Where the list comes to rest, not a moment on its way: one that reached
     // the bottom and crept back up fails here
     await untilSettledAtBottom(scroller, 'list snapped to the bottom after own send', 4);
@@ -112,7 +114,7 @@ test.describe('chat scroll behavior', () => {
 
     await page.locator('textarea').fill('my reply must land in view');
     await page.keyboard.press('Enter');
-    await expect(page.getByText('my reply must land in view')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[data-message-id]', { hasText: 'my reply must land in view' })).toBeVisible({ timeout: 10_000 });
     await expectNewestFullyVisible('own message');
 
     const res = await request.post(`${API_URL}/channels/${general.id}/messages`, {
