@@ -456,6 +456,70 @@ describe('syncChannelVisibilityRooms — this node\'s sockets', () => {
     }
   });
 
+  // Review of #71: with every read outlasting the 30 s bound, each pass was
+  // overtaken by the next, finished, and queued itself again at the tail: 21,
+  // 41 and 121 reads at 10, 20 and 60 minutes from six requests, and a member
+  // pass queued at minute 60 waited 150 s behind them.
+  it('six requests whose reads all outlast the bound read six times, then the queue drains', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+      m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+      m.filterForUsers.mockImplementation(() => new Promise((resolve) => {
+        setTimeout(() => resolve(visibility({ 'user-1': ['ch-1'] })), 40_000);
+      }));
+
+      for (let i = 0; i < 6; i++) void syncChannelVisibilityRooms('server-slow');
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(m.filterForUsers).toHaveBeenCalledTimes(6);
+      await vi.advanceTimersByTimeAsync(50 * 60_000);
+      expect(m.filterForUsers).toHaveBeenCalledTimes(6);
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('a fresh pass of its scope is queued'));
+
+      // Drained: a member pass at minute 60 runs at once
+      m.filterForUsers.mockImplementation(async () => visibility({ 'user-1': ['ch-1'] }));
+      const member = syncChannelVisibilityRooms('server-slow', { userId: 'user-1' });
+      await vi.advanceTimersByTimeAsync(0);
+      await member;
+      expect(m.filterForUsers).toHaveBeenCalledTimes(7);
+      expect(m.localIn).toHaveBeenLastCalledWith('user:user-1');
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
+  });
+
+  it('an overtaken pass still queues a fresh pass when the later pass is not of a covering scope', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+      m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+      m.filterForUsers.mockResolvedValue(visibility({ 'user-1': ['ch-1'] }));
+      let releaseStale!: (visible: Map<string, Set<string>>) => void;
+      let releaseLater!: (visible: Map<string, Set<string>>) => void;
+      m.filterForUsers
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseStale = resolve; }))
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseLater = resolve; }));
+
+      const stale = syncChannelVisibilityRooms('server-stuck-e');          // the whole space
+      await vi.advanceTimersByTimeAsync(0);
+      void syncChannelVisibilityRooms('server-stuck-e', { userId: 'user-1' }); // one member only
+      await vi.advanceTimersByTimeAsync(LOCAL_PASS_MAX_WAIT_MS);
+      // The member pass started and is still reading when the stale one ends
+      releaseStale(visibility({ 'user-1': [] }));
+      await stale;
+
+      expect(warn).toHaveBeenCalledWith('[Visibility] An overtaken resync of server server-stuck-e on this node finished late; a fresh pass of its scope is queued');
+      releaseLater(visibility({ 'user-1': ['ch-1'] }));
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
+  });
+
   // Review of #71: an overtaken pass was never queued again, so a grant its
   // late leaves undid stayed undone until the member opened the channel or
   // reconnected (for a voice channel, only a reconnect).

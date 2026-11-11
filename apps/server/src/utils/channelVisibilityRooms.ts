@@ -291,15 +291,38 @@ function inVoiceChannel(s: { rooms?: Set<string>; data: { voiceChannelId?: strin
 
 /** One queued local pass. `started` resolves when it begins to run (its own
  *  wait is over); `overtaken` is set when the pass queued after it stopped
- *  waiting for it (see waitAtMost). */
+ *  waiting for it (see waitAtMost); `applying` once it has read the database
+ *  and begins to change rooms. */
 interface LocalPass {
   run: Promise<void>;
   started: Promise<void>;
   overtaken: boolean;
+  applying: boolean;
+  job: PassJob;
 }
 
 /** The tail of the local passes queued for each server on this node. */
 const localPassTail = new Map<string, LocalPass>();
+/** Every pass queued and not finished, per server, in queue order. */
+const livePasses = new Map<string, LocalPass[]>();
+
+/** Does a pass of scope `outer` recompute everything a pass of `inner` does? */
+function covers(outer: ResyncScope, inner: ResyncScope): boolean {
+  return (outer.userId === undefined || outer.userId === inner.userId)
+    && (outer.channelId === undefined || outer.channelId === inner.channelId);
+}
+
+/**
+ * Will a pass queued after `pass` give back whatever `pass`'s late leaves
+ * take? Yes when one of a covering scope has not begun to change rooms yet:
+ * it read (or will read) the database after `pass` did and applies after it.
+ * A later pass that is already applying, or done, may have granted rooms
+ * `pass` just took away.
+ */
+function laterPassWillApply(pass: LocalPass): boolean {
+  const list = livePasses.get(pass.job.scope.serverId) ?? [];
+  return list.slice(list.indexOf(pass) + 1).some((later) => !later.applying && covers(later.job.scope, pass.job.scope));
+}
 
 /**
  * Resync THIS node's sockets for `scope`, after the passes already queued on
@@ -366,6 +389,8 @@ function enqueuePass(job: PassJob, onStart?: () => void): Promise<void> {
     run: Promise.resolve(),
     started: new Promise<void>((resolve) => { markStarted = resolve; }),
     overtaken: false,
+    applying: false,
+    job,
   };
   pass.run = (previous ? waitAtMost(previous, serverId) : Promise.resolve())
     .then(() => {
@@ -376,19 +401,27 @@ function enqueuePass(job: PassJob, onStart?: () => void): Promise<void> {
     .then((applied) => {
       if (!applied) {
         afterFailedPass(job.scope, job.attempt);
-      } else if (pass.overtaken) {
+      } else if (pass.overtaken && !laterPassWillApply(pass)) {
         // It skipped its joins, and its late leaves may have undone what the
         // passes that ran past it granted: one fresh pass of the same scope,
-        // reading the database now, puts the rooms right (a repeat of a
-        // repeat needs another 30 s stall)
+        // reading the database now, puts the rooms right. Not when a later
+        // pass of a covering scope has yet to apply: it has the last word
+        // anyway, and requeueing then made a space whose passes all outlast
+        // the 30 s bound requeue itself forever (each overtaken by the next).
         console.warn(`[Visibility] An overtaken resync of server ${serverId} on this node finished late; a fresh pass of its scope is queued`);
         void resyncLocalSockets({ ...job.scope });
       }
     });
   localPassTail.set(serverId, pass);
+  const live = livePasses.get(serverId) ?? [];
+  live.push(pass);
+  livePasses.set(serverId, live);
   // runLocalPass never rejects and afterFailedPass never throws, so neither does `run`
   void pass.run.then(() => {
     if (localPassTail.get(serverId) === pass) localPassTail.delete(serverId);
+    const remaining = (livePasses.get(serverId) ?? []).filter((p) => p !== pass);
+    if (remaining.length > 0) livePasses.set(serverId, remaining);
+    else livePasses.delete(serverId);
   });
   return pass.run;
 }
@@ -514,7 +547,7 @@ async function waitAtMost(previous: LocalPass, serverId: string): Promise<void> 
 
 /** One pass over this node's sockets for `scope`. Resolves false when it
  *  failed (logged), true otherwise; never rejects. */
-async function runLocalPass(scope: ResyncScope, pass: Pick<LocalPass, 'overtaken'>): Promise<boolean> {
+async function runLocalPass(scope: ResyncScope, pass: Pick<LocalPass, 'overtaken' | 'applying'>): Promise<boolean> {
   const { serverId } = scope;
   try {
     const io = getIO();
@@ -569,6 +602,7 @@ async function runLocalPass(scope: ResyncScope, pass: Pick<LocalPass, 'overtaken
     for (let i = 0; i < uids.length; i += USER_BATCH) {
       const batch = uids.slice(i, i + USER_BATCH);
       const visibleByUser = await filterVisibleChannelsForUsers(batch, serverId, channels);
+      pass.applying = true;
       for (const uid of batch) {
         const visibleIds = visibleByUser.get(uid) ?? new Set<string>();
         const userSockets = socketsByUser.get(uid)!;
