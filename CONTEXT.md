@@ -70,7 +70,6 @@ Voxium/
 
 ## Known Issues
 
-- No duplicate report prevention (same user can submit multiple pending reports against the same target)
 - Admin viewing an unclaimed support ticket does not receive real-time message updates (socket only joined to `support:{ticketId}` room upon claiming)
 
 ## Remaining Work
