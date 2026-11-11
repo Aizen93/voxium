@@ -2,9 +2,10 @@ name: Desktop shell
 
 # The Tauri shell (apps/desktop/src-tauri) is the one part of the repository
 # that CI never compiled: a Cargo change could pass every check and fail at
-# the release build. This job compiles it on every change to the shell, on
-# Windows, where share_bar.rs (cfg(windows)) is part of the build and the
-# webview2-com / windows-core versions can be checked.
+# the release build. The `check` job compiles, lints and tests it on every
+# change to the shell, on Windows, where share_bar.rs (cfg(windows)) and the
+# debug-only dev_console.rs are part of the build and the webview2-com /
+# windows-core versions can be checked.
 on:
   push:
     branches: [develop]
@@ -27,6 +28,8 @@ jobs:
   check:
     name: cargo check & test (Windows)
     runs-on: windows-latest
+    # A cold build takes about six minutes; past this the run is hung
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -36,10 +39,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The action installs the minimal profile: rustfmt and clippy are asked for
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
+          components: rustfmt, clippy
 
       - name: Cache Cargo
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -52,11 +57,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
+      # No build needed: a formatting difference fails here, in seconds
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
       # A debug check embeds no frontend (build.devUrl is set), so the Vite
       # build is not needed here; --locked refuses a Cargo.lock that does not
       # match Cargo.toml instead of rewriting it.
       - name: cargo check
         run: cargo check --locked
+
+      # --all-targets lints the test modules too; any warning fails the step
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: cargo test
         run: cargo test --locked --lib
