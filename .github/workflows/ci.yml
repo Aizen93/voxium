@@ -16,6 +16,8 @@ jobs:
   lint-typecheck:
     name: Lint & Typecheck (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # About 3 minutes (unit tests included); past 20 the run is hung
+    timeout-minutes: 20
     # 26 is the supported runtime; 24 (maintenance until 2028-04) stays covered
     # for self-hosters until it is dropped from engines.node.
     strategy:
@@ -218,7 +220,10 @@ jobs:
       # RELEASE.2025-07-23, pinned by digest so a tag move cannot change what
       # runs. Its entrypoint starts the server itself (no `server /data`
       # argument) and honours MINIO_ROOT_USER / MINIO_ROOT_PASSWORD.
+      # The image pull has no limit of its own: a registry that stops
+      # answering would hold the step until the job's 30 minutes
       - name: Start MinIO and create the assets bucket
+        timeout-minutes: 5
         run: |
           docker run -d --name minio \
             -p 9000:9000 \
@@ -408,6 +413,8 @@ jobs:
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    # Seconds in practice
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -425,6 +432,8 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    # About a minute; past 15 the run is hung
+    timeout-minutes: 15
 
     steps:
       - name: Checkout

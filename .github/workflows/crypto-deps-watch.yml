@@ -21,6 +21,8 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
+    # About 3 minutes (building cargo-audit); past 20 the run is hung
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: packages/crypto-engine

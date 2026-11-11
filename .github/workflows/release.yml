@@ -19,6 +19,9 @@ jobs:
           - os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
+    # 2 to 9 minutes per platform so far (cached); 60 leaves room for a cold
+    # cache while a hung build still ends well before the runner's six hours
+    timeout-minutes: 60
 
     steps:
       - name: Disable CRLF conversion
