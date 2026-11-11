@@ -13,6 +13,7 @@ import { createRequire } from 'node:module';
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import {
   E2E_LIMITS,
+  E2E_ROW_ID_RE,
   buildE2EEnvelope,
   buildMegolmEnvelope,
   parseE2EEnvelope,
@@ -97,6 +98,8 @@ interface StoredShare {
   sessionId: string;
   body: string;
   createdAt: string;
+  /** Until when a leasing claim holds it (ms); null: never handed out under a lease. */
+  leasedUntil: number | null;
 }
 
 // Request bodies, as the client sends them to each route. The fake trusts the
@@ -137,6 +140,10 @@ interface MasterTransferAckBody {
   deviceId: string;
   ids: string[];
 }
+interface KeyShareAckBody {
+  deviceId: string;
+  ids: string[];
+}
 interface DeviceSignatureBody {
   signature: string;
 }
@@ -146,6 +153,7 @@ type FakePostBody =
   | MessageKeysBody
   | MasterTransfersBody
   | MasterTransferAckBody
+  | KeyShareAckBody
   | DeviceSignatureBody;
 
 interface StoredUser {
@@ -166,6 +174,10 @@ function createFakeServer() {
   let failSignaturePublish = false;
   let failDeviceListReads = false;
   let refuseDeviceListReads = false;
+  /** false: a server from before leases, which ignores lease=1 and has no acknowledgement route. */
+  let leasesSupported = true;
+  /** Every acknowledgement the server took, in order (routes/e2e.ts POST /keyshares/ack). */
+  const shareAcks: Array<{ userId: string; deviceId: string; ids: string[]; cleared: number }> = [];
   /** Shaped like the axios error the real client throws: the status on `response`. */
   const httpError = (status: number, message: string) =>
     Object.assign(new Error(`${status}: ${message}`), { response: { status } });
@@ -289,11 +301,23 @@ function createFakeServer() {
         if (path === '/e2e/keyshares') {
           const deviceId = query.get('deviceId')!;
           if (!userOf(userId).devices.has(deviceId)) throw new Error('403: unknown device');
-          const mine = shares.filter((s) => s.recipientUserId === userId && s.recipientDeviceId === deviceId);
+          // Mirrors utils/keyShareInbox.ts: either claim takes only shares no
+          // live lease holds, oldest first. lease=1 reserves them for
+          // KEYSHARE_LEASE_MS and deletes nothing; without it (or on a server
+          // from before leases) the claim deletes what it hands out.
+          const leasing = leasesSupported && query.get('lease') === '1';
+          const now = Date.now();
+          const mine = shares.filter(
+            (s) =>
+              s.recipientUserId === userId &&
+              s.recipientDeviceId === deviceId &&
+              (s.leasedUntil === null || s.leasedUntil <= now)
+          );
           const claimed = mine.slice(0, E2E_LIMITS.KEYSHARE_CLAIM_MAX);
-          // claim-and-delete: Olm pre-key bodies are one-shot
-          for (const s of claimed) shares.splice(shares.indexOf(s), 1);
-          return ok({ shares: claimed.map(({ recipientUserId: _r, recipientDeviceId: _d, ...rest }) => rest) });
+          if (leasing) for (const s of claimed) s.leasedUntil = now + E2E_LIMITS.KEYSHARE_LEASE_MS;
+          else for (const s of claimed) shares.splice(shares.indexOf(s), 1);
+          const page = claimed.map(({ recipientUserId: _r, recipientDeviceId: _d, leasedUntil: _l, ...rest }) => rest);
+          return ok(leasing ? { shares: page, leaseMs: E2E_LIMITS.KEYSHARE_LEASE_MS } : { shares: page });
         }
 
         const channelMatch = path.match(/^\/e2e\/channels\/([^/]+)\/devices$/);
@@ -479,7 +503,8 @@ function createFakeServer() {
               }
             }
             shares.push({
-              id: `share-${++shareSeq}`,
+              // a row id of the real shape (a cuid): the client acknowledges only those
+              id: `cmkeyshare${String(++shareSeq).padStart(12, '0')}`,
               recipientUserId: s.recipientUserId,
               recipientDeviceId: s.recipientDeviceId,
               senderUserId: userId,
@@ -488,9 +513,33 @@ function createFakeServer() {
               sessionId: s.sessionId,
               body: s.body,
               createdAt: new Date().toISOString(),
+              leasedUntil: null,
             });
           }
           return ok({ stored: body.shares.length - skipped.length, evicted: 0, skipped });
+        }
+
+        if (path === '/e2e/keyshares/ack') {
+          // routes/e2e.ts: only this device's own shares, whatever their lease says
+          if (!leasesSupported) throw httpError(404, 'not found');
+          const body = payload as KeyShareAckBody;
+          if (!userOf(userId).devices.has(body.deviceId)) throw httpError(403, 'Unknown device');
+          if (!Array.isArray(body.ids) || body.ids.length === 0 || body.ids.length > E2E_LIMITS.KEYSHARE_ACK_MAX) {
+            throw httpError(400, 'bad ids');
+          }
+          if (!body.ids.every((id) => typeof id === 'string' && E2E_ROW_ID_RE.test(id))) {
+            throw httpError(400, 'Invalid key share id');
+          }
+          let cleared = 0;
+          for (let i = shares.length - 1; i >= 0; i--) {
+            const row = shares[i];
+            if (row.recipientUserId === userId && row.recipientDeviceId === body.deviceId && body.ids.includes(row.id)) {
+              shares.splice(i, 1);
+              cleared++;
+            }
+          }
+          shareAcks.push({ userId, deviceId: body.deviceId, ids: [...body.ids], cleared });
+          return ok({ cleared });
         }
 
         if (path === '/e2e/message-keys') {
@@ -653,8 +702,15 @@ function createFakeServer() {
   return {
     users,
     shares,
+    shareAcks,
     transfers,
     apiFor,
+    /** Every lease the inbox holds runs out now. */
+    expireLeases: () => {
+      for (const s of shares) if (s.leasedUntil !== null) s.leasedUntil = Date.now() - 1;
+    },
+    /** false: answer as a server from before leases (claim-and-delete, no acknowledgement route). */
+    setLeasesSupported: (supported: boolean) => { leasesSupported = supported; },
     deviceOf: (u: string, d: string) => userOf(u).devices.get(d)!,
     userOf,
     setKeyshareUploadFailure: (fail: boolean) => { failKeyshareUploads = fail; },
@@ -1011,7 +1067,7 @@ describe('E2EService (client crypto core)', () => {
     })).text).toBe('over the cap');
   });
 
-  it('claims each key share exactly once (claimed shares are deleted server-side)', async () => {
+  it('claims each key share exactly once (imported shares are acknowledged, and so deleted server-side)', async () => {
     uniq++;
     const server = createFakeServer();
     const alice = makeParty(server, 'alice');
@@ -1026,7 +1082,7 @@ describe('E2EService (client crypto core)', () => {
     expect((await bob.service.decryptMessage({
       id: 'm1', conversationId: 'c1', authorId: alice.userId, content: envelope,
     })).text).toBe('one shot');
-    expect(server.shares.length).toBe(0); // claim-and-delete
+    expect(server.shares.length).toBe(0); // imported, then acknowledged
 
     // the next message on the same session needs no new share
     const { envelope: next } = await alice.service.encryptMessage('c1', bob.userId, 'and another');
@@ -4423,12 +4479,17 @@ describe('E2EService — lifecycle', () => {
   });
 
   describe('key shares claimed around a logout', () => {
-    // GET /e2e/keyshares deletes what it returns, so a claim answered after a
-    // logout holds the only copy of those session keys. And logout clears the
-    // tokens before it disposes the service: from then on every request,
-    // including the look-up of a sender this device has never seen, is a 401.
+    // A claim answered after a logout holds session keys this device has not
+    // stored yet (the server keeps them under a lease until they are
+    // acknowledged; a server from before leases has deleted them). And logout
+    // clears the tokens before it disposes the service: from then on every
+    // request, including the look-up of a sender this device has never seen,
+    // is a 401.
     type Party = { userId: string; keyProvider: PickleKeyProvider; vaultNamespace: string };
     const sharesFor = (server: Server, userId: string) => server.shares.filter((s) => s.recipientUserId === userId);
+    /** Still in the inbox, held for the claim that handed it out. */
+    const leasedFor = (server: Server, userId: string) =>
+      sharesFor(server, userId).filter((s) => s.leasedUntil !== null && s.leasedUntil > Date.now());
     const restart = (server: Server, party: Party) =>
       makeDevice(server, party.userId, { keyProvider: party.keyProvider, vaultNamespace: party.vaultNamespace });
     /** The key shares kept in a party's vault, read over a connection of its own. */
@@ -4468,7 +4529,7 @@ describe('E2EService — lifecycle', () => {
       });
       await restarted.initialize();
       await gate.held;
-      expect(sharesFor(server, alice.userId)).toHaveLength(0); // deleted on read
+      expect(leasedFor(server, alice.userId)).toHaveLength(1); // handed out under a lease, not deleted
 
       server.setLoggedOut(alice.userId, true); // logout: the tokens go first…
       const tornDown = restarted.dispose(); // …then the service
@@ -5031,7 +5092,9 @@ describe('E2EService — lifecycle', () => {
     });
 
     it('writes a claim answer that arrives after the deadline, raw, for the next start', async () => {
-      // The server deleted the page when it answered; the teardown has run.
+      // The server leased the page when it answered; the teardown has run.
+      // Written raw, the next start imports it at once instead of waiting for
+      // the lease to pass, and acknowledges it then.
       uniq++;
       const server = createFakeServer();
       const alice = makeParty(server, 'alice');
@@ -5057,16 +5120,19 @@ describe('E2EService — lifecycle', () => {
       });
       await restarted.initialize();
       await gate.held;
-      expect(sharesFor(server, alice.userId)).toHaveLength(0); // deleted on read
+      expect(leasedFor(server, alice.userId)).toHaveLength(1); // leased, not deleted
       await restarted.dispose(); // the deadline passes with the answer still on its way
       expect((restarted as unknown as { tornDown: boolean }).tornDown).toBe(true);
       gate.release();
       await vi.waitFor(async () => expect(await pendingIn(alice)).toHaveLength(1));
+      // the torn-down service asked the server nothing more
+      expect(server.shareAcks).toHaveLength(0);
 
       const again = restart(server, alice);
       await again.service.initialize();
       const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
       expect((await again.service.decryptMessage(message)).text).toBe('answered after the deadline');
+      expect(sharesFor(server, alice.userId)).toHaveLength(0); // acknowledged by the next start
     });
 
     it('refuses initialize() once disposed, while a claim still holds the teardown back', async () => {
@@ -5430,6 +5496,309 @@ describe('E2EService — lifecycle', () => {
         await again.service.initialize();
         const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
         expect((await again.service.decryptMessage(message)).text).toBe('from someone new');
+      });
+    });
+
+    describe('under a lease: a share is acknowledged only once this device is done with it (spec §12.3)', () => {
+      /** The fake's client, every call recorded in order, query string included. */
+      const recording = (base: ReturnType<Server['apiFor']>) => {
+        const calls: string[] = [];
+        const verb = (name: 'get' | 'put' | 'post' | 'delete') => async (url: string, body?: unknown) => {
+          calls.push(`${name.toUpperCase()} ${url}`);
+          return (base[name] as (url: string, body?: unknown) => Promise<unknown>)(url, body);
+        };
+        return { api: { get: verb('get'), put: verb('put'), post: verb('post'), delete: verb('delete') }, calls };
+      };
+      /** The claims and acknowledgements among recorded calls, in order. */
+      const inboxCalls = (calls: string[]) =>
+        calls.flatMap((c) =>
+          c.startsWith('GET /e2e/keyshares?') ? ['claim'] : c === 'POST /e2e/keyshares/ack' ? ['ack'] : []
+        );
+      const over = (party: Party, api: unknown) =>
+        serviceOver(party.userId, api, { keyProvider: party.keyProvider, vaultNamespace: party.vaultNamespace });
+      const warned = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.flat().map(String).join('\n');
+
+      it('asks for a lease, and acknowledges a share once its session is stored', async () => {
+        const { server, alice, message } = await bobWroteWhileAliceWasAway('leased, imported, acknowledged');
+        const [row] = sharesFor(server, alice.userId);
+        const rec = recording(server.apiFor(alice.userId));
+        const again = over(alice, rec.api);
+        await again.initialize();
+        await again.claimMasterTransfers(); // queued behind the start-up claim
+
+        expect(rec.calls.find((c) => c.startsWith('GET /e2e/keyshares?'))).toMatch(/[?&]lease=1(&|$)/);
+        expect(inboxCalls(rec.calls)).toEqual(['claim', 'ack']);
+        expect(server.shareAcks).toEqual([{ userId: alice.userId, deviceId: again.deviceId, ids: [row.id], cleared: 1 }]);
+        expect(sharesFor(server, alice.userId)).toHaveLength(0);
+        expect((await again.decryptMessage(message)).text).toBe('leased, imported, acknowledged');
+      });
+
+      it('claims a share again once its lease has passed when the answer that held it was lost', async () => {
+        const { server, alice, message } = await bobWroteWhileAliceWasAway('claimed again after its lease');
+        const base = server.apiFor(alice.userId);
+        let lose = true;
+        const api = {
+          ...base,
+          async get(url: string) {
+            const res = await base.get(url); // the server answered, and took the page…
+            if (lose && url.startsWith('/e2e/keyshares?')) {
+              lose = false;
+              throw new Error('network error: the answer never arrived'); // …which never came back
+            }
+            return res;
+          },
+        };
+        const again = over(alice, api);
+        await again.initialize();
+        await again.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+        expect(await pendingIn(alice)).toHaveLength(0); // nothing reached this device
+        expect(leasedFor(server, alice.userId)).toHaveLength(1); // and the server still holds it
+
+        server.expireLeases();
+        expect((await again.decryptMessage(message)).text).toBe('claimed again after its lease');
+        expect(sharesFor(server, alice.userId)).toHaveLength(0);
+      });
+
+      it.each([
+        ['its sender cannot be looked up (rate limited)', 'look-up'],
+        ['its session cannot be stored (a full disk)', 'storage'],
+      ])('leaves a share in the inbox while %s, and acknowledges it once imported', async (_label, failure) => {
+        const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept through a passing failure');
+        const again = restart(server, alice);
+        if (failure === 'look-up') server.setDeviceListReadFailure(true);
+        else
+          vi.spyOn((again.service as unknown as { vault: E2EVault }).vault, 'putInboundGroupSession').mockRejectedValueOnce(
+            new DOMException('The quota has been exceeded.', 'QuotaExceededError')
+          );
+        await again.service.initialize();
+        await again.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+
+        expect((await pendingIn(alice)).map((p) => p.record.attempts)).toEqual([0]); // kept here…
+        expect(sharesFor(server, alice.userId)).toHaveLength(1); // …and not acknowledged
+        expect(server.shareAcks).toHaveLength(0);
+
+        server.setDeviceListReadFailure(false);
+        await missOn(again, bob.userId, ['cGFzc2luZw']); // the next claim imports it
+        expect(await pendingIn(alice)).toHaveLength(0);
+        expect(sharesFor(server, alice.userId)).toHaveLength(0);
+        expect((await again.service.decryptMessage(message)).text).toBe('kept through a passing failure');
+      });
+
+      it('acknowledges a share handed out again after its session was imported, without counting it unusable', async () => {
+        // What a lost acknowledgement leads to once the lease passes: the same
+        // share, whose Olm message this device has already consumed.
+        const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('imported once, handed out again');
+        const [row] = sharesFor(server, alice.userId);
+        const base = server.apiFor(alice.userId);
+        let page: unknown = null;
+        let replay = false;
+        const api = {
+          ...base,
+          async get(url: string) {
+            const res = await base.get(url);
+            if (!url.startsWith('/e2e/keyshares?')) return res;
+            const shares = (res as { data: { data: { shares: unknown[] } } }).data.data.shares;
+            if (page === null && shares.length > 0) page = structuredClone(res);
+            else if (replay && page !== null) {
+              replay = false;
+              return structuredClone(page);
+            }
+            return res;
+          },
+        };
+        const again = over(alice, api);
+        await again.initialize();
+        await again.claimMasterTransfers(); // queued behind the start-up claim
+        expect((await again.decryptMessage(message)).text).toBe('imported once, handed out again');
+
+        const warn = vi.spyOn(console, 'warn');
+        try {
+          replay = true;
+          await missOn({ service: again }, bob.userId, ['YWdhaW4']);
+          expect(warned(warn)).not.toMatch(/discarding an unusable key share/);
+        } finally {
+          warn.mockRestore();
+        }
+        expect(server.shareAcks.map((a) => a.ids)).toEqual([[row.id], [row.id]]); // acknowledged again
+        expect(await pendingIn(alice)).toHaveLength(0);
+        // the session it carried is untouched
+        expect((await again.decryptMessage(message)).text).toBe('imported once, handed out again');
+        await again.dispose();
+        const later = restart(server, alice);
+        await later.service.initialize();
+        expect((await later.service.decryptMessage(message)).text).toBe('imported once, handed out again');
+      });
+
+      it('sends an acknowledgement that never reached the server at the next start, before it claims', async () => {
+        const { server, alice, message } = await bobWroteWhileAliceWasAway('acknowledged at the next start');
+        const [row] = sharesFor(server, alice.userId);
+        const flaky = failingOnce(server.apiFor(alice.userId), (verb, url) => verb === 'post' && url === '/e2e/keyshares/ack');
+        flaky.arm();
+        const first = over(alice, flaky.api);
+        const warn = vi.spyOn(console, 'warn');
+        try {
+          await first.initialize();
+          await first.claimMasterTransfers(); // queued behind the start-up claim
+          expect(warned(warn)).toMatch(/could not acknowledge[\s\S]*503/);
+        } finally {
+          warn.mockRestore();
+        }
+        expect((await first.decryptMessage(message)).text).toBe('acknowledged at the next start');
+        expect(server.shareAcks).toHaveLength(0);
+        expect(leasedFor(server, alice.userId)).toHaveLength(1);
+        await first.dispose();
+
+        server.expireLeases(); // the next start comes after the lease passed
+        const rec = recording(server.apiFor(alice.userId));
+        const second = over(alice, rec.api);
+        await second.initialize();
+        await second.claimMasterTransfers(); // queued behind the start-up claim
+        // sent first, so the server does not hand the share out again
+        expect(inboxCalls(rec.calls)).toEqual(['ack', 'claim']);
+        expect(server.shareAcks.map((a) => a.ids)).toEqual([[row.id]]);
+        expect(sharesFor(server, alice.userId)).toHaveLength(0);
+      });
+
+      it('sends again, at the next claim of the same start, an acknowledgement whose answer was lost', async () => {
+        const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('acknowledged, answer lost');
+        const [row] = sharesFor(server, alice.userId);
+        const base = server.apiFor(alice.userId);
+        let lose = true;
+        const rec = recording({
+          ...base,
+          async post(url: string, body?: Parameters<typeof base.post>[1]) {
+            const res = await base.post(url, body); // the server took it…
+            if (lose && url === '/e2e/keyshares/ack') {
+              lose = false;
+              throw new Error('network error: the answer never arrived'); // …and the answer was lost
+            }
+            return res;
+          },
+        });
+        const again = over(alice, rec.api);
+        await again.initialize();
+        await again.claimMasterTransfers(); // queued behind the start-up claim
+        expect((await again.decryptMessage(message)).text).toBe('acknowledged, answer lost');
+
+        rec.calls.length = 0;
+        await missOn({ service: again }, bob.userId, ['YW5zd2Vy']);
+        expect(inboxCalls(rec.calls)).toEqual(['ack', 'claim']);
+        expect(server.shareAcks.map((a) => [a.ids, a.cleared])).toEqual([
+          [[row.id], 1],
+          [[row.id], 0], // the server had it already: counted nothing, and that settles it
+        ]);
+        // settled: the claim after that sends nothing more
+        rec.calls.length = 0;
+        await missOn({ service: again }, bob.userId, ['c2V0dGxlZA']);
+        expect(inboxCalls(rec.calls)).toEqual(['claim']);
+      });
+
+      it('acknowledges nothing from a claim a logout overtook, and the next start sends its acknowledgement first', async () => {
+        uniq++;
+        const server = createFakeServer();
+        const alice = makeParty(server, 'alice');
+        const bob = makeParty(server, 'bob');
+        await alice.service.initialize();
+        await bob.service.initialize();
+        await flushQueue();
+        await alice.service.fetchDeviceList(bob.userId, true); // Bob is known: his share imports without the network
+        await alice.service.dispose();
+        const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'claimed at logout');
+        const [row] = sharesFor(server, alice.userId);
+
+        const gate = holdingApi(
+          server.apiFor(alice.userId),
+          (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+          'response'
+        );
+        const restarted = over(alice, gate.api);
+        await restarted.initialize();
+        await gate.held;
+        server.setLoggedOut(alice.userId, true); // logout: the tokens go first…
+        const tornDown = restarted.dispose(); // …then the service
+        const writesBefore = gate.writes.length;
+        gate.release();
+        await tornDown;
+        server.setLoggedOut(alice.userId, false);
+
+        // the claim imported the share and asked the server nothing more
+        expect(gate.writes.slice(writesBefore)).toEqual([]);
+        expect(await pendingIn(alice)).toHaveLength(0);
+        expect(leasedFor(server, alice.userId)).toHaveLength(1);
+
+        const rec = recording(server.apiFor(alice.userId));
+        const again = over(alice, rec.api);
+        await again.initialize();
+        await again.claimMasterTransfers(); // queued behind the start-up claim
+        expect(inboxCalls(rec.calls)).toEqual(['ack', 'claim']);
+        expect(server.shareAcks.map((a) => a.ids)).toEqual([[row.id]]);
+        expect(sharesFor(server, alice.userId)).toHaveLength(0);
+        const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+        expect((await again.decryptMessage(message)).text).toBe('claimed at logout');
+      });
+
+      it('keeps a kept share’s refused look-ups counted when the server hands it out again, and acknowledges it when dropped', async () => {
+        // Kept because its sender could not be checked, the share stays in the
+        // inbox unacknowledged, and comes back at every claim after its lease:
+        // that must neither reset its count nor import it a second time.
+        const { server, alice, bob } = await claimAnsweredAfterLogout({ aliceKnowsBob: false });
+        server.setDeviceListReadRefusal(true); // a definitive answer: 403
+        for (let start = 1; start <= 5; start++) {
+          server.expireLeases(); // each start comes after the lease passed
+          const again = restart(server, alice);
+          await again.service.initialize();
+          await missOn(again, bob.userId, [`cmVkZWxpdmVyZWQ${start}`]); // another claim of the same start
+          const kept = await pendingIn(alice);
+          if (start < 5) {
+            expect(kept.map((p) => p.record.attempts)).toEqual([start]);
+            expect(sharesFor(server, alice.userId)).toHaveLength(1); // still there, unacknowledged
+          } else {
+            expect(kept).toHaveLength(0);
+            expect(sharesFor(server, alice.userId)).toHaveLength(0); // dropped for good, so acknowledged
+          }
+          await again.service.dispose();
+        }
+        expect(server.shareAcks).toHaveLength(1);
+      });
+
+      it('drops unsent an acknowledgement owed for longer than the server keeps a share', async () => {
+        const { server, alice } = await bobWroteWhileAliceWasAway('beside an old debt');
+        const [row] = sharesFor(server, alice.userId);
+        const swept = 'cmkeyshare-swept-long-ago';
+        const vault = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
+        await vault.open();
+        vi.spyOn(Date, 'now').mockReturnValueOnce(Date.now() - E2E_LIMITS.KEYSHARE_MAX_AGE_MS - 60_000);
+        await vault.putShareAck(swept);
+        vault.close();
+
+        const again = restart(server, alice);
+        await again.service.initialize();
+        await again.service.claimMasterTransfers(); // queued behind the start-up claim
+        expect(server.shareAcks.map((a) => a.ids)).toEqual([[row.id]]);
+        const reader = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
+        await reader.open();
+        try {
+          expect(await reader.listShareAcks()).toEqual([]);
+        } finally {
+          reader.close();
+        }
+      });
+
+      it('never acknowledges what a server without leases handed out (it deleted it on read)', async () => {
+        const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('from a server without leases');
+        server.setLeasesSupported(false);
+        server.setDeviceListReadFailure(true); // kept at first, imported by a later claim
+        const rec = recording(server.apiFor(alice.userId));
+        const again = over(alice, rec.api);
+        await again.initialize();
+        await again.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+        expect(await pendingIn(alice)).toHaveLength(1);
+        server.setDeviceListReadFailure(false);
+        await missOn({ service: again }, bob.userId, ['bm9sZWFzZQ']);
+
+        expect((await again.decryptMessage(message)).text).toBe('from a server without leases');
+        expect(rec.calls.find((c) => c.startsWith('GET /e2e/keyshares?'))).toMatch(/[?&]lease=1(&|$)/);
+        expect(inboxCalls(rec.calls).filter((c) => c === 'ack')).toEqual([]);
       });
     });
   });
