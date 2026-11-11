@@ -297,15 +297,18 @@ describe('secureChannelLifecycle', () => {
       expect(still).toEqual(new Set(['u1']));
     });
 
-    it('a failed re-read is logged and touches no room', async () => {
+    it('a failed re-read confirms nobody: every join is taken back, and it is logged', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       prismaMock.channelMember.findMany.mockRejectedValue(new Error('db hiccup'));
       try {
-        const still = await undoRoomJoinsOfRemovedMembers('sec-1', ['u1']);
+        const still = await undoRoomJoinsOfRemovedMembers('sec-1', ['u1', 'u2']);
 
-        expect(still).toEqual(new Set(['u1']));
-        expect(mockSocketsLeave).not.toHaveBeenCalled();
-        expect(warn).toHaveBeenCalledWith('[SecureChannel] Could not re-check the members joined to channel:sec-1:', 'db hiccup');
+        expect(still).toEqual(new Set());
+        expect(mockIn).toHaveBeenCalledWith('user:u1');
+        expect(mockIn).toHaveBeenCalledWith('user:u2');
+        expect(mockSocketsLeave).toHaveBeenCalledTimes(2);
+        expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-1');
+        expect(warn).toHaveBeenCalledWith('[SecureChannel] Could not re-check the members joined to channel:sec-1; taking every join back:', 'db hiccup');
       } finally {
         warn.mockRestore();
         prismaMock.channelMember.findMany.mockReset().mockResolvedValue([]);

@@ -53,25 +53,33 @@ export async function lockServerMemberRows(tx: Prisma.TransactionClient, serverI
  * the write and the join already sent its room leave, and the join, applied
  * after it, would have put the departed member's sockets back in the room
  * until they reconnect. Room operations by `user:{id}`, adapter-wide, never
- * `fetchSockets()`. Answers the users still members; never throws (a failed
- * read is logged and leaves the rooms as they are).
+ * `fetchSockets()`. Answers the users confirmed still members; never throws.
+ * A read that fails confirms nobody: every join is taken back (logged), since
+ * sockets left in the room of a channel whose membership could not be
+ * confirmed is the wrong default; a member opens the channel again, or
+ * reconnects, and is back in the room.
  */
 export async function undoRoomJoinsOfRemovedMembers(channelId: string, userIds: string[]): Promise<Set<string>> {
+  let still: Set<string>;
   try {
     const rows = await prisma.channelMember.findMany({
       where: { channelId, userId: { in: userIds } },
       select: { userId: true },
     });
-    const still = new Set(rows.map((r) => r.userId));
+    still = new Set(rows.map((r) => r.userId));
+  } catch (err) {
+    console.warn(`[SecureChannel] Could not re-check the members joined to channel:${channelId}; taking every join back:`, err instanceof Error ? err.message : err);
+    still = new Set();
+  }
+  try {
     const io = getIO();
     for (const uid of userIds) {
       if (!still.has(uid)) io.in(`user:${uid}`).socketsLeave(`channel:${channelId}`);
     }
-    return still;
   } catch (err) {
-    console.warn(`[SecureChannel] Could not re-check the members joined to channel:${channelId}:`, err instanceof Error ? err.message : err);
-    return new Set(userIds);
+    console.warn(`[SecureChannel] Could not take the joins to channel:${channelId} back:`, err instanceof Error ? err.message : err);
   }
+  return still;
 }
 
 /** What `removeSecureMembershipsInTx` removed, for the notices after the commit. */
