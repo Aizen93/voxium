@@ -11,6 +11,10 @@
 //
 // It changes `csp` only: `tauri dev` runs under `devCsp`, the same policy
 // plus the dev server's localhost:3001, which no release build names.
+//
+// This is the project's own release: tauri.conf.json's hosts, update feed and
+// signing key. A build for another server is `pnpm tauri:build`
+// (tauri-build-config.mjs), which replaces all three.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

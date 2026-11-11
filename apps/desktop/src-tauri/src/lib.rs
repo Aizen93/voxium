@@ -517,3 +517,38 @@ mod session_secret_tests {
         assert!(!valid_session_secret_value("\u{7f}"));
     }
 }
+
+/// The updater plugin is registered in every build and deserialises
+/// `plugins > updater` when the app starts: a block it cannot read is an app
+/// that does not open. A self-hosted build without a feed ships the emptied
+/// block `scripts/tauriSelfHosted.mjs` writes (its test pins the same JSON).
+#[cfg(test)]
+mod updater_config_tests {
+    use tauri_plugin_updater::Config;
+
+    #[test]
+    fn a_build_without_a_feed_starts_with_the_emptied_block() {
+        let none: Config =
+            serde_json::from_value(serde_json::json!({ "endpoints": [], "pubkey": "" }))
+                .expect("the no-updater block must deserialise");
+        assert!(none.endpoints.is_empty());
+        assert!(none.pubkey.is_empty());
+    }
+
+    #[test]
+    fn a_removed_block_or_one_without_a_key_would_stop_the_app() {
+        assert!(serde_json::from_value::<Config>(serde_json::Value::Null).is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({ "endpoints": [] })).is_err());
+    }
+
+    #[test]
+    fn the_official_block_in_tauri_conf_json_deserialises_with_its_feed() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json is JSON");
+        let official: Config = serde_json::from_value(conf["plugins"]["updater"].clone())
+            .expect("the release updater block must deserialise");
+        assert!(!official.endpoints.is_empty());
+        assert!(official.endpoints.iter().all(|url| url.scheme() == "https"));
+        assert!(!official.pubkey.is_empty());
+    }
+}
