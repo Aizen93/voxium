@@ -91,6 +91,7 @@ vi.mock('../../utils/redis', () => ({
 vi.mock('../../utils/email', () => ({
   sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
+  describeEmailError: vi.fn((err: unknown) => (err instanceof Error ? err.message : String(err))),
   MailSuppressedError: class MailSuppressedError extends Error {},
 }));
 
@@ -168,6 +169,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   normalizeIp: (ip: string) => (ip.startsWith('::ffff:') ? ip.slice(7) : ip),
   subnetOf: (ip: string) => ip,
   consumeMailCap: vi.fn().mockResolvedValue(true),
+  refundRateLimit: vi.fn().mockResolvedValue(undefined),
   getSubnetRegistrationPressure: vi.fn().mockResolvedValue(0),
   getDomainRegistrationCount: vi.fn().mockResolvedValue(0),
   countDomainRegistration: vi.fn().mockResolvedValue(undefined),
@@ -1681,5 +1683,63 @@ describe('DELETE /api/v1/auth/account', () => {
   it('requires authentication', async () => {
     const res = await request(app).delete('/api/v1/auth/account').send({ password: PASSWORD });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /api/v1/auth/resend-verification', () => {
+  function authAs() {
+    // Auth middleware lookup: a signed-in, not yet verified account
+    mockPrismaUser.findUnique.mockResolvedValueOnce({
+      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+    });
+    return generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username, tokenVersion: 0 });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrismaMailSuppression.findUnique.mockResolvedValue(null);
+    mockPrismaUser.update.mockResolvedValue({});
+    mockPrismaUser.updateMany = vi.fn().mockResolvedValue({ count: 1 });
+  });
+
+  const resend = (token: string) => request(app)
+    .post('/api/v1/auth/resend-verification')
+    .set('Authorization', `Bearer ${token}`);
+
+  it('answers 200 when the mail goes out', async () => {
+    const token = authAs();
+    mockPrismaUser.findUnique.mockResolvedValueOnce({
+      id: MOCK_USER.id, email: MOCK_USER.email, emailVerified: false,
+      emailVerificationToken: null, emailVerificationTokenExpiresAt: null,
+    });
+
+    const res = await resend(token);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, message: 'Verification email sent.' });
+  });
+
+  it('answers 503 with the sentence the client maps when the mail cannot be sent, and restores the previous link', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const previousExpiry = new Date('2026-11-12T09:00:00Z');
+    const token = authAs();
+    mockPrismaUser.findUnique.mockResolvedValueOnce({
+      id: MOCK_USER.id, email: MOCK_USER.email, emailVerified: false,
+      emailVerificationToken: 'c'.repeat(64), emailVerificationTokenExpiresAt: previousExpiry,
+    });
+
+    try {
+      const res = await resend(token);
+
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ success: false, error: 'The verification email could not be sent — please try again later' });
+      expect(mockPrismaUser.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: { emailVerificationToken: 'c'.repeat(64), emailVerificationTokenExpiresAt: previousExpiry },
+      }));
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 });

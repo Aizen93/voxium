@@ -5,12 +5,12 @@ import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
 import type { UserRole, RegistrationConsent } from '@voxium/shared';
-import { AppError, BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from '../utils/errors';
+import { AppError, BadRequestError, ConflictError, ForbiddenError, ServiceUnavailableError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, canonicalizeEmail, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError, MailSuppressedError } from '../utils/email';
 import { isMailSuppressed } from '../utils/mailSuppression';
 import { isJwtVerifyError } from '../utils/jwtErrors';
-import { consumeMailCap, normalizeIp } from '../middleware/rateLimiter';
+import { consumeMailCap, refundRateLimit, normalizeIp } from '../middleware/rateLimiter';
 import { consentIsRequired } from '../middleware/auth';
 import { verifyTOTP } from './totpService';
 import { deleteUserAccount } from '../utils/accountDeletion';
@@ -419,10 +419,18 @@ export async function verifyEmail(token: string) {
 /** What a resend answers for a mailbox on the suppression list (mapped in the desktop's serverErrors.ts). */
 export const MAIL_BLOCKED_MESSAGE = 'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again';
 
+/** What a resend answers when the mail could not be sent (mapped in the desktop's serverErrors.ts). */
+export const VERIFICATION_SEND_FAILED_MESSAGE = 'The verification email could not be sent — please try again later';
+
 export async function resendVerificationEmail(userId: string) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true, emailVerified: true },
+    // The current link's digest and expiry too, so a send that fails can put
+    // them back: they never leave this function.
+    select: {
+      id: true, email: true, emailVerified: true,
+      emailVerificationToken: true, emailVerificationTokenExpiresAt: true,
+    },
   });
   if (!user) throw new UnauthorizedError('User not found');
   if (user.emailVerified) throw new BadRequestError('Email already verified');
@@ -440,26 +448,64 @@ export async function resendVerificationEmail(userId: string) {
   // really owns the address. 5 mails to one mailbox per day is the ceiling
   // no matter which account, IP, or cadence asks. Fail open on store errors:
   // a broken counter must not lock legitimate users out of verification.
-  if (!(await consumeMailCap('verifyMail', canonicalizeEmail(user.email)))) {
+  const inbox = canonicalizeEmail(user.email);
+  if (!(await consumeMailCap('verifyMail', inbox))) {
     throw new BadRequestError('Too many verification emails requested — try again tomorrow');
   }
 
   const rawToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-  await prisma.user.update({
-    where: { id: user.id },
-    data: {
-      emailVerificationToken: hashedToken,
-      emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-    },
-  });
+  // The token is stored BEFORE the send, so a link never arrives ahead of the
+  // row that makes it work. Every way out below that sends nothing gives the
+  // mailbox its point back (refunded, never a read in place of the consume)
+  // and, once the new token is written, puts the previous link back in force.
+  try {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerificationToken: hashedToken,
+        emailVerificationTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      },
+    });
+  } catch (err) {
+    await refundRateLimit('verifyMail', inbox);
+    throw err;
+  }
 
   try {
     await sendVerificationEmail(user.email, rawToken);
   } catch (err) {
+    await refundRateLimit('verifyMail', inbox);
+    await restorePreviousVerificationLink(user, hashedToken);
     if (err instanceof MailSuppressedError) throw new BadRequestError(MAIL_BLOCKED_MESSAGE);
-    throw err;
+    // Never the error object: an SMTP refusal quotes the recipient address
+    console.error('[Auth] Failed to send verification email:', describeEmailError(err));
+    throw new ServiceUnavailableError(VERIFICATION_SEND_FAILED_MESSAGE);
+  }
+}
+
+/**
+ * Put back the verification token a failed resend replaced, so the link the
+ * user already holds keeps working. Only while the row still holds the token
+ * this resend wrote: a resend that succeeded meanwhile keeps its own, and a
+ * verification that landed meanwhile keeps its cleared token. Never throws:
+ * the caller is already answering the failed send.
+ */
+async function restorePreviousVerificationLink(
+  previous: { id: string; emailVerificationToken: string | null; emailVerificationTokenExpiresAt: Date | null },
+  replacedBy: string,
+): Promise<void> {
+  try {
+    await prisma.user.updateMany({
+      where: { id: previous.id, emailVerificationToken: replacedBy },
+      data: {
+        emailVerificationToken: previous.emailVerificationToken,
+        emailVerificationTokenExpiresAt: previous.emailVerificationTokenExpiresAt,
+      },
+    });
+  } catch (err) {
+    console.error('[Auth] Failed to restore the previous verification link after a failed send:', err instanceof Error ? err.message : err);
   }
 }
 

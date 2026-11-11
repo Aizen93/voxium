@@ -9,6 +9,7 @@ vi.mock('../../utils/prisma', () => ({
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     ipBan: { findUnique: vi.fn() },
     ipRecord: { upsert: vi.fn(), create: vi.fn() },
@@ -37,8 +38,9 @@ vi.mock('../../utils/redis', () => ({
   getRedis: () => ({ incr: redisIncr, expire: redisExpire, get: redisGet }),
 }));
 
-const { mailCap } = vi.hoisted(() => ({
+const { mailCap, refund } = vi.hoisted(() => ({
   mailCap: vi.fn().mockResolvedValue(true),
+  refund: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../../middleware/rateLimiter', async (importOriginal) => {
   // normalizeIp is a pure function with no store behind it — the real one is
@@ -48,6 +50,7 @@ vi.mock('../../middleware/rateLimiter', async (importOriginal) => {
   return {
     normalizeIp: actual.normalizeIp,
     consumeMailCap: mailCap,
+    refundRateLimit: refund,
   };
 });
 
@@ -167,17 +170,23 @@ describe('authService — a mailbox that blocked Voxium mail', () => {
     await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({ statusCode: 400, message: /blocked/ });
   });
 
-  it('resend still surfaces a transport failure as the error it is', async () => {
-    const { sendVerificationEmail } = await import('../../utils/email');
+  it('resend gives the point back and restores the previous link when the sender refuses a blocked mailbox', async () => {
+    const { sendVerificationEmail, MailSuppressedError } = await import('../../utils/email');
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({
       id: 'user-1', email: 'victim@example.com', emailVerified: false,
+      emailVerificationToken: 'a'.repeat(64), emailVerificationTokenExpiresAt: new Date('2026-11-12T10:00:00Z'),
     } as any);
     vi.mocked(prisma.user.update).mockResolvedValueOnce({} as any);
-    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new Error('relay refused'));
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new MailSuppressedError());
+    refund.mockClear();
+    vi.mocked(prisma.user.updateMany).mockClear();
 
-    await expect(resendVerificationEmail('user-1')).rejects.toThrow('relay refused');
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({ statusCode: 400, message: /blocked/ });
+    expect(refund).toHaveBeenCalledWith('verifyMail', 'victim@example.com');
+    expect(prisma.user.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: { emailVerificationToken: 'a'.repeat(64), emailVerificationTokenExpiresAt: new Date('2026-11-12T10:00:00Z') },
+    }));
   });
-
 
   it('password reset answers as always and logs the skipped mail at WARN', async () => {
     const { sendPasswordResetEmail, MailSuppressedError } = await import('../../utils/email');
@@ -194,6 +203,146 @@ describe('authService — a mailbox that blocked Voxium mail', () => {
     expect(error).not.toHaveBeenCalled();
     warn.mockRestore();
     error.mockRestore();
+  });
+});
+
+describe('authService — a verification resend whose mail cannot be sent', () => {
+  const PREVIOUS_DIGEST = 'b'.repeat(64);
+  const PREVIOUS_EXPIRY = new Date('2026-11-12T08:30:00Z');
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    mailSuppressed.mockReset().mockResolvedValue(false);
+    mailCap.mockReset().mockResolvedValue(true);
+    refund.mockReset().mockResolvedValue(undefined);
+    vi.mocked(prisma.user.update).mockReset().mockResolvedValue({} as any);
+    vi.mocked(prisma.user.updateMany).mockReset().mockResolvedValue({ count: 1 } as any);
+    vi.mocked(prisma.user.findUnique).mockReset().mockResolvedValue({
+      id: 'user-1', email: 'J.Doe@gmail.com', emailVerified: false,
+      emailVerificationToken: PREVIOUS_DIGEST, emailVerificationTokenExpiresAt: PREVIOUS_EXPIRY,
+    } as any);
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(sendVerificationEmail).mockReset().mockResolvedValue(undefined);
+    errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorLog.mockRestore();
+  });
+
+  /** The digest the resend wrote before it tried to send. */
+  const writtenDigest = () => (vi.mocked(prisma.user.update).mock.calls[0][0] as any).data.emailVerificationToken as string;
+
+  it('answers a 503 the client can show, instead of a bare 500', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({
+      statusCode: 503,
+      message: 'The verification email could not be sent — please try again later',
+    });
+  });
+
+  it('gives the mailbox its daily point back, keyed on the canonical inbox the consume used', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({ statusCode: 503 });
+
+    expect(mailCap).toHaveBeenCalledWith('verifyMail', 'jdoe@gmail.com');
+    expect(refund).toHaveBeenCalledTimes(1);
+    expect(refund).toHaveBeenCalledWith('verifyMail', 'jdoe@gmail.com');
+  });
+
+  it('puts the previous link back in force, only while the row still holds the token this resend wrote', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({ statusCode: 503 });
+
+    // Written first (a link never arrives before its token), then restored
+    expect(writtenDigest()).toMatch(/^[0-9a-f]{64}$/);
+    expect(writtenDigest()).not.toBe(PREVIOUS_DIGEST);
+    expect(prisma.user.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.user.updateMany).toHaveBeenCalledWith({
+      where: { id: 'user-1', emailVerificationToken: writtenDigest() },
+      data: { emailVerificationToken: PREVIOUS_DIGEST, emailVerificationTokenExpiresAt: PREVIOUS_EXPIRY },
+    });
+    expect(vi.mocked(prisma.user.updateMany).mock.invocationCallOrder[0])
+      .toBeGreaterThan(vi.mocked(prisma.user.update).mock.invocationCallOrder[0]);
+  });
+
+  it('restores an account that had no live link to no link (the row is as it was)', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({
+      id: 'user-1', email: 'someone@example.com', emailVerified: false,
+      emailVerificationToken: null, emailVerificationTokenExpiresAt: null,
+    } as any);
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({ statusCode: 503 });
+
+    expect(prisma.user.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: { emailVerificationToken: null, emailVerificationTokenExpiresAt: null },
+    }));
+  });
+
+  it('logs the log-safe summary of the failure, never the error object (an SMTP refusal quotes the address)', async () => {
+    const { sendVerificationEmail, describeEmailError } = await import('../../utils/email');
+    const smtpError = Object.assign(new Error('Can\'t send mail - all recipients were rejected: 550 <j.doe@gmail.com>'), {
+      code: 'EENVELOPE', responseCode: 550, envelope: { to: ['j.doe@gmail.com'] },
+    });
+    vi.mocked(describeEmailError).mockReturnValueOnce('EENVELOPE (SMTP 550)');
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(smtpError);
+
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({ statusCode: 503 });
+
+    expect(describeEmailError).toHaveBeenCalledWith(smtpError);
+    expect(errorLog).toHaveBeenCalledWith('[Auth] Failed to send verification email:', 'EENVELOPE (SMTP 550)');
+    for (const call of errorLog.mock.calls) {
+      for (const arg of call) expect(typeof arg).toBe('string');
+    }
+  });
+
+  it('still answers the failed send when putting the previous link back fails, and logs that on its own', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(sendVerificationEmail).mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    vi.mocked(prisma.user.updateMany).mockRejectedValueOnce(new Error('db gone'));
+
+    await expect(resendVerificationEmail('user-1')).rejects.toMatchObject({ statusCode: 503 });
+
+    expect(refund).toHaveBeenCalledWith('verifyMail', 'jdoe@gmail.com');
+    expect(errorLog).toHaveBeenCalledWith('[Auth] Failed to restore the previous verification link after a failed send:', 'db gone');
+  });
+
+  it('a token write that fails sends nothing, refunds the point and keeps the previous link (nothing to restore)', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+    vi.mocked(prisma.user.update).mockRejectedValueOnce(new Error('db gone'));
+
+    await expect(resendVerificationEmail('user-1')).rejects.toThrow('db gone');
+
+    expect(sendVerificationEmail).not.toHaveBeenCalled();
+    expect(refund).toHaveBeenCalledWith('verifyMail', 'jdoe@gmail.com');
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a send that goes out keeps the new link and the spent point', async () => {
+    const { sendVerificationEmail } = await import('../../utils/email');
+
+    await expect(resendVerificationEmail('user-1')).resolves.toBeUndefined();
+
+    expect(sendVerificationEmail).toHaveBeenCalledWith('J.Doe@gmail.com', expect.stringMatching(/^[0-9a-f]{64}$/));
+    expect(refund).not.toHaveBeenCalled();
+    expect(prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('the daily cap still answers before any token is written', async () => {
+    mailCap.mockResolvedValueOnce(false);
+
+    await expect(resendVerificationEmail('user-1')).rejects.toThrow('Too many verification emails requested');
+
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(refund).not.toHaveBeenCalled();
   });
 });
 
