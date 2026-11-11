@@ -296,8 +296,8 @@ const localPassTail = new Map<string, LocalPass>();
  * never answers) no longer holds the next one back, and from then on it
  * applies its LEAVES ONLY: it read the database before the passes that ran
  * past it, so a join of its own could undo a later revocation, while a leave
- * at worst removes a room the next resync or the member's next channel open
- * gives back.
+ * at worst removes a room the passes past it had granted. When it finishes,
+ * one fresh pass of its scope is queued to give such rooms back.
  *
  * A pass that fails (the database refused one of its reads) is queued again,
  * through this same queue, after each of LOCAL_PASS_RETRY_DELAYS_MS: the
@@ -358,7 +358,16 @@ function enqueuePass(job: PassJob, onStart?: () => void): Promise<void> {
       return runLocalPass(job.scope, pass);
     })
     .then((applied) => {
-      if (!applied) afterFailedPass(job.scope, job.attempt);
+      if (!applied) {
+        afterFailedPass(job.scope, job.attempt);
+      } else if (pass.overtaken) {
+        // It skipped its joins, and its late leaves may have undone what the
+        // passes that ran past it granted: one fresh pass of the same scope,
+        // reading the database now, puts the rooms right (a repeat of a
+        // repeat needs another 30 s stall)
+        console.warn(`[Visibility] An overtaken resync of server ${serverId} on this node finished late; a fresh pass of its scope is queued`);
+        void resyncLocalSockets({ ...job.scope });
+      }
     });
   localPassTail.set(serverId, pass);
   // runLocalPass never rejects and afterFailedPass never throws, so neither does `run`

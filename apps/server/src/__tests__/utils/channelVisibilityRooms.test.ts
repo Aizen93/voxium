@@ -425,9 +425,10 @@ describe('syncChannelVisibilityRooms — this node\'s sockets', () => {
       m.localFetch.mockResolvedValue([socket]);
       m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-a' }, { id: 'ch-b' }]);
       let releaseStale!: (visible: Map<string, Set<string>>) => void;
-      m.filterForUsers
-        .mockImplementationOnce(() => new Promise((resolve) => { releaseStale = resolve; }))
-        .mockResolvedValueOnce(visibility({ 'user-1': [] }));
+      // Every read after the stale one sees the revocation (the fresh pass
+      // queued after the stale one finishes reads it too)
+      m.filterForUsers.mockResolvedValue(visibility({ 'user-1': [] }));
+      m.filterForUsers.mockImplementationOnce(() => new Promise((resolve) => { releaseStale = resolve; }));
 
       const stale = syncChannelVisibilityRooms('server-stuck-c');
       await vi.advanceTimersByTimeAsync(0);
@@ -443,6 +444,47 @@ describe('syncChannelVisibilityRooms — this node\'s sockets', () => {
       expect(socket.join).not.toHaveBeenCalled();
       expect(socket.leave).toHaveBeenCalledWith('channel:ch-b');
       expect(warn).toHaveBeenCalledWith('[Visibility] A resync of server server-stuck-c overtaken on this node applied its leaves only (1 join(s) skipped)');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(socket.join).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
+  });
+
+  // Review of #71: an overtaken pass was never queued again, so a grant its
+  // late leaves undid stayed undone until the member opened the channel or
+  // reconnected (for a voice channel, only a reconnect).
+  it('an overtaken pass, once finished, queues a fresh pass of its scope that gives back what its late leaves took', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const socket = createMockSocket('user-1', { rooms: ['user:user-1'] });
+      m.localFetch.mockResolvedValue([socket]);
+      m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-a' }]);
+      let releaseStale!: (visible: Map<string, Set<string>>) => void;
+      // The truth after the stale read: ch-a granted
+      m.filterForUsers.mockResolvedValue(visibility({ 'user-1': ['ch-a'] }));
+      m.filterForUsers.mockImplementationOnce(() => new Promise((resolve) => { releaseStale = resolve; }));
+
+      const stale = syncChannelVisibilityRooms('server-stuck-d');
+      await vi.advanceTimersByTimeAsync(0);
+      const grant = syncChannelVisibilityRooms('server-stuck-d', { userId: 'user-1' });
+      await vi.advanceTimersByTimeAsync(LOCAL_PASS_MAX_WAIT_MS);
+      await grant;
+      expect(socket.join).toHaveBeenCalledTimes(1);
+
+      // The stale read, from before the grant: its late leave undoes it
+      releaseStale(visibility({ 'user-1': [] }));
+      await stale;
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(socket.leave).toHaveBeenCalledWith('channel:ch-a');
+      expect(warn).toHaveBeenCalledWith('[Visibility] An overtaken resync of server server-stuck-d on this node finished late; a fresh pass of its scope is queued');
+      expect(m.filterForUsers).toHaveBeenCalledTimes(3);
+      expect(m.localIn).toHaveBeenLastCalledWith('server:server-stuck-d');
+      expect(socket.join).toHaveBeenCalledTimes(2);
+      expect(socket.join.mock.invocationCallOrder[1]).toBeGreaterThan(socket.leave.mock.invocationCallOrder[0]);
     } finally {
       vi.useRealTimers();
       warn.mockRestore();
