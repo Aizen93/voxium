@@ -693,16 +693,18 @@ describe('authService — a password-reset mail that provably reached nobody ref
     await flush();
   };
 
+  // The shapes nodemailer's smtp-connection produces (its _onError / _formatError calls)
   it.each([
-    ['the connection', { code: 'ECONNECTION', command: 'CONN' }],
-    ['a connect timeout', { code: 'ETIMEDOUT', command: 'CONN' }],
-    ['the greeting', { code: 'EPROTOCOL', command: 'EHLO' }],
-    ['TLS', { code: 'ETLS', command: 'STARTTLS' }],
-    ['the login', { code: 'EAUTH', command: 'AUTH PLAIN' }],
-    ['a DNS failure, no command', { code: 'EDNS' }],
-    ['a refused login, no command', { code: 'EAUTH' }],
-    ['a refused connection, no command', { code: 'ECONNECTION' }],
-  ])('refunds the point after a failure at %s, keyed on the canonical inbox the consume used', async (_what, fields) => {
+    ['a DNS failure', { code: 'EDNS', command: 'CONN', originalCode: 'ENOTFOUND' }],
+    ['a refused connection', { code: 'ESOCKET', command: 'CONN', originalCode: 'ECONNREFUSED' }],
+    ['a connect timeout', { code: 'ETIMEDOUT', command: 'CONN', timeoutType: 'CONNECT_TIMEOUT' }],
+    ['a greeting that never came', { code: 'ETIMEDOUT', command: 'CONN', timeoutType: 'GREETING_TIMEOUT' }],
+    ['the greeting refused', { code: 'ECONNECTION', command: 'EHLO', responseCode: 421 }],
+    ['STARTTLS', { code: 'ETLS', command: 'STARTTLS' }],
+    ['a TLS handshake timeout', { code: 'ETIMEDOUT', command: 'CONN', timeoutType: 'UPGRADE_TIMEOUT' }],
+    ['the login', { code: 'EAUTH', command: 'AUTH PLAIN', responseCode: 535 }],
+    ['missing credentials', { code: 'EAUTH', command: 'API' }],
+  ])('refunds the point after %s, keyed on the canonical inbox the consume used', async (_what, fields) => {
     await resetWithSendFailure(smtpError(fields));
 
     expect(mailCap).toHaveBeenCalledWith('resetMail', 'jdoe@gmail.com');
@@ -713,11 +715,15 @@ describe('authService — a password-reset mail that provably reached nobody ref
   it.each([
     ['a refused recipient', { code: 'EENVELOPE', command: 'RCPT TO', responseCode: 550 }],
     ['a refused sender', { code: 'EENVELOPE', command: 'MAIL FROM', responseCode: 553 }],
-    ['a timeout during DATA', { code: 'ETIMEDOUT', command: 'DATA' }],
-    ['a dropped connection during DATA', { code: 'ECONNECTION', command: 'DATA' }],
-    ['a failure after the message', { code: 'EMESSAGE', command: 'MESSAGE' }],
-    ['a timeout naming no command', { code: 'ETIMEDOUT' }],
-    ['an error with neither code nor command', {}],
+    // nodemailer reports every inactivity timeout, DATA included, as CONN
+    ['a socket timeout (any phase, DATA included)', { code: 'ETIMEDOUT', command: 'CONN', timeoutType: 'SOCKET_TIMEOUT' }],
+    // ...and every close, before the greeting or during DATA alike
+    ['a closed connection', { code: 'ECONNECTION', command: 'CONN' }],
+    ['the server closing during the send', { code: 'ECONNECTION', command: 'CONN', responseCode: 421 }],
+    ['a reset socket', { code: 'ESOCKET', command: 'CONN', originalCode: 'ECONNRESET' }],
+    ['a refused message', { code: 'EMESSAGE', command: 'DATA', responseCode: 554 }],
+    ['a timeout naming no phase', { code: 'ETIMEDOUT' }],
+    ['the transport\'s own "Connection closed"', {}],
   ])('keeps the point after %s: no proof that nobody got the mail', async (_what, fields) => {
     await resetWithSendFailure(smtpError(fields));
 
@@ -725,7 +731,7 @@ describe('authService — a password-reset mail that provably reached nobody ref
   });
 
   it('never restores the previous reset token, whatever the failure', async () => {
-    await resetWithSendFailure(smtpError({ code: 'ECONNECTION', command: 'CONN' }));
+    await resetWithSendFailure(smtpError({ code: 'ESOCKET', command: 'CONN', originalCode: 'ECONNREFUSED' }));
 
     // The one write is the new token; nothing writes an older one back
     expect(prisma.user.update).toHaveBeenCalledTimes(1);
@@ -769,7 +775,7 @@ describe('authService — a password-reset mail that provably reached nobody ref
     expect(sendPasswordResetEmail).toHaveBeenCalled();
     expect(refund).not.toHaveBeenCalled();
 
-    fail(smtpError({ code: 'ECONNECTION', command: 'CONN' }));
+    fail(smtpError({ code: 'ESOCKET', command: 'CONN', originalCode: 'ECONNREFUSED' }));
     await flush();
     await flush();
     expect(refund).toHaveBeenCalledWith('resetMail', 'jdoe@gmail.com');
@@ -794,7 +800,7 @@ describe('authService — a password-reset mail that provably reached nobody ref
     });
     const unsent = await awaitedBeforeAnswer(() => {
       vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', email: 'j.doe@gmail.com' } as any);
-      vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(smtpError({ code: 'ECONNECTION', command: 'CONN' }));
+      vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(smtpError({ code: 'ESOCKET', command: 'CONN', originalCode: 'ECONNREFUSED' }));
     });
 
     expect(unknown).toEqual({ answer: undefined, lookups: 1, consumes: 1, refundsYet: 0 });

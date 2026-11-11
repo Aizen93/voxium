@@ -1411,7 +1411,7 @@ describe('POST /api/v1/auth/forgot-password', () => {
       mockPrismaUser.findUnique.mockResolvedValueOnce({ id: MOCK_USER.id, email: 'test@example.com' });
       await ask();
       mockPrismaUser.findUnique.mockResolvedValueOnce({ id: MOCK_USER.id, email: 'test@example.com' });
-      vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNECTION', command: 'CONN' }));
+      vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ESOCKET', command: 'CONN', originalCode: 'ECONNREFUSED' }));
       await ask();
       mockPrismaUser.findUnique.mockResolvedValueOnce({ id: MOCK_USER.id, email: 'test@example.com' });
       vi.mocked(sendPasswordResetEmail).mockRejectedValueOnce(Object.assign(new Error('550 <test@example.com> rejected'), { code: 'EENVELOPE', command: 'RCPT TO', responseCode: 550 }));

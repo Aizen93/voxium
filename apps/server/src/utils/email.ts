@@ -64,24 +64,39 @@ export function describeEmailError(err: unknown): string {
   return String(err);
 }
 
-/** nodemailer's `command` before any recipient is named: the connection, the greeting, TLS, the login. */
-const PRE_RECIPIENT_COMMAND_RE = /^(?:CONN|EHLO|HELO|LHLO|STARTTLS|AUTH(?: .*)?)$/;
-/** nodemailer's codes for a failure to reach or log in to the relay at all. */
-const PRE_RECIPIENT_CODES = new Set(['EDNS', 'EAUTH', 'ECONNECTION']);
+/** SMTP commands that are only ever in flight before the envelope: the greeting, STARTTLS, the login. */
+const PRE_ENVELOPE_COMMAND_RE = /^(?:EHLO|HELO|LHLO|STARTTLS|AUTH(?: .+)?)$/;
+/** nodemailer codes raised only while resolving, securing or logging in to the relay. */
+const PRE_ENVELOPE_CODES = new Set(['EDNS', 'ETLS', 'EAUTH']);
+/** nodemailer's timeoutType of the setup phases (a SOCKET_TIMEOUT can strike at any point, DATA included). */
+const SETUP_TIMEOUTS = new Set(['CONNECT_TIMEOUT', 'GREETING_TIMEOUT', 'UPGRADE_TIMEOUT']);
+/** System errors that mean no connection was ever established. */
+const NEVER_CONNECTED = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN']);
 
 /**
  * Whether a send failure PROVES no recipient was reached: the relay could not
- * be resolved, connected to, greeted, secured or logged in to. When the error
- * names the SMTP command it failed on, the command decides (a connection drop
- * during DATA may still have delivered); only without one does the code. A
- * refused recipient (RCPT TO, EENVELOPE), anything during or after DATA, and
- * an error carrying neither are not proof.
+ * be resolved, connected to, greeted, secured or logged in to. Read from what
+ * nodemailer actually sets (smtp-connection): its `command` is a fixed 'CONN'
+ * for every socket error, close and inactivity timeout, whatever phase the
+ * session was in, so 'CONN' proves nothing by itself, and neither does
+ * ECONNECTION, which a connection closed during DATA also carries. What does
+ * prove it: a command only sent before the envelope (EHLO, HELO, LHLO,
+ * STARTTLS, AUTH …), a code only raised during setup (EDNS, ETLS, EAUTH), a
+ * setup-phase `timeoutType`, or a system error meaning the TCP connection was
+ * never made. Everything else, a refused recipient or sender, anything during
+ * or after DATA, a socket timeout, a dropped connection, is no proof.
  */
 export function failedBeforeAnyRecipient(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
-  const { code, command } = err as { code?: unknown; command?: unknown };
-  if (typeof command === 'string') return PRE_RECIPIENT_COMMAND_RE.test(command);
-  return typeof code === 'string' && PRE_RECIPIENT_CODES.has(code);
+  const { code, command, timeoutType, originalCode } = err as {
+    code?: unknown; command?: unknown; timeoutType?: unknown; originalCode?: unknown;
+  };
+  if (typeof command === 'string' && PRE_ENVELOPE_COMMAND_RE.test(command)) return true;
+  if (typeof code !== 'string') return false;
+  if (PRE_ENVELOPE_CODES.has(code)) return true;
+  if (code === 'ETIMEDOUT') return typeof timeoutType === 'string' && SETUP_TIMEOUTS.has(timeoutType);
+  if (code === 'ESOCKET') return typeof originalCode === 'string' && NEVER_CONNECTED.has(originalCode);
+  return false;
 }
 
 export interface CleanupReport {
