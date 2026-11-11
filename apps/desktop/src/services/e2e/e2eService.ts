@@ -1853,8 +1853,10 @@ export class E2EService {
    * key it read under (pullHistory drops the record otherwise).
    */
   private async resumeHistoryPull(): Promise<void> {
+    const before = this.historyPull;
     const marker = await this.enqueue(() => this.vault.getHistoryPull());
-    if (!marker) return;
+    // a pull started while the record was read reads from its own start: it is the newer one
+    if (!marker || this.historyPull !== before) return;
     await this.pullHistory(marker);
   }
 

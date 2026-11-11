@@ -5613,6 +5613,20 @@ describe('E2EService — lifecycle', () => {
       expect(urls).toHaveLength(0); // done: nothing left to resume
     });
 
+    it('leaves a pull started right after the start to read from the beginning, instead of resuming over it', async () => {
+      const { server, phone } = await backedUpAccount(5); // three pages of the fake's two
+      const masterKey = (phone.service as unknown as { masterKey: EngineMasterKey }).masterKey.publicKey();
+      await phone.service.dispose();
+      await readVault(phone, (vault) => vault.putHistoryPull({ masterKey, cursor: '2', pages: 1 }));
+
+      const urls: string[] = [];
+      const again = serviceOver(phone.userId, recordingPages(server.apiFor(phone.userId), urls), phone);
+      await again.initialize();
+      await again.restoreMessageKeys(); // before the resume has read the record
+      await flushQueue();
+      expect(urls).toEqual(['/e2e/message-keys', '/e2e/message-keys?cursor=2', '/e2e/message-keys?cursor=4']);
+    });
+
     it('drops an unfinished history pull of another account key instead of resuming it', async () => {
       const { server, phone } = await backedUpAccount(1);
       await phone.service.dispose();
