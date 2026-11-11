@@ -48,6 +48,7 @@ import {
   removeSecureMembershipsInTx,
   announceSecureMembershipsRemoved,
   getSecureChannelMembersPayload,
+  lockServerMemberRows,
 } from '../../utils/secureChannelLifecycle';
 
 describe('secureChannelLifecycle', () => {
@@ -258,6 +259,23 @@ describe('secureChannelLifecycle', () => {
         WS_EVENTS.CHANNEL_MEMBERS_UPDATED,
         expect.objectContaining({ channelId: 'sec-1', serverId: 'srv-1' }),
       );
+    });
+  });
+
+  describe('lockServerMemberRows', () => {
+    it('takes FOR KEY SHARE on the member rows, in id order, and answers the ids that are members', async () => {
+      const tx = { $queryRaw: vi.fn().mockResolvedValue([{ user_id: 'u1' }, { user_id: 'u3' }]) };
+
+      const members = await lockServerMemberRows(tx as any, 'srv-1', ['u3', 'u1', 'u2']);
+
+      const sql = (tx.$queryRaw.mock.calls[0][0] as string[]).join('?');
+      // KEY SHARE: the removal's DELETE of the row waits for it, an UPDATE of
+      // the row (an ownership transfer takes the space row, then the member
+      // rows) does not, so the two never deadlock. FOR SHARE blocked it.
+      expect(sql).toMatch(/ORDER BY user_id\s+FOR KEY SHARE$/);
+      expect(sql).not.toMatch(/FOR SHARE/);
+      expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['srv-1', ['u3', 'u1', 'u2']]);
+      expect(members).toEqual(new Set(['u1', 'u3']));
     });
   });
 

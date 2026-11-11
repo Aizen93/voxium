@@ -25,21 +25,24 @@ import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websoc
  */
 
 /**
- * Lock the `server_members` rows of `userIds` in `serverId` FOR SHARE and
- * return the ids that are members. Called first in every transaction that
- * writes a ChannelMember row, which then writes rows only for ids returned:
- * a removal deletes the membership row, so it waits for this transaction and
- * then deletes the rows written here, or it committed first and the row is
- * not there to lock. FOR SHARE, so two writers never wait for each other.
- * Taken BEFORE any channel or space row, the order the removal takes them
- * in, so the two never deadlock.
+ * Lock the `server_members` rows of `userIds` in `serverId` FOR KEY SHARE
+ * and return the ids that are members. Called first in every transaction
+ * that writes a ChannelMember row, which then writes rows only for ids
+ * returned: a removal deletes the membership row, and a DELETE conflicts with
+ * a key-share lock, so it waits for this transaction and then deletes the
+ * rows written here, or it committed first and the row is not there to lock.
+ * KEY SHARE, the weakest lock a DELETE still waits for: two writers never
+ * wait for each other, and an UPDATE of a member row (a role or a nickname,
+ * an ownership transfer, which takes the space row first) does not wait for
+ * it either. Taken BEFORE any channel or space row, the order the removal
+ * takes them in.
  */
 export async function lockServerMemberRows(tx: Prisma.TransactionClient, serverId: string, userIds: string[]): Promise<Set<string>> {
   const rows = await tx.$queryRaw<Array<{ user_id: string }>>`
     SELECT user_id FROM server_members
     WHERE server_id = ${serverId} AND user_id = ANY(${userIds}::text[])
     ORDER BY user_id
-    FOR SHARE`;
+    FOR KEY SHARE`;
   return new Set(rows.map((r) => r.user_id));
 }
 

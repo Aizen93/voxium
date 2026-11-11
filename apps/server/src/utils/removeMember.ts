@@ -47,7 +47,7 @@ export interface RemoveMemberOptions {
  *       before this transaction takes any row a create or a join needs;
  *    b. the pending/declined join request gone;
  *    c. the membership row gone. Every writer of a secure-channel row locks
- *       that row first (FOR SHARE), so this delete waits for one in progress.
+ *       that row first (FOR KEY SHARE), so this delete waits for one in progress.
  *       Before any statement that locks the space row: a secure-channel
  *       creation locks the member rows and then the space row, and taking
  *       them in the other order here could deadlock with it;

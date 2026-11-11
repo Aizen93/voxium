@@ -1172,8 +1172,10 @@ machinery above, not a second protocol. The crypto engine is unchanged.
   transaction as the membership row, so the departure commits whole or not at
   all; the events, the voice eviction and the blob cleanup follow the commit.
   Every write of a row (creation, invitation) checks its user's server
-  membership inside the writing transaction, under a `FOR SHARE` lock on the
-  membership row, so a concurrent removal is ordered before or after it.
+  membership inside the writing transaction, under a `FOR KEY SHARE` lock on
+  the membership row (the weakest lock the removal's DELETE still waits for;
+  an UPDATE of the row does not), so a concurrent removal is ordered before
+  or after it.
   A new membership starts with none: every join deletes any row of its user
   in that server in the join's transaction, so a rejoin never restores a
   channel without a new invitation.

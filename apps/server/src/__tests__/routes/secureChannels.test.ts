@@ -309,13 +309,13 @@ describe('Secure Channel Routes', () => {
       expect(prismaMock.channel.create).not.toHaveBeenCalled();
     });
 
-    it('checks every member, the creator included, INSIDE the transaction under a FOR SHARE lock on their member rows, taken before the space row', async () => {
+    it('checks every member, the creator included, INSIDE the transaction under a FOR KEY SHARE lock on their member rows, taken before the space row', async () => {
       const locks: string[] = [];
       prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
         const sql = strings.join('?');
         locks.push(sql.includes('FROM server_members') ? 'members' : 'space');
         if (sql.includes('FROM server_members')) {
-          expect(sql).toMatch(/FOR SHARE/);
+          expect(sql).toMatch(/FOR KEY SHARE$/);
           expect(values).toEqual(['srv-1', ['user-1', 'user-2', 'user-3']]);
         }
         return rowLocks(strings, ...values);
@@ -564,14 +564,14 @@ describe('Secure Channel Routes', () => {
       expect(maxInFlight).toBe(1);
     });
 
-    it('checks the target\'s space membership INSIDE the transaction, under a FOR SHARE lock on its member row', async () => {
+    it('checks the target\'s space membership INSIDE the transaction, under a FOR KEY SHARE lock on its member row', async () => {
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
         .send({ userId: 'user-9' });
 
       expect(res.status).toBe(201);
       const memberLock = prismaMock.$queryRaw.mock.calls.find(([s]: [TemplateStringsArray]) => s.join('?').includes('FROM server_members'));
-      expect(memberLock![0].join('?')).toMatch(/FOR SHARE/);
+      expect(memberLock![0].join('?')).toMatch(/FOR KEY SHARE$/);
       expect(memberLock!.slice(1)).toEqual(['srv-1', ['user-9']]);
       // only the caller's gate reads a membership outside the transaction
       expect(prismaMock.serverMember.findUnique).toHaveBeenCalledTimes(1);
