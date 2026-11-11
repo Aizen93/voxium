@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser, createServer, createInvite, joinServerViaInvite, getServerChannels, clearRateLimits, API_URL } from './helpers/api';
+import { untilSettled, untilSettledAtBottom, watchScrollTop } from './helpers/scroll';
 
 /**
  * Scroll contract when a message arrives with the panel full:
@@ -8,6 +9,10 @@ import { registerUser, createServer, createInvite, joinServerViaInvite, getServe
  *    drifted slightly above Virtuoso's at-bottom threshold (the regression:
  *    followOutput never fired there, hiding the message you just sent).
  *  - OTHERS' messages never move your reading position.
+ *
+ * No fixed sleeps: each step waits until the list has come to REST in the
+ * state it needs (helpers/scroll.ts), so a slow machine waits longer instead
+ * of measuring a list that is still moving.
  */
 
 async function fillChannel(request: Parameters<typeof registerUser>[0], token: string, channelId: string, count: number) {
@@ -36,22 +41,29 @@ test.describe('chat scroll behavior', () => {
     await page.getByRole('button', { name: server.name, exact: true }).click({ timeout: 10_000 });
     await page.getByText('general').first().click();
     await expect(page.locator('[data-message-id]').first()).toBeVisible({ timeout: 10_000 });
-    await page.waitForTimeout(500);
+    const scroller = page.locator('[data-virtuoso-scroller]');
+    const jumpButton = page.getByRole('button', { name: 'Jump to bottom' });
+    // The channel opens at the bottom. Drift only once the list rests there:
+    // a positioning pass still to come would undo the drift.
+    await untilSettledAtBottom(scroller, 'channel opened');
+    await expect(jumpButton).toBeHidden();
 
     // Drift a bit above the bottom — inside the dead zone where followOutput
     // no longer fires but a user still perceives themselves "at the bottom".
-    const scroller = page.locator('[data-virtuoso-scroller]');
     await scroller.evaluate((el) => { el.scrollTop -= 150; });
-    await page.waitForTimeout(300);
+    // Virtuoso shows its jump button exactly when it reports not-at-bottom
+    // (threshold 100 px), the state in which followOutput stays put: the send
+    // below must snap the list down from there, and the drift must have held.
+    await expect(jumpButton).toBeVisible();
+    await untilSettled(scroller, 'drifted above the bottom', (s) => s.gap > 100);
 
     await page.locator('textarea').fill('my own message must land in view');
     await page.keyboard.press('Enter');
 
     await expect(page.getByText('my own message must land in view')).toBeVisible({ timeout: 10_000 });
-    await page.waitForTimeout(600);
-
-    const atBottom = await scroller.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 5);
-    expect(atBottom, 'list snapped to the bottom after own send').toBeTruthy();
+    // Where the list comes to rest, not a moment on its way: one that reached
+    // the bottom and crept back up fails here
+    await untilSettledAtBottom(scroller, 'list snapped to the bottom after own send', 4);
     const rowBox = (await page.locator('[data-message-id]').last().boundingBox())!;
     const scrollerBox = (await scroller.boundingBox())!;
     expect(rowBox.y + rowBox.height, 'sent message fully inside the viewport')
@@ -86,13 +98,12 @@ test.describe('chat scroll behavior', () => {
     await page.getByRole('button', { name: server.name, exact: true }).click({ timeout: 10_000 });
     await page.getByText('general').first().click();
     await expect(page.locator('[data-message-id]').first()).toBeVisible({ timeout: 10_000 });
-    await page.waitForTimeout(500);
-
     const scroller = page.locator('[data-virtuoso-scroller]');
-    const gapToBottom = () => scroller.evaluate((el) => Math.round(el.scrollHeight - el.scrollTop - el.clientHeight));
+    await untilSettledAtBottom(scroller, 'channel opened');
+
     const expectNewestFullyVisible = async (label: string) => {
-      // Where the list settles, not how fast: the config's expect budget applies.
-      await expect.poll(gapToBottom, { message: `${label}: list at the bottom` }).toBeLessThanOrEqual(2);
+      // Where the list comes to rest, not how fast: the config's expect budget applies.
+      await untilSettledAtBottom(scroller, label);
       const rowBox = (await page.locator('[data-message-id]').last().boundingBox())!;
       const scrollerBox = (await scroller.boundingBox())!;
       expect(rowBox.y + rowBox.height, `${label}: newest message fully inside the viewport`)
@@ -129,13 +140,16 @@ test.describe('chat scroll behavior', () => {
     await page.getByRole('button', { name: server.name, exact: true }).click({ timeout: 10_000 });
     await page.getByText('general').first().click();
     await expect(page.locator('[data-message-id]').first()).toBeVisible({ timeout: 10_000 });
-    await page.waitForTimeout(500);
+    const scroller = page.locator('[data-virtuoso-scroller]');
+    await untilSettledAtBottom(scroller, 'channel opened');
 
     // Scroll well up into history — a genuine reading position.
-    const scroller = page.locator('[data-virtuoso-scroller]');
     await scroller.evaluate((el) => { el.scrollTop -= 600; });
-    await page.waitForTimeout(300);
-    const before = await scroller.evaluate((el) => ({ top: el.scrollTop, height: el.scrollHeight }));
+    // Virtuoso reports not-at-bottom (its jump button), and the position
+    // rests: only then is it the reading position the message must not move
+    await expect(page.getByRole('button', { name: 'Jump to bottom' })).toBeVisible();
+    const rest = await untilSettled(scroller, 'scrolled up into history', (s) => s.gap > 100);
+    const before = { top: rest.scrollTop, height: rest.scrollHeight };
 
     // B posts; it arrives over the socket and grows the list.
     const res = await request.post(`${API_URL}/channels/${general.id}/messages`, {
@@ -146,13 +160,14 @@ test.describe('chat scroll behavior', () => {
     await expect
       .poll(() => scroller.evaluate((el) => el.scrollHeight), { timeout: 10_000 })
       .toBeGreaterThan(before.height);
-    await page.waitForTimeout(500);
 
-    const after = await scroller.evaluate((el) => ({
-      top: el.scrollTop,
-      atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < 5,
-    }));
-    expect(Math.abs(after.top - before.top), 'reading position unchanged').toBeLessThanOrEqual(5);
-    expect(after.atBottom, 'must NOT have been dragged to the bottom').toBeFalsy();
+    // The list has taken the message in. What must not follow (a drag to the
+    // bottom) has no event to wait for, so this is a measured time window:
+    // scrollTop is read on each of 30 frames (about half a second at 60 Hz,
+    // longer on a slower machine) and every reading must be the position.
+    const watched = await watchScrollTop(scroller, 30);
+    expect(watched.max - before.top, 'reading position unchanged (never moved down)').toBeLessThanOrEqual(5);
+    expect(before.top - watched.min, 'reading position unchanged (never moved up)').toBeLessThanOrEqual(5);
+    expect(watched.gap, 'must NOT have been dragged to the bottom').toBeGreaterThanOrEqual(5);
   });
 });

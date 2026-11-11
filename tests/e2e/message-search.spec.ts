@@ -1,6 +1,16 @@
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser, createServer, createChannel, getServerChannels, sendFriendRequest, acceptFriendRequest, clearRateLimits, API_URL } from './helpers/api';
+import { untilRowRestsInView, untilSettledAtBottom } from './helpers/scroll';
+
+/**
+ * A jump to a search result re-applies its scroll for 350 ms after the row
+ * mounts (MessageList: the remounted list positions itself asynchronously, so
+ * the jump retries at 120 and 350 ms). Thirty frames at rest, about half a
+ * second at 60 Hz, span those retries: a row that is only passing through the
+ * viewport on its way somewhere else does not count as landed.
+ */
+const JUMP_REST_FRAMES = 30;
 
 /**
  * Search must actually take you to the message.
@@ -40,7 +50,10 @@ test.describe('message search jump', () => {
     await page.getByRole('button', { name: server.name, exact: true }).click({ timeout: 10_000 });
     await page.getByText('general', { exact: true }).first().click();
     await expect(page.locator('[data-message-id]').first()).toBeVisible({ timeout: 10_000 });
-    await page.waitForTimeout(500);
+    // The latest page is the one loaded and the list rests at its bottom
+    await expect(page.getByText('haystack message 59', { exact: false }).first()).toBeVisible();
+    const scroller = page.locator('[data-virtuoso-scroller]');
+    await untilSettledAtBottom(scroller, 'channel opened');
 
     // The needle is NOT in the loaded page.
     await expect(page.getByText(needle)).not.toBeVisible();
@@ -56,11 +69,12 @@ test.describe('message search jump', () => {
     // boundary — that was the reported "search is broken".
     await expect(page.getByText('This section encountered an error')).not.toBeVisible();
 
-    // The target message is on screen, inside the scroller viewport.
+    // The target message is on screen, inside the scroller viewport, and
+    // stays there once the jump has stopped re-applying itself.
     const target = page.locator(`[data-message-id]`, { hasText: needle }).first();
     await expect(target).toBeVisible({ timeout: 10_000 });
-    await page.waitForTimeout(600);
-    const scroller = page.locator('[data-virtuoso-scroller]');
+    const targetId = (await target.getAttribute('data-message-id'))!;
+    await untilRowRestsInView(scroller, targetId, 'search jump', JUMP_REST_FRAMES);
     const box = (await target.boundingBox())!;
     const sBox = (await scroller.boundingBox())!;
     expect(box.y, 'target above the fold').toBeGreaterThanOrEqual(sBox.y - 2);
@@ -118,8 +132,9 @@ test.describe('message search jump', () => {
     await expect(page.getByText('This section encountered an error')).not.toBeVisible();
     const target = page.locator(`[data-message-id]`, { hasText: needle }).first();
     await expect(target).toBeVisible({ timeout: 10_000 });
-    await page.waitForTimeout(600);
     const scroller = page.locator('[data-virtuoso-scroller]');
+    const targetId = (await target.getAttribute('data-message-id'))!;
+    await untilRowRestsInView(scroller, targetId, 'cross-channel jump', JUMP_REST_FRAMES);
     const box = (await target.boundingBox())!;
     const sBox = (await scroller.boundingBox())!;
     expect(box.y, 'target above the fold').toBeGreaterThanOrEqual(sBox.y - 2);
@@ -158,8 +173,19 @@ test.describe('message search jump', () => {
       if (m.type() === 'error') consoleLog.push(m.text().slice(0, 200));
     });
 
-    // Let B's freshly-registered device propagate before encrypting to it.
-    await page.waitForTimeout(1500);
+    // B's page loading is not B's device being published (engine init, vault,
+    // key upload come after): wait on the server's own device list before A
+    // encrypts to it, as dm-flow does.
+    await expect
+      .poll(async () => {
+        const res = await request.get(`${API_URL}/e2e/devices/${dataB.user.id}`, {
+          headers: { Authorization: `Bearer ${dataA.accessToken}` },
+        });
+        if (!res.ok()) return 0;
+        const body = (await res.json()) as { data?: { devices?: unknown[] } };
+        return body.data?.devices?.length ?? 0;
+      }, { timeout: 30_000, message: "user B's E2E device was never published" })
+      .toBeGreaterThan(0);
 
     const needle = 'pulsar-needle-gamma';
     for (let i = 0; i < 10; i++) {
@@ -187,7 +213,9 @@ test.describe('message search jump', () => {
     });
 
     // Bisect: are the sent messages still on screen before the search opens?
-    await page.waitForTimeout(1000);
+    // The first and the last of them, rendered after every send has landed
+    await expect(page.locator('[data-message-id]', { hasText: `the ${needle} hides here` }).first()).toBeVisible();
+    await expect(page.locator('[data-message-id]', { hasText: 'dm filler line 9 some words' }).first()).toBeVisible();
     const visibleRows = await page.locator('[data-message-id]').count();
     console.log('ROWS BEFORE SEARCH:', visibleRows);
 
