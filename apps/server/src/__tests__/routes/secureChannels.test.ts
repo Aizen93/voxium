@@ -344,6 +344,43 @@ describe('Secure Channel Routes', () => {
       expect(prismaMock.channelMember.createMany).not.toHaveBeenCalled();
     });
 
+    it('404 Server when the space was deleted since the permission check, creating nothing (not a foreign-key 500)', async () => {
+      spaceMembers.clear(); // the delete cascaded the members too
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) =>
+        (strings.join('?').includes('FROM servers') ? [] : rowLocks(strings, ...values)));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops', memberIds: ['user-2'] });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+    });
+
+    it('a creation PostgreSQL aborted to break a deadlock is run again and succeeds', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => {
+          throw Object.assign(new Error('Raw query failed. Code: `40P01`.'), {
+            code: 'P2010', meta: { driverAdapterError: { cause: { originalCode: '40P01' } } },
+          });
+        })
+        .mockImplementation(real);
+      try {
+        const res = await request(app)
+          .post('/api/v1/servers/srv-1/secure-channels')
+          .send({ name: 'covert-ops', memberIds: ['user-2'] });
+
+        expect(res.status).toBe(201);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(prismaMock.channel.create).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     /** `total` answers the all-channels count, `secure` the secure-only one. */
     function counts(total: number, secure: number): void {
       prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) =>
@@ -591,6 +628,40 @@ describe('Secure Channel Routes', () => {
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('Channel not found');
       expect(prismaMock.channelMember.create).not.toHaveBeenCalled();
+    });
+
+    it('404 Channel, not the membership 400, when the whole space was deleted meanwhile (the gate\'s answer for a missing space)', async () => {
+      spaceMembers.clear();
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) =>
+        (strings.join('?').includes('FROM channels') ? [] : rowLocks(strings, ...values)));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Channel not found');
+    });
+
+    it('an invite PostgreSQL aborted to break a deadlock is run again and succeeds', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => {
+          throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+        })
+        .mockImplementation(real);
+      try {
+        const res = await request(app)
+          .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+          .send({ userId: 'user-9' });
+
+        expect(res.status).toBe(201);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(prismaMock.channelMember.create).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('a failing occupancy replay is logged and the invitation still succeeds', async () => {

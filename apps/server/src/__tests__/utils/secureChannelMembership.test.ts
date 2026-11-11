@@ -215,6 +215,7 @@ const client: Record<string, any> = {
     },
   },
   server: {
+    findUnique: async ({ where }: any) => db.servers.get(where.id) ?? null,
     update: async ({ where, data }: any) => {
       const s = db.servers.get(where.id)!;
       if (data.memberCount?.increment) s.memberCount += data.memberCount.increment;
@@ -416,6 +417,13 @@ function seed(): void {
   db.channelMembers.push({ channelId: C, userId: 'alice', isCreator: true, addedAt: new Date() });
 }
 
+/** A space delete, as its cascade leaves the database. */
+function deleteSpace(serverId: string): void {
+  db.servers.delete(serverId);
+  db.serverMembers = db.serverMembers.filter((m) => m.serverId !== serverId);
+  dropChannels(db.channels.filter((c) => c.serverId === serverId).map((c) => c.id));
+}
+
 function rowsOf(userId: string): ChannelMemberRow[] {
   return db.channelMembers.filter((m) => m.userId === userId);
 }
@@ -541,6 +549,34 @@ describe('a secure-channel row is written only for a current member of the space
     expect(res.status).toBe(403);
     expect(db.channels.filter((c) => c.name === 'plans')).toEqual([]);
     expect(rowsOf('bob')).toEqual([]);
+  });
+
+  it('a creation whose transaction starts after the space was deleted answers 404 Server and writes nothing', async () => {
+    hooks.push({ at: 'transaction.start', run: async () => deleteSpace(S) });
+
+    const res = await request(app).post(`/api/v1/servers/${S}/secure-channels`).set('x-test-user', 'alice')
+      .send({ name: 'plans', memberIds: ['bob'] });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Server not found');
+    expect(db.channels).toEqual([]);
+  });
+
+  it('an invite whose transaction starts after the space was deleted answers 404 Channel, as the gate answers for a missing space', async () => {
+    hooks.push({ at: 'transaction.start', run: async () => deleteSpace(S) });
+
+    const res = await invite('bob');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Channel not found');
+  });
+
+  it('a kick whose transaction starts after the space was deleted answers 404 Server', async () => {
+    hooks.push({ at: 'transaction.start', run: async () => deleteSpace(S) });
+
+    await expect(removeMemberFromServer('bob', S, { ban: { by: 'owner', reason: null } }))
+      .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
+    expect(db.bans).toEqual([]);
   });
 
   it('an invite into a channel deleted meanwhile answers 404 Channel, not a 500', async () => {

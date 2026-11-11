@@ -8,6 +8,7 @@ import { replayVoiceState } from '../websocket/voiceHandler';
 import { rateLimitSecureChannelManage, rateLimitMemberManage } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
+import { retryOnTransactionConflict } from '../utils/transactionRetry';
 import { hasServerPermission } from '../utils/permissionCalculator';
 import {
   broadcastSecureMembersUpdated,
@@ -114,22 +115,27 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
 
     const now = new Date();
     const allMemberIds = [userId, ...memberIds];
-    const channel = await prisma.$transaction(async (tx) => {
+    // Run again when PostgreSQL aborts it to break a deadlock (a space delete
+    // takes the space row, then the member rows): the second run then finds
+    // the space gone and answers so
+    const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // Every row written below belongs to a current member of the space,
       // the creator included: their membership rows are locked FIRST (a
       // removal of one of them waits for this transaction, then deletes what
       // it wrote, or committed before and the row is gone) and before the
       // space row, the order a removal takes them in.
       const members = await lockServerMemberRows(tx, serverId, allMemberIds);
+      // Count and insert under the space row lock, so two concurrent creations
+      // cannot both pass the limit. A space deleted since the permission check
+      // answers as one: not found.
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
       if (!members.has(userId)) {
         throw new ForbiddenError('You do not have permission to create secure channels');
       }
       if (members.size !== allMemberIds.length) {
         throw new BadRequestError('All invited users must be members of this server');
       }
-      // Count and insert under the space row lock, so two concurrent creations
-      // cannot both pass the limit
-      await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
       const secureCount = await tx.channel.count({ where: { serverId, secure: true } });
       if (secureCount >= limits.maxSecureChannelsPerServer) {
         throw new BadRequestError(`Server can have at most ${limits.maxSecureChannelsPerServer} secure channels`);
@@ -161,7 +167,7 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
         });
       }
       return ch;
-    });
+    }), '[SecureChannels] A secure-channel creation');
 
     // Members-only fanout: their sidebars gain the channel, their sockets join
     // the room. The server room is deliberately never touched.
@@ -206,25 +212,27 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
       throw new BadRequestError('userId is required');
     }
 
-    const channel = await prisma.$transaction(async (tx) => {
+    // Run again when PostgreSQL aborts it to break a deadlock (a space
+    // delete): the second run then finds the channel gone and answers so
+    const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // The target's space membership is checked HERE, under a lock on its
       // row, taken first (before the channel row, the order a removal takes
       // them in): a removal of the target waits for this transaction and then
       // deletes the row written below, or it committed first and there is no
       // row to lock.
       const members = await lockServerMemberRows(tx, serverId, [targetUserId]);
-      if (!members.has(targetUserId)) throw new BadRequestError('User is not a member of this server');
 
       // Cap + duplicate checks live INSIDE the transaction, serialized by a
       // row lock on the channel: two concurrent invites both reading count=24
       // under READ COMMITTED would otherwise both insert — and an over-cap
       // channel is not just untidy, the CLIENT refuses to encrypt to more than
       // the cap, so every member's sends would break. A channel deleted since
-      // the gate above (its creator's departure deletes it under this same
-      // lock) answers like any other missing channel.
+      // the gate above (its creator's departure or its space's delete) answers
+      // like any other missing channel, before the target's membership.
       const locked = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM channels WHERE id = ${channelId} AND server_id = ${serverId} AND secure = true FOR UPDATE`;
       if (locked.length === 0) throw new NotFoundError('Channel');
+      if (!members.has(targetUserId)) throw new BadRequestError('User is not a member of this server');
 
       // One after the other, never Promise.all: Prisma gives a findUnique its
       // own batch, so issued together these two ran at once on the
@@ -258,7 +266,7 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
         });
       }
       return ch;
-    });
+    }), '[SecureChannels] A secure-channel invite');
 
     // The invitee's sidebar gains the channel; their sockets join the room
     const io = getIO();

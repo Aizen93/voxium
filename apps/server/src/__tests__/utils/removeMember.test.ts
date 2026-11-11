@@ -22,6 +22,8 @@ const prismaMock = vi.hoisted(() => ({
   messageAttachment: { findMany: vi.fn() },
   // The read markers go after the commit, on the plain client
   channelRead: { deleteMany: vi.fn() },
+  // Read only when the transaction found the member gone or lost a deadlock
+  server: { findUnique: vi.fn() },
   $transaction: vi.fn(),
 }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
@@ -75,6 +77,7 @@ beforeEach(() => {
   tx.serverMember.delete.mockImplementation(async () => { order.push('member'); return {}; });
   removeSecure.mockImplementation(async () => { order.push('secure'); return NO_SECURE; });
   prismaMock.channelRead.deleteMany.mockImplementation(async () => { order.push('reads'); return { count: 2 }; });
+  prismaMock.server.findUnique.mockResolvedValue({ id: 's-1' });
   tx.server.updateMany.mockImplementation(async () => { order.push('count'); return { count: 1 }; });
   prismaMock.$transaction.mockImplementation(async (fn: (client: typeof tx) => Promise<unknown>) => {
     order.push('txn:start');
@@ -308,6 +311,52 @@ describe('removeMemberFromServer', () => {
       .rejects.toMatchObject({ statusCode: 404, message: 'Member not found' });
     expect(removeSecure).not.toHaveBeenCalled();
     expect(memberLeft).not.toHaveBeenCalled();
+  });
+
+  describe('a space deleted while the removal ran', () => {
+    beforeEach(() => { prismaMock.server.findUnique.mockResolvedValue(null); });
+
+    it('answers 404 Server when its delete committed first (the member row is already gone), not 404 Member', async () => {
+      tx.serverMember.delete.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+
+      await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null } }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
+      expect(prismaMock.server.findUnique).toHaveBeenCalledWith({ where: { id: 's-1' }, select: { id: true } });
+      expect(memberLeft).not.toHaveBeenCalled();
+    });
+
+    it('answers 404 Server, not a 500, when its delete won every deadlock against the removal', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.$transaction.mockImplementation(async () => {
+        throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+      });
+      try {
+        await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null } }))
+          .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a space lookup that fails keeps the answer the error had (it is not read as "gone")', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.server.findUnique.mockRejectedValue(new Error('db hiccup'));
+      tx.serverMember.delete.mockRejectedValue(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+      try {
+        await expect(removeMemberFromServer('u-1', 's-1'))
+          .rejects.toMatchObject({ statusCode: 404, message: 'Member not found' });
+        expect(warn).toHaveBeenCalledWith('[Servers] Could not tell whether space s-1 still exists:', 'db hiccup');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a plain error is never turned into a not-found', async () => {
+      prismaMock.$transaction.mockRejectedValue(new Error('db gone'));
+
+      await expect(removeMemberFromServer('u-1', 's-1')).rejects.toThrow('db gone');
+      expect(prismaMock.server.findUnique).not.toHaveBeenCalled();
+    });
   });
 
   it('a failed transaction surfaces the error and never broadcasts member:left', async () => {

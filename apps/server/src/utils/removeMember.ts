@@ -9,9 +9,19 @@ import {
   type SecureMembershipRemoval,
 } from './secureChannelLifecycle';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
-import { retryOnTransactionConflict } from './transactionRetry';
+import { isTransactionConflict, retryOnTransactionConflict } from './transactionRetry';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { emitWebhookChanged } from './webhookLifecycle';
+
+/** False only when the space row is certainly gone (a failed read is not "gone"). */
+async function spaceExists(serverId: string): Promise<boolean> {
+  try {
+    return (await prisma.server.findUnique({ where: { id: serverId }, select: { id: true } })) !== null;
+  } catch (err) {
+    console.warn(`[Servers] Could not tell whether space ${serverId} still exists:`, err instanceof Error ? err.message : err);
+    return true;
+  }
+}
 
 export interface RemoveMemberOptions {
   /**
@@ -155,12 +165,19 @@ export async function removeMemberFromServer(
       maxWait: 10_000,
     }), `[Servers] The removal of ${userId} from ${serverId}`);
   } catch (err) {
+    const missing = (err as { code?: unknown })?.code === 'P2025';
+    // A space deleted meanwhile (its delete takes the space row, then the
+    // member rows, and wins a deadlock or simply commits first): the removal
+    // has nothing left to remove, and answers that the space is gone.
+    if ((missing || isTransactionConflict(err)) && !(await spaceExists(serverId))) {
+      throw new NotFoundError('Server');
+    }
     // The member left (or was removed) between the caller's membership check
     // and this transaction: serverMember.delete is the only statement here
     // that can raise P2025 (every other one is an updateMany, a deleteMany or
     // an upsert). Same answer the pre-check gives — not a 500 that rolls back
     // the ban the moderator asked for and tells them nothing.
-    if ((err as { code?: unknown })?.code === 'P2025') throw new NotFoundError('Member');
+    if (missing) throw new NotFoundError('Member');
     throw err;
   }
   const { disabledWebhooks, secure } = outcome;
