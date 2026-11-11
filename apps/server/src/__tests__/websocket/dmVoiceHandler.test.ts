@@ -76,7 +76,7 @@ vi.mock('../../websocket/voiceHandler', () => ({
   leaveCurrentVoiceChannel: vi.fn(),
 }));
 
-import { handleDMVoiceEvents, leaveCurrentDMVoiceChannel, getActiveDMCallCount, getTotalDMVoiceUsers, clearDMVoiceState } from '../../websocket/dmVoiceHandler';
+import { handleDMVoiceEvents, leaveCurrentDMVoiceChannel, getActiveDMCallCount, getTotalDMVoiceUsers, clearDMVoiceState, endDMCall } from '../../websocket/dmVoiceHandler';
 import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
@@ -1819,5 +1819,147 @@ describe('dmVoiceHandler — clearDMVoiceState snapshot ordering', () => {
 
     expect(mockRedis.del).toHaveBeenCalledWith('dm:voice:call:u-orphan');
     warn.mockRestore();
+  });
+});
+
+// ─── endDMCall (a call ended from outside, e.g. the conversation deleted) ────
+
+describe('dmVoiceHandler — endDMCall', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+  });
+
+  const inCall = {
+    'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+    'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: true, selfDeaf: false }),
+  };
+
+  it('removes every participant of THIS call, read from the call hash', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+
+    const removed = await endDMCall(io as any, 'conv-1', { notice: false });
+
+    expect(removed).toEqual(['user-1', 'user-2']);
+    expect(mockRedis.hGetAll).toHaveBeenCalledWith('dm:voice:users:conv-1');
+    expect(mockRedis.eval).toHaveBeenCalledTimes(2);
+    expect(mockRedis.eval).toHaveBeenCalledWith(expect.any(String), {
+      keys: ['dm:voice:users:conv-1', 'dm:voice:call:user-1', 'dm:voice:active'], arguments: ['user-1', 'conv-1'],
+    });
+    expect(mockRedis.eval).toHaveBeenCalledWith(expect.any(String), {
+      keys: ['dm:voice:users:conv-1', 'dm:voice:call:user-2', 'dm:voice:active'], arguments: ['user-2', 'conv-1'],
+    });
+  });
+
+  it('makes every socket in the call room leave it with ONE adapter-wide operation, never a fetch', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+
+    await endDMCall(io as any, 'conv-1', { notice: false });
+
+    expect(io.in).toHaveBeenCalledTimes(1);
+    expect(io.in).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(io._socketsLeave).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(io._fetchSockets).not.toHaveBeenCalled();
+  });
+
+  it('tells both sides through the events the client already handles, after the state is gone', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+
+    await endDMCall(io as any, 'conv-1', { notice: false });
+
+    expect(io.to).toHaveBeenCalledWith('dm:conv-1');
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-1', userId: 'user-1' });
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:ended', { conversationId: 'conv-1' });
+    const endedIndex = io._emit.mock.calls.findIndex(([event]: [string]) => event === 'dm:voice:ended');
+    expect(io._emit.mock.invocationCallOrder[endedIndex]).toBeGreaterThan(mockRedis.eval.mock.invocationCallOrder[1]);
+  });
+
+  it('writes no "call ended" notice when asked not to (a deleted conversation cannot hold it)', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+
+    await endDMCall(io as any, 'conv-1', { notice: false });
+
+    expect(prisma.message.create).not.toHaveBeenCalled();
+  });
+
+  it('writes the "call ended" notice when asked to', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+    vi.mocked(prisma.message.create).mockResolvedValueOnce({
+      id: 'msg-1', content: 'call_ended', type: 'system', channelId: null, conversationId: 'conv-1', authorId: 'user-1',
+      author: mockUser, createdAt: new Date(), editedAt: null,
+    } as any);
+    vi.mocked(prisma.conversation.update).mockResolvedValueOnce({} as any);
+
+    await endDMCall(io as any, 'conv-1', { notice: true });
+
+    expect(prisma.message.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ type: 'system', conversationId: 'conv-1', authorId: 'user-1' }),
+    }));
+  });
+
+  it('without a call: touches nothing (no state, no room, no event, no notice)', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce({});
+
+    const removed = await endDMCall(io as any, 'conv-1', { notice: true });
+
+    expect(removed).toEqual([]);
+    expect(mockRedis.eval).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalled();
+    expect(prisma.message.create).not.toHaveBeenCalled();
+    expect(io._socketsLeave).not.toHaveBeenCalled();
+  });
+
+  it('clears the ring timer this node armed for the call', async () => {
+    vi.useFakeTimers();
+    try {
+      // Arm it: a caller reconnecting into a call that is still ringing
+      const { socket, handlers } = createMockSocket('user-1', 'socket-NEW');
+      const io = createMockIO();
+      handleDMVoiceEvents(io as any, socket as any);
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      mockRedis.get.mockResolvedValueOnce('conv-1');
+      mockRedis.eval.mockResolvedValueOnce(1);
+      mockRedis.hGetAll.mockResolvedValueOnce({ 'user-1': JSON.stringify({ socketId: 'socket-NEW', selfMute: false, selfDeaf: false }) });
+      vi.mocked(prisma.user.findMany).mockResolvedValueOnce([mockUser] as any);
+      await handlers.get('dm:voice:join')!('conv-1');
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      mockRedis.hGetAll.mockResolvedValueOnce({ 'user-1': JSON.stringify({ socketId: 'socket-NEW', selfMute: false, selfDeaf: false }) });
+      await endDMCall(io as any, 'conv-1', { notice: false });
+
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('dm:voice:decline ends the call through it: the room leave included', async () => {
+    const io = createMockIO();
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({ 'user-2': JSON.stringify({ socketId: 'socket-2', selfMute: false, selfDeaf: false }) });
+    vi.mocked(prisma.message.create).mockResolvedValueOnce({
+      id: 'msg-1', content: 'call_ended', type: 'system', channelId: null, conversationId: 'conv-1', authorId: 'user-2',
+      author: mockUser2, createdAt: new Date(), editedAt: null,
+    } as any);
+    vi.mocked(prisma.conversation.update).mockResolvedValueOnce({} as any);
+
+    const decliner = createMockSocket('user-1', 'socket-1');
+    handleDMVoiceEvents(io as any, decliner.socket as any);
+    await decliner.handlers.get('dm:voice:decline')!('conv-1');
+
+    expect(io.in).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(io._socketsLeave).toHaveBeenCalledWith('dm:voice:conv-1');
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:ended', { conversationId: 'conv-1' });
+    // The decline keeps its notice, authored by the caller who rang
+    expect(prisma.message.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ type: 'system', conversationId: 'conv-1', authorId: 'user-2' }),
+    }));
   });
 });

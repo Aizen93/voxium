@@ -386,6 +386,51 @@ export async function leaveCurrentDMVoiceChannel(
   createSystemMessage(io, conversationId, userId, DM_NOTICE_CALL_ENDED);
 }
 
+/**
+ * End the call in one conversation for everyone in it, from anywhere: no
+ * participant's socket is needed, so a REST route can call it as well as a
+ * socket handler. Driven by the call's own hash (`dm:voice:users:{id}`),
+ * never by the conversation's two participants: a participant who is in a
+ * call in ANOTHER conversation keeps it (removeDMVoiceUser drops the
+ * participant's `dm:voice:call:{userId}` key unconditionally).
+ *
+ * Each participant's Redis state goes, every socket in `dm:voice:{id}`
+ * leaves it (one adapter-wide room operation, every node, never a
+ * `fetchSockets()` round trip), this node's ring timer is cleared (a peer's
+ * fires later, finds no participant and does nothing), and `dm:voice:left` +
+ * `dm:voice:ended` go to `dm:{id}`, which every client already handles as
+ * the end of the call (and of an incoming ring). The "call ended" notice is
+ * written only with `notice: true`: a deleted conversation cannot hold it.
+ * Without a participant there is no call and nothing is touched (a late
+ * decline must not reach a call that starts in the same conversation).
+ *
+ * Resolves the ids of the participants it removed (none: no call).
+ */
+export async function endDMCall(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  conversationId: string,
+  opts: { notice: boolean },
+): Promise<string[]> {
+  const callUsers = await getDMVoiceUsers(conversationId);
+  const participants = Array.from(callUsers.keys());
+  if (participants.length === 0) return participants;
+  const room = `dm:voice:${conversationId}`;
+
+  for (const uid of participants) {
+    await removeDMVoiceUser(conversationId, uid);
+  }
+  // Addressed to the room, not to each participant's user room: one publish,
+  // and a socket of the call whose state a sweep already dropped leaves too
+  io.in(room).socketsLeave(room);
+  clearCallTimeout(conversationId);
+
+  const [first] = participants;
+  io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: first });
+  io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
+  if (opts.notice) createSystemMessage(io, conversationId, first, DM_NOTICE_CALL_ENDED);
+  return participants;
+}
+
 /** Returns count of active DM calls (cross-node via Redis) */
 export async function getActiveDMCallCount(): Promise<number> {
   return await getRedis().sCard('dm:voice:active');
@@ -578,22 +623,8 @@ export function handleDMVoiceEvents(
 
     console.log(`[DMVoice] User ${userId} declined DM call ${conversationId}`);
 
-    const callUsers = await getDMVoiceUsers(conversationId);
-    if (callUsers.size === 0) return;
-
     // End the call for all users in the conversation
-    const callerIdForMsg = Array.from(callUsers.keys())[0];
-    for (const [callerId] of callUsers) {
-      await removeDMVoiceUser(conversationId, callerId);
-      // socketsLeave: adapter-wide and fire-and-forget (never blocks on peers)
-      io.in(`user:${callerId}`).socketsLeave(`dm:voice:${conversationId}`);
-    }
-
-    clearCallTimeout(conversationId);
-
-    io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: callerIdForMsg });
-    io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
-    createSystemMessage(io, conversationId, callerIdForMsg, DM_NOTICE_CALL_ENDED);
+    await endDMCall(io, conversationId, { notice: true });
   });
 
   socket.on('dm:voice:mute', async (muted: boolean) => {
