@@ -42,6 +42,7 @@ const STATUS_EXIT = {
   'oldest-pending-others-applied': 1,
   'partly-migrated': 1,
   'interrupted-first-start': 1,
+  'missing-database-coloured': 1,
   unreachable: 1,
   'wrong-password': 1,
 } as const;
@@ -54,12 +55,12 @@ function captured(name: Fixture): Status {
 
 const shAvailable = spawnSync('sh', ['-c', 'exit 0']).status === 0;
 
-// Logs every call with the update-check switch it saw. `migrate status`
-// answers on STDERR, the stream Prisma prints its pending list on, so an
-// entrypoint that stops merging stderr reads nothing. The queued answers are
-// used in order and the last one repeats.
+// Logs every call with the update-check and colour switches it saw. `migrate
+// status` answers on STDERR, the stream Prisma prints its pending list on, so
+// an entrypoint that stops merging stderr reads nothing. The queued answers
+// are used in order and the last one repeats.
 const STUB_NODE = `#!/bin/sh
-printf '%s|CHECKPOINT_DISABLE=%s\\n' "$*" "\${CHECKPOINT_DISABLE-}" >> "$STUB_DIR/calls.log"
+printf '%s|CHECKPOINT_DISABLE=%s|NO_COLOR=%s|FORCE_COLOR=%s\\n' "$*" "\${CHECKPOINT_DISABLE-}" "\${NO_COLOR-}" "\${FORCE_COLOR-<unset>}" >> "$STUB_DIR/calls.log"
 case "$*" in
   *"migrate status"*)
     n=$(( $(cat "$STUB_DIR/status-count") + 1 ))
@@ -89,7 +90,11 @@ interface Run {
   sleeps: number;
   /** The CHECKPOINT_DISABLE value each Prisma CLI call saw. */
   checkpointSwitch: string[];
+  /** The NO_COLOR and FORCE_COLOR values each Prisma CLI call saw. */
+  colourSwitches: string[];
 }
+
+const logged = (call: string, name: string) => call.match(new RegExp(`\\|${name}=([^|]*)`))?.[1] ?? '';
 
 const workDirs: string[] = [];
 
@@ -97,7 +102,10 @@ afterEach(() => {
   for (const dir of workDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function runEntrypoint(statuses: Status[], opts: { allowCutover?: string; deployExit?: number } = {}): Run {
+function runEntrypoint(
+  statuses: Status[],
+  opts: { allowCutover?: string; deployExit?: number; env?: Record<string, string> } = {}
+): Run {
   const work = mkdtempSync(join(tmpdir(), 'voxium-entrypoint-'));
   workDirs.push(work);
 
@@ -131,12 +139,13 @@ function runEntrypoint(statuses: Status[], opts: { allowCutover?: string; deploy
   // child may see the unstubbed one.
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!/^(path|voxium_allow_cutover|checkpoint_disable|node_options)$/i.test(key)) env[key] = value;
+    if (!/^(path|voxium_allow_cutover|checkpoint_disable|node_options|no_color|force_color)$/i.test(key)) env[key] = value;
   }
   const inheritedPath = Object.entries(process.env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? '';
   env.PATH = `${stub}${delimiter}${inheritedPath}`;
   env.STUB_DIR = stub.replace(/\\/g, '/');
   if (opts.allowCutover !== undefined) env.VOXIUM_ALLOW_CUTOVER = opts.allowCutover;
+  Object.assign(env, opts.env);
 
   const result = spawnSync('sh', [ENTRYPOINT.replace(/\\/g, '/')], { cwd: work, env, encoding: 'utf8' });
   if (result.error) throw result.error;
@@ -150,7 +159,8 @@ function runEntrypoint(statuses: Status[], opts: { allowCutover?: string; deploy
     deploys: calls.filter((c) => c.includes('migrate deploy')).length,
     serverStarted: calls.some((c) => c.includes('apps/server/dist/index.js')),
     sleeps: calls.filter((c) => c.startsWith('sleep ')).length,
-    checkpointSwitch: prismaCalls.map((c) => c.slice(c.lastIndexOf('|CHECKPOINT_DISABLE=') + '|CHECKPOINT_DISABLE='.length)),
+    checkpointSwitch: prismaCalls.map((c) => logged(c, 'CHECKPOINT_DISABLE')),
+    colourSwitches: prismaCalls.map((c) => `NO_COLOR=${logged(c, 'NO_COLOR')} FORCE_COLOR=${logged(c, 'FORCE_COLOR')}`),
   };
 }
 
@@ -309,6 +319,23 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     const run = runEntrypoint([{ ...empty, output: empty.output.replace(/\r?\n/g, '\r\n') }]);
     expect(run.deploys).toBe(1);
     expect(run.code).toBe(0);
+  }, TIMEOUT);
+
+  it('reads a status printed in colour (FORCE_COLOR set when it was captured)', () => {
+    // The CLI wraps "Error:" in ANSI codes: unstripped, a missing database
+    // read as an unreadable status and the container gave up after retries.
+    const coloured = captured('missing-database-coloured');
+    expect(coloured.output).toContain('\u001b[31mError: \u001b[39m');
+    const run = runEntrypoint([coloured]);
+    expect(run.out).toContain('[Voxium] The database does not exist yet: migrate deploy creates it.');
+    expect(run.statusReads).toBe(1);
+    expect(run.deploys).toBe(1);
+    expect(run.code).toBe(0);
+  }, TIMEOUT);
+
+  it('runs every Prisma CLI call without colour, even when the caller forces it', () => {
+    const run = runEntrypoint([captured('empty-database')], { env: { FORCE_COLOR: '1' } });
+    expect(run.colourSwitches).toEqual(['NO_COLOR=1 FORCE_COLOR=<unset>', 'NO_COLOR=1 FORCE_COLOR=<unset>']);
   }, TIMEOUT);
 
   it('runs every Prisma CLI call with the update check off', () => {

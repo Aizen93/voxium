@@ -9,10 +9,15 @@ export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}"
 # (Dockerfile ENV) and apps/server/prisma.config.ts set it as well.
 export CHECKPOINT_DISABLE=1
 
-# Every Prisma CLI run starts from apps/server, where prisma.config.ts lives.
+# Every Prisma CLI run starts from apps/server, where prisma.config.ts lives,
+# and prints no colour: with FORCE_COLOR set it wraps "Error:" in ANSI codes,
+# which the status checks below would not recognise (NO_COLOR wins over it).
 prisma_cli() {
-  (cd apps/server && node ../../node_modules/prisma/build/index.js "$@")
+  (unset FORCE_COLOR; NO_COLOR=1; export NO_COLOR; cd apps/server && node ../../node_modules/prisma/build/index.js "$@")
 }
+
+# The escape character, to strip any colour a status still carries.
+ESC=$(printf '\033')
 
 MAX_ATTEMPTS=10
 RETRY_DELAY_SECONDS=3
@@ -108,7 +113,7 @@ if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
     # because it exits non-zero whenever anything is pending, which `set -e`
     # would otherwise take for a failure of this script.
     STATUS=$(prisma_cli migrate status 2>&1) || true
-    STATUS_LINES=$(printf '%s\n' "$STATUS" | tr -d '\r')
+    STATUS_LINES=$(printf '%s\n' "$STATUS" | tr -d '\r' | sed "s/${ESC}\[[0-9;]*m//g")
     STATE=$(status_state)
     if [ "$STATE" != "unreadable" ] || [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
       break
