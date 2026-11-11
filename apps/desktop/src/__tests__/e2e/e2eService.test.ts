@@ -5557,6 +5557,74 @@ describe('E2EService — lifecycle', () => {
       return { server, phone, recoveryKey };
     }
 
+    /** The fake's client, recording every history page it is asked for (full URL). */
+    const recordingPages = (base: ReturnType<Server['apiFor']>, urls: string[]) => ({
+      ...base,
+      async get(url: string) {
+        if (url.startsWith('/e2e/message-keys')) urls.push(url);
+        return base.get(url);
+      },
+    });
+    /** Read a device's vault over a connection of its own. */
+    const readVault = async <T>(party: { userId: string; keyProvider: PickleKeyProvider; vaultNamespace: string }, read: (vault: E2EVault) => Promise<T>) => {
+      const vault = new E2EVault(party.userId, party.keyProvider, party.vaultNamespace);
+      await vault.open();
+      try {
+        return await read(vault);
+      } finally {
+        vault.close();
+      }
+    };
+
+    it('resumes a history pull an earlier start left unfinished where it stopped, and forgets it once done', async () => {
+      const { server, phone, recoveryKey } = await backedUpAccount(5); // three pages of the fake's two
+      const laptop = { userId: phone.userId, keyProvider: memoryKeyProvider(), vaultNamespace: `v${++vaultSeq}` };
+      let armed = false;
+      let pages = 0;
+      const gate = holdingApi(
+        server.apiFor(laptop.userId),
+        (verb, url) => armed && verb === 'get' && url.startsWith('/e2e/message-keys') && ++pages === 2
+      );
+      const first = serviceOver(laptop.userId, gate.api, laptop);
+      await first.initialize();
+      await flushQueue();
+      armed = true;
+      const restoring = first.restoreKeyBackup(recoveryKey);
+      await gate.held; // the second page is on its way…
+      await first.dispose(); // …when the app is closed
+      gate.release();
+      await restoring;
+      const sessions = () => readVault(laptop, async (vault) => (await vault.listInboundGroupSessions()).length);
+      expect(await sessions()).toBe(2); // the first page only
+
+      const urls: string[] = [];
+      const again = serviceOver(laptop.userId, recordingPages(server.apiFor(laptop.userId), urls), laptop);
+      await again.initialize();
+      await vi.waitFor(async () => expect(await sessions()).toBe(5));
+      expect(urls[0]).toMatch(/\?cursor=/); // from the second page, not from the start
+      expect(urls).toHaveLength(2);
+      await vi.waitFor(async () => expect(await readVault(laptop, (vault) => vault.getHistoryPull())).toBeUndefined());
+      await again.dispose();
+
+      urls.length = 0;
+      const third = serviceOver(laptop.userId, recordingPages(server.apiFor(laptop.userId), urls), laptop);
+      await third.initialize();
+      await flushQueue();
+      expect(urls).toHaveLength(0); // done: nothing left to resume
+    });
+
+    it('drops an unfinished history pull of another account key instead of resuming it', async () => {
+      const { server, phone } = await backedUpAccount(1);
+      await phone.service.dispose();
+      await readVault(phone, (vault) => vault.putHistoryPull({ masterKey: 'a key this device does not hold', cursor: '0' }));
+
+      const urls: string[] = [];
+      const again = serviceOver(phone.userId, recordingPages(server.apiFor(phone.userId), urls), phone);
+      await again.initialize();
+      await vi.waitFor(async () => expect(await readVault(phone, (vault) => vault.getHistoryPull())).toBeUndefined());
+      expect(urls).toHaveLength(0);
+    });
+
     it('stops a history pull the session ended under, instead of opening the next row with the freed key', async () => {
       const { server, phone, recoveryKey } = await backedUpAccount(3);
       const laptop = makeDevice(server, phone.userId);

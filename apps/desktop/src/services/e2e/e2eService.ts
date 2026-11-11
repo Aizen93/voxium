@@ -57,6 +57,7 @@ import {
   E2EVault,
   E2EVaultClosedError,
   type DeviceListState,
+  type HistoryPullMarker,
   type InboundGroupSessionRecord,
   type MessagePosition,
   type OutboundGroupSessionRecord,
@@ -549,6 +550,8 @@ export class E2EService {
    * (dispose()), makes the index unknown again (lateShareWrites).
    */
   private keptShares: Map<string, string> | null = null;
+  /** The latest history pull started (pullHistory): an older one stops at its next page. */
+  private historyPull = 0;
   /** lateShareWrites of this vault when keptShares was last filled. */
   private keptSharesLateWrites = 0;
   private deviceListListeners = new Set<(userId: string) => void>();
@@ -765,6 +768,10 @@ export class E2EService {
     // client working, and the next launch tries again.
     this.backupMessageKeys().catch((err) => {
       this.logStartupTaskFailure('message-key backup pass', err);
+    });
+    // A history pull an earlier start left unfinished goes on where it stopped.
+    this.resumeHistoryPull().catch((err) => {
+      this.logStartupTaskFailure('history pull resume', err);
     });
   }
 
@@ -1618,7 +1625,7 @@ export class E2EService {
     // Recovering the identity without the history leaves the user staring at
     // empty conversations: the account is back and everything in it is still
     // unreadable. Not fatal if it fails — the identity IS recovered, and the
-    // next launch retries.
+    // next start goes on from where the pull stopped (resumeHistoryPull).
     try {
       await this.restoreMessageKeys();
     } catch (err) {
@@ -1778,30 +1785,65 @@ export class E2EService {
    * that finds the key replaced since the pull began stops the pull: the
    * replacement brought its own (restoreKeyBackup), and the old key opens
    * nothing the account publishes any more. At most MAX_RESTORE_PAGES pages.
+   *
+   * A pull that does not reach its end (the app closed, a dispose, a failed
+   * request, the page cap) resumes at the next start where it stopped
+   * (resumeHistoryPull): the vault keeps the account key it read under and the
+   * cursor of its next page (`history_pull`), written before each page and
+   * dropped at the end. A newer pull supersedes a running one: it reads the
+   * history from its own start, and owns that record from then on.
    */
   async restoreMessageKeys(): Promise<number> {
+    return this.pullHistory(null);
+  }
+
+  /** restoreMessageKeys, from the start or (resume) from where an earlier pull stopped. */
+  private async pullHistory(resume: HistoryPullMarker | null): Promise<number> {
+    const pull = ++this.historyPull;
     let master: EngineMasterKey | null = null;
-    let cursor: string | null = null;
+    let cursor: string | null = resume?.cursor ?? null;
     let imported = 0;
     for (let page = 0; page < MAX_RESTORE_PAGES; page++) {
       const step = await this.enqueue(async () => {
+        if (pull !== this.historyPull) return null; // a newer pull reads it all
         if (page === 0) {
           master = this.masterKey;
+          if (resume && master?.publicKey() !== resume.masterKey) {
+            // left by a pull under another account key: nothing this one reads
+            await this.vault.deleteHistoryPull();
+            return null;
+          }
         } else if (this.masterKey !== master) {
           console.debug('e2e: the account key was replaced during the history pull; the pull stops here');
           return null;
         }
         const key = master;
         if (!key) throw new Error('This device does not hold the account key');
-        return this.restoreMessageKeyPage(key, cursor);
+        // where this pull stands, for the next start should it stop here
+        if (page === 0) await this.vault.putHistoryPull({ masterKey: key.publicKey(), cursor });
+        const result = await this.restoreMessageKeyPage(key, cursor);
+        if (result.next) await this.vault.putHistoryPull({ masterKey: key.publicKey(), cursor: result.next });
+        else await this.vault.deleteHistoryPull();
+        return result;
       });
-      if (!step) return imported; // the key was replaced: not the page cap
+      if (!step) return imported; // superseded, or the key was replaced: not the page cap
       imported += step.imported;
       cursor = step.next;
       if (!cursor) return imported;
     }
-    if (cursor) console.warn(`e2e: stopped the history pull after ${MAX_RESTORE_PAGES} pages`);
+    if (cursor) console.warn(`e2e: stopped the history pull after ${MAX_RESTORE_PAGES} pages (the next start goes on)`);
     return imported;
+  }
+
+  /**
+   * Go on with a history pull an earlier start of this account left
+   * unfinished, from its next page, if this device still holds the account
+   * key it read under (pullHistory drops the record otherwise).
+   */
+  private async resumeHistoryPull(): Promise<void> {
+    const marker = await this.enqueue(() => this.vault.getHistoryPull());
+    if (!marker) return;
+    await this.pullHistory(marker);
   }
 
   /** One page of restoreMessageKeys. Callers must hold the serial queue. */
