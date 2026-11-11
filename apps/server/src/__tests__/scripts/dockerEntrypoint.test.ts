@@ -39,6 +39,7 @@ const STATUS_EXIT = {
   'cutover-applied-later-pending': 1,
   'up-to-date': 0,
   'database-ahead-of-image': 0,
+  'oldest-pending-others-applied': 1,
   unreachable: 1,
   'wrong-password': 1,
 } as const;
@@ -179,6 +180,19 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.code).toBe(1);
     expect(run.out).toContain(`FATAL: the always-on E2E cutover (${CUTOVER}) has not been applied`);
     expect(run.out).toContain('VOXIUM_ALLOW_CUTOVER=1');
+    expect(run.deploys).toBe(0);
+    expect(run.serverStarted).toBe(false);
+  }, TIMEOUT);
+
+  it('refuses an existing database whose OLDEST migration is pending too (a back-dated migration)', () => {
+    // 42 of the 56 migrations applied, the first one among the pending: what
+    // every existing database would show if a migration older than the
+    // applied ones were ever added. Only "every migration pending" is empty.
+    const status = captured('oldest-pending-others-applied');
+    expect(status.output).toContain('20260220223130_migration_version_1');
+    const run = runEntrypoint([status]);
+    expect(run.code).toBe(1);
+    expect(run.out).toContain(`FATAL: the always-on E2E cutover (${CUTOVER}) has not been applied`);
     expect(run.deploys).toBe(0);
     expect(run.serverStarted).toBe(false);
   }, TIMEOUT);

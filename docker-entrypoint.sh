@@ -29,7 +29,7 @@ RETRY_DELAY_SECONDS=3
 # means the node declines to start without touching the database at all.
 #
 # The gate refuses an EXISTING database only: one where migrations have been
-# applied (the oldest one is no longer pending) and the cutover has not. A new
+# applied (fewer are pending than were found) and the cutover has not. A new
 # database, where no migration was ever applied, or one that does not exist
 # yet (`migrate deploy` creates it), holds nothing to lose, and the
 # migration's own SQL gate lets it through: a first start migrates it with no
@@ -66,7 +66,9 @@ status_state() {
     echo unreadable
   elif ! listed_as_pending "$CUTOVER_MIGRATION"; then
     echo applied
-  elif listed_as_pending "$FIRST_MIGRATION"; then
+  elif [ "$(pending_count)" -eq "$(found_count)" ]; then
+    # Every migration pending, not merely the oldest: a migration ever added
+    # with an earlier date would be pending on every existing database.
     echo empty
   else
     echo existing
@@ -78,20 +80,23 @@ listed_as_pending() {
   printf '%s\n' "$STATUS_LINES" | grep -qx "[[:space:]]*$1[[:space:]]*"
 }
 
-if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
-  # The oldest migration: still pending only where nothing was ever applied.
-  FIRST_MIGRATION=""
+# How many of this image's migrations the status lists as pending.
+pending_count() {
+  count=0
   for dir in apps/server/prisma/migrations/*/; do
-    if [ -f "${dir}migration.sql" ]; then
-      FIRST_MIGRATION=$(basename "$dir")
-      break
+    if [ -f "${dir}migration.sql" ] && listed_as_pending "$(basename "$dir")"; then
+      count=$((count + 1))
     fi
   done
-  if [ -z "$FIRST_MIGRATION" ]; then
-    echo "[Voxium] FATAL: no migration found in apps/server/prisma/migrations."
-    exit 1
-  fi
+  echo "$count"
+}
 
+# N in "N migrations found in prisma/migrations".
+found_count() {
+  printf '%s\n' "$STATUS_LINES" | sed -n 's/^\([0-9][0-9]*\) migrations\{0,1\} found in .*/\1/p' | head -n 1
+}
+
+if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
   ATTEMPT=1
   while :; do
     # 2>&1 is load-bearing: `migrate status` reports the pending list on
