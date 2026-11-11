@@ -70,6 +70,7 @@ case "$*" in
     cat "$STUB_DIR/status-$n.txt" >&2
     exit "$(cat "$STUB_DIR/status-$n.exit")" ;;
   *"migrate deploy"*)
+    if [ -f "$STUB_DIR/deploy.txt" ]; then cat "$STUB_DIR/deploy.txt" >&2; fi
     exit "$(cat "$STUB_DIR/deploy-exit")" ;;
   *"apps/server/dist/index.js"*)
     exit 0 ;;
@@ -105,7 +106,7 @@ afterEach(() => {
 
 function runEntrypoint(
   statuses: Status[],
-  opts: { allowCutover?: string; deployExit?: number; env?: Record<string, string> } = {}
+  opts: { allowCutover?: string; deployExit?: number; deployOutput?: string; env?: Record<string, string> } = {}
 ): Run {
   const work = mkdtempSync(join(tmpdir(), 'voxium-entrypoint-'));
   workDirs.push(work);
@@ -134,6 +135,7 @@ function runEntrypoint(
   writeFileSync(join(stub, 'status-total'), String(statuses.length));
   writeFileSync(join(stub, 'status-count'), '0');
   writeFileSync(join(stub, 'deploy-exit'), String(opts.deployExit ?? 0));
+  if (opts.deployOutput !== undefined) writeFileSync(join(stub, 'deploy.txt'), opts.deployOutput);
   writeFileSync(join(stub, 'calls.log'), '');
 
   // Windows spells it Path: drop every spelling before setting ours, or the
@@ -386,17 +388,59 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.code).toBe(0);
   }, TIMEOUT);
 
-  it('leaves a failed cutover record to migrate deploy, which refuses it without touching anything', () => {
+  it('stops at once on a failed cutover record (P3009) and says the database served users', () => {
     // Prisma 7.10.1 `migrate status` does not list a failed migration at all:
-    // its output equals the "applied" one, so the gate cannot see it. The
-    // deploy then stops on P3009 before applying anything (checked live), and
-    // the container exits after its retries instead of starting the server.
+    // its output equals the "applied" one, so the gate cannot see it, and
+    // every start since the cutover's SQL gate refused reaches the deploy,
+    // which stops on P3009 before applying anything. Ten retries cannot change
+    // that, and the refusal's guidance was never shown on this path.
     const failed = captured('cutover-failed');
     expect(failed.output).not.toContain(CUTOVER);
-    const run = runEntrypoint([failed], { deployExit: 1 });
-    expect(run.deploys).toBe(MAX_ATTEMPTS);
+    const deploy = readFileSync(join(FIXTURES, 'deploy-cutover-failed.txt'), 'utf8');
+    expect(deploy).toContain(`The \`${CUTOVER}\` migration started at`);
+    const run = runEntrypoint([failed], { deployExit: 1, deployOutput: deploy });
+    expect(run.deploys).toBe(1);
+    expect(run.sleeps).toBe(0);
     expect(run.serverStarted).toBe(false);
     expect(run.code).toBe(1);
+    expect(run.out).toContain(`[Voxium] FATAL: migrate deploy stops on a migration recorded as failed (P3009): ${CUTOVER}.`);
+    expect(run.out).toContain('this database served users. Never recreate it.');
+    expect(run.out).toContain(`migrate resolve --rolled-back ${CUTOVER}`);
+    expect(run.out).toContain('docs/e2e-always-on-plan.md 7.7');
+    expect(run.out).not.toMatch(/recreate the database empty/);
+  }, TIMEOUT);
+
+  it('stops at once on a failed record of another migration (an interrupted first start) and says how to go on', () => {
+    // Captured: migration 5 cut off while it ran, then a start with the
+    // override, as the refusal advises for a database that never served users.
+    const name = '20260226170434_add_channel_reads';
+    const deploy = readFileSync(join(FIXTURES, 'deploy-interrupted-migration-failed.txt'), 'utf8');
+    const run = runEntrypoint([captured('interrupted-first-start')], { allowCutover: '1', deployExit: 1, deployOutput: deploy });
+    expect(run.deploys).toBe(1);
+    expect(run.sleeps).toBe(0);
+    expect(run.code).toBe(1);
+    expect(run.out).toContain(`(P3009): ${name}.`);
+    expect(run.out).toContain('If this database never served users');
+    expect(run.out).toContain('recreate the database empty');
+    expect(run.out).toContain(`migrate resolve --rolled-back ${name}`);
+    expect(run.out).toContain('If it served users, never recreate it');
+    expect(run.out).not.toContain('found DMs or keys');
+  }, TIMEOUT);
+
+  it('still retries an ordinary deploy failure, and prints the deploy output without a connection string', () => {
+    const unreachable = readFileSync(join(FIXTURES, 'deploy-unreachable.txt'), 'utf8');
+    const run = runEntrypoint([captured('empty-database')], {
+      deployExit: 1,
+      deployOutput: `${unreachable}\nSynthetic: postgresql://voxium:s3cret@postgres:5432/voxium, see https://pris.ly/d/config-url\n`,
+    });
+    expect(run.deploys).toBe(MAX_ATTEMPTS);
+    expect(run.sleeps).toBe(MAX_ATTEMPTS);
+    expect(run.code).toBe(1);
+    expect(run.out).toContain("Error: P1001: Can't reach database server at `postgres:5432`");
+    expect(run.out).toContain('[Voxium] FATAL: Migrations failed after 10 attempts.');
+    expect(run.out).toContain('Synthetic: <redacted URL> see https://pris.ly/d/config-url');
+    expect(run.out).not.toContain('s3cret');
+    expect(run.out).not.toContain('P3009');
   }, TIMEOUT);
 
   it('reads a status printed with CRLF line endings', () => {

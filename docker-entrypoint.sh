@@ -129,6 +129,43 @@ found_count() {
   printf '%s\n' "$STATUS_LINES" | sed -n 's/^\([0-9][0-9]*\) migrations\{0,1\} found in .*/\1/p' | head -n 1
 }
 
+# What to do about a failed cutover record; $1 leads into it. Its SQL gate
+# refuses only when it would delete DMs or keys; the one other way to such a
+# record, an authorised run cut off, is a database that served users too.
+advise_failed_cutover() {
+  echo "[Voxium] $1 the cutover's SQL gate"
+  echo "[Voxium] found DMs or keys: this database served users. Never recreate it. Mark the cutover"
+  echo "[Voxium] rolled back (from apps/server), then follow docs/e2e-always-on-plan.md 7.7:"
+  echo "[Voxium]   node ../../node_modules/prisma/build/index.js migrate resolve --rolled-back $CUTOVER_MIGRATION"
+}
+
+# The migrations a failed `migrate deploy` ($DEPLOY_LINES) names as recorded
+# failed, one per line ("The `NAME` migration started at <time> failed").
+failed_migrations() {
+  printf '%s\n' "$DEPLOY_LINES" | sed -n 's/^The `\([A-Za-z0-9_]*\)` migration started at .* failed$/\1/p'
+}
+
+# P3009: a migration recorded as failed blocks every deploy until resolved.
+advise_on_failed_record() {
+  FAILED=$(failed_migrations)
+  OTHER=$(printf '%s\n' "$FAILED" | grep -vx "$CUTOVER_MIGRATION" | head -n 1) || true
+  echo "[Voxium] FATAL: migrate deploy stops on a migration recorded as failed (P3009): $(printf '%s' "${FAILED:-named above}" | tr '\n' ' ' | sed 's/ $//')."
+  echo "[Voxium] Retrying cannot change that, so this start ends here."
+  if printf '%s\n' "$FAILED" | grep -qx "$CUTOVER_MIGRATION"; then
+    advise_failed_cutover "That is the always-on E2E cutover:"
+  elif [ -z "$FAILED" ]; then
+    advise_failed_cutover "If it is the always-on E2E cutover ($CUTOVER_MIGRATION),"
+  fi
+  if [ -z "$FAILED" ] || [ -n "$OTHER" ]; then
+    echo "[Voxium] If this database never served users (a first start that was interrupted), that"
+    echo "[Voxium] migration may have run in part: recreate the database empty, or undo what it"
+    echo "[Voxium] created and mark it rolled back before the next start (from apps/server):"
+    echo "[Voxium]   node ../../node_modules/prisma/build/index.js migrate resolve --rolled-back ${OTHER:-<name>}"
+    echo "[Voxium] If it served users, never recreate it: undo what that migration created by"
+    echo "[Voxium] hand, then mark it rolled back with the same command."
+  fi
+}
+
 # A count `[ -eq ]` takes without printing an error: 1 to 6 digits.
 is_count() {
   case "$1" in
@@ -179,10 +216,7 @@ if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
       echo "[Voxium]    have run in part: recreate the database empty, or undo what it created and"
       echo "[Voxium]    mark it rolled back before the next start (from apps/server):"
       echo "[Voxium]      node ../../node_modules/prisma/build/index.js migrate resolve --rolled-back <name>"
-      echo "[Voxium] If a start stops on P3009 naming $CUTOVER_MIGRATION, the cutover's SQL gate"
-      echo "[Voxium] found DMs or keys: this database served users. Never recreate it. Mark the cutover"
-      echo "[Voxium] rolled back (from apps/server), then follow docs/e2e-always-on-plan.md 7.7:"
-      echo "[Voxium]   node ../../node_modules/prisma/build/index.js migrate resolve --rolled-back $CUTOVER_MIGRATION"
+      advise_failed_cutover "If a start stops on P3009 naming $CUTOVER_MIGRATION,"
       exit 1
       ;;
     missing)
@@ -196,12 +230,23 @@ fi
 
 echo "[Voxium] Running database migrations..."
 
-# Retry migrations up to 10 times (a transient connection loss, a slow start)
+# Retry migrations up to 10 times (a transient connection loss, a slow start),
+# except on a migration recorded as failed (P3009): no retry changes that, and
+# `migrate status` never shows it, so the guidance is given here. The deploy's
+# output is printed like the status reads: without colour, and without any URL.
 ATTEMPT=1
 until [ $ATTEMPT -gt $MAX_ATTEMPTS ]; do
-  if prisma_cli migrate deploy; then
+  DEPLOY_RC=0
+  DEPLOY=$(prisma_cli migrate deploy 2>&1) || DEPLOY_RC=$?
+  DEPLOY_LINES=$(printf '%s\n' "$DEPLOY" | tr -d '\r' | sed "s/${ESC}\[[0-9;]*m//g")
+  printf '%s\n' "$DEPLOY_LINES" | redact_urls
+  if [ "$DEPLOY_RC" -eq 0 ]; then
     echo "[Voxium] Migrations complete."
     break
+  fi
+  if printf '%s\n' "$DEPLOY_LINES" | grep -q '^Error: P3009'; then
+    advise_on_failed_record
+    exit 1
   fi
   echo "[Voxium] Migration attempt $ATTEMPT/$MAX_ATTEMPTS failed, retrying in ${RETRY_DELAY_SECONDS}s..."
   ATTEMPT=$((ATTEMPT + 1))
