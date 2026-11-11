@@ -9,6 +9,8 @@ import { LIMITS } from '@voxium/shared';
 
 export const reportsRouter = Router();
 
+const DUPLICATE_REPORT_MESSAGE = 'You already have a pending report against this target';
+
 reportsRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // ─── Submit a report ─────────────────────────────────────────────────────────
@@ -70,7 +72,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         select: { id: true },
       });
       if (existingReport) {
-        throw new BadRequestError('You already have a pending report against this target');
+        throw new BadRequestError(DUPLICATE_REPORT_MESSAGE);
       }
 
       reportedUserId = server.ownerId;
@@ -101,7 +103,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         },
       });
       if (existingReport) {
-        throw new BadRequestError('You already have a pending report against this target');
+        throw new BadRequestError(DUPLICATE_REPORT_MESSAGE);
       }
     }
 
@@ -176,20 +178,32 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       }
     }
 
-    await prisma.report.create({
-      data: {
-        type,
-        reason,
-        reporterId: userId,
-        reportedUserId,
-        messageId: type === 'message' ? messageId : null,
-        messageContent,
-        contentSource,
-        channelId,
-        conversationId,
-        serverId,
-      },
-    });
+    try {
+      await prisma.report.create({
+        data: {
+          type,
+          reason,
+          reporterId: userId,
+          reportedUserId,
+          messageId: type === 'message' ? messageId : null,
+          messageContent,
+          contentSource,
+          channelId,
+          conversationId,
+          serverId,
+        },
+      });
+    } catch (err) {
+      // The look above and this insert are two statements: an identical
+      // report sent at the same time passes the look too. The database
+      // refuses the second one (one pending report per reporter and target:
+      // the partial unique indexes of migration
+      // 20261111140000_reports_one_pending_per_target, the only unique
+      // constraints on the table besides its random id), and it gets the
+      // look's answer.
+      if ((err as { code?: unknown } | null)?.code === 'P2002') throw new BadRequestError(DUPLICATE_REPORT_MESSAGE);
+      throw err;
+    }
 
     // Notify admin report subscribers
     const pendingCount = await prisma.report.count({ where: { status: 'pending' } });

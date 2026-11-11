@@ -378,3 +378,85 @@ describe('Report Routes — type: server', () => {
     expect(prisma.report.create).toHaveBeenCalledWith({ data: expect.objectContaining({ messageContent: 'Quiet' }) });
   });
 });
+
+// ─── Two identical reports at once ──────────────────────────────────────────
+//
+// The look for a pending report and the insert are two statements: two
+// identical reports sent together both pass the look. The database refuses
+// the second insert (the partial unique indexes of migration
+// 20261111140000_reports_one_pending_per_target), and its unique violation
+// must get the look's own answer, never a 500.
+
+describe('Report Routes — the duplicate the look cannot see', () => {
+  const REASON = 'Harassing other members in the channel';
+  const DUPLICATE = 'You already have a pending report against this target';
+  const p2002 = () => Object.assign(new Error('Unique constraint failed on the fields: (`reporter_id`,`reported_user_id`)'), { code: 'P2002' });
+
+  /** Two requests at once: both pass the look, the database admits the first insert and refuses the second. */
+  function databaseAdmitsOne() {
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
+    let inserted = 0;
+    vi.mocked(prisma.report.create).mockImplementation((async () => {
+      inserted += 1;
+      if (inserted > 1) throw p2002();
+      return {};
+    }) as any);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.report.count).mockResolvedValue(1 as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-2' } as any);
+  });
+
+  it('two identical USER reports at once: one is filed, the other gets the existing 400', async () => {
+    databaseAdmitsOne();
+    const send = () => request(createApp()).post('/api/v1/reports').send({ type: 'user', reportedUserId: 'user-2', reason: REASON });
+
+    const [a, b] = await Promise.all([send(), send()]);
+
+    expect([a.status, b.status].sort()).toEqual([201, 400]);
+    expect((a.status === 400 ? a : b).body.error).toBe(DUPLICATE);
+    expect(prisma.report.findFirst).toHaveBeenCalledTimes(2);
+    // admins hear about the one report filed, not about the refusal
+    expect(mockEmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('two identical MESSAGE reports at once: one is filed, the other gets the existing 400', async () => {
+    databaseAdmitsOne();
+    vi.mocked(prisma.message.findUnique).mockResolvedValue({
+      id: 'msg-1', content: 'hi', encrypted: false, channelId: 'ch-1', conversationId: null, authorId: 'user-2',
+      channel: { serverId: 'srv-1', secure: false },
+    } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValue({ userId: 'user-1' } as any);
+    const send = () => request(createApp()).post('/api/v1/reports').send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-1', reason: REASON });
+
+    const [a, b] = await Promise.all([send(), send()]);
+
+    expect([a.status, b.status].sort()).toEqual([201, 400]);
+    expect((a.status === 400 ? a : b).body.error).toBe(DUPLICATE);
+  });
+
+  it('two identical SPACE reports at once: one is filed, the other gets the existing 400', async () => {
+    databaseAdmitsOne();
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+    const send = () => request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+
+    const [a, b] = await Promise.all([send(), send()]);
+
+    expect([a.status, b.status].sort()).toEqual([201, 400]);
+    expect((a.status === 400 ? a : b).body.error).toBe(DUPLICATE);
+  });
+
+  it('any other failure of the insert still answers 500', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
+    vi.mocked(prisma.report.create).mockRejectedValue(Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' }));
+
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'user', reportedUserId: 'user-2', reason: REASON });
+
+    expect(res.status).toBe(500);
+    expect(mockEmit).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+});
