@@ -2787,8 +2787,12 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       // its foreign keys; taking them before the account row formed a cycle.
       await lockAccountRows(tx, [report.reportedUserId, report.reporterId]);
       const disarmed = banTarget ? await disarmWebhookRowsHeldBy(tx, banTarget.id) : [];
-      await tx.report.update({
-        where: { id },
+      // Only from pending, re-checked by the write itself: a second resolve or
+      // a dismiss that committed since the read above leaves nothing to
+      // transition, and this whole resolution rolls back (ban included) with
+      // the answer the read gives
+      const transitioned = await tx.report.updateMany({
+        where: { id, status: 'pending' },
         data: {
           status: 'resolved',
           resolvedById: req.user!.userId,
@@ -2796,6 +2800,7 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
           resolution: sanitizedResolution,
         },
       });
+      if (transitioned.count === 0) throw new BadRequestError('Report is already processed');
       // deleteMany: a message its author deleted meanwhile is not an error
       const deleted = message ? (await tx.message.deleteMany({ where: { id: message.id } })).count > 0 : false;
       if (banTarget) {
@@ -2820,7 +2825,9 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
           action: 'report.resolve',
           targetType: 'report',
           targetId: id,
-          metadata: { resolution: sanitizedResolution, action: action ?? null, messageDeleted: !!(deleteMessage && report.messageId) },
+          // What this resolution deleted, not what it asked for: a message its
+          // author deleted meanwhile was not deleted here
+          metadata: { resolution: sanitizedResolution, action: action ?? null, messageDeleted: deleted },
         }),
       });
       return { messageDeleted: deleted, disarmedServerIds: disarmed };
@@ -2871,14 +2878,17 @@ adminRouter.post('/reports/:id/dismiss', async (req: Request<{ id: string }>, re
     if (!report) throw new NotFoundError('Report');
     if (report.status !== 'pending') throw new BadRequestError('Report is already processed');
 
-    await prisma.report.update({
-      where: { id },
+    // Only from pending, as a resolve: a resolve or another dismiss that
+    // committed since the read above must not be overwritten
+    const transitioned = await prisma.report.updateMany({
+      where: { id, status: 'pending' },
       data: {
         status: 'dismissed',
         resolvedById: req.user!.userId,
         resolvedAt: new Date(),
       },
     });
+    if (transitioned.count === 0) throw new BadRequestError('Report is already processed');
 
     logAuditEvent({
       actorId: req.user!.userId,

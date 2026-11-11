@@ -28,7 +28,8 @@ const prismaMock: Record<string, any> = {
   report: {
     findUnique: vi.fn(),
     findMany: vi.fn().mockResolvedValue([]),
-    update: vi.fn().mockResolvedValue({}),
+    // The transition out of pending is conditional (one row, or none when it already left)
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     count: vi.fn().mockResolvedValue(0),
   },
   message: {
@@ -204,7 +205,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
 
   beforeEach(() => {
     vi.clearAllMocks();
-    prismaMock.report.update.mockResolvedValue({});
+    prismaMock.report.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.report.count.mockResolvedValue(0);
     prismaMock.user.update.mockResolvedValue({});
     prismaMock.serverMember.findMany.mockResolvedValue([]);
@@ -315,7 +316,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
         order.push('tx:end');
         return r;
       });
-      prismaMock.report.update.mockImplementation(async () => { order.push('report'); return {}; });
+      prismaMock.report.updateMany.mockImplementation(async () => { order.push('report'); return { count: 1 }; });
       prismaMock.user.update.mockImplementation(async () => { order.push('ban'); return {}; });
       prismaMock.auditLog.create.mockImplementation(async ({ data }: any) => { order.push(`audit:${data.action}`); return {}; });
       prismaMock.webhook.findMany.mockResolvedValueOnce([{ serverId: 's-1' }]);
@@ -344,7 +345,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       const tx = {
         $queryRaw: vi.fn().mockResolvedValue([]),
         webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
-        report: { update: vi.fn().mockResolvedValue({}) },
+        report: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
         message: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
         user: { update: vi.fn().mockResolvedValue({}) },
         serverJoinRequest: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
@@ -357,7 +358,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       expect(res.status).toBe(200);
       expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
       expect(tx.webhook.findMany).toHaveBeenCalledTimes(1);
-      expect(tx.report.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'rep-1' } }));
+      expect(tx.report.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'rep-1', status: 'pending' } }));
       expect(tx.message.deleteMany).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
       expect(tx.user.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'target-1' } }));
       expect(tx.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
@@ -371,8 +372,8 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       }
       expect(tx.$queryRaw.mock.calls.map((c: unknown[]) => c[1])).toEqual(['reporter-9', 'target-1']);
       expect(tx.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(tx.webhook.findMany.mock.invocationCallOrder[0]);
-      expect(tx.webhook.findMany.mock.invocationCallOrder[0]).toBeLessThan(tx.report.update.mock.invocationCallOrder[0]);
-      for (const topLevel of [prismaMock.report.update, prismaMock.message.deleteMany, prismaMock.message.delete, prismaMock.user.update,
+      expect(tx.webhook.findMany.mock.invocationCallOrder[0]).toBeLessThan(tx.report.updateMany.mock.invocationCallOrder[0]);
+      for (const topLevel of [prismaMock.report.updateMany, prismaMock.message.deleteMany, prismaMock.message.delete, prismaMock.user.update,
         prismaMock.serverJoinRequest.deleteMany, prismaMock.auditLog.create]) {
         expect(topLevel).not.toHaveBeenCalled();
       }
@@ -473,7 +474,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     expect(res.status).toBe(403);
     expect(res.body.error).toContain('Only super admins can ban other admins');
     // Pre-validation: the report must be left untouched
-    expect(prismaMock.report.update).not.toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
     expect(prismaMock.user.update).not.toHaveBeenCalled();
   });
 
@@ -503,7 +504,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
 
     expect(res.status).toBe(403);
     expect(res.body.error).toContain('Cannot ban a super admin');
-    expect(prismaMock.report.update).not.toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
   });
 
   it('an admin cannot self-ban via a report against themselves', async () => {
@@ -517,7 +518,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
 
     expect(res.status).toBe(403);
     expect(res.body.error).toContain('Cannot ban yourself');
-    expect(prismaMock.report.update).not.toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
   });
 
   it('resolving WITHOUT a ban action never touches the reported user', async () => {
@@ -530,7 +531,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       .send({ resolution: 'No action needed' });
 
     expect(res.status).toBe(200);
-    expect(prismaMock.report.update).toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).toHaveBeenCalled();
     expect(prismaMock.user.update).not.toHaveBeenCalled();
     expect(mockBroadcastMemberLeft).not.toHaveBeenCalled();
   });
@@ -558,7 +559,7 @@ describe('POST /admin/reports/:id/resolve — deleting the reported message', ()
 
   beforeEach(() => {
     vi.clearAllMocks();
-    prismaMock.report.update.mockResolvedValue({});
+    prismaMock.report.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.report.count.mockResolvedValue(0);
     prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', messageId: 'msg-1' });
     prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
@@ -637,6 +638,83 @@ describe('POST /admin/reports/:id/resolve — deleting the reported message', ()
       errorLog.mockRestore();
       mockEmit.mockReset();
     }
+  });
+});
+
+describe('POST /admin/reports/:id/resolve|dismiss — a report leaves pending once', () => {
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.report.count.mockResolvedValue(0);
+    prismaMock.report.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.message.deleteMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.auditLog.create.mockReset().mockResolvedValue({});
+    prismaMock.user.update.mockReset().mockResolvedValue({});
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: 'msg-1' });
+    prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
+    errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorLog.mockRestore();
+  });
+
+  const post = (path: string, body: Record<string, unknown>) => request(createApp())
+    .post(`/api/v1/admin/reports/rep-1/${path}`)
+    .set('Authorization', `Bearer ${makeToken()}`)
+    .send(body);
+
+  it('a resolve that finds the report already resolved or dismissed by the time it writes answers the conflict and bans nobody', async () => {
+    // Read as pending, but another resolve (or a dismiss) committed first
+    prismaMock.report.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const res = await post('resolve', { resolution: 'Spam', action: 'ban', deleteMessage: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Report is already processed' });
+    expect(prismaMock.report.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'rep-1', status: 'pending' } }));
+    // The transaction stopped at the transition: no delete, no ban, no audit row, nobody signed out
+    expect(prismaMock.message.deleteMany).not.toHaveBeenCalled();
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+  });
+
+  it('a dismiss that finds the report already resolved by the time it writes answers the conflict and audits nothing', async () => {
+    const { logAuditEvent } = await import('../../utils/auditLog');
+    prismaMock.report.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const res = await post('dismiss', {});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Report is already processed' });
+    expect(prismaMock.report.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'rep-1', status: 'pending' }, data: expect.objectContaining({ status: 'dismissed' }),
+    }));
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('a dismiss of a pending report still dismisses it', async () => {
+    const res = await post('dismiss', {});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, message: 'Report dismissed' });
+  });
+
+  it.each([
+    ['deleted it', 1, true],
+    ['found it already deleted by its author', 0, false],
+  ])('the report.resolve row says messageDeleted only when this resolution %s', async (_what, count, expected) => {
+    prismaMock.message.deleteMany.mockResolvedValueOnce({ count });
+
+    const res = await post('resolve', { resolution: 'Removed', deleteMessage: true });
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: 'report.resolve', metadata: expect.objectContaining({ messageDeleted: expected }) }),
+    });
   });
 });
 
