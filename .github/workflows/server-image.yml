@@ -1,0 +1,185 @@
+name: Server image
+
+# Builds the server image and boots it. docker.yml builds it only on release
+# tags and never starts it, so an image that cannot boot (issue #82: every
+# fresh install refused to start) was found by self-hosters, not here.
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .dockerignore
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - package.json
+      - packages/shared/package.json
+      - apps/server/package.json
+      - apps/server/prisma/**
+      - apps/server/prisma.config.ts
+      - .github/workflows/server-image.yml
+  push:
+    branches: [develop]
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .dockerignore
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - package.json
+      - packages/shared/package.json
+      - apps/server/package.json
+      - apps/server/prisma/**
+      - apps/server/prisma.config.ts
+      - .github/workflows/server-image.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boot:
+    name: Build and boot the server image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: voxium-server:ci
+      NET: voxium-ci
+      PG: postgresql://voxium:ci-postgres@postgres:5432
+      CUTOVER: 20260801140000_e2e_always_on
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
+
+      # Loaded into the runner's Docker, never pushed. Pull requests read the
+      # cache develop wrote and write none of their own.
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=server-image
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,scope=server-image,mode=max' || '' }}
+
+      - name: Start PostgreSQL 16 and Redis
+        run: |
+          docker network create "$NET"
+          docker run -d --name postgres --network "$NET" \
+            -e POSTGRES_USER=voxium -e POSTGRES_PASSWORD=ci-postgres -e POSTGRES_DB=voxium \
+            postgres:16-alpine
+          docker run -d --name redis --network "$NET" redis:7-alpine
+          # Over TCP: the image's init phase answers on the socket only, then restarts.
+          for i in $(seq 1 30); do
+            docker exec postgres pg_isready -h 127.0.0.1 -U voxium -q && break
+            sleep 2
+          done
+          docker exec postgres pg_isready -h 127.0.0.1 -U voxium
+          docker exec postgres psql -U voxium -d voxium -v ON_ERROR_STOP=1 -q -c 'CREATE DATABASE voxium_existing'
+          # What the server needs to boot; placeholder storage is enough for /health.
+          cat > "$RUNNER_TEMP/server.env" <<'ENV'
+          NODE_ENV=production
+          REDIS_URL=redis://redis:6379
+          JWT_SECRET=ci-image-secret-at-least-32-characters-long
+          JWT_REFRESH_SECRET=ci-image-refresh-secret-at-least-32-chars
+          TOTP_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          S3_ASSETS_ENDPOINT=http://127.0.0.1:9000
+          S3_ASSETS_REGION=us-east-1
+          S3_ACCESS_KEY=ci-placeholder
+          S3_SECRET_KEY=ci-placeholder
+          S3_ASSETS_BUCKET=ci-placeholder
+          CORS_ORIGIN=http://localhost:8080
+          ENV
+          cat > "$RUNNER_TEMP/wait-health.sh" <<'SH'
+          # Waits until the container named $1 answers /health on the published
+          # port 3001; fails, with its log, when it exits or never answers.
+          for i in $(seq 1 90); do
+            if [ "$(docker inspect -f '{{.State.Running}}' "$1")" != "true" ]; then
+              echo "::error::$1 exited before /health answered"; docker logs "$1"; exit 1
+            fi
+            if body=$(curl -fsS http://127.0.0.1:3001/health 2>/dev/null); then
+              case "$body" in *'"status":"ok"'*) echo "$body"; exit 0 ;; esac
+            fi
+            sleep 2
+          done
+          echo "::error::$1 never answered /health"; docker logs "$1"; exit 1
+          SH
+
+      - name: An empty database migrates on first start, with no override
+        run: |
+          docker run -d --name server --network "$NET" -p 3001:3001 \
+            --env-file "$RUNNER_TEMP/server.env" -e DATABASE_URL="$PG/voxium" "$IMAGE"
+          sh "$RUNNER_TEMP/wait-health.sh" server
+          docker logs server 2>&1 | grep -F '[Voxium] New database: every migration will be applied.'
+          # No Prisma CLI run reported to checkpoint.prisma.io: it leaves a cache behind.
+          if docker exec server sh -c 'ls -A "$HOME/.cache/checkpoint-nodejs"' 2>/dev/null; then
+            echo "::error::the Prisma update check ran in the image"; exit 1
+          fi
+
+      - name: The second start of the migrated database boots
+        run: |
+          docker rm -f server
+          docker run -d --name server --network "$NET" -p 3001:3001 \
+            --env-file "$RUNNER_TEMP/server.env" -e DATABASE_URL="$PG/voxium" "$IMAGE"
+          sh "$RUNNER_TEMP/wait-health.sh" server
+          docker logs server 2>&1 | grep -F 'No pending migrations to apply.'
+          docker rm -f server
+
+      - name: An existing database with the cutover pending is refused and left untouched
+        run: |
+          # The migrations older than the cutover, through the image's own CLI.
+          docker run --rm --network "$NET" -e DATABASE_URL="$PG/voxium_existing" -e CUTOVER \
+            --entrypoint sh "$IMAGE" -c '
+              set -e
+              [ -d "apps/server/prisma/migrations/$CUTOVER" ]
+              mkdir -p /tmp/pre/prisma/migrations
+              cp apps/server/prisma/schema.prisma /tmp/pre/prisma/
+              cp apps/server/prisma/migrations/migration_lock.toml /tmp/pre/prisma/migrations/
+              for dir in apps/server/prisma/migrations/*/; do
+                [ "$(basename "$dir")" = "$CUTOVER" ] && break
+                cp -r "$dir" /tmp/pre/prisma/migrations/
+              done
+              cd apps/server
+              node ../../node_modules/prisma/build/index.js migrate deploy --schema /tmp/pre/prisma/schema.prisma'
+          # One DM, which the cutover would delete.
+          docker exec postgres psql -U voxium -d voxium_existing -v ON_ERROR_STOP=1 -q -c "
+            INSERT INTO users (id, username, email, display_name, password, updated_at) VALUES
+              ('ci-a', 'ci_a', 'a@ci.invalid', 'A', 'x', now()), ('ci-b', 'ci_b', 'b@ci.invalid', 'B', 'x', now());
+            INSERT INTO conversations (id, user1_id, user2_id, updated_at) VALUES ('ci-conv', 'ci-a', 'ci-b', now());
+            INSERT INTO messages (id, content, author_id, conversation_id) VALUES ('ci-dm', 'kept', 'ci-a', 'ci-conv');"
+          q() { docker exec postgres psql -U voxium -d voxium_existing -Atc "$1"; }
+          expect() { [ "$2" = "$3" ] || { echo "::error::$1: expected $3, got $2"; exit 1; }; }
+          applied=$(q 'SELECT count(*) FROM _prisma_migrations')
+
+          # A refusal takes one status read; 120 s only bounds a gate that let it start.
+          code=0
+          timeout 120 docker run --name refused --network "$NET" \
+            --env-file "$RUNNER_TEMP/server.env" -e DATABASE_URL="$PG/voxium_existing" "$IMAGE" \
+            > "$RUNNER_TEMP/refused.log" 2>&1 || code=$?
+          cat "$RUNNER_TEMP/refused.log"
+          if [ "$code" -eq 0 ] || [ "$code" -eq 124 ]; then
+            echo "::error::the container did not refuse (exit $code)"; exit 1
+          fi
+          grep -F "FATAL: the always-on E2E cutover ($CUTOVER) has not been applied." "$RUNNER_TEMP/refused.log"
+          if grep -F -e 'Running database migrations' -e 'Starting server' "$RUNNER_TEMP/refused.log"; then
+            echo "::error::the refused start went on to migrate"; exit 1
+          fi
+          # Untouched: no cutover row (a failed one would block every later deploy),
+          # nothing else applied, the DM still there.
+          expect 'cutover rows' "$(q "SELECT count(*) FROM _prisma_migrations WHERE migration_name = '$CUTOVER'")" 0
+          expect 'applied migrations' "$(q 'SELECT count(*) FROM _prisma_migrations')" "$applied"
+          expect 'DMs' "$(q 'SELECT count(*) FROM messages WHERE conversation_id IS NOT NULL')" 1
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: |
+          docker ps -a
+          for c in server refused postgres; do echo "::group::$c"; docker logs "$c" 2>&1 || true; echo "::endgroup::"; done
