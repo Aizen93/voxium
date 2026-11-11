@@ -516,14 +516,20 @@ the gap, and 5 receiving chains per session, so five ratchet turns of the
 sender (each a reply of ours followed by one of theirs) put it out of reach.
 A kept share is therefore imported before any newer Olm message of its device
 is decrypted: the device-sealed decrypt imports that device's kept shares
-first, its sender pinned by then.
+first, its sender pinned by then. That includes a page an earlier service of
+the account wrote late beside the current one (it makes the in-memory index of
+kept shares unknown, so the next device-sealed decrypt lists the vault again).
+If the import itself fails (reading the kept shares, or a write while one is
+processed), the newer message is decrypted anyway rather than dropped, and the
+shares wait for the next claim or signal.
 
-**Residual: a share overtaken while it is still in the inbox, or while its
-session cannot be stored.** Nothing orders a share the client has not claimed
-yet against a signal that arrives over the socket first, short of claiming
-before every device-sealed decrypt (a request per call signal); a share whose
-session store keeps failing is retried, but the signals are decrypted
-meanwhile. Either is discarded as unusable at its claim once overtaken beyond
+**Residual: a share overtaken while it is still in the inbox, while its
+session cannot be stored, or while importing it fails.** Nothing orders a
+share the client has not claimed yet against a signal that arrives over the
+socket first, short of claiming before every device-sealed decrypt (a request
+per call signal); a share whose session store keeps failing, or whose import
+in front of a signal fails, is retried, but the signals are decrypted
+meanwhile. Each is discarded as unusable at its claim once overtaken beyond
 the bounds above. Decrypting a share's Olm layer before its sender is pinned,
 and leaving only the sender check pending, is not a way out within this
 protocol: a session opened by a pre-key message is created against the pinned
@@ -1095,7 +1101,9 @@ whole session rather than only the part the uploading device happened to see.
   of the client's serial crypto queue: sends, decrypts and call signals run
   between two pages, so restoring thousands of sessions holds none of them up
   for the whole pull. A page that finds the account key replaced since the
-  pull began (another restore, a reset) stops the pull, and so does a dispose.
+  pull began (only another restore can: a reset keeps a key the device
+  holds, and a pull runs only under a held key) stops the pull, and so does a
+  dispose.
   The pull reads at most as many pages as the server can store for one
   account plus two (`MESSAGE_KEY_STORE_CAP / MESSAGE_KEY_PAGE_MAX + 2`, 102:
   the server's cap is checked before an insert without a lock, so two devices

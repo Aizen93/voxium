@@ -1779,9 +1779,10 @@ export class E2EService {
    *
    * One page per step of the serial queue. Each step holds the account key
    * across its request and its imports, and the queue keeps a master-key
-   * replacement (another restore, a reset) or a dispose from freeing that key
-   * under it; between two steps the queue serves whatever else waits (a send,
-   * a decrypt, a call signal), so a long history does not hold them up. A step
+   * replacement (only another restore: a reset keeps a key the device holds)
+   * or a dispose from freeing that key under it; between two steps the queue
+   * serves whatever else waits (a send, a decrypt, a call signal), so a long
+   * history does not hold them up. A step
    * that finds the key replaced since the pull began stops the pull: the
    * replacement brought its own (restoreKeyBackup), and the old key opens
    * nothing the account publishes any more. At most MAX_RESTORE_PAGES pages.
@@ -3210,11 +3211,13 @@ export class E2EService {
    * olmDecryptStaged).
    *
    * A kept share is imported before any newer Olm message of its sender
-   * device (importKeptSharesFrom). Known residual (docs/e2e-dm-spec.md
-   * §12.3): a share still in the inbox has no such guard. A call signal or a
-   * voice key of that device decrypted ahead of it leaves its message only to
-   * vodozemac's skipped message keys (40 per receiving chain, 5 chains per
-   * session), and past those bounds it is discarded as unusable once claimed.
+   * device (importKeptSharesFrom), unless that import fails: the message is
+   * then decrypted anyway. Known residual (docs/e2e-dm-spec.md §12.3): a share
+   * still in the inbox has no such guard, and neither has one whose store or
+   * import keeps failing. A call signal or a voice key of that device
+   * decrypted ahead of it leaves its message only to vodozemac's skipped
+   * message keys (40 per receiving chain, 5 chains per session), and past
+   * those bounds it is discarded as unusable once claimed.
    *
    * Callers must already hold the serial queue (this mutates Olm state).
    */
