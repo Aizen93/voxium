@@ -5613,6 +5613,52 @@ describe('E2EService — lifecycle', () => {
       expect(urls).toHaveLength(0); // done: nothing left to resume
     });
 
+    it('resumes a history pull cut short during its very first page', async () => {
+      const { server, phone } = await backedUpAccount(3);
+      await phone.service.dispose();
+      let armed = false;
+      const gate = holdingApi(
+        server.apiFor(phone.userId),
+        (verb, url) => armed && verb === 'get' && url.startsWith('/e2e/message-keys')
+      );
+      const first = serviceOver(phone.userId, gate.api, phone);
+      await first.initialize();
+      await flushQueue();
+      armed = true;
+      const pulling = first.restoreMessageKeys();
+      pulling.catch(() => undefined); // settled below
+      await gate.held; // the first page is on its way…
+      await first.dispose(); // …when the app is closed
+      gate.release();
+      await expect(pulling).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+
+      const urls: string[] = [];
+      const again = serviceOver(phone.userId, recordingPages(server.apiFor(phone.userId), urls), phone);
+      await again.initialize();
+      await vi.waitFor(() => expect(urls).toEqual(['/e2e/message-keys', '/e2e/message-keys?cursor=2']));
+    });
+
+    it('stops an older history pull at its next page once a newer one has started', async () => {
+      const { server, phone } = await backedUpAccount(5); // three pages of the fake's two
+      await phone.service.dispose();
+      let armed = false;
+      const gate = holdingApi(
+        server.apiFor(phone.userId),
+        (verb, url) => armed && verb === 'get' && url.startsWith('/e2e/message-keys')
+      );
+      const service = serviceOver(phone.userId, gate.api, phone);
+      await service.initialize();
+      await flushQueue();
+      armed = true;
+      const older = service.restoreMessageKeys();
+      await gate.held; // its first page is on its way
+      const newer = service.restoreMessageKeys();
+      gate.release();
+      await Promise.all([older, newer]);
+      // the older one read one page; the newer one all three
+      expect(gate.reads.filter((r) => r === 'GET /e2e/message-keys')).toHaveLength(4);
+    });
+
     it('leaves a pull started right after the start to read from the beginning, instead of resuming over it', async () => {
       const { server, phone } = await backedUpAccount(5); // three pages of the fake's two
       const masterKey = (phone.service as unknown as { masterKey: EngineMasterKey }).masterKey.publicKey();
