@@ -26,7 +26,10 @@ fn is_valid_avatar_key(key: &str) -> bool {
     let Some(name) = rest.strip_suffix(".webp") else {
         return false;
     };
-    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Download an avatar image to the temp directory and return the file path.
@@ -43,7 +46,13 @@ fn cache_avatar_to_file(api_base: &str, key: &str) -> Result<std::path::PathBuf,
     // Replace all non-alphanumeric/dot/dash/underscore chars for safe filenames on all OSes
     let safe_name: String = key
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let path = temp_dir.join(&safe_name);
 
@@ -95,7 +104,7 @@ fn is_valid_image(bytes: &[u8]) -> bool {
         || (bytes.len() >= 12
             && bytes.starts_with(b"RIFF")
             && &bytes[8..12] == b"WEBP")                 // WebP
-        || bytes.starts_with(b"GIF8")                    // GIF
+        || bytes.starts_with(b"GIF8") // GIF
 }
 
 /// Resolve the Windows app identity for toast notifications.
@@ -251,7 +260,9 @@ fn write_session_secret(name: &str, value: &str) -> Result<(), String> {
     if !valid_session_secret_value(value) {
         return Err("invalid credential format".to_string());
     }
-    session_entry(name)?.set_password(value).map_err(|e| e.to_string())
+    session_entry(name)?
+        .set_password(value)
+        .map_err(|e| e.to_string())
 }
 
 /// Removing an entry that is not there is the state the caller asked for.
@@ -295,7 +306,9 @@ mod session_secret_tests {
     /// the in-memory mock store, never the machine's own credential store.
     fn use_mock_store() {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| keyring::set_default_credential_builder(keyring::mock::default_credential_builder()));
+        ONCE.call_once(|| {
+            keyring::set_default_credential_builder(keyring::mock::default_credential_builder())
+        });
     }
 
     #[test]
@@ -303,11 +316,28 @@ mod session_secret_tests {
         use_mock_store();
         assert!(session_entry("tokens").is_ok());
         assert!(session_entry("trusted-device").is_ok());
-        for name in ["", "token", "Tokens", "../tokens", "e2e-pickle-key", "alice"] {
-            assert_eq!(session_entry(name).unwrap_err(), "unknown credential", "{name:?}");
+        for name in [
+            "",
+            "token",
+            "Tokens",
+            "../tokens",
+            "e2e-pickle-key",
+            "alice",
+        ] {
+            assert_eq!(
+                session_entry(name).unwrap_err(),
+                "unknown credential",
+                "{name:?}"
+            );
             assert_eq!(read_session_secret(name).unwrap_err(), "unknown credential");
-            assert_eq!(write_session_secret(name, "abc").unwrap_err(), "unknown credential");
-            assert_eq!(delete_session_secret(name).unwrap_err(), "unknown credential");
+            assert_eq!(
+                write_session_secret(name, "abc").unwrap_err(),
+                "unknown credential"
+            );
+            assert_eq!(
+                delete_session_secret(name).unwrap_err(),
+                "unknown credential"
+            );
         }
     }
 
@@ -331,7 +361,10 @@ mod session_secret_tests {
         use_mock_store();
         let pair = r#"{"accessToken":"eyJhbGciOiJIUzI1NiJ9.a.b","refreshToken":"eyJhbGciOiJIUzI1NiJ9.c.d"}"#;
         assert_eq!(write_session_secret("tokens", pair), Ok(()));
-        assert_eq!(write_session_secret("trusted-device", "eyJhbGciOiJIUzI1NiJ9.a.b"), Ok(()));
+        assert_eq!(
+            write_session_secret("trusted-device", "eyJhbGciOiJIUzI1NiJ9.a.b"),
+            Ok(())
+        );
         // a second delete is still the state the caller asked for
         assert_eq!(delete_session_secret("tokens"), Ok(()));
         assert_eq!(delete_session_secret("tokens"), Ok(()));
@@ -340,8 +373,16 @@ mod session_secret_tests {
     #[test]
     fn a_malformed_value_is_refused_before_the_store_is_touched() {
         use_mock_store();
-        for bad in ["", "with space", "héllo", &"a".repeat(SESSION_SECRET_MAX_CHARS + 1)] {
-            assert_eq!(write_session_secret("tokens", bad).unwrap_err(), "invalid credential format");
+        for bad in [
+            "",
+            "with space",
+            "héllo",
+            &"a".repeat(SESSION_SECRET_MAX_CHARS + 1),
+        ] {
+            assert_eq!(
+                write_session_secret("tokens", bad).unwrap_err(),
+                "invalid credential format"
+            );
         }
         assert_eq!(read_session_secret("tokens"), Ok(None));
     }
@@ -353,10 +394,14 @@ mod session_secret_tests {
         assert!(valid_session_secret_value(&format!(
             "{{\"accessToken\":\"{jwt}\",\"refreshToken\":\"{jwt}\"}}"
         )));
-        assert!(valid_session_secret_value(&"a".repeat(SESSION_SECRET_MAX_CHARS)));
+        assert!(valid_session_secret_value(
+            &"a".repeat(SESSION_SECRET_MAX_CHARS)
+        ));
 
         assert!(!valid_session_secret_value(""));
-        assert!(!valid_session_secret_value(&"a".repeat(SESSION_SECRET_MAX_CHARS + 1)));
+        assert!(!valid_session_secret_value(
+            &"a".repeat(SESSION_SECRET_MAX_CHARS + 1)
+        ));
         assert!(!valid_session_secret_value("with space"));
         assert!(!valid_session_secret_value("line\nbreak"));
         assert!(!valid_session_secret_value("nul\0byte"));
