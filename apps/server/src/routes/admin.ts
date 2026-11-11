@@ -41,6 +41,15 @@ function forceLogoutUser(userId: string, reason: string): void {
   revokeUserSessions(userId, { forceLogoutReason: reason });
 }
 
+/**
+ * Both ban transactions (the ban route, a report resolved with a ban). Their
+ * first statement disarms the webhook rows the account holds, and a
+ * delete-with-purge holds such a row under its own 60 s budget
+ * (utils/webhookLifecycle.ts): the 5 s default would fail a ban queued
+ * behind it, where the ban used to commit and disarm afterwards.
+ */
+const BAN_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 };
+
 /** A step after a committed ban failed: logged, never thrown (the ban holds). */
 function logBanFanOutFailure(userId: string, step: string, err: unknown): void {
   console.error(`[Admin] User ${userId} banned, but ${step} failed:`, err instanceof Error ? err.message : err);
@@ -525,7 +534,7 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
         }),
       });
       return { ipsBanned: ipBanResult.count, disarmedServerIds: disarmed };
-    });
+    }, BAN_TRANSACTION_OPTIONS);
 
     // The ban is committed: sign the account out everywhere NOW (force:logout,
     // then a room-filtered disconnect on every node; never throws), then the
@@ -2772,10 +2781,14 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         }),
       });
       return { messageDeleted: deleted, disarmedServerIds: disarmed };
-    });
+    }, BAN_TRANSACTION_OPTIONS);
 
-    // Committed. Everything below is best effort, each step on its own: one
-    // that throws is logged and never answers 500 for a resolution that holds.
+    // Committed. A ban signs the account out everywhere FIRST, right after
+    // the commit (never throws). Everything after is best effort, each step
+    // on its own: one that throws is logged and never answers 500 for a
+    // resolution that holds.
+    if (banTarget) forceLogoutUser(banTarget.id, 'Your account has been banned');
+
     if (message && messageDeleted) {
       // The files after the row, as on the author's own delete
       deleteAttachmentBlobs(attachmentKeys, '[Admin]', `reported message ${message.id}`);
@@ -2791,12 +2804,8 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       }
     }
 
-    if (banTarget) {
-      // Sign the account out everywhere first (never throws), then the same
-      // fan-out as the canonical ban route
-      forceLogoutUser(banTarget.id, 'Your account has been banned');
-      await announceCommittedBan(banTarget.id, disarmedServerIds, bannedPending);
-    }
+    // The same fan-out as the canonical ban route
+    if (banTarget) await announceCommittedBan(banTarget.id, disarmedServerIds, bannedPending);
 
     try {
       const pendingCount = await prisma.report.count({ where: { status: 'pending' } });

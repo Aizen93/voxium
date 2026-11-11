@@ -357,6 +357,39 @@ describe('POST /admin/users/:userId/ban — atomic IP bans (MED-13)', () => {
       });
     });
 
+    it('runs every write of the ban on the TRANSACTION client, with a budget a queued webhook purge cannot exhaust', async () => {
+      const tx = {
+        webhook: { findMany: vi.fn().mockResolvedValue([{ serverId: 's-1' }]), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        user: { update: vi.fn().mockResolvedValue({}) },
+        ipBan: { createMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        serverJoinRequest: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        auditLog: { create: vi.fn().mockResolvedValue({}) },
+      };
+      prismaMock.$transaction.mockImplementation((fn: (client: unknown) => Promise<unknown>) => fn(tx));
+      prismaMock.ipRecord.findMany.mockResolvedValue([{ ip: '1.1.1.1' }]);
+
+      const res = await ban({ reason: 'spam', banIps: true });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+      expect(tx.webhook.updateMany).toHaveBeenCalledTimes(1);
+      expect(tx.user.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'target-1' } }));
+      expect(tx.ipBan.createMany).toHaveBeenCalledTimes(1);
+      expect(tx.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
+      expect(tx.auditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'user.ban', targetId: 'target-1' }) });
+      // The webhook rows were disarmed FIRST, before the account row was taken
+      expect(tx.webhook.updateMany.mock.invocationCallOrder[0]).toBeLessThan(tx.user.update.mock.invocationCallOrder[0]);
+      // Nothing the ban writes went through the top-level client
+      expect(prismaMock.user.update).not.toHaveBeenCalled();
+      expect(prismaMock.ipBan.createMany).not.toHaveBeenCalled();
+      expect(prismaMock.serverJoinRequest.deleteMany).not.toHaveBeenCalled();
+      expect(prismaMock.webhook.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+      expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+      // ...and the disarmed server still hears about it, after the commit
+      expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 's-1' });
+    });
+
     it('writes no audit row and signs nobody out when the transaction fails (no ban)', async () => {
       prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
 

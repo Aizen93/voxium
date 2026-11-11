@@ -336,6 +336,51 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       });
     });
 
+    it('runs every write of the resolution on the TRANSACTION client, with the ban route\'s budget', async () => {
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', messageId: 'msg-1' });
+      prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
+      const tx = {
+        webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+        report: { update: vi.fn().mockResolvedValue({}) },
+        message: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        user: { update: vi.fn().mockResolvedValue({}) },
+        serverJoinRequest: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        auditLog: { create: vi.fn().mockResolvedValue({}) },
+      };
+      prismaMock.$transaction.mockImplementation((fn: (client: unknown) => Promise<unknown>) => fn(tx));
+
+      const res = await resolve({ resolution: 'Spam confirmed', action: 'ban', deleteMessage: true });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+      expect(tx.webhook.findMany).toHaveBeenCalledTimes(1);
+      expect(tx.report.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'rep-1' } }));
+      expect(tx.message.deleteMany).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+      expect(tx.user.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'target-1' } }));
+      expect(tx.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
+      expect(tx.auditLog.create).toHaveBeenCalledTimes(2);
+      expect(tx.webhook.findMany.mock.invocationCallOrder[0]).toBeLessThan(tx.report.update.mock.invocationCallOrder[0]);
+      for (const topLevel of [prismaMock.report.update, prismaMock.message.deleteMany, prismaMock.message.delete, prismaMock.user.update,
+        prismaMock.serverJoinRequest.deleteMany, prismaMock.auditLog.create, prismaMock.webhook.findMany]) {
+        expect(topLevel).not.toHaveBeenCalled();
+      }
+    });
+
+    it('signs the banned account out right after the commit, before any notice', async () => {
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', messageId: 'msg-1' });
+      prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
+      const order: string[] = [];
+      mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+
+      const res = await resolve({ resolution: 'Spam confirmed', action: 'ban', deleteMessage: true });
+
+      expect(res.status).toBe(200);
+      expect(order.indexOf('force:logout')).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf('force:logout')).toBeLessThan(order.indexOf('message:delete'));
+      expect(order.indexOf('force:logout')).toBeLessThan(order.indexOf('report:new'));
+      mockEmit.mockReset();
+    });
+
     it('a resolution whose transaction fails records nothing, bans nobody and signs nobody out', async () => {
       prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
 
