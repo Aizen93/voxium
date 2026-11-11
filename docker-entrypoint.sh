@@ -112,9 +112,13 @@ status_reason() {
   fi
 }
 
-# A connection string carries the password: no URL is ever printed.
+# A connection string carries the password: no URL is printed but Prisma's
+# own help links (https://pris.ly/...), which the operator needs. Those are
+# set aside first, so a URL that merely contains one is still redacted whole.
 redact_urls() {
-  sed 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]*#<redacted URL>#g'
+  sed -e 's#https://pris\.ly/#VOXIUM_PRISLY_LINK/#g' \
+      -e 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]*#<redacted URL>#g' \
+      -e 's#VOXIUM_PRISLY_LINK/#https://pris.ly/#g'
 }
 
 # N in "N migrations found in prisma/migrations".

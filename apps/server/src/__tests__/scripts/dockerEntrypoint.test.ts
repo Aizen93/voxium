@@ -43,6 +43,7 @@ const STATUS_EXIT = {
   'partly-migrated': 1,
   'interrupted-first-start': 1,
   'missing-database-coloured': 1,
+  'invalid-database-url': 1,
   unreachable: 1,
   'wrong-password': 1,
 } as const;
@@ -322,6 +323,21 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.code).toBe(1);
     expect(run.out).toContain('FATAL: could not read the migration status');
     expect(run.out).toContain('(attempt 1/10): Error: P1013: The provided database string is invalid: <redacted URL>');
+    expect(run.out).not.toContain('s3cret');
+    expect(run.deploys).toBe(0);
+  }, TIMEOUT);
+
+  it("keeps Prisma's pris.ly help links while redacting every other URL", () => {
+    // Captured: an invalid port in DATABASE_URL. The help link is what the
+    // operator needs; a connection string beside it still goes.
+    const invalid = captured('invalid-database-url');
+    expect(invalid.output).toContain('Error: P1013');
+    const run = runEntrypoint([
+      invalid,
+      { output: 'Error: P1013: see https://pris.ly/d/config-url about postgresql://voxium:s3cret@postgres:5432/voxium\n', exit: 1 },
+    ]);
+    expect(run.out).toContain('(attempt 1/10): Error: P1013: The provided database string is invalid. invalid port number in database URL. Please refer to the documentation in https://pris.ly/d/config-url for constructing');
+    expect(run.out).toContain('(attempt 2/10): Error: P1013: see https://pris.ly/d/config-url about <redacted URL>');
     expect(run.out).not.toContain('s3cret');
     expect(run.deploys).toBe(0);
   }, TIMEOUT);
