@@ -61,7 +61,8 @@ const visibility = vi.hoisted(() => ({
 vi.mock('../../utils/channelVisibilityRooms', () => ({
   visibilityRequestMark: visibility.mark,
   resyncRequestedSince: visibility.requestedSince,
-  syncChannelVisibilityRooms: visibility.sync,
+  // The join's own re-check: not a mutation, so it must not count as a request
+  recheckVisibilityAfterJoin: visibility.sync,
 }));
 
 // ─── Import after mocks ─────────────────────────────────────────────────────

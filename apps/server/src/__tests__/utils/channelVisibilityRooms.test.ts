@@ -68,6 +68,7 @@ import {
   visibilityRequestMark,
   resyncAfterJoins,
   resyncRequestedSince,
+  recheckVisibilityAfterJoin,
   _resetChannelVisibilityForTests,
   stopChannelVisibilitySync,
 } from '../../utils/channelVisibilityRooms';
@@ -1226,6 +1227,43 @@ describe('a join that raced a resync (connection handler, channel:join)', () => 
     expect(resyncRequestedSince(before, 'server-1')).toBe(true);
     expect(resyncRequestedSince(before, 'server-2')).toBe(false);
     expect(resyncRequestedSince(after, 'server-1')).toBe(false);
+  });
+
+  // Review of #71: a join site's own cluster-wide re-check counted as a
+  // request, so overlapping joins in one busy space set off each other's
+  // re-checks, every one a request since the others' marks
+  it('a join site\'s re-check resyncs every node but moves no mark, here or on the peers', async () => {
+    m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    const mark = visibilityRequestMark();
+
+    await recheckVisibilityAfterJoin('server-1', { userId: 'user-1' });
+
+    expect(m.localIn).toHaveBeenCalledWith('user:user-1');
+    expect(published()).toEqual([expect.objectContaining({ serverId: 'server-1', userId: 'user-1', recheck: true })]);
+    expect(visibilityRequestMark()).toBe(mark);
+    expect(resyncRequestedSince(mark, 'server-1')).toBe(false);
+
+    // A peer's re-check: applied, not counted; a mutation's request: counted
+    await initChannelVisibilitySync();
+    const deliver = m.subscribe.mock.calls[0][1] as (raw: string) => void;
+    deliver(JSON.stringify({ id: 'recheck-1', fromNode: 'node-b', serverId: 'server-1', userId: 'user-1', recheck: true }));
+    await vi.waitFor(() => expect(m.localIn).toHaveBeenCalledTimes(2));
+    expect(resyncRequestedSince(mark, 'server-1')).toBe(false);
+    deliver(JSON.stringify({ id: 'mutation-1', fromNode: 'node-b', serverId: 'server-1' }));
+    expect(resyncRequestedSince(mark, 'server-1')).toBe(true);
+  });
+
+  it('a message whose recheck flag is not `true` is refused', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await initChannelVisibilitySync();
+    const deliver = m.subscribe.mock.calls[0][1] as (raw: string) => void;
+
+    deliver(JSON.stringify({ id: 'bad-recheck', fromNode: 'node-b', serverId: 'server-1', recheck: 'yes' }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(warn).toHaveBeenCalledWith('[Visibility] Ignored a resync message with an invalid shape');
+    expect(m.localIn).not.toHaveBeenCalled();
   });
 
   it('a space forgotten past REQUEST_SPACES_MAX reads as requested to a mark older than it was forgotten', async () => {

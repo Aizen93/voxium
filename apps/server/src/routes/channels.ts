@@ -11,7 +11,7 @@ import { hasServerPermission, hasChannelPermission, filterVisibleChannels, compu
 import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
-import { visibilityRequestMark, resyncRequestedSince, syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
+import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from '../utils/channelVisibilityRooms';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -266,7 +266,7 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
       // Voice channels get the room too — it carries voice presence events.
       getIO().in(room).socketsJoin(`channel:${channel.id}`);
     }
-    if (resyncRequestedSince(visibilityMark, serverId)) void syncChannelVisibilityRooms(serverId, { channelId: channel.id });
+    if (resyncRequestedSince(visibilityMark, serverId)) void recheckVisibilityAfterJoin(serverId, { channelId: channel.id });
 
     // NOTE (MED-15): no per-member ChannelRead seeding here. A brand-new channel
     // has zero messages, so the unread computation (COALESCE(last_read_at, epoch))

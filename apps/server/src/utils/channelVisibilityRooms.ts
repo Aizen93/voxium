@@ -99,11 +99,29 @@ export async function syncChannelVisibilityRooms(
   serverId: string,
   opts?: { channelId?: string; userId?: string },
 ): Promise<void> {
-  const scope: ResyncScope = { serverId, channelId: opts?.channelId, userId: opts?.userId };
   noteResyncRequest(serverId);
+  await resyncEveryNode({ serverId, channelId: opts?.channelId, userId: opts?.userId }, false);
+}
+
+/**
+ * The cluster-wide resync an ADAPTER-WIDE join site runs when a request raced
+ * its read (see resyncRequestedSince): the same passes as
+ * syncChannelVisibilityRooms, but it is not a visibility MUTATION, so it does
+ * not count as a request here or on the peers (its message says `recheck`).
+ * Counted, the re-checks of overlapping joins in one busy space set each other
+ * off: each was a request since the others' marks.
+ */
+export async function recheckVisibilityAfterJoin(
+  serverId: string,
+  opts: { channelId?: string; userId?: string },
+): Promise<void> {
+  await resyncEveryNode({ serverId, channelId: opts.channelId, userId: opts.userId }, true);
+}
+
+async function resyncEveryNode(scope: ResyncScope, recheck: boolean): Promise<void> {
   // Independent halves, each catching its own errors: a database failure in
   // the local pass must not keep the peers from resyncing, nor the reverse
-  await Promise.all([resyncLocalSockets(passScope(scope)), fanOutResync(scope)]);
+  await Promise.all([resyncLocalSockets(passScope(scope)), fanOutResync(scope, recheck)]);
 }
 
 // ─── Joins that raced a resync ──────────────────────────────────────────────
@@ -163,7 +181,8 @@ export function resyncAfterJoins(mark: number, userId: string, serverIds: Iterab
  * Did this node see a resync request for `serverId` since `mark`? For code
  * whose join is ADAPTER-WIDE (a new member's rooms, a new channel's audience):
  * a local re-check would repair only this node, so such code answers a true
- * with syncChannelVisibilityRooms, which resyncs every node.
+ * with recheckVisibilityAfterJoin, which resyncs every node (and, not being a
+ * mutation, moves no mark).
  *
  * The gap that remains: a request only a PEER had seen at that moment (its
  * publish not yet here) re-checks nothing, and the join may then land on that
@@ -234,6 +253,8 @@ interface ResyncMessage extends ResyncScope {
   /** One id per resync request; its retries reuse it. */
   id: string;
   fromNode: string;
+  /** A join site's re-check, not a mutation (see recheckVisibilityAfterJoin). */
+  recheck?: true;
 }
 
 const isOptionalId = (value: unknown): value is string | undefined =>
@@ -242,12 +263,13 @@ const isOptionalId = (value: unknown): value is string | undefined =>
 /** The message, or null when any field is not what a node publishes. */
 function parseResyncMessage(value: unknown): ResyncMessage | null {
   if (typeof value !== 'object' || value === null) return null;
-  const { id, fromNode, serverId, channelId, userId } = value as Record<string, unknown>;
+  const { id, fromNode, serverId, channelId, userId, recheck } = value as Record<string, unknown>;
   if (typeof id !== 'string' || !OPAQUE_ID_RE.test(id)) return null;
   if (typeof fromNode !== 'string' || fromNode.length === 0 || fromNode.length > 128) return null;
   if (typeof serverId !== 'string' || !OPAQUE_ID_RE.test(serverId)) return null;
   if (!isOptionalId(channelId) || !isOptionalId(userId)) return null;
-  return { id, fromNode, serverId, channelId, userId };
+  if (recheck !== undefined && recheck !== true) return null;
+  return { id, fromNode, serverId, channelId, userId, ...(recheck ? { recheck } : {}) };
 }
 
 const seenIds = new Map<string, true>();
@@ -280,7 +302,8 @@ function handleResyncMessage(raw: string): void {
   if (message.fromNode === NODE_ID()) return;
   // A retry of a request this node already applied
   if (!firstSighting(message.id)) return;
-  noteResyncRequest(message.serverId);
+  // Only a mutation's request moves the mark the join sites compare against
+  if (!message.recheck) noteResyncRequest(message.serverId);
   void resyncLocalSockets(passScope({ serverId: message.serverId, channelId: message.channelId, userId: message.userId }));
 }
 
@@ -765,8 +788,8 @@ async function publishOnce(payload: string): Promise<{ received: number; expecte
  * and is confirmed although the reconnecting node missed it; it keeps its
  * stale rooms until the next resync of the space or its sockets reconnect.
  */
-async function fanOutResync(scope: ResyncScope): Promise<void> {
-  const message: ResyncMessage = { id: randomUUID(), fromNode: NODE_ID(), ...scope };
+async function fanOutResync(scope: ResyncScope, recheck = false): Promise<void> {
+  const message: ResyncMessage = { id: randomUUID(), fromNode: NODE_ID(), ...scope, ...(recheck ? { recheck: true as const } : {}) };
   const payload = JSON.stringify(message);
   let failure = 'not attempted';
   for (let attempt = 1; attempt <= RESYNC_PUBLISH_ATTEMPTS; attempt++) {

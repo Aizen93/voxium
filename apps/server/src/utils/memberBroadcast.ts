@@ -2,7 +2,7 @@ import { getIO } from '../websocket/socketServer';
 import { replayVoiceState } from '../websocket/voiceHandler';
 import { prisma } from './prisma';
 import { filterVisibleChannels } from './permissionCalculator';
-import { visibilityRequestMark, resyncRequestedSince, syncChannelVisibilityRooms } from './channelVisibilityRooms';
+import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from './channelVisibilityRooms';
 import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
 
 /**
@@ -46,7 +46,7 @@ async function joinVisibleChannelRooms(userId: string, serverId: string): Promis
   const rooms = [`server:${serverId}`, ...visibleIds.map((id) => `channel:${id}`)];
   io.local.in(`user:${userId}`).socketsJoin(rooms);
   io.in(`user:${userId}`).socketsJoin(rooms);
-  if (resyncRequestedSince(visibilityMark, serverId)) void syncChannelVisibilityRooms(serverId, { userId });
+  if (resyncRequestedSince(visibilityMark, serverId)) void recheckVisibilityAfterJoin(serverId, { userId });
   return visibleIds;
 }
 
