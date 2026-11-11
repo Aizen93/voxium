@@ -5094,5 +5094,57 @@ describe('E2EService — lifecycle', () => {
         error.mockRestore();
       }
     });
+
+    it('a master-key replacement during the history pull of a restore waits for it instead of freeing the key it opens with', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const userId = `alice-${uniq}`;
+      let armed = false;
+      // the pull's first page is held, with the history still to open under the account key
+      const gate = holdingApi(
+        server.apiFor(userId),
+        (verb, url) => armed && verb === 'get' && url.startsWith('/e2e/message-keys')
+      );
+      const service = serviceOver(userId, gate.api);
+      await service.initialize();
+      await flushQueue();
+      const recoveryKey = await service.createKeyBackup();
+      const internals = internalsOf(service);
+      for (let i = 0; i < 3; i++) {
+        const outbound = new EngineGroupSession();
+        await internals.importInboundGroupSession(outbound.sessionKey(), {
+          sessionId: outbound.sessionId(),
+          conversationId: 'c1',
+          senderUserId: 'peer',
+          senderDeviceId: 'peer-device',
+        });
+        outbound.free();
+      }
+      expect(await service.backupMessageKeys()).toBe(3);
+
+      const backupReads = () => gate.reads.filter((r) => r === 'GET /e2e/backup').length;
+      const warn = vi.spyOn(console, 'warn');
+      const error = vi.spyOn(console, 'error');
+      try {
+        armed = true;
+        const first = service.restoreKeyBackup(recoveryKey);
+        await gate.held;
+        const readsBefore = backupReads();
+        // a second restore replaces (and frees) the account key the pull opens the history with
+        const second = service.restoreKeyBackup(recoveryKey);
+        // a restore free to start would have sent its first request by now
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(backupReads()).toBe(readsBefore);
+        gate.release();
+
+        await expect(first).resolves.toBeUndefined();
+        await expect(second).resolves.toBeUndefined();
+        const logged = [...warn.mock.calls, ...error.mock.calls].flat().map(String).join('\n');
+        expect(logged).not.toMatch(/null pointer|unusable backed-up session key/);
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
+    });
   });
 });

@@ -1370,7 +1370,8 @@ export class E2EService {
       // only ever worked for someone who had lost every device — the rarer
       // path — and a freshly linked one showed empty conversations.
       try {
-        await this.restoreMessageKeys();
+        // already on the queue: the queued entry point would wait for this very task
+        await this.restoreMessageKeysUnqueued();
       } catch (err) {
         console.warn('e2e: linked device has the account key but not its history yet:', errText(err));
       }
@@ -1697,8 +1698,19 @@ export class E2EService {
    * Pull every backed-up session key and import what this device is missing.
    * Run after linking or recovery — it is what turns a blank new device into
    * one that shows the account's history.
+   *
+   * On the queue, like the backup pass and for the same reason: it holds the
+   * master key across every page it reads, and only the queue keeps a
+   * master-key replacement (another restore, a reset, a transfer) or a
+   * dispose from freeing that key under it. It also imports inbound sessions,
+   * which the queue serialises with the claim and the decrypts.
    */
   async restoreMessageKeys(): Promise<number> {
+    return this.enqueue(() => this.restoreMessageKeysUnqueued());
+  }
+
+  /** Callers must already hold the serial queue (see restoreMessageKeys). */
+  private async restoreMessageKeysUnqueued(): Promise<number> {
     const master = this.masterKey;
     if (!master) throw new Error('This device does not hold the account key');
 
