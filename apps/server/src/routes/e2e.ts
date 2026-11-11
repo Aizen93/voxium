@@ -16,6 +16,7 @@ import {
   E2E_SIGNATURE_B64_RE,
   E2E_DEVICE_ID_RE,
   E2E_SESSION_ID_B64_RE,
+  E2E_ROW_ID_RE,
   E2E_ENGINE_OLM1,
   E2E_LIMITS,
   e2eDeviceCanonical,
@@ -195,14 +196,13 @@ const DEVICE_LIST_SELECT = {
 const CROSS_SIGNING_CAPABILITY = { crossSigning: true } as const;
 
 /**
- * Bound the shape of a row id before it reaches a query — transfer ids on the
- * ack route, pagination cursors on the message-key download. Deliberately wider
- * than today's cuid: pinning it to the current generator would turn a later
- * switch to cuid2/uuid into a silent 400 on every ack. Prisma parameterizes
- * anyway — this is a length/charset guard, not the defence, and it is never an
- * authorization boundary either (the userId scope on the query is).
+ * Bound the shape of a row id before it reaches a query — share and transfer
+ * ids on the ack routes, pagination cursors on the message-key download.
+ * Prisma parameterizes anyway: E2E_ROW_ID_RE is a length/charset guard, not
+ * the defence, and never an authorization boundary (the userId scope on the
+ * query is). Shared with the client, which sends back only ids it accepts.
  */
-const ROW_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const ROW_ID_RE = E2E_ROW_ID_RE;
 
 async function getMasterKeyInfo(userId: string): Promise<{ masterKey: string | null; masterSignature: string | null }> {
   const row = await prisma.e2EMasterKey.findUnique({
