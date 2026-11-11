@@ -4853,6 +4853,59 @@ describe('E2EService — lifecycle', () => {
       expect((await again.service.decryptMessage(secondMessage)).text).toBe('the second share');
     });
 
+    /** Bob seals a signal to Alice's restarted device; returns how often its kept shares were read so far. */
+    const signalCounting = (
+      bob: { userId: string; service: E2EService },
+      alice: { userId: string },
+      service: E2EService,
+      scans: { mock: { calls: unknown[] } }
+    ) => async (n: number) => {
+      const sealed = await bob.service.encryptToDevice(alice.userId, service.deviceId, `signal ${n}`);
+      expect(await service.decryptFromDevice(bob.userId, bob.service.deviceId, sealed)).toBe(`signal ${n}`);
+      return scans.mock.calls.length;
+    };
+
+    it('keeps naming a kept share whose delete failed, so the next signal still looks for it', async () => {
+      const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('imported, then not deleted');
+      server.setDeviceListReadFailure(true);
+      const again = restart(server, alice);
+      await again.service.initialize();
+      await again.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+      expect(await pendingIn(alice)).toHaveLength(1);
+      server.setDeviceListReadFailure(false);
+
+      const vault = (again.service as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(vault, 'deletePendingShare').mockRejectedValueOnce(
+        new DOMException('The quota has been exceeded.', 'QuotaExceededError')
+      );
+      const scans = vi.spyOn(vault, 'listPendingShares');
+      const signal = signalCounting(bob, alice, again.service, scans);
+      expect(await signal(1)).toBe(1); // imports the share; deleting the kept copy fails
+      expect(await pendingIn(alice)).toHaveLength(1);
+      expect(await signal(2)).toBe(2); // still named: looked for, and dropped now
+      expect(await pendingIn(alice)).toHaveLength(0);
+      expect((await again.service.decryptMessage(message)).text).toBe('imported, then not deleted');
+    });
+
+    it('corrects at its next listing an index that names a share the vault never kept', async () => {
+      // A claimed page is noted before it is written, so a page whose write
+      // failed is named all the same; the next listing takes it back.
+      const { server, alice, bob } = await bobWroteWhileAliceWasAway('a page that never landed');
+      const again = restart(server, alice);
+      const vault = (again.service as unknown as { vault: E2EVault }).vault;
+      vi.spyOn(vault, 'putPendingShares').mockRejectedValueOnce(
+        new DOMException('The quota has been exceeded.', 'QuotaExceededError')
+      );
+      await again.service.initialize();
+      await again.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+      expect(await pendingIn(alice)).toHaveLength(0);
+
+      const scans = vi.spyOn(vault, 'listPendingShares');
+      const signal = signalCounting(bob, alice, again.service, scans);
+      expect(await signal(1)).toBe(1); // named: looked for, nothing there
+      expect(await signal(2)).toBe(1); // and no longer named
+    });
+
     it('still decrypts a call signal when importing its sender’s kept shares first fails', async () => {
       const { server, alice, bob, message } = await bobWroteWhileAliceWasAway('kept across a failed import');
       server.setDeviceListReadFailure(true);
