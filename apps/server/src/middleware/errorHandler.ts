@@ -39,6 +39,15 @@ const EXPOSED_ERROR_MESSAGES = new Map<string, string>([
   ['encoding.unsupported', 'Unsupported request encoding'],
 ]);
 
+/** The two strings an unexpected error is logged with, read without touching anything else on it. */
+function loggableError(err: unknown): { message: string; stack: string | undefined } {
+  const fields = typeof err === 'object' && err !== null ? err as { message?: unknown; stack?: unknown } : {};
+  const message = typeof fields.message === 'string'
+    ? fields.message
+    : typeof err === 'string' ? err : `Non-error value thrown (${err === null ? 'null' : typeof err})`;
+  return { message, stack: typeof fields.stack === 'string' ? fields.stack : undefined };
+}
+
 export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
   if (err instanceof AppError) {
     return res.status(err.statusCode).json({
@@ -73,10 +82,15 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
     });
   }
 
+  // The message and the stack, never the object: printing an error prints its
+  // own properties too, and some carry personal data (a nodemailer error holds
+  // the recipient address in `.envelope`). Strings only, in both modes; a
+  // value thrown that is not an error is named by its type, never printed.
+  const { message, stack } = loggableError(err);
   if (process.env.NODE_ENV === 'production') {
-    console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', message: err.message, stack: err.stack }));
+    console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', message, stack }));
   } else {
-    console.error('[Error]', err);
+    console.error('[Error]', message, stack ?? '');
   }
 
   return res.status(500).json({

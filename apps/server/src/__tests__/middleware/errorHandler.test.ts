@@ -240,6 +240,74 @@ describe('errorHandler middleware', () => {
   });
 });
 
+// ─── What an unexpected error is logged with ────────────────────────────────
+
+/** What nodemailer rejects with when the relay refuses a recipient: the
+ *  recipient address rides on the error object, outside its message. */
+function mailTransportError(): Error {
+  return Object.assign(new Error('Can\'t send mail - all recipients were rejected'), {
+    code: 'EENVELOPE',
+    envelope: { from: 'noreply@voxium.example', to: ['someone.private@example.org'] },
+    rejected: ['someone.private@example.org'],
+    response: '550 5.1.1 <someone.private@example.org>: Recipient address rejected',
+  });
+}
+
+describe('errorHandler middleware — an unexpected error is logged as its message and stack only', () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    process.env.NODE_ENV = originalNodeEnv;
+    vi.restoreAllMocks();
+  });
+
+  for (const mode of ['development', 'test', 'production']) {
+    it(`${mode}: prints strings only, and none of the error's other properties`, async () => {
+      process.env.NODE_ENV = mode;
+      const error = mailTransportError();
+
+      const res = await request(buildApp(error)).get('/test');
+
+      expect(res.status).toBe(500);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      // Printing the object prints `.envelope`, `.rejected` and `.response`
+      for (const arg of errorSpy.mock.calls[0]) expect(typeof arg).toBe('string');
+      const logged = errorSpy.mock.calls[0].join(' ');
+      expect(logged).not.toContain('someone.private@example.org');
+      expect(logged).toContain('all recipients were rejected');
+      expect(logged).toContain(error.stack!.split('\n')[1].trim());
+    });
+  }
+
+  it('outside production, the line is the label, the message and the stack', async () => {
+    process.env.NODE_ENV = 'development';
+    const error = new Error('Something broke internally');
+
+    await request(buildApp(error)).get('/test');
+
+    expect(errorSpy.mock.calls[0]).toEqual(['[Error]', 'Something broke internally', error.stack]);
+  });
+
+  it('a thrown value that is not an error is named by its type, never printed', async () => {
+    process.env.NODE_ENV = 'development';
+    const app = express();
+    app.get('/test', () => {
+      throw { to: 'someone.private@example.org' };
+    });
+    app.use(errorHandler);
+
+    const res = await request(app).get('/test');
+
+    expect(res.status).toBe(500);
+    expect(errorSpy.mock.calls[0]).toEqual(['[Error]', 'Non-error value thrown (object)', '']);
+  });
+});
+
 // ─── Exposed http-errors (body-parser failures) ──────────────────────────────
 
 /** The shape body-parser's http-errors carry (built by hand: http-errors is
