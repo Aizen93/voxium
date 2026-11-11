@@ -152,6 +152,17 @@ describe('the index the live-file reads rest on', () => {
       .join('\n');
     expect(sql).toContain('CREATE INDEX "message_attachments_expired_id_idx" ON "message_attachments"("expired", "id");');
   });
+
+  it('tells the operator how to build it without blocking writes, like the earlier big-table migrations', () => {
+    const name = '20261111120000_message_attachments_live_index';
+    const sql = readFileSync(resolve(SERVER, 'prisma/migrations', name, 'migration.sql'), 'utf8').replace(/\r\n/g, '\n');
+    // What the plain build blocks
+    expect(sql).toContain('SHARE lock on "message_attachments"');
+    // The way around it, with the exact statement and the resolve command
+    expect(sql).toMatch(/CREATE INDEX CONCURRENTLY\s+-- "message_attachments_expired_id_idx" ON "message_attachments"\("expired",\s+-- "id"\)/);
+    expect(sql).toContain('CONCURRENTLY cannot run inside one');
+    expect(sql).toContain(`prisma migrate resolve --applied ${name}`);
+  });
 });
 
 describe('deleteAttachmentBlobs', () => {
