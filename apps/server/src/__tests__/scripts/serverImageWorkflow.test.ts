@@ -49,6 +49,33 @@ describe('server-image workflow', () => {
     expect(workflow).toMatch(/push:\n {4}branches: \[develop\]/);
   });
 
+  it('also runs on develop pushes that change the code the image compiles, never on such a pull request', () => {
+    // A runtime import of a devDependency compiles in ci.yml and fails only
+    // in the image, which installs --prod. Pull requests already compile the
+    // code in ci.yml; this job would run on nearly every one.
+    const lines = workflow.split('\n');
+    const pushStart = lines.findIndex((l) => l === '  push:');
+    const pullRequest = lines.slice(0, pushStart);
+    const push = lines.slice(pushStart, lines.findIndex((l) => l === 'permissions:'));
+    for (const path of ['apps/server/src/**', 'packages/shared/src/**', '!apps/server/src/__tests__/**']) {
+      expect(push.filter((l) => l.trim() === `- '${path}'` || l.trim() === `- ${path}`), path).toHaveLength(1);
+      expect(pullRequest.some((l) => l.includes(path.replace(/^!/, ''))), path).toBe(false);
+    }
+  });
+
+  it('bounds every network wait', () => {
+    const lines = workflow.split('\n');
+    const curls = lines.filter((l) => /\bcurl /.test(l));
+    expect(curls.length).toBeGreaterThan(0);
+    for (const l of curls) expect(l).toMatch(/--max-time \d+/);
+    for (const l of lines.filter((x) => /\bpg_isready /.test(x))) expect(l).toMatch(/ -t \d+/);
+    // Every container that talks to the database ends within a bound: the
+    // server ones are polled by wait-health.sh (90 x 2 s) or detached.
+    for (const l of lines.filter((x) => /docker (run|exec) /.test(x) && !/ -d /.test(x))) {
+      expect(l, l.trim()).toMatch(/timeout \d+ docker (run|exec) /);
+    }
+  });
+
   it('interpolates no attacker-controlled context', () => {
     // Every expression in the file, none of them inside a run: script.
     expect(new Set(workflow.match(/\$\{\{.*?\}\}/g))).toEqual(

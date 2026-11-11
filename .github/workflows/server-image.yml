@@ -31,6 +31,13 @@ on:
       - apps/server/prisma/**
       - apps/server/prisma.config.ts
       - .github/workflows/server-image.yml
+      # The code the image compiles, on develop only: a runtime import of a
+      # devDependency compiles in ci.yml and fails only here (--prod install).
+      # ci.yml compiles every pull request already, and this job would run on
+      # nearly all of them.
+      - apps/server/src/**
+      - '!apps/server/src/__tests__/**'
+      - packages/shared/src/**
 
 permissions:
   contents: read
@@ -78,12 +85,13 @@ jobs:
             postgres:16-alpine
           docker run -d --name redis --network "$NET" redis:7-alpine
           # Over TCP: the image's init phase answers on the socket only, then restarts.
+          # Every wait on the network below is bounded (timeout, -t, --max-time).
           for i in $(seq 1 30); do
-            docker exec postgres pg_isready -h 127.0.0.1 -U voxium -q && break
+            timeout 10 docker exec postgres pg_isready -h 127.0.0.1 -U voxium -q -t 2 && break
             sleep 2
           done
-          docker exec postgres pg_isready -h 127.0.0.1 -U voxium
-          docker exec postgres psql -U voxium -d voxium -v ON_ERROR_STOP=1 -q -c 'CREATE DATABASE voxium_existing'
+          timeout 10 docker exec postgres pg_isready -h 127.0.0.1 -U voxium -t 2
+          timeout 30 docker exec postgres psql -U voxium -d voxium -v ON_ERROR_STOP=1 -q -c 'CREATE DATABASE voxium_existing'
           # What the server needs to boot; placeholder storage is enough for /health.
           cat > "$RUNNER_TEMP/server.env" <<'ENV'
           NODE_ENV=production
@@ -105,7 +113,7 @@ jobs:
             if [ "$(docker inspect -f '{{.State.Running}}' "$1")" != "true" ]; then
               echo "::error::$1 exited before /health answered"; docker logs "$1"; exit 1
             fi
-            if body=$(curl -fsS http://127.0.0.1:3001/health 2>/dev/null); then
+            if body=$(curl -fsS --max-time 5 http://127.0.0.1:3001/health 2>/dev/null); then
               case "$body" in *'"status":"ok"'*) echo "$body"; exit 0 ;; esac
             fi
             sleep 2
@@ -120,7 +128,7 @@ jobs:
           sh "$RUNNER_TEMP/wait-health.sh" server
           docker logs server 2>&1 | grep -F '[Voxium] No migration is recorded in this database: every migration is pending.'
           # No Prisma CLI run reported to checkpoint.prisma.io: it leaves a cache behind.
-          if docker exec server sh -c 'ls -A "$HOME/.cache/checkpoint-nodejs"' 2>/dev/null; then
+          if timeout 30 docker exec server sh -c 'ls -A "$HOME/.cache/checkpoint-nodejs"' 2>/dev/null; then
             echo "::error::the Prisma update check ran in the image"; exit 1
           fi
 
@@ -136,7 +144,7 @@ jobs:
       - name: An existing database with the cutover pending is refused and left untouched
         run: |
           # The migrations older than the cutover, through the image's own CLI.
-          docker run --rm --network "$NET" -e DATABASE_URL="$PG/voxium_existing" -e CUTOVER \
+          timeout 180 docker run --rm --network "$NET" -e DATABASE_URL="$PG/voxium_existing" -e CUTOVER \
             --entrypoint sh "$IMAGE" -c '
               set -e
               [ -d "apps/server/prisma/migrations/$CUTOVER" ]
@@ -150,12 +158,12 @@ jobs:
               cd apps/server
               node ../../node_modules/prisma/build/index.js migrate deploy --schema /tmp/pre/prisma/schema.prisma'
           # One DM, which the cutover would delete.
-          docker exec postgres psql -U voxium -d voxium_existing -v ON_ERROR_STOP=1 -q -c "
+          timeout 30 docker exec postgres psql -U voxium -d voxium_existing -v ON_ERROR_STOP=1 -q -c "
             INSERT INTO users (id, username, email, display_name, password, updated_at) VALUES
               ('ci-a', 'ci_a', 'a@ci.invalid', 'A', 'x', now()), ('ci-b', 'ci_b', 'b@ci.invalid', 'B', 'x', now());
             INSERT INTO conversations (id, user1_id, user2_id, updated_at) VALUES ('ci-conv', 'ci-a', 'ci-b', now());
             INSERT INTO messages (id, content, author_id, conversation_id) VALUES ('ci-dm', 'kept', 'ci-a', 'ci-conv');"
-          q() { docker exec postgres psql -U voxium -d voxium_existing -Atc "$1"; }
+          q() { timeout 30 docker exec postgres psql -U voxium -d voxium_existing -Atc "$1"; }
           expect() { [ "$2" = "$3" ] || { echo "::error::$1: expected $3, got $2"; exit 1; }; }
           applied=$(q 'SELECT count(*) FROM _prisma_migrations')
 
