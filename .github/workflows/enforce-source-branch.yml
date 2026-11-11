@@ -4,6 +4,9 @@ on:
   pull_request:
     branches: [main]
 
+# The check reads only the event's own context: the token needs no scope
+permissions: {}
+
 jobs:
   check-source:
     runs-on: ubuntu-latest
