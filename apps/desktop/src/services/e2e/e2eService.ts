@@ -1519,6 +1519,7 @@ export class E2EService {
     }
     this.masterKey?.free();
     this.masterKey = master;
+    await this.notePullDue(master);
     // We hold the secret now, which is the strongest proof there is that this
     // is the account key — stronger than the pin it may be replacing. Without
     // this, a device rescued by the §14.4 reset would keep the superseded pin
@@ -1607,6 +1608,7 @@ export class E2EService {
       await this.vault.putMasterSecret(master.seal(this.vault.pickleKey()));
       this.masterKey?.free();
       this.masterKey = master;
+      await this.notePullDue(master);
       // Holding the secret proves the key, so the pin becomes verified.
       await this.vault.putMasterIdentity(this.userId, { masterKey: master.publicKey(), verified: true });
       this.masterKeyConflict = false;
@@ -1844,6 +1846,22 @@ export class E2EService {
       imported += step.imported;
       cursor = step.next;
       if (!cursor) return imported;
+    }
+  }
+
+  /**
+   * Record a history pull from the start as due under a key just sealed on
+   * this device (a restore, an incoming transfer), in the step that installs
+   * it: the pull itself starts after that step, and an app closed in between
+   * would otherwise leave that key's history unread for good. Best effort:
+   * the pull writes the record again before its first page.
+   */
+  private async notePullDue(master: EngineMasterKey): Promise<void> {
+    try {
+      await this.vault.putHistoryPull({ masterKey: master.publicKey(), cursor: null, pages: 0 });
+    } catch (err) {
+      if (isE2ESessionEnded(err)) throw err;
+      console.warn('e2e: could not note the history pull of a new account key:', errText(err));
     }
   }
 

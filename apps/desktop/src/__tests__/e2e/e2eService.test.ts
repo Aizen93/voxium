@@ -5613,6 +5613,65 @@ describe('E2EService — lifecycle', () => {
       expect(urls).toHaveLength(0); // done: nothing left to resume
     });
 
+    it('pulls at the next start the history of a key a restore installed just before the app closed', async () => {
+      const { server, phone, recoveryKey } = await backedUpAccount(3);
+      const laptop = { userId: phone.userId, keyProvider: memoryKeyProvider(), vaultNamespace: `v${++vaultSeq}` };
+      let armed = false;
+      // the key is installed; the device is being signed with it when the app closes
+      const gate = holdingApi(
+        server.apiFor(laptop.userId),
+        (verb, url) => armed && verb === 'post' && url.endsWith('/signature'),
+        'response'
+      );
+      const first = serviceOver(laptop.userId, gate.api, laptop);
+      await first.initialize();
+      await flushQueue();
+      armed = true;
+      const restoring = first.restoreKeyBackup(recoveryKey);
+      restoring.catch(() => undefined); // settled below
+      await gate.held;
+      await first.dispose();
+      gate.release();
+      await expect(restoring).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+
+      const sessions = () => readVault(laptop, async (vault) => (await vault.listInboundGroupSessions()).length);
+      expect(await sessions()).toBe(0);
+      const again = serviceOver(laptop.userId, server.apiFor(laptop.userId), laptop);
+      await again.initialize();
+      expect(again.hasMasterSecret()).toBe(true);
+      await vi.waitFor(async () => expect(await sessions()).toBe(3));
+    });
+
+    it('pulls at the next start the history of a key a device approval installed just before the app closed', async () => {
+      const { server, phone } = await backedUpAccount(3);
+      const laptop = { userId: phone.userId, keyProvider: memoryKeyProvider(), vaultNamespace: `v${++vaultSeq}` };
+      let armed = false;
+      // the transfer is imported; its mailbox row is being cleared when the app closes
+      const gate = holdingApi(
+        server.apiFor(laptop.userId),
+        (verb, url) => armed && verb === 'post' && url === '/e2e/master-transfers/ack',
+        'response'
+      );
+      const first = serviceOver(laptop.userId, gate.api, laptop);
+      await first.initialize();
+      await flushQueue();
+      const found = await phone.service.findLinkableDevice(first.linkingCode());
+      await phone.service.approveDevice(found!.deviceId);
+      armed = true;
+      const claiming = first.claimMasterTransfers();
+      await gate.held;
+      await first.dispose();
+      gate.release();
+      await claiming;
+
+      const sessions = () => readVault(laptop, async (vault) => (await vault.listInboundGroupSessions()).length);
+      expect(await sessions()).toBe(0);
+      const again = serviceOver(laptop.userId, server.apiFor(laptop.userId), laptop);
+      await again.initialize();
+      expect(again.hasMasterSecret()).toBe(true);
+      await vi.waitFor(async () => expect(await sessions()).toBe(3));
+    });
+
     it('resumes a history pull cut short during its very first page', async () => {
       const { server, phone } = await backedUpAccount(3);
       await phone.service.dispose();

@@ -1118,7 +1118,10 @@ whole session rather than only the part the uploading device happened to see.
   and the number of requests made so far, this one included (`history_pull`,
   §7), and the record is dropped once the pull reaches the end or the cap. A
   page that failed is the first, and only, request of the next start until it
-  answers. A record left under another account key is dropped unread. A newer pull supersedes a running one: it reads from its own start
+  answers. A restore or a device approval that installs an account key
+  records a pull from the start in the same step, so a key installed just
+  before the app closed still has its history read at the next start. A
+  record left under another account key is dropped unread. A newer pull supersedes a running one: it reads from its own start
   and owns the record from then on.
 - Only a device holding the master secret can seal or open, which is the same
   condition as being able to approve devices.
