@@ -494,8 +494,10 @@ function enqueuePass(job: PassJob, onStart?: () => void): Promise<void> {
  *    leave each channel's room, a socket in its voice room kept. Exact, and
  *    nothing else of the member changes.
  *  - ONE CHANNEL (an override change): every socket of the space on this node
- *    leaves the channel's room, the channel's voice participants kept. They
- *    get it back by opening the channel or reconnecting.
+ *    leaves the channel's room, the channel's voice participants kept. Its
+ *    legitimate viewers get a TEXT channel's room back by opening it
+ *    (channel:join re-checks VIEW), a VOICE channel's by joining its call;
+ *    either by reconnecting or by a later pass that succeeds.
  *  - ONE MEMBER (a role taken away, a re-check after a connect): that
  *    member's sockets on this node are disconnected, except a socket in a
  *    call, a space voice channel's or a DM's (cutting a call is worse than a
@@ -552,8 +554,9 @@ function leaveChannelLocally(serverId: string, channelId: string, userId: string
  * call is kept connected, but it is not kept as it was: without the database
  * the pass cannot tell which rooms the member lost, so the socket leaves every
  * `channel:` room except the one of each voice channel it is in (the call's
- * presence events). It gets the others back when the member opens a channel
- * (channel:join re-checks VIEW) or reconnects. Never rejects.
+ * presence events). It gets a text channel's room back when the member opens
+ * it (channel:join re-checks VIEW), a voice channel's when they join its call,
+ * and any by reconnecting or by a later pass that succeeds. Never rejects.
  */
 async function disconnectOutsideVoice(serverId: string, userId: string, failures: number): Promise<void> {
   try {
@@ -865,8 +868,9 @@ async function revokeHiddenRoomsClusterWide(scope: ResyncScope): Promise<void> {
       // ACCEPTED RACE: the leaves below apply what this read saw. A grant that
       // commits between the read and the leave (and whose own resync joined
       // the member first) is undone: the member loses that channel's live
-      // events until they open the channel (channel:join re-checks VIEW) or
-      // reconnect. It errs on the closed side, on a path already degraded, and
+      // events until they open it (a text channel: channel:join re-checks
+      // VIEW), join its call (a voice channel), reconnect, or a later pass
+      // succeeds. It errs on the closed side, on a path already degraded, and
       // closing it would mean holding the space's permission writes for the
       // whole fallback.
       const visibleByUser = await filterVisibleChannelsForUsers(batch, serverId, channels);

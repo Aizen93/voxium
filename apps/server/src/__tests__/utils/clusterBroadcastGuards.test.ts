@@ -150,7 +150,7 @@ describe('fetchSockets() appears only where nothing waits on its answer', () => 
   // cluster-wide form must never come back to that file.
   const LOCAL_ALLOWED: Record<string, number> = {
     // The local pass, and the fail-closed disconnect of a member whose pass
-    // failed three times (both read this node's sockets only)
+    // failed its last retry (both read this node's sockets only)
     'utils/channelVisibilityRooms.ts': 2,
   };
 
