@@ -873,6 +873,25 @@ describe('syncChannelVisibilityRooms — telling the other nodes', () => {
     ]);
   });
 
+  // Review of #71: every hidden set above differs in size, and the leaves were
+  // counted without pairing users to rooms, so grouping by the SIZE of the
+  // hidden set passed. Two sets of equal size must stay two leaves.
+  it('groups by the hidden set itself: equal-size sets stay apart, each leave pairing its users with its rooms', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    m.prisma.channel.findMany.mockResolvedValue(['t1', 't2', 't3', 't4'].map(text));
+    m.prisma.serverMember.findMany.mockResolvedValueOnce([{ userId: 'u-1' }, { userId: 'u-2' }, { userId: 'u-3' }]);
+    m.filterForUsers.mockResolvedValueOnce(visibility({ 'u-1': ['t3', 't4'], 'u-2': ['t1', 't2'], 'u-3': ['t3', 't4'] }));
+
+    await runUnconfirmed();
+
+    const pairs = m.clusterIn.mock.calls.map((c, i) => [c[0], m.clusterGroupLeave.mock.calls[i][0]]);
+    expect(pairs).toEqual([
+      [['user:u-1', 'user:u-3'], ['channel:t1', 'channel:t2']],
+      [['user:u-2'], ['channel:t3', 'channel:t4']],
+    ]);
+  });
+
   it('the fallback of a member-scoped resync recomputes that member alone', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
