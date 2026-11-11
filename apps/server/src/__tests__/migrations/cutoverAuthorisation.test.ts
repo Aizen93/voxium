@@ -17,7 +17,9 @@ import { resolve } from 'node:path';
  * These assert the SHAPE of the guards, not their behaviour — the behaviour was
  * exercised against a real database during the rehearsal (refuse without
  * authorisation, apply with it, sentinel spent afterwards). What a unit test can
- * usefully add is noticing if someone removes them.
+ * usefully add is noticing if someone removes them. The entrypoint's decision
+ * itself (empty database, existing database, unreadable status) runs for real
+ * in __tests__/scripts/dockerEntrypoint.test.ts.
  */
 
 const REPO = resolve(__dirname, '../../../../..');
@@ -109,12 +111,15 @@ describe('always-on cutover — the entrypoint will not apply it on a restart', 
     // `2>/dev/null` the grep matches nothing and the gate silently passes
     // everything — which is exactly the failure it exists to prevent, and it
     // was written that way first. This assertion is the reason it isn't now.
-    const line = entrypoint
+    // Anchored on the invocation: the comments name `migrate status` too, and
+    // the first of them once carried `2>&1`, so matching any line passed
+    // whatever the command did.
+    const invocations = entrypoint
       .split('\n')
-      .find((l) => l.includes('migrate status'));
-    expect(line).toBeDefined();
-    expect(line).toContain('2>&1');
-    expect(line).not.toContain('2>/dev/null');
+      .filter((l) => !l.trimStart().startsWith('#') && l.includes('migrate status'));
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toContain('2>&1');
+    expect(invocations[0]).not.toContain('2>/dev/null');
   });
 
   it('refuses rather than migrating, and names the override', () => {

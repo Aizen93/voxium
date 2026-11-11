@@ -434,7 +434,9 @@ This starts three services:
 | `voxium-postgres` | PostgreSQL 16            | internal |
 | `voxium-redis`    | Redis 7                  | internal |
 
-Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed.
+Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed. On a new, empty database the first start applies all of them. Before migrating, the container reads `prisma migrate status` until the database answers (10 attempts, 3 s apart) and never migrates a database it could not read: if PostgreSQL stays unreachable, the server container exits and its log shows the last error.
+
+> **`VOXIUM_ALLOW_CUTOVER`:** one migration, the always-on E2E cutover (`20260801140000_e2e_always_on`), deletes all DM history and every E2E key, and there is no rollback. When a database that already holds an install (migrations applied before) still has it pending, the container refuses to start instead of applying it on an ordinary restart. Apply it deliberately, after a snapshot and inside a maintenance window, by setting `VOXIUM_ALLOW_CUTOVER=1` for that one start (procedure: `docs/e2e-always-on-plan.md` §7.7), then remove the variable. A new database never needs it.
 
 ### 4. Verify It's Running
 
