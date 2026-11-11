@@ -154,6 +154,30 @@ describe('deleteUserAccount', () => {
       }
     });
 
+    it('a retry that meets a space the account came to own (a transfer to it committed meanwhile) answers 409, not a 500', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.$transaction
+        .mockRejectedValueOnce(deadlock())
+        .mockRejectedValueOnce(Object.assign(
+          new Error('Foreign key constraint violated on the constraint: `servers_owner_id_fkey`'),
+          { code: 'P2003' },
+        ));
+      try {
+        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' }))
+          .rejects.toMatchObject({ statusCode: 409, message: 'Transfer or delete the servers you own before deleting your account' });
+        expect(announceSecure).not.toHaveBeenCalled();
+        expect(deleteFromS3).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('another foreign-key failure is not taken for an owned space', async () => {
+      prismaMock.$transaction.mockRejectedValue(Object.assign(new Error('Foreign key constraint violated on the constraint: `other_fkey`'), { code: 'P2003' }));
+
+      await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toMatchObject({ code: 'P2003' });
+    });
+
     it('any other failure is not retried', async () => {
       prismaMock.$transaction.mockRejectedValue(new Error('db gone'));
 

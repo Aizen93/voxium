@@ -7,6 +7,7 @@ import {
   type SecureMembershipRemoval,
 } from './secureChannelLifecycle';
 import { retryOnTransactionConflict } from './transactionRetry';
+import { ConflictError } from './errors';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { deleteFromS3 } from './s3';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
@@ -132,6 +133,29 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * retry.
  */
 export async function deleteAccountRows(userId: string, serverIds: string[]): Promise<SecureMembershipRemoval> {
+  try {
+    return await runAccountDeletionTransaction(userId, serverIds);
+  } catch (err) {
+    // `Server.owner` is onDelete: Restrict: the account came to own a space
+    // after `deleteUserAccount` checked it owned none (a transfer to it, which
+    // a retried attempt meets committed). Nothing was deleted; the answer is
+    // the one an owner gets, not a 500.
+    if (ownsASpaceNow(err)) throw new ConflictError(ACCOUNT_OWNS_A_SPACE_MESSAGE);
+    throw err;
+  }
+}
+
+/** What an account that owns a space is told when it asks to be deleted. */
+export const ACCOUNT_OWNS_A_SPACE_MESSAGE = 'Transfer or delete the servers you own before deleting your account';
+
+function ownsASpaceNow(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown; meta?: { constraint?: unknown; field_name?: unknown } } | null;
+  if (e?.code !== 'P2003') return false;
+  const named = [e.message, e.meta?.constraint, e.meta?.field_name].filter((v): v is string => typeof v === 'string');
+  return named.some((v) => v.includes('servers_owner_id_fkey'));
+}
+
+function runAccountDeletionTransaction(userId: string, serverIds: string[]): Promise<SecureMembershipRemoval> {
   // E2E key material has no FK to User (except the key backup), so it would
   // otherwise outlive the account it belongs to. One transaction with the
   // delete: purging a user who then survives strands every device they own.
