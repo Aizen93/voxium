@@ -51,13 +51,12 @@ RETRY_DELAY_SECONDS=3
 # (P3009) before applying anything.
 CUTOVER_MIGRATION="20260801140000_e2e_always_on"
 
-# Prints what the last `migrate status` output ($STATUS) says:
+# Prints what the last `migrate status` output ($STATUS_LINES) says:
 #   unreadable  the status did not reach the database
 #   empty       nothing applied yet, or no database yet: nothing to lose
 #   existing    an existing database with the cutover pending
 #   applied     the cutover is not pending
 status_state() {
-  STATUS_LINES=$(printf '%s\n' "$STATUS" | tr -d '\r')
   if printf '%s\n' "$STATUS_LINES" | grep -q '^Error: P1003'; then
     echo empty
   elif printf '%s\n' "$STATUS_LINES" | grep -q '^Error'; then
@@ -104,6 +103,7 @@ if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
     # because it exits non-zero whenever anything is pending, which `set -e`
     # would otherwise take for a failure of this script.
     STATUS=$(prisma_cli migrate status 2>&1) || true
+    STATUS_LINES=$(printf '%s\n' "$STATUS" | tr -d '\r')
     STATE=$(status_state)
     if [ "$STATE" != "unreadable" ] || [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
       break
@@ -122,10 +122,19 @@ if [ "${VOXIUM_ALLOW_CUTOVER:-0}" != "1" ]; then
       ;;
     existing)
       echo "[Voxium] FATAL: the always-on E2E cutover ($CUTOVER_MIGRATION) has not been applied."
-      echo "[Voxium] It deletes all DM history and every E2E key, and there is no rollback."
+      echo "[Voxium] This database is not new: $(pending_count) of its $(found_count) migrations are pending."
+      echo "[Voxium] The cutover deletes all DM history and every E2E key, and there is no rollback."
       echo "[Voxium] Refusing to apply it on a restart. Run it deliberately, inside the"
       echo "[Voxium] maintenance window, per docs/e2e-always-on-plan.md 7.7 — or set"
       echo "[Voxium] VOXIUM_ALLOW_CUTOVER=1 for the one boot that is meant to perform it."
+      echo "[Voxium] If this database never served users:"
+      echo "[Voxium]  - another replica is migrating it right now: start this one again once that one is up;"
+      echo "[Voxium]  - a first start was interrupted: set VOXIUM_ALLOW_CUTOVER=1 for one start;"
+      echo "[Voxium]    the cutover's own SQL gate still refuses if it would delete anything."
+      echo "[Voxium] If that start stops on a failed migration (P3009), the interrupted migration may"
+      echo "[Voxium] have run in part: recreate the database empty, or undo what that migration created"
+      echo "[Voxium] and mark it rolled back, from apps/server, before the next start:"
+      echo "[Voxium]   node ../../node_modules/prisma/build/index.js migrate resolve --rolled-back <name>"
       exit 1
       ;;
     empty)

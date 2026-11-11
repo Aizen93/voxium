@@ -40,6 +40,8 @@ const STATUS_EXIT = {
   'up-to-date': 0,
   'database-ahead-of-image': 0,
   'oldest-pending-others-applied': 1,
+  'partly-migrated': 1,
+  'interrupted-first-start': 1,
   unreachable: 1,
   'wrong-password': 1,
 } as const;
@@ -195,6 +197,26 @@ describe.runIf(shAvailable)('docker-entrypoint.sh — the cutover gate decides o
     expect(run.out).toContain(`FATAL: the always-on E2E cutover (${CUTOVER}) has not been applied`);
     expect(run.deploys).toBe(0);
     expect(run.serverStarted).toBe(false);
+  }, TIMEOUT);
+
+  it.each([
+    // Killed while migration 5 ran: 1-4 applied, 5 recorded as started and
+    // never finished (which `migrate status` does not list), 6-56 pending.
+    ['a first start killed while migrating', 'interrupted-first-start', '51 of its 56'],
+    ['a first start stopped between migrations', 'partly-migrated', '52 of its 56'],
+  ] as const)('refuses %s, and says how to go on with a database that never served users', (_label, name, counts) => {
+    const run = runEntrypoint([captured(name)]);
+    expect(run.code).toBe(1);
+    expect(run.deploys).toBe(0);
+    expect(run.out).toContain(`FATAL: the always-on E2E cutover (${CUTOVER}) has not been applied.`);
+    expect(run.out).toContain(`This database is not new: ${counts} migrations are pending.`);
+    expect(run.out).toContain('If this database never served users');
+    expect(run.out).toContain('another replica');
+    expect(run.out).toContain('interrupted');
+    expect(run.out).toContain("the cutover's own SQL gate still refuses");
+    // What the override then meets: the interrupted migration's failed record.
+    expect(run.out).toContain('P3009');
+    expect(run.out).toContain('migrate resolve --rolled-back');
   }, TIMEOUT);
 
   it('retries a status that did not reach the database, then refuses once an existing database answers', () => {
