@@ -65,7 +65,7 @@ import {
   type PinnedIdentity,
   vaultDbName,
 } from './vault';
-import { pinSecure } from '../../utils/securePins';
+import { pinSecure, securePinGeneration } from '../../utils/securePins';
 import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 
 interface OneTimeKeyPair {
@@ -470,6 +470,8 @@ export class E2EService {
   private readonly vault: E2EVault;
   /** The vault as work off the queue reaches it: refused once dispose() ran (see guardedVault). */
   private readonly liveVault: E2EVault;
+  /** The account's secure-pin generation when this service began (securePinGeneration). */
+  private readonly pinGeneration: number;
   /** The vault's database name: the key of pendingTeardowns. */
   private readonly vaultName: string;
   /** This service's deferred teardown, while a claim holds it back (see dispose()). */
@@ -555,6 +557,8 @@ export class E2EService {
     this.client = opts.api ?? defaultApi;
     this.api = this.guardedApi(this.client);
     this.vaultName = vaultDbName(userId, opts.vaultNamespace);
+    // an account deleted later: what this service still imports pins nothing for it
+    this.pinGeneration = securePinGeneration(userId);
     this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace, () => {
       // an earlier service's teardown on this vault, never this one's own
       const pending = pendingTeardowns.get(this.vaultName);
@@ -3709,7 +3713,7 @@ export class E2EService {
   private pinSecureScope(scope: string): void {
     const parsed = parseE2EScope(scope);
     // for this service's account: a claim finishing after a logout must not pin for the next one
-    if (parsed.kind === 'channel') pinSecure(parsed.channelId, this.userId);
+    if (parsed.kind === 'channel') pinSecure(parsed.channelId, this.userId, this.pinGeneration);
   }
 
   /**

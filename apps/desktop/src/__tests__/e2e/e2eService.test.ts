@@ -5229,6 +5229,47 @@ describe('E2EService — lifecycle', () => {
       }
     });
 
+    it('recreates no pins of an account deleted while its late claim was still importing', async () => {
+      uniq++;
+      const server = createFakeServer();
+      const alice = makeParty(server, 'alice');
+      const bob = makeParty(server, 'bob');
+      await alice.service.initialize();
+      await bob.service.initialize();
+      await flushQueue();
+      await alice.service.fetchDeviceList(bob.userId, true);
+      const channelId = `chan-deleted-${uniq}`;
+      server.setChannelMembers(channelId, [bob.userId, alice.userId]);
+      await alice.service.dispose();
+      await bob.service.encryptChannelMessage(channelId, 'in a secure channel');
+
+      const gate = holdingApi(
+        server.apiFor(alice.userId),
+        (verb, url) => verb === 'get' && url.startsWith('/e2e/keyshares'),
+        'response'
+      );
+      const restarted = serviceOver(alice.userId, gate.api, {
+        keyProvider: alice.keyProvider,
+        vaultNamespace: alice.vaultNamespace,
+      });
+      activateSecurePins(alice.userId);
+      try {
+        await restarted.initialize();
+        await gate.held;
+        const tornDown = restarted.dispose();
+        deactivateSecurePins();
+        forgetSecurePins(alice.userId); // the account is deleted, its claim still importing
+        gate.release();
+        await tornDown;
+        // a later account under the same id starts with no pin of the old one
+        activateSecurePins(alice.userId);
+        expect(isPinnedSecure(channelId)).toBe(false);
+      } finally {
+        deactivateSecurePins();
+        forgetSecurePins(alice.userId);
+      }
+    });
+
     describe('while that claim holds the teardown back, nothing else touches the vault or the network', () => {
       /** Every vault access from now on (see the backup test above for why withStore covers them). */
       const spyOnVaultAccesses = (service: E2EService) =>

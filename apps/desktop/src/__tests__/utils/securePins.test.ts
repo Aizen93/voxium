@@ -7,6 +7,7 @@ import {
   forgetSecurePins,
   claimDowngradeWarning,
   securePinStorageKey,
+  securePinGeneration,
 } from '../../utils/securePins';
 
 function stored(userId: string): unknown {
@@ -63,6 +64,22 @@ describe('securePins', () => {
     activateSecurePins('alice');
     expect(isPinnedSecure('ch-alice')).toBe(true);
     expect(isPinnedSecure('ch-alice-2')).toBe(true);
+  });
+
+  it('lets no work begun before a forget recreate the account’s pins, while a later sign-in pins again', () => {
+    activateSecurePins('alice');
+    const before = securePinGeneration('alice');
+    expect(pinSecure('ch-1', 'alice', before)).toBe(true);
+    deactivateSecurePins();
+    expect(pinSecure('ch-after-logout', 'alice', before)).toBe(true); // a logout is no forget
+    forgetSecurePins('alice'); // the account is deleted
+    expect(pinSecure('ch-late', 'alice', before)).toBe(false);
+    expect(stored('alice')).toBeNull();
+    // the same id signs in again: new work, the new generation
+    activateSecurePins('alice');
+    expect(isPinnedSecure('ch-late')).toBe(false);
+    expect(pinSecure('ch-new', 'alice', securePinGeneration('alice'))).toBe(true);
+    expect(stored('alice')).toEqual(['ch-new']);
   });
 
   it('survives deactivate/activate (logout keeps the pins)', () => {
