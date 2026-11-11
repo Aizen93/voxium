@@ -17,6 +17,7 @@ const prismaMock: Record<string, any> = {
   server: { findUnique: vi.fn(), update: vi.fn(), findMany: vi.fn().mockResolvedValue([]), count: vi.fn().mockResolvedValue(0) },
   message: { groupBy: vi.fn().mockResolvedValue([]) },
   channel: { findMany: vi.fn().mockResolvedValue([]) },
+  messageAttachment: { findMany: vi.fn().mockResolvedValue([]) },
   serverMember: { findMany: vi.fn().mockResolvedValue([]) },
   auditLog: { create: vi.fn().mockResolvedValue({}) },
   $queryRawUnsafe: vi.fn().mockResolvedValue([]),
@@ -53,9 +54,11 @@ vi.mock('../../utils/serverLimits', () => ({ getGlobalLimits: vi.fn().mockResolv
 vi.mock('../../utils/sanitize', () => ({ sanitizeText: vi.fn((s: string) => s) }));
 vi.mock('../../utils/memberBroadcast', () => ({ broadcastMemberJoined: vi.fn(), broadcastMemberLeft: vi.fn() }));
 const mockDeleteFromS3 = vi.fn().mockResolvedValue(undefined);
+const mockDeleteMultipleFromS3 = vi.fn(async (keys: string[]) => keys.length);
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/, VALID_ATTACHMENT_KEY_RE: /^attachments\//,
   listAllS3Objects: vi.fn().mockResolvedValue([]), deleteFromS3: (...a: any[]) => mockDeleteFromS3(...a),
+  deleteMultipleFromS3: (keys: string[]) => mockDeleteMultipleFromS3(keys),
 }));
 const mockLogAuditEvent = vi.fn();
 vi.mock('../../utils/auditLog', () => ({ logAuditEvent: (...a: any[]) => mockLogAuditEvent(...a) }));
@@ -355,6 +358,53 @@ describe('DELETE /admin/servers/:serverId', () => {
         expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'server.delete', targetId: 'srv-1' }));
       } finally {
         mockFetchSockets.mockResolvedValue([]);
+      }
+    });
+  });
+
+  describe('attachment files', () => {
+    const ICON = 'server-icons/srv-1-1700000000000-0123456789ab.webp';
+    const KEYS = ['attachments/ch-1/clmsg1-photo.png', 'attachments/ch-1/clmsg2-notes.txt'];
+
+    beforeEach(() => {
+      prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'S', iconUrl: ICON });
+      prismaMock.server.delete = vi.fn().mockResolvedValue({});
+      prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
+      mockDeleteMultipleFromS3.mockReset().mockImplementation(async (keys: string[]) => keys.length);
+    });
+
+    it('reads the keys of the space before the row and deletes icon and attachment files after it', async () => {
+      prismaMock.messageAttachment.findMany.mockResolvedValueOnce([
+        { id: 'att-1', s3Key: KEYS[0] }, { id: 'att-2', s3Key: KEYS[1] },
+      ]);
+
+      const res = await del('srv-1');
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { expired: false, message: { channel: { serverId: 'srv-1' } } },
+      }));
+      const deleteOrder = prismaMock.server.delete.mock.invocationCallOrder[0];
+      expect(prismaMock.messageAttachment.findMany.mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
+      expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith(KEYS);
+      expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+      expect(mockDeleteFromS3).toHaveBeenCalledWith(ICON);
+      expect(mockDeleteFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+    });
+
+    it('a storage failure still answers 200 and audits', async () => {
+      prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
+      mockDeleteMultipleFromS3.mockRejectedValueOnce(new Error('S3 unavailable'));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const res = await del('srv-1');
+
+        expect(res.status).toBe(200);
+        expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'server.delete', targetId: 'srv-1' }));
+        await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+          '[Admin] Attachment file cleanup failed for space srv-1 (the orphan sweep will reclaim them):', 'S3 unavailable'));
+      } finally {
+        warn.mockRestore();
       }
     });
   });

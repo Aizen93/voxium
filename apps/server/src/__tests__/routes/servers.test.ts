@@ -87,6 +87,10 @@ const prismaMock: Record<string, any> = {
     findMany: vi.fn(),
     createMany: vi.fn(),
   },
+  // The attachment keys a space delete reads before the cascade takes them
+  messageAttachment: {
+    findMany: vi.fn().mockResolvedValue([]),
+  },
   category: {
     create: vi.fn(),
   },
@@ -216,7 +220,9 @@ vi.mock('../../utils/moderatorAudience', () => ({
 // S3
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,
+  VALID_ATTACHMENT_KEY_RE: /^attachments\/(ch|dm)-[\w-]+\/[\w]+-[\w][\w.-]*$/,
   deleteFromS3: vi.fn().mockResolvedValue(undefined),
+  deleteMultipleFromS3: vi.fn().mockImplementation(async (keys: string[]) => keys.length),
 }));
 
 // Upload read-back (its own unit tests cover the S3 side)
@@ -1151,6 +1157,92 @@ describe('Server Routes', () => {
         const { deleteFromS3 } = await import('../../utils/s3');
         expect(deleteFromS3).toHaveBeenCalledWith(ICON);
         expect(vi.mocked(deleteFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+      });
+    });
+
+    describe('attachment files', () => {
+      const KEYS = ['attachments/ch-text/clmsg1-report.pdf', 'attachments/ch-secure/clmsg2-blob.bin'];
+
+      beforeEach(async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1' });
+        prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-text' }, { id: 'ch-secure' }]);
+        prismaMock.server.delete.mockReset().mockResolvedValue({});
+        prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        vi.mocked(deleteMultipleFromS3).mockReset().mockImplementation(async (keys: string[]) => keys.length);
+      });
+
+      const deleteServer = () => request(app)
+        .delete('/api/v1/servers/srv-1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+
+      it('reads the kept attachment keys of every channel of the space BEFORE the row, and deletes the files AFTER it', async () => {
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([
+          { id: 'att-1', s3Key: KEYS[0] }, { id: 'att-2', s3Key: KEYS[1] },
+        ]);
+
+        const res = await deleteServer();
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+          where: { expired: false, message: { channel: { serverId: 'srv-1' } } },
+        }));
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        expect(deleteMultipleFromS3).toHaveBeenCalledTimes(1);
+        expect(deleteMultipleFromS3).toHaveBeenCalledWith(KEYS);
+        const deleteOrder = prismaMock.server.delete.mock.invocationCallOrder[0];
+        expect(prismaMock.messageAttachment.findMany.mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
+        expect(vi.mocked(deleteMultipleFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+      });
+
+      it('touches storage not at all when the space holds no kept attachment', async () => {
+        await deleteServer();
+
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+      });
+
+      it('a storage failure is logged and the delete still answers 200', async () => {
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        vi.mocked(deleteMultipleFromS3).mockRejectedValueOnce(new Error('S3 unavailable'));
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const res = await deleteServer();
+
+          expect(res.status).toBe(200);
+          expect(res.body).toEqual({ success: true, message: 'Server deleted' });
+          await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+            '[Servers] Attachment file cleanup failed for space srv-1 (the orphan sweep will reclaim them):', 'S3 unavailable'));
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('a row delete that fails deletes no file', async () => {
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
+        prismaMock.server.delete.mockRejectedValueOnce(new Error('db gone'));
+
+        const res = await deleteServer();
+
+        expect(res.status).toBe(500);
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+      });
+
+      it('a fan-out that fails does not skip the files', async () => {
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
+        mockBroadcastServerVoiceCleanup.mockRejectedValueOnce(new Error('mediasoup router close failed'));
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          const res = await deleteServer();
+
+          expect(res.status).toBe(200);
+          const { deleteMultipleFromS3 } = await import('../../utils/s3');
+          expect(deleteMultipleFromS3).toHaveBeenCalledWith([KEYS[0]]);
+        } finally {
+          errorLog.mockRestore();
+        }
       });
     });
   });

@@ -10,6 +10,7 @@ import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 import { verifyAttachmentUploads } from '../utils/uploadVerification';
 import { shapeMessageRow } from '../utils/messageAuthor';
 import { endDMCall } from '../websocket/dmVoiceHandler';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
 
 /** A step after the conversation delete committed failed: logged, never thrown. */
 function logDeleteFanOutFailure(conversationId: string, step: string, err: unknown): void {
@@ -558,19 +559,15 @@ dmRouter.delete('/:conversationId', rateLimitInteract, async (req: Request<{ con
 
     await getConversationOrThrow(conversationId, userId);
 
-    // Collect attachment S3 keys before cascade delete
-    const attachments = await prisma.messageAttachment.findMany({
-      where: { message: { conversationId } },
-      select: { s3Key: true },
-    });
+    // Collect the attachment keys before the cascade delete, in bounded
+    // batches (utils/attachmentBlobs.ts)
+    const attachmentKeys = await collectAttachmentKeys({ conversationId });
 
     // Delete conversation (cascades messages + attachments + conversation reads)
     await prisma.conversation.delete({ where: { id: conversationId } });
 
-    // Fire-and-forget S3 cleanup
-    if (attachments.length > 0) {
-      deleteMultipleFromS3(attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete DM conversation attachments:', err));
-    }
+    // The files after the row; never awaited, never throws
+    deleteAttachmentBlobs(attachmentKeys, '[DM]', `conversation ${conversationId}`);
 
     // Everything below is best effort, each step on its own: the conversation
     // is gone, so a step that throws is logged and the request still answers

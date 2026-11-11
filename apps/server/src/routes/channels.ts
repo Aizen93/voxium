@@ -11,6 +11,7 @@ import { hasServerPermission, hasChannelPermission, filterVisibleChannels, compu
 import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -408,8 +409,12 @@ channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request
     // webhook manager who could not see the channel would keep a stale "N of M"
     // in the Integrations tab. webhook:changed carries the server id alone.
     const webhooks = await prisma.webhook.count({ where: { channelId } });
+    // The cascade takes the attachment rows with the messages: their keys are
+    // read now and the files deleted once the row is gone
+    const attachmentKeys = await collectAttachmentKeys({ channelId });
 
     await prisma.channel.delete({ where: { id: channelId } });
+    deleteAttachmentBlobs(attachmentKeys, '[Channels]', `channel ${channelId}`);
 
     // Same audience as every other lifecycle event for this channel: the people
     // who could see it. Nobody else has it in their sidebar to remove.

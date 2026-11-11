@@ -1,6 +1,7 @@
 import { WS_EVENTS } from '@voxium/shared';
 import { prisma } from './prisma';
 import { deleteFromS3 } from './s3';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
 import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { getIO } from '../websocket/socketServer';
 import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
@@ -26,11 +27,16 @@ function logFanOutFailure(logPrefix: string, step: string, serverId: string, err
  * that did not happen.
  *
  * What a step after the delete needs and the cascade takes with the row is
- * read before it: the channel ids, whose rooms the sockets must leave.
+ * read before it: the channel ids, whose rooms the sockets must leave, and
+ * the keys of the attachment files still kept on the messages of every
+ * channel (secure ones included), whose files go with the space.
  *
  * After the row, in this order:
  *  - the Explore page cache generation (never throws), so the card is gone
  *    at the next open;
+ *  - the icon and attachment files, started and never awaited (the response
+ *    does not wait on storage; the orphan sweep reclaims a file whose delete
+ *    failed), ahead of the fan-out so nothing in it can skip them;
  *  - live voice, on every node (mediasoup objects are node-local), silently:
  *    clients tear their call down on `server:deleted`;
  *  - `server:deleted` to the space room;
@@ -42,9 +48,7 @@ function logFanOutFailure(logPrefix: string, step: string, serverId: string, err
  *    Redis adapter applies the cluster form on this node only when its own
  *    message comes back); published after the notice on the same Redis
  *    connection, so every peer delivers the notice before it applies the
- *    leave;
- *  - the icon blob, never awaited (the response does not wait on storage;
- *    the orphan sweep reclaims a blob whose delete failed).
+ *    leave.
  */
 export async function deleteServerAndAnnounce(
   server: { id: string; iconUrl: string | null },
@@ -55,12 +59,19 @@ export async function deleteServerAndAnnounce(
     where: { serverId },
     select: { id: true },
   });
+  const attachmentKeys = await collectAttachmentKeys({ channel: { serverId } });
 
-  // The cascade takes channels, members, messages, reactions, reads,
-  // categories, invites, roles and webhooks with the row.
+  // The cascade takes channels, members, messages, attachments, reactions,
+  // reads, categories, invites, roles and webhooks with the row.
   await prisma.server.delete({ where: { id: serverId } });
 
   await bumpDiscoveryPageCache(opts.cacheReason);
+
+  if (server.iconUrl) {
+    deleteFromS3(server.iconUrl).catch((err) =>
+      console.warn(`${opts.logPrefix} Server icon cleanup failed (the orphan sweep will reclaim it):`, err instanceof Error ? err.message : err));
+  }
+  deleteAttachmentBlobs(attachmentKeys, opts.logPrefix, `space ${serverId}`);
 
   const io = getIO();
 
@@ -86,10 +97,5 @@ export async function deleteServerAndAnnounce(
     io.in(rooms).socketsLeave(rooms);
   } catch (err) {
     logFanOutFailure(opts.logPrefix, 'the cluster room leave', serverId, err);
-  }
-
-  if (server.iconUrl) {
-    deleteFromS3(server.iconUrl).catch((err) =>
-      console.warn(`${opts.logPrefix} Server icon cleanup failed (the orphan sweep will reclaim it):`, err instanceof Error ? err.message : err));
   }
 }

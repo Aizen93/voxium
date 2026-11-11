@@ -662,6 +662,30 @@ describe('DM routes — DELETE /:conversationId', () => {
     expect(mockEmit).toHaveBeenCalledWith('dm:conversation:deleted', { conversationId: 'conv-1' });
   });
 
+  it('reads the kept attachment keys in bounded batches before the row and deletes the files after it', async () => {
+    const { deleteMultipleFromS3 } = await import('../../utils/s3');
+    const keys = ['attachments/dm-conv-1/clmsg1-blob.bin', 'attachments/dm-conv-1/clmsg2-blob.bin'];
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([
+      { id: 'att-1', s3Key: keys[0] }, { id: 'att-2', s3Key: keys[1] },
+    ] as any);
+    vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
+
+    const res = await request(createApp()).delete('/api/v1/dm/conv-1');
+
+    expect(res.status).toBe(200);
+    expect(prisma.messageAttachment.findMany).toHaveBeenCalledWith({
+      where: { expired: false, message: { conversationId: 'conv-1' } },
+      select: { id: true, s3Key: true },
+      orderBy: { id: 'asc' },
+      take: 1000,
+    });
+    expect(deleteMultipleFromS3).toHaveBeenCalledWith(keys);
+    const deleteOrder = vi.mocked(prisma.conversation.delete).mock.invocationCallOrder[0];
+    expect(vi.mocked(prisma.messageAttachment.findMany).mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
+    expect(vi.mocked(deleteMultipleFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+  });
+
   it('returns 403 for non-participant', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
       ...mockConversation,

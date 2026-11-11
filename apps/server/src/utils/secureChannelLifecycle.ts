@@ -1,6 +1,6 @@
 import { getIO } from '../websocket/socketServer';
 import { prisma } from './prisma';
-import { deleteMultipleFromS3 } from './s3';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
 import { WS_EVENTS, e2eChannelScope } from '@voxium/shared';
 import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
 
@@ -71,18 +71,20 @@ export async function deleteSecureChannel(channelId: string): Promise<boolean> {
       secure: true,
       serverId: true,
       members: { select: { userId: true } },
-      messages: {
-        select: { attachments: { select: { s3Key: true } } },
-        where: { attachments: { some: {} } },
-      },
     },
   });
   if (!channel || !channel.secure) return false;
 
   const memberIds = channel.members.map((m) => m.userId);
-  const s3Keys = channel.messages.flatMap((m) => m.attachments.map((a) => a.s3Key));
+  // Read in bounded batches (utils/attachmentBlobs.ts), not as one nested
+  // load of every message with an attachment the channel ever had
+  const s3Keys = await collectAttachmentKeys({ channelId });
 
   await prisma.channel.delete({ where: { id: channelId } });
+
+  // Started right after the row, ahead of the events: a fan-out step that
+  // throws below must not skip it. Never awaited, never throws.
+  deleteAttachmentBlobs(s3Keys, '[SecureChannel]', `deleted channel ${channelId}`);
 
   const io = getIO();
   for (const userId of memberIds) {
@@ -96,18 +98,6 @@ export async function deleteSecureChannel(channelId: string): Promise<boolean> {
   // Live voice in a deleted secure VOICE channel must die with it, on every
   // node (spec §21) — mediasoup handles are node-local, hence the fan-out.
   await broadcastChannelVoiceCleanup(io, channelId);
-
-  if (s3Keys.length > 0) {
-    // Fire-and-forget: a failed blob delete must not fail the channel delete;
-    // the attachment rows are already gone so the sweep can't find them, hence
-    // the loud log if this ever fails.
-    deleteMultipleFromS3(s3Keys).catch((err) => {
-      console.error(
-        `[SecureChannel] Failed to delete ${s3Keys.length} attachment blob(s) for deleted channel ${channelId}:`,
-        err,
-      );
-    });
-  }
 
   return true;
 }

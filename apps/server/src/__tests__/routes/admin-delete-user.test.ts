@@ -90,6 +90,10 @@ const prismaMock: Record<string, any> = {
   channel: {
     findMany: vi.fn().mockResolvedValue([]),
   },
+  // Attachment keys read before a cascade (an owned space, the account's messages)
+  messageAttachment: {
+    findMany: vi.fn().mockResolvedValue([]),
+  },
   channelRead: {
     upsert: vi.fn().mockResolvedValue({}),
   },
@@ -209,11 +213,13 @@ vi.mock('../../utils/secureChannelLifecycle', () => ({
 
 // S3
 const mockDeleteFromS3 = vi.fn().mockResolvedValue(undefined);
+const mockDeleteMultipleFromS3 = vi.fn(async (keys: string[]) => keys.length);
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,
   VALID_ATTACHMENT_KEY_RE: /^attachments\//,
   listAllS3Objects: vi.fn().mockResolvedValue([]),
   deleteFromS3: (...args: any[]) => mockDeleteFromS3(...args),
+  deleteMultipleFromS3: (keys: string[]) => mockDeleteMultipleFromS3(keys),
 }));
 
 // Audit log
@@ -591,6 +597,24 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     expectAtomicPurgeAndDelete('target-1');
     expect(errorLog).toHaveBeenCalledWith('[Admin] Space srv-owned deleted, but the voice cleanup failed:', 'mediasoup router close failed');
     expect(errorLog).toHaveBeenCalledWith('[Admin] Space srv-owned deleted, but the server:deleted notice failed:', 'adapter publish failed');
+  });
+
+  it('deletes the owned space\'s attachment files after its row', async () => {
+    const spaceKey = 'attachments/ch-text/clmsg1-photo.png';
+    prismaMock.messageAttachment.findMany.mockImplementation(async ({ where }: any) =>
+      (where.message?.channel?.serverId === 'srv-owned' ? [{ id: 'att-1', s3Key: spaceKey }] : []));
+    mockDeleteMultipleFromS3.mockClear();
+    try {
+      const res = await deleteOwner();
+
+      expect(res.status).toBe(200);
+      expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([spaceKey]);
+      const spaceCall = mockDeleteMultipleFromS3.mock.calls.findIndex(([keys]) => keys[0] === spaceKey);
+      expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[spaceCall])
+        .toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    } finally {
+      prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
+    }
   });
 
   it('a space row delete that fails stops the deletion before any notice, with the account untouched', async () => {
