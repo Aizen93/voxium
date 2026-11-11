@@ -709,6 +709,7 @@ tagged; no spec is tagged at the moment.
 | `npx tsx scripts/test-permissions.ts` | Run permission system integration test against a running backend (11 phases) |
 | `npx tsx scripts/test-multi-node.ts` | Spawn two server nodes and validate cross-node behavior, including real voice media and owner-crash takeover |
 | `npx tsx scripts/load-test-voice.ts` | Voice channel load test with real WebRTC media |
+| `KEYSHARE_INBOX_CHECK=1 npx tsx scripts/check-keyshare-inbox.ts` | Check the key-share lease and acknowledgement statements on a migrated database, two-session races included (writes and then deletes rows of its own only) |
 
 ---
 
