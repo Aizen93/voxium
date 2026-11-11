@@ -212,12 +212,14 @@ export async function initChannelVisibilitySync(): Promise<void> {
  * is deleted: until the process exits its subscriber would still receive,
  * one receiver more than the live heartbeats, and every peer's resync in that
  * window would mismatch, retry and take the fallback (about 7.5 s). Its
- * sockets are disconnected next, so it has nothing left to resync. Never
- * rejects.
+ * sockets are disconnected next, so it has nothing left to resync. Bounded
+ * by STOP_UNSUBSCRIBE_TIMEOUT_MS: an unsubscribe issued while the subscriber
+ * reconnects waits in the client's offline queue, and a stop must never hang
+ * on it. Never rejects.
  */
 export async function stopChannelVisibilitySync(): Promise<void> {
   try {
-    await getRedisConfigSub().unsubscribe(VISIBILITY_RESYNC_CHANNEL);
+    await withTimeout(getRedisConfigSub().unsubscribe(VISIBILITY_RESYNC_CHANNEL), STOP_UNSUBSCRIBE_TIMEOUT_MS);
   } catch (err) {
     console.warn('[Visibility] Could not leave the resync channel at shutdown (peers may retry their resyncs until this process exits):', err instanceof Error ? err.message : err);
   }
@@ -245,6 +247,9 @@ interface PassScope {
 function passScope({ serverId, userId, channelId }: ResyncScope): PassScope {
   return { serverId, ...(userId ? { userId } : {}), ...(channelId ? { channelIds: [channelId] } : {}) };
 }
+
+/** How long a stopping node waits to leave the resync channel. */
+export const STOP_UNSUBSCRIBE_TIMEOUT_MS = 1000;
 
 /** Channels a waiting member pass remembers before it widens to the space. */
 export const MEMBER_PASS_CHANNELS_MAX = 8;

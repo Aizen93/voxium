@@ -71,6 +71,7 @@ import {
   recheckVisibilityAfterJoin,
   _resetChannelVisibilityForTests,
   stopChannelVisibilitySync,
+  STOP_UNSUBSCRIBE_TIMEOUT_MS,
 } from '../../utils/channelVisibilityRooms';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -1045,6 +1046,28 @@ describe('a node receiving a peer\'s resync request', () => {
     m.unsubscribe.mockRejectedValueOnce(new Error('connection closed'));
     await expect(stopChannelVisibilitySync()).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Could not leave the resync channel at shutdown'), 'connection closed');
+  });
+
+  // Review of #71: an unsubscribe issued while the subscriber reconnects
+  // waits in the client's offline queue, and the stop waited with it
+  it('a stop never hangs on an unsubscribe Redis does not answer: it gives up after the bound, logged', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      m.unsubscribe.mockReturnValueOnce(new Promise(() => {}));
+      let stopped = false;
+      void stopChannelVisibilitySync().then(() => { stopped = true; });
+
+      await vi.advanceTimersByTimeAsync(STOP_UNSUBSCRIBE_TIMEOUT_MS - 1);
+      expect(stopped).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(stopped).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Could not leave the resync channel at shutdown'), `no answer from Redis within ${STOP_UNSUBSCRIBE_TIMEOUT_MS} ms`);
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
   });
 
   it('the shutdown leaves the resync channel right after deleting the heartbeat, before hanging up its sockets', () => {
