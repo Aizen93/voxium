@@ -5844,6 +5844,66 @@ describe('E2EService — lifecycle', () => {
         ]);
       });
 
+      it('notes the acknowledgement before it lets go of the kept copy: a run cut in between leaves the kept copy', async () => {
+        // The other order, cut in between, leaves neither: nothing on this
+        // device says the share is owed, and its server copy waits for its lease.
+        const { server, alice, message } = await bobWroteWhileAliceWasAway('cut between the two');
+        const cut = restart(server, alice);
+        const cutVault = (cut.service as unknown as { vault: E2EVault }).vault;
+        vi.spyOn(cutVault, 'putShareAck').mockRejectedValueOnce(new E2EVaultClosedError()); // the run stops right there
+        await cut.service.initialize();
+        await cut.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+        expect(await pendingIn(alice)).toHaveLength(1);
+        await cut.service.dispose();
+
+        // the next start settles the kept copy and acknowledges it, the lease still running
+        const again = restart(server, alice);
+        await again.service.initialize();
+        await again.service.claimMasterTransfers(); // queued behind the start-up claim
+        await acksSent(again.service);
+        expect(leasedFor(server, alice.userId)).toHaveLength(0);
+        expect(sharesFor(server, alice.userId)).toHaveLength(0);
+        expect(await pendingIn(alice)).toHaveLength(0);
+        expect((await again.service.decryptMessage(message)).text).toBe('cut between the two');
+      });
+
+      it('does not process again a share handed out again while its acknowledgement is owed', async () => {
+        // Discarded as unusable, its acknowledgement refused for now (503):
+        // after its lease the server hands it out again, and it must not be
+        // kept, decrypted and discarded a second time.
+        const { server, alice, bob } = await bobWroteWhileAliceWasAway('unusable');
+        const [row] = sharesFor(server, alice.userId);
+        const corrupted = mangledClaims(server.apiFor(alice.userId), (res) => {
+          for (const share of res.data.data!.shares as Array<{ body: string }>) share.body = 'not an envelope';
+          return res;
+        });
+        const api = {
+          ...corrupted,
+          async post(url: string, body?: Parameters<typeof corrupted.post>[1]) {
+            if (url === '/e2e/keyshares/ack') {
+              throw Object.assign(new Error('Request failed with status code 503'), { response: { status: 503 } });
+            }
+            return corrupted.post(url, body);
+          },
+        };
+        const again = over(alice, api);
+        const warn = vi.spyOn(console, 'warn');
+        try {
+          await again.initialize();
+          await again.claimMasterTransfers(); // queued behind the start-up claim
+          await acksSent(again);
+          server.expireLeases();
+          await missOn({ service: again }, bob.userId, ['b3dlZA']); // the next claim gets it again
+          await acksSent(again);
+          const discarded = warned(warn).match(/discarding an unusable key share/g) ?? [];
+          expect(discarded).toHaveLength(1);
+        } finally {
+          warn.mockRestore();
+        }
+        expect(leasedFor(server, alice.userId).map((s) => s.id)).toEqual([row.id]); // handed out again, and leased
+        expect(await pendingIn(alice)).toHaveLength(0);
+      });
+
       describe('shares this device already holds do not starve newer ones', () => {
         // A share kept here unacknowledged (its sender cannot be looked up
         // yet) is handed out again, oldest first, after every lease: with
