@@ -708,13 +708,20 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
 
     const server = await prisma.server.findUnique({ where: { id: serverId } });
     if (!server) throw new NotFoundError('Server');
-    if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can delete it');
+    const refusal = () => new ForbiddenError('Only the server owner can delete it');
+    if (server.ownerId !== req.user!.userId) throw refusal();
 
     // The row first, then voice, the notice, the room leaves and the icon
     // blob, each best effort (utils/serverDeletion.ts, shared with the admin
     // deletes): a fan-out step that throws no longer leaves members told the
     // space is gone while it is still there.
-    await deleteServerAndAnnounce(server, { cacheReason: 'server delete', logPrefix: '[Servers]' });
+    // The ownership check above is carried by the delete too, so a transfer
+    // committing while it retries never gets the heir's space deleted
+    await deleteServerAndAnnounce(server, {
+      cacheReason: 'server delete',
+      logPrefix: '[Servers]',
+      ownedBy: { userId: req.user!.userId, refusal },
+    });
 
     res.json({ success: true, message: 'Server deleted' });
   } catch (err) {

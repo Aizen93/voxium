@@ -61,6 +61,7 @@ const prismaMock: Record<string, any> = {
     findUniqueOrThrow: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
+    deleteMany: vi.fn(),
     count: vi.fn(),
   },
   serverMember: {
@@ -916,7 +917,7 @@ describe('Server Routes', () => {
         ownerId: 'user-1',
       });
       prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
-      prismaMock.server.delete.mockResolvedValue({});
+      prismaMock.server.deleteMany.mockResolvedValue({ count: 1 });
 
       const res = await request(app)
         .delete('/api/v1/servers/srv-1')
@@ -928,7 +929,7 @@ describe('Server Routes', () => {
       // a deleted space must leave the cached Explore pages: bumped after the delete committed
       expect(mockBumpDiscoveryPageCache).toHaveBeenCalledTimes(1);
       expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('server delete');
-      expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+      expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     });
 
     it('a delete PostgreSQL aborted to break a deadlock (a removal or an account deletion in the space) runs again instead of answering 500', async () => {
@@ -936,20 +937,62 @@ describe('Server Routes', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1' });
       prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
-      prismaMock.server.delete
+      prismaMock.server.deleteMany
         .mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }))
-        .mockResolvedValueOnce({});
+        .mockResolvedValueOnce({ count: 1 });
       try {
         const res = await request(app)
           .delete('/api/v1/servers/srv-1')
           .set('Authorization', `Bearer ${token}`);
 
         expect(res.status).toBe(200);
-        expect(prismaMock.server.delete).toHaveBeenCalledTimes(2);
+        expect(prismaMock.server.deleteMany).toHaveBeenCalledTimes(2);
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('The delete of space srv-1 was aborted by a deadlock'));
       } finally {
         warn.mockRestore();
       }
+    });
+
+    it('deletes only while the caller still owns the space: a transfer committed during a retry\'s pause refuses, the heir\'s space stays', async () => {
+      const token = makeToken();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.server.findUnique
+        .mockResolvedValueOnce({ id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1' })
+        // re-read after the delete matched nothing: still there, another owner
+        .mockResolvedValueOnce({ id: 'srv-1' });
+      prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+      prismaMock.server.deleteMany
+        .mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }))
+        .mockResolvedValueOnce({ count: 0 });
+      try {
+        const res = await request(app)
+          .delete('/api/v1/servers/srv-1')
+          .set('Authorization', `Bearer ${token}`);
+
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe('Only the server owner can delete it');
+        expect(prismaMock.server.deleteMany).toHaveBeenLastCalledWith({ where: { id: 'srv-1', ownerId: 'user-1' } });
+        // nothing announced for a space that was not deleted
+        expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a guarded delete that finds the space already gone answers 404', async () => {
+      const token = makeToken();
+      prismaMock.server.findUnique
+        .mockResolvedValueOnce({ id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1' })
+        .mockResolvedValueOnce(null);
+      prismaMock.channel.findMany.mockResolvedValue([]);
+      prismaMock.server.deleteMany.mockResolvedValueOnce({ count: 0 });
+
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
     });
 
     it('returns 403 for non-owner', async () => {
@@ -988,7 +1031,7 @@ describe('Server Routes', () => {
         ownerId: 'user-1',
       });
       prismaMock.channel.findMany.mockResolvedValue([]);
-      prismaMock.server.delete.mockResolvedValue({});
+      prismaMock.server.deleteMany.mockResolvedValue({ count: 1 });
 
       await request(app)
         .delete('/api/v1/servers/srv-1')
@@ -1006,7 +1049,7 @@ describe('Server Routes', () => {
         prismaMock.server.findUnique.mockResolvedValue(ownedServer);
         // Every channel, text, voice and secure alike: no visibility filter
         prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-text' }, { id: 'ch-voice' }, { id: 'ch-secure' }]);
-        prismaMock.server.delete.mockResolvedValue({});
+        prismaMock.server.deleteMany.mockResolvedValue({ count: 1 });
       });
 
       const deleteServer = () => request(app)
@@ -1042,7 +1085,7 @@ describe('Server Routes', () => {
 
         const noticeOrder = mockEmit.mock.invocationCallOrder[mockEmit.mock.calls.findIndex(([event]) => event === 'server:deleted')];
         expect(noticeOrder).toBeDefined();
-        const deleteOrder = prismaMock.server.delete.mock.invocationCallOrder[0];
+        const deleteOrder = prismaMock.server.deleteMany.mock.invocationCallOrder[0];
         expect(noticeOrder).toBeGreaterThan(deleteOrder);
         expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
         expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
@@ -1051,7 +1094,7 @@ describe('Server Routes', () => {
       it('reads the channel ids for the leave BEFORE the row goes (the cascade takes them)', async () => {
         await deleteServer();
 
-        expect(prismaMock.channel.findMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+        expect(prismaMock.channel.findMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
       });
 
       it('leaves only the server room when the space has no channels', async () => {
@@ -1075,7 +1118,7 @@ describe('Server Routes', () => {
           expect(res.status).toBe(200);
           expect(res.body.message).toBe('Server deleted');
           expect(mockFetchSockets).not.toHaveBeenCalled();
-          expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+          expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-1', ownerId: 'user-1' } });
         } finally {
           mockFetchSockets.mockResolvedValue([]);
         }
@@ -1090,7 +1133,7 @@ describe('Server Routes', () => {
       beforeEach(async () => {
         prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'Test Server', iconUrl: ICON, ownerId: 'user-1' });
         prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-text' }, { id: 'ch-voice' }]);
-        prismaMock.server.delete.mockReset().mockResolvedValue({});
+        prismaMock.server.deleteMany.mockReset().mockResolvedValue({ count: 1 });
         const { deleteFromS3 } = await import('../../utils/s3');
         vi.mocked(deleteFromS3).mockReset().mockResolvedValue(undefined);
         errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -1111,7 +1154,7 @@ describe('Server Routes', () => {
       it('deletes the row BEFORE the voice cleanup, the notice and the room leaves', async () => {
         await deleteServer();
 
-        const deleteOrder = prismaMock.server.delete.mock.invocationCallOrder[0];
+        const deleteOrder = prismaMock.server.deleteMany.mock.invocationCallOrder[0];
         expect(mockBroadcastServerVoiceCleanup).toHaveBeenCalledWith(expect.anything(), 'srv-1');
         expect(mockBroadcastServerVoiceCleanup.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
         expect(mockEmit.mock.invocationCallOrder[0]).toBeGreaterThan(mockBroadcastServerVoiceCleanup.mock.invocationCallOrder[0]);
@@ -1125,7 +1168,7 @@ describe('Server Routes', () => {
 
         expect(res.status).toBe(200);
         expect(res.body).toEqual({ success: true, message: 'Server deleted' });
-        expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-1', ownerId: 'user-1' } });
         expect(mockEmit).toHaveBeenCalledWith('server:deleted', { serverId: 'srv-1' });
         expect(mockLocalSocketsLeave).toHaveBeenCalledWith(allRooms);
         expect(mockSocketsLeave).toHaveBeenCalledWith(allRooms);
@@ -1140,7 +1183,7 @@ describe('Server Routes', () => {
         const res = await deleteServer();
 
         expect(res.status).toBe(200);
-        expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-1', ownerId: 'user-1' } });
         expect(mockLocalSocketsLeave).toHaveBeenCalledWith(allRooms);
         expect(mockSocketsLeave).toHaveBeenCalledWith(allRooms);
         expect(errorLog).toHaveBeenCalledWith('[Servers] Space srv-1 deleted, but the server:deleted notice failed:', 'adapter publish failed');
@@ -1153,14 +1196,14 @@ describe('Server Routes', () => {
         const res = await deleteServer();
 
         expect(res.status).toBe(200);
-        expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-1', ownerId: 'user-1' } });
         expect(mockSocketsLeave).toHaveBeenCalledWith(allRooms);
         expect(errorLog).toHaveBeenCalledWith('[Servers] Space srv-1 deleted, but the local room leave failed:', 'local adapter failed');
         expect(errorLog).toHaveBeenCalledWith('[Servers] Space srv-1 deleted, but the cluster room leave failed:', 'cluster adapter failed');
       });
 
       it('a row delete that fails announces nothing: no voice teardown, no notice, no leave, no blob delete', async () => {
-        prismaMock.server.delete.mockRejectedValueOnce(new Error('db gone'));
+        prismaMock.server.deleteMany.mockRejectedValueOnce(new Error('db gone'));
 
         const res = await deleteServer();
 
@@ -1179,7 +1222,7 @@ describe('Server Routes', () => {
 
         const { deleteFromS3 } = await import('../../utils/s3');
         expect(deleteFromS3).toHaveBeenCalledWith(ICON);
-        expect(vi.mocked(deleteFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+        expect(vi.mocked(deleteFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
       });
     });
 
@@ -1189,7 +1232,7 @@ describe('Server Routes', () => {
       beforeEach(async () => {
         prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1' });
         prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-text' }, { id: 'ch-secure' }]);
-        prismaMock.server.delete.mockReset().mockResolvedValue({});
+        prismaMock.server.deleteMany.mockReset().mockResolvedValue({ count: 1 });
         prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
         const { deleteMultipleFromS3 } = await import('../../utils/s3');
         vi.mocked(deleteMultipleFromS3).mockReset().mockImplementation(async (keys: string[]) => keys.length);
@@ -1213,7 +1256,7 @@ describe('Server Routes', () => {
         const { deleteMultipleFromS3 } = await import('../../utils/s3');
         expect(deleteMultipleFromS3).toHaveBeenCalledTimes(1);
         expect(deleteMultipleFromS3).toHaveBeenCalledWith(KEYS);
-        const deleteOrder = prismaMock.server.delete.mock.invocationCallOrder[0];
+        const deleteOrder = prismaMock.server.deleteMany.mock.invocationCallOrder[0];
         expect(prismaMock.messageAttachment.findMany.mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
         expect(vi.mocked(deleteMultipleFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
       });
@@ -1244,7 +1287,7 @@ describe('Server Routes', () => {
 
       it('a row delete that fails deletes no file', async () => {
         prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
-        prismaMock.server.delete.mockRejectedValueOnce(new Error('db gone'));
+        prismaMock.server.deleteMany.mockRejectedValueOnce(new Error('db gone'));
 
         const res = await deleteServer();
 
