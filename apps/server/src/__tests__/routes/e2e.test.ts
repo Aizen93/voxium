@@ -989,6 +989,8 @@ function claimedRow(id: string, at = '2026-07-25T10:00:00Z') {
 
 /** Either claim takes only shares no live lease holds, on the database's UTC clock. */
 const LEASE_FREE = "(leased_until IS NULL OR leased_until <= (now() AT TIME ZONE 'UTC'))";
+/** Either claim reads the inbox of the device it was asked for: the recipient's columns, bound in this order. */
+const INBOX_OF = 'WHERE recipient_user_id = ? AND recipient_device_id = ?';
 
 describe('E2E routes — GET /keyshares', () => {
   it('claims pending shares atomically and deletes them (the legacy claim, no lease=1)', async () => {
@@ -1026,8 +1028,12 @@ describe('E2E routes — GET /keyshares', () => {
     expect(sql).toContain('DELETE FROM e2e_key_shares');
     expect(sql).toContain('RETURNING');
     expect(sql).toContain('FOR UPDATE SKIP LOCKED');
-    // scoped to the caller's own inbox and bounded
+    // scoped to the caller's own inbox (the recipient columns, never the
+    // sender's) and bounded
+    expect(sql).toContain(INBOX_OF);
     expect(call.slice(1)).toEqual(['user-1', DEVICE_A, E2E_LIMITS.KEYSHARE_CLAIM_MAX]);
+    // oldest first, as the leasing claim scans it: the page limit takes the oldest
+    expect(sql).toContain('ORDER BY created_at, id');
     // a claim that deletes on read leaves nothing to acknowledge: no lease is announced
     expect(res.body.data).not.toHaveProperty('leaseMs');
   });
@@ -1128,7 +1134,8 @@ describe('E2E routes — GET /keyshares?lease=1 (the leasing claim)', () => {
     expect(sql).toContain('ORDER BY created_at, id');
     expect(sql).toContain('FOR UPDATE SKIP LOCKED');
     expect(sql).toContain('RETURNING');
-    // the lease, then the caller's own inbox, bounded
+    // the lease, then the caller's own inbox (the recipient columns, never the sender's), bounded
+    expect(sql).toContain(INBOX_OF);
     expect(params).toEqual([E2E_LIMITS.KEYSHARE_LEASE_MS / 1000, 'user-1', DEVICE_A, E2E_LIMITS.KEYSHARE_CLAIM_MAX]);
   });
 
