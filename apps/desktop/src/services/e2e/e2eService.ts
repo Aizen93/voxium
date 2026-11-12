@@ -303,8 +303,25 @@ const DEVICE_LIST_CACHE_MS = 10_000;
 const SHARE_RETRY_BACKOFF_MS = 30_000;
 /** Give up on a target after this many failed retry rounds (see spec §12.4). */
 const MAX_SHARE_RETRIES = 10;
-/** Hard stop when draining the key-share inbox (guards a hostile server). */
+/**
+ * Hard stop when draining the key-share inbox (guards a hostile server): the
+ * pages one run reads that hold a share this device does not hold yet.
+ */
 const MAX_CLAIM_PAGES = 20;
+/**
+ * Hard stop on the claims of one run, whatever their pages hold. A page made
+ * only of shares this device holds already (kept here until their sender can
+ * be checked, or done with and their acknowledgement owed) does not count
+ * toward MAX_CLAIM_PAGES: the server hands those out again, oldest first,
+ * after each lease, and MAX_CLAIM_PAGES pages of them would keep a run from
+ * ever reaching a share stored after them. Each claim leases its page, so the
+ * next one gets the page after it. 25 of the 30 claims a minute the server
+ * allows (e2eShares, shared with the share uploads), so a run leaves the
+ * uploads of that minute some room; more held shares than a run reaches wait
+ * for a run within those leases (the next one starts past them) or for the
+ * held ones to be settled.
+ */
+const MAX_CLAIM_REQUESTS = 25;
 /**
  * Owed key-share acknowledgements (`pka:`) kept at most, the oldest dropped
  * beyond: the debts of two full claim runs (MAX_CLAIM_PAGES pages of
@@ -3381,7 +3398,9 @@ export class E2EService {
       this.sendShareAcksDetached();
       // Drain every page: the inbox is oldest-first and capped per response, so
       // stopping at one page would let queued older shares delay a live one.
-      for (let page = 0; page < MAX_CLAIM_PAGES; page++) {
+      // A page of shares all held here already does not count (MAX_CLAIM_REQUESTS).
+      let pages = 0;
+      for (let request = 0; request < MAX_CLAIM_REQUESTS && pages < MAX_CLAIM_PAGES; request++) {
         // Disposed meanwhile: this page is imported (dispose() waits for it),
         // the next one stays on the server.
         if (this.disposed) break;
@@ -3424,6 +3443,8 @@ export class E2EService {
         const { served, entries } = claimedPageEntries(res);
         if (served === 0) break;
         const fresh = this.notHeldYet(entries);
+        // every element read, and every one held here already: not a page that counts
+        if (fresh.length > 0 || entries.length < served) pages++;
         await this.keepShares(fresh);
         imported += await this.processPendingShares(fresh, deferredSenders);
         await this.capShareAcks();

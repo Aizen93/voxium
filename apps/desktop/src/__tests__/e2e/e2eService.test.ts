@@ -5844,6 +5844,129 @@ describe('E2EService — lifecycle', () => {
         ]);
       });
 
+      describe('shares this device already holds do not starve newer ones', () => {
+        // A share kept here unacknowledged (its sender cannot be looked up
+        // yet) is handed out again, oldest first, after every lease: with
+        // MAX_CLAIM_PAGES (20) pages of them ahead, a run never reached a
+        // share stored after them.
+        const GHOST = 'ghost-sender';
+        const GHOST_DEVICE = 'ghostdeviceAAAAAAAAAA';
+
+        /**
+         * `n` shares from a sender whose device list cannot be read now, older
+         * than anything else in Alice's inbox: kept in her vault as a claim
+         * left them, and still on the server, unacknowledged.
+         */
+        async function heldShares(server: Server, party: Party, n: number) {
+          const base = Date.parse('2026-01-01T00:00:00.000Z');
+          const rows: StoredShare[] = Array.from({ length: n }, (_, i) => ({
+            id: `cmheldshare${String(i).padStart(10, '0')}`,
+            recipientUserId: party.userId,
+            recipientDeviceId: [...server.users.get(party.userId)!.devices.keys()][0],
+            senderUserId: GHOST,
+            senderDeviceId: GHOST_DEVICE,
+            conversationId: 'c-ghost',
+            sessionId: 'Z2hvc3RzZXNzaW9u',
+            body: buildE2EEnvelope(0, 'AAAA'),
+            createdAt: new Date(base + i).toISOString(),
+            leasedUntil: null,
+          }));
+          server.shares.unshift(...rows); // the oldest: served first
+          const vault = new E2EVault(party.userId, party.keyProvider, party.vaultNamespace);
+          await vault.open();
+          try {
+            await vault.putPendingShares(
+              rows.map(({ recipientUserId: _u, recipientDeviceId: _d, leasedUntil: _l, ...share }) => ({
+                key: `pks:${share.createdAt}|${share.id}`,
+                record: { share, attempts: 0, receivedAt: Date.now(), leased: true },
+              }))
+            );
+          } finally {
+            vault.close();
+          }
+          return rows;
+        }
+
+        /** The fake's client, its claims counted. */
+        const countingClaims = (base: ReturnType<Server['apiFor']>, rewrite?: (res: unknown) => unknown) => {
+          let claims = 0;
+          const api = {
+            ...base,
+            async get(url: string) {
+              const res = await base.get(url);
+              if (!url.startsWith('/e2e/keyshares?')) return res;
+              claims++;
+              return rewrite ? rewrite(res) : res;
+            },
+          };
+          return { api, claims: () => claims };
+        };
+
+        it('reaches a share stored behind 2000 held ones in the same run', async () => {
+          uniq++;
+          const server = createFakeServer();
+          const alice = makeParty(server, 'alice');
+          const bob = makeParty(server, 'bob');
+          await alice.service.initialize();
+          await bob.service.initialize();
+          await flushQueue();
+          await alice.service.fetchDeviceList(bob.userId, true); // Bob is pinned: his share needs no look-up
+          await alice.service.dispose();
+          await heldShares(server, alice, 2000);
+          const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'behind the held ones');
+          server.setDeviceListReadFailure(true); // the held ones' sender stays out of reach
+
+          const counted = countingClaims(server.apiFor(alice.userId));
+          const again = over(alice, counted.api);
+          await again.initialize();
+          await again.claimMasterTransfers(); // queued behind the start-up claim
+          expect(counted.claims()).toBe(21); // 20 pages of held shares, then Bob's
+
+          // stored by that run: the decrypt claims nothing, even once the leases have passed
+          server.expireLeases();
+          const message = { id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope };
+          expect((await again.decryptMessage(message)).text).toBe('behind the held ones');
+          expect(counted.claims()).toBe(21);
+          expect(await pendingIn(alice)).toHaveLength(2000); // still held, still unacknowledged
+        });
+
+        it('still stops a run: at 25 requests when every page is held already, at 20 pages of anything else', async () => {
+          uniq++;
+          const server = createFakeServer();
+          const alice = makeParty(server, 'alice');
+          await alice.service.initialize();
+          await flushQueue();
+          await alice.service.dispose();
+          await heldShares(server, alice, 100);
+          server.setDeviceListReadFailure(true);
+          // a server that serves the same full page at every claim, whatever the lease says
+          let page: unknown = null;
+          const replaying = countingClaims(server.apiFor(alice.userId), (res) => {
+            if (page === null) page = structuredClone(res);
+            return structuredClone(page);
+          });
+          const again = over(alice, replaying.api);
+          await again.initialize();
+          await again.claimMasterTransfers(); // queued behind the start-up claim
+          expect(replaying.claims()).toBe(25);
+          await again.dispose();
+
+          // a full page of what this device does not hold (here, junk) counts toward the 20
+          const junk = countingClaims(server.apiFor(alice.userId), () => ({
+            data: { success: true, data: { shares: Array.from({ length: 100 }, () => null), leaseMs: E2E_LIMITS.KEYSHARE_LEASE_MS } },
+          }));
+          const later = over(alice, junk.api);
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+          try {
+            await later.initialize();
+            await later.claimMasterTransfers(); // queued behind the start-up claim
+          } finally {
+            warn.mockRestore();
+          }
+          expect(junk.claims()).toBe(20);
+        });
+      });
+
       describe('owed acknowledgements in requests of a page each, a refusal for good settled', () => {
         /** Share ids of the shape the server takes back, in the order they are noted. */
         const owedIds = (n: number) => Array.from({ length: n }, (_, i) => `cmowedshare${String(i).padStart(10, '0')}`);
