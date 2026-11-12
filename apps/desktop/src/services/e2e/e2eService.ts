@@ -345,6 +345,19 @@ const LOST_CLAIM_RETRY_MARGIN_MS = 5_000;
  * before. Any claim the server answers starts the count again.
  */
 const LOST_CLAIM_RETRY_MAX = 3;
+/**
+ * Answers that refuse an acknowledgement for good: sent again it gets the
+ * same answer, and kept it would go first in every later request, holding
+ * back every acknowledgement after it for as long as the vault keeps one.
+ * 400: the server takes these ids from this device never (the client sends
+ * only ids of the shape it takes, a page at most); 403: the device is not
+ * the caller's (revoked, its shares deleted with it); 404: no such route (a
+ * server from before leases, which deleted what it handed out). Settled,
+ * a share the server still has comes back after its lease, is recognised by
+ * its session, and is acknowledged again. A 429, a 5xx or no answer at all
+ * leaves the acknowledgement owed.
+ */
+const ACK_REFUSED_FOR_GOOD = new Set([400, 403, 404]);
 
 const noop = (): void => {};
 
@@ -3556,13 +3569,22 @@ export class E2EService {
             { timeout: KEYSHARE_REQUEST_TIMEOUT_MS }
           );
         } catch (err) {
-          // a dispose that overtook it is not a failure to report
-          if (!(this.disposed && isE2ESessionEnded(err))) {
-            console.warn('e2e: could not acknowledge claimed key shares (sent again by the next claim):', errText(err));
+          const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
+          if (this.disposed || typeof status !== 'number' || !ACK_REFUSED_FOR_GOOD.has(status)) {
+            // a dispose that overtook it is not a failure to report
+            if (!(this.disposed && isE2ESessionEnded(err))) {
+              console.warn('e2e: could not acknowledge claimed key shares (sent again by the next claim):', errText(err));
+            }
+            return;
           }
-          return;
+          // Refused for good (ACK_REFUSED_FOR_GOOD): settled like a confirmed
+          // one, so it holds back none of the requests after it. Neither the
+          // ids nor the server's words are logged.
+          console.warn(
+            `e2e: the server refused an acknowledgement of ${ids.length} claimed key share(s) for good (HTTP ${status}); not sending it again`
+          );
         }
-        // confirmed: forgotten here, then in the vault (refused once disposed)
+        // settled: forgotten here, then in the vault (refused once disposed)
         for (const id of ids) this.shareAcksOwed.delete(id);
         try {
           await this.liveVault.deleteShareAcks(ids);

@@ -5844,6 +5844,119 @@ describe('E2EService — lifecycle', () => {
         ]);
       });
 
+      describe('owed acknowledgements in requests of a page each, a refusal for good settled', () => {
+        /** Share ids of the shape the server takes back, in the order they are noted. */
+        const owedIds = (n: number) => Array.from({ length: n }, (_, i) => `cmowedshare${String(i).padStart(10, '0')}`);
+        /** Note `ids` as owed in a party's vault, one millisecond apart, oldest first. */
+        const oweIn = async (party: Party, ids: string[]) => {
+          const vault = new E2EVault(party.userId, party.keyProvider, party.vaultNamespace);
+          await vault.open();
+          const start = Date.now() - ids.length;
+          const now = vi.spyOn(Date, 'now');
+          try {
+            for (const [i, id] of ids.entries()) {
+              now.mockReturnValue(start + i);
+              await vault.putShareAck(id);
+            }
+          } finally {
+            now.mockRestore();
+            vault.close();
+          }
+        };
+        const owedIn = async (party: Party) => {
+          const vault = new E2EVault(party.userId, party.keyProvider, party.vaultNamespace);
+          await vault.open();
+          try {
+            return (await vault.listShareAcks()).map((a) => a.id).sort();
+          } finally {
+            vault.close();
+          }
+        };
+        /** An axios-shaped failure: an answer with `status`, or none at all. */
+        const failure = (status: number | null) =>
+          status === null
+            ? Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' })
+            : Object.assign(new Error(`Request failed with status code ${status}`), { response: { status } });
+
+        /**
+         * Alice, registered and away, owes `owed` acknowledgements; she restarts
+         * over a client whose acknowledgement requests are recorded, and whose
+         * first one fails as `first` says (null: it is not failed).
+         */
+        async function aliceOwing(owed: string[], first: number | null | undefined) {
+          uniq++;
+          const server = createFakeServer();
+          const alice = makeParty(server, 'alice');
+          await alice.service.initialize();
+          await flushQueue();
+          await alice.service.dispose();
+          await oweIn(alice, owed);
+          const base = server.apiFor(alice.userId);
+          const sent: string[][] = [];
+          let failNext = first !== undefined;
+          const api = {
+            ...base,
+            async post(url: string, body?: Parameters<typeof base.post>[1]) {
+              if (url !== '/e2e/keyshares/ack') return base.post(url, body);
+              sent.push([...(body as KeyShareAckBody).ids]);
+              if (failNext) {
+                failNext = false;
+                throw failure(first ?? null);
+              }
+              return base.post(url, body);
+            },
+          };
+          const again = over(alice, api);
+          await again.initialize();
+          await again.claimMasterTransfers(); // queued behind the start-up claim
+          await acksSent(again);
+          return { server, alice, again, sent };
+        }
+
+        it('sends them oldest first, a page of KEYSHARE_ACK_MAX (100) ids per request', async () => {
+          const owed = owedIds(250);
+          const { alice, sent } = await aliceOwing(owed, undefined);
+          expect(sent.map((ids) => ids.length)).toEqual([100, 100, 50]);
+          expect(sent.flat()).toEqual(owed);
+          expect(await owedIn(alice)).toEqual([]);
+        });
+
+        it.each([400, 403, 404])('drops a request refused with %i for good, warns once without ids, and sends the rest', async (status) => {
+          const owed = owedIds(150);
+          const warn = vi.spyOn(console, 'warn');
+          try {
+            const { alice, again, sent } = await aliceOwing(owed, status);
+            expect(sent).toEqual([owed.slice(0, 100), owed.slice(100)]); // the refusal holds nothing back
+            expect(await owedIn(alice)).toEqual([]);
+            const refusals = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((w) => w.includes('for good'));
+            expect(refusals).toHaveLength(1);
+            expect(refusals[0]).toContain(String(status));
+            expect(owed.some((id) => refusals[0].includes(id))).toBe(false);
+
+            // settled: the next run sends nothing more for them
+            sent.length = 0;
+            await missOn({ service: again }, 'bob-nobody', ['cmVmdXNlZA']);
+            await acksSent(again);
+            expect(sent).toEqual([]);
+          } finally {
+            warn.mockRestore();
+          }
+        });
+
+        it.each([429, 500, 503, null])('keeps every id owed when a request fails with %s, and sends them all again later', async (status) => {
+          const owed = owedIds(150);
+          const { alice, again, sent } = await aliceOwing(owed, status);
+          expect(sent).toEqual([owed.slice(0, 100)]); // stopped there: the next run sends them
+          expect(await owedIn(alice)).toEqual(owed);
+
+          sent.length = 0;
+          await missOn({ service: again }, 'bob-nobody', ['YWdhaW4']);
+          await acksSent(again);
+          expect(sent).toEqual([owed.slice(0, 100), owed.slice(100)]);
+          expect(await owedIn(alice)).toEqual([]);
+        });
+      });
+
       describe('a claim whose answer was lost claims again once its lease has passed', () => {
         // The server may have leased the page of a claim whose answer never
         // came back: no claim gets those shares until the lease passes, and
