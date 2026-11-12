@@ -222,7 +222,10 @@ fn e2e_pickle_key_set(user_id: String, key_b64: String) -> Result<(), String> {
 // fixed service name and a closed set of entry names on the Rust side of the
 // IPC boundary, so webview code can only ever reach Voxium's own entries, and
 // a value is shape-checked before it is written. The webview side is
-// services/tokenStorage.ts (`createKeychainSessionStore`).
+// services/tokenStorage.ts (`createKeychainSessionStore`). These names are
+// the same in every build, a build made for another server included, so the
+// webview stamps each value with the origin of the API that issued it and
+// never uses a value stamped with another one.
 
 const SESSION_KEYCHAIN_SERVICE: &str = "app.voxium.session";
 const SESSION_SECRET_NAMES: &[&str] = &["tokens", "trusted-device"];
@@ -476,6 +479,34 @@ mod session_secret_tests {
         // a second delete is still the state the caller asked for
         assert_eq!(delete_session_secret("tokens"), Ok(()));
         assert_eq!(delete_session_secret("tokens"), Ok(()));
+    }
+
+    /// The entries carry the origin of the API that issued them
+    /// (services/tokenStorage.ts): the pair with its origin as one JSON
+    /// object, the trusted-device token as `{ token, origin }`. Both stay
+    /// printable ASCII without spaces, and a long pair with a long origin
+    /// still fits the Windows cap.
+    #[test]
+    fn the_stamped_entries_the_webview_writes_are_accepted() {
+        use_mock_store();
+        let jwt = format!("eyJhbGciOiJIUzI1NiJ9.{}.sig", "a".repeat(380));
+        let host = format!("{}.example.org", "h".repeat(240));
+        let pair = format!(
+            "{{\"accessToken\":\"{jwt}\",\"refreshToken\":\"{jwt}\",\"origin\":\"https://{host}:8443\"}}"
+        );
+        assert!(
+            pair.len() <= SESSION_SECRET_MAX_CHARS,
+            "{} chars",
+            pair.len()
+        );
+        assert!(valid_session_secret_value(&pair));
+        assert_eq!(write_session_secret("tokens", &pair), Ok(()));
+
+        let trusted = format!("{{\"token\":\"{jwt}\",\"origin\":\"https://chat.example.org\"}}");
+        assert!(valid_session_secret_value(&trusted));
+        assert_eq!(write_session_secret("trusted-device", &trusted), Ok(()));
+        // an older build's bare trusted-device token is still a valid value
+        assert!(valid_session_secret_value(&jwt));
     }
 
     #[test]

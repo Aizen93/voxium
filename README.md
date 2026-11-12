@@ -351,6 +351,8 @@ The `VITE_*` values are read exactly as the frontend build reads them, through V
 
 **Do not reuse the project's feed or key.** `tauri.conf.json` holds the official release's settings: the Voxium project's domains in the policy, its update feed (`https://github.com/Aizen93/voxium/releases/…`) and its public key. A build pointed at that feed would replace your app with the official installer, compiled for another server, at the next upstream release; with that key, no update you sign could ever install. `pnpm tauri:build` refuses both. Do not build with a plain `pnpm tauri build` or `scripts/tauri-release-config.mjs` either: they produce the official configuration, which only the project's release workflow uses (and which stops at the signing step without the project's private key). In a CI of your own, write the overlay with `node scripts/tauri-build-config.mjs --out <file>` and pass `--config <file>` to `tauri build`.
 
+**Two builds on one machine do not share a session.** Every Voxium desktop build, the official one and yours alike, uses the same app identifier and the same entries in the OS credential store. Each stored session (and the two-factor "trusted device" token) is kept with the address of the server that issued it, and a build only ever sends it back to that server: your build never sends the official app's session to your server, and the official app never sends yours to the project's. The cost is that the two take turns: signing in on one signs the other out, which asks for a sign-in (and the two-factor code) at its next launch.
+
 `pnpm tauri:dev` is not affected: the development build allows `localhost:3001` through `devCsp`.
 
 This creates platform-specific installers in `apps/desktop/src-tauri/target/release/bundle/`:
