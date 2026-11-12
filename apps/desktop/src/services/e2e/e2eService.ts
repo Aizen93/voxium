@@ -314,6 +314,14 @@ const MAX_RESTORE_PAGES = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMIT
 const MAX_PENDING_SHARE_ATTEMPTS = 5;
 /** How long a dispose waits for a key-share claim in flight before tearing down anyway. */
 const TEARDOWN_DEADLINE_MS = 10_000;
+/**
+ * Deadline of the key-share claim's GET and of the acknowledgement POST, the
+ * one the session refresh has (REFRESH_TIMEOUT_MS): the api sets none, and a
+ * request hung on a dead connection would hold the claim run, and the queue
+ * behind it, or the acknowledgement sender, until the browser gave up. A
+ * claim that times out is a claim whose answer was lost.
+ */
+const KEYSHARE_REQUEST_TIMEOUT_MS = 15_000;
 
 const noop = (): void => {};
 
@@ -851,7 +859,8 @@ export class E2EService {
     }
     // the claim may use the open connection, never a new one
     this.vault.stopReopening();
-    // Bounded: a request can hang (the client sets no timeout). At the
+    // Bounded: the claim's request has a longer deadline of its own
+    // (KEYSHARE_REQUEST_TIMEOUT_MS), and a page takes time to import. At this
     // deadline the teardown runs anyway, and what the claim had not imported
     // stays kept in the vault for the next start.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -3323,7 +3332,9 @@ export class E2EService {
         // stored, and must reach the vault rather than be thrown away.
         this.claimPageInFlight = true;
         const res = await this.client
-          .get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}&lease=1`)
+          .get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}&lease=1`, {
+            timeout: KEYSHARE_REQUEST_TIMEOUT_MS,
+          })
           .catch((err: unknown) => {
             // no answer to write: the connection kept for one is not needed
             if (this.tornDown) this.vault.releaseLateConnection();
@@ -3481,7 +3492,11 @@ export class E2EService {
       while (this.shareAcksOwed.size > 0 && !this.disposed) {
         const ids = [...this.shareAcksOwed].slice(0, E2E_LIMITS.KEYSHARE_ACK_MAX);
         try {
-          await this.api.post('/e2e/keyshares/ack', { deviceId: this.deviceId, ids });
+          await this.api.post(
+            '/e2e/keyshares/ack',
+            { deviceId: this.deviceId, ids },
+            { timeout: KEYSHARE_REQUEST_TIMEOUT_MS }
+          );
         } catch (err) {
           // a dispose that overtook it is not a failure to report
           if (!(this.disposed && isE2ESessionEnded(err))) {

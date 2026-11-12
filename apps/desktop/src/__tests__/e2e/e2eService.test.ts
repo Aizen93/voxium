@@ -5816,6 +5816,34 @@ describe('E2EService — lifecycle', () => {
         expect(inboxCalls(rec.calls).filter((c) => c === 'ack')).toEqual([]);
       });
 
+      it('gives the claim and the acknowledgement a deadline of their own', async () => {
+        // The api sets none: a request hung on a dead connection would hold
+        // the claim run, and the queue behind it, until the browser gave up.
+        const { server, alice } = await bobWroteWhileAliceWasAway('on a deadline');
+        const base = server.apiFor(alice.userId);
+        const configs: Array<[string, unknown]> = [];
+        const api = {
+          ...base,
+          async get(url: string, config?: unknown) {
+            if (url.startsWith('/e2e/keyshares?')) configs.push(['claim', config]);
+            return base.get(url);
+          },
+          async post(url: string, body?: Parameters<typeof base.post>[1], config?: unknown) {
+            if (url === '/e2e/keyshares/ack') configs.push(['ack', config]);
+            return base.post(url, body);
+          },
+        };
+        const again = over(alice, api);
+        await again.initialize();
+        await again.claimMasterTransfers(); // queued behind the start-up claim
+        await acksSent(again);
+        // 15 s, the session refresh's deadline (services/session.ts REFRESH_TIMEOUT_MS)
+        expect(configs).toEqual([
+          ['claim', { timeout: 15_000 }],
+          ['ack', { timeout: 15_000 }],
+        ]);
+      });
+
       describe('acknowledgements are sent beside the claims, never waited for', () => {
         const ACK = 'POST /e2e/keyshares/ack';
         /** `promise`'s value, or 'still pending' when it has not settled within a short wait. */
