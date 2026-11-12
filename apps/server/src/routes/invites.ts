@@ -68,7 +68,9 @@ inviteRouter.post('/:code/join', rateLimitInviteUse, async (req: Request<{ code:
     try {
       await joinServerMember(req.user!.userId, invite.serverId, {
         via: 'invite',
-        extraWrites: [prisma.invite.delete({ where: { code } })],
+        // built on each attempt's transaction: a retried join consumes the
+        // invite once, or finds it consumed and fails
+        extraWrites: (tx) => [tx.invite.delete({ where: { code } })],
       });
     } catch (err) {
       // P2025 = the delete found no row: the invite was already consumed.

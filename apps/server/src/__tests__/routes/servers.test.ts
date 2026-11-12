@@ -1728,7 +1728,10 @@ describe('Server Routes', () => {
       const res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
 
       expect(res.status).toBe(200);
-      expect(mockJoinServerMember).toHaveBeenCalledWith('user-2', 'srv-1', { via: 'approval', extraWrites: [DELETE] });
+      // the row delete is built on each attempt's transaction client
+      expect(mockJoinServerMember).toHaveBeenCalledWith('user-2', 'srv-1', { via: 'approval', extraWrites: expect.any(Function) });
+      const { extraWrites } = mockJoinServerMember.mock.calls[0][2];
+      expect(extraWrites(prismaMock)).toEqual([DELETE]);
       expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
       // a request names a non-member: the whole server never hears about it
       expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');

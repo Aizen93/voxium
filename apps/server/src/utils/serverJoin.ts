@@ -1,7 +1,8 @@
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
-import { BadRequestError, ForbiddenError } from './errors';
+import { BadRequestError, ForbiddenError, NotFoundError } from './errors';
 import { getEffectiveLimits } from './serverLimits';
+import { retryOnTransactionConflict } from './transactionRetry';
 import { broadcastMemberJoined } from './memberBroadcast';
 import { emitToModerators } from './moderatorAudience';
 import { WS_EVENTS } from '@voxium/shared';
@@ -13,12 +14,14 @@ export interface JoinServerOptions {
   via: JoinServerVia;
   /**
    * Writes that must commit WITH the membership, in the same transaction and
-   * before it: the invite route passes `invite.delete({ where: { code } })`,
-   * the approval route the join-request delete. If one of them finds no row
-   * the whole transaction fails and no membership is created — which is what
-   * keeps a single-use invite from being consumed twice.
+   * before it, built on that transaction's client for EACH attempt (the
+   * transaction can run again after a deadlock): the invite route passes
+   * `(tx) => [tx.invite.delete({ where: { code } })]`, the approval route the
+   * join-request delete. If one of them finds no row the whole transaction
+   * fails and no membership is created — which is what keeps a single-use
+   * invite from being consumed twice, on every attempt.
    */
-  extraWrites?: Prisma.PrismaPromise<unknown>[];
+  extraWrites?: (tx: Prisma.TransactionClient) => Array<Promise<unknown>>;
 }
 
 /**
@@ -29,8 +32,9 @@ export interface JoinServerOptions {
  * and nowhere else (docs/local/server-discovery-plan.html).
  *
  * Order: ban (403) → already a member (400) → member limit (400) → one
- * transaction (extra writes, any secure-channel row an earlier membership
- * left, membership row, memberCount + 1) → the room
+ * transaction, retried on a deadlock and holding those three checks again
+ * under the space row lock (extra writes, any secure-channel row an earlier
+ * membership left, membership row, memberCount + 1) → the room
  * invariant (broadcastMemberJoined joins the sockets to `server:{id}` and the
  * visible `channel:{id}` rooms) → ChannelRead seeding for the server's
  * non-secure text channels so existing history does not show as unread.
@@ -74,28 +78,47 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
         select: { status: true },
       });
 
+  // The checks above are a fast answer; the transaction holds them again on
+  // every attempt, since PostgreSQL may abort it to break a deadlock with a
+  // space delete or an account deletion and it then runs again: the space
+  // row first (FOR UPDATE, the order a space delete and a transfer take it
+  // in), so the member limit is counted with no other join in between, then
+  // the extra writes (a consumed invite fails them), the ban, the duplicate.
   try {
-    await prisma.$transaction([
-      ...(opts.extraWrites ?? []),
+    await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
+      for (const write of opts.extraWrites?.(tx) ?? []) await write;
+      const bannedNow = await tx.serverBan.findUnique({
+        where: { serverId_userId: { serverId, userId } },
+        select: { userId: true },
+      });
+      if (bannedNow) throw new ForbiddenError('You are banned from this server');
+      const memberNow = await tx.serverMember.findUnique({
+        where: { userId_serverId: { userId, serverId } },
+        select: { userId: true },
+      });
+      if (memberNow) throw new BadRequestError('You are already a member of this server');
+      if (limits.maxMembersPerServer > 0) {
+        const countNow = await tx.serverMember.count({ where: { serverId } });
+        if (countNow >= limits.maxMembersPerServer) {
+          throw new BadRequestError(`This server has reached its member limit (${limits.maxMembersPerServer})`);
+        }
+      }
       // A membership replaces any request the joiner had open or declined
       // here (an open-mode join after the owner switched modes, an invite
       // used while a request was pending). The approval route still passes
       // its single-row delete as an extra write: THAT one must fail when the
       // row is gone (double approval), this one is a sweep.
-      prisma.serverJoinRequest.deleteMany({ where: { serverId, userId } }),
+      await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
       // A membership starts with no secure-channel row: access to a secure
       // channel is derived from its ChannelMember rows alone, so one an
       // earlier membership of this space left behind must not be honoured
       // again. Every channel of the space (rows exist only for secure ones).
-      prisma.channelMember.deleteMany({ where: { userId, channel: { serverId } } }),
-      prisma.serverMember.create({
-        data: { userId, serverId },
-      }),
-      prisma.server.update({
-        where: { id: serverId },
-        data: { memberCount: { increment: 1 } },
-      }),
-    ]);
+      await tx.channelMember.deleteMany({ where: { userId, channel: { serverId } } });
+      await tx.serverMember.create({ data: { userId, serverId } });
+      await tx.server.update({ where: { id: serverId }, data: { memberCount: { increment: 1 } } });
+    }), `[ServerJoin] The join of ${userId} to ${serverId}`);
   } catch (err) {
     // Two concurrent joins by the same user: the second one's create hits the
     // composite primary key. That is "already a member", not a 500.

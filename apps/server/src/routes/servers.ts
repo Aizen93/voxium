@@ -1072,7 +1072,7 @@ serverRouter.post(
           // status in the where: a decline that commits between the read
           // above and this transaction leaves a row this delete must NOT
           // find, so the approval fails instead of admitting a declined user
-          extraWrites: [prisma.serverJoinRequest.delete({ where: { id: request.id, status: 'pending' } })],
+          extraWrites: (tx) => [tx.serverJoinRequest.delete({ where: { id: request.id, status: 'pending' } })],
         });
       } catch (err) {
         const e = err as { code?: unknown; statusCode?: unknown; message?: unknown };
