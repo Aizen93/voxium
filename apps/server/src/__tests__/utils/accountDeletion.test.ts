@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const prismaMock = vi.hoisted(() => ({
   user: { findUnique: vi.fn(), delete: vi.fn() },
   server: { updateMany: vi.fn() },
-  serverMember: { findMany: vi.fn(), deleteMany: vi.fn() },
+  serverMember: { findMany: vi.fn() },
+  // The member rows are deleted with RETURNING server_id inside the transaction
+  $queryRaw: vi.fn(),
   serverJoinRequest: { findMany: vi.fn() },
   messageAttachment: { findMany: vi.fn() },
   $transaction: vi.fn(),
@@ -64,7 +66,7 @@ beforeEach(() => {
   io.localDisconnectSockets.mockImplementation(() => { order.push('disconnect:local'); });
   io.disconnectSockets.mockImplementation(() => { order.push('disconnect'); });
   io.emit.mockImplementation(() => { order.push('force:logout'); });
-  prismaMock.serverMember.deleteMany.mockImplementation(async () => { order.push('memberships'); return { count: 2 }; });
+  prismaMock.$queryRaw.mockImplementation(async () => { order.push('memberships'); return [{ server_id: 's-1' }, { server_id: 's-2' }]; });
   removeSecure.mockImplementation(async () => { order.push('secure'); return SECURE_REMOVAL; });
   announceSecure.mockImplementation(async () => { order.push('secure:notices'); });
   purgeE2E.mockImplementation(async () => { order.push('e2e'); });
@@ -72,7 +74,7 @@ beforeEach(() => {
   prismaMock.server.updateMany.mockImplementation(async () => { order.push('counts'); return { count: 2 }; });
   prismaMock.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
     order.push('txn:start');
-    const result = await fn({ user: prismaMock.user, server: prismaMock.server, serverMember: prismaMock.serverMember });
+    const result = await fn({ user: prismaMock.user, server: prismaMock.server, serverMember: prismaMock.serverMember, $queryRaw: prismaMock.$queryRaw });
     order.push('txn:end');
     return result;
   });
@@ -104,9 +106,11 @@ describe('deleteUserAccount', () => {
   it('removes the memberships, then the secure-channel state, inside the delete transaction and on its client', async () => {
     await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
 
-    expect(prismaMock.serverMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1' } });
+    const [sql, ...values] = prismaMock.$queryRaw.mock.calls[0];
+    expect((sql as string[]).join('?')).toMatch(/DELETE FROM server_members WHERE user_id = \? RETURNING server_id/);
+    expect(values).toEqual(['u-1']);
     // Every space at once (no space argument), on the transaction's client
-    expect(removeSecure).toHaveBeenCalledWith(expect.objectContaining({ serverMember: prismaMock.serverMember }), 'u-1');
+    expect(removeSecure).toHaveBeenCalledWith(expect.objectContaining({ $queryRaw: prismaMock.$queryRaw }), 'u-1');
     // The member rows before any space row: the lock order every writer of a
     // secure-channel row takes them in
     expect(order.indexOf('memberships')).toBeLessThan(order.indexOf('secure'));
@@ -123,7 +127,7 @@ describe('deleteUserAccount', () => {
   it('a secure-channel step that throws fails the deletion: the account survives and nothing is announced', async () => {
     removeSecure.mockRejectedValue(new Error('channel delete failed'));
     prismaMock.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ user: prismaMock.user, server: prismaMock.server, serverMember: prismaMock.serverMember }));
+      fn({ user: prismaMock.user, server: prismaMock.server, serverMember: prismaMock.serverMember, $queryRaw: prismaMock.$queryRaw }));
 
     await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toThrow('channel delete failed');
 
@@ -263,8 +267,32 @@ describe('deleteUserAccount', () => {
 
   it('skips the count update when the account was a member of nothing', async () => {
     prismaMock.serverMember.findMany.mockResolvedValue([]);
+    prismaMock.$queryRaw.mockResolvedValue([]);
     await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
     expect(prismaMock.server.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('counts the spaces the transaction\'s own delete removed a row from, on each attempt, not a list read before it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // read before the transaction: s-1 and s-2. Between the attempts a join
+    // to s-3 committed and a removal from s-2 did
+    prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's-1' }, { serverId: 's-2' }]);
+    prismaMock.$queryRaw.mockResolvedValue([{ server_id: 's-1' }, { server_id: 's-3' }]);
+    const real = prismaMock.$transaction.getMockImplementation()!;
+    prismaMock.$transaction
+      .mockImplementationOnce(async () => { throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })
+      .mockImplementation(real);
+    try {
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+      expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['s-1', 's-3'] }, memberCount: { gt: 0 } },
+        data: { memberCount: { decrement: 1 } },
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   describe('the attachment files of the messages the delete cascades', () => {

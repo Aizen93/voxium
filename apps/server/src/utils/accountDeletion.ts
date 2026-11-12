@@ -90,7 +90,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     ...await readKeys({ channel: { createdById: userId, secure: true } }, 'the secure channels the account created'),
   ])];
 
-  const secure = await deleteAccountRows(userId, memberships.map((m) => m.serverId));
+  const secure = await deleteAccountRows(userId);
 
   // Again, now that the row is gone: a socket whose handshake landed while
   // the row still existed joined user:{id} after the first pass and passed
@@ -132,9 +132,9 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * stays possible either way; PostgreSQL aborts one side and both sides
  * retry.
  */
-export async function deleteAccountRows(userId: string, serverIds: string[]): Promise<SecureMembershipRemoval> {
+export async function deleteAccountRows(userId: string): Promise<SecureMembershipRemoval> {
   try {
-    return await runAccountDeletionTransaction(userId, serverIds);
+    return await runAccountDeletionTransaction(userId);
   } catch (err) {
     // `Server.owner` is onDelete: Restrict: the account came to own a space
     // after `deleteUserAccount` checked it owned none (a transfer to it, which
@@ -155,15 +155,20 @@ function ownsASpaceNow(err: unknown): boolean {
   return named.some((v) => v.includes('servers_owner_id_fkey'));
 }
 
-function runAccountDeletionTransaction(userId: string, serverIds: string[]): Promise<SecureMembershipRemoval> {
+function runAccountDeletionTransaction(userId: string): Promise<SecureMembershipRemoval> {
   // E2E key material has no FK to User (except the key backup), so it would
   // otherwise outlive the account it belongs to. One transaction with the
   // delete: purging a user who then survives strands every device they own.
   return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
     await purgeE2EMaterial(userId, tx);
     // The memberships first, explicitly (the cascade would take them with the
-    // row, last): see the lock order above.
-    await tx.serverMember.deleteMany({ where: { userId } });
+    // row, last): see the lock order above. The spaces whose count moves are
+    // the ones this very statement removed a row from, on this attempt: a
+    // list read before the transaction would miscount after a join or a
+    // removal committed between two attempts.
+    const removedFrom = await tx.$queryRaw<Array<{ server_id: string }>>`
+      DELETE FROM server_members WHERE user_id = ${userId} RETURNING server_id`;
+    const serverIds = removedFrom.map((r) => r.server_id);
     // Then the secure-channel state, in the same transaction: the channels
     // the account created (with every member's row), its rows in the others,
     // the key shares addressed to it there. The notices go out after the commit.

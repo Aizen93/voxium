@@ -52,10 +52,10 @@ function makeTxMock() {
     server: {
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
-    // The memberships go first, explicitly, ahead of the secure-channel state
-    serverMember: {
-      deleteMany: vi.fn(async () => ({ count: 0 })),
-    },
+    // The memberships go first, explicitly, ahead of the secure-channel state,
+    // with RETURNING server_id: the spaces whose member count moves
+    $queryRaw: vi.fn(async () =>
+      ((await prismaMock.serverMember.findMany()) as Array<{ serverId: string }>).map((m) => ({ server_id: m.serverId }))),
     // The E2E tables purgeE2EMaterial touches — present so the REAL purge can
     // be driven against this client, not just the observing mock.
     e2EKeyShare: { deleteMany: deleteMany() },
@@ -319,8 +319,10 @@ function expectAtomicPurgeAndDelete(targetId: string) {
   // The secure-channel rows go in the same transaction, on its client, after
   // the memberships and before the row; the notices only after the commit
   expect(mockRemoveSecureInTx).toHaveBeenCalledWith(txMock, targetId);
-  expect(txMock.serverMember.deleteMany).toHaveBeenCalledWith({ where: { userId: targetId } });
-  expect(txMock.serverMember.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(mockRemoveSecureInTx.mock.invocationCallOrder[0]);
+  const memberDelete = txMock.$queryRaw.mock.calls[0] as unknown as [string[], ...unknown[]];
+  expect(memberDelete[0].join('?')).toMatch(/DELETE FROM server_members WHERE user_id = \? RETURNING server_id/);
+  expect(memberDelete.slice(1)).toEqual([targetId]);
+  expect(txMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(mockRemoveSecureInTx.mock.invocationCallOrder[0]);
   expect(mockRemoveSecureInTx.mock.invocationCallOrder[0]).toBeLessThan(txMock.user.delete.mock.invocationCallOrder[0]);
   expect(mockAnnounceSecureRemoved).toHaveBeenCalledWith({ userId: targetId, deleted: [], left: [] });
   expect(mockAnnounceSecureRemoved.mock.invocationCallOrder[0]).toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
