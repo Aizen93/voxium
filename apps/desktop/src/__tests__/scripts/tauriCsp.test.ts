@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { parseAssetOrigins, withAssetOrigins, releaseConfig } from '../../../scripts/tauriCsp.mjs';
 
@@ -91,7 +91,7 @@ describe('parseAssetOrigins', () => {
 
   it('refuses anything that is not a bare scheme://host[:port] (a path, a trailing slash, another scheme, a bare host)', () => {
     for (const bad of [`${ORIGIN}/`, `${ORIGIN}/bucket`, 'ftp://assets.example.com', 'assets.example.com', 'https://', `${ORIGIN}?x=1`, 'https://user@assets.example.com']) {
-      expect(() => parseAssetOrigins(bad), bad).toThrow(/TAURI_ASSET_ORIGIN must hold origins like https:\/\/host\[:port\]/);
+      expect(() => parseAssetOrigins(bad), bad).toThrow(/TAURI_ASSET_ORIGIN entry \d+ of \d+ is not an origin like https:\/\/host\[:port\]/);
     }
   });
 
@@ -108,7 +108,33 @@ describe('parseAssetOrigins', () => {
       'https://*.example.org',
       'https://storage_example.org',
     ]) {
-      expect(() => parseAssetOrigins(bad), bad).toThrow(/TAURI_ASSET_ORIGIN must hold origins like https:\/\/host\[:port\]/);
+      expect(() => parseAssetOrigins(bad), bad).toThrow(/TAURI_ASSET_ORIGIN entry \d+ of \d+ is not an origin like https:\/\/host\[:port\]/);
+    }
+  });
+
+  // The release workflow reads the variable from a repository secret, and the
+  // Actions log is public: GitHub masks the whole secret, not one part of a
+  // comma-separated value, so a message quoting the refused part leaks it
+  it('names the position and the rule broken, never the value or any part of it', () => {
+    const cases: Array<[string, number, number, RegExp]> = [
+      ['https://good.example.org, https://secret-bucket.example.org/objects', 2, 2, /nothing may follow the host and port/],
+      ['https://secret-bucket.example.org:99999', 1, 1, /port must be 1 to 65535/],
+      ['https://secret..bucket.example.org', 1, 1, /host must be dot-separated labels/],
+      ['secret-bucket.example.org', 1, 1, /must start with http:\/\/ or https:\/\//],
+      ['https://admin:secret-pass@secret-bucket.example.org', 1, 1, /no credentials/],
+    ];
+    for (const [value, position, count, rule] of cases) {
+      let message = '';
+      try {
+        parseAssetOrigins(value);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message, value).toMatch(new RegExp(`^TAURI_ASSET_ORIGIN entry ${position} of ${count} is not an origin like https://host\\[:port\\]`.replace(/\//g, '\\/')));
+      expect(message, value).toMatch(rule);
+      for (const fragment of ['secret', 'bucket', 'example', 'good', 'objects', 'admin', '99999']) {
+        expect(message, `${value} -> ${message}`).not.toContain(fragment);
+      }
     }
   });
 
@@ -198,5 +224,18 @@ describe('tauri-release-config.mjs (the CLI the release workflow runs)', () => {
 
   it('fails the build on a malformed variable instead of shipping the base policy silently', () => {
     expect(() => run({ TAURI_ASSET_ORIGIN: 'assets.example.com' })).toThrow();
+  });
+
+  it('prints nothing of a refused value, on stdout or stderr', () => {
+    const result = spawnSync(process.execPath, [CLI_PATH], {
+      env: { ...process.env, TAURI_ASSET_ORIGIN: 'https://ok.example.org,https://secret-bucket.internal.example.org/x' },
+      encoding: 'utf8',
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('TAURI_ASSET_ORIGIN entry 2 of 2 is not an origin');
+    for (const fragment of ['secret', 'internal', 'ok.example', 'example.org']) {
+      expect(result.stderr).not.toContain(fragment);
+    }
   });
 });

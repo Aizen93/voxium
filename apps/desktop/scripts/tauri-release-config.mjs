@@ -21,6 +21,13 @@ import { fileURLToPath } from 'node:url';
 import { releaseConfig } from './tauriCsp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const conf = JSON.parse(readFileSync(join(here, '..', 'src-tauri', 'tauri.conf.json'), 'utf8'));
-const merged = releaseConfig(conf, process.env.TAURI_ASSET_ORIGIN);
-process.stdout.write(JSON.stringify(merged ?? {}, null, 2) + '\n');
+try {
+  const conf = JSON.parse(readFileSync(join(here, '..', 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  const merged = releaseConfig(conf, process.env.TAURI_ASSET_ORIGIN);
+  process.stdout.write(JSON.stringify(merged ?? {}, null, 2) + '\n');
+} catch (err) {
+  // The message alone: it names the rule broken and never the value (a
+  // secret in the release workflow, whose log is public)
+  console.error(`[tauri-release-config] ${err instanceof Error ? err.message : String(err)}`);
+  process.exitCode = 1;
+}

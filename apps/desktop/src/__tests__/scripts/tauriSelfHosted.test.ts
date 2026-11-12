@@ -104,6 +104,50 @@ describe('parseServerUrl', () => {
   });
 });
 
+/** The message `fn` throws. */
+function thrown(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (err) {
+    return (err as Error).message;
+  }
+  throw new Error('did not throw');
+}
+
+describe('no message quotes a refused value (a CI log may be public, and a value may come from a secret)', () => {
+  const FRAGMENTS = ['secret', 'internal', 'hunter2', 'admin', 'token=', '70000'];
+
+  it('the frontend URLs: the setting and the rule, nothing of the value', () => {
+    for (const value of [
+      'secret.internal/api',
+      'ftp://secret.internal',
+      'https://admin:hunter2@secret.internal/api',
+      'https://secret.internal/api?token=hunter2',
+      'https://[::1]:3001/secret',
+      'https://secret_internal.example.org',
+      'https://secret.internal:70000/api',
+    ]) {
+      const message = thrown(() => parseServerUrl('VITE_API_URL', value, ['http:', 'https:']));
+      expect(message.startsWith('VITE_API_URL '), message).toBe(true);
+      for (const fragment of FRAGMENTS) expect(message, `${value} -> ${message}`).not.toContain(fragment);
+    }
+  });
+
+  it('the update feed: the entry\'s position and the rule, nothing of the value', () => {
+    const official = conf.plugins.updater;
+    for (const value of [
+      'http://secret.internal/latest.json',
+      'secret.internal/latest.json',
+      'https://admin:hunter2@secret.internal/latest.json',
+      `https://ok.example.org/latest.json,${OFFICIAL_FEED[0]}`,
+    ]) {
+      const message = thrown(() => selfHostedUpdater(value, KEY, official));
+      expect(message.startsWith('TAURI_UPDATER_ENDPOINTS entry '), message).toBe(true);
+      for (const fragment of [...FRAGMENTS, 'github', 'ok.example']) expect(message, `${value} -> ${message}`).not.toContain(fragment);
+    }
+  });
+});
+
 describe('serverSources', () => {
   it('one host: the API origin in both directives, the socket origin over https and wss', () => {
     expect(serverSources(API, WS)).toEqual({
@@ -201,8 +245,8 @@ describe('selfHostedUpdater', () => {
   });
 
   it('refuses a feed the release build would refuse at start (not https) or that carries credentials', () => {
-    expect(() => selfHostedUpdater('http://updates.example.org/latest.json', KEY, official)).toThrow(/must hold https URLs/);
-    expect(() => selfHostedUpdater('updates.example.org/latest.json', KEY, official)).toThrow(/must hold https URLs/);
+    expect(() => selfHostedUpdater('http://updates.example.org/latest.json', KEY, official)).toThrow(/must be an https URL/);
+    expect(() => selfHostedUpdater('updates.example.org/latest.json', KEY, official)).toThrow(/must be an https URL/);
     expect(() => selfHostedUpdater('https://u:p@updates.example.org/latest.json', KEY, official)).toThrow(/must not carry credentials/);
   });
 
@@ -293,7 +337,7 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
   it('refuses malformed inputs instead of shipping a weaker or broken build', () => {
     expect(() => build({ wsUrl: WS })).toThrow(/VITE_API_URL is not set/);
     expect(() => build({ apiUrl: API })).toThrow(/VITE_WS_URL is not set/);
-    expect(() => build({ apiUrl: API, wsUrl: WS, assetOrigin: 'storage.example.org' })).toThrow(/TAURI_ASSET_ORIGIN must hold origins/);
+    expect(() => build({ apiUrl: API, wsUrl: WS, assetOrigin: 'storage.example.org' })).toThrow(/TAURI_ASSET_ORIGIN entry 1 of 1 is not an origin/);
     expect(() => build({ apiUrl: API, wsUrl: WS, updaterEndpoints: FEED })).toThrow(/go together/);
     expect(() => build({ apiUrl: API, wsUrl: WS, updaterEndpoints: OFFICIAL_FEED.join(','), updaterPubkey: KEY })).toThrow(/project's own update feed/);
     expect(() => selfHostedConfig({ app: { security: {} } }, { apiUrl: API, wsUrl: WS })).toThrow('The base CSP is empty');
@@ -395,6 +439,23 @@ describe('tauri-build-config.mjs (the CLI `pnpm tauri:build` runs)', () => {
     const failed = run(['--out', out]);
     expect(failed.status).toBe(1);
     expect(existsSync(out)).toBe(false);
+  });
+
+  it('a refused storage origin, URL or feed leaves no part of its value in the output', () => {
+    writeEnvFiles({ '.env': `VITE_API_URL=${API}\nVITE_WS_URL=${WS}\n` });
+    const envs: Array<Record<string, string>> = [
+      { TAURI_ASSET_ORIGIN: `${STORAGE},https://secret-bucket.internal.example.org/x` },
+      { TAURI_UPDATER_ENDPOINTS: 'http://secret.internal/latest.json', TAURI_UPDATER_PUBKEY: KEY },
+      { VITE_API_URL: 'https://admin:hunter2@secret.internal/api' },
+    ];
+    for (const env of envs) {
+      const result = run([], env);
+      expect(result.status, JSON.stringify(Object.keys(env))).toBe(1);
+      expect(result.stdout).toBe('');
+      for (const fragment of ['secret', 'internal', 'hunter2', 'admin', 'storage.example']) {
+        expect(result.stderr, fragment).not.toContain(fragment);
+      }
+    }
   });
 
   it('refuses an unknown or incomplete argument', () => {

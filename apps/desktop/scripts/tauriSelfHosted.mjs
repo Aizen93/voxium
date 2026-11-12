@@ -35,7 +35,8 @@ export function isHostSource(source) {
  * The URL a frontend setting holds, refused unless the policy can name its
  * origin: an absolute URL of one of `protocols`, no credentials, no query or
  * fragment (the app appends paths to it), a host a CSP source can name (an
- * IPv6 literal cannot be one).
+ * IPv6 literal cannot be one). No message quotes the value: a builder's CI
+ * may read it from a secret, and its log may be public.
  */
 export function parseServerUrl(name, value, protocols) {
   const raw = typeof value === 'string' ? value.trim() : '';
@@ -46,15 +47,15 @@ export function parseServerUrl(name, value, protocols) {
   try {
     url = new URL(raw);
   } catch {
-    throw new Error(`${name} must be an absolute URL like ${protocols[protocols.length - 1]}//host[:port][/path], got "${raw}"`);
+    throw new Error(`${name} must be an absolute URL like ${protocols[protocols.length - 1]}//host[:port][/path] (with a port of 1 to 65535)`);
   }
   if (!protocols.includes(url.protocol)) {
-    throw new Error(`${name} must use ${protocols.join(' or ')}, got "${raw}"`);
+    throw new Error(`${name} must use ${protocols.join(' or ')}`);
   }
-  if (url.username || url.password) throw new Error(`${name} must not carry credentials, got "${raw}"`);
-  if (url.search || url.hash) throw new Error(`${name} must not carry a query or a fragment, got "${raw}"`);
+  if (url.username || url.password) throw new Error(`${name} must not carry credentials`);
+  if (url.search || url.hash) throw new Error(`${name} must not carry a query or a fragment`);
   if (!isCspHost(url.hostname) || (url.port && !isTcpPort(url.port))) {
-    throw new Error(`${name} must name a DNS host or an IPv4 address the policy can allow (no IPv6 literal), got "${raw}"`);
+    throw new Error(`${name} must name a DNS host or an IPv4 address the policy can allow (no IPv6 literal, no underscore)`);
   }
   return url;
 }
@@ -164,20 +165,22 @@ export function selfHostedUpdater(endpointsValue, pubkeyValue, official) {
     throw new Error('TAURI_UPDATER_ENDPOINTS and TAURI_UPDATER_PUBKEY go together: set both for your own update feed, or neither for a build without an updater');
   }
   const officialScopes = (official?.endpoints ?? []).map(feedScope).filter(Boolean);
-  for (const endpoint of endpoints) {
+  endpoints.forEach((endpoint, i) => {
+    // The entry's position, never its value: the setting may come from a secret
+    const entry = `TAURI_UPDATER_ENDPOINTS entry ${i + 1} of ${endpoints.length}`;
     let url;
     try {
       url = new URL(endpoint);
     } catch {
-      throw new Error(`TAURI_UPDATER_ENDPOINTS must hold https URLs, got "${endpoint}"`);
+      throw new Error(`${entry} must be an https URL`);
     }
-    if (url.protocol !== 'https:') throw new Error(`TAURI_UPDATER_ENDPOINTS must hold https URLs (the release build refuses any other), got "${endpoint}"`);
-    if (url.username || url.password) throw new Error(`TAURI_UPDATER_ENDPOINTS must not carry credentials, got "${endpoint}"`);
+    if (url.protocol !== 'https:') throw new Error(`${entry} must be an https URL (the release build refuses any other scheme)`);
+    if (url.username || url.password) throw new Error(`${entry} must not carry credentials`);
     const href = url.href.toLowerCase();
     if (officialScopes.some((scope) => href.startsWith(scope))) {
-      throw new Error(`TAURI_UPDATER_ENDPOINTS names the Voxium project's own update feed ("${endpoint}"): publish your builds on a feed of your own`);
+      throw new Error(`${entry} names the Voxium project's own update feed: publish your builds on a feed of your own`);
     }
-  }
+  });
   const key = parseUpdaterPubkey(pubkey);
   let officialKey = null;
   try {
