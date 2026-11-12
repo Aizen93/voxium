@@ -424,9 +424,11 @@ jobs:
       # that fails at random still passes it. Every such test of the two
       # blocking runs is listed in the job summary and as a warning on its own
       # line; this step never fails the job (whether a flaky test should is a
-      # decision of its own).
+      # decision of its own), so a fault of the script itself shows on the step
+      # and stops nothing.
       - name: Tests that passed only on a retry
         if: ${{ !cancelled() }}
+        continue-on-error: true
         env:
           CHROMIUM_REPORT: ${{ runner.temp }}/playwright-chromium.json
           FIREFOX_REPORT: ${{ runner.temp }}/playwright-firefox.json

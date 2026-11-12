@@ -161,6 +161,22 @@ describe('playwright-flaky-summary.mjs', () => {
     expect(r.warnings.some((w) => w.startsWith('::warning title=Playwright report::Missing: no report'))).toBe(true);
   });
 
+  it('says a report it does not understand, keeps the other runs and still exits 0', () => {
+    const good = write('good.json', report(e2eDir, { grouped: [spec('full admin flow', 9, 'flaky', failedThenPassed('Error: a'))] }));
+    // Parses, but is not a Playwright report: a flaky test with no file, a
+    // bare null, suites that are not a list
+    const noFile = report(e2eDir, { top: [spec('no file', 3, 'flaky', failedThenPassed('Error: c'))] });
+    delete (noFile.suites[0].specs[0] as { file?: string }).file;
+    const shapes = [write('nofile.json', noFile), write('null.json', 'null'), write('suites.json', { suites: 5 })];
+    const r = run([`Chromium=${good}`, ...shapes.map((file, i) => `Odd ${i}=${file}`)]);
+    expect(r.status).toBe(0);
+    expect(r.summary).toContain('| Chromium | `tests/e2e/admin-flow.spec.ts:9` Admin flow › full admin flow | 1 | Error: a |');
+    for (const i of [0, 1, 2]) {
+      expect(r.summary).toMatch(new RegExp(`- Odd ${i}: report not understood \\(`));
+      expect(r.warnings.some((w) => w.startsWith(`::warning title=Playwright report::Odd ${i}: report not understood`))).toBe(true);
+    }
+  });
+
   it('escapes what would break an annotation or a table row', () => {
     const file = write(
       'chromium.json',
@@ -281,6 +297,7 @@ describe('the end-to-end job lists the tests that passed only on a retry', () =>
       workflow.indexOf('- name: E2E secure voice (Firefox'),
     );
     expect(s).toContain('if: ${{ !cancelled() }}');
+    expect(s).toContain('\n        continue-on-error: true\n');
     expect(s).toContain('CHROMIUM_REPORT: ${{ runner.temp }}/playwright-chromium.json');
     expect(s).toContain('FIREFOX_REPORT: ${{ runner.temp }}/playwright-firefox.json');
     expect(s).toContain(

@@ -64,29 +64,38 @@ for (const { label, file } of runs) {
     notes.push(`${label}: ${problem}.`);
     continue;
   }
-  const rootDir = report.config?.rootDir ?? process.cwd();
-  for (const suite of report.suites ?? []) {
-    // The file-level suite's title is the file name: not part of the test's title
-    for (const { spec, test, titles } of testsOf(suite)) {
-      if (test.status !== 'flaky') continue;
-      const results = test.results ?? [];
-      const failed = results.filter((r) => r.status !== 'passed' && r.status !== 'skipped');
-      const passed = results.find((r) => r.status === 'passed');
-      const firstError = failed.map((r) => r.error?.message ?? r.errors?.[0]?.message).find(Boolean) ?? '';
-      flaky.push({
-        label,
-        file: path.relative(process.cwd(), path.resolve(rootDir, spec.file)).replace(/\\/g, '/'),
-        line: spec.line,
-        title: titles.join(' › '),
-        project: test.projectName,
-        failedAttempts: failed.length,
-        passedOnRetry: passed?.retry,
-        firstError: stripAnsi(firstError).split('\n').find((l) => l.trim()) ?? '',
-      });
+  // A report that parses but is not shaped like Playwright's (another
+  // reporter version, a truncated write that still parses) is said like an
+  // unreadable one: this step reports, it must not throw.
+  try {
+    const rootDir = report.config?.rootDir ?? process.cwd();
+    for (const suite of report.suites ?? []) {
+      // The file-level suite's title is the file name: not part of the test's title
+      for (const { spec, test, titles } of testsOf(suite)) {
+        if (test.status !== 'flaky') continue;
+        const results = test.results ?? [];
+        const failed = results.filter((r) => r.status !== 'passed' && r.status !== 'skipped');
+        const passed = results.find((r) => r.status === 'passed');
+        const firstError = failed.map((r) => r.error?.message ?? r.errors?.[0]?.message).find(Boolean) ?? '';
+        flaky.push({
+          label,
+          file: path.relative(process.cwd(), path.resolve(rootDir, spec.file)).replace(/\\/g, '/'),
+          line: spec.line,
+          title: titles.join(' › '),
+          project: test.projectName,
+          failedAttempts: failed.length,
+          passedOnRetry: passed?.retry,
+          firstError: stripAnsi(firstError).split('\n').find((l) => l.trim()) ?? '',
+        });
+      }
     }
+    const s = report.stats ?? {};
+    notes.push(`${label}: ${s.expected ?? 0} passed, ${s.flaky ?? 0} flaky, ${s.unexpected ?? 0} failed, ${s.skipped ?? 0} skipped.`);
+  } catch (err) {
+    const why = `report not understood (${err instanceof Error ? err.message : err})`;
+    console.log(`::warning title=Playwright report::${escapeData(`${label}: ${why}: ${file}`)}`);
+    notes.push(`${label}: ${why}.`);
   }
-  const s = report.stats ?? {};
-  notes.push(`${label}: ${s.expected ?? 0} passed, ${s.flaky ?? 0} flaky, ${s.unexpected ?? 0} failed, ${s.skipped ?? 0} skipped.`);
 }
 
 for (const t of flaky) {
