@@ -6,7 +6,7 @@
 // signature verification → Olm key-share fanout → Megolm group session →
 // pickle persistence → plaintext cache.
 import 'fake-indexeddb/auto';
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { activateSecurePins, deactivateSecurePins, forgetSecurePins, isPinnedSecure } from '../../utils/securePins';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -5842,6 +5842,114 @@ describe('E2EService — lifecycle', () => {
           ['claim', { timeout: 15_000 }],
           ['ack', { timeout: 15_000 }],
         ]);
+      });
+
+      describe('a claim whose answer was lost claims again once its lease has passed', () => {
+        // The server may have leased the page of a claim whose answer never
+        // came back: no claim gets those shares until the lease passes, and
+        // nothing else would claim again before the next decrypt miss or start.
+        const AFTER_LEASE = E2E_LIMITS.KEYSHARE_LEASE_MS + 5_000;
+        /** What axios throws when no answer arrives: no `response`. */
+        const networkError = () => Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' });
+        const timedOut = () => Object.assign(new Error('timeout of 15000ms exceeded'), { code: 'ECONNABORTED' });
+        /** An answer, if a refusal: what axios throws for an HTTP error status. */
+        const refused = () => Object.assign(new Error('Request failed with status code 503'), { response: { status: 503 } });
+        const queueFree = (service: E2EService) =>
+          (service as unknown as { enqueue<T>(fn: () => Promise<T>): Promise<T> }).enqueue(async () => undefined);
+
+        /**
+         * Alice was away while Bob wrote. She restarts over a client whose
+         * claims the server answers (and leases) but which fail with `failure`
+         * while `failing` says so; every claim sent is counted.
+         */
+        async function claimsFailing(text: string, failure: () => Error, failing: (n: number) => boolean) {
+          const { server, alice, bob, message } = await bobWroteWhileAliceWasAway(text);
+          const base = server.apiFor(alice.userId);
+          const claims: number[] = [];
+          const api = {
+            ...base,
+            async get(url: string) {
+              const res = await base.get(url);
+              if (!url.startsWith('/e2e/keyshares?')) return res;
+              claims.push(claims.length + 1);
+              if (failing(claims.length)) throw failure();
+              return res;
+            },
+          };
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+          const again = over(alice, api);
+          await again.initialize();
+          await queueFree(again); // the start-up claim has run
+          return { server, alice, bob, message, again, claims };
+        }
+
+        /** Move the clock on, then let whatever that queued run. */
+        const after = async (service: E2EService, ms: number) => {
+          vi.advanceTimersByTime(ms);
+          await queueFree(service);
+        };
+
+        afterEach(() => {
+          vi.useRealTimers();
+        });
+
+        it.each([
+          ['no answer at all (a network error)', networkError],
+          ['no answer within its deadline', timedOut],
+        ])('claims once more after %s, once the lease has passed, and imports the share', async (_label, failure) => {
+          const { server, alice, message, again, claims } = await claimsFailing('claimed after the lease', failure, (n) => n === 1);
+          expect(claims).toHaveLength(1);
+          expect(leasedFor(server, alice.userId)).toHaveLength(1); // the server leased what never arrived
+
+          await after(again, AFTER_LEASE - 1);
+          expect(claims).toHaveLength(1); // not within the lease, which would hand out nothing
+          await after(again, 1);
+          expect(claims).toHaveLength(2);
+          expect((await again.decryptMessage(message)).text).toBe('claimed after the lease');
+          await acksSent(again);
+          expect(sharesFor(server, alice.userId)).toHaveLength(0);
+
+          await after(again, 10 * AFTER_LEASE);
+          expect(claims).toHaveLength(2); // once
+          expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('does not claim again after an answer, even a refusal', async () => {
+          const { again, claims } = await claimsFailing('refused, not lost', refused, (n) => n === 1);
+          expect(claims).toHaveLength(1);
+          expect(vi.getTimerCount()).toBe(0);
+          await after(again, 10 * AFTER_LEASE);
+          expect(claims).toHaveLength(1);
+        });
+
+        it('is cleared by a dispose', async () => {
+          const { again, claims } = await claimsFailing('disposed meanwhile', networkError, (n) => n === 1);
+          expect(vi.getTimerCount()).toBe(1);
+          await again.dispose();
+          expect(vi.getTimerCount()).toBe(0);
+          await after(again, 10 * AFTER_LEASE).catch(() => undefined); // the queue refuses work now
+          expect(claims).toHaveLength(1);
+        });
+
+        it('stops after three in a row while no answer comes, and starts again after an answered claim', async () => {
+          let offline = true;
+          const { bob, again, claims } = await claimsFailing('offline for a while', networkError, () => offline);
+          for (let i = 0; i < 10; i++) await after(again, AFTER_LEASE);
+          expect(claims).toHaveLength(1 + 3); // the start-up claim, then three timed ones
+          expect(vi.getTimerCount()).toBe(0);
+
+          // back online: a decrypt miss is answered, and a later lost answer is retried again
+          offline = false;
+          const miss = { id: 'mx', conversationId: 'c1', authorId: bob.userId, content: buildMegolmEnvelope('b25saW5l', 'Y2lwaGVy') };
+          expect((await again.decryptMessage(miss)).failed).toBe(true);
+          expect(claims).toHaveLength(5);
+          offline = true;
+          await after(again, 20_000); // past the decrypt-miss throttle of that session
+          expect((await again.decryptMessage(miss)).failed).toBe(true);
+          expect(claims).toHaveLength(6);
+          await after(again, AFTER_LEASE);
+          expect(claims).toHaveLength(7);
+        });
       });
 
       describe('acknowledgements are sent beside the claims, never waited for', () => {

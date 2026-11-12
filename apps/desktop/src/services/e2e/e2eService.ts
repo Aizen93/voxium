@@ -238,6 +238,15 @@ function isStorageFailure(err: unknown): boolean {
   return typeof DOMException !== 'undefined' && err instanceof DOMException;
 }
 
+/**
+ * A request that failed with no answer from the server (a network error, its
+ * deadline): the server may have acted on it all the same. A refusal is an
+ * answer, and a dispose is not a failure of the request.
+ */
+function answerLost(err: unknown): boolean {
+  return !isE2ESessionEnded(err) && (err as { response?: unknown } | null)?.response === undefined;
+}
+
 /** A 403 or 404 from the server: an answer about the request, not about the connection. */
 function isDefinitiveRefusal(err: unknown): boolean {
   const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
@@ -322,6 +331,20 @@ const TEARDOWN_DEADLINE_MS = 10_000;
  * claim that times out is a claim whose answer was lost.
  */
 const KEYSHARE_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * A claim whose answer never came (a network error, its deadline) may have
+ * leased its page on the server all the same, and no claim gets those shares
+ * until the lease passes: the service claims again then, this long after
+ * the lease length, which covers the time the request took to reach the
+ * server (the lease starts there, the failure is seen later).
+ */
+const LOST_CLAIM_RETRY_MARGIN_MS = 5_000;
+/**
+ * Claims after a lost answer, in a row, at most: a device that stays offline
+ * stops after this many, and the next decrypt miss or start claims as
+ * before. Any claim the server answers starts the count again.
+ */
+const LOST_CLAIM_RETRY_MAX = 3;
 
 const noop = (): void => {};
 
@@ -561,6 +584,10 @@ export class E2EService {
   private claimInFlight: Promise<number> | null = null;
   /** A claim's GET is on its way: a teardown keeps one vault connection for its answer. */
   private claimPageInFlight = false;
+  /** Claims again once the lease of a lost claim answer has passed (claimAgainAfterLease); cleared by dispose(). */
+  private lostClaimTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Claims armed after lost answers since the server last answered one (LOST_CLAIM_RETRY_MAX). */
+  private lostClaimRetries = 0;
   /** session id → last time we drained the inbox looking for it */
   private missingSessions = new Map<string, number>();
   /** Kept shares whose refused look-up was already counted in this start (see processPendingShares). */
@@ -851,6 +878,8 @@ export class E2EService {
   dispose(): Promise<void> {
     // First, so work resuming after this point sees it before any freed handle
     this.disposed = true;
+    clearTimeout(this.lostClaimTimer);
+    this.lostClaimTimer = undefined;
     if (this.teardownDone) return this.teardownDone;
     const claim = this.claimInFlight;
     if (!claim) {
@@ -3293,7 +3322,9 @@ export class E2EService {
    * it out again after its lease, and the run that gets it leaves the kept
    * copy as it is (notHeldYet). The acknowledgements owed are sent beside the
    * run, started before its first claim and after each page and awaited by
-   * nobody (sendShareAcksDetached), never after a dispose.
+   * nobody (sendShareAcksDetached), never after a dispose. A claim that gets
+   * no answer may have leased its page anyway: it is claimed again once that
+   * lease has passed (claimAgainAfterLease).
    *
    * A kept share is imported before any newer Olm message of its sender
    * device (importKeptSharesFrom), unless that import fails: the message is
@@ -3338,11 +3369,16 @@ export class E2EService {
           .catch((err: unknown) => {
             // no answer to write: the connection kept for one is not needed
             if (this.tornDown) this.vault.releaseLateConnection();
+            // the server may have leased this page all the same
+            else if (answerLost(err)) this.claimAgainAfterLease();
+            // a refusal is an answer: the next lost one counts from zero
+            else this.lostClaimRetries = 0;
             throw err;
           })
           .finally(() => {
             this.claimPageInFlight = false;
           });
+        this.lostClaimRetries = 0;
         if (this.tornDown) {
           // Torn down while the answer was on its way: write it raw on the
           // connection the teardown kept for it, for the next start, and stop.
@@ -3374,6 +3410,28 @@ export class E2EService {
     });
     this.claimInFlight = run;
     return run;
+  }
+
+  /**
+   * A claim got no answer (a network error, its deadline), and the server may
+   * have leased its page all the same: those shares go to no claim until the
+   * lease passes, and nothing else claims again before the next decrypt miss
+   * or start. One timer queues a claim once the lease has passed; a later lost
+   * answer re-arms it, dispose() clears it. LOST_CLAIM_RETRY_MAX in a row at
+   * most, so a device that stays offline stops; a claim the server answers
+   * starts the count again (claimKeyShares).
+   */
+  private claimAgainAfterLease(): void {
+    if (this.disposed || this.lostClaimRetries >= LOST_CLAIM_RETRY_MAX) return;
+    this.lostClaimRetries++;
+    clearTimeout(this.lostClaimTimer);
+    this.lostClaimTimer = setTimeout(() => {
+      this.lostClaimTimer = undefined;
+      if (this.disposed) return;
+      this.enqueue(() => this.claimKeyShares()).catch((err: unknown) => {
+        this.logStartupTaskFailure('key-share claim after a lost answer', err);
+      });
+    }, E2E_LIMITS.KEYSHARE_LEASE_MS + LOST_CLAIM_RETRY_MARGIN_MS);
   }
 
   // Every read, write and delete of a kept share goes through these three, so
