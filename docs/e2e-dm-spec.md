@@ -597,9 +597,10 @@ rows rather than carrying a compatibility path. Clients re-register their
   the server stores an opaque blob. GCM's auth tag makes a swapped or
   corrupted blob fail decryption, so no separate content hash is needed.
 - **Structured plaintext**: messages with attachments encrypt
-  `"" + JSON {v:1, t:text, a:[metas]}`; text-only messages remain raw
-  strings (wire-compatible with Phase B). The control-character prefix cannot
-  be typed, so raw text and payloads never collide. Each meta carries the real
+  `"\u0001" + JSON {v:1, t:text, a:[metas]}`; text-only messages remain raw
+  strings (wire-compatible with Phase B). The prefix is the single control character U+0001
+  (`E2E_PAYLOAD_PREFIX`, written above as an escape, never as the raw byte);
+  it cannot be typed, so raw text and payloads never collide. Each meta carries the real
   `fileName`/`mimeType`/`fileSize` plus `key`/`iv` — peer-authored metas are
   validated like any untrusted input and invalid ones dropped
   (`parseE2EPlaintext`, shared).
@@ -1065,10 +1066,11 @@ It is not new cryptography. It is a safer trigger for the approval flow of
 
 ### 17.1 The code
 
-`base32(SHA-512("voxium-link-v1" || userId ⁠|| deviceId || curve25519 || ed25519))`,
-first 16 characters, grouped `XXXX-XXXX-XXXX-XXXX`. Public material only, like
-a safety number. Fields are separated by a NUL byte so no two different tuples
-can concatenate to the same input.
+`base32(SHA-512("voxium-link-v1" || userId || 0x00 || deviceId || 0x00 || curve25519 || 0x00 || ed25519))`,
+first 16 characters (the first 10 bytes of the digest), grouped
+`XXXX-XXXX-XXXX-XXXX`. Public material only, like a safety number. The four
+fields are separated by a NUL byte (`0x00`) so no two different tuples can
+concatenate to the same input.
 
 ### 17.2 Why it is safe
 
