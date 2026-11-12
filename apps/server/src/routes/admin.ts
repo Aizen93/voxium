@@ -815,7 +815,9 @@ export async function transferOwnedSpaceToHeir(
     if (space.ownerId !== fromId) throw new BadRequestError(`Server "${serverId}" is not owned by this user`);
     if (code === 'P2003') throw new NotFoundError('Transfer target user');
     if (code === 'P2002') throw new ConflictError('The heir joined the space while it was being transferred; send the request again');
-    throw err;
+    // P2025 with the space still this account's: the heir's row the batch
+    // updates is gone (they left between the membership read and the batch)
+    throw new NotFoundError('Transfer target user');
   }
 }
 

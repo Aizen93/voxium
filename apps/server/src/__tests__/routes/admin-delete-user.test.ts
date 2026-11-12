@@ -1258,6 +1258,21 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
       expect(txMock.user.delete).not.toHaveBeenCalled();
     });
 
+    it('an heir who left between the membership read and the existing-member batch answers 404 Transfer target user, not a 500', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      prismaMock.$transaction.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Record to update not found.'), { code: 'P2025' });
+      });
+      // the space is still the departing account's: the heir's row is what went
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'target-1' });
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Transfer target user not found');
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+    });
+
     it('a batch that finds the space gone answers 404 Server', async () => {
       prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
       prismaMock.$transaction.mockImplementationOnce(async () => {
