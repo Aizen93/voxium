@@ -57,12 +57,15 @@ describe('the channel_members migration', () => {
     );
   });
 
-  it('says what its time predicate rests on: the application\'s clock, one instance, and what a clock step costs', () => {
+  it('says what its time predicate rests on: the writers\' clocks, several instances included, and what a clock step costs', () => {
     const comments = commentLines.join('\n');
     expect(comments).toMatch(/APPLICATION's clock/);
-    expect(comments).toMatch(/single-instance deployment/);
-    expect(comments).toMatch(/clock\s+--\s+stepped backwards|clock stepped backwards/);
-    expect(comments).toMatch(/only ever removes access/);
+    expect(comments).toMatch(/the writers'\s+clocks/);
+    // a multi-node self-hoster is not told it is safe because of one clock
+    expect(comments).not.toMatch(/single-instance/);
+    expect(comments).toMatch(/several instances/);
+    expect(comments).toMatch(/stepped backwards/);
+    expect(comments).toMatch(/only\s+--\s+ever removes access|only ever removes access/);
   });
 
   it('is idempotent: its only conditions are the state it produces, so a second run matches nothing', () => {
