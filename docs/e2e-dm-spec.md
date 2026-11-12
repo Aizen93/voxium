@@ -486,6 +486,11 @@ Server-side rules — every one of these is load-bearing:
   value is a 400. The server tells the two clients apart by that parameter
   alone, never by a user agent.
 
+Deployment order: the migration that adds `leased_until` first, then the
+server, then the clients, current and legacy in either order. Server code
+running before its migration answers 500 to every claim, the legacy one
+included, because the legacy statement reads the new column too.
+
 Both claims are one statement (`utils/keyShareInbox.ts`) and take only shares
 no live lease holds. A share another claim is taking at that moment is
 skipped (`SKIP LOCKED`, never waited for), and one a claim took and committed
@@ -498,17 +503,20 @@ the client then recognises the share it got (below); a share stored while a
 claim runs is seen by the next claim. The lease is written and compared on the
 database clock, in UTC like the table's other timestamps, never a node's. The
 claims keep the `e2eShares` budget (30 a minute per user, shared with the
-uploads); the acknowledgement has its own (`e2eShareAck`, 60 a minute): a
-drain of 20 pages sends up to 21 acknowledgements, which on the shared budget
-would starve the uploads of a rotation, while a refused acknowledgement only
-means the share is handed out once more.
+uploads); the acknowledgement has its own (`e2eShareAck`, 60 a minute): an
+acknowledgement carries up to 100 ids, and a device sends one per 100 it
+owes, what each page of a run settles and whatever earlier runs left owed
+(up to 4000, so 40 requests, below), which on the shared budget would starve
+the uploads of a rotation, while a refused acknowledgement only means the
+share is handed out once more.
 
 Why 60 s. The lease is not a correctness bound: whatever comes back after it,
 the client recognises (below), so a lease that runs out while a page is still
 being imported costs a second delivery, which the service's claim run
 recognises, not a second import (its runs are one at a time, and each page is
 done with before the next is asked for). It is how soon
-a claim whose answer was lost heals, and it covers what a page normally takes:
+a claim whose answer was lost heals (the client claims again by itself once
+it has passed, below), and it covers what a page normally takes:
 the answer, the vault write, a sender look-up per unknown device, the
 acknowledgement, and the 10 s a logout gives a claim in flight. A share stays
 on the server, counted against `KEYSHARE_STORE_CAP_PER_SENDER` and
@@ -543,14 +551,50 @@ owes the server its acknowledgement:
 
 The acknowledgements owed are written to the vault (`pka:{shareId}`, share ids
 only) before the kept copy is removed, so a run cut in between leaves both and
-never neither. They go out once per claimed page, and once before the first
-claim of a run, which would otherwise be handed again what they are for. One
-the server did not confirm (the request or its answer lost, a 429) stays owed
-and goes out with the next claim run, before its first claim; the server
-counts nothing for one it had deleted already, and that settles it. One owed
-for longer than the server keeps shares is dropped unsent. An answer without
-`leaseMs` (a server from before leases) is never acknowledged; its shares had
-their vault copy as their only copy, as before.
+never neither. A sender of their own sends them, off the service's serial
+queue: a claim run starts it before its first claim and after each page, and
+neither the run nor a decrypt waiting on the run waits for the server to
+answer it. One sender runs at a time; one already running sends what a later
+page settled once its request is answered. It sends the oldest first, one
+request per 100 owed ids, each with a 15 s deadline. Whether an
+acknowledgement or the next claim reaches the server first does not matter: a
+share handed out again while its acknowledgement is owed is recognised by its
+id and left out of the page. One the server confirmed is done with, whatever
+the server counted for it (it may have gone already: acknowledged before,
+swept, evicted). One it did not confirm (the request or its answer lost, the
+deadline passed, a 429, a 5xx) stays owed: the sender stops there, and it goes
+out again after the next page of the same run, or with the next run; the
+server counts nothing for one it had deleted already, and that settles it. A
+400, 403 or 404 is final for that request (ids the server never takes from
+this device; a device that is not the caller's, revoked with its shares; a
+server from before leases): its ids are dropped with one warning that names
+none of them, and the next request goes out, so a refused one never holds
+back the rest. A device keeps at most 4000 owed (two full runs' worth: the run
+in progress and one before it whose acknowledgements all failed), the oldest
+dropped beyond, and drops unsent one owed for longer than the server keeps
+shares. A dropped acknowledgement costs a delivery, never a key: its share, if
+the server still has it, comes back after its lease, is recognised by its
+session, and is acknowledged then. An answer without `leaseMs` (a server from
+before leases) is never acknowledged; its shares had their vault copy as their
+only copy, as before.
+
+Each claim has a 15 s deadline too. A claim that gets no answer (a network
+error, the deadline) may have reached the server, which leased its page all
+the same, and no claim gets those shares until the lease passes: the client
+claims again by itself once, 65 s later (the lease, and 5 s for the time the
+request took to reach the server). A later lost answer replaces that timer, a
+dispose clears it, and after three in a row with no answer (a device that
+stays offline) none is armed until a claim the server answers starts the count
+again; a refusal is an answer and arms nothing. A run reads at most 20 pages
+that hold a share the device does not hold yet. A page made only of shares it
+holds already (kept here unacknowledged, or done with and owed) does not
+count: the server hands those out again, oldest first, after each lease, and
+20 pages of them would keep a run from ever reaching a share stored after
+them. Each claim leases its page, so the next claim gets the page after it;
+every claim counts toward a ceiling of 25 per run, under the 30 a minute the
+claims share with the uploads. More held shares than one run reaches (about
+2500) leave a newer share to a run started within their leases, which starts
+past them, or to the held ones being settled.
 
 A passing failure acknowledges nothing. A malformed element of a page is
 logged and skipped; the rest of the page is kept. A share whose sender device
@@ -587,10 +631,13 @@ it reads or writes the vault, and the claim itself asks the server nothing
 more, so a share whose sender it would still have to look up stays kept,
 uncounted, and what it imports is acknowledged by no request of its own: the
 acknowledgements it owes stay in the vault, and the next start of the account
-sends them before it claims (logout has dropped the tokens by then, and after
-a new sign-in on the same page a request would carry the next account's
-bearer). A service started meanwhile for the same account on this device
-(signing back in) opens the vault only once that teardown has run, so it
+sends them (logout has dropped the tokens by then, and after a new sign-in on
+the same page a request would carry the next account's bearer). The
+acknowledgement sender stops too: one of its requests still on its way is not
+confirmed on the device (its answer is dropped), so the next start sends those
+ids again, which the server counts as nothing; and the timer of a lost claim
+answer is cleared. A service started meanwhile for the same account on this
+device (signing back in) opens the vault only once that teardown has run, so it
 never loads an account the claim is still advancing. Whatever the claim had
 not processed by then stays kept, and a page whose answer only arrives after
 that is still written, raw, on the one vault connection the teardown keeps
