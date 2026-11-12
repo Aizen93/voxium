@@ -10,6 +10,7 @@ const prismaMock: Record<string, any> = {
   e2EKeyShare: { deleteMany: vi.fn() },
   messageAttachment: { findMany: vi.fn() },
   $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -229,6 +230,37 @@ describe('secureChannelLifecycle', () => {
   });
 
   describe('removeSecureMember', () => {
+    it('locks the channel row FIRST, then deletes the rows, in one transaction (the order every delete in the channel takes)', async () => {
+      const order: string[] = [];
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => { order.push(strings.join('?').includes('FOR UPDATE') ? 'lock' : 'other'); return [{ id: 'sec-1' }]; });
+      prismaMock.channelMember.deleteMany.mockImplementation(async () => { order.push('member'); return { count: 1 }; });
+      prismaMock.channelRead.deleteMany.mockImplementation(async () => { order.push('read'); return { count: 1 }; });
+      prismaMock.e2EKeyShare.deleteMany.mockImplementation(async () => { order.push('shares'); return { count: 0 }; });
+
+      await removeSecureMember('sec-1', 'srv-1', 'u2');
+
+      expect(order.slice(0, 4)).toEqual(['lock', 'member', 'read', 'shares']);
+      expect((prismaMock.$queryRaw.mock.calls[0][0] as string[]).join('?')).toMatch(/SELECT id FROM channels WHERE id = \? FOR UPDATE/);
+      expect(prismaMock.$queryRaw.mock.calls[0][1]).toBe('sec-1');
+      expect(typeof prismaMock.$transaction.mock.calls[0][0]).toBe('function');
+    });
+
+    it('a removal PostgreSQL aborted to break a deadlock (its creator leaving at once) runs again instead of answering 500', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.$queryRaw.mockResolvedValue([{ id: 'sec-1' }]);
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })
+        .mockImplementation(real);
+      try {
+        await expect(removeSecureMember('sec-1', 'srv-1', 'u2')).resolves.toBeUndefined();
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_DELETED, { channelId: 'sec-1', serverId: 'srv-1' });
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('deletes membership+read rows, tells the removed user, refreshes the member list', async () => {
       prismaMock.channelMember.findMany.mockResolvedValue([
         {

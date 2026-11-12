@@ -2,6 +2,7 @@ import type { Prisma } from '../generated/prisma/client';
 import { getIO } from '../websocket/socketServer';
 import { prisma } from './prisma';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
+import { retryOnTransactionConflict } from './transactionRetry';
 import { WS_EVENTS, e2eChannelScope } from '@voxium/shared';
 import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
 
@@ -344,20 +345,27 @@ function logSecureDeleteFanOutFailure(channelId: string, step: string, err: unkn
  * Remove one member from a secure channel: membership + ChannelRead rows,
  * `channel:deleted` to the removed member (their sidebar drops the channel),
  * members-update to the remaining members, socket room teardown.
+ *
+ * The channel row is locked FIRST, FOR UPDATE, like every other transaction
+ * that deletes in the channel (its delete, its creator's departure, a
+ * member's departure, an invite): they queue on it in one order instead of
+ * each holding a row the other needs. Run again when PostgreSQL aborts it to
+ * break a deadlock nobody foresaw (retryOnTransactionConflict).
  */
 export async function removeSecureMember(channelId: string, serverId: string, userId: string): Promise<void> {
-  await prisma.$transaction([
-    prisma.channelMember.deleteMany({ where: { channelId, userId } }),
-    prisma.channelRead.deleteMany({ where: { channelId, userId } }),
+  await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR UPDATE`;
+    await tx.channelMember.deleteMany({ where: { channelId, userId } });
+    await tx.channelRead.deleteMany({ where: { channelId, userId } });
     // Hygiene: unclaimed key shares addressed to the removed member for this
     // channel's scope die with the membership. A share stored concurrently
     // can still land after this delete (the key-share gate reads the row in
     // its transaction without a lock): it carries the session its sender held
     // at the removal, at most one in flight, never a later one.
-    prisma.e2EKeyShare.deleteMany({
+    await tx.e2EKeyShare.deleteMany({
       where: { recipientUserId: userId, conversationId: e2eChannelScope(channelId) },
-    }),
-  ]);
+    });
+  }), `[SecureChannel] The removal of ${userId} from channel ${channelId}`);
 
   const io = getIO();
   io.to(`user:${userId}`).emit(WS_EVENTS.CHANNEL_DELETED, { channelId, serverId });
