@@ -1,8 +1,8 @@
-# Voxium E2E DM Protocol Specification (v1 — "olm1")
+# Voxium E2E DM Protocol Specification (envelope v1 — "olm1" and "megolm1")
 
 Status: **shipped** (multi-device, cross-signing, key and message-key backup,
 device linking, secure channels, sealed call signaling and secure voice are
-all in; §12–§21) · Engine: vodozemac `=0.11.1` · Envelope: `v1` / engines
+all in; §12–§21) · Engine: vodozemac `=0.11.2` · Envelope: `v1` / engines
 `olm1` (pairwise Olm: key shares, call signaling, legacy history) and `megolm1`
 (message bodies, §12.2)
 
@@ -40,13 +40,14 @@ Double Ratchet messaging), as implemented by
 [vodozemac](https://github.com/matrix-org/vodozemac) — audited by Least
 Authority (2022), Apache-2.0.
 
-- **Version pin:** `vodozemac = "=0.11.1"` (Cargo.toml, `packages/crypto-engine`).
+- **Version pin:** `vodozemac = "=0.11.2"` (Cargo.toml, `packages/crypto-engine`).
   Since 0.10.0 vodozemac carries the defense-in-depth responses to the February
   2026 report: fallible `diffie_hellman()` (all-zero shared-secret check) and
-  strict Ed25519 signature verification by default; 0.11.1 keeps both. The
-  0.10.0 → 0.11.1 bump (2.1.0) changed neither the Olm/Megolm wire format nor
-  the pickle or backup formats — checked cross-version in both directions, so
-  2.0 and 2.1 clients interoperate and existing vaults open. Bumps are gated by
+  strict Ed25519 signature verification by default; 0.11 keeps both. The
+  0.10.0 → 0.11.1 bump (followed by the 0.11.2 patch) changed neither the
+  Olm/Megolm wire format nor the pickle or backup formats — checked
+  cross-version in both directions for 0.11.1, so clients on either side of the
+  bump interoperate and existing vaults open. Bumps are gated by
   the watch workflow (§10).
 - **Session config:** `SessionConfig::version_1()` — the upstream default,
   set explicitly in the binding so an upstream default change cannot silently
@@ -73,9 +74,10 @@ JS. The only computation it performs beyond encoding is the safety-number
 digest (§8), which operates exclusively on public keys. The one secret JS
 handles is the 32-byte pickle key (§7.3).
 
-The engine is versioned: envelopes carry `e: "olm1"`, and
-`engine_version()` reports `olm1/vodozemac-0.11.1` (diagnostics only;
-envelopes carry the scheme `olm1`, never this string). A future engine (e.g.
+The engine is versioned: envelopes carry `e: "olm1"` (pairwise) or
+`e: "megolm1"` (message bodies, §12.2), and
+`engine_version()` reports `olm1/vodozemac-0.11.2` (diagnostics only;
+envelopes carry the scheme id, never this string). A future engine (e.g.
 post-quantum) is introduced as `e: "<new-id>"` — clients negotiate by
 re-establishing sessions; old envelopes remain decodable from the cache.
 
@@ -378,7 +380,7 @@ did not vouch for:
 
 ## 10. Supply-chain policy
 
-- **Version pinning:** vodozemac pinned exactly (`=0.11.1`); the built WASM
+- **Version pinning:** vodozemac pinned exactly (`=0.11.2`); the built WASM
   artifact is vendored in-repo (`packages/crypto-engine/pkg`) so builds don't
   need a Rust toolchain. Rebuild: `pnpm --filter @voxium/crypto-engine build:wasm`
   (requires rustup target `wasm32-unknown-unknown` + wasm-pack).
