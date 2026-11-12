@@ -352,7 +352,9 @@ jobs:
         env:
           NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
           PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
-        run: npx playwright test --grep-invert @quarantine --reporter=github,line
+          # Read by "Tests that passed only on a retry" below
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/playwright-chromium.json
+        run: npx playwright test --grep-invert @quarantine --reporter=github,line,json
 
       # The flagship E2E-voice proof is the one place a second browser engine
       # earns its runtime: it exercises the RTCRtpScriptTransform path that
@@ -361,7 +363,8 @@ jobs:
         env:
           NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
           PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
-        run: npx playwright test secure-voice --config=playwright-firefox.config.ts --reporter=github,line
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/playwright-firefox.json
+        run: npx playwright test secure-voice --config=playwright-firefox.config.ts --reporter=github,line,json
 
       # Visible but non-blocking, so a quarantined spec cannot rot silently:
       # the step goes red in the UI while the job still passes. The script
@@ -416,6 +419,18 @@ jobs:
             exit 1
           fi
           echo "No query was issued on a busy pg client (guard armed in: $(grep -c 'apps/server/src/index.ts' "$REPORT.armed") server process(es))."
+
+      # The gate retries a failed test twice (playwright.config.ts), so a test
+      # that fails at random still passes it. Every such test of the two
+      # blocking runs is listed in the job summary and as a warning on its own
+      # line; this step never fails the job (whether a flaky test should is a
+      # decision of its own).
+      - name: Tests that passed only on a retry
+        if: ${{ !cancelled() }}
+        env:
+          CHROMIUM_REPORT: ${{ runner.temp }}/playwright-chromium.json
+          FIREFOX_REPORT: ${{ runner.temp }}/playwright-firefox.json
+        run: node .github/scripts/playwright-flaky-summary.mjs "Chromium=$CHROMIUM_REPORT" "Firefox secure voice=$FIREFOX_REPORT"
 
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
