@@ -145,9 +145,10 @@ describe.runIf(usableTools())('the "Locate the pnpm store" step', () => {
     const line = readFileSync(output, 'utf8').trim();
     expect(line).toMatch(/^dir=.+/);
     const reported = line.slice('dir='.length);
-    // The store of this very checkout: it exists, since the dependencies were installed from it
+    // The store of this very checkout: it exists, since the dependencies were
+    // installed from it. Its name is not checked: on a drive that does not
+    // hold the home directory pnpm keeps it in `<drive>/.pnpm-store`.
     expect(existsSync(reported), reported).toBe(true);
-    expect(reported).not.toContain('.pnpm-store');
   });
 
   it('fails the step when pnpm names no store', () => {
