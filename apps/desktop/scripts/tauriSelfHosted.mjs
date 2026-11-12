@@ -53,7 +53,8 @@ export function parseServerUrl(name, value, protocols) {
     throw new Error(`${name} must use ${protocols.join(' or ')}`);
   }
   if (url.username || url.password) throw new Error(`${name} must not carry credentials`);
-  if (url.search || url.hash) throw new Error(`${name} must not carry a query or a fragment`);
+  // A bare `?` or `#` parses to an empty search or hash, so the raw text is checked too
+  if (url.search || url.hash || /[?#]/.test(raw)) throw new Error(`${name} must not carry a query or a fragment`);
   if (!isCspHost(url.hostname) || (url.port && !isTcpPort(url.port))) {
     throw new Error(`${name} must name a DNS host or an IPv4 address the policy can allow (no IPv6 literal, no underscore)`);
   }

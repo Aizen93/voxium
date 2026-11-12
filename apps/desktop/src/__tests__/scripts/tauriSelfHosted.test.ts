@@ -93,6 +93,10 @@ describe('parseServerUrl', () => {
       ['https://user:secret@chat.example.org/api/v1', /must not carry credentials/],
       ['https://chat.example.org/api/v1?x=1', /must not carry a query or a fragment/],
       ['https://chat.example.org/api/v1#top', /must not carry a query or a fragment/],
+      // an empty query or fragment parses to '' but still breaks the paths the app appends
+      ['https://chat.example.org/api/v1?', /must not carry a query or a fragment/],
+      ['https://chat.example.org/api/v1#', /must not carry a query or a fragment/],
+      ['https://chat.example.org?#', /must not carry a query or a fragment/],
       ['https://[::1]:3001/api/v1', /no IPv6 literal/],
       ['https://chat_server.example.org/api/v1', /DNS host/],
       ['https://chat.example.org:70000/api/v1', /must be an absolute URL/],
