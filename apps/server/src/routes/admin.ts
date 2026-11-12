@@ -732,8 +732,14 @@ function parseOwnedServerActions(raw: unknown, targetId: string): OwnedServerAct
  * A batch that finds a check no longer true answers what the route answers
  * for it (the space gone, no longer this account's, the heir's account gone,
  * the heir joining meanwhile).
+ *
+ * Both batches also demote the departing account's own member row from
+ * owner to admin: the account deletion that follows can still fail (the
+ * account came to own a space, its retries ran out, its timeout), and an
+ * account surviving with role owner beside the heir would outrank them (the
+ * heir could not kick it, it could not leave) and keep an owner's powers.
  */
-async function transferOwnedSpaceToHeir(
+export async function transferOwnedSpaceToHeir(
   serverId: string,
   fromId: string,
   heirId: string,
@@ -753,6 +759,7 @@ async function transferOwnedSpaceToHeir(
             where: { userId_serverId: { userId: heirId, serverId } },
             data: { role: 'owner' },
           }),
+          prisma.serverMember.updateMany({ where: { userId: fromId, serverId, role: 'owner' }, data: { role: 'admin' } }),
         ]);
         return { joined: false, heirRequestPending: false };
       }
@@ -795,6 +802,7 @@ async function transferOwnedSpaceToHeir(
           where: { id: serverId, ownerId: fromId },
           data: { ownerId: heirId, memberCount: { increment: 1 } },
         }),
+        prisma.serverMember.updateMany({ where: { userId: fromId, serverId, role: 'owner' }, data: { role: 'admin' } }),
       ]);
       return { joined: true, heirRequestPending: heirRequest?.status === 'pending' };
     }, `[Admin] The transfer of space ${serverId}`);
@@ -873,8 +881,19 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
       // Process each server action
       for (const action of serverActions) {
+        // Each space's action is audited the moment it commits, on its own:
+        // the account deletion after the loop can still fail, and what was
+        // transferred or deleted by then stays done
+        const serverName = ownedServers.find((s) => s.id === action.serverId)?.name;
         if (action.action === 'transfer') {
           const outcome = await transferOwnedSpaceToHeir(action.serverId, targetId, action.newOwnerId);
+          logAuditEvent({
+            actorId: req.user!.userId,
+            action: 'server.transfer',
+            targetType: 'server',
+            targetId: action.serverId,
+            metadata: { serverName, fromUserId: targetId, newOwnerId: action.newOwnerId, via: 'user.delete' },
+          });
 
           if (outcome.joined) {
             await broadcastMemberJoined(action.newOwnerId, action.serverId);
@@ -933,6 +952,13 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             { id: action.serverId, iconUrl: doomed?.iconUrl ?? null },
             { cacheReason: 'admin server delete', logPrefix: '[Admin]' },
           );
+          logAuditEvent({
+            actorId: req.user!.userId,
+            action: 'server.delete',
+            targetType: 'server',
+            targetId: action.serverId,
+            metadata: { serverName, ownerId: targetId, via: 'user.delete' },
+          });
         }
       }
 

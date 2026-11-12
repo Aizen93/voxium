@@ -90,6 +90,8 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn().mockResolvedValue(null),
     create: vi.fn().mockResolvedValue({}),
     update: vi.fn().mockResolvedValue({}),
+    // the departing owner's own row, demoted in the transfer batch
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   channel: {
     findMany: vi.fn().mockResolvedValue([]),
@@ -232,8 +234,9 @@ vi.mock('../../utils/s3', () => ({
 }));
 
 // Audit log
+const mockLogAuditEvent = vi.fn();
 vi.mock('../../utils/auditLog', () => ({
-  logAuditEvent: vi.fn(),
+  logAuditEvent: (...args: any[]) => mockLogAuditEvent(...args),
 }));
 
 // Feature flags
@@ -1137,6 +1140,59 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
     expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-a' } });
     expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-b', ownerId: 'target-1' }, data: { ownerId: 'heir-1' } });
     expectAtomicPurgeAndDelete('target-1');
+  });
+
+  describe('a transfer leaves no second owner if the account deletion then fails', () => {
+    beforeEach(() => {
+      prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-b', name: 'B' }]);
+    });
+    const transferToHeir = () => del().send({ serverActions: [{ serverId: 'srv-b', action: 'transfer', newOwnerId: 'heir-1' }] });
+    const demotion = { where: { userId: 'target-1', serverId: 'srv-b', role: 'owner' }, data: { role: 'admin' } };
+
+    it('to an heir already a member: the departing account\'s own row is demoted to admin in the same batch', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+
+      expect((await transferToHeir()).status).toBe(200);
+
+      expect(prismaMock.serverMember.updateMany).toHaveBeenCalledWith(demotion);
+      const batch = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg))![0];
+      expect(batch).toContain(prismaMock.serverMember.updateMany.mock.results[0].value);
+    });
+
+    it('to an heir who joins with it: the departing account\'s own row is demoted to admin in the same batch', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+
+      expect((await transferToHeir()).status).toBe(200);
+
+      expect(prismaMock.serverMember.updateMany).toHaveBeenCalledWith(demotion);
+      const batch = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg))![0];
+      expect(batch).toContain(prismaMock.serverMember.updateMany.mock.results[0].value);
+    });
+
+    it('audits each transfer and delete the moment it commits, so a deletion that fails after them still leaves their record', async () => {
+      prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-a', name: 'A' }, { id: 'srv-b', name: 'B' }]);
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      // the account deletion fails after both spaces were handled
+      prismaMock.$transaction.mockImplementation((arg: any) =>
+        (typeof arg === 'function' ? Promise.reject(new Error('db gone')) : Promise.all(arg)));
+
+      const res = await del().send({ serverActions: [
+        { serverId: 'srv-a', action: 'delete' },
+        { serverId: 'srv-b', action: 'transfer', newOwnerId: 'heir-1' },
+      ] });
+
+      expect(res.status).toBe(500);
+      expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'server.delete', targetType: 'server', targetId: 'srv-a',
+        metadata: expect.objectContaining({ serverName: 'A', ownerId: 'target-1', via: 'user.delete' }),
+      }));
+      expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'server.transfer', targetType: 'server', targetId: 'srv-b',
+        metadata: expect.objectContaining({ serverName: 'B', fromUserId: 'target-1', newOwnerId: 'heir-1', via: 'user.delete' }),
+      }));
+      // ...and no row claims the account was deleted
+      expect(mockLogAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'user.delete' }));
+    });
   });
 
   describe('a transfer batch PostgreSQL aborted, or whose check went stale', () => {
