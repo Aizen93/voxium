@@ -4,12 +4,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-// The "Cache pnpm store" steps of ci.yml and release.yml. They cached
-// ~/.pnpm-store, a directory pnpm never uses: every run logged "Path
-// Validation Error ... no cache is being saved" and downloaded every package
-// again. Each job now asks pnpm where its store is ("Locate the pnpm store")
-// and caches that. The step's own run block is taken out of the workflow and
-// run under bash with the real pnpm.
+// The "Cache pnpm store" steps of ci.yml. They cached ~/.pnpm-store, a
+// directory pnpm never uses: every run logged "Path Validation Error ... no
+// cache is being saved" and downloaded every package again. Each job now asks
+// pnpm where its store is ("Locate the pnpm store") and caches that. The
+// step's own run block is taken out of the workflow and run under bash with
+// the real pnpm. release.yml has no pnpm cache at all (see below).
 
 const ROOT = path.resolve(__dirname, '../../../../..');
 const WORKFLOWS = ['ci.yml', 'release.yml'].map((f) => path.join(ROOT, '.github/workflows', f));
@@ -57,10 +57,24 @@ const cachingJobs = WORKFLOWS.flatMap((file) =>
 );
 
 describe('the pnpm store cache', () => {
-  it('is in the four jobs that install with pnpm', () => {
+  it('is in the three CI jobs that install with pnpm', () => {
     expect(cachingJobs.map((j) => `${j.file}:${j.id}`).sort()).toEqual(
-      ['ci.yml:build', 'ci.yml:e2e', 'ci.yml:lint-typecheck', 'release.yml:publish'].sort(),
+      ['ci.yml:build', 'ci.yml:e2e', 'ci.yml:lint-typecheck'].sort(),
     );
+  });
+
+  it('is not in the release job, where it could never be restored', () => {
+    // A tag run restores only caches saved on its own tag or on the default
+    // branch, so a release could never hit one: the cache would add a step
+    // whose first macOS and Windows runs would be the release itself, and
+    // save three caches per release that nothing reads.
+    const publish = jobs(read(WORKFLOWS[1])).find((j) => j.id === 'publish');
+    expect(publish).toBeDefined();
+    const names = stepNames(publish!.block);
+    expect(names).toContain('Install dependencies');
+    expect(names).not.toContain('Cache pnpm store');
+    expect(names).not.toContain('Locate the pnpm store');
+    expect(publish!.block).not.toMatch(/pnpm store path/);
   });
 
   it('never names a guessed store directory', () => {
@@ -86,7 +100,7 @@ describe('the pnpm store cache', () => {
 
       const locateStep = step(job.block, 'Locate the pnpm store');
       expect(locateStep).toContain('id: pnpm-store');
-      // release.yml runs on Windows too, where the default shell is PowerShell
+      // Explicit, so a job moved to a Windows runner (PowerShell by default) still runs it
       expect(locateStep).toContain('shell: bash');
       expect(step(job.block, 'Cache pnpm store')).toContain('path: ${{ steps.pnpm-store.outputs.dir }}');
     },
