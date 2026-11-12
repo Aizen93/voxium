@@ -126,7 +126,7 @@ The code is multi-node capable: shared state lives in Redis, voice channels foll
 | | User Profiles | Avatars with online/offline status, display names, bios with real-time sync across all clients |
 | | Presence | Real-time online/offline status for all space members and DM participants |
 | **Admin** | Admin Dashboard | Two-tier admin/superadmin panel with user/space/ban management, storage management (avatars/icons/attachments with top uploaders and orphan cleanup), live metrics, audit log, moderation queue |
-| | Resource Limits | Dynamic limits (max channels, voice users, categories, members) — global defaults with per-space overrides |
+| | Resource Limits | Dynamic limits (max channels, voice users, categories, members, webhooks and secure channels per space) — global defaults with per-space overrides |
 | | Feature Flags | Toggle registration, invites, space creation, voice, DM voice, support, space discovery and more — Redis-backed, no redeploy needed |
 | | Reports & Moderation | User/message reports, admin moderation queue with resolve/dismiss/ban workflows |
 | | Support Tickets | One-per-user real-time chat with staff, admin claim/close workflow, audit logging |
@@ -171,7 +171,7 @@ The code is multi-node capable: shared state lives in Redis, voice channels foll
 |------|---------|---------|
 | **Node.js** | >= 24.x (26 LTS recommended) | JavaScript runtime |
 | **pnpm** | >= 10.x | Package manager |
-| **PostgreSQL** | >= 15.x | Database (local installation) |
+| **PostgreSQL** | >= 16.x | Database (local installation) |
 | **Docker** & **Docker Compose** | Latest | Redis (and dev STUN) containers |
 | **Rust** | Latest stable | Required by Tauri for desktop builds |
 | **Git** | Latest | Version control |
