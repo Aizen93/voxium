@@ -147,10 +147,17 @@ function feedScope(endpoint) {
  * The updater a self-hosted build ships. Both settings or neither: neither is
  * no updater (`createUpdaterArtifacts: false`, no endpoint, no key); both is
  * the builder's feed (https only: a release build refuses any other scheme
- * when the plugin starts, so the app would not open) and key. The project's
- * own feed or key is refused: with it, the next upstream release moves the
- * build's users to the upstream installer and its server, or (with another
- * key) to an update that can never install.
+ * when the plugin starts, so the app would not open) and key.
+ *
+ * The project's key is refused (its key material, however it is wrapped):
+ * with it, only the project could sign this build's updates. The project's
+ * feed is refused as a guard against ACCIDENTS only, a value copied from
+ * tauri.conf.json or the same URL in another case: the check compares the
+ * lower-cased URL with the official repository's prefix, so `www.github.com`,
+ * a final dot, percent-encoding or a doubled `/` pass. It is no security
+ * boundary and needs to be none: with the builder's own key, an update the
+ * project signed cannot install. What the guard spares is the build's users
+ * a mandatory update dialog that fails at every upstream release.
  */
 export function selfHostedUpdater(endpointsValue, pubkeyValue, official) {
   const endpoints = (endpointsValue ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -197,9 +204,12 @@ export function selfHostedUpdater(endpointsValue, pubkeyValue, official) {
 
 /**
  * The JSON `tauri build --config` merges over tauri.conf.json for a
- * self-hosted build. Always the three parts, never a `null` (a merge patch
- * deletes the key it names, and the app does not start without its updater
- * block).
+ * self-hosted build. Always the three parts, never a `null`: tauri-cli 2.12
+ * keeps a null when it combines several `--config` patches, and the JSON
+ * merge patch it then applies to tauri.conf.json (json_patch::merge, as
+ * tauri-build does with TAURI_CONFIG) removes the key it names. Either way
+ * the updater plugin is handed no block, and the app does not start without
+ * one (src-tauri/src/lib.rs pins that a null block is refused).
  */
 export function selfHostedConfig(tauriConf, { apiUrl, wsUrl, assetOrigin, updaterEndpoints, updaterPubkey } = {}) {
   const server = serverSources(apiUrl, wsUrl);
