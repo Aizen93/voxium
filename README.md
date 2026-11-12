@@ -353,7 +353,7 @@ The `VITE_*` values are read exactly as the frontend build reads them, through V
 
 **Two builds on one machine do not share a session.** Every Voxium desktop build, the official one and yours alike, uses the same app identifier and the same entries in the OS credential store. Each stored session (and the two-factor "trusted device" token) is kept with the address of the server that issued it, and a build only ever sends it back to that server: your build never sends the official app's session to your server, and the official app never sends yours to the project's. The cost is that the two take turns: signing in on one signs the other out, which asks for a sign-in (and the two-factor code) at its next launch.
 
-`pnpm tauri:dev` is not affected: the development build allows `localhost:3001` through `devCsp`.
+`pnpm tauri:dev` is not affected: the development build loads the Vite dev server directly, and Tauri adds its Content Security Policy only to the pages it serves itself, so no policy applies there and it reaches `localhost:3001` as before.
 
 This creates platform-specific installers in `apps/desktop/src-tauri/target/release/bundle/`:
 - **Windows:** `.msi` and `.exe` installers

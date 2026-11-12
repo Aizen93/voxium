@@ -16,7 +16,7 @@ import { parseAssetOrigins, withAssetOrigins, releaseConfig } from '../../../scr
 // the page's http URL, not a file URL
 const CONF_PATH = resolve(__dirname, '../../../src-tauri/tauri.conf.json');
 const CLI_PATH = resolve(__dirname, '../../../scripts/tauri-release-config.mjs');
-const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as { app: { security: { csp: string; devCsp?: string } } };
+const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as { build: { devUrl: string }; app: { security: { csp: string; devCsp?: string } } };
 const BASE = conf.app.security.csp;
 const ORIGIN = 'https://assets.example.com';
 
@@ -70,10 +70,16 @@ describe('the official release policy (tauri.conf.json + the release overlay)', 
     expect(overlay.app.security.csp).not.toMatch(/localhost/);
   });
 
-  it('the development policy is the one 2.1.1 used everywhere, so `tauri dev` still reaches localhost:3001', () => {
-    expect(conf.app.security.devCsp).toBe(CSP_2_1_1);
-    expect(directive(conf.app.security.devCsp!, 'connect-src')).toEqual(expect.arrayContaining(LOCALHOST_SOURCES));
-    expect(directive(conf.app.security.devCsp!, 'img-src')).toContain('http://localhost:3001');
+  // `tauri dev` on the desktop loads the dev URL straight from the Vite dev
+  // server, and Tauri injects its policy only into the pages it serves itself
+  // (its own protocol; the dev server is proxied through it on mobile only):
+  // no policy applies to the dev build, which is why it reaches
+  // localhost:3001 although no policy names it. A `devCsp` would apply to
+  // nothing here, so there is none.
+  it('no policy names localhost, and the desktop dev build is loaded from the dev server, which no policy covers', () => {
+    expect(conf.app.security.devCsp).toBeUndefined();
+    expect(JSON.stringify(conf.app.security)).not.toMatch(/localhost|127\.0\.0\.1/);
+    expect(new URL(conf.build.devUrl).hostname).toBe('localhost');
   });
 });
 

@@ -9,8 +9,10 @@
 //     node scripts/tauri-release-config.mjs > "$RUNNER_TEMP/tauri.release.json"
 //   pnpm tauri build --config "$RUNNER_TEMP/tauri.release.json"
 //
-// It changes `csp` only: `tauri dev` runs under `devCsp`, the same policy
-// plus the dev server's localhost:3001, which no release build names.
+// It changes `csp` only, which names no localhost source. `tauri dev` is not
+// affected: on the desktop it loads the Vite dev server directly, and Tauri
+// adds the policy only to the pages it serves itself, so no policy applies
+// there and the dev build reaches localhost:3001.
 //
 // This is the project's own release: tauri.conf.json's hosts, update feed and
 // signing key. A build for another server is `pnpm tauri:build`

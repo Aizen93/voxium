@@ -347,7 +347,7 @@ apps/desktop/
 │   │   ├── share_bar.rs      # Windows: hides WebView2's "origin is sharing your screen" bar on each capture start (strict process/size/title match)
 │   │   └── lib.rs            # Tauri setup + notify_with_avatar (WinRT toast with circular avatar) + e2e_pickle_key_* and session_secret_* (OS credential store) + graceful tray (Linux)
 │   ├── Cargo.toml
-│   └── tauri.conf.json       # Two undecorated windows: splash (360x240) and main (1280x800, min 940x560; React TitleBar is its chrome), CSP (`csp`, the official release's policy without any localhost source, which the release build extends with the object-store origin through scripts/tauri-release-config.mjs; `devCsp`, the same plus localhost:3001, for `tauri dev`), the official updater feed and public key
+│   └── tauri.conf.json       # Two undecorated windows: splash (360x240) and main (1280x800, min 940x560; React TitleBar is its chrome), CSP (`csp`, the official release's policy without any localhost source, which the release build extends with the object-store origin through scripts/tauri-release-config.mjs; `tauri dev` on the desktop loads the Vite dev server directly and Tauri adds the policy only to pages it serves itself, so no policy applies to the dev build), the official updater feed and public key
 ```
 
 ### UI Layout
@@ -1360,7 +1360,7 @@ sequenceDiagram
 | Layer | Protection |
 |-------|-----------|
 | Transport | HTTPS in production |
-| Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) + Tauri CSP (restrictive `connect-src`, `script-src`, etc.; the release build merges the deployment's object-store origin into `img-src` / `connect-src` from `TAURI_ASSET_ORIGIN` through a `tauri build --config` overlay, `apps/desktop/scripts/tauriCsp.mjs`, so avatars and space icons load and upload while the origin never enters the repository; no release policy names localhost, only `devCsp` does; a self-hosted build, `pnpm tauri:build`, replaces the project's hosts with the origins of its own `VITE_API_URL` / `VITE_WS_URL` and storage, `apps/desktop/scripts/tauriSelfHosted.mjs`) |
+| Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) + Tauri CSP (restrictive `connect-src`, `script-src`, etc.; the release build merges the deployment's object-store origin into `img-src` / `connect-src` from `TAURI_ASSET_ORIGIN` through a `tauri build --config` overlay, `apps/desktop/scripts/tauriCsp.mjs`, so avatars and space icons load and upload while the origin never enters the repository; no policy names localhost (the desktop dev build is not under one); a self-hosted build, `pnpm tauri:build`, replaces the project's hosts with the origins of its own `VITE_API_URL` / `VITE_WS_URL` and storage, `apps/desktop/scripts/tauriSelfHosted.mjs`) |
 | Auth | JWT with short expiry + refresh rotation + tokenVersion invalidation + `algorithms: ['HS256']` pinning + purpose field rejection (prevents token type confusion) |
 | Passwords | bcrypt with 12 salt rounds, PASSWORD_MAX=72 (matches bcrypt's actual input limit) |
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
