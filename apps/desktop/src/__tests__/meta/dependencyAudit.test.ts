@@ -93,6 +93,22 @@ describe('dependency audit policy', () => {
   });
 });
 
+describe('the minimatch override', () => {
+  const overrides = (JSON.parse(read('package.json')) as { pnpm: { overrides: Record<string, string> } }).pnpm
+    .overrides;
+
+  it('moves only the vulnerable range, so a minimatch 3 dependent keeps its own major', () => {
+    // GHSA-g3hv-75wg-m249: >=7.0.0 <11.0.1. Unscoped, the override would hand
+    // minimatch 11 to anything asking for 3 (whose export is a bare function)
+    expect(overrides).not.toHaveProperty('minimatch');
+    expect(overrides['minimatch@>=7 <11.0.1']).toBe('>=11.0.1 <12');
+  });
+
+  it('the lockfile records the same override', () => {
+    expect(read('pnpm-lock.yaml')).toContain("  minimatch@>=7 <11.0.1: '>=11.0.1 <12'\n");
+  });
+});
+
 describe('desktop shell Cargo.lock audit', () => {
   const workflow = read('.github/workflows/desktop-shell.yml');
   const config = read('apps/desktop/src-tauri/.cargo/audit.toml');
