@@ -52,6 +52,18 @@ describe('tracked Markdown documents', () => {
   });
 });
 
+describe('E2E spec version pin', () => {
+  it('states the exact vodozemac pin Cargo.toml holds', () => {
+    const cargo = readFileSync(path.join(ROOT, 'packages/crypto-engine/Cargo.toml'), 'utf8');
+    const pin = /^vodozemac\s*=\s*"=(\d+\.\d+\.\d+)"/m.exec(cargo);
+    expect(pin).not.toBeNull();
+    const spec = readFileSync(path.join(ROOT, 'docs/e2e-dm-spec.md'), 'utf8');
+    const stated = [...spec.matchAll(/=(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
+    expect(stated.length).toBeGreaterThan(0);
+    expect(stated.filter((v) => v !== pin![1])).toEqual([]);
+  });
+});
+
 describe('CONTEXT.md pointers', () => {
   // A backticked token with a slash that ends in a source or document
   // extension and holds nothing a glob, a placeholder or an example would.
