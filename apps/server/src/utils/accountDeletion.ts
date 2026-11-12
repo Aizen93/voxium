@@ -7,7 +7,7 @@ import {
   type SecureMembershipRemoval,
 } from './secureChannelLifecycle';
 import { retryOnTransactionConflict } from './transactionRetry';
-import { ConflictError } from './errors';
+import { OwnedServersError } from './errors';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { deleteFromS3 } from './s3';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
@@ -138,15 +138,23 @@ export async function deleteAccountRows(userId: string): Promise<SecureMembershi
   } catch (err) {
     // `Server.owner` is onDelete: Restrict: the account came to own a space
     // after `deleteUserAccount` checked it owned none (a transfer to it, which
-    // a retried attempt meets committed). Nothing was deleted; the answer is
-    // the one an owner gets, not a 500.
-    if (ownsASpaceNow(err)) throw new ConflictError(ACCOUNT_OWNS_A_SPACE_MESSAGE);
+    // a retried attempt meets committed). Nothing was deleted, and the answer
+    // is the one an owner gets, with the spaces the client's owned-spaces
+    // dialog lists, not a 500. By then `deleteUserAccount` has already sent
+    // member:left in every space and ended the account's sessions with
+    // force:logout: the user is signed out and their account is intact; they
+    // sign in again, transfer or delete the space, and ask again.
+    if (ownsASpaceNow(err)) {
+      const servers = await prisma.server.findMany({ where: { ownerId: userId }, select: { id: true, name: true } })
+        .catch((readErr: unknown) => {
+          console.warn(`[Accounts] Could not list the spaces account ${userId} owns now:`, readErr instanceof Error ? readErr.message : readErr);
+          return [];
+        });
+      throw new OwnedServersError(servers);
+    }
     throw err;
   }
 }
-
-/** What an account that owns a space is told when it asks to be deleted. */
-export const ACCOUNT_OWNS_A_SPACE_MESSAGE = 'Transfer or delete the servers you own before deleting your account';
 
 function ownsASpaceNow(err: unknown): boolean {
   const e = err as { code?: unknown; message?: unknown; meta?: { constraint?: unknown; field_name?: unknown } } | null;

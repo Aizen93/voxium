@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
   user: { findUnique: vi.fn(), delete: vi.fn() },
-  server: { updateMany: vi.fn() },
+  server: { updateMany: vi.fn(), findMany: vi.fn() },
   serverMember: { findMany: vi.fn() },
   // The member rows are deleted with RETURNING server_id inside the transaction
   $queryRaw: vi.fn(),
@@ -48,6 +48,7 @@ const io = vi.hoisted(() => {
 vi.mock('../../websocket/socketServer', () => ({ getIO: () => io }));
 
 import { deleteUserAccount } from '../../utils/accountDeletion';
+import { OwnedServersError } from '../../utils/errors';
 
 const order: string[] = [];
 const SECURE_REMOVAL = {
@@ -166,9 +167,19 @@ describe('deleteUserAccount', () => {
           new Error('Foreign key constraint violated on the constraint: `servers_owner_id_fkey`'),
           { code: 'P2003' },
         ));
+      prismaMock.server.findMany.mockResolvedValue([{ id: 's-9', name: 'Handed over' }]);
       try {
-        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' }))
-          .rejects.toMatchObject({ statusCode: 409, message: 'Transfer or delete the servers you own before deleting your account' });
+        const refusal = await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' }).catch((e: unknown) => e);
+
+        // the error the self-service route answers with data.ownedServers,
+        // which the client's owned-spaces dialog lists
+        expect(refusal).toBeInstanceOf(OwnedServersError);
+        expect(refusal).toMatchObject({
+          statusCode: 409,
+          message: 'Transfer or delete the servers you own before deleting your account',
+          servers: [{ id: 's-9', name: 'Handed over' }],
+        });
+        expect(prismaMock.server.findMany).toHaveBeenCalledWith({ where: { ownerId: 'u-1' }, select: { id: true, name: true } });
         expect(announceSecure).not.toHaveBeenCalled();
         expect(deleteFromS3).not.toHaveBeenCalled();
       } finally {

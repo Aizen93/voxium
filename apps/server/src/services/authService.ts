@@ -5,7 +5,7 @@ import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
 import type { AuthPayload } from '../middleware/auth';
 import type { UserRole, RegistrationConsent } from '@voxium/shared';
-import { AppError, BadRequestError, ConflictError, ForbiddenError, ServiceUnavailableError, UnauthorizedError } from '../utils/errors';
+import { AppError, BadRequestError, ForbiddenError, OwnedServersError, ServiceUnavailableError, UnauthorizedError } from '../utils/errors';
 import { validateEmail, validatePassword, canonicalizeEmail, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError, failedBeforeAnyRecipient, MailSuppressedError } from '../utils/email';
 import { isMailSuppressed } from '../utils/mailSuppression';
@@ -590,13 +590,5 @@ export async function deleteOwnAccount(
   await deleteUserAccount(userId, { reason: 'Your account has been deleted', logPrefix: '[Auth]' });
 }
 
-/** 409 carrying the servers the account must transfer or delete first. */
-export class OwnedServersError extends ConflictError {
-  constructor(public readonly servers: Array<{ id: string; name: string }>) {
-    super('Transfer or delete the servers you own before deleting your account');
-    this.name = 'OwnedServersError';
-    // AppError pins every instance's prototype to AppError.prototype, which
-    // makes `instanceof` false for any deeper subclass — re-pin to ours.
-    Object.setPrototypeOf(this, OwnedServersError.prototype);
-  }
-}
+/** 409 carrying the servers the account must transfer or delete first (utils/errors.ts). */
+export { OwnedServersError };
