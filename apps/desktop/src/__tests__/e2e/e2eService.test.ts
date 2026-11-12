@@ -5943,6 +5943,51 @@ describe('E2EService — lifecycle', () => {
           }
         });
 
+        describe('at most 4000 owed, the oldest dropped beyond', () => {
+          // Two full claim runs' worth (2 x 20 pages of 100): the run in
+          // progress and one before it whose acknowledgements all failed.
+          const CAP = 4000;
+          /** The fake's client with every acknowledgement refused for now (503): nothing is settled. */
+          const acksDown = (base: ReturnType<Server['apiFor']>) => ({
+            ...base,
+            async post(url: string, body?: Parameters<typeof base.post>[1]) {
+              if (url === '/e2e/keyshares/ack') throw failure(503);
+              return base.post(url, body);
+            },
+          });
+
+          it('drops the oldest of what the vault holds beyond the cap when a run reads it', async () => {
+            const { server, alice } = await bobWroteWhileAliceWasAway('beside a long debt');
+            const owed = owedIds(CAP + 5);
+            await oweIn(alice, owed);
+            const warn = vi.spyOn(console, 'warn');
+            try {
+              const again = over(alice, acksDown(server.apiFor(alice.userId)));
+              await again.initialize();
+              await again.claimMasterTransfers(); // queued behind the start-up claim
+              await acksSent(again);
+              expect(warned(warn)).toMatch(/dropping the 5 oldest owed key-share acknowledgement/);
+            } finally {
+              warn.mockRestore();
+            }
+            const [row] = sharesFor(server, alice.userId); // imported by that run, its acknowledgement owed too
+            expect(await owedIn(alice)).toEqual([...owed.slice(6), row.id].sort());
+          });
+
+          it('drops the oldest when a run settles one more share at the cap', async () => {
+            const { server, alice } = await bobWroteWhileAliceWasAway('one more at the cap');
+            const owed = owedIds(CAP);
+            await oweIn(alice, owed);
+            const [row] = sharesFor(server, alice.userId);
+            const again = over(alice, acksDown(server.apiFor(alice.userId)));
+            await again.initialize();
+            await again.claimMasterTransfers(); // queued behind the start-up claim
+            await acksSent(again);
+            // the newest is kept, the oldest made room for it
+            expect(await owedIn(alice)).toEqual([...owed.slice(1), row.id].sort());
+          });
+        });
+
         it.each([429, 500, 503, null])('keeps every id owed when a request fails with %s, and sends them all again later', async (status) => {
           const owed = owedIds(150);
           const { alice, again, sent } = await aliceOwing(owed, status);

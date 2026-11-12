@@ -306,6 +306,17 @@ const MAX_SHARE_RETRIES = 10;
 /** Hard stop when draining the key-share inbox (guards a hostile server). */
 const MAX_CLAIM_PAGES = 20;
 /**
+ * Owed key-share acknowledgements (`pka:`) kept at most, the oldest dropped
+ * beyond: the debts of two full claim runs (MAX_CLAIM_PAGES pages of
+ * KEYSHARE_ACK_MAX), the run in progress and one before it whose
+ * acknowledgements all failed. Dropping one costs a delivery, never a key:
+ * its share, if the server still has it, is handed out again after its
+ * lease, recognised by its session, and acknowledged then. The cap bounds
+ * the vault (an id and a time each) and what one pass of the sender sends
+ * (40 requests, inside the server's 60 a minute for acknowledgements).
+ */
+const MAX_OWED_SHARE_ACKS = 2 * MAX_CLAIM_PAGES * E2E_LIMITS.KEYSHARE_ACK_MAX;
+/**
  * Hard stop for the message-key history pull (guards a hostile server's
  * endless cursor): as many pages as the server holds for one account, plus
  * two. The server checks its cap before it inserts, without a lock, so two
@@ -621,9 +632,11 @@ export class E2EService {
    * server has not confirmed (spec §12.3): the vault's `pka:` entries, read
    * back at the start of every claim run. An id stays here until the server
    * confirms it, also while a request carrying it is on its way: a share
-   * handed out again meanwhile is recognised by it (notHeldYet).
+   * handed out again meanwhile is recognised by it (notHeldYet). Each id maps
+   * to when it was noted, oldest first: the order they are sent in, and
+   * dropped in beyond MAX_OWED_SHARE_ACKS.
    */
-  private shareAcksOwed = new Set<string>();
+  private shareAcksOwed = new Map<string, number>();
   /** The acknowledgement sender is running (sendShareAcks): one at a time, off the queue. */
   private shareAckSenderRunning = false;
   /** The acknowledgement sender started last, settled or not: nothing in the service awaits it. */
@@ -3362,6 +3375,7 @@ export class E2EService {
       await this.loadShareAcks();
       // Kept shares first: they are older than anything still on the server.
       let imported = await this.processPendingShares(await this.listKeptShares(), deferredSenders);
+      await this.capShareAcks();
       // Started before the first claim, never waited for: what the server
       // hands out again meanwhile is recognised by its owed id (notHeldYet)
       this.sendShareAcksDetached();
@@ -3412,6 +3426,7 @@ export class E2EService {
         const fresh = this.notHeldYet(entries);
         await this.keepShares(fresh);
         imported += await this.processPendingShares(fresh, deferredSenders);
+        await this.capShareAcks();
         // Not once disposed: the next start sends what this page settled
         this.sendShareAcksDetached();
         // the server's count, malformed elements included, decides whether more pages wait
@@ -3477,7 +3492,9 @@ export class E2EService {
     const ackId = shareAckId(record);
     if (ackId) {
       await this.vault.putShareAck(ackId);
-      this.shareAcksOwed.add(ackId);
+      // the newest: noted again, it moves to the end
+      this.shareAcksOwed.delete(ackId);
+      this.shareAcksOwed.set(ackId, Date.now());
     }
     await this.vault.deletePendingShare(key);
     this.keptShares?.delete(key);
@@ -3511,19 +3528,38 @@ export class E2EService {
    * Read back the acknowledgements owed (the vault is the record: what a run a
    * dispose cut short, or an earlier start, noted there is sent by this one).
    * One older than the server's retention is dropped unsent: the share it was
-   * for has been swept.
+   * for has been swept. So are the oldest beyond MAX_OWED_SHARE_ACKS.
    */
   private async loadShareAcks(): Promise<void> {
     const cutoff = Date.now() - E2E_LIMITS.KEYSHARE_MAX_AGE_MS;
-    const owed = new Set<string>();
+    const owed: Array<{ id: string; at: number }> = [];
     const stale: string[] = [];
     for (const entry of await this.vault.listShareAcks()) {
       if (typeof entry?.id !== 'string') continue;
-      if (typeof entry.at === 'number' && entry.at >= cutoff) owed.add(entry.id);
+      if (typeof entry.at === 'number' && entry.at >= cutoff) owed.push({ id: entry.id, at: entry.at });
       else stale.push(entry.id);
     }
-    this.shareAcksOwed = owed;
+    // oldest first (the vault lists them by id)
+    owed.sort((a, b) => a.at - b.at);
+    this.shareAcksOwed = new Map(owed.map(({ id, at }) => [id, at]));
     if (stale.length > 0) await this.vault.deleteShareAcks(stale);
+    await this.capShareAcks();
+  }
+
+  /**
+   * Keep at most MAX_OWED_SHARE_ACKS owed acknowledgements, the oldest
+   * dropped (see there for why that costs no key). On the queue: when a run
+   * reads them back, and after each part of a run that settles shares.
+   */
+  private async capShareAcks(): Promise<void> {
+    const excess = this.shareAcksOwed.size - MAX_OWED_SHARE_ACKS;
+    if (excess <= 0) return;
+    const dropped = [...this.shareAcksOwed.keys()].slice(0, excess);
+    for (const id of dropped) this.shareAcksOwed.delete(id);
+    console.warn(
+      `e2e: dropping the ${excess} oldest owed key-share acknowledgement(s) beyond ${MAX_OWED_SHARE_ACKS} (acknowledged when their shares are handed out again)`
+    );
+    await this.vault.deleteShareAcks(dropped);
   }
 
   /**
@@ -3561,7 +3597,7 @@ export class E2EService {
   private async sendShareAcks(): Promise<void> {
     try {
       while (this.shareAcksOwed.size > 0 && !this.disposed) {
-        const ids = [...this.shareAcksOwed].slice(0, E2E_LIMITS.KEYSHARE_ACK_MAX);
+        const ids = [...this.shareAcksOwed.keys()].slice(0, E2E_LIMITS.KEYSHARE_ACK_MAX);
         try {
           await this.api.post(
             '/e2e/keyshares/ack',
