@@ -571,9 +571,15 @@ export class E2EService {
   /**
    * Ids of the key shares this device is done with whose acknowledgement the
    * server has not confirmed (spec §12.3): the vault's `pka:` entries, read
-   * back at the start of every claim run, which sends them before it claims.
+   * back at the start of every claim run. An id stays here until the server
+   * confirms it, also while a request carrying it is on its way: a share
+   * handed out again meanwhile is recognised by it (notHeldYet).
    */
   private shareAcksOwed = new Set<string>();
+  /** The acknowledgement sender is running (sendShareAcks): one at a time, off the queue. */
+  private shareAckSenderRunning = false;
+  /** The acknowledgement sender started last, settled or not: nothing in the service awaits it. */
+  private shareAckSending: Promise<void> = Promise.resolve();
   /** The latest history pull started (pullHistory): an older one stops at its next page. */
   private historyPull = 0;
   /** lateShareWrites of this vault when keptShares was last filled. */
@@ -822,7 +828,8 @@ export class E2EService {
    * keep the ones it cannot (pks:, see claimKeyShares), where the next start
    * of this account finds them; the claim reads no further page and asks the
    * server nothing more, its acknowledgements included (they stay owed in the
-   * vault, and the next start sends them before it claims).
+   * vault, and the next start sends them; one already on its way is not
+   * confirmed there, and goes out again).
    * Until the teardown, that claim is the only thing that touches the vault:
    * in this service the queue starts nothing, a decrypt that waited on the
    * claim stops there, and every path off the queue is refused by the guarded
@@ -3275,8 +3282,9 @@ export class E2EService {
    * whose session could not be stored (its Olm decrypt is not committed, see
    * olmDecryptStaged); neither is acknowledged meanwhile, so the server hands
    * it out again after its lease, and the run that gets it leaves the kept
-   * copy as it is (notHeldYet). Acknowledgements go out once per page and once
-   * before the first claim of a run (sendShareAcks), never after a dispose.
+   * copy as it is (notHeldYet). The acknowledgements owed are sent beside the
+   * run, started before its first claim and after each page and awaited by
+   * nobody (sendShareAcksDetached), never after a dispose.
    *
    * A kept share is imported before any newer Olm message of its sender
    * device (importKeptSharesFrom), unless that import fails: the message is
@@ -3301,8 +3309,9 @@ export class E2EService {
       await this.loadShareAcks();
       // Kept shares first: they are older than anything still on the server.
       let imported = await this.processPendingShares(await this.listKeptShares(), deferredSenders);
-      // Before the first claim: the server would hand out again what these are for
-      await this.sendShareAcks();
+      // Started before the first claim, never waited for: what the server
+      // hands out again meanwhile is recognised by its owed id (notHeldYet)
+      this.sendShareAcksDetached();
       // Drain every page: the inbox is oldest-first and capped per response, so
       // stopping at one page would let queued older shares delay a live one.
       for (let page = 0; page < MAX_CLAIM_PAGES; page++) {
@@ -3344,7 +3353,7 @@ export class E2EService {
         await this.keepShares(fresh);
         imported += await this.processPendingShares(fresh, deferredSenders);
         // Not once disposed: the next start sends what this page settled
-        await this.sendShareAcks();
+        this.sendShareAcksDetached();
         // the server's count, malformed elements included, decides whether more pages wait
         if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
       }
@@ -3436,34 +3445,64 @@ export class E2EService {
   }
 
   /**
+   * Start sending the acknowledgements owed (sendShareAcks), off the queue
+   * and awaited by nobody: neither a claim run nor a decrypt waiting on one
+   * waits for the server to confirm an acknowledgement, or for a request that
+   * never answers. One sender at a time: one already running sends what is
+   * owed now when it gets there. Whether an acknowledgement or the next claim
+   * reaches the server first does not matter: a share handed out again before
+   * its acknowledgement is confirmed is recognised by its owed id (notHeldYet).
+   */
+  private sendShareAcksDetached(): void {
+    if (this.shareAckSenderRunning || this.disposed || this.shareAcksOwed.size === 0) return;
+    this.shareAckSenderRunning = true;
+    // runs up to its first request now, so the request leaves before anything the caller sends next
+    this.shareAckSending = this.sendShareAcks().catch((err: unknown) => {
+      // sendShareAcks handles what it expects; nothing else awaits this promise
+      console.warn('e2e: the key-share acknowledgement sender stopped:', errText(err));
+    });
+  }
+
+  /**
    * Acknowledge the key shares this device is done with (spec §12.3), a page
-   * of ids per request, so the server deletes them. Never once disposed: the
-   * claim in flight asks the server nothing more, and the vault keeps them for
-   * the next start. Never a failure of its own: an acknowledgement the server
-   * did not confirm stays owed and goes out with the next claim run, before
-   * its first claim. A confirmed id is done with whatever the server counted
-   * for it (it may have gone already: acknowledged before, swept, evicted).
+   * of ids per request, oldest first, so the server deletes them: until none
+   * is owed, a request fails, or the service is disposed. Off the queue, so
+   * the vault is reached through liveVault: once disposed, nothing is sent
+   * and nothing forgotten, and the vault keeps what is owed for the next
+   * start (an answer that comes back after the dispose is dropped by the
+   * guarded client, and the server counts nothing for it when it comes
+   * again). An acknowledgement the server did not confirm stays owed and goes
+   * out again after the next page of a claim run, or with the next run. A
+   * confirmed id is done with whatever the server counted for it (it may have
+   * gone already: acknowledged before, swept, evicted).
    */
   private async sendShareAcks(): Promise<void> {
-    while (this.shareAcksOwed.size > 0 && !this.disposed) {
-      const ids = [...this.shareAcksOwed].slice(0, E2E_LIMITS.KEYSHARE_ACK_MAX);
-      try {
-        await this.api.post('/e2e/keyshares/ack', { deviceId: this.deviceId, ids });
-      } catch (err) {
-        // a dispose that overtook it is not a failure to report
-        if (!(this.disposed && isE2ESessionEnded(err))) {
-          console.warn('e2e: could not acknowledge claimed key shares (sent again by the next claim):', errText(err));
+    try {
+      while (this.shareAcksOwed.size > 0 && !this.disposed) {
+        const ids = [...this.shareAcksOwed].slice(0, E2E_LIMITS.KEYSHARE_ACK_MAX);
+        try {
+          await this.api.post('/e2e/keyshares/ack', { deviceId: this.deviceId, ids });
+        } catch (err) {
+          // a dispose that overtook it is not a failure to report
+          if (!(this.disposed && isE2ESessionEnded(err))) {
+            console.warn('e2e: could not acknowledge claimed key shares (sent again by the next claim):', errText(err));
+          }
+          return;
         }
-        return;
+        // confirmed: forgotten here, then in the vault (refused once disposed)
+        for (const id of ids) this.shareAcksOwed.delete(id);
+        try {
+          await this.liveVault.deleteShareAcks(ids);
+        } catch (err) {
+          if (isE2ESessionEnded(err)) return;
+          // read back and sent again by the next run, which the server counts as nothing
+          console.warn('e2e: could not forget acknowledged key shares:', errText(err));
+        }
       }
-      for (const id of ids) this.shareAcksOwed.delete(id);
-      try {
-        await this.vault.deleteShareAcks(ids);
-      } catch (err) {
-        if (isE2ESessionEnded(err)) return;
-        // read back and sent again by the next run, which the server counts as nothing
-        console.warn('e2e: could not forget acknowledged key shares:', errText(err));
-      }
+    } finally {
+      // In the step that decides to stop: a kick after it starts a new
+      // sender, one before it found this one still running.
+      this.shareAckSenderRunning = false;
     }
   }
 
@@ -3746,8 +3785,8 @@ export class E2EService {
    * message keys, whose receiving chains a few turns of a call push out
    * (spec §12.3). The device is pinned by now (decryptFromDevice), so this
    * asks the server nothing, not even the acknowledgement of what it imports:
-   * that is owed, and the next claim run sends it before it claims, never a
-   * request on the way to a call signal. Callers must hold the serial queue.
+   * that is owed, and the next claim run sends it, never a request on the way
+   * to a call signal. Callers must hold the serial queue.
    */
   private async importKeptSharesFrom(userId: string, deviceId: string): Promise<void> {
     const sender = `${userId}|${deviceId}`;

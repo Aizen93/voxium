@@ -4492,6 +4492,18 @@ describe('E2EService — lifecycle', () => {
       sharesFor(server, userId).filter((s) => s.leasedUntil !== null && s.leasedUntil > Date.now());
     const restart = (server: Server, party: Party) =>
       makeDevice(server, party.userId, { keyProvider: party.keyProvider, vaultNamespace: party.vaultNamespace });
+    /**
+     * Until the acknowledgement senders a service started have settled: they
+     * run beside the claims, and nothing in the service waits for them.
+     */
+    const acksSent = async (service: E2EService) => {
+      const internals = service as unknown as { shareAckSending?: Promise<void> };
+      for (;;) {
+        const sending = internals.shareAckSending;
+        await sending;
+        if (internals.shareAckSending === sending) return;
+      }
+    };
     /** The key shares kept in a party's vault, read over a connection of its own. */
     const pendingIn = async (party: Party) => {
       const vault = new E2EVault(party.userId, party.keyProvider, party.vaultNamespace);
@@ -5639,6 +5651,7 @@ describe('E2EService — lifecycle', () => {
         try {
           await first.initialize();
           await first.claimMasterTransfers(); // queued behind the start-up claim
+          await acksSent(first);
           expect(warned(warn)).toMatch(/could not acknowledge[\s\S]*503/);
         } finally {
           warn.mockRestore();
@@ -5679,6 +5692,7 @@ describe('E2EService — lifecycle', () => {
         await again.initialize();
         await again.claimMasterTransfers(); // queued behind the start-up claim
         expect((await again.decryptMessage(message)).text).toBe('acknowledged, answer lost');
+        await acksSent(again); // the request whose answer was lost has settled
 
         rec.calls.length = 0;
         await missOn({ service: again }, bob.userId, ['YW5zd2Vy']);
@@ -5774,6 +5788,7 @@ describe('E2EService — lifecycle', () => {
         const again = restart(server, alice);
         await again.service.initialize();
         await again.service.claimMasterTransfers(); // queued behind the start-up claim
+        await acksSent(again.service);
         expect(server.shareAcks.map((a) => a.ids)).toEqual([[row.id]]);
         const reader = new E2EVault(alice.userId, alice.keyProvider, alice.vaultNamespace);
         await reader.open();
@@ -5799,6 +5814,104 @@ describe('E2EService — lifecycle', () => {
         expect((await again.decryptMessage(message)).text).toBe('from a server without leases');
         expect(rec.calls.find((c) => c.startsWith('GET /e2e/keyshares?'))).toMatch(/[?&]lease=1(&|$)/);
         expect(inboxCalls(rec.calls).filter((c) => c === 'ack')).toEqual([]);
+      });
+
+      describe('acknowledgements are sent beside the claims, never waited for', () => {
+        const ACK = 'POST /e2e/keyshares/ack';
+        /** `promise`'s value, or 'still pending' when it has not settled within a short wait. */
+        const settledSoon = <T,>(promise: Promise<T>, ms = 1_000) =>
+          Promise.race([promise, new Promise<'still pending'>((resolve) => setTimeout(() => resolve('still pending'), ms))]);
+        /** The serial queue, free once every task queued before this one has run. */
+        const queueFree = (service: E2EService) =>
+          (service as unknown as { enqueue<T>(fn: () => Promise<T>): Promise<T> }).enqueue(async () => 'free');
+        /** The acknowledgements owed in a party's vault, read over a connection of its own. */
+        const owedIn = async (party: Party) => {
+          const vault = new E2EVault(party.userId, party.keyProvider, party.vaultNamespace);
+          await vault.open();
+          try {
+            return (await vault.listShareAcks()).map((a) => a.id).sort();
+          } finally {
+            vault.close();
+          }
+        };
+
+        it('lets the claim run and a decrypt of a session it stored finish while the acknowledgement is held open', async () => {
+          const { server, alice, message } = await bobWroteWhileAliceWasAway('not behind an acknowledgement');
+          const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'post' && url === '/e2e/keyshares/ack');
+          const again = over(alice, gate.api);
+          await again.initialize();
+          await gate.held; // the start-up claim stored the session; its acknowledgement does not come back
+
+          // the run that sent it is over: the queue is free…
+          expect(await settledSoon(queueFree(again))).toBe('free');
+          // …and a message under the session it stored decrypts
+          expect(await settledSoon(again.decryptMessage(message))).toEqual({ text: 'not behind an acknowledgement' });
+          gate.release();
+          await acksSent(again);
+          expect(server.shareAcks).toHaveLength(1);
+          expect(await owedIn(alice)).toEqual([]);
+        });
+
+        it('starts no second request while one is held, and sends what a later run settled once it is answered', async () => {
+          const { server, alice, bob } = await bobWroteWhileAliceWasAway('first');
+          const [first] = sharesFor(server, alice.userId);
+          const gate = holdingApi(server.apiFor(alice.userId), (verb, url) => verb === 'post' && url === '/e2e/keyshares/ack');
+          const again = over(alice, gate.api);
+          await again.initialize();
+          await gate.held;
+
+          // a second run, while the first acknowledgement is held, settles another share
+          const { envelope } = await bob.service.encryptMessage('c2', alice.userId, 'second');
+          const second = sharesFor(server, alice.userId).find((s) => s.id !== first.id)!;
+          const decrypt = again.decryptMessage({ id: 'm2', conversationId: 'c2', authorId: bob.userId, content: envelope });
+          expect(await settledSoon(decrypt)).toEqual({ text: 'second' });
+          expect(gate.writes.filter((w) => w === ACK)).toHaveLength(1); // the held one only
+
+          gate.release();
+          await acksSent(again);
+          // one after the other: the second only once the first was answered
+          expect(server.shareAcks.map((a) => a.ids)).toEqual([[first.id], [second.id]]);
+          expect(gate.writes.filter((w) => w === ACK)).toHaveLength(2);
+          expect(await owedIn(alice)).toEqual([]);
+        });
+
+        it('a dispose while an acknowledgement is held leaves every owed one in the vault and sends nothing more', async () => {
+          const { server, alice, bob } = await bobWroteWhileAliceWasAway('first');
+          const [first] = sharesFor(server, alice.userId);
+          // the server takes the request, and its answer is still on its way at the dispose
+          const gate = holdingApi(
+            server.apiFor(alice.userId),
+            (verb, url) => verb === 'post' && url === '/e2e/keyshares/ack',
+            'response'
+          );
+          const again = over(alice, gate.api);
+          await again.initialize();
+          await gate.held;
+          const { envelope } = await bob.service.encryptMessage('c2', alice.userId, 'second');
+          const second = sharesFor(server, alice.userId).find((s) => s.id !== first.id)!;
+          expect(await settledSoon(again.decryptMessage({ id: 'm2', conversationId: 'c2', authorId: bob.userId, content: envelope })))
+            .toEqual({ text: 'second' });
+
+          await again.dispose();
+          const writesAtDispose = gate.writes.length;
+          gate.release();
+          await acksSent(again);
+
+          expect(gate.writes.slice(writesAtDispose)).toEqual([]); // nothing more went out
+          // the answer that came back after the dispose confirmed nothing on this device
+          expect(await owedIn(alice)).toEqual([first.id, second.id].sort());
+
+          // the next start sends both; the server had the first one already
+          const later = restart(server, alice);
+          await later.service.initialize();
+          await later.service.claimMasterTransfers(); // queued behind the start-up claim
+          await acksSent(later.service);
+          expect(server.shareAcks.map((a) => [a.ids, a.cleared])).toEqual([
+            [[first.id], 1],
+            [[first.id, second.id].sort(), 1],
+          ]);
+          expect(await owedIn(alice)).toEqual([]);
+        });
       });
     });
   });
