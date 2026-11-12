@@ -4,8 +4,7 @@
 
 **Voxium** is a modern, source-available voice and text communication platform. Monorepo with pnpm workspaces: Node.js/Express backend, React/Tauri 2 desktop client, standalone admin dashboard, a shared types package, and a Rust/WASM end-to-end encryption engine.
 
-**Version:** 2.1.1 (current release, 2026-11-08); 2.2.0 in preparation (stabilisation, late November 2026)
-**Date:** 2026-11-09
+**Version:** see `package.json` (the workspace version; the release notes are on GitHub Releases)
 
 ## Project Structure
 
@@ -44,15 +43,15 @@ Voxium/
 - Per-space invite lock (owners/admins can lock/unlock invites independently of global flag)
 - Tauri 2 desktop wrapper with native notifications (avatar support: WinRT circular icon on Windows, blob URL icon in browser), auto-update with signed builds via `tauri-plugin-updater`; on Windows the webview's own screen-share bar is hidden (`share_bar.rs`) and the in-app "You are sharing your screen" line, red with a recording dot, is the indicator
 - Support ticket system (one-per-user, real-time chat with staff, admin claim/close workflow)
-- **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, members and webhooks; admin UI for global + per-space management; read-only limits tab in Space Settings
+- **Dynamic resource limits** — 3-tier resolution (per-server override > global config > hardcoded defaults) for max channels, voice users, categories, members, webhooks and secure channels; admin UI for global + per-space management; read-only limits tab in Space Settings
 - Custom frameless title bar with system tray (close-to-tray with graceful fallback on Linux — quit cleanly if tray unavailable), splash screen window, infrastructure server management with interactive 3D globe visualization in admin geography dashboard
 - **Community themes** — create, publish, browse, install/uninstall themes with live preview editor, JSON import/export, marketplace with search/sort/tag filtering, admin moderation (remove)
 - **Internationalization (i18n)** — 11 languages (en, fr, es, pt, de, ru, uk, ko, zh, ja, ar) with RTL support for Arabic, browser language detection, localStorage persistence, language settings tab
 - **End-to-end encryption** — DMs sealed on the sending device (vodozemac via the Rust/WASM crypto engine), encrypted attachments, device linking with a displayed code, cross-signing with safety numbers, encrypted key backup, E2E-sealed DM call signaling; no plaintext fallback
-- **Secure channels** — invite-only E2E space channels invisible to non-members (owners and admins included); **secure voice channels** encrypt audio per frame with rotating keys (audio only)
+- **Secure channels** — invite-only E2E space channels invisible to non-members (owners and admins included); **secure voice channels** encrypt audio per frame with rotating keys (audio only). Design: `Architecture.md`, "Secure Channels" and "Secure Voice Channels"; protocol: `docs/e2e-dm-spec.md` §19 and §21
   - Secure channel pickers list the whole space from the member directory (search on the server, 100 a page) and show picked members as chips
-- **Space discovery (Explore)** — searchable directory with tags, sorts, Featured row, Bronze to Diamond activity badges, approval-first join requests, removal = ban, admin Feature/Block curation, `server_discovery` flag; the 60 s page cache is invalidated by every listing change (generation key), and Explore stays pull-based
-- **Incoming webhooks** — secret URL per text channel (Space Settings → Integrations, Manage Webhooks permission), Discord-format payloads plus a signed GitHub type, APP tag, no third-party fetches, `webhooks` flag
+- **Space discovery (Explore)** — searchable directory with tags, sorts, Featured row, Bronze to Diamond activity badges, approval-first join requests, removal = ban, admin Feature/Block curation, `server_discovery` flag; the 60 s page cache is invalidated by every listing change (generation key), and Explore stays pull-based. Design: `Architecture.md`, "Server Discovery (Explore)"
+- **Incoming webhooks** — secret URL per text channel (Space Settings → Integrations, Manage Webhooks permission), Discord-format payloads plus a signed GitHub type, APP tag, no third-party fetches, `webhooks` flag. Design: `Architecture.md`, "Incoming Webhooks"
 - **Screen-share annotations and privacy masks** — live pen, highlighter, shapes, captions and image overlays as vector data; masks composited on the sharer's machine and failing closed; the "Prepare your share" preview fills the window
 - **Registration abuse defenses** — canonical emails, invisible proof-of-work, daily IP/subnet/domain budgets, mail caps, 7-day unverified sweep, admin Registrations panel
 - **Space-first wording** — a community is a space in every user-facing string (11 locales, landing page, legal documents in English and French); code, API and admin keep 'server'
@@ -70,8 +69,7 @@ Voxium/
 
 ## Known Issues
 
-- No duplicate report prevention (same user can submit multiple pending reports against the same target)
-- Admin viewing an unclaimed support ticket does not receive real-time message updates (socket only joined to `support:{ticketId}` room upon claiming)
+None are tracked in this file; open issues are on the GitHub issue tracker.
 
 ## Remaining Work
 
@@ -83,7 +81,6 @@ Voxium/
 - [ ] 2.2.0: stabilisation after 2.1.1 — bug fixes, code-quality and security passes
 - [ ] Mobile apps — Android and iOS, native (Kotlin Multiplatform shared logic, Compose and SwiftUI, the Rust E2E core ported in); the next big step
 - [ ] Agents and the bot API — planned after the mobile apps
-- [x] ~~E2E encryption for DMs~~ (done in 2.0.0 — also secure channels, secure voice and sealed call signaling)
 - [ ] Prometheus + Grafana monitoring
 
 ## Recent Changes
@@ -104,7 +101,7 @@ Voxium/
   - **Landing page comparison table:** Added "Custom Themes" row (Voxium ✓, Discord ✗, TeamSpeak "TS3 Addons", Matrix "JSON Themes") and "Role Permissions + Channel Overrides" row (Voxium ✓, Discord ✓, TeamSpeak ✓, Matrix "Power Levels"). All values fact-checked against free tiers.
   - **Landing page footer:** Contributing link now points to GitHub CONTRIBUTING.md. Status link commented out (placeholder for future Uptime Kuma deployment).
   - **Message area horizontal scroll fix:** Added `!overflow-x-hidden` to Virtuoso scroller (overrides inline `overflow: auto`) and `min-w-0` to ChatArea/DMChatArea root flex containers. Prevents useless horizontal scrollbar in both server and DM message lists.
-  - **Server error translations:** New `utils/serverErrors.ts` maps 130+ server error messages to i18n keys. All error-displaying components updated to use `getTranslatedError()`.
+  - **Server error translations:** New `apps/desktop/src/utils/serverErrors.ts` maps 130+ server error messages to i18n keys. All error-displaying components updated to use `getTranslatedError()`.
   - **Production env template:** `.env.production.example` now documents all three Tauri CORS origins (Windows/macOS/Linux).
   - Translation keys added across all 11 locales for new comparison rows.
   - Version bump: 1.6.0 → 1.7.0 across all packages, Tauri config, and Cargo files.
@@ -176,4 +173,4 @@ Voxium/
 - **`CONTRIBUTING.md`** — Commands, conventions and the contribution workflow
 - **GitHub Releases** — the release notes of every version
 - **`docs/e2e-dm-spec.md`** — End-to-end encryption protocol
-- **`ARCHITECTURE.md`** — Detailed system architecture, database design, scalability strategy
+- **`Architecture.md`** — Detailed system architecture, database design, scalability strategy
