@@ -1,6 +1,7 @@
 # Always-on E2E: plan, migration and cutover
 
-**Status:** proposed, not started. Companion to `docs/e2e-dm-spec.md` (the design
+**Status:** complete — every phase of §9 has shipped; this is now a historical
+plan, kept for the reasoning behind the decisions. Companion to `docs/e2e-dm-spec.md` (the design
 of record). This document covers the change from *opt-in per conversation* to
 *always on*, the device-linking flow that replaces manual approval as the
 primary path, and the production cutover.
@@ -290,9 +291,10 @@ orphaned.
 
 ### 6.3 Clients in the wild
 
-Gate the API on a minimum client version (D2) before the wipe, so nobody is left
-on a build that cannot send. The Tauri updater should carry everyone forward in
-the days before cutover.
+No version gate was built (D2): the plaintext rejection in `POST /dm/:id/messages`
+tells an old client to update, and the Tauri updater carries everyone forward on
+its own. A user on an old build cannot send DMs until the app updates; that cost
+was accepted.
 
 ## 7. Cutover runbook
 
@@ -368,10 +370,9 @@ individually revertible; step 7 is the point of no return.
    event, its listener and its store handler. The server stopped emitting it in
    the cutover build, so removing the other end is pure dead code.
 
-   Still to remove, once production has cut over: the plaintext branches of the
-   DM send and edit routes (keeping the rejection that tells an old client what
-   to do), and `Conversation.encryptedAt` can stop being nullable in the shared
-   client type.
+   Done: the plaintext branches of the DM send and edit routes are gone
+   (`dm.ts` keeps only the rejection that tells an old client what to do), and
+   `Conversation.encryptedAt` is a non-null `string` in the shared client type.
 
 **Verification before lifting maintenance**
 
@@ -406,5 +407,5 @@ this out loud before starting.
 | 3 | ~~Device linking by code~~ | a second device works without touching a device list (**done**, spec §17) |
 | 4 | ~~UI to Settings → Security~~ | nothing account-level is administered from a DM (**done**, spec §18) |
 | 5 | ~~Min client version~~ | **dropped** — the plaintext rejection already tells an old client what to do (D2) |
-| 6 | Cutover | §7 verification passes |
-| 7 | Delete the opt-in code | no reference to `encryptedAt` as a choice remains |
+| 6 | ~~Cutover~~ | §7 verification passes (**done**, migration `20260801140000_e2e_always_on`) |
+| 7 | ~~Delete the opt-in code~~ | no reference to `encryptedAt` as a choice remains (**done**) |
