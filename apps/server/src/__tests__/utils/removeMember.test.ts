@@ -361,37 +361,48 @@ describe('removeMemberFromServer', () => {
       }
     });
 
-    it('runs the caller\'s check inside the transaction, before the member delete, on every attempt', async () => {
+    it('runs the caller\'s check before each attempt\'s transaction opens, on every attempt, NEVER while one is open', async () => {
+      // A check inside the transaction would hold the transaction's pool
+      // connection while it waits for a second one for its own reads: enough
+      // concurrent kicks exhaust the pool and stall the node
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const authorize = vi.fn(async () => { order.push('authorize'); });
+      let open = 0;
+      const seenOpen: number[] = [];
+      const authorize = vi.fn(async () => { seenOpen.push(open); order.push('authorize'); });
       const real = prismaMock.$transaction.getMockImplementation()!;
+      const tracked = (impl: (fn: (client: typeof tx) => Promise<unknown>) => Promise<unknown>) =>
+        async (fn: (client: typeof tx) => Promise<unknown>) => {
+          open++;
+          try { return await impl(fn); } finally { open--; }
+        };
       prismaMock.$transaction
-        .mockImplementationOnce(async (fn: (client: typeof tx) => Promise<unknown>) => { await fn(tx); throw deadlock(); })
-        .mockImplementation(real);
+        .mockImplementationOnce(tracked(async (fn) => { await fn(tx); throw deadlock(); }))
+        .mockImplementation(tracked(real));
       try {
         await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize });
 
         expect(authorize).toHaveBeenCalledTimes(2);
-        const lastAttempt = order.slice(order.lastIndexOf('txn:start'));
-        expect(lastAttempt.indexOf('authorize')).toBeLessThan(lastAttempt.indexOf('member'));
+        expect(seenOpen).toEqual([0, 0]);
+        // and before the attempt's statements
+        const lastAttempt = order.slice(order.lastIndexOf('authorize'));
+        expect(lastAttempt.indexOf('txn:start')).toBeGreaterThan(0);
+        expect(lastAttempt.indexOf('member')).toBeGreaterThan(lastAttempt.indexOf('txn:start'));
       } finally {
         warn.mockRestore();
       }
     });
 
-    it('a check that refuses on a retried attempt is the answer: nothing is removed', async () => {
+    it('a check that refuses on a retried attempt is the answer: no transaction is opened for it, nothing is removed', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const refusal = Object.assign(new Error('Cannot kick a member with an equal or higher role'), { statusCode: 403 });
       const authorize = vi.fn()
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(refusal);
-      const real = prismaMock.$transaction.getMockImplementation()!;
-      prismaMock.$transaction
-        .mockImplementationOnce(async () => { await authorize(); throw deadlock(); })
-        .mockImplementation(real);
+      prismaMock.$transaction.mockImplementationOnce(async () => { throw deadlock(); });
       try {
         await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize }))
           .rejects.toBe(refusal);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
         expect(tx.serverMember.deleteMany).not.toHaveBeenCalled();
         expect(memberLeft).not.toHaveBeenCalled();
       } finally {

@@ -39,9 +39,13 @@ export interface RemoveMemberOptions {
   ban?: { by: string; reason: string | null };
   /**
    * The caller's precondition (a kick's permission and role hierarchy), run
-   * INSIDE the transaction, before the membership row is deleted, on EVERY
-   * attempt: a removal the transaction retry runs again must not act on a
-   * check an earlier attempt passed. Throws the route's own refusal.
+   * on EVERY attempt, right before that attempt's transaction opens: a
+   * removal the transaction retry runs again must not act on a check an
+   * earlier attempt passed. Throws the route's own refusal. Never inside the
+   * transaction: its reads go through the shared client, and a transaction
+   * holding a pool connection while it waits for a second one stalls the
+   * node once enough of them do it at once. Those reads take no lock, so the
+   * guarantee is the same; the owner rule is held by the delete itself.
    */
   authorize?: () => Promise<void>;
 }
@@ -134,67 +138,71 @@ export async function removeMemberFromServer(
 
   let outcome: { disabledWebhooks: number; secure: SecureMembershipRemoval };
   try {
-    outcome = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
-      // One statement after the other: they share the transaction's one
-      // connection, and the order is the one documented above.
-      let disabled = 0;
-      if (opts.ban) {
-        ({ count: disabled } = await tx.webhook.updateMany({
-          where: {
-            serverId,
-            // The webhooks whose LIVE URL the member holds: created by them
-            // and never rotated since, or rotated last by them. Disabled or
-            // not: a disabled row gets the mark too, so a later enable is warned.
-            OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }],
-          },
-          data: { enabled: false, creatorRemovedAt: new Date() },
-        }));
-      }
-      await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
-      // The caller's precondition, read again on this attempt
+    outcome = await retryOnTransactionConflict(async () => {
+      // The caller's precondition, read again for this attempt BEFORE its
+      // transaction opens (see `authorize`)
       if (opts.authorize) await opts.authorize();
-      // The owner is never removed, whatever the caller checked before the
-      // transaction: the precondition is in the delete itself, so it holds on
-      // every attempt (a transfer to this member may have committed between
-      // two of them). Zero rows: the owner, or a member already gone.
-      const { count } = await tx.serverMember.deleteMany({
-        where: { userId, serverId, role: { not: 'owner' } },
-      });
-      if (count === 0) {
-        const held = await tx.serverMember.findUnique({
-          where: { userId_serverId: { userId, serverId } },
-          select: { role: true },
+      return prisma.$transaction(async (tx) => {
+        // One statement after the other: they share the transaction's one
+        // connection, and the order is the one documented above. Nothing in
+        // here reads through the shared client.
+        let disabled = 0;
+        if (opts.ban) {
+          ({ count: disabled } = await tx.webhook.updateMany({
+            where: {
+              serverId,
+              // The webhooks whose LIVE URL the member holds: created by them
+              // and never rotated since, or rotated last by them. Disabled or
+              // not: a disabled row gets the mark too, so a later enable is warned.
+              OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }],
+            },
+            data: { enabled: false, creatorRemovedAt: new Date() },
+          }));
+        }
+        await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
+        // The owner is never removed, whatever the caller checked before the
+        // transaction: the precondition is in the delete itself, so it holds on
+        // every attempt (a transfer to this member may have committed between
+        // two of them). Zero rows: the owner, or a member already gone.
+        const { count } = await tx.serverMember.deleteMany({
+          where: { userId, serverId, role: { not: 'owner' } },
         });
-        if (held) throw new ForbiddenError(opts.ban ? KICK_OUTRANKED_MESSAGE : OWNER_CANNOT_LEAVE_MESSAGE);
-        throw new MembershipGone();
-      }
-      const removal = await removeSecureMembershipsInTx(tx, userId, serverId);
-      if (opts.ban) {
-        // Next to the count, after the channel cascade: inserting a ban locks
-        // the space row through its foreign key
-        await tx.serverBan.upsert({
-          where: { serverId_userId: { serverId, userId } },
-          create: { serverId, userId, bannedById: opts.ban.by, reason: opts.ban.reason },
-          // A re-ban refreshes who, why and when — the latest decision is the
-          // one the Banned section should show.
-          update: { bannedById: opts.ban.by, reason: opts.ban.reason, createdAt: new Date() },
+        if (count === 0) {
+          const held = await tx.serverMember.findUnique({
+            where: { userId_serverId: { userId, serverId } },
+            select: { role: true },
+          });
+          if (held) throw new ForbiddenError(opts.ban ? KICK_OUTRANKED_MESSAGE : OWNER_CANNOT_LEAVE_MESSAGE);
+          throw new MembershipGone();
+        }
+        const removal = await removeSecureMembershipsInTx(tx, userId, serverId);
+        if (opts.ban) {
+          // Next to the count, after the channel cascade: inserting a ban locks
+          // the space row through its foreign key
+          await tx.serverBan.upsert({
+            where: { serverId_userId: { serverId, userId } },
+            create: { serverId, userId, bannedById: opts.ban.by, reason: opts.ban.reason },
+            // A re-ban refreshes who, why and when — the latest decision is the
+            // one the Banned section should show.
+            update: { bannedById: opts.ban.by, reason: opts.ban.reason, createdAt: new Date() },
+          });
+        }
+        // Guarded so inline drift can never push the count negative; the
+        // nightly recount is what makes it exact again.
+        await tx.server.updateMany({
+          where: { id: serverId, memberCount: { gt: 0 } },
+          data: { memberCount: { decrement: 1 } },
         });
-      }
-      // Guarded so inline drift can never push the count negative; the
-      // nightly recount is what makes it exact again.
-      await tx.server.updateMany({
-        where: { id: serverId, memberCount: { gt: 0 } },
-        data: { memberCount: { decrement: 1 } },
+        return { disabledWebhooks: disabled, secure: removal };
+      }, {
+        // A departing creator's channels are deleted in here, with every
+        // message they hold, and a kick may first wait for a webhook purge:
+        // Prisma's 5 s interactive default would roll back a removal that is
+        // merely slow.
+        timeout: 60_000,
+        maxWait: 10_000,
       });
-      return { disabledWebhooks: disabled, secure: removal };
-    }, {
-      // A departing creator's channels are deleted in here, with every
-      // message they hold, and a kick may first wait for a webhook purge:
-      // Prisma's 5 s interactive default would roll back a removal that is
-      // merely slow.
-      timeout: 60_000,
-      maxWait: 10_000,
-    }), `[Servers] The removal of ${userId} from ${serverId}`);
+    }, `[Servers] The removal of ${userId} from ${serverId}`);
   } catch (err) {
     const missing = err instanceof MembershipGone;
     // A space deleted meanwhile (its delete takes the space row, then the
