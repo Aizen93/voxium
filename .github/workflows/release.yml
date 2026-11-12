@@ -72,12 +72,11 @@ jobs:
           toolchain: stable
 
       # No pnpm store cache here. A tag run restores only caches saved on its
-      # own tag or on the default branch (the v2.1.1 run found no Linux-cargo-
+      # own tag or on the default branch (the v2.1.1 run found no Linux cargo
       # cache, which the v2.1.0 run had saved), so one could never hit in a
-      # release; it would
-      # only save three caches per release that nothing reads. The step that
-      # stood here cached ~/.pnpm-store, a directory pnpm never uses, so it
-      # never restored or saved anything either.
+      # release; it would only save three caches per release that nothing
+      # reads. The step that stood here cached ~/.pnpm-store, a directory pnpm
+      # never uses, so it never restored or saved anything either.
       - name: Cache Cargo
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
