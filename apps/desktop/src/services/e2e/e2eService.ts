@@ -4131,15 +4131,26 @@ export class E2EService {
    * or during the decrypt rejects (E2EServiceDisposedError, or
    * E2EVaultClosedError from the vault), which the display gate settles as
    * nothing to show (decryptMessageForDisplay).
+   *
+   * With `claimMissing: false` a group session this device does not hold is a
+   * failure at once: no key-share claim is started for it. With
+   * `storageFailureRejects: true` a failure of the vault (reading the session,
+   * writing its state, the position or the plaintext) rejects instead of
+   * answering `failed`: it says nothing about the message.
    */
-  async decryptMessage(message: {
-    id: string;
-    conversationId: string;
-    authorId: string;
-    content: string;
-    editedAt?: string | null;
-    createdAt?: string;
-  }): Promise<DecryptResult> {
+  async decryptMessage(
+    message: {
+      id: string;
+      conversationId: string;
+      authorId: string;
+      content: string;
+      editedAt?: string | null;
+      createdAt?: string;
+    },
+    opts: { claimMissing?: boolean; storageFailureRejects?: boolean } = {},
+  ): Promise<DecryptResult> {
+    const claimMissing = opts.claimMissing ?? true;
+    const storageFailureRejects = opts.storageFailureRejects ?? false;
     const version = message.editedAt ?? null;
     // off the queue: liveVault
     const cached = await this.liveVault.getPlaintext(message.id);
@@ -4172,7 +4183,7 @@ export class E2EService {
         // olm1 (legacy pairwise) carries no ratchet position to bind
         const decrypted =
           envelope.e === E2E_ENGINE_MEGOLM1
-            ? await this.decryptGroupMessage(message, envelope.sid, envelope.b)
+            ? await this.decryptGroupMessage(message, envelope.sid, envelope.b, claimMissing)
             : { text: await this.olmDecryptFromUser(message.authorId, envelope), position: undefined };
         if (decrypted === null || decrypted.text === null) return { text: '', failed: true };
         const { text, position } = decrypted;
@@ -4189,6 +4200,7 @@ export class E2EService {
       } catch (err) {
         // the session ended under this decrypt: said as such, never as a marker
         if (isE2ESessionEnded(err)) throw err;
+        if (storageFailureRejects && isStorageFailure(err)) throw err;
         console.warn(`e2e: failed to decrypt message ${message.id}:`, errText(err));
         return { text: '', failed: true };
       }
@@ -4217,10 +4229,11 @@ export class E2EService {
   private async decryptGroupMessage(
     message: { id: string; conversationId: string; authorId: string; editedAt?: string | null },
     sessionId: string,
-    body: string
+    body: string,
+    claimMissing = true
   ): Promise<{ text: string; position: E2EMessagePosition } | null> {
     let entry = await this.loadInbound(sessionId);
-    if (!entry) {
+    if (!entry && claimMissing) {
       // The key share may still be sitting in this device's inbox. One drain
       // per unknown session (retried after SHARE_CLAIM_RETRY_MS) — a backlog of
       // undecryptable messages must not turn into a request storm.

@@ -7293,4 +7293,70 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
       useDMStore.setState({ activeConversationId: null });
     }
   });
+
+  it('a decrypt that must not claim answers a session the device lacks as a failure, asking the server nothing', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const claims: string[] = [];
+    const base = server.apiFor(bobId);
+    const bob = new E2EService(bobId, {
+      api: {
+        ...base,
+        async get(url: string) {
+          if (url.startsWith('/e2e/keyshares')) claims.push(url);
+          return base.get(url);
+        },
+      } as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    await alice.service.initialize();
+    await bob.initialize();
+    await flushQueue();
+    await bob.claimMasterTransfers(); // queued behind Bob's start-up claim
+    const sent = await alice.service.encryptMessage('c1', bobId, 'its share waits in the inbox');
+    const message = { id: 'm1', conversationId: 'c1', authorId: alice.userId, content: sent.envelope };
+    const before = claims.length;
+
+    expect(await bob.decryptMessage(message, { claimMissing: false })).toEqual({ text: '', failed: true });
+    expect(claims.length).toBe(before);
+    // the ordinary decrypt claims the share and opens
+    expect(await bob.decryptMessage(message)).toEqual({ text: 'its share waits in the inbox' });
+    expect(claims.length).toBeGreaterThan(before);
+  });
+
+  it('a decrypt told to reject on a vault failure rejects with it; by default it answers failed', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    // the share is claimed and its session stored by a first message
+    const first = await alice.service.encryptMessage('c1', bob.userId, 'the first');
+    expect(
+      (await bob.service.decryptMessage({ id: 'm0', conversationId: 'c1', authorId: alice.userId, content: first.envelope })).text
+    ).toBe('the first');
+    const sent = await alice.service.encryptMessage('c1', bob.userId, 'stored once the disk has room');
+    const message = { id: 'm1', conversationId: 'c1', authorId: alice.userId, content: sent.envelope };
+
+    const vault = (bob.service as unknown as { vault: E2EVault }).vault;
+    const full = () => new DOMException('the disk is full', 'QuotaExceededError');
+    const put = vi.spyOn(vault, 'putInboundGroupSession').mockRejectedValueOnce(full()).mockRejectedValueOnce(full());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await bob.service.decryptMessage(message)).toEqual({ text: '', failed: true });
+      await expect(bob.service.decryptMessage(message, { storageFailureRejects: true })).rejects.toThrow('the disk is full');
+    } finally {
+      warn.mockRestore();
+      put.mockRestore();
+    }
+    // nothing about the message changed: it opens once the vault takes the write
+    expect(await bob.service.decryptMessage(message, { storageFailureRejects: true })).toEqual({ text: 'stored once the disk has room' });
+  });
 });
