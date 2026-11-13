@@ -77,6 +77,16 @@ function extractSignalPayloads(frames: string[]): unknown[] {
   return signals;
 }
 
+/** Every signal is a parsable pairwise-Olm envelope: a string, never an SDP or candidate object. */
+function expectOnlyOlmEnvelopes(signals: unknown[]) {
+  for (const signal of signals) {
+    expect(typeof signal, `signal must be an envelope string, got: ${JSON.stringify(signal)}`).toBe('string');
+    const envelope = parseE2EEnvelope(signal as string);
+    expect(envelope, `not a parsable olm1 envelope: ${String(signal).slice(0, 80)}`).not.toBeNull();
+    expect(envelope!.e).toBe('olm1');
+  }
+}
+
 test.describe('E2E-authenticated DM calls', () => {
   test('call connects with the lock shown, only Olm envelopes on the wire, mute propagates, hangup tears down', async ({ page, request, browser }) => {
     test.setTimeout(180_000);
@@ -110,15 +120,16 @@ test.describe('E2E-authenticated DM calls', () => {
 
     // ── The wire: every signal A's client sent is an Olm envelope ──
     // ≥2 guarantees the tap saw real signaling (the offer plus at least one
-    // ICE candidate), not an empty vacuous pass.
-    const signals = extractSignalPayloads(sentFrames);
-    expect(signals.length).toBeGreaterThanOrEqual(2);
-    for (const signal of signals) {
-      expect(typeof signal, `signal must be an envelope string, got: ${JSON.stringify(signal)}`).toBe('string');
-      const envelope = parseE2EEnvelope(signal as string);
-      expect(envelope, `not a parsable olm1 envelope: ${String(signal).slice(0, 80)}`).not.toBeNull();
-      expect(envelope!.e).toBe('olm1');
-    }
+    // ICE candidate), not an empty vacuous pass. The count is polled, never
+    // read once: the lock shows when the peer's device is pinned, and A's
+    // first sealed signal leaves within a few tens of milliseconds of that
+    // moment — measured 24 to 32 ms BEFORE the two lock checks above return on
+    // a quiet machine, and after them on a busy one, where a single read saw
+    // zero frames and failed a call that was signaling correctly.
+    await expect
+      .poll(() => extractSignalPayloads(sentFrames).length, { timeout: 15_000, message: 'sealed dm:voice:signal frames sent by A' })
+      .toBeGreaterThanOrEqual(2);
+    expectOnlyOlmEnvelopes(extractSignalPayloads(sentFrames));
 
     // ── Mute propagates (socket state, unaffected by the E2E signal path) ──
     await page.locator(CALL_PANEL).locator('button[aria-label="Mute"]').click();
@@ -131,6 +142,10 @@ test.describe('E2E-authenticated DM calls', () => {
 
     // Signaling must have actually WORKED, not just looked connected
     expect(macFailures, `E2E signal decryption failed:\n${macFailures.slice(0, 3).join('\n')}`).toEqual([]);
+
+    // Candidates trickle for as long as the call lasts: the frames sent after
+    // the first look are held to the same rule
+    expectOnlyOlmEnvelopes(extractSignalPayloads(sentFrames));
 
     await contextB.close();
   });

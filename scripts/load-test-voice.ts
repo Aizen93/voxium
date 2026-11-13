@@ -25,6 +25,7 @@
 
 import axios from 'axios';
 import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
+import { signInOrRegister } from './lib/signInOrRegister';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Device } from 'mediasoup-client';
 import { Chrome111 } from 'mediasoup-client/handlers/Chrome111';
@@ -108,7 +109,12 @@ const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } })
 // every POST regardless of outcome and are never refunded, so a rerun after a
 // partial failure hits them before the others; registerAttemptSubnet (300/day
 // per /24) is the one a third default run of the day hits from one host.
-const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'admin', 'general'];
+// A raised limit does not shorten a counter that existed before it, so the
+// accounts are signed in first and registered only when unknown
+// (scripts/lib/signInOrRegister.ts): a rerun starts no registration at all.
+// 'loginSubnet' is raised for the first run, whose sign-ins are all refused
+// as unknown before the accounts exist (60 failures a minute per /24).
+const LIMITS_TO_RAISE = ['login', 'loginSubnet', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'admin', 'general'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -405,16 +411,21 @@ async function run() {
         const email = `${username}@loadtest.local`;
         batch.push(
           (async () => {
-            try {
-              // Verify-first: start, known code set in the DB, complete
-              await registerTestUser(API, { username, email, password: PASSWORD });
-            } catch (err) {
-              // 409 = the username is taken (an earlier run): log in below
-              if (!axios.isAxiosError(err) || err.response?.status !== 409) {
-                console.warn(`  register ${username} failed:`, axios.isAxiosError(err) ? err.response?.data ?? err.message : (err as Error).message);
-              }
-            }
-            const { token } = await login(email);
+            // Signed in first, registered only when the account does not exist
+            // yet (an earlier run made it): scripts/lib/signInOrRegister.ts
+            const { token } = await signInOrRegister(
+              () => login(email),
+              async () => {
+                try {
+                  // Verify-first: start, known code set in the DB, complete
+                  await registerTestUser(API, { username, email, password: PASSWORD });
+                } catch (err) {
+                  console.warn(`  register ${username} failed:`, axios.isAxiosError(err) ? err.response?.data ?? err.message : (err as Error).message);
+                  throw err;
+                }
+                return login(email);
+              },
+            );
             try {
               const { data: inv } = await axios.post(`${API}/invites/servers/${target.serverId}`, {}, h(seed.token));
               const code = inv.data?.code || inv.code;
