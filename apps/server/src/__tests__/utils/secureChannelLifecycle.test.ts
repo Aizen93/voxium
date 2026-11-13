@@ -245,6 +245,15 @@ describe('secureChannelLifecycle', () => {
       expect(typeof prismaMock.$transaction.mock.calls[0][0]).toBe('function');
     });
 
+    it('gives the transaction the long budget: the channel row it waits for is held through an account deletion\'s cascade', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([{ id: 'sec-1' }]);
+
+      await removeSecureMember('sec-1', 'srv-1', 'u2');
+
+      // Under Prisma's 5 s default the wait alone expired the transaction (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
     it('a removal PostgreSQL aborted to break a deadlock (its creator leaving at once) runs again instead of answering 500', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       prismaMock.$queryRaw.mockResolvedValue([{ id: 'sec-1' }]);

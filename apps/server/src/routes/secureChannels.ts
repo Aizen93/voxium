@@ -8,7 +8,7 @@ import { replayVoiceState } from '../websocket/voiceHandler';
 import { rateLimitSecureChannelManage, rateLimitMemberManage } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { retryOnTransactionConflict } from '../utils/transactionRetry';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { hasServerPermission } from '../utils/permissionCalculator';
 import {
   broadcastSecureMembersUpdated,
@@ -218,7 +218,10 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
     }
 
     // Run again when PostgreSQL aborts it to break a deadlock (a space
-    // delete): the second run then finds the channel gone and answers so
+    // delete): the second run then finds the channel gone and answers so.
+    // The long budget: an account deletion of the target holds their member
+    // row, and one of another member the channel row, through its whole
+    // cascade, and an invite waiting for either must not expire meanwhile.
     const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // The target's space membership is checked HERE, under a lock on its
       // row, taken first (before the channel row, the order a removal takes
@@ -271,7 +274,7 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
         });
       }
       return ch;
-    }), '[SecureChannels] A secure-channel invite');
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), '[SecureChannels] A secure-channel invite');
 
     // The invitee's sidebar gains the channel; their sockets join the room
     const io = getIO();

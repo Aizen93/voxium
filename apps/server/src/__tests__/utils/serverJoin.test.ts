@@ -152,6 +152,14 @@ describe('joinServerMember', () => {
       expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 's-1' }, data: { memberCount: { increment: 1 } } });
     });
 
+    it('gives the transaction the long budget: the space row it waits for is held through an account deletion\'s cascade', async () => {
+      await joinServerMember('u-1', 's-1', { via: 'invite' });
+
+      // Under Prisma's 5 s default the wait alone expired the join (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
     it('builds the extra writes on each attempt\'s own transaction client', async () => {
       const clients: unknown[] = [];
       await joinServerMember('u-1', 's-1', { via: 'invite', extraWrites: (tx) => { clients.push(tx); return []; } });
@@ -286,6 +294,9 @@ describe('joinServerMember', () => {
     await expect(joinServerMember('u-1', 's-1', { via: 'invite' })).rejects.toMatchObject({ statusCode: 403 });
 
     expect(order).toEqual(['txn', 'undo', 'member', 'created-channels', 'rows']);
+    // the long budget too: its channel delete and its count update wait on
+    // rows an account deletion holds through its cascade
+    expect(prismaMock.$transaction).toHaveBeenLastCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
     expect(prismaMock.serverMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u-1', serverId: 's-1' } });
     // The membership was real for a moment: a secure-channel row written
     // meanwhile, or a secure channel the joiner created, goes with it, after

@@ -23,7 +23,7 @@ import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { removeMemberFromServer, OWNER_CANNOT_LEAVE_MESSAGE, KICK_OUTRANKED_MESSAGE } from '../utils/removeMember';
-import { retryOnTransactionConflict } from '../utils/transactionRetry';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { recomputeListed } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
@@ -1277,7 +1277,10 @@ serverRouter.post(
       // the statements themselves, so they hold on every attempt: the space
       // row only while the actor still owns it, the actor's row only while it
       // is the owner's, the heir's row only while they are a member (P2025
-      // otherwise, or P2003 when the heir's account is gone).
+      // otherwise, or P2003 when the heir's account is gone). The long
+      // budget: an account deletion of any member holds the space row through
+      // its cascade, and a batch waiting for it expires under Prisma's 5 s
+      // default like an interactive transaction.
       const actorId = req.user!.userId;
       try {
         await retryOnTransactionConflict(() => prisma.$transaction([
@@ -1290,7 +1293,7 @@ serverRouter.post(
             where: { userId_serverId: { userId: actorId, serverId }, role: 'owner' },
             data: { role: 'admin' },
           }),
-        ]), `[Servers] The transfer of space ${serverId}`);
+        ], LOCK_WAIT_TRANSACTION_OPTIONS), `[Servers] The transfer of space ${serverId}`);
       } catch (err) {
         const code = (err as { code?: unknown })?.code;
         if (code !== 'P2025' && code !== 'P2003') throw err;

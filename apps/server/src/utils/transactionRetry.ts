@@ -13,6 +13,17 @@
  * effect outside it.
  */
 
+/**
+ * The budget of a transaction that waits on a row another transaction can
+ * hold for a long time: a space row, a secure channel's row or a member row
+ * (an account deletion holds them through its whole cascade, tens of seconds
+ * on a heavy account), a webhook row (its purge-delete). Prisma's default (5 s
+ * for the transaction, 2 s for a connection) expired such a transaction while
+ * it merely waited, and answered 500 for work that would have gone through.
+ * The batch form of `$transaction([...])` is bound by the same default.
+ */
+export const LOCK_WAIT_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 } as const;
+
 /** Retries after the first attempt. */
 export const TRANSACTION_CONFLICT_RETRIES = 2;
 

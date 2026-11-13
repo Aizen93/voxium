@@ -2,7 +2,7 @@ import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from './errors';
 import { getEffectiveLimits } from './serverLimits';
-import { retryOnTransactionConflict } from './transactionRetry';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from './transactionRetry';
 import { broadcastMemberJoined } from './memberBroadcast';
 import { emitToModerators } from './moderatorAudience';
 import { WS_EVENTS } from '@voxium/shared';
@@ -84,6 +84,9 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   // row first (FOR UPDATE, the order a space delete and a transfer take it
   // in), so the member limit is counted with no other join in between, then
   // the extra writes (a consumed invite fails them), the ban, the duplicate.
+  // The long budget: an account deletion of a member holds the space row
+  // through its whole cascade, and a join merely waiting for it must not
+  // expire (LOCK_WAIT_TRANSACTION_OPTIONS).
   try {
     await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
@@ -118,7 +121,7 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
       await tx.channelMember.deleteMany({ where: { userId, channel: { serverId } } });
       await tx.serverMember.create({ data: { userId, serverId } });
       await tx.server.update({ where: { id: serverId }, data: { memberCount: { increment: 1 } } });
-    }), `[ServerJoin] The join of ${userId} to ${serverId}`);
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[ServerJoin] The join of ${userId} to ${serverId}`);
   } catch (err) {
     // Two concurrent joins by the same user: the second one's create hits the
     // composite primary key. That is "already a member", not a 500.
@@ -132,7 +135,9 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   // that committed between them (ban upsert + member delete, one transaction)
   // has just been undone by the create. Nothing has been broadcast or joined
   // yet, so re-read the ban after the commit and compensate: the row and the
-  // counter, only if the row is still ours to remove.
+  // counter, only if the row is still ours to remove. The same long budget:
+  // its channel delete and its count update wait on the rows an account
+  // deletion holds through its cascade.
   const banAfter = await prisma.serverBan.findUnique({
     where: { serverId_userId: { serverId, userId } },
     select: { userId: true },
@@ -149,7 +154,7 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
         await tx.channelMember.deleteMany({ where: { userId, channel: { serverId } } });
         await tx.server.updateMany({ where: { id: serverId, memberCount: { gt: 0 } }, data: { memberCount: { decrement: 1 } } });
       }
-    });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS);
     console.warn(`[ServerJoin] User ${userId} was banned from ${serverId} mid-join; the membership was rolled back`);
     throw new ForbiddenError('You are banned from this server');
   }

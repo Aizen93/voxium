@@ -2423,6 +2423,16 @@ describe('Server Routes', () => {
         });
       });
 
+      it('runs with the long budget: an account deletion of any member holds the space row through its cascade', async () => {
+        prismaMock.$transaction.mockResolvedValue([]);
+
+        expect((await transfer()).status).toBe(200);
+
+        // a batch expires under Prisma's 5 s default while it waits, as an interactive transaction does
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+        expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+      });
+
       it('a batch PostgreSQL aborted to break a deadlock runs again instead of answering 500', async () => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         prismaMock.$transaction.mockRejectedValueOnce(deadlock()).mockResolvedValueOnce([]);

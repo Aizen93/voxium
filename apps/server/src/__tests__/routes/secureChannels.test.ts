@@ -672,6 +672,17 @@ describe('Secure Channel Routes', () => {
       expect(res.body.error).toBe('Channel not found');
     });
 
+    it('gives the transaction the long budget: the member and channel rows it waits for are held through an account deletion\'s cascade', async () => {
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(201);
+      // Under Prisma's 5 s default the wait alone expired the invite (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
     it('an invite PostgreSQL aborted to break a deadlock is run again and succeeds', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const real = prismaMock.$transaction.getMockImplementation()!;

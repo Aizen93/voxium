@@ -483,6 +483,9 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     const arrayTxns = prismaMock.$transaction.mock.calls.filter(
       ([arg]: [unknown]) => Array.isArray(arg));
     expect(arrayTxns).toHaveLength(1);
+    // with the long budget: an account deletion of any member holds the space
+    // row through its cascade, and a batch expires under the 5 s default too
+    expect(arrayTxns[0][1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
     // only while the departing account still owns the space
     expect(prismaMock.server.update).toHaveBeenCalledWith({
       where: { id: 'srv-owned', ownerId: 'target-1' },
@@ -539,6 +542,8 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expect(prismaMock.channelMember.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.serverMember.create.mock.invocationCallOrder[0]);
     const heirTx = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg));
     expect(heirTx![0]).toContain(prismaMock.channelMember.deleteMany.mock.results[0].value);
+    // the long budget, as the existing-member batch
+    expect(heirTx![1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
     expect(mockEmitToModerators).toHaveBeenCalledWith('srv-owned', 'server:join_request_resolved', { serverId: 'srv-owned', userId: 'heir-1', outcome: 'joined' });
     expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
     // the deleted account's own membership is decremented inside the delete transaction

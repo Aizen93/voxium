@@ -19,7 +19,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroadcast';
 import { emitToModerators } from '../utils/moderatorAudience';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
-import { retryOnTransactionConflict } from '../utils/transactionRetry';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
@@ -731,7 +731,11 @@ function parseOwnedServerActions(raw: unknown, targetId: string): OwnedServerAct
  * the departing account still owns it, the heir's row only while it exists.
  * A batch that finds a check no longer true answers what the route answers
  * for it (the space gone, no longer this account's, the heir's account gone,
- * the heir joining meanwhile).
+ * the heir joining meanwhile). Both batches carry the long budget
+ * (LOCK_WAIT_TRANSACTION_OPTIONS): the space row they update is held by an
+ * account deletion of any of its members through that deletion's cascade,
+ * and a batch, like an interactive transaction, expires after Prisma's 5 s
+ * default while it waits.
  *
  * Both batches also demote the departing account's own member row from
  * owner to admin: the account deletion that follows can still fail (the
@@ -760,7 +764,7 @@ export async function transferOwnedSpaceToHeir(
             data: { role: 'owner' },
           }),
           prisma.serverMember.updateMany({ where: { userId: fromId, serverId, role: 'owner' }, data: { role: 'admin' } }),
-        ]);
+        ], LOCK_WAIT_TRANSACTION_OPTIONS);
         return { joined: false, heirRequestPending: false };
       }
 
@@ -803,7 +807,7 @@ export async function transferOwnedSpaceToHeir(
           data: { ownerId: heirId, memberCount: { increment: 1 } },
         }),
         prisma.serverMember.updateMany({ where: { userId: fromId, serverId, role: 'owner' }, data: { role: 'admin' } }),
-      ]);
+      ], LOCK_WAIT_TRANSACTION_OPTIONS);
       return { joined: true, heirRequestPending: heirRequest?.status === 'pending' };
     }, `[Admin] The transfer of space ${serverId}`);
   } catch (err) {

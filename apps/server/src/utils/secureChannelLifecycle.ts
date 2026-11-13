@@ -2,7 +2,7 @@ import type { Prisma } from '../generated/prisma/client';
 import { getIO } from '../websocket/socketServer';
 import { prisma } from './prisma';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
-import { retryOnTransactionConflict } from './transactionRetry';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from './transactionRetry';
 import { WS_EVENTS, e2eChannelScope } from '@voxium/shared';
 import { broadcastChannelVoiceCleanup, broadcastVoiceEvictUser } from '../websocket/voiceCluster';
 
@@ -351,6 +351,12 @@ function logSecureDeleteFanOutFailure(channelId: string, step: string, err: unkn
  * member's departure, an invite): they queue on it in one order instead of
  * each holding a row the other needs. Run again when PostgreSQL aborts it to
  * break a deadlock nobody foresaw (retryOnTransactionConflict).
+ *
+ * The lock can be held long: an account deletion of another member holds the
+ * channel row through its whole cascade, and a departing creator's removal
+ * through the channel's delete. Hence the long budget
+ * (LOCK_WAIT_TRANSACTION_OPTIONS): under Prisma's 5 s default the wait alone
+ * expired the transaction and answered 500.
  */
 export async function removeSecureMember(channelId: string, serverId: string, userId: string): Promise<void> {
   await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
@@ -365,7 +371,7 @@ export async function removeSecureMember(channelId: string, serverId: string, us
     await tx.e2EKeyShare.deleteMany({
       where: { recipientUserId: userId, conversationId: e2eChannelScope(channelId) },
     });
-  }), `[SecureChannel] The removal of ${userId} from channel ${channelId}`);
+  }, LOCK_WAIT_TRANSACTION_OPTIONS), `[SecureChannel] The removal of ${userId} from channel ${channelId}`);
 
   const io = getIO();
   io.to(`user:${userId}`).emit(WS_EVENTS.CHANNEL_DELETED, { channelId, serverId });
