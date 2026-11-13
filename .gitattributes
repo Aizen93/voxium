@@ -42,3 +42,6 @@ Cargo.lock text eol=lf
 *.mp3 binary
 *.ogg binary
 *.wav binary
+
+# Captured CLI output the entrypoint test replays line by line.
+apps/server/src/__tests__/fixtures/migrate-status/*.txt text eol=lf

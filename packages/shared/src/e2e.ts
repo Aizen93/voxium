@@ -54,8 +54,19 @@ export const E2E_LIMITS = {
   KEYSHARE_STORE_CAP_PER_SENDER: 100,
   /** Undelivered shares are swept after this long (cleanup job). */
   KEYSHARE_MAX_AGE_MS: 30 * 24 * 60 * 60 * 1000,
-  /** Max key shares returned (and deleted) by one GET /e2e/keyshares claim. */
+  /** Max key shares handed out by one GET /e2e/keyshares claim (spec §12.3). */
   KEYSHARE_CLAIM_MAX: 100,
+  /**
+   * How long a share a leasing claim (`?lease=1`) handed out stays reserved
+   * for that answer: no other claim, leasing or legacy, gets it before this
+   * has passed. Not a correctness bound (the client recognises a share it
+   * gets again, imported or kept); it is how soon a claim whose answer was
+   * lost is healed. A minute covers a page's import with its sender look-ups
+   * and the 10 s a logout gives a claim in flight (spec §12.3).
+   */
+  KEYSHARE_LEASE_MS: 60_000,
+  /** Max share ids per POST /e2e/keyshares/ack: one claimed page. */
+  KEYSHARE_ACK_MAX: 100,
   /**
    * Max serialized key-share body. A real Olm pre-key share is ~600 bytes;
    * allowing the full ENVELOPE_MAX here would let a sender inflate the shared
@@ -179,6 +190,16 @@ export const E2E_KEY_ID_B64_RE = /^[A-Za-z0-9+/]{1,32}$/;
 export const E2E_DEVICE_ID_RE = /^[A-Za-z0-9_-]{8,32}$/;
 /** Megolm session id, unpadded standard base64. */
 export const E2E_SESSION_ID_B64_RE = /^[A-Za-z0-9+/]{1,64}$/;
+/**
+ * The shape of a mailbox row id the E2E routes accept back from a client
+ * (key-share and master-transfer acks, message-key cursors). Deliberately
+ * wider than today's cuid: pinning it to the current generator would turn a
+ * later switch to cuid2/uuid into a silent 400 on every ack. A length and
+ * charset guard, never an authorization boundary (the owner scope on each
+ * query is). Shared so a client sends back only ids the server would take:
+ * one malformed id refuses the whole batch.
+ */
+export const E2E_ROW_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
 /** Envelope body: unpadded standard base64 ciphertext. */
 const E2E_BODY_B64_RE = /^[A-Za-z0-9+/]+$/;
 

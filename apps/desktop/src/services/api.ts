@@ -47,7 +47,12 @@ function bearerOf(config: SessionRequestConfig): string | null {
 
 export const COALESCE_MAX_AGE_MS = 5_000;
 
-/** Reads whose answer is consumed by the reading (never shared). */
+/**
+ * Reads whose answer is consumed by the reading (never shared): the key-share
+ * claim hands a share to one claim at a time, under a lease or deleting it on
+ * read (docs/e2e-dm-spec.md §12.3), so each claim must get its own answer; a
+ * second one joining the first would process the first one's page again.
+ */
 const NON_IDEMPOTENT_GETS = [/^\/?e2e\/keyshares(\/|\?|$)/];
 
 interface InFlightGet {

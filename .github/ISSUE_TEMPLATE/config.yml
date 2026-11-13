@@ -1,5 +1,9 @@
 blank_issues_enabled: false
 contact_links:
+  # First, so a vulnerability is never filed as a public issue (SECURITY.md)
+  - name: Report a security vulnerability
+    url: https://github.com/Aizen93/voxium/security/advisories/new
+    about: Report it privately to the maintainer, never in a public issue (see SECURITY.md)
   - name: Questions & Discussion
     url: https://github.com/Aizen93/voxium/discussions
     about: Ask questions, share ideas, or chat with the community

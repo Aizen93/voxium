@@ -5,13 +5,15 @@ import { withClusterLock, wasSkipped } from './dailySchedule';
 // Sweeps undeliverable E2E key shares (docs/e2e-dm-spec.md §12) and stale
 // master-secret transfers (§14).
 //
-// Key shares are claim-and-delete. Master transfers are read-then-ack (§14.4:
-// a read that consumed the row would strand a device that fails mid-claim), so
-// this sweep is their only automatic reclaimer when the ack itself never
-// arrives. Rows that are never cleared — a device that never comes back, or an
-// account that was deleted (neither table has an FK to User, so nothing
-// cascades) — would otherwise live forever, holding routing metadata (who
-// key-shared or device-approved with whom, when) long past its use.
+// Key shares are leased, then deleted when their device acknowledges them
+// (§12.3; a legacy claim still deletes on read), and master transfers are
+// read-then-ack (§14.4: a read that consumed the row would strand a device
+// that fails mid-claim), so this sweep is their only automatic reclaimer when
+// the ack itself never arrives. It deletes by age whatever the lease says.
+// Rows that are never cleared — a device that never comes back, or an account
+// that was deleted (neither table has an FK to User, so nothing cascades) —
+// would otherwise live forever, holding routing metadata (who key-shared or
+// device-approved with whom, when) long past its use.
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 let stopped = true;

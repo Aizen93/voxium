@@ -2,6 +2,7 @@ import { getIO } from '../websocket/socketServer';
 import { replayVoiceState } from '../websocket/voiceHandler';
 import { prisma } from './prisma';
 import { filterVisibleChannels } from './permissionCalculator';
+import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from './channelVisibilityRooms';
 import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
 
 /**
@@ -22,10 +23,18 @@ import type { UserRole, UserStatus, SupporterTier } from '@voxium/shared';
  * would still find the sockets in the rooms they are leaving, or miss the
  * ones they are joining). The echo re-applies the same join: idempotent.
  *
+ * The read and the join race the visibility resync: a revocation (or grant)
+ * whose pass runs between them finds the member's sockets not yet in the
+ * rooms, and the join then applies the stale read. A mark is taken before the
+ * read; when this node saw a resync request for the space since, the member is
+ * resynced on every node after the join. A request only a peer had seen is the
+ * gap left (see resyncRequestedSince).
+ *
  * Returns the ids of the channels the user can view.
  */
 async function joinVisibleChannelRooms(userId: string, serverId: string): Promise<string[]> {
   const io = getIO();
+  const visibilityMark = visibilityRequestMark();
   const channels = await prisma.channel.findMany({
     where: { serverId },
     // `secure` is load-bearing: filterVisibleChannels can only apply the
@@ -37,6 +46,7 @@ async function joinVisibleChannelRooms(userId: string, serverId: string): Promis
   const rooms = [`server:${serverId}`, ...visibleIds.map((id) => `channel:${id}`)];
   io.local.in(`user:${userId}`).socketsJoin(rooms);
   io.in(`user:${userId}`).socketsJoin(rooms);
+  if (resyncRequestedSince(visibilityMark, serverId)) void recheckVisibilityAfterJoin(serverId, { userId });
   return visibleIds;
 }
 

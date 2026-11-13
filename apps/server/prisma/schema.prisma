@@ -966,17 +966,24 @@ model E2EMessageKeyBackup {
 
 /// A pending Megolm group-session key, encrypted pairwise with Olm for exactly
 /// one recipient device. `body` is an opaque olm1 envelope — the server never
-/// sees the session key. Claim-and-delete: Olm pre-key bodies are one-shot.
+/// sees the session key. Leased, then acknowledged (spec §12.3): a leasing
+/// claim reserves a share for its answer until `leasedUntil` (Olm pre-key
+/// bodies are one-shot, so no two claims may hold one at once), and the row is
+/// deleted when the device acknowledges it. A legacy claim (no `lease=1`)
+/// still deletes what it hands out.
 model E2EKeyShare {
-  id                String   @id @default(cuid())
-  recipientUserId   String   @map("recipient_user_id")
-  recipientDeviceId String   @map("recipient_device_id")
-  senderUserId      String   @map("sender_user_id")
-  senderDeviceId    String   @map("sender_device_id")
-  conversationId    String   @map("conversation_id")
-  sessionId         String   @map("session_id")
+  id                String    @id @default(cuid())
+  recipientUserId   String    @map("recipient_user_id")
+  recipientDeviceId String    @map("recipient_device_id")
+  senderUserId      String    @map("sender_user_id")
+  senderDeviceId    String    @map("sender_device_id")
+  conversationId    String    @map("conversation_id")
+  sessionId         String    @map("session_id")
   body              String // olm1 envelope (JSON string)
-  createdAt         DateTime @default(now()) @map("created_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  /// UTC, written and compared on the database clock; null until a leasing
+  /// claim hands the share out
+  leasedUntil       DateTime? @map("leased_until")
 
   @@index([recipientUserId, recipientDeviceId, createdAt])
   // the retention sweep deletes by age across all recipients
@@ -1001,7 +1008,8 @@ model E2EMasterKey {
 
 /// A pending master-secret handoff between two devices of the SAME account
 /// (device approval, spec §14). `body` is an opaque olm1 envelope — the server
-/// never sees the master secret. Claim-and-delete, like key shares.
+/// never sees the master secret. Read, then acknowledged (POST
+/// /e2e/master-transfers/ack): a read never consumes it (§14.6).
 model E2EMasterTransfer {
   id                String   @id @default(cuid())
   userId            String   @map("user_id") // owner: both sender and recipient

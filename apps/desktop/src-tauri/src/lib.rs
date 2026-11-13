@@ -26,7 +26,10 @@ fn is_valid_avatar_key(key: &str) -> bool {
     let Some(name) = rest.strip_suffix(".webp") else {
         return false;
     };
-    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Download an avatar image to the temp directory and return the file path.
@@ -43,7 +46,13 @@ fn cache_avatar_to_file(api_base: &str, key: &str) -> Result<std::path::PathBuf,
     // Replace all non-alphanumeric/dot/dash/underscore chars for safe filenames on all OSes
     let safe_name: String = key
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let path = temp_dir.join(&safe_name);
 
@@ -95,7 +104,7 @@ fn is_valid_image(bytes: &[u8]) -> bool {
         || (bytes.len() >= 12
             && bytes.starts_with(b"RIFF")
             && &bytes[8..12] == b"WEBP")                 // WebP
-        || bytes.starts_with(b"GIF8")                    // GIF
+        || bytes.starts_with(b"GIF8") // GIF
 }
 
 /// Resolve the Windows app identity for toast notifications.
@@ -144,7 +153,7 @@ fn notify_with_avatar(
         }
 
         toast.show().map_err(|e| format!("{e:?}"))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -251,7 +260,9 @@ fn write_session_secret(name: &str, value: &str) -> Result<(), String> {
     if !valid_session_secret_value(value) {
         return Err("invalid credential format".to_string());
     }
-    session_entry(name)?.set_password(value).map_err(|e| e.to_string())
+    session_entry(name)?
+        .set_password(value)
+        .map_err(|e| e.to_string())
 }
 
 /// Removing an entry that is not there is the state the caller asked for.
@@ -285,84 +296,6 @@ async fn session_secret_delete(name: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || delete_session_secret(&name))
         .await
         .map_err(|e| e.to_string())?
-}
-
-#[cfg(test)]
-mod session_secret_tests {
-    use super::*;
-
-    /// Every test in this binary shares the process-wide default builder:
-    /// the in-memory mock store, never the machine's own credential store.
-    fn use_mock_store() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| keyring::set_default_credential_builder(keyring::mock::default_credential_builder()));
-    }
-
-    #[test]
-    fn only_the_known_entry_names_resolve() {
-        use_mock_store();
-        assert!(session_entry("tokens").is_ok());
-        assert!(session_entry("trusted-device").is_ok());
-        for name in ["", "token", "Tokens", "../tokens", "e2e-pickle-key", "alice"] {
-            assert_eq!(session_entry(name).unwrap_err(), "unknown credential", "{name:?}");
-            assert_eq!(read_session_secret(name).unwrap_err(), "unknown credential");
-            assert_eq!(write_session_secret(name, "abc").unwrap_err(), "unknown credential");
-            assert_eq!(delete_session_secret(name).unwrap_err(), "unknown credential");
-        }
-    }
-
-    #[test]
-    fn a_missing_entry_reads_as_none_and_deletes_as_ok() {
-        use_mock_store();
-        // the two entries are independent: this one is never written here
-        assert_eq!(read_session_secret("trusted-device"), Ok(None));
-        assert_eq!(delete_session_secret("trusted-device"), Ok(()));
-        assert_eq!(read_session_secret("trusted-device"), Ok(None));
-    }
-
-    /// The mock store holds one credential PER `Entry` (no shared table), so a
-    /// round trip across two helper calls cannot be observed here; it was
-    /// exercised against the real Windows Credential Manager (set, read back,
-    /// overwrite, delete, read after delete, two independent entry names)
-    /// when this landed. What the mock does show: the pair the webview writes
-    /// passes the shape check and a write of it succeeds.
-    #[test]
-    fn the_pair_the_webview_writes_is_accepted() {
-        use_mock_store();
-        let pair = r#"{"accessToken":"eyJhbGciOiJIUzI1NiJ9.a.b","refreshToken":"eyJhbGciOiJIUzI1NiJ9.c.d"}"#;
-        assert_eq!(write_session_secret("tokens", pair), Ok(()));
-        assert_eq!(write_session_secret("trusted-device", "eyJhbGciOiJIUzI1NiJ9.a.b"), Ok(()));
-        // a second delete is still the state the caller asked for
-        assert_eq!(delete_session_secret("tokens"), Ok(()));
-        assert_eq!(delete_session_secret("tokens"), Ok(()));
-    }
-
-    #[test]
-    fn a_malformed_value_is_refused_before_the_store_is_touched() {
-        use_mock_store();
-        for bad in ["", "with space", "héllo", &"a".repeat(SESSION_SECRET_MAX_CHARS + 1)] {
-            assert_eq!(write_session_secret("tokens", bad).unwrap_err(), "invalid credential format");
-        }
-        assert_eq!(read_session_secret("tokens"), Ok(None));
-    }
-
-    #[test]
-    fn a_value_is_bounded_printable_ascii_without_spaces() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiJjbHgxIn0.abc-_DEF";
-        assert!(valid_session_secret_value(jwt));
-        assert!(valid_session_secret_value(&format!(
-            "{{\"accessToken\":\"{jwt}\",\"refreshToken\":\"{jwt}\"}}"
-        )));
-        assert!(valid_session_secret_value(&"a".repeat(SESSION_SECRET_MAX_CHARS)));
-
-        assert!(!valid_session_secret_value(""));
-        assert!(!valid_session_secret_value(&"a".repeat(SESSION_SECRET_MAX_CHARS + 1)));
-        assert!(!valid_session_secret_value("with space"));
-        assert!(!valid_session_secret_value("line\nbreak"));
-        assert!(!valid_session_secret_value("nul\0byte"));
-        assert!(!valid_session_secret_value("héllo"));
-        assert!(!valid_session_secret_value("\u{7f}"));
-    }
 }
 
 pub fn run() {
@@ -449,7 +382,7 @@ pub fn run() {
                 // WebView2 names the page origin on its screen-share bar; the
                 // bar is hidden once a capture starts (share_bar.rs, Windows only)
                 #[cfg(windows)]
-                share_bar::hide_on_capture(&window, share_bar::app_host(&app.config()));
+                share_bar::hide_on_capture(&window, share_bar::app_host(app.config()));
 
                 // If tray is available: close → hide to tray
                 // If no tray (Linux GNOME/Wayland): close → quit the app
@@ -471,4 +404,116 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod session_secret_tests {
+    use super::*;
+
+    /// Every test in this binary shares the process-wide default builder:
+    /// the in-memory mock store, never the machine's own credential store.
+    fn use_mock_store() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            keyring::set_default_credential_builder(keyring::mock::default_credential_builder())
+        });
+    }
+
+    #[test]
+    fn only_the_known_entry_names_resolve() {
+        use_mock_store();
+        assert!(session_entry("tokens").is_ok());
+        assert!(session_entry("trusted-device").is_ok());
+        for name in [
+            "",
+            "token",
+            "Tokens",
+            "../tokens",
+            "e2e-pickle-key",
+            "alice",
+        ] {
+            assert_eq!(
+                session_entry(name).unwrap_err(),
+                "unknown credential",
+                "{name:?}"
+            );
+            assert_eq!(read_session_secret(name).unwrap_err(), "unknown credential");
+            assert_eq!(
+                write_session_secret(name, "abc").unwrap_err(),
+                "unknown credential"
+            );
+            assert_eq!(
+                delete_session_secret(name).unwrap_err(),
+                "unknown credential"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_entry_reads_as_none_and_deletes_as_ok() {
+        use_mock_store();
+        // the two entries are independent: this one is never written here
+        assert_eq!(read_session_secret("trusted-device"), Ok(None));
+        assert_eq!(delete_session_secret("trusted-device"), Ok(()));
+        assert_eq!(read_session_secret("trusted-device"), Ok(None));
+    }
+
+    /// The mock store holds one credential PER `Entry` (no shared table), so a
+    /// round trip across two helper calls cannot be observed here; it was
+    /// exercised against the real Windows Credential Manager (set, read back,
+    /// overwrite, delete, read after delete, two independent entry names)
+    /// when this landed. What the mock does show: the pair the webview writes
+    /// passes the shape check and a write of it succeeds.
+    #[test]
+    fn the_pair_the_webview_writes_is_accepted() {
+        use_mock_store();
+        let pair = r#"{"accessToken":"eyJhbGciOiJIUzI1NiJ9.a.b","refreshToken":"eyJhbGciOiJIUzI1NiJ9.c.d"}"#;
+        assert_eq!(write_session_secret("tokens", pair), Ok(()));
+        assert_eq!(
+            write_session_secret("trusted-device", "eyJhbGciOiJIUzI1NiJ9.a.b"),
+            Ok(())
+        );
+        // a second delete is still the state the caller asked for
+        assert_eq!(delete_session_secret("tokens"), Ok(()));
+        assert_eq!(delete_session_secret("tokens"), Ok(()));
+    }
+
+    #[test]
+    fn a_malformed_value_is_refused_before_the_store_is_touched() {
+        use_mock_store();
+        for bad in [
+            "",
+            "with space",
+            "héllo",
+            &"a".repeat(SESSION_SECRET_MAX_CHARS + 1),
+        ] {
+            assert_eq!(
+                write_session_secret("tokens", bad).unwrap_err(),
+                "invalid credential format"
+            );
+        }
+        assert_eq!(read_session_secret("tokens"), Ok(None));
+    }
+
+    #[test]
+    fn a_value_is_bounded_printable_ascii_without_spaces() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiJjbHgxIn0.abc-_DEF";
+        assert!(valid_session_secret_value(jwt));
+        assert!(valid_session_secret_value(&format!(
+            "{{\"accessToken\":\"{jwt}\",\"refreshToken\":\"{jwt}\"}}"
+        )));
+        assert!(valid_session_secret_value(
+            &"a".repeat(SESSION_SECRET_MAX_CHARS)
+        ));
+
+        assert!(!valid_session_secret_value(""));
+        assert!(!valid_session_secret_value(
+            &"a".repeat(SESSION_SECRET_MAX_CHARS + 1)
+        ));
+        assert!(!valid_session_secret_value("with space"));
+        assert!(!valid_session_secret_value("line\nbreak"));
+        assert!(!valid_session_secret_value("nul\0byte"));
+        assert!(!valid_session_secret_value("héllo"));
+        assert!(!valid_session_secret_value("\u{7f}"));
+    }
 }
