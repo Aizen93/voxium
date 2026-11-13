@@ -72,6 +72,10 @@ import {
   _resetChannelVisibilityForTests,
   stopChannelVisibilitySync,
   STOP_UNSUBSCRIBE_TIMEOUT_MS,
+  NODE_HEARTBEAT_TTL_MS,
+  RESYNC_FOLLOW_UP_MARGIN_MS,
+  RESYNC_FOLLOW_UP_DELAY_MS,
+  RESYNC_FOLLOW_UP_SCOPES_MAX,
 } from '../../utils/channelVisibilityRooms';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -884,7 +888,7 @@ describe('syncChannelVisibilityRooms — telling the other nodes', () => {
     await runUnconfirmed();
 
     expect(m.publish).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS);
-    expect(warn).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS - 1 + 1); // each retry, then the fallback's summary
+    expect(warn).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS - 1 + 2); // each retry, the fallback's summary, then the follow-up's schedule
     expect(error).toHaveBeenCalledWith(expect.stringContaining(`not confirmed by every node after ${RESYNC_PUBLISH_ATTEMPTS} attempts (redis away): removing hidden channel rooms cluster-wide (fail closed)`));
     // The member list comes from the database, never from a socket snapshot
     expect(m.prisma.serverMember.findMany).toHaveBeenCalledWith({ where: { serverId: 'server-1' }, select: { userId: true } });
@@ -1013,6 +1017,306 @@ describe('syncChannelVisibilityRooms — telling the other nodes', () => {
       expect.stringContaining('Fail-closed fallback for server server-1 failed; revoked members on unconfirmed nodes keep their rooms until they reconnect'),
       expect.any(Error),
     );
+  });
+});
+
+// ─── The follow-up of a publish that failed closed ──────────────────────────
+
+describe('a publish that failed closed is published again once, past the heartbeat TTL', () => {
+  const RETRIES = RESYNC_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+  let liveHeartbeats: number;
+  let receivers: number;
+  let warn: ReturnType<typeof vi.spyOn>;
+  let error: ReturnType<typeof vi.spyOn>;
+  let log: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    resetMocks();
+    vi.useFakeTimers();
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    // Two nodes up, and the heartbeat of a third killed hard: two receivers
+    // where three are counted, until that heartbeat expires
+    liveHeartbeats = 3;
+    receivers = 2;
+    m.liveNodeCounts.mockImplementation(async () => ({ total: liveHeartbeats, peers: liveHeartbeats - 1 }));
+    m.publish.mockImplementation(async () => receivers);
+  });
+  afterEach(() => {
+    // the spies first: a setTimeout spy restored after the fake clock would
+    // put the fake one back
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const heartbeatExpires = () => { liveHeartbeats = 2; };
+
+  /** Resyncs of server-1 started together, every publish of each unconfirmed
+   *  through all its attempts, then their fallbacks. */
+  async function failClosed(...scopes: Array<{ channelId?: string; userId?: string } | undefined>) {
+    const runs = (scopes.length > 0 ? scopes : [undefined]).map((opts) => syncChannelVisibilityRooms('server-1', opts));
+    await vi.advanceTimersByTimeAsync(RETRIES);
+    await Promise.all(runs);
+  }
+
+  /** The messages published after the first `skip`, without their ids. */
+  const publishedAfter = (skip: number) => published().slice(skip).map(({ id: _id, ...rest }) => rest);
+
+  it.each([
+    ['the space', undefined, { serverId: 'server-1' }],
+    ['one channel', { channelId: 'ch-1' }, { serverId: 'server-1', channelId: 'ch-1' }],
+    ['one member', { userId: 'user-9' }, { serverId: 'server-1', userId: 'user-9' }],
+  ])('%s: the same scope, RESYNC_FOLLOW_UP_DELAY_MS after the fallback, under a new id, as a re-check that moves no mark', async (_label, opts, scope) => {
+    await failClosed(opts);
+    expect(m.publish).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS);
+    expect(warn).toHaveBeenCalledWith(`[Visibility] Resync of ${opts?.channelId ? 'server server-1, channel ch-1' : opts?.userId ? 'server server-1, member user-9' : 'server server-1'} failed closed; its scope is published again in ${RESYNC_FOLLOW_UP_DELAY_MS} ms, past the heartbeat TTL, so a grant reaches the members of a node that missed it (1 scope(s) pending for the space)`);
+    const mark = visibilityRequestMark();
+    const localPasses = m.localIn.mock.calls.length;
+    heartbeatExpires();
+
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS - 1);
+    expect(m.publish).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(m.publish).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS + 1);
+    const [first] = published();
+    const followUp = published()[RESYNC_PUBLISH_ATTEMPTS];
+    expect(followUp).toEqual({ ...scope, id: expect.stringMatching(/^[A-Za-z0-9_-]{1,64}$/), fromNode: 'node-a', recheck: true });
+    expect(followUp.id).not.toBe(first.id);
+    // This node's pass too, through the same queue
+    expect(m.localIn).toHaveBeenCalledTimes(localPasses + 1);
+    expect(visibilityRequestMark()).toBe(mark);
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[Visibility\] Follow-up resync of server server-1.* confirmed by every node$/));
+
+    // Once
+    await vi.advanceTimersByTimeAsync(10 * RESYNC_FOLLOW_UP_DELAY_MS);
+    expect(m.publish).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS + 1);
+  });
+
+  it('gives a member on the publishing node back the channel the fallback\'s leaves took from a grant that committed during it', async () => {
+    const socket = createMockSocket('user-1');
+    m.localFetch.mockResolvedValue([socket]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-priv', secure: false, type: 'text' }]);
+    m.filterForUsers
+      .mockResolvedValueOnce(visibility({ 'user-1': [] }))          // this node's pass: not yet granted
+      .mockResolvedValueOnce(visibility({ 'user-1': [] }))          // the fallback's read
+      .mockResolvedValueOnce(visibility({ 'user-1': ['ch-priv'] })); // the follow-up's pass: granted since
+
+    await failClosed({ userId: 'user-1' });
+    expect(m.clusterIn).toHaveBeenCalledWith(['user:user-1']);
+    expect(m.clusterGroupLeave).toHaveBeenCalledWith(['channel:ch-priv']);
+    expect(socket.join).not.toHaveBeenCalled();
+    heartbeatExpires();
+
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS);
+
+    expect(socket.join).toHaveBeenCalledWith('channel:ch-priv');
+    expect(socket.join.mock.invocationCallOrder[0]).toBeGreaterThan(m.clusterGroupLeave.mock.invocationCallOrder[0]);
+    expect(m.filterForUsers).toHaveBeenCalledTimes(3);
+    expect(m.clusterGroupLeave).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('[Visibility] Follow-up resync of server server-1, member user-1 confirmed by every node');
+  });
+
+  it('runs this node\'s pass behind the passes already queued for the space', async () => {
+    await failClosed();
+    heartbeatExpires();
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS - 1000);
+    // A space-wide pass whose read is still out when the follow-up fires
+    m.localFetch.mockResolvedValue([createMockSocket('user-1')]);
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+    let release!: (visible: Map<string, Set<string>>) => void;
+    m.filterForUsers.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const held = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(0);
+    const passes = m.localIn.mock.calls.length;
+
+    try {
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(m.publish).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS + 2); // the held one's, then the follow-up's
+      expect(m.localIn).toHaveBeenCalledTimes(passes);
+    } finally {
+      release(visibility({ 'user-1': ['ch-1'] }));
+    }
+    await held;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(m.localIn).toHaveBeenCalledTimes(passes + 1);
+    expect(m.filterForUsers).toHaveBeenCalledTimes(2);
+  });
+
+  // ── Coalescing ───────────────────────────────────────────────────────────
+
+  it('failures of one scope while its follow-up is pending share it, and the timer is never moved', async () => {
+    await failClosed();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await failClosed(); // fails closed again, 10 s and its retries later
+    expect(m.publish).toHaveBeenCalledTimes(2 * RESYNC_PUBLISH_ATTEMPTS);
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining(`published again in ${RESYNC_FOLLOW_UP_DELAY_MS - 10_000 - RETRIES} ms`));
+    heartbeatExpires();
+
+    // Due when the FIRST failure scheduled it
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS - 10_000 - RETRIES);
+    expect(publishedAfter(2 * RESYNC_PUBLISH_ATTEMPTS)).toEqual([{ serverId: 'server-1', fromNode: 'node-a', recheck: true }]);
+
+    await vi.advanceTimersByTimeAsync(10 * RESYNC_FOLLOW_UP_DELAY_MS);
+    expect(m.publish).toHaveBeenCalledTimes(2 * RESYNC_PUBLISH_ATTEMPTS + 1);
+  });
+
+  it.each([
+    ['a whole-space failure replaces a pending member and channel one', [{ userId: 'user-1' }, { channelId: 'ch-1' }, undefined]],
+    ['a pending whole-space follow-up absorbs a member and a channel failure', [undefined, { userId: 'user-1' }, { channelId: 'ch-1' }]],
+    ['a pending channel follow-up absorbs a failure of one member\'s view of that channel', [{ channelId: 'ch-1' }, { channelId: 'ch-1', userId: 'user-1' }]],
+  ])('the widest scope wins: %s', async (_label, scopes) => {
+    await failClosed(...scopes);
+    const before = m.publish.mock.calls.length;
+    heartbeatExpires();
+
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS);
+
+    const widest = scopes.includes(undefined) ? { serverId: 'server-1' } : { serverId: 'server-1', channelId: 'ch-1' };
+    expect(publishedAfter(before)).toEqual([{ ...widest, fromNode: 'node-a', recheck: true }]);
+  });
+
+  it('scopes neither of which covers the other are published side by side, and every space has its own follow-up', async () => {
+    const runs = [
+      syncChannelVisibilityRooms('server-1', { userId: 'user-1' }),
+      syncChannelVisibilityRooms('server-1', { channelId: 'ch-1' }),
+      syncChannelVisibilityRooms('server-2'),
+    ];
+    await vi.advanceTimersByTimeAsync(RETRIES);
+    await Promise.all(runs);
+    const before = m.publish.mock.calls.length;
+    heartbeatExpires();
+
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS);
+
+    expect(publishedAfter(before)).toEqual(expect.arrayContaining([
+      { serverId: 'server-1', userId: 'user-1', fromNode: 'node-a', recheck: true },
+      { serverId: 'server-1', channelId: 'ch-1', fromNode: 'node-a', recheck: true },
+      { serverId: 'server-2', fromNode: 'node-a', recheck: true },
+    ]));
+    expect(m.publish).toHaveBeenCalledTimes(before + 3);
+  });
+
+  it('past RESYNC_FOLLOW_UP_SCOPES_MAX scopes, a space\'s follow-up widens to the whole space', async () => {
+    await failClosed(...Array.from({ length: RESYNC_FOLLOW_UP_SCOPES_MAX }, (_, i) => ({ userId: `user-${i}` })));
+    const atMax = m.publish.mock.calls.length;
+    heartbeatExpires();
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS);
+    expect(m.publish).toHaveBeenCalledTimes(atMax + RESYNC_FOLLOW_UP_SCOPES_MAX);
+
+    // One more scope than that (a live node not receiving, this time)
+    receivers = 1;
+    await failClosed(...Array.from({ length: RESYNC_FOLLOW_UP_SCOPES_MAX + 1 }, (_, i) => ({ userId: `user-${i}` })));
+    const pastMax = m.publish.mock.calls.length;
+    receivers = 2;
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS);
+
+    expect(publishedAfter(pastMax)).toEqual([{ serverId: 'server-1', fromNode: 'node-a', recheck: true }]);
+  });
+
+  // ── Bounds ───────────────────────────────────────────────────────────────
+
+  it('a follow-up that fails closed too runs the fallback again and schedules nothing more', async () => {
+    m.prisma.channel.findMany.mockResolvedValue([{ id: 'ch-1', secure: false, type: 'text' }]);
+    // The mismatch outlives the TTL: a node that is up and does not receive
+    await failClosed();
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS + RETRIES);
+
+    expect(m.publish).toHaveBeenCalledTimes(2 * RESYNC_PUBLISH_ATTEMPTS);
+    expect(m.prisma.serverMember.findMany).toHaveBeenCalledTimes(2); // each fallback reads the members
+    expect(error).toHaveBeenLastCalledWith('[Visibility] Follow-up resync of server server-1 failed closed too; no further follow-up: a grant on a node that missed it reaches the member at their next connect');
+
+    await vi.advanceTimersByTimeAsync(10 * RESYNC_FOLLOW_UP_DELAY_MS);
+    expect(m.publish).toHaveBeenCalledTimes(2 * RESYNC_PUBLISH_ATTEMPTS);
+    expect(m.prisma.serverMember.findMany).toHaveBeenCalledTimes(2);
+  });
+
+  it('a confirmed publish, at the first attempt or after a retry, schedules none', async () => {
+    heartbeatExpires();
+    await syncChannelVisibilityRooms('server-1');
+    receivers = 1; // a subscriber reconnecting at the first attempt
+    m.publish.mockImplementationOnce(async () => receivers).mockImplementation(async () => 2);
+    const retried = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(RESYNC_RETRY_DELAYS_MS[0]);
+    await retried;
+    expect(m.publish).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(10 * RESYNC_FOLLOW_UP_DELAY_MS);
+
+    expect(m.publish).toHaveBeenCalledTimes(3);
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('published again'));
+  });
+
+  it('a join site\'s re-check that failed closed is followed up the same way, still as a re-check', async () => {
+    const mark = visibilityRequestMark();
+    const done = recheckVisibilityAfterJoin('server-1', { userId: 'user-1' });
+    await vi.advanceTimersByTimeAsync(RETRIES);
+    await done;
+    heartbeatExpires();
+
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS);
+
+    expect(publishedAfter(RESYNC_PUBLISH_ATTEMPTS)).toEqual([{ serverId: 'server-1', userId: 'user-1', fromNode: 'node-a', recheck: true }]);
+    expect(visibilityRequestMark()).toBe(mark);
+  });
+
+  // ── Shutdown and the timer ───────────────────────────────────────────────
+
+  it('a stop drops the pending follow-ups, and a fan-out still retrying at the stop schedules none', async () => {
+    m.unsubscribe.mockResolvedValue(undefined);
+    await failClosed();
+    await stopChannelVisibilitySync();
+    expect(warn).toHaveBeenLastCalledWith('[Visibility] 1 space(s) with a follow-up resync pending at shutdown; dropped');
+    heartbeatExpires();
+    await vi.advanceTimersByTimeAsync(2 * RESYNC_FOLLOW_UP_DELAY_MS);
+    expect(m.publish).toHaveBeenCalledTimes(RESYNC_PUBLISH_ATTEMPTS);
+
+    // A resync whose retries straddle the stop
+    liveHeartbeats = 3;
+    _resetChannelVisibilityForTests();
+    const straddling = syncChannelVisibilityRooms('server-1');
+    await vi.advanceTimersByTimeAsync(RESYNC_RETRY_DELAYS_MS[0]);
+    await stopChannelVisibilitySync();
+    await vi.advanceTimersByTimeAsync(RETRIES);
+    await straddling;
+    expect(m.publish).toHaveBeenCalledTimes(2 * RESYNC_PUBLISH_ATTEMPTS);
+    heartbeatExpires();
+    await vi.advanceTimersByTimeAsync(2 * RESYNC_FOLLOW_UP_DELAY_MS);
+    expect(m.publish).toHaveBeenCalledTimes(2 * RESYNC_PUBLISH_ATTEMPTS);
+
+    // Subscribed again (a restart of the module), follow-ups are scheduled again
+    liveHeartbeats = 3;
+    await initChannelVisibilitySync();
+    await failClosed();
+    heartbeatExpires();
+    await vi.advanceTimersByTimeAsync(RESYNC_FOLLOW_UP_DELAY_MS);
+    expect(m.publish).toHaveBeenCalledTimes(3 * RESYNC_PUBLISH_ATTEMPTS + 1);
+  });
+
+  it('the follow-up timer never keeps the process alive', async () => {
+    const fakeSetTimeout = globalThis.setTimeout;
+    const unrefed: Array<number | undefined> = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      const timer = fakeSetTimeout(fn, ms);
+      const unref = timer.unref.bind(timer);
+      timer.unref = () => {
+        unrefed.push(ms);
+        return unref();
+      };
+      return timer;
+    }) as typeof setTimeout);
+
+    await failClosed();
+
+    expect(unrefed).toEqual([RESYNC_FOLLOW_UP_DELAY_MS]);
+  });
+
+  it('waits out the TTL redis.ts gives a heartbeat, plus the margin', async () => {
+    const redis = await vi.importActual<typeof import('../../utils/redis')>('../../utils/redis');
+    expect(NODE_HEARTBEAT_TTL_MS).toBe(redis.NODE_HEARTBEAT_TTL_S * 1000);
+    expect(RESYNC_FOLLOW_UP_DELAY_MS).toBe(NODE_HEARTBEAT_TTL_MS + RESYNC_FOLLOW_UP_MARGIN_MS);
+    expect(RESYNC_FOLLOW_UP_MARGIN_MS).toBeGreaterThan(0);
   });
 });
 

@@ -16,7 +16,12 @@
  *    private channel's `message:new` live, without reconnecting, when the
  *    owner changes their role, the channel's override or deletes the role
  *    through node-1
- * 8. Owner-node crash: dead owner's channel taken over by the surviving node
+ * 8. Visibility resync while a dead node's heartbeat is still counted (a
+ *    heartbeat key no node refreshes): the publish fails closed, is published
+ *    again past the heartbeat TTL and confirmed, and the member on node-2
+ *    receives the channel granted in that window (skip with
+ *    SKIP_STALE_HEARTBEAT_TEST=1 — it waits out the 30s heartbeat TTL)
+ * 9. Owner-node crash: dead owner's channel taken over by the surviving node
  *    (skip with SKIP_CRASH_TEST=1 — it waits out the 30s heartbeat TTL)
  *
  * Usage:
@@ -1086,6 +1091,126 @@ async function testVisibilityResyncCrossNode(redis: any, ownerToken: string, mem
   }
 }
 
+// ─── A resync while a dead node's heartbeat is still there ──────────────────
+
+/** A heartbeat key no running node refreshes: what a node killed hard leaves
+ *  behind (NODE_HEARTBEAT_TTL_S in apps/server/src/utils/redis.ts). */
+const GHOST_HEARTBEAT_KEY = 'node:alive:mn-ghost';
+const GHOST_HEARTBEAT_TTL_S = 30;
+/** How long a node reuses its count of the live nodes (LIVE_NODES_MEMO_MS in
+ *  apps/server/src/utils/channelVisibilityRooms.ts), plus a margin: a resync
+ *  published sooner after the ghost appears is judged against the old count. */
+const LIVE_NODES_MEMO_WAIT_MS = 5500;
+/** The server's follow-up delay (RESYNC_FOLLOW_UP_DELAY_MS: the heartbeat TTL
+ *  plus 5 s), with room for the follow-up's own publish. */
+const FOLLOW_UP_WAIT_MS = 60_000;
+
+/** Resolves true once node `nodeId` has printed `text` after `from` characters
+ *  of its output, false when `ms` pass first. */
+async function nodePrints(nodeId: string, from: number, text: string, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if ((nodeOutput[nodeId] ?? '').slice(from).includes(text)) return true;
+    await sleep(250);
+  }
+  return (nodeOutput[nodeId] ?? '').slice(from).includes(text);
+}
+
+/**
+ * A heartbeat no node refreshes (GHOST_HEARTBEAT_KEY) makes both nodes count
+ * three live nodes where two receive. The owner, through node-1, gives the
+ * member on node-2 a role that shows a private channel: node-1's publish reads
+ * one receiver short, is retried and fails closed. Past the heartbeat TTL,
+ * node-1 publishes the same scope again, and that follow-up is confirmed by
+ * both nodes. The member receives the private channel live, on the same
+ * socket, never reconnected.
+ */
+async function testVisibilityFollowUpAfterStaleHeartbeat(redis: any, ownerToken: string, memberToken: string, serverId: string) {
+  console.log('\n── Test: Visibility Resync While a Dead Node\'s Heartbeat Lingers ──');
+
+  let member: Socket | null = null;
+  try {
+    const memberId: string = (await axios.get(`${API2}/auth/me`, auth(memberToken))).data.data.id;
+    const channels = (await axios.get(`${API1}/servers/${serverId}/channels`, auth(ownerToken))).data.data as Array<{ id: string; type: string }>;
+    const publicChannel = channels.find((c) => c.type === 'text');
+    if (!publicChannel) throw new Error('the test space has no text channel');
+    const privateChannel: string = (await axios.post(`${API1}/servers/${serverId}/channels`, { name: 'mn-follow-up', type: 'text' }, auth(ownerToken))).data.data.id;
+    const roles = (await axios.get(`${API1}/servers/${serverId}/roles`, auth(ownerToken))).data.data as Array<{ id: string; isDefault: boolean }>;
+    const everyone = roles.find((r) => r.isDefault);
+    if (!everyone) throw new Error('the test space has no @everyone role');
+    const viewer: string = (await axios.post(`${API1}/servers/${serverId}/roles`, { name: 'mn-follow-up-viewer' }, auth(ownerToken))).data.data.id;
+
+    // Private: hidden from @everyone, shown to the new role, which nobody holds yet
+    const override = (roleId: string, allow: string, deny: string) =>
+      axios.put(`${API1}/servers/${serverId}/roles/channels/${privateChannel}/permissions/${roleId}`, { allow, deny }, auth(ownerToken));
+    await override(everyone.id, '0', VIEW_CHANNEL);
+    await override(viewer, VIEW_CHANNEL, '0');
+
+    member = await connectSocket(WS2, memberToken);
+    const sock = member;
+    const socketId = sock.id;
+    let disconnects = 0;
+    sock.on('disconnect', () => { disconnects++; });
+
+    // The dead node's heartbeat, then long enough for both nodes to count it
+    await redis.set(GHOST_HEARTBEAT_KEY, String(Date.now()), { EX: GHOST_HEARTBEAT_TTL_S });
+    await sleep(LIVE_NODES_MEMO_WAIT_MS);
+    const from = (nodeOutput['node-1'] ?? '').length;
+
+    await axios.patch(`${API1}/servers/${serverId}/roles/members/${memberId}`, { roleIds: [viewer] }, auth(ownerToken));
+
+    assert(
+      await nodePrints('node-1', from, `Resync of server ${serverId}, member ${memberId} failed closed; its scope is published again in`, 30_000),
+      'With a dead node\'s heartbeat counted, the member-scoped resync fails closed and its follow-up is scheduled',
+    );
+    assert(
+      await nodePrints('node-1', from, `Follow-up resync of server ${serverId}, member ${memberId} confirmed by every node`, FOLLOW_UP_WAIT_MS),
+      'Past the heartbeat TTL, the follow-up is published again and confirmed by both nodes',
+    );
+    assert(
+      !(nodeOutput['node-1'] ?? '').slice(from).includes('failed closed too'),
+      'The follow-up did not fail closed',
+    );
+
+    /** Does the member receive a message posted to the private channel? (A
+     *  sentinel in the public channel answers "no" without a bare sleep, as in
+     *  testVisibilityResyncCrossNode.) Posted after the follow-up, a minute
+     *  after the previous test's posts: the owner may post 30 a minute. */
+    const tag = `mn-follow-up-${Date.now()}`;
+    let gotPrivate = false;
+    let sentinelIn!: () => void;
+    const sentinel = new Promise<void>((resolve) => { sentinelIn = resolve; });
+    const onMessage = (msg: any) => {
+      if (msg?.channelId === privateChannel && msg?.content === `${tag} private`) gotPrivate = true;
+      if (msg?.channelId === publicChannel.id && msg?.content === `${tag} sentinel`) sentinelIn();
+    };
+    sock.on('message:new', onMessage);
+    try {
+      await axios.post(`${API1}/channels/${privateChannel}/messages`, { content: `${tag} private` }, auth(ownerToken));
+      await axios.post(`${API1}/channels/${publicChannel.id}/messages`, { content: `${tag} sentinel` }, auth(ownerToken));
+      const arrived = await Promise.race([sentinel.then(() => true), sleep(5000).then(() => false)]);
+      if (!arrived) throw new Error('the sentinel in the public channel never reached the member');
+    } finally {
+      sock.off('message:new', onMessage);
+    }
+    assert(gotPrivate, 'The member on node-2 receives the private channel granted while the dead node\'s heartbeat was counted');
+    assert(
+      sock.connected && sock.id === socketId && disconnects === 0,
+      'The member\'s socket was never reconnected',
+      `connected=${sock.connected} sameId=${sock.id === socketId} disconnects=${disconnects}`,
+    );
+  } finally {
+    member?.disconnect();
+    // Gone already unless the test ended early; never left to the next run's
+    // heartbeat check
+    try {
+      await redis.del(GHOST_HEARTBEAT_KEY);
+    } catch (err: any) {
+      console.warn('Could not delete the ghost heartbeat:', err?.message ?? err);
+    }
+  }
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1238,6 +1363,16 @@ async function main() {
       await testVisibilityResyncCrossNode(redis, user1Token, user2Token, serverId);
     } catch (err: any) {
       assert(false, 'Visibility resync cross-node test', errorText(err));
+    }
+
+    if (process.env.SKIP_STALE_HEARTBEAT_TEST === '1') {
+      console.log('\n── Skipping the stale-heartbeat resync test (SKIP_STALE_HEARTBEAT_TEST=1) ──');
+    } else {
+      try {
+        await testVisibilityFollowUpAfterStaleHeartbeat(redis, user1Token, user2Token, serverId);
+      } catch (err: any) {
+        assert(false, 'Visibility follow-up after a stale heartbeat test', errorText(err));
+      }
     }
 
     if (process.env.SKIP_CRASH_TEST === '1') {
