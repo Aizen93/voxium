@@ -1,4 +1,6 @@
 import { act } from 'react';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -216,6 +218,11 @@ describe('public landing pages', () => {
     expect(avatar.querySelector('img')).toBeNull();
     expect(avatar.textContent).toBe('OA');
     expect(container.querySelector('#supporters ul')).toBeNull();
+  });
+
+  it('documents why contributor avatars use bundled files instead of upload keys', () => {
+    const source = readFileSync(resolve(__dirname, '../../components/landing/PublicPageContent.tsx'), 'utf8');
+    expect(source).toMatch(/\/\/ The shared Avatar resolves upload keys through the API\. Contributor avatars use local static files\.\s*function ContributorAvatar/);
   });
 
   it('recognizes named and anonymous supporters and respects the funding switch', () => {

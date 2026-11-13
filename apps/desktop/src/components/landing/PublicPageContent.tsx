@@ -217,6 +217,7 @@ const contributors: readonly Contributor[] = [
   { username: 'XRafik', initials: 'XR', avatar: '/contributor-avatars/xrafik.png', credit: 'nickname' },
 ];
 
+// The shared Avatar resolves upload keys through the API. Contributor avatars use local static files.
 function ContributorAvatar({ contributor }: { contributor: Contributor }) {
   const [failed, setFailed] = useState(false);
   return (
