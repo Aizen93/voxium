@@ -18,6 +18,9 @@ tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# A second launch hands over to the running app instead of starting another
+# one (src/lib.rs): registered first, in release builds.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = "3"
