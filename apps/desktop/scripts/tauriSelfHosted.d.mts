@@ -14,10 +14,11 @@ export interface UpdaterBlock {
 export interface SelfHostedOverlay {
   identifier: string;
   app: { security: { csp: string } };
-  bundle: { createUpdaterArtifacts: boolean };
+  bundle: { createUpdaterArtifacts: boolean; windows: { nsis: { installerHooks: string } } };
   plugins: { updater: UpdaterBlock };
 }
 
+export const SELF_HOSTED_INSTALLER_HOOKS: string;
 export function isHostSource(source: string): boolean;
 export function parseServerUrl(name: string, value: string | undefined | null, protocols: readonly string[]): URL;
 export function serverSources(
