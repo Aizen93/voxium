@@ -632,7 +632,7 @@ On Linux, ensure all system dependencies are installed (see Prerequisites).
 
 ## Testing
 
-Voxium has three Vitest suites — over 3,500 server, 2,700 desktop and 140 admin unit and integration tests as of 2026-11-08 — plus a Playwright E2E suite.
+Voxium has three Vitest suites — over 4,200 server, 3,100 desktop and 140 admin unit and integration tests as of 2026-11-13 — plus a Playwright E2E suite.
 
 ### Running Tests
 
