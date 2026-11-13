@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react';
+import { useEffect, useState, useRef, useCallback, type MouseEvent, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -383,6 +383,26 @@ function LandingLanguageSelect({ className }: { className: string }) {
   );
 }
 
+const HERO_PATH = '/#hero';
+
+function HeroLink({ children, className, onClick }: {
+  children: ReactNode;
+  className: string;
+  onClick?: () => void;
+}) {
+  const { pathname, hash } = useLocation();
+
+  function handleClick(event: MouseEvent<HTMLAnchorElement>) {
+    onClick?.();
+    if (pathname !== '/' || hash !== '#hero' || event.button !== 0
+      || event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return;
+    event.preventDefault();
+    document.getElementById('hero')?.scrollIntoView?.();
+  }
+
+  return <Link to={HERO_PATH} className={className} onClick={handleClick}>{children}</Link>;
+}
+
 function Navbar({ home }: { home: boolean }) {
   const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -390,10 +410,10 @@ function Navbar({ home }: { home: boolean }) {
   return (
     <nav className="fixed top-3 sm:top-4 left-0 right-0 z-50 px-3 sm:px-6">
       <div className="lp-nav max-w-7xl mx-auto h-14 px-4 sm:px-5 flex items-center justify-between">
-        <Link to="/#hero" className="flex items-center gap-2.5" onClick={() => setMenuOpen(false)}>
+        <HeroLink className="flex items-center gap-2.5" onClick={() => setMenuOpen(false)}>
           <img src="/logo.svg" alt="" className="h-8 w-8 rounded-lg" />
           <span className="text-lg font-bold tracking-tight text-vox-text-primary">Voxium</span>
-        </Link>
+        </HeroLink>
 
         {/* Desktop controls */}
         <div className="hidden md:flex items-center gap-3">
@@ -1552,7 +1572,7 @@ function Footer({ showFunding }: { showFunding: boolean }) {
           <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.product')}</h4>
             <ul className="space-y-2">
-              <li><Link to="/#hero" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.download')}</Link></li>
+              <li><HeroLink className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.download')}</HeroLink></li>
               <li><a href={DOWNLOAD_URLS.releases} target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.changelog')}</a></li>
               <li><Link to="/architecture" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.publicPages.architecture')}</Link></li>
               {/* Status page: uncomment once Uptime Kuma is deployed

@@ -1,6 +1,6 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SupporterAcknowledgments } from '../../components/landing/PublicPageContent';
 import i18n, { SUPPORTED_LANGUAGES } from '../../i18n';
@@ -28,6 +28,38 @@ afterEach(() => {
 });
 
 describe('public landing pages', () => {
+  it.each(['/', '/architecture', '/contributors'])('scrolls to the hero on every home-link click from %s', async (initialPath) => {
+    vi.stubGlobal('IntersectionObserver', class {
+      observe() {}
+      disconnect() {}
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+    await act(async () => root.render(
+      <MemoryRouter initialEntries={[initialPath]}>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/architecture" element={<LandingPage page="architecture" />} />
+          <Route path="/contributors" element={<LandingPage page="contributors" />} />
+        </Routes>
+      </MemoryRouter>,
+    ));
+    const scroll = vi.fn(function (this: HTMLElement) { return this.id; });
+    const restore = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+
+    try {
+      await act(async () => container.querySelector<HTMLAnchorElement>('nav a[href="/#hero"]')!.click());
+      expect(container.querySelector('#hero')).not.toBeNull();
+      for (const region of ['nav', 'footer', 'footer']) {
+        await act(async () => container.querySelector<HTMLAnchorElement>(region + ' a[href="/#hero"]')!.click());
+      }
+      expect(scroll.mock.results.map(({ value }) => value)).toEqual(['hero', 'hero', 'hero', 'hero']);
+    } finally {
+      if (restore) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', restore);
+      else Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
+    }
+  });
+
   it.each([
     ["en","infrastructure","self-hosted","private audio"] as const,
     ["fr","infrastructure","auto-hébergé","audio de l’appel privé"] as const,
