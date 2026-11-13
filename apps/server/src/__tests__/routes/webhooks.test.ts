@@ -3,6 +3,7 @@ import request from 'supertest';
 import express from 'express';
 import crypto from 'crypto';
 import { Permissions } from '@voxium/shared';
+import { lazyStatement } from '../helpers/lazyStatement';
 
 // The authenticated webhook MANAGEMENT router (routes/webhooks.ts): list,
 // create, patch, rotate, delete (+ purge). The public execute route has its
@@ -914,11 +915,10 @@ describe('POST /servers/:serverId/webhooks', () => {
 
   it('waits, holding nothing, for the channel row and the creator\'s account row before each attempt\'s transaction takes the space row', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // each wait recorded when it RUNS (awaited), as a PrismaPromise runs
     const order: string[] = [];
-    prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      order.push(`${strings.join('?')} [${values.join(',')}]`);
-      return [];
-    });
+    prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) =>
+      lazyStatement(order, `${strings.join('?')} [${values.join(',')}]`, []));
     const realTransaction = prismaMock.$transaction.getMockImplementation();
     prismaMock.$transaction
       .mockImplementationOnce(async () => { order.push('txn aborted'); throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })

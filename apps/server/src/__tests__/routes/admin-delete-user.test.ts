@@ -277,7 +277,7 @@ vi.mock('../../utils/discoveryPageCache', () => ({
 import { prisma } from '../../utils/prisma';
 import { adminRouter } from '../../routes/admin';
 import { errorHandler } from '../../middleware/errorHandler';
-import { lazyStatement, runBatch } from '../helpers/lazyStatement';
+import { lazySentinel, runBatch } from '../helpers/lazyStatement';
 
 function createApp() {
   const app = express();
@@ -1298,9 +1298,7 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
         const ran: string[] = [];
         prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
           const sql = strings.join('?');
-          const statement = { op: 'lock', sql };
-          Object.defineProperty(statement, 'then', { value: lazyStatement(ran, `${sql} [${values.join(',')}]`, []).then, enumerable: false });
-          return statement;
+          return lazySentinel(ran, `${sql} [${values.join(',')}]`, { op: 'lock', sql });
         });
         prismaMock.$transaction.mockImplementation((arg: any) => {
           if (typeof arg === 'function') return arg(txMock);

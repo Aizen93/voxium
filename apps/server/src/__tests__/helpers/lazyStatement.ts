@@ -18,6 +18,17 @@ export function lazyStatement<T>(ran: string[], name: string, result: T): Promis
   };
 }
 
+/**
+ * `shape` (the sentinel a batch assertion compares) made a lazy statement
+ * too: it records `name` in `ran` when it is awaited or run in a batch. The
+ * `then` it gains is not enumerable, so `toEqual` still compares the shape
+ * alone.
+ */
+export function lazySentinel<T extends object>(ran: string[], name: string, shape: T, result: unknown = []): T {
+  Object.defineProperty(shape, 'then', { value: lazyStatement(ran, name, result).then, enumerable: false });
+  return shape;
+}
+
 /** Runs a batch of lazy statements the way `$transaction([...])` does: each in turn. */
 export async function runBatch(statements: unknown[]): Promise<unknown[]> {
   const results: unknown[] = [];
