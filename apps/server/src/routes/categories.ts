@@ -55,13 +55,21 @@ categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ se
     // other, where in the clients' orders two reversed reorders each held a
     // row the other needed (a deadlock, a 500). A category the validation saw
     // and that is gone by the update answers as an unknown one, never a 500.
+    // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a category delete holds
+    // its row until it commits, and it takes each of its channels out of it,
+    // waiting on any of them a channel delete holds; a space delete holds
+    // every category row through its cascade; a reorder merely waiting for
+    // one must not expire. The batch is built again for each attempt and
+    // run again whole when PostgreSQL aborts it to break a deadlock: it writes
+    // absolute positions, so a second run writes what the first would have.
     const sorted = [...order].sort((a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     try {
-      await prisma.$transaction(
+      await retryOnTransactionConflict(() => prisma.$transaction(
         sorted.map((o: { id: string; position: number }) =>
           prisma.category.update({ where: { id: o.id }, data: { position: o.position } })
-        )
-      );
+        ),
+        LOCK_WAIT_TRANSACTION_OPTIONS,
+      ), `[Categories] The reorder of categories in ${serverId}`);
     } catch (err) {
       if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Category');
       throw err;

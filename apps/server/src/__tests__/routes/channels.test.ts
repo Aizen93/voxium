@@ -1684,6 +1684,32 @@ describe('Channel Routes', () => {
       expect(prismaMock.channel.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['ch-a', 'ch-b', 'ch-c']);
     });
 
+    it('runs the batch with the long budget: a reorder waiting on a channel row a long delete holds does not expire', async () => {
+      expect((await reorder(ORDER)).status).toBe(200);
+
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+    });
+
+    it('a batch PostgreSQL aborted to break a deadlock is built again and run again', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }));
+      try {
+        const res = await reorder(ORDER);
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        const [first, second] = prismaMock.$transaction.mock.calls.map(([batch]: any[]) => batch);
+        // fresh statements for the second attempt, in the same fixed order
+        expect(second).not.toBe(first);
+        expect(second).toHaveLength(3);
+        expect(prismaMock.channel.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['ch-a', 'ch-b', 'ch-c', 'ch-a', 'ch-b', 'ch-c']);
+        expect(prismaMock.$transaction).toHaveBeenLastCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/reorder of channels in srv-1 was aborted by a deadlock or a serialization failure; retrying \(1 of 2\)/));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('a channel deleted between the validation and the update answers 404 Channel, not a 500, and announces nothing', async () => {
       prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
 
@@ -1692,6 +1718,8 @@ describe('Channel Routes', () => {
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('Channel not found');
       expect(mockEmit).not.toHaveBeenCalled();
+      // the answer, never retried
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     });
 
     it('a category deleted between the validation and the update answers 404 Category, not a 500', async () => {
@@ -1702,6 +1730,7 @@ describe('Channel Routes', () => {
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('Category not found');
       expect(mockEmit).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     });
 
     it('any other failure is not turned into a not-found', async () => {
@@ -1709,6 +1738,7 @@ describe('Channel Routes', () => {
       prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
       try {
         expect((await reorder(ORDER)).status).toBe(500);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
       } finally {
         errSpy.mockRestore();
       }

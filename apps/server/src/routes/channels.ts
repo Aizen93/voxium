@@ -172,16 +172,24 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
     // reorders each held a row the other needed (a deadlock, a 500). A row
     // the validation saw and that is gone by the update (a channel or a
     // category deleted meanwhile) answers as an unknown one, never a 500.
+    // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a channel delete holds
+    // the channel row through its cascade (every message of the channel), a
+    // category delete the category a channel is moved into, a space delete
+    // all of them, and a reorder merely waiting for one must not expire. The
+    // batch is built again for each attempt and run again whole when
+    // PostgreSQL aborts it to break a deadlock: it writes absolute positions,
+    // so a second run writes what the first would have.
     const sorted = [...order].sort(byId);
     try {
-      await prisma.$transaction(
+      await retryOnTransactionConflict(() => prisma.$transaction(
         sorted.map((o: { id: string; position: number; categoryId?: string | null }) =>
           prisma.channel.update({
             where: { id: o.id },
             data: { position: o.position, categoryId: o.categoryId ?? null },
           })
-        )
-      );
+        ),
+        LOCK_WAIT_TRANSACTION_OPTIONS,
+      ), `[Channels] The reorder of channels in ${serverId}`);
     } catch (err) {
       const code = prismaErrorCode(err);
       // The channel row is gone: the update found nothing to update

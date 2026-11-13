@@ -917,6 +917,32 @@ describe('Category Routes', () => {
         expect(prismaMock.category.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['cat-a', 'cat-b', 'cat-c']);
       });
 
+      it('runs the batch with the long budget: a reorder waiting on a category row a long delete holds does not expire', async () => {
+        expect((await reorder(ORDER)).status).toBe(200);
+
+        expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+      });
+
+      it('a batch PostgreSQL aborted to break a deadlock is built again and run again', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }));
+        try {
+          const res = await reorder(ORDER);
+
+          expect(res.status).toBe(200);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+          const [first, second] = prismaMock.$transaction.mock.calls.map(([batch]: any[]) => batch);
+          // fresh statements for the second attempt, in the same fixed order
+          expect(second).not.toBe(first);
+          expect(second).toHaveLength(3);
+          expect(prismaMock.category.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['cat-a', 'cat-b', 'cat-c', 'cat-a', 'cat-b', 'cat-c']);
+          expect(prismaMock.$transaction).toHaveBeenLastCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+          expect(warn).toHaveBeenCalledWith(expect.stringMatching(/reorder of categories in srv-1 was aborted by a deadlock or a serialization failure; retrying \(1 of 2\)/));
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
       it('a category deleted between the validation and the update answers 404 Category, not a 500, and announces nothing', async () => {
         prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
 
@@ -925,6 +951,8 @@ describe('Category Routes', () => {
         expect(res.status).toBe(404);
         expect(res.body.error).toBe('Category not found');
         expect(mockEmit).not.toHaveBeenCalled();
+        // the answer, never retried
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
       });
 
       it('any other failure is not turned into a not-found', async () => {
@@ -932,6 +960,7 @@ describe('Category Routes', () => {
         prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
         try {
           expect((await reorder(ORDER)).status).toBe(500);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
         } finally {
           errSpy.mockRestore();
         }
