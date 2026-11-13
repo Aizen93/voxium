@@ -739,8 +739,10 @@ function demotedRow(result: unknown): boolean {
  * Hand a space the account being deleted owns to its heir: the heir becomes a
  * member first when they are not one, or their row turns owner. Its batch
  * takes the space row and member rows in the order a space delete and the
- * owner's transfer do, so PostgreSQL may abort it to break a deadlock with a
- * removal or an account deletion; the WHOLE attempt then runs again
+ * owner's transfer do (for an heir who is a member: the space row, then the
+ * heir's member row, then the owner update that key-shares the heir's
+ * account row), so PostgreSQL may abort it to break a deadlock with a
+ * removal of the heir (member row, then space row); the WHOLE attempt then runs again
  * (retryOnTransactionConflict), the heir's membership read included, so each
  * attempt picks its branch from what is true now. The statements carry the
  * checks, so a retry cannot outlive them: the space row is updated only while
@@ -750,8 +752,8 @@ function demotedRow(result: unknown): boolean {
  * the heir joining meanwhile). Both batches carry the long budget
  * (LOCK_WAIT_TRANSACTION_OPTIONS): the heir's member and account rows are
  * held by an account deletion of the heir through its cascade, and the space
- * row by a space delete through its own; a batch, like an interactive
- * transaction, expires after Prisma's 5 s default while it waits.
+ * row by a space delete through its own; the batch form is bound by Prisma's
+ * default budget as an interactive transaction is.
  *
  * Both batches also demote the departing account's own member row from
  * owner to admin: the account deletion that follows can still fail (the
@@ -774,8 +776,14 @@ export async function transferOwnedSpaceToHeir(
       });
 
       if (existingMembership) {
-        // Already a member: their row turns owner with the space row
-        const [, , demotion] = await prisma.$transaction([
+        // Already a member: their row turns owner with the space row. The
+        // space row, then the heir's member row, both FOR NO KEY UPDATE,
+        // before the owner update key-shares the heir's account row: the
+        // order of the owner's transfer route (routes/servers.ts), so an
+        // account deletion of the heir queues with this batch on the member row
+        const [, , , , demotion] = await prisma.$transaction([
+          prisma.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR NO KEY UPDATE`,
+          prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${heirId} AND server_id = ${serverId} FOR NO KEY UPDATE`,
           prisma.server.update({ where: { id: serverId, ownerId: fromId }, data: { ownerId: heirId } }),
           prisma.serverMember.update({
             where: { userId_serverId: { userId: heirId, serverId } },

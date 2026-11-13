@@ -73,33 +73,39 @@ export interface RemoveMemberOptions {
  *    Cross-node via the Redis reverse lookup + the cluster eviction fan-out
  *    (the channel's mediasoup Router lives on exactly one node).
  * 2. One transaction, which commits whole or not at all:
- *    a. with a ban (a kick), FIRST, the webhooks whose LIVE URL the member
- *       holds (created by them and never rotated by another, or last rotated
- *       by them: a rotate hands its caller the only working URL), enabled or
+ *    a. FIRST, the membership row, locked FOR UPDATE (the strength its
+ *       delete in d takes). Every transaction that needs this row and a row
+ *       this one takes later queues with it on this row: an account deletion
+ *       of the member deletes its member rows before its cascade reaches the
+ *       member's webhooks (b) and account row (f, the ban's key); a transfer
+ *       to the member locks this row before it key-shares the member's
+ *       account row. A secure-channel writer's key share on this row, and a
+ *       role assignment to the member (whose row in member_roles key-shares
+ *       it), are waited for here, so `authorize` below sees them committed;
+ *    b. with a ban (a kick), the webhooks whose LIVE URL the member holds
+ *       (created by them and never rotated by another, or last rotated by
+ *       them: a rotate hands its caller the only working URL), enabled or
  *       not, disabled and marked `creatorRemovedAt`. The URL is a bearer
  *       credential that may have left with the kicked member, so it stops
  *       posting the moment they are out, and a row already disabled carries
  *       the mark too, so whoever enables it later is warned; any enable or a
- *       rotate clears the mark. A voluntary leave keeps them. First because a
- *       60 s purge-delete may hold one of these rows, and that wait must come
- *       before this transaction takes any row a create or a join needs.
- *       Right after it (or first, without a ban), `authorize` again, on this
- *       transaction's client, taking no lock: a check made before that wait
- *       is not the one in force when the membership row goes;
- *    b. the pending/declined join request gone;
- *    c. the membership row gone. Every writer of a secure-channel row locks
- *       that row first (FOR KEY SHARE), so this delete waits for one in progress.
- *       Before any statement that locks the space row: a secure-channel
- *       creation locks the member rows and then the space row, and taking
- *       them in the other order here could deadlock with it;
- *    d. THEN the member's secure-channel state (removeSecureMembershipsInTx):
+ *       rotate clears the mark. A voluntary leave keeps them. Before the rows
+ *       a create or a join needs: a purge-delete may hold one of these rows.
+ *       Right after it (or right after a, without a ban), `authorize` again,
+ *       on this transaction's client: the check in force when the membership
+ *       row goes is the one made after every wait;
+ *    c. the pending/declined join request gone;
+ *    d. the membership row gone. Before any statement that locks the space
+ *       row: a secure-channel creation locks the member rows and then the
+ *       space row, in that order;
+ *    e. THEN the member's secure-channel state (removeSecureMembershipsInTx):
  *       every secure channel they created or belong to locked FOR UPDATE in
  *       id order before anything is deleted, then the ones they created
  *       deleted (a creator never stays the manager of a channel in a space
  *       they left; if the delete fails, the departure fails), their rows in
  *       the others and the key shares addressed to them there removed. After
- *       (c), so it also removes a row an invite wrote while (c) waited for it;
- *    e. with a ban, the ServerBan upsert, and memberCount − 1 (never below
+ *       (d), so it also removes a row an invite wrote before (a) had the row;
+ *    f. with a ban, the ServerBan upsert, and memberCount − 1 (never below
  *       zero), LAST: both lock the space row (the ban's foreign key takes a
  *       key-share lock on it), which every join, secure-channel creation and
  *       webhook creation also takes, so it is held for the shortest time,
@@ -115,7 +121,7 @@ export interface RemoveMemberOptions {
  *    rooms emptied).
  * 4. The room invariant's other half: sockets leave `server:{id}` and every
  *    `channel:{id}` room, remaining members get member:left.
- * 5. When step 2a disabled any webhook: the `webhook:changed` refetch hint to
+ * 5. When step 2b disabled any webhook: the `webhook:changed` refetch hint to
  *    `server:{id}` (the server id alone), after step 4 so the removed
  *    member's sockets are no longer in the room.
  *
@@ -155,6 +161,8 @@ export async function removeMemberFromServer(
         // One statement after the other: they share the transaction's one
         // connection, and the order is the one documented above. Nothing in
         // here reads through the shared client.
+        // The membership row first (2a). No row: the delete below answers.
+        await tx.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${userId} AND server_id = ${serverId} FOR UPDATE`;
         let disabled = 0;
         if (opts.ban) {
           ({ count: disabled } = await tx.webhook.updateMany({

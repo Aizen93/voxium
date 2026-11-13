@@ -40,6 +40,7 @@ let order: string[] = [];
  */
 function makeTxMock() {
   const deleteMany = () => vi.fn().mockResolvedValue({ count: 0 });
+  let memberDeletes = 0;
   return {
     user: {
       delete: vi.fn(async () => {
@@ -54,9 +55,13 @@ function makeTxMock() {
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
     // The memberships go first, explicitly, ahead of the secure-channel state,
-    // with RETURNING server_id: the spaces whose member count moves
-    $queryRaw: vi.fn(async () =>
-      ((await prismaMock.serverMember.findMany()) as Array<{ serverId: string }>).map((m) => ({ server_id: m.serverId }))),
+    // with RETURNING server_id: the spaces whose member count moves. Then the
+    // account row lock and the second member-row delete, which finds none here
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      if (/FROM users/.test(strings.join('?'))) return [{ id: 'locked' }];
+      if (memberDeletes++ > 0) return [];
+      return ((await prismaMock.serverMember.findMany()) as Array<{ serverId: string }>).map((m) => ({ server_id: m.serverId }));
+    }),
     // The E2E tables purgeE2EMaterial touches — present so the REAL purge can
     // be driven against this client, not just the observing mock.
     e2EKeyShare: { deleteMany: deleteMany() },
@@ -120,6 +125,8 @@ const prismaMock: Record<string, any> = {
   // statements) and the callback/interactive form (used by purge + delete).
   $transaction: vi.fn((arg: any) =>
     typeof arg === 'function' ? arg(txMock) : Promise.all(arg)),
+  // the row locks a transfer batch takes first (the space row, the heir's member row)
+  $queryRaw: vi.fn((strings: TemplateStringsArray) => ({ op: 'lock', sql: strings.join('?') })),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -1258,6 +1265,21 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
       expect(prismaMock.serverMember.updateMany).toHaveBeenCalledWith(demotion);
       const batch = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg))![0];
       expect(batch).toContain(prismaMock.serverMember.updateMany.mock.results[0].value);
+    });
+
+    it('to an heir already a member: the batch locks the space row, then the heir\'s member row, both FOR NO KEY UPDATE, before the owner update', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+
+      expect((await transferToHeir()).status).toBe(200);
+
+      const batch = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg))![0] as Array<{ op?: string; sql?: string }>;
+      expect(batch.slice(0, 2)).toEqual([
+        { op: 'lock', sql: 'SELECT id FROM servers WHERE id = ? FOR NO KEY UPDATE' },
+        { op: 'lock', sql: 'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE' },
+      ]);
+      expect(prismaMock.$queryRaw.mock.calls.map((call: unknown[]) => call.slice(1))).toEqual([['srv-b'], ['heir-1', 'srv-b']]);
+      expect(batch[2]).toBe(prismaMock.server.update.mock.results[0].value);
+      expect(batch).toHaveLength(5);
     });
 
     it('to an heir who joins with it: the departing account\'s own row is demoted to admin in the same batch', async () => {

@@ -11,6 +11,8 @@ const order: string[] = [];
 
 /** The interactive transaction's client: every statement records itself. */
 const tx = vi.hoisted(() => ({
+  // the membership row lock, the transaction's first statement
+  $queryRaw: vi.fn(),
   webhook: { updateMany: vi.fn() },
   serverBan: { upsert: vi.fn() },
   serverJoinRequest: { deleteMany: vi.fn() },
@@ -72,6 +74,7 @@ beforeEach(() => {
   evict.mockImplementation(async () => { order.push('voice'); });
   prismaMock.messageAttachment.findMany.mockImplementation(async () => { order.push('attachment-keys'); return []; });
   webhooksDisabled(0);
+  tx.$queryRaw.mockImplementation(async () => { order.push('lock:member'); return [{ user_id: 'u-1' }]; });
   tx.serverBan.upsert.mockImplementation(async () => { order.push('ban'); return {}; });
   tx.serverJoinRequest.deleteMany.mockImplementation(async () => { order.push('request'); return { count: 0 }; });
   tx.serverMember.deleteMany.mockImplementation(async () => { order.push('member'); return { count: 1 }; });
@@ -100,11 +103,29 @@ describe('removeMemberFromServer', () => {
 
     expect(order).toEqual([
       'voice', 'attachment-keys',
-      'txn:start', 'request', 'member', 'secure', 'count', 'txn:end',
+      'txn:start', 'lock:member', 'request', 'member', 'secure', 'count', 'txn:end',
       'reads', 'secure:notices', 'left',
     ]);
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(memberLeft).toHaveBeenCalledWith('u-1', 's-1');
+  });
+
+  it('locks the membership row FIRST, FOR UPDATE, on the transaction\'s client: before the webhooks, the check, the request and the delete', async () => {
+    const authorize = vi.fn(async (db: unknown) => { order.push(db === tx ? 'authorize:tx' : 'authorize:shared'); });
+    await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize });
+
+    const inTx = order.slice(order.indexOf('txn:start') + 1, order.indexOf('txn:end'));
+    expect(inTx[0]).toBe('lock:member');
+    expect(inTx.slice(0, 4)).toEqual(['lock:member', 'webhooks.disable', 'authorize:tx', 'request']);
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+    const [strings, ...values] = tx.$queryRaw.mock.calls[0] as unknown as [string[], ...unknown[]];
+    expect(strings.join('?')).toBe('SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR UPDATE');
+    expect(values).toEqual(['u-1', 's-1']);
+  });
+
+  it('a voluntary leave locks the membership row first too', async () => {
+    await removeMemberFromServer('u-1', 's-1');
+    expect(order[order.indexOf('txn:start') + 1]).toBe('lock:member');
   });
 
   it('removes the member\'s secure-channel state INSIDE the transaction, on its client, after the membership row', async () => {
@@ -258,7 +279,7 @@ describe('removeMemberFromServer', () => {
     // before the count (which locks it anyway), after the member row and the
     // secure-channel cascade, it is held for the shortest time
     expect(order.slice(0, order.indexOf('txn:end') + 1)).toEqual([
-      'attachment-keys', 'txn:start', 'webhooks.disable', 'request', 'member', 'secure', 'ban', 'count', 'txn:end',
+      'attachment-keys', 'txn:start', 'lock:member', 'webhooks.disable', 'request', 'member', 'secure', 'ban', 'count', 'txn:end',
     ]);
     expect(tx.serverBan.upsert).toHaveBeenCalledWith({
       where: { serverId_userId: { serverId: 's-1', userId: 'u-1' } },
@@ -388,7 +409,7 @@ describe('removeMemberFromServer', () => {
           { open: 0, client: 'shared' }, { open: 1, client: 'tx' },
         ]);
         const lastAttempt = order.slice(order.lastIndexOf('authorize:shared'));
-        expect(lastAttempt.slice(0, 5)).toEqual(['authorize:shared', 'txn:start', 'webhooks.disable', 'authorize:tx', 'request']);
+        expect(lastAttempt.slice(0, 6)).toEqual(['authorize:shared', 'txn:start', 'lock:member', 'webhooks.disable', 'authorize:tx', 'request']);
         expect(lastAttempt.indexOf('member')).toBeGreaterThan(lastAttempt.indexOf('authorize:tx'));
       } finally {
         warn.mockRestore();
@@ -510,11 +531,11 @@ describe('removeMemberFromServer: a kick disables the removed creator\'s webhook
     expect(args.data.creatorRemovedAt.getTime()).toBeGreaterThanOrEqual(before);
   });
 
-  it('rides FIRST in the SAME transaction as the membership delete (a removal never commits without it; the row lock of a purge is waited for before any other row is taken)', async () => {
+  it('rides in the SAME transaction as the membership delete, right after the membership row lock (a removal never commits without it; the row lock of a purge is waited for before the rows a create or a join needs)', async () => {
     webhooksDisabled(1);
     await removeMemberFromServer('u-1', 's-1', KICK);
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-    expect(order[order.indexOf('txn:start') + 1]).toBe('webhooks.disable');
+    expect(order.slice(order.indexOf('txn:start') + 1, order.indexOf('txn:start') + 3)).toEqual(['lock:member', 'webhooks.disable']);
   });
 
   it('when it disabled any: one webhook:changed with the server id alone, AFTER member:left (the removed member is out of the room)', async () => {

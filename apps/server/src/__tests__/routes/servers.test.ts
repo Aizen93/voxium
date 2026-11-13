@@ -2453,6 +2453,28 @@ describe('Server Routes', () => {
         });
       });
 
+      it('locks the space row, then the heir\'s member row, both FOR NO KEY UPDATE, before the owner update key-shares the heir\'s account row', async () => {
+        const built: string[] = [];
+        prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+          built.push(`${strings.join('?')} [${values.join(',')}]`);
+          return { op: 'lock' };
+        });
+        prismaMock.server.update.mockImplementation(() => { built.push('server.update'); return { op: 'owner' }; });
+        prismaMock.serverMember.update.mockImplementation(({ where }: any) => { built.push(`member.update ${where.userId_serverId.userId}`); return { op: 'member' }; });
+        prismaMock.$transaction.mockResolvedValue([]);
+
+        expect((await transfer()).status).toBe(200);
+
+        // the batch's statements, in the order they run
+        expect(built).toEqual([
+          'SELECT id FROM servers WHERE id = ? FOR NO KEY UPDATE [srv-1]',
+          'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE [user-2,srv-1]',
+          'server.update', 'member.update user-2', 'member.update user-1',
+        ]);
+        const [batch] = prismaMock.$transaction.mock.calls[0] as [unknown[]];
+        expect(batch).toEqual([{ op: 'lock' }, { op: 'lock' }, { op: 'owner' }, { op: 'member' }, { op: 'member' }]);
+      });
+
       it('runs with the long budget: an account deletion of any member holds the space row through its cascade', async () => {
         prismaMock.$transaction.mockResolvedValue([]);
 
