@@ -6360,12 +6360,36 @@ describe('E2EService — lifecycle', () => {
             state.inRun = 0;
             await after(again, 20_000); // past the decrypt-miss throttle
             expect((await again.decryptMessage(miss)).failed).toBe(true);
-            expect(vi.getTimerCount()).toBe(1); // armed again: the count began at zero
+                        expect(vi.getTimerCount()).toBe(1); // armed again: the count began at zero
           } finally {
             warn.mockRestore();
           }
           void alice;
         });
+
+        it('arms nothing and counts nothing for an answer lost while the device is offline', async () => {
+          const nav = { onLine: false };
+          vi.stubGlobal('navigator', nav);
+          const { bob, again, state, warn } = await scriptedClaims();
+          const retries = () => (again as unknown as { lostClaimRetries: number }).lostClaimRetries;
+          try {
+            expect(state.claims).toBe(2); // the start-up run lost its second answer
+            expect(vi.getTimerCount()).toBe(0);
+            expect(retries()).toBe(0);
+
+            // online again: a lost answer arms the timer and counts
+            nav.onLine = true;
+            state.inRun = 0;
+            const miss = { id: 'mo', conversationId: 'c1', authorId: bob.userId, content: buildMegolmEnvelope('b2ZmbGluZQ', 'Y2lwaGVy') };
+            expect((await again.decryptMessage(miss)).failed).toBe(true);
+            expect(vi.getTimerCount()).toBe(1);
+            expect(retries()).toBe(1);
+          } finally {
+                        warn.mockRestore();
+            vi.unstubAllGlobals();
+          }
+        });
+
       });
 
 

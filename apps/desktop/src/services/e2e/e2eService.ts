@@ -3480,11 +3480,14 @@ export class E2EService {
    * lease passes, and nothing else claims again before the next decrypt miss
    * or start. One timer queues a claim once the lease has passed; a later lost
    * answer re-arms it, dispose() clears it. LOST_CLAIM_RETRY_MAX in a row at
-   * most, so a device that stays offline stops; a run that ends with no lost
+   * most (none while the device is offline: not armed, not counted), so a device that stays offline stops; a run that ends with no lost
    * claim (one at least answered) starts the count again (claimKeyShares).
    */
   private claimAgainAfterLease(): void {
-    if (this.disposed || this.lostClaimRetries >= LOST_CLAIM_RETRY_MAX) return;
+        if (this.disposed || this.lostClaimRetries >= LOST_CLAIM_RETRY_MAX) return;
+    // Offline: nothing is armed and the attempt is not counted; the fetches of
+    // the reconnect cause the next claim.
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     this.lostClaimRetries++;
     clearTimeout(this.lostClaimTimer);
     this.lostClaimTimer = setTimeout(() => {
