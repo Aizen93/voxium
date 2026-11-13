@@ -147,9 +147,15 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
     }
     // The membership's key to the space refused: the space is gone, the
     // answer for a space that does not exist (the row lock above normally
-    // finds that first). A joiner whose own account is gone is another key,
-    // and stays what it is.
+    // finds that first).
     if (violatesForeignKey(err, 'server_members_server_id_fkey')) throw new NotFoundError('Server');
+    // Its key to the joiner refused: the joiner's account was deleted while
+    // the join ran (the insert's key check waits for that deletion, which
+    // holds the account row through its cascade, then finds no row). The
+    // joiner is the caller of an invite or discovery join, the requester of
+    // an approval (whose request goes with the account, so that route
+    // usually meets the missing request first): the account does not exist.
+    if (violatesForeignKey(err, 'server_members_user_id_fkey')) throw new NotFoundError('User');
     throw err;
   }
 
@@ -214,6 +220,9 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   try {
     await seedReads();
   } catch (err) {
+    // The joiner's account deleted since the commit (its deletion took the
+    // new membership with the row): the account does not exist.
+    if (violatesForeignKey(err, 'channel_reads_user_id_fkey')) throw new NotFoundError('User');
     // A channel read above was deleted before the insert: the whole space,
     // being deleted since the commit, answers as a space that does not
     // exist; a single channel deleted meanwhile leaves the others to seed,

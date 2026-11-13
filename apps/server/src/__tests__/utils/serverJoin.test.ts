@@ -379,11 +379,39 @@ describe('joinServerMember', () => {
         .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
     });
 
-    it('a joiner whose own account is gone is another key: not reported as a missing space', async () => {
+    it('a joiner whose account was deleted while the join ran answers 404 User, not a missing space nor a 500', async () => {
+      prismaMock.$transaction.mockRejectedValue(fk('server_members_user_id_fkey', 'ServerMember'));
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'invite' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'User not found' });
+      expect(broadcastMemberJoined).not.toHaveBeenCalled();
+      expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
+    });
+
+    it('the joiner\'s key matched by the constraint the adapter names, even when the message does not quote it', async () => {
       const err = fk('server_members_user_id_fkey', 'ServerMember');
+      err.message = 'Foreign key constraint violated';
+      prismaMock.$transaction.mockRejectedValue(err);
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'approval' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'User not found' });
+    });
+
+    it('any other foreign key stays what it is', async () => {
+      const err = fk('channel_members_channel_id_fkey', 'ChannelMember');
       prismaMock.$transaction.mockRejectedValue(err);
 
       await expect(joinServerMember('u-1', 's-1', { via: 'discovery' })).rejects.toBe(err);
+    });
+
+    it('the joiner\'s account deleted after the commit, before the read markers are seeded, answers 404 User', async () => {
+      prismaMock.channelRead.createMany.mockRejectedValueOnce(fk('channel_reads_user_id_fkey', 'ChannelRead'));
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'discovery' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'User not found' });
+      // seeded once, never read again as if a channel had gone
+      expect(prismaMock.channelRead.createMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.server.findUnique).not.toHaveBeenCalled();
     });
 
     it('the space deleted after the commit, before the read markers are seeded (its channels went with it)', async () => {
