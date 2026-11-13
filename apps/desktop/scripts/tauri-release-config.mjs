@@ -14,9 +14,11 @@
 // adds the policy only to the pages it serves itself, so no policy applies
 // there and the dev build reaches localhost:3001.
 //
-// This is the project's own release: tauri.conf.json's hosts, update feed and
-// signing key. A build for another server is `pnpm tauri:build`
-// (tauri-build-config.mjs), which replaces all three.
+// This is the project's own release: tauri.conf.json's hosts, update feed,
+// signing key and identifier (`com.voxium.app`, which every installed app
+// keeps its data and credential-store entries under: this overlay never sets
+// it). A build for another server is `pnpm tauri:build`
+// (tauri-build-config.mjs), which replaces all four.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

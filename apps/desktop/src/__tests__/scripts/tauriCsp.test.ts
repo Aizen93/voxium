@@ -16,7 +16,7 @@ import { parseAssetOrigins, withAssetOrigins, releaseConfig } from '../../../scr
 // the page's http URL, not a file URL
 const CONF_PATH = resolve(__dirname, '../../../src-tauri/tauri.conf.json');
 const CLI_PATH = resolve(__dirname, '../../../scripts/tauri-release-config.mjs');
-const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as { build: { devUrl: string }; app: { security: { csp: string; devCsp?: string } } };
+const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as { identifier: string; build: { devUrl: string }; app: { security: { csp: string; devCsp?: string } } };
 const BASE = conf.app.security.csp;
 const ORIGIN = 'https://assets.example.com';
 
@@ -205,6 +205,25 @@ describe('releaseConfig', () => {
   });
 });
 
+describe('the official identifier', () => {
+  // Every installed official app keeps its webview data, its session and its
+  // vault key under this identifier (lib.rs derives the credential-store
+  // names from it): a release that changed it would start every user on an
+  // empty profile, signed out, without the key to their vault
+  it('is com.voxium.app in tauri.conf.json', () => {
+    expect(conf.identifier).toBe('com.voxium.app');
+  });
+
+  it('is never set by the release overlay, with or without a storage origin', () => {
+    expect(releaseConfig(conf, undefined)).toBeNull();
+    for (const origin of [ORIGIN, `${ORIGIN}, https://cdn.example.com:9000`]) {
+      const overlay = releaseConfig(conf, origin) as Record<string, unknown>;
+      expect(overlay).not.toHaveProperty('identifier');
+      expect(JSON.stringify(overlay)).not.toContain('identifier');
+    }
+  });
+});
+
 describe('tauri-release-config.mjs (the CLI the release workflow runs)', () => {
   const run = (env: Record<string, string | undefined>) =>
     // stderr captured, not inherited: the malformed-variable case prints its stack
@@ -221,11 +240,12 @@ describe('tauri-release-config.mjs (the CLI the release workflow runs)', () => {
     expect(printed.app.security.csp).toBe(withAssetOrigins(BASE, [ORIGIN]));
   });
 
-  it('prints only the policy: the release keeps tauri.conf.json\'s updater and bundle settings as they are', () => {
+  it('prints only the policy: the release keeps tauri.conf.json\'s identifier, updater and bundle settings as they are', () => {
     const printed = JSON.parse(run({ TAURI_ASSET_ORIGIN: 'https://storage.example.org' })) as Record<string, unknown>;
     expect(Object.keys(printed)).toEqual(['app']);
     expect(printed.app).toEqual({ security: { csp: expect.any(String) } });
     expect(JSON.stringify(printed)).not.toMatch(/localhost/);
+    expect(JSON.stringify(printed)).not.toContain('identifier');
   });
 
   it('fails the build on a malformed variable instead of shipping the base policy silently', () => {

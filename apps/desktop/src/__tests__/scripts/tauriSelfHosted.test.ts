@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -10,6 +11,7 @@ import {
   selfHostedCsp,
   parseUpdaterPubkey,
   selfHostedUpdater,
+  selfHostedIdentifier,
   selfHostedConfig,
 } from '../../../scripts/tauriSelfHosted.mjs';
 import { releaseConfig } from '../../../scripts/tauriCsp.mjs';
@@ -27,7 +29,7 @@ import { releaseConfig } from '../../../scripts/tauriCsp.mjs';
 const DESKTOP = resolve(__dirname, '../../..');
 const CONF_PATH = join(DESKTOP, 'src-tauri', 'tauri.conf.json');
 const CLI_PATH = join(DESKTOP, 'scripts', 'tauri-build-config.mjs');
-type Conf = { app: { security: { csp: string } }; bundle: { createUpdaterArtifacts: unknown }; plugins: { updater: { endpoints: string[]; pubkey: string } } };
+type Conf = { identifier: string; app: { security: { csp: string } }; bundle: { createUpdaterArtifacts: unknown }; plugins: { updater: { endpoints: string[]; pubkey: string } } };
 const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as Conf;
 const BASE = conf.app.security.csp;
 const OFFICIAL_FEED = conf.plugins.updater.endpoints;
@@ -280,12 +282,96 @@ describe('selfHostedUpdater', () => {
   });
 });
 
+describe('selfHostedIdentifier (a build for another server keeps its own local state)', () => {
+  // The identifier names the webview's data folder and, in lib.rs, the
+  // credential-store services: one per server, the same on every rebuild
+  const IDENTIFIER_RE = /^com\.voxium\.selfhosted\.[a-z][a-z0-9]*$/;
+  const digestOf = (origin: string) => createHash('sha256').update(origin).digest('hex').slice(0, 16);
+
+  it('is the same for the same origin however the URL is written: case, default port, trailing slash, path', () => {
+    const id = selfHostedIdentifier(API);
+    for (const url of [
+      'HTTPS://Chat.Example.ORG/api/v1',
+      'https://chat.example.org:443/api/v1',
+      'https://chat.example.org/',
+      'https://chat.example.org',
+      'https://chat.example.org/somewhere/else',
+      ' https://chat.example.org/api/v1 ',
+    ]) {
+      expect(selfHostedIdentifier(url), url).toBe(id);
+    }
+  });
+
+  it('keeps a final dot as the URL parser does, like the origin the app stamps its sessions with: another origin, another identifier', () => {
+    expect(new URL('https://chat.example.org./api/v1').origin).toBe('https://chat.example.org.');
+    expect(selfHostedIdentifier('https://chat.example.org./api/v1')).toBe(`com.voxium.selfhosted.s${digestOf('https://chat.example.org.')}`);
+    expect(selfHostedIdentifier('https://chat.example.org./api/v1')).not.toBe(selfHostedIdentifier(API));
+  });
+
+  it('differs for another origin: another host, scheme or port', () => {
+    const origins = [
+      'https://chat.example.org',
+      'https://chat.example.net',
+      'https://api.chat.example.org',
+      'http://chat.example.org',
+      'https://chat.example.org:8443',
+      'http://10.0.0.5:3001',
+      'http://localhost:3001',
+    ];
+    const ids = origins.map((origin) => selfHostedIdentifier(`${origin}/api/v1`));
+    expect(new Set(ids).size).toBe(origins.length);
+  });
+
+  it('is `com.voxium.selfhosted.` and a label of a letter and the first 16 hex digits of the origin\'s SHA-256', () => {
+    for (const [url, origin] of [
+      [API, 'https://chat.example.org'],
+      ['http://10.0.0.5:3001/api/v1', 'http://10.0.0.5:3001'],
+      ['https://xn--bcher-kva.example/api/v1', 'https://xn--bcher-kva.example'],
+      ['https://Bücher.example/api/v1', 'https://xn--bcher-kva.example'],
+    ] as const) {
+      const id = selfHostedIdentifier(url);
+      expect(id, url).toMatch(IDENTIFIER_RE);
+      expect(id, url).toBe(`com.voxium.selfhosted.s${digestOf(origin)}`);
+    }
+  });
+
+  it('can never be the official identifier, not even for the official server', () => {
+    expect(conf.identifier).toBe('com.voxium.app');
+    for (const url of [API, 'https://voxium.app/api/v1', 'https://api.voxium.app/api/v1', 'http://localhost:3001/api/v1']) {
+      const id = selfHostedIdentifier(url);
+      expect(id).not.toBe(conf.identifier);
+      expect(id.startsWith('com.voxium.selfhosted.')).toBe(true);
+    }
+  });
+
+  it('refuses what the API URL check refuses, naming the setting', () => {
+    expect(() => selfHostedIdentifier(undefined)).toThrow(/VITE_API_URL is not set/);
+    expect(() => selfHostedIdentifier('wss://chat.example.org')).toThrow(/VITE_API_URL must use http: or https:/);
+  });
+
+  it('comes from the API origin alone: no input, base identifier or other setting changes it', () => {
+    const expected = selfHostedIdentifier(API);
+    const overlay = selfHostedConfig(conf, {
+      apiUrl: API,
+      wsUrl: 'https://ws.example.org',
+      assetOrigin: STORAGE,
+      updaterEndpoints: FEED,
+      updaterPubkey: KEY,
+      // not a setting: ignored
+      identifier: 'com.voxium.app',
+    } as Parameters<typeof selfHostedConfig>[1]);
+    expect(overlay.identifier).toBe(expected);
+    expect(selfHostedConfig({ ...conf, identifier: 'com.example.other' } as Conf, { apiUrl: API, wsUrl: WS }).identifier).toBe(expected);
+  });
+});
+
 describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
   const build = (inputs: Parameters<typeof selfHostedConfig>[1]) => selfHostedConfig(conf, inputs);
 
   it('one host, no storage origin, no updater', () => {
     const overlay = build({ apiUrl: API, wsUrl: WS });
     expect(overlay).toEqual({
+      identifier: selfHostedIdentifier(API),
       app: {
         security: {
           csp: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://chat.example.org wss://chat.example.org; img-src 'self' blob: data: https://chat.example.org; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:",
@@ -330,12 +416,13 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
     expect(Object.keys(overlay.plugins.updater).sort()).toEqual(Object.keys(conf.plugins.updater).sort());
   });
 
-  it('differs from the official release overlay, which keeps tauri.conf.json\'s updater and the project hosts', () => {
+  it('differs from the official release overlay, which keeps tauri.conf.json\'s identifier, updater and the project hosts', () => {
     const official = releaseConfig(conf, STORAGE)!;
     expect(Object.keys(official)).toEqual(['app']);
     for (const host of projectHosts) expect(official.app.security.csp).toContain(host);
     const selfHosted = build({ apiUrl: API, wsUrl: WS, assetOrigin: STORAGE });
-    expect(Object.keys(selfHosted)).toEqual(['app', 'bundle', 'plugins']);
+    expect(Object.keys(selfHosted)).toEqual(['identifier', 'app', 'bundle', 'plugins']);
+    expect(selfHosted.identifier).not.toBe(conf.identifier);
   });
 
   it('refuses malformed inputs instead of shipping a weaker or broken build', () => {
@@ -410,6 +497,13 @@ describe('tauri-build-config.mjs (the CLI `pnpm tauri:build` runs)', () => {
     expect(result.stderr).toContain('TAURI_SIGNING_PRIVATE_KEY is not set here');
     const signed = run([], { TAURI_ASSET_ORIGIN: STORAGE, TAURI_UPDATER_ENDPOINTS: FEED, TAURI_UPDATER_PUBKEY: KEY, TAURI_SIGNING_PRIVATE_KEY: 'placeholder' });
     expect(signed.stderr).not.toContain('TAURI_SIGNING_PRIVATE_KEY');
+  });
+
+  it('prints the identifier of the server the app is compiled for, and no variable sets another', () => {
+    writeEnvFiles({ '.env': `VITE_API_URL=${API}\nVITE_WS_URL=${WS}\nVITE_IDENTIFIER=com.voxium.app\n` });
+    const result = run([], { TAURI_IDENTIFIER: 'com.voxium.app', TAURI_BUNDLE_IDENTIFIER: 'com.voxium.app', IDENTIFIER: 'com.voxium.app' });
+    expect(result.status, result.stderr).toBe(0);
+    expect((JSON.parse(result.stdout) as Conf).identifier).toBe(selfHostedIdentifier(API));
   });
 
   it('warns when no storage origin is set', () => {

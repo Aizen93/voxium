@@ -2,7 +2,9 @@
 // Prints (or writes, with --out) the JSON `tauri build --config <file>`
 // merges over tauri.conf.json for a self-hosted desktop build
 // (tauriSelfHosted.mjs): a Content Security Policy naming the server the app
-// is compiled for and its object store, and the builder's own updater or none.
+// is compiled for and its object store, the builder's own updater or none,
+// and an app identifier derived from the API origin (so the build keeps its
+// local state apart from the official app's and other servers' builds).
 // `pnpm tauri:build` runs it, then `tauri build` with the file.
 //
 // Read from the same places as the build that compiles the frontend:

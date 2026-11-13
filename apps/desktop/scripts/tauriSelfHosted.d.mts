@@ -12,6 +12,7 @@ export interface UpdaterBlock {
 }
 
 export interface SelfHostedOverlay {
+  identifier: string;
   app: { security: { csp: string } };
   bundle: { createUpdaterArtifacts: boolean };
   plugins: { updater: UpdaterBlock };
@@ -30,6 +31,7 @@ export function selfHostedUpdater(
   pubkeyValue: string | undefined | null,
   official: { endpoints?: string[]; pubkey?: string } | null | undefined,
 ): { createUpdaterArtifacts: boolean; updater: UpdaterBlock };
+export function selfHostedIdentifier(apiUrl: string | undefined | null): string;
 export function selfHostedConfig(
   tauriConf: { app?: { security?: { csp?: string } }; plugins?: { updater?: { endpoints?: string[]; pubkey?: string } } } | null | undefined,
   inputs?: SelfHostedInputs,

@@ -14,12 +14,16 @@
 //   and must name no host;
 // - the updater reads the builder's own feed and key (TAURI_UPDATER_ENDPOINTS
 //   + TAURI_UPDATER_PUBKEY), or there is no updater at all: no update
-//   artifacts (so no signing key is needed) and no endpoint to ask.
+//   artifacts (so no signing key is needed) and no endpoint to ask;
+// - the app identifier is the server's own (`selfHostedIdentifier`), so a
+//   build for another server keeps its own local state: its webview data,
+//   and the credential-store entries lib.rs names after the identifier.
 // The official release does not use this file: it builds tauri.conf.json as
 // is, with the storage origin from tauri-release-config.mjs.
 //
 // Pure functions, so the desktop test suite can pin them.
 
+import { createHash } from 'node:crypto';
 import { isCspHost, isTcpPort, parseAssetOrigins } from './tauriCsp.mjs';
 
 const SERVER_DIRECTIVES = ['connect-src', 'img-src'];
@@ -203,8 +207,36 @@ export function selfHostedUpdater(endpointsValue, pubkeyValue, official) {
 }
 
 /**
+ * The app identifier of a build for the server at `apiUrl`:
+ * `com.voxium.selfhosted.` and a label derived from the API's origin alone
+ * (scheme, lower-cased host, port without the scheme's default: the origin
+ * the app stamps its stored sessions with), so the same server gives the same
+ * identifier on every rebuild and every machine, and no other server gives it.
+ *
+ * Tauri names the webview's data folder after the identifier (on Windows and
+ * Linux at least: the E2E vault and localStorage live there), and lib.rs
+ * names the credential-store services after it: a build for one server never
+ * shares that state with the official app (`com.voxium.app`, which this
+ * prefix can never spell) or with a build for another server.
+ *
+ * A digest of the origin, not the host name: a host may hold what one
+ * platform's identifier rules refuse (a segment starting with a digit or a
+ * hyphen, punycode, a length), and the identifier ends up in folder and
+ * credential names on the user's machine, which would then spell out the
+ * server's address. The label is a letter and the first 16 hex digits of the
+ * origin's SHA-256: `[a-z][a-z0-9]*` like every segment Tauri, macOS and
+ * Android accept, and it reveals nothing. There is deliberately no setting
+ * that overrides it.
+ */
+export function selfHostedIdentifier(apiUrl) {
+  const { origin } = parseServerUrl('VITE_API_URL', apiUrl, ['http:', 'https:']);
+  const digest = createHash('sha256').update(origin, 'utf8').digest('hex').slice(0, 16);
+  return `com.voxium.selfhosted.s${digest}`;
+}
+
+/**
  * The JSON `tauri build --config` merges over tauri.conf.json for a
- * self-hosted build. Always the three parts, never a `null`: tauri-cli 2.12
+ * self-hosted build. Always the four parts, never a `null`: tauri-cli 2.12
  * keeps a null when it combines several `--config` patches, and the JSON
  * merge patch it then applies to tauri.conf.json (json_patch::merge, as
  * tauri-build does with TAURI_CONFIG) removes the key it names. Either way
@@ -220,6 +252,7 @@ export function selfHostedConfig(tauriConf, { apiUrl, wsUrl, assetOrigin, update
   });
   const { createUpdaterArtifacts, updater } = selfHostedUpdater(updaterEndpoints, updaterPubkey, tauriConf?.plugins?.updater);
   return {
+    identifier: selfHostedIdentifier(apiUrl),
     app: { security: { csp } },
     bundle: { createUpdaterArtifacts },
     plugins: { updater },
