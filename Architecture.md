@@ -781,6 +781,7 @@ erDiagram
         string conversationId
         string sessionId
         string body
+        datetime leasedUntil
     }
 
     E2EMasterKey {

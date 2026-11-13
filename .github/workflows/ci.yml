@@ -290,6 +290,17 @@ jobs:
         working-directory: apps/server
         run: npx prisma migrate deploy
 
+      # The key-share inbox statements on the real database (the route tests
+      # mock Prisma). DATABASE_URL is the job's: the script reads no .env. It
+      # imports the server's inbox module, which needs the built shared
+      # package, and the e2e build of it only comes next.
+      - name: Key-share inbox statements on PostgreSQL
+        env:
+          KEYSHARE_INBOX_CHECK: '1'
+        run: |
+          pnpm build:shared
+          npx tsx scripts/check-keyshare-inbox.ts
+
       # The desktop app imports the BUILT shared package, so Vite would serve a
       # stale (or missing) dist without this.
       - name: Build shared
