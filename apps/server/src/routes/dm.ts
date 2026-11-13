@@ -9,6 +9,13 @@ import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 import { verifyAttachmentUploads } from '../utils/uploadVerification';
 import { shapeMessageRow } from '../utils/messageAuthor';
+import { endDMCall } from '../websocket/dmVoiceHandler';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
+
+/** A step after the conversation delete committed failed: logged, never thrown. */
+function logDeleteFanOutFailure(conversationId: string, step: string, err: unknown): void {
+  console.error(`[DM] Conversation ${conversationId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
+}
 
 const attachmentSelect = {
   select: { id: true, s3Key: true, fileName: true, fileSize: true, mimeType: true, expired: true },
@@ -552,23 +559,37 @@ dmRouter.delete('/:conversationId', rateLimitInteract, async (req: Request<{ con
 
     await getConversationOrThrow(conversationId, userId);
 
-    // Collect attachment S3 keys before cascade delete
-    const attachments = await prisma.messageAttachment.findMany({
-      where: { message: { conversationId } },
-      select: { s3Key: true },
-    });
+    // Collect the attachment keys before the cascade delete, in bounded
+    // batches (utils/attachmentBlobs.ts)
+    const attachmentKeys = await collectAttachmentKeys({ conversationId });
 
     // Delete conversation (cascades messages + attachments + conversation reads)
     await prisma.conversation.delete({ where: { id: conversationId } });
 
-    // Fire-and-forget S3 cleanup
-    if (attachments.length > 0) {
-      deleteMultipleFromS3(attachments.map((a) => a.s3Key)).catch((err) => console.warn('[S3] Failed to delete DM conversation attachments:', err));
+    // The files after the row; never awaited, never throws
+    deleteAttachmentBlobs(attachmentKeys, '[DM]', `conversation ${conversationId}`);
+
+    // Everything below is best effort, each step on its own: the conversation
+    // is gone, so a step that throws is logged and the request still answers
+    // the delete that happened.
+    const io = getIO();
+
+    // A call in progress ends with the conversation: both sides get
+    // dm:voice:ended (sent to dm:{id}, so before that room is emptied), the
+    // call's Redis state goes and the sockets leave dm:voice:{id}. No "call
+    // ended" notice: there is no conversation left to hold it.
+    try {
+      await endDMCall(io, conversationId, { notice: false });
+    } catch (err) {
+      logDeleteFanOutFailure(conversationId, 'ending its call', err);
     }
 
     // Notify the other participant
-    const io = getIO();
-    io.to(`dm:${conversationId}`).emit('dm:conversation:deleted', { conversationId });
+    try {
+      io.to(`dm:${conversationId}`).emit('dm:conversation:deleted', { conversationId });
+    } catch (err) {
+      logDeleteFanOutFailure(conversationId, 'the dm:conversation:deleted notice', err);
+    }
 
     // Remove all sockets from the DM room. An adapter-wide room operation,
     // never a `fetchSockets()` round trip: it waits for every node's reply and
@@ -578,8 +599,16 @@ dmRouter.delete('/:conversationId', rateLimitInteract, async (req: Request<{ con
     // form on this node only when its own message comes back). Published after
     // the notice on the same Redis connection, so peers deliver it first.
     const rooms = [`dm:${conversationId}`];
-    io.local.in(rooms).socketsLeave(rooms);
-    io.in(rooms).socketsLeave(rooms);
+    try {
+      io.local.in(rooms).socketsLeave(rooms);
+    } catch (err) {
+      logDeleteFanOutFailure(conversationId, 'the local room leave', err);
+    }
+    try {
+      io.in(rooms).socketsLeave(rooms);
+    } catch (err) {
+      logDeleteFanOutFailure(conversationId, 'the cluster room leave', err);
+    }
 
     res.json({ success: true, message: 'Conversation deleted' });
   } catch (err) {

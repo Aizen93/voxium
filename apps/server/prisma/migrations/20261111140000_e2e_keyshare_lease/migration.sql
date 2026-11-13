@@ -1,0 +1,19 @@
+-- Key-share leases (docs/e2e-dm-spec.md §12.3).
+--
+-- A leasing claim (GET /e2e/keyshares?deviceId=…&lease=1) no longer deletes
+-- the shares it hands out: it reserves each one until leased_until, and the
+-- device deletes it with POST /e2e/keyshares/ack once it has imported it (or
+-- found it unusable). A share whose lease has passed is claimable again, by
+-- either kind of claim; a legacy claim (no lease=1, desktop 2.1.x) still
+-- deletes what it hands out, and skips shares under a live lease.
+--
+-- UTC like every other timestamp column here: the routes write and compare it
+-- as (now() AT TIME ZONE 'UTC'), the database clock, never a node's. NULL:
+-- never handed out by a leasing claim.
+--
+-- A nullable column without a default is a catalog-only change: no table
+-- rewrite, no backfill. No index: a claim scans one device's inbox through
+-- e2e_key_shares_recipient_user_id_recipient_device_id_create_idx and filters
+-- the lease there; an inbox holds at most KEYSHARE_STORE_CAP_PER_SENDER rows
+-- per sender.
+ALTER TABLE "e2e_key_shares" ADD COLUMN "leased_until" TIMESTAMP(3);

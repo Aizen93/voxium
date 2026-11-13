@@ -1065,7 +1065,7 @@ export interface CommunityTheme extends CommunityThemeData {
 
 export type AuditAction =
   | 'user.ban' | 'user.unban' | 'user.delete' | 'user.role_change'
-  | 'server.delete'
+  | 'server.delete' | 'server.transfer'
   | 'server.discovery_feature' | 'server.discovery_unfeature'
   | 'server.discovery_block' | 'server.discovery_unblock'
   | 'ip_ban.create' | 'ip_ban.delete'

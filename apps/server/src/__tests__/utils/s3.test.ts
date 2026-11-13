@@ -427,3 +427,50 @@ describe('utils/s3 — copyS3Object', () => {
     await expect(copyS3Object('avatars/u1-1.webp', 'avatars/u1-2.webp')).rejects.toThrow('AccessDenied');
   });
 });
+
+describe('utils/s3 — deleteMultipleFromS3', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+    process.env.S3_ASSETS_BUCKET = 'test-bucket';
+  });
+
+  it('answers how many keys the store accepted', async () => {
+    mockSend.mockResolvedValue({ Errors: [{ Key: 'attachments/ch-a/clmsg1-x.png', Code: 'AccessDenied' }] });
+    const { deleteMultipleFromS3 } = await import('../../utils/s3');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(deleteMultipleFromS3(['attachments/ch-a/clmsg1-x.png', 'attachments/ch-a/clmsg2-y.png'])).resolves.toBe(1);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('logs the count and the store\'s codes of the refused keys, never the keys (they carry the file names)', async () => {
+    mockSend.mockResolvedValue({
+      Errors: [
+        { Key: 'attachments/ch-a/clmsg1-medical-report-jane-doe.pdf', Code: 'AccessDenied' },
+        { Key: 'attachments/ch-a/clmsg2-passport-scan.png', Code: 'AccessDenied' },
+        { Key: 'attachments/ch-a/clmsg3-notes.txt', Code: 'InternalError' },
+      ],
+    });
+    const { deleteMultipleFromS3 } = await import('../../utils/s3');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await deleteMultipleFromS3([
+        'attachments/ch-a/clmsg1-medical-report-jane-doe.pdf',
+        'attachments/ch-a/clmsg2-passport-scan.png',
+        'attachments/ch-a/clmsg3-notes.txt',
+        'attachments/ch-a/clmsg4-ok.txt',
+      ]);
+
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledWith('[S3] Failed to delete 3 of 4 objects (AccessDenied, InternalError)');
+      const logged = JSON.stringify(error.mock.calls);
+      expect(logged).not.toContain('medical-report');
+      expect(logged).not.toContain('attachments/');
+    } finally {
+      error.mockRestore();
+    }
+  });
+});

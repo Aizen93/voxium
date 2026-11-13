@@ -20,6 +20,7 @@ const prismaMock: Record<string, any> = {
     update: vi.fn(),
     delete: vi.fn(),
     count: vi.fn(),
+    aggregate: vi.fn(),
   },
   channelMember: {
     findUnique: vi.fn(),
@@ -146,6 +147,26 @@ function mockCallerMembership(isCreator: boolean | null) {
   );
 }
 
+/** The space's members, as the in-transaction member-row lock reads them. */
+let spaceMembers = new Set<string>();
+/** Users a concurrent removal took out of the channel after the write committed. */
+let removedSinceCommit = new Set<string>();
+
+/**
+ * The transactions' row locks, answered by table: the member rows (FOR
+ * SHARE) return the ids among `spaceMembers`, a channel or space row lock
+ * returns its row.
+ */
+async function rowLocks(strings: TemplateStringsArray, ...values: unknown[]) {
+  const sql = strings.join('?');
+  if (sql.includes('FROM server_members')) {
+    const ids = values.find(Array.isArray) as string[];
+    return ids.filter((id) => spaceMembers.has(id)).map((id) => ({ user_id: id }));
+  }
+  if (sql.includes('FROM channels')) return [{ id: CH.id }];
+  return [{ id: 'srv-1' }];
+}
+
 function membersPayloadRows() {
   return [
     {
@@ -171,11 +192,18 @@ describe('Secure Channel Routes', () => {
       if (Array.isArray(arg)) return Promise.all(arg);
       return arg(new Proxy({} as any, { get: (_t, prop) => prismaMock[prop as string] }));
     });
-    prismaMock.channelMember.findMany.mockResolvedValue(membersPayloadRows());
-    // Caller gate cross-checks ServerMember (stale-row defense); the invite tx
-    // takes a row lock via $queryRaw before its in-tx cap/duplicate checks
+    // The member-list payload (it selects the user), or the re-read after a
+    // room join (the ids still members, minus `removedSinceCommit`)
+    removedSinceCommit = new Set();
+    prismaMock.channelMember.findMany.mockImplementation(async (args: any) => (args?.select?.user
+      ? membersPayloadRows()
+      : ((args?.where?.userId?.in ?? []) as string[]).filter((id) => !removedSinceCommit.has(id)).map((userId) => ({ userId }))));
+    // Caller gate cross-checks ServerMember (stale-row defense); the create
+    // and invite transactions lock the member rows, then the space or the
+    // channel row, via $queryRaw before their in-tx checks
     prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1' });
-    prismaMock.$queryRaw.mockResolvedValue([{ id: CH.id }]);
+    spaceMembers = new Set(['user-1', 'user-2', 'user-3', 'user-9']);
+    prismaMock.$queryRaw.mockImplementation(rowLocks);
   });
 
   // ── POST / (create) ────────────────────────────────────────────────────
@@ -183,6 +211,8 @@ describe('Secure Channel Routes', () => {
   describe('POST / (create)', () => {
     beforeEach(() => {
       prismaMock.channel.count.mockResolvedValue(3);
+      // The highest position in the space, read under the space row lock
+      prismaMock.channel.aggregate.mockResolvedValue({ _max: { position: 2 } });
       prismaMock.serverMember.findMany.mockResolvedValue([
         { userId: 'user-2' }, { userId: 'user-3' },
       ]);
@@ -218,6 +248,17 @@ describe('Secure Channel Routes', () => {
       // Sockets joined into the channel room via user rooms
       expect(mockIn).toHaveBeenCalledWith('user:user-2');
       expect(mockSocketsJoin).toHaveBeenCalledWith(`channel:${CH.id}`);
+    });
+
+    it('gives the transaction the long budget: the member rows and the space row it waits for are held through an account deletion\'s cascade', async () => {
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops', memberIds: ['user-2', 'user-3'] });
+
+      expect(res.status).toBe(201);
+      // Under Prisma's 5 s default the wait alone expired the creation (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
     });
 
     it('403 without CREATE_SECURE_CHANNELS', async () => {
@@ -277,8 +318,8 @@ describe('Secure Channel Routes', () => {
       expect(res.body.error).toContain(`${E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP}`);
     });
 
-    it('400 when an invitee is not a server member', async () => {
-      prismaMock.serverMember.findMany.mockResolvedValue([{ userId: 'user-2' }]); // user-3 missing
+    it('400 when an invitee is not a server member, creating nothing', async () => {
+      spaceMembers.delete('user-3');
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels')
@@ -286,16 +327,113 @@ describe('Secure Channel Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('members of this server');
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
     });
 
-    /** `total` answers the all-channels count, `secure` the secure-only one. */
-    function counts(total: number, secure: number): void {
-      prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) =>
-        (where.secure === true ? secure : total));
+    it('checks every member, the creator included, INSIDE the transaction under a FOR KEY SHARE lock on their member rows, taken before the space row', async () => {
+      const locks: string[] = [];
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const sql = strings.join('?');
+        locks.push(sql.includes('FROM server_members') ? 'members' : 'space');
+        if (sql.includes('FROM server_members')) {
+          expect(sql).toMatch(/FOR KEY SHARE$/);
+          expect(values).toEqual(['srv-1', ['user-1', 'user-2', 'user-3']]);
+        }
+        return rowLocks(strings, ...values);
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops', memberIds: ['user-2', 'user-3'] });
+
+      expect(res.status).toBe(201);
+      expect(locks).toEqual(['members', 'space']);
+      // no pre-check outside the transaction to go stale before the write
+      expect(prismaMock.serverMember.findMany).not.toHaveBeenCalled();
+    });
+
+    it('403 when the creator is no longer a member of the space by the time the transaction runs, creating nothing', async () => {
+      spaceMembers.delete('user-1');
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops', memberIds: ['user-2'] });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('You do not have permission to create secure channels');
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+      expect(prismaMock.channelMember.createMany).not.toHaveBeenCalled();
+    });
+
+    it('takes back out of the room a member a removal took out of the channel between the commit and the room join', async () => {
+      removedSinceCommit = new Set(['user-3']);
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops', memberIds: ['user-2', 'user-3'] });
+
+      expect(res.status).toBe(201);
+      // Re-read after the joins: the rows of the users just joined
+      expect(prismaMock.channelMember.findMany).toHaveBeenCalledWith({
+        where: { channelId: CH.id, userId: { in: ['user-1', 'user-2', 'user-3'] } },
+        select: { userId: true },
+      });
+      // One leave, for the removed member only (the room op is addressed by
+      // their user room, the last one taken)
+      expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
+      expect(mockSocketsLeave).toHaveBeenCalledWith(`channel:${CH.id}`);
+      expect(mockIn).toHaveBeenLastCalledWith('user:user-3');
+      // ...after its join, so the leave is the last word for that member
+      expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(Math.max(...mockSocketsJoin.mock.invocationCallOrder));
+    });
+
+    it('404 Server when the space was deleted since the permission check, creating nothing (not a foreign-key 500)', async () => {
+      spaceMembers.clear(); // the delete cascaded the members too
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) =>
+        (strings.join('?').includes('FROM servers') ? [] : rowLocks(strings, ...values)));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops', memberIds: ['user-2'] });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
+      expect(prismaMock.channel.create).not.toHaveBeenCalled();
+    });
+
+    it('a creation PostgreSQL aborted to break a deadlock is run again and succeeds', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => {
+          throw Object.assign(new Error('Raw query failed. Code: `40P01`.'), {
+            code: 'P2010', meta: { driverAdapterError: { cause: { originalCode: '40P01' } } },
+          });
+        })
+        .mockImplementation(real);
+      try {
+        const res = await request(app)
+          .post('/api/v1/servers/srv-1/secure-channels')
+          .send({ name: 'covert-ops', memberIds: ['user-2'] });
+
+        expect(res.status).toBe(201);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(prismaMock.channel.create).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    /** The space's secure-channel count (the only count the route reads). */
+    function secureCount(secure: number): void {
+      prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) => {
+        if (where.secure !== true) throw new Error('the route counts secure channels only');
+        return secure;
+      });
     }
 
     it('400 at the secure-channel limit (5 by default), creating nothing', async () => {
-      counts(8, 5);
+      secureCount(5);
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels')
@@ -307,42 +445,78 @@ describe('Secure Channel Routes', () => {
     });
 
     it('counts secure channels apart: a space at its regular channel limit still gets one', async () => {
-      counts(24, 4);  // 20 regular channels (the channel limit) + 4 secure
+      secureCount(4);  // beside 20 regular channels (the channel limit)
+      prismaMock.channel.aggregate.mockResolvedValue({ _max: { position: 23 } });
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels')
         .send({ name: 'covert-ops' });
 
       expect(res.status).toBe(201);
+      expect(prismaMock.channel.count).toHaveBeenCalledTimes(1);
       expect(prismaMock.channel.count).toHaveBeenCalledWith({ where: { serverId: 'srv-1', secure: true } });
-      // the total still places the new channel last
+      // placed after the highest position held by any channel of the space
+      expect(prismaMock.channel.aggregate).toHaveBeenCalledWith({ where: { serverId: 'srv-1' }, _max: { position: true } });
       expect(prismaMock.channel.create).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ position: 24, secure: true }),
       }));
     });
 
-    it('counts under the space row lock, inside the transaction', async () => {
+    it('places the channel after the highest position, not after the count, and at 0 in an empty space', async () => {
+      secureCount(1);
+      prismaMock.channel.aggregate.mockResolvedValueOnce({ _max: { position: 41 } });
+      let res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops' });
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenLastCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 42 }),
+      }));
+
+      secureCount(0);
+      prismaMock.channel.aggregate.mockResolvedValueOnce({ _max: { position: null } });
+      res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops' });
+      expect(res.status).toBe(201);
+      expect(prismaMock.channel.create).toHaveBeenLastCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ position: 0 }),
+      }));
+    });
+
+    it('counts under the space row lock, inside the transaction, and places the channel there too: nothing is read before it', async () => {
       const order: string[] = [];
-      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
-        order.push(strings.join('?').includes('FROM servers') ? 'lock-server' : 'lock-other');
-        return [{ id: 'srv-1' }];
+      let inTransaction = false;
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction.mockImplementation(async (arg: any) => {
+        inTransaction = true;
+        try { return await real(arg); } finally { inTransaction = false; }
+      });
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const sql = strings.join('?');
+        order.push(sql.includes('FROM servers') ? 'lock-server' : sql.includes('FROM server_members') ? 'lock-members' : 'lock-other');
+        return rowLocks(strings, ...values);
       });
       prismaMock.channel.count.mockImplementation(async ({ where }: { where: { secure?: boolean } }) => {
-        if (where.secure === true) order.push('count-secure');
-        return where.secure === true ? 1 : 3;
+        order.push(`count-${where.secure === true ? 'secure' : 'all'}${inTransaction ? '' : ' (outside)'}`);
+        return 1;
       });
-      prismaMock.channel.create.mockImplementation(async () => { order.push('create'); return { ...CH, type: 'text', position: 3 }; });
+      prismaMock.channel.aggregate.mockImplementation(async () => {
+        order.push(`place${inTransaction ? '' : ' (outside)'}`);
+        return { _max: { position: 6 } };
+      });
+      prismaMock.channel.create.mockImplementation(async () => { order.push('create'); return { ...CH, type: 'text', position: 7 }; });
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels')
         .send({ name: 'covert-ops' });
 
       expect(res.status).toBe(201);
-      expect(order.slice(0, 3)).toEqual(['lock-server', 'count-secure', 'create']);
+      expect(order).toEqual(['lock-members', 'lock-server', 'count-secure', 'place', 'create']);
     });
 
     it('a limit of 0 freezes secure-channel creation', async () => {
-      counts(0, 0);
+      secureCount(0);
       (getEffectiveLimits as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         maxChannelsPerServer: 20,
         maxVoiceUsersPerChannel: 12,
@@ -423,6 +597,9 @@ describe('Secure Channel Routes', () => {
 
   describe('POST /:channelId/members (invite)', () => {
     beforeEach(() => {
+      // A test refused before the target lookup leaves its queued answer
+      // behind: clearAllMocks keeps the *Once queue
+      prismaMock.channelMember.findUnique.mockReset();
       mockCallerMembership(true);
       prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-9' });
       prismaMock.channelMember.count.mockResolvedValue(2);
@@ -483,7 +660,9 @@ describe('Secure Channel Routes', () => {
         inFlight--;
         return value;
       };
-      prismaMock.$queryRaw.mockImplementation(() => track('tx:lock', [{ id: CH.id }]));
+      prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) =>
+        track(strings.join('?').includes('FROM server_members') ? 'tx:lock-member' : 'tx:lock-channel', null)
+          .then(() => rowLocks(strings, ...values)));
       prismaMock.channelMember.findUnique.mockReset();
       prismaMock.channelMember.findUnique
         .mockResolvedValueOnce({ isCreator: true }) // caller gate, before the transaction
@@ -496,8 +675,98 @@ describe('Secure Channel Routes', () => {
         .send({ userId: 'user-9' });
 
       expect(res.status).toBe(201);
-      expect(order).toEqual(['tx:lock', 'tx:duplicate', 'tx:count', 'tx:create']);
+      // The target's member row first, then the channel row: the order a
+      // removal takes them in
+      expect(order).toEqual(['tx:lock-member', 'tx:lock-channel', 'tx:duplicate', 'tx:count', 'tx:create']);
       expect(maxInFlight).toBe(1);
+    });
+
+    it('checks the target\'s space membership INSIDE the transaction, under a FOR KEY SHARE lock on its member row', async () => {
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(201);
+      const memberLock = prismaMock.$queryRaw.mock.calls.find(([s]: [TemplateStringsArray]) => s.join('?').includes('FROM server_members'));
+      expect(memberLock![0].join('?')).toMatch(/FOR KEY SHARE$/);
+      expect(memberLock!.slice(1)).toEqual(['srv-1', ['user-9']]);
+      // only the caller's gate reads a membership outside the transaction
+      expect(prismaMock.serverMember.findUnique).toHaveBeenCalledTimes(1);
+      expect(prismaMock.serverMember.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+        where: { userId_serverId: { userId: 'user-1', serverId: 'srv-1' } },
+      }));
+    });
+
+    it('404 Channel when the channel was deleted between the gate and the transaction, writing nothing', async () => {
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) =>
+        (strings.join('?').includes('FROM channels') ? [] : rowLocks(strings, ...values)));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Channel not found');
+      expect(prismaMock.channelMember.create).not.toHaveBeenCalled();
+    });
+
+    it('404 Channel, not the membership 400, when the whole space was deleted meanwhile (the gate\'s answer for a missing space)', async () => {
+      spaceMembers.clear();
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) =>
+        (strings.join('?').includes('FROM channels') ? [] : rowLocks(strings, ...values)));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Channel not found');
+    });
+
+    it('gives the transaction the long budget: the member and channel rows it waits for are held through an account deletion\'s cascade', async () => {
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(201);
+      // Under Prisma's 5 s default the wait alone expired the invite (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
+    it('an invite PostgreSQL aborted to break a deadlock is run again and succeeds', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => {
+          throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+        })
+        .mockImplementation(real);
+      try {
+        const res = await request(app)
+          .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+          .send({ userId: 'user-9' });
+
+        expect(res.status).toBe(201);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(prismaMock.channelMember.create).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('takes an invitee a removal took out between the commit and the room join back out of the room, and replays them nothing', async () => {
+      removedSinceCommit = new Set(['user-9']);
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
+        .send({ userId: 'user-9' });
+
+      expect(res.status).toBe(201);
+      expect(mockSocketsJoin).toHaveBeenCalledWith('channel:sec-1');
+      expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-1');
+      expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(mockSocketsJoin.mock.invocationCallOrder[0]);
+      expect(mockReplayVoiceState).not.toHaveBeenCalled();
     });
 
     it('a failing occupancy replay is logged and the invitation still succeeds', async () => {
@@ -536,18 +805,15 @@ describe('Secure Channel Routes', () => {
       expect(res.status).toBe(404);
     });
 
-    it('400 when the target is not a server member', async () => {
-      // First lookup = the CALLER's server membership (gate), second = target
-      prismaMock.serverMember.findUnique
-        .mockResolvedValueOnce({ userId: 'user-1' })
-        .mockResolvedValueOnce(null);
-
+    it('400 when the target is not a server member, writing nothing', async () => {
       const res = await request(app)
         .post('/api/v1/servers/srv-1/secure-channels/sec-1/members')
         .send({ userId: 'outsider' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('member of this server');
+      expect(res.body.error).toBe('User is not a member of this server');
+      expect(prismaMock.channelMember.create).not.toHaveBeenCalled();
+      expect(prismaMock.channelRead.upsert).not.toHaveBeenCalled();
     });
 
     it('400 when the target is already a channel member', async () => {

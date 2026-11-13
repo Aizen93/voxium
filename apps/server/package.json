@@ -10,7 +10,7 @@
     "db:migrate:prod": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
-    "db:generate": "prisma generate",
+    "db:generate": "prisma generate --no-hints",
     "lint": "eslint src/",
     "test": "vitest run",
     "test:watch": "vitest",

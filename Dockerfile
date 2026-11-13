@@ -7,6 +7,10 @@
 # node:26.13.0-slim (Node 26 LTS), pinned by digest; bump the tag and the digest together
 FROM node:26.13.0-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS build
 
+# No Prisma CLI run may contact checkpoint.prisma.io (its update check), here
+# or in the image: apps/server/prisma.config.ts sets it too.
+ENV CHECKPOINT_DISABLE=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -39,6 +43,10 @@ RUN npx tsc --project apps/server/tsconfig.json
 
 # ── Stage 2: Production ─────────────────────────────────────────────────────
 FROM node:26.13.0-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS production
+
+# The entrypoint's migrate runs, and any Prisma command an operator runs in the
+# container from any directory, skip the update check (checkpoint.prisma.io).
+ENV CHECKPOINT_DISABLE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*

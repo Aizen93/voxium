@@ -1,0 +1,13 @@
+Loaded Prisma config from prisma.config.ts.
+
+Prisma schema loaded from prisma/schema.prisma.
+Datasource "db": PostgreSQL database "voxium", schema "public" at "postgres:5432"
+
+56 migrations found in prisma/migrations
+
+Error: P3009
+
+migrate found failed migrations in the target database, new migrations will not be applied. Read more about how to resolve migration issues in a production database: https://pris.ly/d/migrate-resolve
+The `20260226170434_add_channel_reads` migration started at 2026-11-11 20:36:59.202354 UTC failed
+
+

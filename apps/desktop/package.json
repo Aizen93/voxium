@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri:build": "node scripts/tauri-build-config.mjs --out src-tauri/target/tauri.self-hosted.json && tauri build --config src-tauri/target/tauri.self-hosted.json",
     "lint": "eslint src/",
     "test": "vitest run",
     "test:watch": "vitest"

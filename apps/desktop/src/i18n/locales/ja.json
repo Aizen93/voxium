@@ -1468,6 +1468,7 @@
     "emailAlreadyVerified": "メールアドレスは確認済みです",
     "tooManyVerificationEmails": "確認メールのリクエストが多すぎます — 明日もう一度お試しください",
     "mailBlocked": "このアドレスへのメールはブロックされています — 再び許可するには、以前の Voxium のメールにあるリンクを使用してください",
+    "verificationEmailSendFailed": "確認メールを送信できませんでした — しばらくしてからもう一度お試しください",
     "registrationChallengeInvalid": "登録チェックが無効か期限切れです — 再読み込みしてもう一度お試しください",
     "powExpired": "登録チェックに時間がかかりすぎました — もう一度お試しください",
     "powUnavailable": "このブラウザーでは登録チェックを実行できません（WebCrypto を利用できません）",

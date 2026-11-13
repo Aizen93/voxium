@@ -43,6 +43,11 @@ interface CodeScan {
   names: Map<string, number>;
   /** Reads of `<…>.adapter.sockets` / `adapter['sockets']`. */
   adapterSockets: number;
+  /** The `fetchSockets` reads whose receiver is provably THIS node's
+   *  (`io.local.in(room).fetchSockets`, `io.in(room).local.fetchSockets`):
+   *  answered by the node's own adapter, they never wait on a peer. Every
+   *  other occurrence of the name counts as the cluster-wide form. */
+  localFetchSockets: number;
 }
 
 /** The member a `x.name` / `x['name']` reads, or null for a computed one. */
@@ -51,24 +56,43 @@ function memberName(node: ts.PropertyAccessExpression | ts.ElementAccessExpressi
   return ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : null;
 }
 
+/** True when the receiver chain of a member read goes through `.local` in the
+ *  same expression. An alias (`const op = io.local.in(room); op.fetchSockets()`)
+ *  is not provable from the call site and counts as cluster-wide. */
+function receiverIsLocal(expr: ts.Expression): boolean {
+  let current: ts.Expression = expr;
+  for (;;) {
+    if (ts.isCallExpression(current) || ts.isParenthesizedExpression(current) || ts.isNonNullExpression(current) || ts.isAsExpression(current)) {
+      current = current.expression;
+    } else if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+      if (memberName(current) === 'local') return true;
+      current = current.expression;
+    } else {
+      return false;
+    }
+  }
+}
+
 /** Parsed with the TypeScript compiler, so a comment that merely mentions a
  *  name is not a call site and spacing or bracket access cannot hide one. */
 function scanSource(fileName: string, text: string): CodeScan {
   const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
   const names = new Map<string, number>();
   let adapterSockets = 0;
+  let localFetchSockets = 0;
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node)) {
       names.set(node.text, (names.get(node.text) ?? 0) + 1);
     }
-    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
-      && memberName(node) === 'sockets' && lastName(node.expression) === 'adapter') {
-      adapterSockets++;
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const member = memberName(node);
+      if (member === 'sockets' && lastName(node.expression) === 'adapter') adapterSockets++;
+      if (member === 'fetchSockets' && receiverIsLocal(node.expression)) localFetchSockets++;
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return { names, adapterSockets };
+  return { names, adapterSockets, localFetchSockets };
 }
 
 const scanCode = (rel: string): CodeScan => scanSource(rel, read(rel));
@@ -112,26 +136,50 @@ describe('fetchSockets() appears only where nothing waits on its answer', () => 
   // (`socketsJoin` / `socketsLeave`, `io.local` first): no call site may come
   // back without its own entry here. A file that drops its call drops its entry.
   const ALLOWED: Record<string, number> = {
-    // Needs each socket's userId and rooms to recompute visibility per user;
-    // every caller fires and forgets it and it logs a failure, so a stalled
-    // peer fails no request (that resync is skipped until the next reconnect).
-    'utils/channelVisibilityRooms.ts': 1,
     // The one-socket existence check, used only when the adapter has no
     // allRooms snapshot (never the Redis adapter); every caller skips on a
     // throw. Two names: the call, and the member of its ClusterSocketLookup type.
     'utils/redis.ts': 2,
   };
+  // The LOCAL form (`io.local.in(room).fetchSockets()`) is answered by this
+  // node's adapter alone and cannot time out. The visibility resync used the
+  // cluster-wide form: one silent peer made it reject, the catch skipped the
+  // resync on every node, and a member whose VIEW_CHANNEL had been revoked
+  // kept the channel's events until they reconnected (issue #71). Each node
+  // now resyncs its own sockets and the others are told over pub/sub, so the
+  // cluster-wide form must never come back to that file.
+  const LOCAL_ALLOWED: Record<string, number> = {
+    // The local pass, and the fail-closed disconnect of a member whose pass
+    // failed its last retry (both read this node's sockets only)
+    'utils/channelVisibilityRooms.ts': 2,
+  };
 
   const files = sourceFiles();
   const scans = new Map(files.map((file) => [file, scanCode(file)]));
 
-  it('every other file under src/ names it nowhere in its code', () => {
+  it('every other file under src/ names the cluster-wide form nowhere in its code', () => {
     const found: Record<string, number> = {};
     for (const [file, scan] of scans) {
-      const count = scan.names.get('fetchSockets') ?? 0;
+      const count = (scan.names.get('fetchSockets') ?? 0) - scan.localFetchSockets;
       if (count > 0) found[file] = count;
     }
     expect(found).toEqual(ALLOWED);
+  });
+
+  it('the local form appears only where it has its own entry', () => {
+    const found: Record<string, number> = {};
+    for (const [file, scan] of scans) {
+      if (scan.localFetchSockets > 0) found[file] = scan.localFetchSockets;
+    }
+    expect(found).toEqual(LOCAL_ALLOWED);
+  });
+
+  it('the visibility resync waits on no peer: no cluster-wide fetchSockets, no unscoped cluster round trip', () => {
+    const scan = scans.get('utils/channelVisibilityRooms.ts')!;
+    expect((scan.names.get('fetchSockets') ?? 0) - scan.localFetchSockets).toBe(0);
+    for (const name of ['allRooms', 'serverCount', 'allSockets', 'serverSideEmitWithAck']) {
+      expect(scan.names.get(name) ?? 0).toBe(0);
+    }
   });
 
   it('no file uses the other every-node waits (allSockets, serverSideEmitWithAck, adapter.sockets)', () => {
@@ -167,9 +215,26 @@ describe('fetchSockets() appears only where nothing waits on its answer', () => 
     expect(names.get('allSockets')).toBe(1);
   });
 
+  it('the scan tells the local form from the cluster-wide one, and counts what it cannot prove local as cluster-wide', () => {
+    const { names, localFetchSockets } = scanSource('probe.ts', [
+      '// io.local.in(room).fetchSockets() in a comment',
+      'const a = io.local.in(room).fetchSockets();',
+      "const b = io['local'].in(room)['fetchSockets']();",
+      'const c = io.in(room).local.fetchSockets();',
+      'const d = (io.local.in(room) as Op).fetchSockets();',
+      'const e = io.in(room).fetchSockets();',
+      'const f = io.of("/").in(room).except(x).fetchSockets();',
+      'const op = io.local.in(room); const g = op.fetchSockets();',
+      'const { local } = io; const h = local.in(room).fetchSockets();',
+    ].join('\n'));
+    expect(names.get('fetchSockets')).toBe(8);
+    // a, b, c, d — the aliases (g, h) are not provable from the call site
+    expect(localFetchSockets).toBe(4);
+  });
+
   it('the walk reaches the route files it guards', () => {
     // An empty or misdirected walk would pass the checks above vacuously
-    for (const file of ['routes/servers.ts', 'routes/dm.ts', 'routes/admin.ts', ...Object.keys(ALLOWED)]) {
+    for (const file of ['routes/servers.ts', 'routes/dm.ts', 'routes/admin.ts', ...Object.keys(ALLOWED), ...Object.keys(LOCAL_ALLOWED)]) {
       expect(files).toContain(file);
     }
   });

@@ -1470,6 +1470,7 @@
     "emailAlreadyVerified": "Seu endereço de e-mail já foi verificado",
     "tooManyVerificationEmails": "Muitos e-mails de verificação solicitados — tente novamente amanhã",
     "mailBlocked": "Os e-mails para este endereço estão bloqueados — use o link de um e-mail anterior do Voxium para permiti-los novamente",
+    "verificationEmailSendFailed": "Não foi possível enviar o e-mail de verificação — tente novamente mais tarde",
     "registrationChallengeInvalid": "A verificação de cadastro é inválida ou expirou — atualize e tente novamente",
     "powExpired": "A verificação de cadastro demorou demais — tente novamente",
     "powUnavailable": "Este navegador não consegue executar a verificação de cadastro (WebCrypto indisponível)",

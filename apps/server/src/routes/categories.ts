@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
 import { validateCategoryName, WS_EVENTS, Permissions } from '@voxium/shared';
 import type { Category, Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
@@ -9,10 +9,19 @@ import { sanitizeText } from '../utils/sanitize';
 import { rateLimitCategoryManage } from '../middleware/rateLimiter';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission } from '../utils/permissionCalculator';
+import { isSortPosition, MAX_SORT_POSITION, positionAfter } from '../utils/sortPosition';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 
 export const categoryRouter = Router({ mergeParams: true });
 
 categoryRouter.use(authenticate, requireVerifiedEmail, requireConsent);
+
+/** One entry of a reorder: a category id and its new position. */
+function isCategoryOrderEntry(entry: unknown): entry is { id: string; position: number } {
+  if (!entry || typeof entry !== 'object') return false;
+  const { id, position } = entry as Record<string, unknown>;
+  return typeof id === 'string' && isSortPosition(position);
+}
 
 // Bulk reorder categories
 categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -26,6 +35,9 @@ categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ se
     if (!Array.isArray(order) || order.length === 0) {
       throw new BadRequestError('order must be a non-empty array');
     }
+    if (!order.every(isCategoryOrderEntry)) {
+      throw new BadRequestError(`Each order entry needs a category id and a whole-number position from 0 to ${MAX_SORT_POSITION}`);
+    }
 
     // Validate all IDs belong to this server
     const categoryIds = order.map((o: { id: string }) => o.id);
@@ -37,12 +49,31 @@ categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ se
       throw new BadRequestError('One or more category IDs do not belong to this server');
     }
 
-    // Update positions in a transaction
-    await prisma.$transaction(
-      order.map((o: { id: string; position: number }) =>
-        prisma.category.update({ where: { id: o.id }, data: { position: o.position } })
-      )
-    );
+    // Update positions in a transaction, one row after the other in ONE
+    // fixed order, sorted by id, whatever order the client sent: two reorders
+    // of the same rows then lock them in the same order and one waits for the
+    // other, where in the clients' orders two reversed reorders each held a
+    // row the other needed (a deadlock, a 500). A category the validation saw
+    // and that is gone by the update answers as an unknown one, never a 500.
+    // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a category delete holds
+    // its row until it commits, and it takes each of its channels out of it,
+    // waiting on any of them a channel delete holds; a space delete holds
+    // every category row through its cascade; a reorder merely waiting for
+    // one must not expire. The batch is built again for each attempt and
+    // run again whole when PostgreSQL aborts it to break a deadlock: it writes
+    // absolute positions, so a second run writes what the first would have.
+    const sorted = [...order].sort((a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    try {
+      await retryOnTransactionConflict(() => prisma.$transaction(
+        sorted.map((o: { id: string; position: number }) =>
+          prisma.category.update({ where: { id: o.id }, data: { position: o.position } })
+        ),
+        LOCK_WAIT_TRANSACTION_OPTIONS,
+      ), `[Categories] The reorder of categories in ${serverId}`);
+    } catch (err) {
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Category');
+      throw err;
+    }
 
     // Re-read updated categories and emit events
     const updated = await prisma.category.findMany({
@@ -71,17 +102,33 @@ categoryRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId
     const nameErr = validateCategoryName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
-    const [categoryCount, limits] = await Promise.all([
-      prisma.category.count({ where: { serverId } }),
-      getEffectiveLimits(serverId),
-    ]);
-    if (categoryCount >= limits.maxCategoriesPerServer) {
-      throw new BadRequestError(`Server can have at most ${limits.maxCategoriesPerServer} categories`);
-    }
+    const limits = await getEffectiveLimits(serverId);
 
-    const category = await prisma.category.create({
-      data: { name, serverId, position: categoryCount },
-    });
+    // Count, place and insert under the space row lock (FOR UPDATE, as a
+    // channel creation takes it), so concurrent creations in one space run
+    // one after the other: each counts, and places itself after, the
+    // categories committed before it. The space row is the only existing row
+    // this transaction locks. Run again when PostgreSQL aborts it to break a
+    // deadlock. The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space
+    // delete holds the space row through its cascade (every channel and
+    // message of the space), and a creation merely waiting for it must not
+    // expire.
+    const category = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      // A space deleted since the permission check answers as one
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
+      const { _count, _max } = await tx.category.aggregate({
+        where: { serverId },
+        _count: { _all: true },
+        _max: { position: true },
+      });
+      if (_count._all >= limits.maxCategoriesPerServer) {
+        throw new BadRequestError(`Server can have at most ${limits.maxCategoriesPerServer} categories`);
+      }
+      return tx.category.create({
+        data: { name, serverId, position: positionAfter(_max.position) },
+      });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), '[Categories] A category creation');
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_CREATED, category as unknown as Category);
 

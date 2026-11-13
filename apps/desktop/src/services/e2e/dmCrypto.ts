@@ -17,12 +17,24 @@ import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
 import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 import { isE2ESessionEnded } from './session';
+import { arrivalMark, noteQuoteAwaiting, noteUndecrypted } from './undecryptedRows';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
   return useAuthStore.getState().user?.id ?? null;
+}
+
+/**
+ * A quote's text from the local cache: an entry of THIS conversation written
+ * by the quoted author (the server names both the id and the author); null
+ * when there is none.
+ */
+async function cachedQuoteText(scope: string, quote: NonNullable<Message['replyTo']>, userId: string): Promise<string | null> {
+  const cached = await getE2EService(userId).getCachedPlaintext(quote.id, { scope, authorId: quote.author?.id });
+  // cached entries hold raw plaintext — structured payloads carry the text field
+  return cached ? parseE2EPlaintext(cached).text : null;
 }
 
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
@@ -37,15 +49,24 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
       ? message
       : { ...message, replyTo: lockedQuote(message.replyTo) };
   }
-  // The quote answers only from an entry of THIS conversation written by the
-  // quoted author (the server names both the id and the author)
-  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id, {
-    scope,
-    authorId: message.replyTo.author?.id,
-  });
-  // cached entries hold raw plaintext — structured payloads carry the text field
-  const preview = cached ? parseE2EPlaintext(cached).text : '';
-  return { ...message, replyTo: { ...message.replyTo, content: preview } };
+  const text = await cachedQuoteText(scope, message.replyTo, userId);
+  const replyTo = { ...message.replyTo, content: text ?? '' };
+  // nothing yet: this very quote is looked up again once the quoted row opens here
+  if (text === null && scope) noteQuoteAwaiting(replyTo, scope);
+  return { ...message, replyTo };
+}
+
+/**
+ * The text the quote of `message` shows from the local cache, by the rule its
+ * gating followed (resolveReplyPreview): for a quote that found nothing when
+ * its row was gated, once the quoted row opened on this device. Null while
+ * the cache still has nothing, or when nobody is signed in.
+ */
+export async function quotedTextFromCache(message: Message): Promise<string | null> {
+  if (!message.replyTo?.author || !message.conversationId) return null;
+  const userId = await currentUserId();
+  if (!userId) return null;
+  return cachedQuoteText(message.conversationId, message.replyTo, userId);
 }
 
 /**
@@ -58,10 +79,18 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * `null`: nothing about it may be shown, counted or notified, since the
  * screen and the stores belong to whoever signs in next. Its callers include
  * socket handlers that do not catch, so it never rejects for that.
+ *
+ * `retry: true` (a row tried again once its session was stored) never starts
+ * a key-share claim, a session that is not on the device being a failure,
+ * and rejects on a failure of the vault instead of answering the refused
+ * shape: such a try says nothing about the message.
  */
-export async function decryptMessageForDisplay(input: Message): Promise<Message | null> {
+export async function decryptMessageForDisplay(
+  input: Message,
+  opts: { retry?: boolean } = {},
+): Promise<Message | null> {
   try {
-    return await decryptOneForDisplay(input);
+    return await decryptOneForDisplay(input, opts.retry === true);
   } catch (err) {
     if (!isE2ESessionEnded(err)) throw err;
     console.debug(`e2e: decrypt of ${input.id} ended with the session:`, err instanceof Error ? err.message : err);
@@ -69,7 +98,7 @@ export async function decryptMessageForDisplay(input: Message): Promise<Message 
   }
 }
 
-async function decryptOneForDisplay(input: Message): Promise<Message> {
+async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Message> {
   const message = withoutServerAssertions(input);
   if (!message.encrypted) {
     // After the always-on cutover there is no plaintext DM path: conversations
@@ -106,14 +135,19 @@ async function decryptOneForDisplay(input: Message): Promise<Message> {
   const service = getE2EService(userId);
   const own = message.author?.id === userId;
 
-  const result = await service.decryptMessage({
-    id: message.id,
-    conversationId: message.conversationId,
-    authorId: message.author?.id ?? '',
-    content: message.content,
-    editedAt: message.editedAt ?? null,
-    createdAt: message.createdAt,
-  });
+  // before the decrypt: a session stored while it runs makes this row due too
+  const mark = arrivalMark();
+  const result = await service.decryptMessage(
+    {
+      id: message.id,
+      conversationId: message.conversationId,
+      authorId: message.author?.id ?? '',
+      content: message.content,
+      editedAt: message.editedAt ?? null,
+      createdAt: message.createdAt,
+    },
+    { claimMissing: !retry, storageFailureRejects: retry },
+  );
   if (!result.failed) {
     return resolveReplyPreview(decryptedRow(message, result.text), userId);
   }
@@ -142,8 +176,12 @@ async function decryptOneForDisplay(input: Message): Promise<Message> {
     }
   }
   // Nothing vouched for this row: the refused shape, its quote still resolvable
-  // from the local cache
-  return resolveReplyPreview(refusedRow(message), userId);
+  // from the local cache. The failure is noted for this version, so that its
+  // group session reaching this device later opens the row in place once the
+  // view shows it (redecryptOnKeyArrival.ts)
+  const refused = await resolveReplyPreview(refusedRow(message), userId);
+  noteUndecrypted(message, message.conversationId, mark);
+  return refused;
 }
 
 /** Decrypt a fetched page of messages (order preserved; only the server's call notices pass unencrypted). */

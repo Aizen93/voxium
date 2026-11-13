@@ -118,6 +118,8 @@ describe('channelCrypto — display boundary', () => {
     expect(result.content).toBe('decrypted!');
     expect(decryptMessage).toHaveBeenCalledWith(
       expect.objectContaining({ conversationId: e2eChannelScope('sec-1') }),
+      // a first decrypt claims the key share of a session it lacks
+      { claimMissing: true, storageFailureRejects: false },
     );
   });
 

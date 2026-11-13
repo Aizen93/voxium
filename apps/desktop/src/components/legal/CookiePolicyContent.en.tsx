@@ -44,6 +44,12 @@ const SESSION_ROWS: StorageRow[] = [
     where: 'Desktop app: the credential store. Browser: local storage',
     duration: '30 days; kept when you sign out, removed when you turn off two-factor authentication or delete your account on this device; changing your password invalidates it',
   },
+  {
+    item: 'voxium_session_origin, voxium_trusted_device_origin',
+    purpose: 'The address of the server that issued the tokens above, so that the app only ever sends them back to that server',
+    where: 'Browser: next to the tokens. Desktop app: inside each token’s credential store entry',
+    duration: 'Removed with the token it belongs to',
+  },
 ];
 
 const ENCRYPTION_ROWS: StorageRow[] = [
@@ -110,7 +116,7 @@ export function CookiePolicyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Cookie Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 25, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 12, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>

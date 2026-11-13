@@ -514,6 +514,80 @@ describe('permissionCalculator', () => {
     });
   });
 
+  // ── Reading through a transaction's client ─────────────────────────────
+
+  describe('the server-level reads, given a transaction\'s client', () => {
+    /**
+     * A transaction client whose every read is recorded, stays pending a few
+     * ms (so two issued at once would overlap) and answers what the test set.
+     */
+    function makeTxClient(rows: { ownerId: string; member: boolean; everyone: bigint; roles: Array<{ permissions: bigint; position: number }> }) {
+      let inFlight = 0;
+      const stats = { maxInFlight: 0, reads: [] as string[] };
+      const read = <T>(name: string, value: T) => vi.fn(async () => {
+        inFlight++;
+        stats.maxInFlight = Math.max(stats.maxInFlight, inFlight);
+        stats.reads.push(name);
+        await new Promise((r) => setTimeout(r, 3));
+        inFlight--;
+        return value;
+      });
+      const client = {
+        server: { findUnique: read('server', { ownerId: rows.ownerId }) },
+        serverMember: { findUnique: read('serverMember', rows.member ? { userId: 'user1' } : null) },
+        role: { findFirst: read('role', { permissions: permissionsToString(rows.everyone) }) },
+        memberRole: {
+          findMany: read('memberRole', rows.roles.map((r) => ({ role: { permissions: permissionsToString(r.permissions), position: r.position } }))),
+        },
+      };
+      return { client, stats };
+    }
+
+    /** Nothing on the shared client: every model it has must stay untouched. */
+    function expectSharedClientUntouched() {
+      for (const model of Object.values(prismaMock)) {
+        for (const fn of Object.values(model)) expect(fn).not.toHaveBeenCalled();
+      }
+    }
+
+    it('computeServerPermissions and hasServerPermission read only through it, one read after the other', async () => {
+      const { client, stats } = makeTxClient({ ownerId: 'someone-else', member: true, everyone: Permissions.VIEW_CHANNEL, roles: [{ permissions: Permissions.KICK_MEMBERS, position: 3 }] });
+
+      await expect(computeServerPermissions('user1', 'srv1', client as never)).resolves.toBe(Permissions.VIEW_CHANNEL | Permissions.KICK_MEMBERS);
+      await expect(hasServerPermission('user1', 'srv1', Permissions.KICK_MEMBERS, client as never)).resolves.toBe(true);
+
+      expect(stats.reads).toEqual(['server', 'serverMember', 'role', 'memberRole', 'server', 'serverMember', 'role', 'memberRole']);
+      // never two at once on the transaction's one connection
+      expect(stats.maxInFlight).toBe(1);
+      expectSharedClientUntouched();
+    });
+
+    it('what it reads decides: a member whose role was taken away inside the transaction is refused', async () => {
+      const { client } = makeTxClient({ ownerId: 'someone-else', member: true, everyone: 0n, roles: [] });
+      // the shared client still sees the role: it must not be what answers
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'someone-else' });
+      prismaMock.memberRole.findMany.mockResolvedValue([{ role: { permissions: permissionsToString(Permissions.KICK_MEMBERS) } }]);
+
+      await expect(hasServerPermission('user1', 'srv1', Permissions.KICK_MEMBERS, client as never)).resolves.toBe(false);
+      const { client: gone } = makeTxClient({ ownerId: 'someone-else', member: false, everyone: Permissions.KICK_MEMBERS, roles: [] });
+      await expect(hasServerPermission('user1', 'srv1', Permissions.KICK_MEMBERS, gone as never)).resolves.toBe(false);
+    });
+
+    it('getHighestRolePosition reads only through it, one read after the other', async () => {
+      const { client, stats } = makeTxClient({ ownerId: 'someone-else', member: true, everyone: 0n, roles: [{ permissions: 0n, position: 4 }, { permissions: 0n, position: 9 }] });
+
+      await expect(getHighestRolePosition('user1', 'srv1', client as never)).resolves.toBe(9);
+
+      expect(stats.reads).toEqual(['server', 'memberRole']);
+      expect(stats.maxInFlight).toBe(1);
+      expectSharedClientUntouched();
+
+      const { client: owner } = makeTxClient({ ownerId: 'user1', member: true, everyone: 0n, roles: [] });
+      await expect(getHighestRolePosition('user1', 'srv1', owner as never)).resolves.toBe(Infinity);
+      expectSharedClientUntouched();
+    });
+  });
+
   // ── hasChannelPermission ───────────────────────────────────────────────
 
   describe('hasChannelPermission', () => {
@@ -969,6 +1043,23 @@ describe('filterVisibleChannelsForUsers', () => {
     const result = await filterVisibleChannelsForUsers(['member'], 'srv', [CH_PUB]);
 
     expect([...result.get('member')!]).toEqual([]);
+  });
+
+  // The membership check used to come AFTER the secure rows were added, so a
+  // ChannelMember row that outlived its ServerMember one kept the secure
+  // channel visible (and its room joined by the visibility resync), unlike
+  // computeUserChannelPermissions, which requires both.
+  it('denies a secure channel to a user who holds its ChannelMember row but is no longer a server member', async () => {
+    prismaMock.serverMember.findMany.mockResolvedValue([{ userId: 'member' }]);
+    prismaMock.channelMember.findMany.mockResolvedValue([
+      { channelId: 'ch-sec', userId: 'member' },
+      { channelId: 'ch-sec', userId: 'departed' },
+    ]);
+
+    const result = await filterVisibleChannelsForUsers(['member', 'departed'], 'srv', [CH_PUB, CH_SEC]);
+
+    expect([...result.get('member')!].sort()).toEqual(['ch-pub', 'ch-sec']);
+    expect([...result.get('departed')!]).toEqual([]);
   });
 
   it('returns an empty set per user when the server is gone', async () => {

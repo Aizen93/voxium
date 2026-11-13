@@ -306,7 +306,10 @@ export async function deleteMultipleFromS3(keys: string[]): Promise<number> {
     );
     if (response.Errors && response.Errors.length > 0) {
       failed += response.Errors.length;
-      console.error(`[S3] Failed to delete ${response.Errors.length} objects:`, response.Errors.map((e) => e.Key));
+      // The count and the store's error codes, never the keys: an attachment
+      // key carries the cleaned-up original file name the user chose
+      const codes = [...new Set(response.Errors.map((e) => e.Code ?? 'unknown'))].join(', ');
+      console.error(`[S3] Failed to delete ${response.Errors.length} of ${batch.length} objects (${codes})`);
     }
   }
   return keys.length - failed;

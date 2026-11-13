@@ -1470,6 +1470,7 @@
     "emailAlreadyVerified": "Deine E-Mail-Adresse ist bereits bestätigt",
     "tooManyVerificationEmails": "Zu viele Bestätigungs-E-Mails angefordert — versuche es morgen erneut",
     "mailBlocked": "E-Mails an diese Adresse sind blockiert — verwende den Link aus einer früheren Voxium-E-Mail, um sie wieder zu erlauben",
+    "verificationEmailSendFailed": "Die Bestätigungs-E-Mail konnte nicht gesendet werden — bitte versuche es später erneut",
     "registrationChallengeInvalid": "Die Registrierungsprüfung ist ungültig oder abgelaufen — lade neu und versuche es erneut",
     "powExpired": "Die Registrierungsprüfung hat zu lange gedauert — bitte versuche es erneut",
     "powUnavailable": "Dieser Browser kann die Registrierungsprüfung nicht ausführen (WebCrypto nicht verfügbar)",

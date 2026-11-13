@@ -42,6 +42,7 @@ import {
   deleteWebhookWithPurge,
   emitWebhookDeletion,
   disarmWebhooksHeldBy,
+  disarmWebhookRowsHeldBy,
   type WebhookDeletion,
 } from '../../utils/webhookLifecycle';
 
@@ -337,6 +338,26 @@ describe('disarmWebhooksHeldBy — a platform ban stops the URLs the account hol
   it('holds none: no write, no event', async () => {
     const servers = await disarmWebhooksHeldBy('u-9');
     expect(servers).toEqual([]);
+    expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('the write half runs on the client it is given (a ban transaction) and announces nothing itself', async () => {
+    const tx = {
+      webhook: {
+        findMany: vi.fn().mockResolvedValue([{ serverId: 'srv-1' }]),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+
+    const servers = await disarmWebhookRowsHeldBy(tx as never, 'u-1');
+
+    expect(servers).toEqual(['srv-1']);
+    expect(tx.webhook.findMany).toHaveBeenCalledWith({ where: HELD, select: { serverId: true }, distinct: ['serverId'] });
+    expect(tx.webhook.updateMany).toHaveBeenCalledWith({ where: HELD, data: { enabled: false, creatorRemovedAt: expect.any(Date) } });
+    // Sequential, never overlapping on the transaction's one connection
+    expect(tx.webhook.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.webhook.findMany.mock.invocationCallOrder[0]);
+    expect(prismaMock.webhook.findMany).not.toHaveBeenCalled();
     expect(prismaMock.webhook.updateMany).not.toHaveBeenCalled();
     expect(h.emitted).toHaveLength(0);
   });

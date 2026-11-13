@@ -837,6 +837,15 @@ describe('POST /servers/:serverId/webhooks', () => {
       expect(count).toBeLessThan(insert);
     });
 
+    it('gives the transaction the long budget: the server row it waits for is held through an account deletion\'s cascade', async () => {
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(201);
+
+      // Under Prisma's 5 s default the wait alone expired the creation (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
     it('announces webhook:changed only once the transaction has committed', async () => {
       const emittedInside: number[] = [];
       prismaMock.$transaction.mockImplementationOnce(async (cb: (tx: typeof txMock) => unknown) => {
