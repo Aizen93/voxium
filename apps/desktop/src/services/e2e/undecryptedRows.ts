@@ -28,6 +28,8 @@ import { isRefusedShape } from './displayGate';
 export const PENDING_FAILURES_MAX = 500;
 /** Announced sessions remembered at most (see arrivalMark); the oldest is dropped beyond. */
 export const SESSION_ARRIVALS_MAX = 2000;
+/** Changes of the view after which a held row whose try ended in an error is tried again. */
+export const RETRY_AFTER_VIEW_CHANGES = 5;
 
 interface Failure {
   /** The row as the gate received it, the server's assertions dropped. */
@@ -44,6 +46,10 @@ interface HeldRow extends Failure {
   key: string;
   /** Its session was announced after its decrypt began, and no pass has tried it since. */
   due: boolean;
+  /** After a try that ended in an error: changes of the view left before the next try (0: none waited for). */
+  viewChangesLeft: number;
+  /** A try of it has ended in an error already (warned about once). */
+  errored: boolean;
 }
 
 /** What a quote the gate left empty waits for: the row it quotes, in which scope, by which author. */
@@ -144,7 +150,9 @@ export function noteSessionsAvailable(scope: string, sessionIds: readonly string
   }
   if (scope !== heldScope) return;
   for (const entry of held.values()) {
-    if (ids.has(entry.sessionId)) entry.due = true;
+    if (!ids.has(entry.sessionId)) continue;
+    entry.due = true;
+    entry.viewChangesLeft = 0;
   }
 }
 
@@ -167,7 +175,7 @@ export function syncWithView(scope: string | null, rows: readonly Message[]): vo
     const fresh = pending.get(`${scope}|${key}`);
     if (fresh) {
       pending.delete(`${scope}|${key}`);
-      held.set(row.id, { ...fresh, key, due: announcedAfter(fresh) });
+      held.set(row.id, { ...fresh, key, due: announcedAfter(fresh), viewChangesLeft: 0, errored: false });
     } else if (held.get(row.id)?.key !== key) {
       held.delete(row.id);
     }
@@ -202,12 +210,28 @@ export function takeDueRows(scope: string): Message[] {
 }
 
 /**
- * A try of this held row ended in an error, not in an answer: it stays held
- * and due, for the next announcement or change of the view.
+ * A try of this held row ended in an error, not in an answer: it stays held,
+ * and is tried again at the next announcement of its session or once the view
+ * has changed RETRY_AFTER_VIEW_CHANGES times. True for the first such error of
+ * the row (the one to warn about).
  */
-export function retryLater(row: Message): void {
+export function retryLater(row: Message): boolean {
   const entry = held.get(row.id);
-  if (entry && entry.key === versionKey(row)) entry.due = true;
+  if (!entry || entry.key !== versionKey(row)) return false;
+  entry.viewChangesLeft = RETRY_AFTER_VIEW_CHANGES;
+  const first = !entry.errored;
+  entry.errored = true;
+  return first;
+}
+
+/** The view changed (after syncWithView): a row waiting out an error comes due once its count runs out. */
+export function countViewChange(scope: string): void {
+  if (scope !== heldScope) return;
+  for (const entry of held.values()) {
+    if (entry.viewChangesLeft === 0) continue;
+    entry.viewChangesLeft -= 1;
+    if (entry.viewChangesLeft === 0) entry.due = true;
+  }
 }
 
 /**

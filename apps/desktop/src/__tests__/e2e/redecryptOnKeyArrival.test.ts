@@ -30,7 +30,7 @@ vi.mock('../../services/socket', () => ({ getSocket: () => null }));
 vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 
 import { watchKeyArrivals, redecryptPassesSettled } from '../../services/e2e/redecryptOnKeyArrival';
-import { resetUndecryptedRows, hasDueRows } from '../../services/e2e/undecryptedRows';
+import { resetUndecryptedRows, hasDueRows, RETRY_AFTER_VIEW_CHANGES } from '../../services/e2e/undecryptedRows';
 import { decryptMessagesForDisplay, decryptMessageForDisplay, DECRYPT_FAILED_CONTENT } from '../../services/e2e/dmCrypto';
 import { decryptChannelMessagesForDisplay } from '../../services/e2e/channelCrypto';
 import { E2EServiceDisposedError, type E2ESessionsAvailable } from '../../services/e2e/e2eService';
@@ -556,23 +556,41 @@ describe('what is held follows the view', () => {
 });
 
 describe('a try of a held row', () => {
-  it('that ends in an error stays held, and is tried again at the next change of the view, not in a loop', async () => {
+  it(`that ends in an error stays held, is tried again after ${RETRY_AFTER_VIEW_CHANGES} changes of the view, and is warned about once`, async () => {
     useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A)]) });
-    decryptMessage.mockRejectedValueOnce(new Error('vault read failed'));
+    // what the service rejects with in the retry's mode: the vault's own error
+    const full = () => new DOMException('the disk is full', 'QuotaExceededError');
+    decryptMessage.mockRejectedValueOnce(full()).mockRejectedValueOnce(full());
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const changeTheView = async (times: number) => {
+      for (let i = 0; i < times; i++) {
+        useChatStore.getState().addMessage(unrelated());
+        await redecryptPassesSettled();
+      }
+    };
     try {
       arrive('c1', [SID_A]);
       await redecryptPassesSettled();
       await flush();
       expect(decryptMessage).toHaveBeenCalledTimes(2);
       expect(rowById('m1')?.content).toBe(DECRYPT_FAILED_CONTENT);
+
+      // not tried at each change of the view
+      await changeTheView(RETRY_AFTER_VIEW_CHANGES - 1);
+      expect(decryptMessage).toHaveBeenCalledTimes(2);
+      // tried again after a few, and the vault still fails
+      await changeTheView(1);
+      expect(decryptMessage).toHaveBeenCalledTimes(3);
+      expect(rowById('m1')?.content).toBe(DECRYPT_FAILED_CONTENT);
+      // one warning for the row, however many tries failed
+      expect(warn.mock.calls.filter(([text]) => String(text).includes('m1'))).toHaveLength(1);
     } finally {
       warn.mockRestore();
     }
 
-    useChatStore.getState().addMessage(unrelated());
-    await redecryptPassesSettled();
-    expect(decryptMessage).toHaveBeenCalledTimes(3);
+    // the error passes: the row is not lost
+    await changeTheView(RETRY_AFTER_VIEW_CHANGES);
+    expect(decryptMessage).toHaveBeenCalledTimes(4);
     expect(rowById('m1')?.content).toBe('text of m1');
   });
 

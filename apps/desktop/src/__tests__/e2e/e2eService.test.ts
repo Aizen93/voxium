@@ -53,6 +53,7 @@ vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi
 
 import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
 import { watchKeyArrivals, redecryptPassesSettled } from '../../services/e2e/redecryptOnKeyArrival';
+import { RETRY_AFTER_VIEW_CHANGES } from '../../services/e2e/undecryptedRows';
 import { decryptMessageForDisplay, decryptMessagesForDisplay, DECRYPT_FAILED_CONTENT } from '../../services/e2e/dmCrypto';
 import { useChatStore } from '../../stores/chatStore';
 import { useDMStore } from '../../stores/dmStore';
@@ -7296,7 +7297,7 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
     }
   });
 
-  it('keeps the row held when the vault fails during its try, and opens it at the next change of the view', async () => {
+  it('keeps the row held when the vault fails during its try, and opens it after a few changes of the view', async () => {
     uniq++;
     const server = createFakeServer();
     const alice = makeParty(server, 'alice');
@@ -7359,8 +7360,12 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
       expect(writes).toBe(2);
       expect(useChatStore.getState().messages[0].content).toBe(DECRYPT_FAILED_CONTENT);
 
-      useChatStore.getState().addMessage(rowOf('m3', 'c1', 'a notice of some kind', false));
-      await redecryptPassesSettled();
+      // tried again after a few changes of the view, not at each
+      for (let change = 1; change <= RETRY_AFTER_VIEW_CHANGES; change++) {
+        useChatStore.getState().addMessage(rowOf(`n${change}`, 'c1', 'a notice of some kind', false));
+        await redecryptPassesSettled();
+        if (change < RETRY_AFTER_VIEW_CHANGES) expect(writes).toBe(2);
+      }
       expect(useChatStore.getState().messages[0]).toMatchObject({ id: 'm1', content: 'opened at the second try' });
     } finally {
       stop();

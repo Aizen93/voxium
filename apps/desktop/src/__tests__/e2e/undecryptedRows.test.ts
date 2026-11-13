@@ -5,6 +5,7 @@ import type { Message } from '@voxium/shared';
 import {
   PENDING_FAILURES_MAX,
   SESSION_ARRIVALS_MAX,
+  RETRY_AFTER_VIEW_CHANGES,
   arrivalMark,
   noteSessionsAvailable,
   noteUndecrypted,
@@ -12,6 +13,7 @@ import {
   hasDueRows,
   takeDueRows,
   retryLater,
+  countViewChange,
   setViewScopeSource,
   noteQuoteAwaiting,
   quoteAwaits,
@@ -150,15 +152,28 @@ describe('rows held to be decrypted again', () => {
     expect(hasDueRows('c1')).toBe(false);
   });
 
-  it('a try that ended in an error stays held and due, for the same version only', () => {
+  it(`a try that ended in an error stays held, due again after ${RETRY_AFTER_VIEW_CHANGES} changes of the view, not at each`, () => {
     const m1 = wire('m1', 'c2lkQQ');
     noteUndecrypted(m1, 'c1', arrivalMark());
     syncWithView('c1', [shown(m1)]);
     noteSessionsAvailable('c1', ['c2lkQQ']);
     const [taken] = takeDueRows('c1');
-    retryLater(taken);
+    // the first error of the row is the one to warn about; the next ones are not
+    expect(retryLater(taken)).toBe(true);
+    for (let change = 1; change < RETRY_AFTER_VIEW_CHANGES; change++) {
+      countViewChange('c1');
+      expect(hasDueRows('c1')).toBe(false);
+    }
+    countViewChange('c1');
     expect(ids(takeDueRows('c1'))).toEqual(['m1']);
-    retryLater({ ...taken, editedAt: '2026-11-01T11:00:00.000Z' } as Message);
+    expect(retryLater(taken)).toBe(false);
+
+    // an announcement of its session makes it due at once
+    noteSessionsAvailable('c1', ['c2lkQQ']);
+    expect(ids(takeDueRows('c1'))).toEqual(['m1']);
+    // another version of the row is not this one
+    expect(retryLater({ ...taken, editedAt: '2026-11-01T11:00:00.000Z' } as Message)).toBe(false);
+    for (let change = 0; change < RETRY_AFTER_VIEW_CHANGES; change++) countViewChange('c1');
     expect(hasDueRows('c1')).toBe(false);
   });
 

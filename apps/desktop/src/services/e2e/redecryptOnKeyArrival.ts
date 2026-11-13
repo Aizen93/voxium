@@ -11,8 +11,10 @@
 //
 // Local only. A row is tried again only once its own session was announced,
 // and the try (retry: true) never starts a key-share claim: a session no
-// longer on the device leaves the row as it is. A failure of the vault during
-// a try leaves the row held for the next announcement or change of the view.
+// longer on the device leaves the row as it is. A try that ends in an error (a
+// failure of the vault) leaves the row held, tried again at the next
+// announcement of its session or after a few changes of the view, with one
+// warning per row.
 // Nothing here acknowledges or deletes a key share. No sound, unread count or
 // notification: those belong to a message's arrival.
 //
@@ -29,6 +31,7 @@ import { isRefusedShape } from './displayGate';
 import type { E2ESessionsAvailable } from './e2eService';
 import { currentE2ESessionUser } from './session';
 import {
+  countViewChange,
   hasDueRows,
   noteSessionsAvailable,
   quoteAwaits,
@@ -165,9 +168,11 @@ async function retryDueRows(scope: string, live: () => boolean): Promise<void> {
         : await decryptMessageForDisplay(heldRow, { retry: true });
     } catch (err) {
       if (!live()) return;
-      console.warn(`e2e: message ${heldRow.id} could not be decrypted again:`, errorText(err));
-      // an error, not an answer: tried again at the next announcement or view change
-      retryLater(heldRow);
+      // an error, not an answer: the row stays held, and is tried again at the
+      // next announcement of its session or after a few changes of the view
+      if (retryLater(heldRow)) {
+        console.warn(`e2e: message ${heldRow.id} could not be decrypted again (tried again later):`, errorText(err));
+      }
       continue;
     }
     // null: the E2E session ended during the decrypt. A logout, an account
@@ -240,7 +245,9 @@ export function watchKeyArrivals(userId: string, service: SessionsService): () =
     if (state.messages === previous.messages || !live()) return;
     const scope = scopeOnScreen();
     syncWithView(scope, state.messages);
-    if (scope && hasDueRows(scope)) schedulePass(scope, live);
+    if (!scope) return;
+    countViewChange(scope);
+    if (hasDueRows(scope)) schedulePass(scope, live);
   });
   const watch = {
     userId,
