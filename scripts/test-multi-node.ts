@@ -38,6 +38,7 @@ import { killProcessTree } from './lib/processTree.mjs';
 import { portProblem } from './lib/portProbe.mjs';
 import { HEARTBEAT_PATTERN, foreignNodeProblem } from './lib/nodeHeartbeats.mjs';
 import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
+import { signInOrRegister } from './lib/signInOrRegister';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import path from 'path';
 import { createClient as createRedisClient } from 'redis';
@@ -175,22 +176,13 @@ async function login(api: string, username: string): Promise<string> {
 }
 
 async function registerUser(api: string, username: string): Promise<string> {
-  try {
-    // Verify-first registration: proof-of-work + consent (dev difficulty is
-    // tiny; same code path as production), then the known code set in the DB
-    const data = await registerTestUser(api, {
-      username,
-      email: `${username}@multinode.test`,
-      password: PASSWORD,
-    });
-    return data.accessToken;
-  } catch (err: any) {
-    if (err.response?.status === 409) {
-      // Already exists, login
-      const res = await axios.post(`${api}/auth/login`, {
-        email: `${username}@multinode.test`,
-        password: PASSWORD,
-      });
+  const email = `${username}@multinode.test`;
+  // Signed in first, registered only when the account does not exist yet
+  // (scripts/lib/signInOrRegister.ts: a registration started for an account
+  // that exists is a failed attempt the server counts against this address)
+  return signInOrRegister(
+    async () => {
+      const res = await axios.post(`${api}/auth/login`, { email, password: PASSWORD });
       const token = res.data.data.accessToken;
       // An account left over from a run before consent-at-signup existed has
       // null acceptance timestamps, and the server refuses it everything —
@@ -200,9 +192,14 @@ async function registerUser(api: string, username: string): Promise<string> {
         await axios.post(`${api}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, { headers: { Authorization: `Bearer ${token}` } });
       }
       return token;
-    }
-    throw err;
-  }
+    },
+    async () => {
+      // Verify-first registration: proof-of-work + consent (dev difficulty is
+      // tiny; same code path as production), then the known code set in the DB
+      const data = await registerTestUser(api, { username, email, password: PASSWORD });
+      return data.accessToken;
+    },
+  );
 }
 
 function connectSocket(ws: string, token: string): Promise<Socket> {
