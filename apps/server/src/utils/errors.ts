@@ -84,6 +84,20 @@ export function prismaErrorCode(err: unknown): string | undefined {
 }
 
 /**
+ * A write on a space member that is gone by the time it runs: no member row
+ * to update (P2025), or a new member_roles row's key to the membership
+ * refused (P2003 on member_roles_user_id_server_id_fkey). Thrown as the 404
+ * of the missing `entity` (the route's own answer for a missing membership,
+ * 'Member' unless the route names another); anything else is thrown as it is.
+ */
+export function memberGoneAsNotFound(err: unknown, entity = 'Member'): never {
+  if (prismaErrorCode(err) === 'P2025' || violatesForeignKey(err, 'member_roles_user_id_server_id_fkey')) {
+    throw new NotFoundError(entity);
+  }
+  throw err;
+}
+
+/**
  * A foreign-key violation (P2003) on `constraint`, as the driver names it
  * (the adapter's constraint index, or the message that quotes it).
  */

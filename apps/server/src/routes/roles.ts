@@ -1,7 +1,8 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, memberGoneAsNotFound } from '../utils/errors';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import {
   validateRoleName,
   validateRoleColor,
@@ -377,15 +378,27 @@ roleRouter.patch(
         }
       }
 
-      // Replace all member roles atomically
-      await prisma.$transaction([
-        prisma.memberRole.deleteMany({ where: { userId: memberId, serverId } }),
-        ...roleIds.map((roleId) =>
-          prisma.memberRole.create({
-            data: { userId: memberId, serverId, roleId },
-          })
-        ),
-      ]);
+      // Replace all member roles atomically. The member row first, in the
+      // mode the new rows' key takes it (FOR KEY SHARE): a removal of the
+      // member locks that row as its first statement, and this batch then
+      // waits for it before it holds any role row the removal's cascade
+      // deletes. The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): the batch
+      // waits for the removal inside it. Run again whole when PostgreSQL
+      // aborts it to break a deadlock. A member gone by the time it runs is
+      // refused by the new rows' key (P2003): 404 Member.
+      try {
+        await retryOnTransactionConflict(() => prisma.$transaction([
+          prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${memberId} AND server_id = ${serverId} FOR KEY SHARE`,
+          prisma.memberRole.deleteMany({ where: { userId: memberId, serverId } }),
+          ...roleIds.map((roleId) =>
+            prisma.memberRole.create({
+              data: { userId: memberId, serverId, roleId },
+            })
+          ),
+        ], LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The role assignment of ${memberId} in ${serverId}`);
+      } catch (err) {
+        memberGoneAsNotFound(err);
+      }
 
       // Also update the legacy `role` field for backward compat
       // If any assigned role has ADMINISTRATOR or MANAGE_* permissions, set to 'admin'
@@ -405,10 +418,16 @@ roleRouter.patch(
       let legacyRole: MemberRole = 'member';
       if (server?.ownerId !== memberId) {
         legacyRole = isAdminLevel ? 'admin' : 'member';
-        await prisma.serverMember.update({
-          where: { userId_serverId: { userId: memberId, serverId } },
-          data: { role: legacyRole },
-        });
+        // A member gone since the batch (removed with no role to replace)
+        // finds no row (P2025): 404 Member
+        try {
+          await prisma.serverMember.update({
+            where: { userId_serverId: { userId: memberId, serverId } },
+            data: { role: legacyRole },
+          });
+        } catch (err) {
+          memberGoneAsNotFound(err);
+        }
       } else {
         legacyRole = 'owner';
       }

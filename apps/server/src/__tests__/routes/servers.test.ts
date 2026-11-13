@@ -2304,6 +2304,60 @@ describe('Server Routes', () => {
 
   // ── PATCH /api/v1/servers/:serverId/members/:memberId/role ──────────────
 
+  describe('a write on a member removed before it runs answers the route\'s 404, never a 500', () => {
+    const noRow = () => Object.assign(new Error('Record to update not found.'), { code: 'P2025' });
+    afterEach(() => { prismaMock.serverMember.findUnique.mockReset(); });
+
+    it('the owner\'s role change of a member: 404 Member, nothing announced', async () => {
+      prismaMock.serverMember.findUnique
+        .mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'owner' })
+        .mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.update.mockRejectedValueOnce(noRow());
+
+      const res = await request(app).patch('/api/v1/servers/srv-1/members/user-2/role').set('Authorization', `Bearer ${makeToken()}`).send({ role: 'admin' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Member not found');
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('another member\'s nickname: 404 Member, nothing announced', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.update.mockRejectedValueOnce(noRow());
+
+      const res = await request(app).patch('/api/v1/servers/srv-1/members/user-2/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: 'pp' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Member not found');
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    for (const nickname of ['pp', null]) {
+      it(`the caller's own nickname (${nickname === null ? 'cleared' : 'set'}): the route's answer for a caller who is not a member, 404 Server`, async () => {
+        prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+        prismaMock.serverMember.update.mockRejectedValueOnce(noRow());
+
+        const res = await request(app).patch('/api/v1/servers/srv-1/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname });
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Server not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+    }
+
+    it('any other failure of the write is still a 500', async () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.update.mockRejectedValueOnce(new Error('db gone'));
+      try {
+        const res = await request(app).patch('/api/v1/servers/srv-1/members/user-2/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: 'pp' });
+        expect(res.status).toBe(500);
+      } finally {
+        err.mockRestore();
+      }
+    });
+  });
+
   describe('PATCH /api/v1/servers/:serverId/members/:memberId/role', () => {
     it('allows owner to change member role', async () => {
       const token = makeToken();

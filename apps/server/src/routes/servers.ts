@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, memberGoneAsNotFound } from '../utils/errors';
 import {
   validateServerName, validateNickname, validateBanReason, validateServerDescription, validateDiscoveryTags, dedupeDiscoveryTags,
   LIMITS, MEMBER_LIST, MEMBER_DIRECTORY_ROLE_FILTERS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, SERVER_JOIN_MODES, permissionsToString,
@@ -756,10 +756,16 @@ serverRouter.patch(
       if (!targetMembership) throw new NotFoundError('Member');
       if (targetMembership.role === 'owner') throw new ForbiddenError('Cannot change the owner\'s role');
 
-      await prisma.serverMember.update({
-        where: { userId_serverId: { userId: memberId, serverId } },
-        data: { role: newRole },
-      });
+      // One statement: it waits for a removal holding the member row, and a
+      // member gone by then finds no row (P2025): 404 Member
+      try {
+        await prisma.serverMember.update({
+          where: { userId_serverId: { userId: memberId, serverId } },
+          data: { role: newRole },
+        });
+      } catch (err) {
+        memberGoneAsNotFound(err);
+      }
 
       getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
         serverId,
@@ -1162,10 +1168,16 @@ serverRouter.patch(
         const err = validateNickname(sanitized);
         if (err) throw new BadRequestError(err);
 
-        await prisma.serverMember.update({
-          where: { userId_serverId: { userId: req.user!.userId, serverId } },
-          data: { nickname: sanitized },
-        });
+        // A caller removed since the membership read finds no row (P2025):
+        // the route's answer for a caller who is not a member
+        try {
+          await prisma.serverMember.update({
+            where: { userId_serverId: { userId: req.user!.userId, serverId } },
+            data: { nickname: sanitized },
+          });
+        } catch (err) {
+          memberGoneAsNotFound(err, 'Server');
+        }
 
         getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
           serverId,
@@ -1175,10 +1187,14 @@ serverRouter.patch(
 
         res.json({ success: true, data: { nickname: sanitized } });
       } else {
-        await prisma.serverMember.update({
-          where: { userId_serverId: { userId: req.user!.userId, serverId } },
-          data: { nickname: null },
-        });
+        try {
+          await prisma.serverMember.update({
+            where: { userId_serverId: { userId: req.user!.userId, serverId } },
+            data: { nickname: null },
+          });
+        } catch (err) {
+          memberGoneAsNotFound(err, 'Server');
+        }
 
         getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
           serverId,
@@ -1226,10 +1242,16 @@ serverRouter.patch(
         if (err) throw new BadRequestError(err);
       }
 
-      await prisma.serverMember.update({
-        where: { userId_serverId: { userId: memberId, serverId } },
-        data: { nickname: sanitized },
-      });
+      // One statement: it waits for a removal holding the member row, and a
+      // member gone by then finds no row (P2025): 404 Member
+      try {
+        await prisma.serverMember.update({
+          where: { userId_serverId: { userId: memberId, serverId } },
+          data: { nickname: sanitized },
+        });
+      } catch (err) {
+        memberGoneAsNotFound(err);
+      }
 
       getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
         serverId,

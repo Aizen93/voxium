@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import { Permissions, permissionsToString, permissionsFromString, ALL_PERMISSIONS, WS_EVENTS } from '@voxium/shared';
@@ -37,6 +37,8 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
   },
   $transaction: vi.fn(),
+  // the member row lock the role assignment batch takes first
+  $queryRaw: vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ op: 'lock', sql: strings.join('?'), values })),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -758,6 +760,92 @@ describe('Role Routes', () => {
       );
       // The member's role set changed — their sockets' channel rooms re-sync
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { userId: 'member1' });
+    });
+
+    describe('a member a removal holds, or removed meanwhile', () => {
+      /** An actor who outranks the member, assigning r2. */
+      function assignable() {
+        mockHasServerPermission.mockResolvedValue(true);
+        mockGetHighestRolePosition.mockResolvedValue(Infinity);
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'member1', serverId: 'srv1' });
+        prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'user1' });
+        prismaMock.role.findMany
+          .mockResolvedValueOnce([{ id: 'r2', position: 2, isDefault: false }])
+          .mockResolvedValueOnce([{ permissions: permissionsToString(Permissions.VIEW_CHANNEL) }]);
+        prismaMock.memberRole.deleteMany.mockReturnValue({ op: 'roles.deleteMany' });
+        prismaMock.memberRole.create.mockReturnValue({ op: 'roles.create' });
+        prismaMock.serverMember.update.mockResolvedValue({});
+      }
+      // clearAllMocks keeps a queued answer a test that stopped early left
+      afterEach(() => { prismaMock.role.findMany.mockReset(); });
+      const assign = () => request(app).patch('/api/v1/servers/srv1/roles/members/member1').send({ roleIds: ['r2'] });
+      const memberKeyRefused = () => Object.assign(new Error('Foreign key constraint violated on the constraint: `member_roles_user_id_server_id_fkey`'), {
+        code: 'P2003',
+        meta: { modelName: 'MemberRole', driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23503', kind: 'ForeignKeyConstraintViolation', constraint: { index: 'member_roles_user_id_server_id_fkey' } } } },
+      });
+
+      it('locks the member row FIRST, FOR KEY SHARE, then replaces the roles, in one batch with the long budget', async () => {
+        assignable();
+        prismaMock.$transaction.mockResolvedValue([]);
+
+        expect((await assign()).status).toBe(200);
+
+        expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+        const [batch] = prismaMock.$transaction.mock.calls[0] as [Array<{ op: string; sql?: string; values?: unknown[] }>];
+        expect(batch.map((s) => s.op)).toEqual(['lock', 'roles.deleteMany', 'roles.create']);
+        expect(batch[0].sql).toBe('SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR KEY SHARE');
+        expect(batch[0].values).toEqual(['member1', 'srv1']);
+      });
+
+      it('a member removed before the batch ran: the new row\'s key is refused, 404 Member, nothing announced', async () => {
+        assignable();
+        prismaMock.$transaction.mockRejectedValueOnce(memberKeyRefused());
+
+        const res = await assign();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Member not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      });
+
+      it('a member removed before the legacy role update: no row (P2025), 404 Member, nothing announced', async () => {
+        assignable();
+        prismaMock.$transaction.mockResolvedValue([]);
+        prismaMock.serverMember.update.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
+
+        const res = await assign();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Member not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a batch PostgreSQL aborted to break a deadlock is built again and run again', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        assignable();
+        prismaMock.$transaction
+          .mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }))
+          .mockResolvedValueOnce([]);
+        try {
+          expect((await assign()).status).toBe(200);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+          expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('any other failure of the batch is still a 500', async () => {
+        const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+        assignable();
+        prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Foreign key constraint violated on the constraint: `member_roles_role_id_fkey`'), { code: 'P2003' }));
+        try {
+          expect((await assign()).status).toBe(500);
+        } finally {
+          err.mockRestore();
+        }
+      });
     });
 
     it('returns 403 without MANAGE_ROLES permission', async () => {
