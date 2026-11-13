@@ -1658,6 +1658,21 @@ describe('DELETE /api/v1/auth/account', () => {
     }));
   });
 
+  it('a deletion that finds the account owning a space after the check (a transfer to it) answers the owned-spaces 409 with its list', async () => {
+    const token = mockAccount({});
+    const { OwnedServersError } = await import('../../utils/errors');
+    deleteUserAccountMock.mockRejectedValueOnce(new OwnedServersError([{ id: 's-9', name: 'Handed over' }]));
+
+    const res = await request(app)
+      .delete('/api/v1/auth/account')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ password: PASSWORD });
+
+    expect(res.status).toBe(409);
+    expect(res.body.data).toEqual({ ownedServers: [{ id: 's-9', name: 'Handed over' }] });
+    expect(logAuditEventMock).not.toHaveBeenCalled();
+  });
+
   it('is reachable by an unverified, unconsented account — leaving must always be possible', async () => {
     // mockAccount's auth row is exactly that account
     const token = mockAccount({});
