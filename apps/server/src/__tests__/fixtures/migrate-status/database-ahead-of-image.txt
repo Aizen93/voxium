@@ -1,0 +1,8 @@
+Loaded Prisma config from prisma.config.ts.
+
+Prisma schema loaded from prisma/schema.prisma.
+Datasource "db": PostgreSQL database "voxium", schema "public" at "postgres:5432"
+
+54 migrations found in prisma/migrations
+
+Database schema is up to date!

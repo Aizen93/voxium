@@ -43,4 +43,13 @@ describe('security disclosure', () => {
     expect(read('CONTRIBUTING.md')).toContain('[SECURITY.md](SECURITY.md)');
     expect(read('.github/pull_request_template.md')).toContain('SECURITY.md');
   });
+
+  it('the issue-template chooser offers the private form first', () => {
+    const chooser = read('.github/ISSUE_TEMPLATE/config.yml').replace(/\r\n/g, '\n');
+    // Blank issues stay off: every public issue goes through a template
+    expect(chooser).toMatch(/^blank_issues_enabled: false$/m);
+    const links = [...chooser.matchAll(/^ {2}- name: (.+)\n {4}url: (\S+)$/gm)].map((m) => ({ name: m[1], url: m[2] }));
+    expect(links[0]).toEqual({ name: 'Report a security vulnerability', url: PRIVATE_REPORT_URL });
+    expect(links.map((l) => l.url)).toContain('https://github.com/Aizen93/voxium/discussions');
+  });
 });

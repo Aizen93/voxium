@@ -21,6 +21,8 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
+    # About 3 minutes (building cargo-audit); past 20 the run is hung
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: packages/crypto-engine
@@ -35,8 +37,18 @@ jobs:
       - name: Check for a newer vodozemac release
         run: |
           PINNED=$(grep -oP 'vodozemac = "=\K[0-9.]+' Cargo.toml)
-          LATEST=$(curl -s -A "voxium-crypto-deps-watch" https://crates.io/api/v1/crates/vodozemac \
-            | python3 -c "import json,sys; print(json.load(sys.stdin)['crate']['max_stable_version'])")
+          # Bounded (a stalled answer used to wait for the job limit), and an
+          # HTTP error ends here with its own message instead of as a JSON
+          # traceback or a version named "None"
+          BODY=$(curl -fsS --max-time 30 --retry 3 --retry-delay 5 -A "voxium-crypto-deps-watch" \
+            https://crates.io/api/v1/crates/vodozemac) \
+            || { echo "::error::crates.io did not answer for vodozemac: run the job again later"; exit 1; }
+          LATEST=$(printf '%s' "$BODY" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['crate']['max_stable_version'] or '')")
+          if ! [[ $LATEST =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::crates.io named no stable vodozemac version (got '$LATEST')"
+            exit 1
+          fi
           echo "pinned=$PINNED latest=$LATEST"
           if [ "$PINNED" != "$LATEST" ]; then
             echo "::error::vodozemac $LATEST is available (pinned: $PINNED). Review the changelog and RustSec, then bump the pin in packages/crypto-engine/Cargo.toml and rebuild the WASM artifact (pnpm --filter @voxium/crypto-engine build:wasm)."

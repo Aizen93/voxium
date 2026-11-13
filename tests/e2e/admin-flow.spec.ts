@@ -84,8 +84,9 @@ test.describe('Admin flow: login -> manage users -> resolve report -> close tick
     // Click on the ticket to select it
     await page.getByText(regularUser.username, { exact: false }).first().click();
 
-    // Should see the ticket message
-    await expect(page.getByText(ticketMessage)).toBeVisible({ timeout: 10_000 });
+    // Should see the ticket message: a paragraph (the thread's message, or the
+    // ticket list's preview of it), since the page can show the words twice
+    await expect(page.locator('p', { hasText: ticketMessage }).first()).toBeVisible({ timeout: 10_000 });
 
     // Claim the ticket
     await page.getByRole('button', { name: 'Claim', exact: true }).click();
@@ -95,7 +96,11 @@ test.describe('Admin flow: login -> manage users -> resolve report -> close tick
     const staffReply = `Staff response ${Date.now()}`;
     await page.getByPlaceholder('Type a message...').fill(staffReply);
     await page.keyboard.press('Enter');
-    await expect(page.getByText(staffReply)).toBeVisible({ timeout: 10_000 });
+    // A paragraph (the thread's message, or the ticket list's preview of it),
+    // not the text anywhere: until the composer clears, its textarea holds the
+    // same words, so a page-wide getByText matches it alone before the message
+    // exists, and both once it does (strict mode)
+    await expect(page.locator('p', { hasText: staffReply }).first()).toBeVisible({ timeout: 10_000 });
 
     // Close the ticket
     await page.getByRole('button', { name: 'Close', exact: true }).click();
@@ -105,7 +110,16 @@ test.describe('Admin flow: login -> manage users -> resolve report -> close tick
     await page.getByRole('button', { name: 'Audit Log' }).click();
     await expect(page.getByText('Audit Log').first()).toBeVisible({ timeout: 10_000 });
 
-    // Should show support and report audit entries (use table locator to avoid matching hidden <option> elements)
-    await expect(page.locator('table').getByText('Ticket Closed').first()).toBeVisible({ timeout: 10_000 });
+    // The audit entry is written beside the route's answer, not before it, and
+    // this page fetches once when it opens: an entry that lands a moment later
+    // is not on it. Choosing the action in the filter fetches again, so the
+    // filter is set until the entry is there (the table locator avoids the
+    // filter's own <option> of the same name).
+    const actionFilter = page.locator('select').filter({ has: page.locator('option', { hasText: 'All Actions' }) });
+    await expect(async () => {
+      await actionFilter.selectOption('');
+      await actionFilter.selectOption('support.close');
+      await expect(page.locator('table').getByText('Ticket Closed').first()).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 20_000 });
   });
 });

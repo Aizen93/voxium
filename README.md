@@ -434,7 +434,9 @@ This starts three services:
 | `voxium-postgres` | PostgreSQL 16            | internal |
 | `voxium-redis`    | Redis 7                  | internal |
 
-Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed.
+Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed. On a new, empty database the first start applies all of them. Unless `VOXIUM_ALLOW_CUTOVER=1` is set (below), the container first reads `prisma migrate status` until the database answers (10 attempts, 3 s apart, each failed read logged with its error) and does not migrate a database it could not read: if PostgreSQL stays unreachable, the server container exits and its log shows the last error.
+
+> **`VOXIUM_ALLOW_CUTOVER`:** one migration, the always-on E2E cutover (`20260801140000_e2e_always_on`), deletes all DM history and every E2E key, and there is no rollback. When a database that already holds an install (migrations applied before) still has it pending, the container refuses to start instead of applying it on an ordinary restart. Apply it deliberately, after a snapshot and inside a maintenance window, following `docs/e2e-always-on-plan.md` §7.7. On a database that holds DMs or E2E keys, setting `VOXIUM_ALLOW_CUTOVER=1` for that one start is not enough on its own: the migration also requires the authorisation that procedure describes (the `e2e_cutover_authorised` table), and without it the migration refuses and leaves a failed-migration record (P3009 naming the cutover), which is marked rolled back, never cleared by recreating the database. Remove the variable afterwards. A new, empty database never needs it. A first start that was interrupted part-way, or a second replica starting while the first one migrates, leaves a database that is no longer empty and reads as an existing one: the refusal message says how to go on when that database never served users.
 
 ### 4. Verify It's Running
 
@@ -507,6 +509,8 @@ Demo seed creates:
 - **Messages:** Sample messages in #general
 
 > **Note:** usernames are kept case-insensitively unique by a functional index Prisma cannot express, so `prisma migrate dev` reports it as drift and may offer to reset the database or drop it. Do not accept — keep the index.
+
+> **No update check:** the Prisma CLI reports to `checkpoint.prisma.io` on every run unless `CHECKPOINT_DISABLE` is set. `apps/server/prisma.config.ts` sets it, so every Prisma command run from `apps/server` (the ones above, CI, the Docker entrypoint) skips the check, and the Docker image sets it for both of its stages.
 
 ---
 
