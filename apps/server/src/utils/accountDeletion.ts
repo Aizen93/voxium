@@ -179,9 +179,12 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * cascade and account-row lock reach. A space delete's cascade reaches this
  * account's member row before any other row this transaction holds and waits
  * there; that rests on the order PostgreSQL fires the cascade triggers of
- * `servers` in (by constraint id: `server_members` ahead of `channels` on a
- * database built from these migrations). Two cycles stay possible, both on a
- * membership the account gained after step 1. A kick of the account from
+ * `servers` in, which is the text order of the trigger names, each ending in
+ * the trigger's oid: `server_members` ahead of `channels` on a database built
+ * from these migrations in one go, not necessarily on a restored one, where
+ * the delete may hold another of these rows first (PostgreSQL then aborts
+ * one side, and both are retried). Two cycles stay possible on any database,
+ * both on a membership the account gained after step 1. A kick of the account from
  * that space, when the kick locks the new member row after step 4 has locked
  * the account row and before the second member-row delete reaches the row
  * (the kick's ban then key-shares the account row). A transfer to the
