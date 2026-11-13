@@ -150,9 +150,17 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  *    from `servers` to `users` is the owner's (Restrict, and an account
  *    deleted here owns no space), and nothing it sets null lives in
  *    `servers`.
- * A deadlock with a space delete (its cascade reaches this account's member
- * row and messages) or with a transfer to this account stays possible;
- * PostgreSQL aborts one side and both sides retry.
+ * Two deadlocks stay possible, both with a transaction that starts between
+ * step 1 and step 4 (a short window, longer when the account created secure
+ * channels with a long history): a transfer to this account (it key-shares
+ * the account row through the new owner's key, then waits for the member row
+ * deleted here, while step 4 waits for that key share) and a kick of this
+ * account (it holds the webhooks the account created or rotated, then waits
+ * for the member row, while the cascade waits for those webhooks). PostgreSQL
+ * aborts this transaction, which runs again whole; after a transfer that
+ * committed meanwhile the retry answers OwnedServersError (below). A space
+ * delete closes no cycle with it: its cascade reaches this account's member
+ * row before any other row this transaction holds, and waits there.
  */
 export async function deleteAccountRows(userId: string): Promise<SecureMembershipRemoval> {
   let committed: { removal: SecureMembershipRemoval; serverIds: string[] };
@@ -177,8 +185,8 @@ export async function deleteAccountRows(userId: string): Promise<SecureMembershi
     }
     throw err;
   }
-  // Not awaited: the statement waits for any of those space rows another
-  // transaction holds (a space delete holds one through its cascade), and
+  // Not awaited: each of its statements waits for a space row while another
+  // transaction holds it (a space delete holds one through its cascade), and
   // what follows the commit (the second session revocation first of all)
   // must not wait with it. It never rejects.
   void lowerMemberCounts(committed.serverIds, userId);
@@ -195,27 +203,42 @@ function ownsASpaceNow(err: unknown): boolean {
 /**
  * The inline member counts (the directory's figure and the member list's
  * total) of the spaces a deleted account was a member of: lowered once the
- * delete has committed, in a statement of its own (see the lock order above:
- * it is the statement that locks space rows). Best effort, like every step
- * that follows a committed delete: nothing decides on this figure (the member
- * limit counts the rows), a failure is logged and the nightly drift
+ * delete has committed, outside its transaction (see the lock order above:
+ * these are the statements that lock space rows). Best effort, like every
+ * step that follows a committed delete: nothing decides on this figure (the
+ * member limit counts the rows), a failure is logged and the nightly drift
  * correction (discoveryStats.ts) recounts. The spaces are the ones the
  * committed attempt removed a row from, so a retried transaction lowers each
- * count once. The statement holds nothing but the space rows it updates; it
- * takes them one after another, so it is run again if PostgreSQL aborts it to
- * break a deadlock with another statement taking several of the same rows.
+ * count once.
+ *
+ * ONE STATEMENT PER SPACE, one after the other, never one statement for all
+ * of them: a statement over several rows keeps the rows it has already
+ * updated locked while it waits for the next, so a space row another
+ * transaction holds for long (a space delete, through its cascade) would
+ * keep the account's OTHER spaces locked for as long, with every join and
+ * creation there queued behind them. A statement over one row holds nothing
+ * while it waits and commits as soon as it has its row, so it can neither
+ * hold up another space nor be part of a deadlock; a row held for long only
+ * delays the counts that come after it.
  */
 async function lowerMemberCounts(serverIds: string[], userId: string): Promise<void> {
-  if (serverIds.length === 0) return;
-  try {
-    await retryOnTransactionConflict(() => prisma.server.updateMany({
-      where: { id: { in: serverIds }, memberCount: { gt: 0 } },
-      data: { memberCount: { decrement: 1 } },
-    }), `[Accounts] The member-count update after the deletion of account ${userId}`);
-  } catch (err) {
+  let failed = 0;
+  let lastError: unknown;
+  for (const serverId of serverIds) {
+    try {
+      await prisma.server.updateMany({
+        where: { id: serverId, memberCount: { gt: 0 } },
+        data: { memberCount: { decrement: 1 } },
+      });
+    } catch (err) {
+      failed++;
+      lastError = err;
+    }
+  }
+  if (failed > 0) {
     console.warn(
-      `[Accounts] The member count of ${serverIds.length} space(s) was not lowered after the deletion of account ${userId} (the nightly recount corrects it):`,
-      err instanceof Error ? err.message : err,
+      `[Accounts] The member count of ${failed} of ${serverIds.length} space(s) was not lowered after the deletion of account ${userId} (the nightly recount corrects it):`,
+      lastError instanceof Error ? lastError.message : lastError,
     );
   }
 }

@@ -561,7 +561,7 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     // the deleted account's own membership leaves the count once the delete
     // transaction has committed, never inside it (it would lock the space row)
     expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['srv-owned'] }, memberCount: { gt: 0 } },
+      where: { id: 'srv-owned', memberCount: { gt: 0 } },
       data: { memberCount: { decrement: 1 } },
     });
     expect(prismaMock.server.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
@@ -596,7 +596,7 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     });
     // and the departing account's own row leaves the count after its deletion committed
     expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['srv-owned'] }, memberCount: { gt: 0 } },
+      where: { id: 'srv-owned', memberCount: { gt: 0 } },
       data: { memberCount: { decrement: 1 } },
     });
     expect(txMock.server.updateMany).not.toHaveBeenCalled();

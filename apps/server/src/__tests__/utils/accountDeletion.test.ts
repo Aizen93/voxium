@@ -76,7 +76,8 @@ beforeEach(() => {
   announceSecure.mockImplementation(async () => { order.push('secure:notices'); });
   purgeE2E.mockImplementation(async () => { order.push('e2e'); });
   prismaMock.user.delete.mockImplementation(async () => { order.push('delete'); return {}; });
-  prismaMock.server.updateMany.mockImplementation(async () => { order.push('counts'); return { count: 2 }; });
+  // one statement per space, after the commit: named by its space in the order log
+  prismaMock.server.updateMany.mockImplementation(async (args: { where: { id: unknown } }) => { order.push(`count:${String(args.where.id)}`); return { count: 1 }; });
   prismaMock.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
     order.push('txn:start');
     const result = await fn({ user: prismaMock.user, server: { updateMany: txSpaceUpdate }, serverMember: prismaMock.serverMember, $queryRaw: prismaMock.$queryRaw });
@@ -93,15 +94,20 @@ describe('deleteUserAccount', () => {
     await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
 
     // members told and sessions ended before anything is purged; the E2E
-    // purge and the row delete share one transaction; the member counts move
-    // once it has committed; the avatar blob goes only AFTER the row (a
-    // failed delete must not strand a live account without its avatar)
-    expect(order).toEqual([
+    // purge and the row delete share one transaction; the avatar blob goes
+    // only AFTER the row (a failed delete must not strand a live account
+    // without its avatar)
+    expect(order.filter((step) => !step.startsWith('count:'))).toEqual([
       'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect',
       'attachment-keys', 'attachment-keys', 'attachment-keys', 'attachment-keys',
-      'txn:start', 'memberships', 'secure', 'e2e', 'delete', 'txn:end', 'counts',
+      'txn:start', 'memberships', 'secure', 'e2e', 'delete', 'txn:end',
       'force:logout', 'disconnect:local', 'disconnect', 'secure:notices', 's3',
     ]);
+    // the member counts move once the transaction has committed, a space at a
+    // time, beside the steps above (nothing waits for them)
+    await vi.waitFor(() => expect(order).toContain('count:s-2'));
+    expect(order.indexOf('count:s-1')).toBeGreaterThan(order.indexOf('txn:end'));
+    expect(order.indexOf('count:s-2')).toBeGreaterThan(order.indexOf('count:s-1'));
     expect(purgeE2E).toHaveBeenCalledWith('u-1', expect.objectContaining({ user: prismaMock.user }));
     expect(prismaMock.user.delete).toHaveBeenCalledWith({ where: { id: 'u-1' } });
     expect(deleteFromS3).toHaveBeenCalledWith('avatars/u-1.webp');
@@ -136,10 +142,10 @@ describe('deleteUserAccount', () => {
   });
 
   describe('the member counts of the spaces the account was in', () => {
-    const COUNT_UPDATE = {
-      where: { id: { in: ['s-1', 's-2'] }, memberCount: { gt: 0 } },
+    const countUpdate = (serverId: string) => ({
+      where: { id: serverId, memberCount: { gt: 0 } },
       data: { memberCount: { decrement: 1 } },
-    };
+    });
 
     it('the delete transaction touches no space row: the user delete is its last statement and the counts move after the commit, on the shared client', async () => {
       // The count update locks the row of every space the account was in,
@@ -161,10 +167,11 @@ describe('deleteUserAccount', () => {
         committed = true;
         return result;
       });
-      let committedAtCountUpdate: boolean | undefined;
-      prismaMock.server.updateMany.mockImplementation(async () => { committedAtCountUpdate = committed; return { count: 2 }; });
+      const committedAtCountUpdate: boolean[] = [];
+      prismaMock.server.updateMany.mockImplementation(async () => { committedAtCountUpdate.push(committed); return { count: 1 }; });
 
       await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+      await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
 
       expect(txOrder).toEqual(['memberships', 'secure', 'e2e', 'delete']);
       expect(tx.user.delete).toHaveBeenCalledWith({ where: { id: 'u-1' } });
@@ -174,12 +181,33 @@ describe('deleteUserAccount', () => {
       // the one statement of the transaction's client that is raw SQL names no space
       expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
       expect(((tx.$queryRaw.mock.calls[0] as unknown[])[0] as string[]).join('?')).not.toMatch(/\bservers\b/);
-      expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(1);
-      expect(prismaMock.server.updateMany).toHaveBeenCalledWith(COUNT_UPDATE);
-      expect(committedAtCountUpdate).toBe(true);
+      expect(prismaMock.server.updateMany).toHaveBeenNthCalledWith(1, countUpdate('s-1'));
+      expect(prismaMock.server.updateMany).toHaveBeenNthCalledWith(2, countUpdate('s-2'));
+      expect(committedAtCountUpdate).toEqual([true, true]);
     });
 
-    it('a count update that waits (a space delete holds one of those rows) holds up nothing that follows the commit', async () => {
+    it('lowers ONE space per statement, one after the other: a statement over several rows would keep the rows it has updated locked while it waits for the next', async () => {
+      let releaseFirst!: () => void;
+      prismaMock.server.updateMany
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = () => resolve({ count: 1 }); }))
+        .mockResolvedValue({ count: 1 });
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+      // the first space's row is held elsewhere: its statement waits, and the
+      // second space has not been touched (no lock taken on it meanwhile)
+      expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.server.updateMany).toHaveBeenCalledWith(countUpdate('s-1'));
+      releaseFirst();
+      await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
+      expect(prismaMock.server.updateMany).toHaveBeenLastCalledWith(countUpdate('s-2'));
+      // never a statement over several spaces
+      for (const [args] of prismaMock.server.updateMany.mock.calls as Array<[{ where: { id: unknown } }]>) {
+        expect(typeof args.where.id).toBe('string');
+      }
+    });
+
+    it('a count update that waits (a space delete holds that row) holds up nothing that follows the commit', async () => {
       // never answers: the second revocation, the notices and the avatar must not wait for it
       prismaMock.server.updateMany.mockImplementation(() => { order.push('counts'); return new Promise(() => {}); });
 
@@ -197,8 +225,10 @@ describe('deleteUserAccount', () => {
         await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
 
         await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
-          '[Accounts] The member count of 2 space(s) was not lowered after the deletion of account u-1 (the nightly recount corrects it):', 'db gone'));
-        expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(1);
+          '[Accounts] The member count of 2 of 2 space(s) was not lowered after the deletion of account u-1 (the nightly recount corrects it):', 'db gone'));
+        // one warning for the pass, and never a second try (the recount is the backstop)
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2);
         expect(announceSecure).toHaveBeenCalledWith(SECURE_REMOVAL);
         expect(deleteFromS3).toHaveBeenCalledWith('avatars/u-1.webp');
       } finally {
@@ -206,19 +236,19 @@ describe('deleteUserAccount', () => {
       }
     });
 
-    it('a count update PostgreSQL aborted to break a deadlock is run again, and lowers each count once', async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    it('a space whose count update fails does not stop the next one', async () => {
       prismaMock.server.updateMany
-        .mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }))
-        .mockResolvedValue({ count: 2 });
+        .mockRejectedValueOnce(new Error('canceling statement due to lock timeout'))
+        .mockResolvedValue({ count: 1 });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
 
-        await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
-        expect(prismaMock.server.updateMany).toHaveBeenNthCalledWith(1, COUNT_UPDATE);
-        expect(prismaMock.server.updateMany).toHaveBeenNthCalledWith(2, COUNT_UPDATE);
-        expect(warn).toHaveBeenCalledWith('[Accounts] The member-count update after the deletion of account u-1 was aborted by a deadlock or a serialization failure; retrying (1 of 2)');
-        expect(warn).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+          '[Accounts] The member count of 1 of 2 space(s) was not lowered after the deletion of account u-1 (the nightly recount corrects it):',
+          'canceling statement due to lock timeout'));
+        expect(prismaMock.server.updateMany).toHaveBeenNthCalledWith(1, countUpdate('s-1'));
+        expect(prismaMock.server.updateMany).toHaveBeenNthCalledWith(2, countUpdate('s-2'));
       } finally {
         warn.mockRestore();
       }
@@ -397,8 +427,13 @@ describe('deleteUserAccount', () => {
     // The transaction removes the memberships; the directory's live member
     // count (server discovery) follows its commit, guarded so drift can never
     // push it negative.
+    await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
     expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['s-1', 's-2'] }, memberCount: { gt: 0 } },
+      where: { id: 's-1', memberCount: { gt: 0 } },
+      data: { memberCount: { decrement: 1 } },
+    });
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
+      where: { id: 's-2', memberCount: { gt: 0 } },
       data: { memberCount: { decrement: 1 } },
     });
     expect(txSpaceUpdate).not.toHaveBeenCalled();
@@ -424,11 +459,10 @@ describe('deleteUserAccount', () => {
     try {
       await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
 
-      expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(1);
-      expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
-        where: { id: { in: ['s-1', 's-3'] }, memberCount: { gt: 0 } },
-        data: { memberCount: { decrement: 1 } },
-      });
+      await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
+      const lowered = (prismaMock.server.updateMany.mock.calls as Array<[{ where: { id: string } }]>).map(([args]) => args.where.id);
+      // each of the committed attempt's spaces once; s-2 (left between the attempts) never
+      expect(lowered).toEqual(['s-1', 's-3']);
     } finally {
       warn.mockRestore();
     }
