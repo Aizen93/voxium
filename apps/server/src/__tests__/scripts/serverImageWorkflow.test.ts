@@ -1,0 +1,103 @@
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+/**
+ * .github/workflows/server-image.yml builds the server image and boots it on
+ * every change that can break a boot: before it, nothing built or started the
+ * image between release tags, and a fresh install that refused to start
+ * (issue #82) reached self-hosters first. These pin what review would
+ * otherwise have to re-check by eye.
+ */
+
+const REPO = resolve(__dirname, '../../../../..');
+const read = (path: string) => readFileSync(resolve(REPO, path), 'utf8').replace(/\r\n/g, '\n');
+const workflow = read('.github/workflows/server-image.yml');
+
+describe('server-image workflow', () => {
+  it('pins every action exactly as docker.yml or ci.yml already does (SHA, tag in a comment)', () => {
+    const known = `${read('.github/workflows/docker.yml')}\n${read('.github/workflows/ci.yml')}`;
+    const uses = workflow.split('\n').filter((l) => /^\s*(- )?uses: /.test(l));
+    expect(uses.length).toBeGreaterThan(0);
+    for (const line of uses) {
+      expect(line).toMatch(/uses: [\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/);
+      expect(known).toContain(line.trim().replace(/^- /, ''));
+    }
+  });
+
+  it('reads the repository and pushes nothing', () => {
+    expect(workflow).toMatch(/^permissions:\n {2}contents: read\n/m);
+    expect(workflow).not.toMatch(/packages: write|push: true|docker\/login-action/);
+  });
+
+  it('runs on pull requests and develop pushes that touch what the image is built from', () => {
+    for (const path of [
+      'Dockerfile',
+      'docker-entrypoint.sh',
+      '.dockerignore',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'package.json',
+      'apps/server/package.json',
+      // The image's tsc steps read these: an outDir or rootDir change moves
+      // the dist/index.js the entrypoint starts.
+      'apps/server/tsconfig.json',
+      'packages/shared/tsconfig.json',
+      'apps/server/prisma/**',
+      'apps/server/prisma.config.ts',
+      '.github/workflows/server-image.yml',
+    ]) {
+      // Once under pull_request, once under push.
+      expect(workflow.split('\n').filter((l) => l.trim() === `- ${path}`), path).toHaveLength(2);
+    }
+    expect(workflow).toMatch(/push:\n {4}branches: \[develop\]/);
+  });
+
+  it('also runs on develop pushes that change the code the image compiles, never on such a pull request', () => {
+    // A runtime import of a devDependency compiles in ci.yml and fails only
+    // in the image, which installs --prod. Pull requests already compile the
+    // code in ci.yml; this job would run on nearly every one.
+    const lines = workflow.split('\n');
+    const pushStart = lines.findIndex((l) => l === '  push:');
+    const pullRequest = lines.slice(0, pushStart);
+    const push = lines.slice(pushStart, lines.findIndex((l) => l === 'permissions:'));
+    for (const path of ['apps/server/src/**', 'packages/shared/src/**', '!apps/server/src/__tests__/**']) {
+      expect(push.filter((l) => l.trim() === `- '${path}'` || l.trim() === `- ${path}`), path).toHaveLength(1);
+      expect(pullRequest.some((l) => l.includes(path.replace(/^!/, ''))), path).toBe(false);
+    }
+  });
+
+  it('bounds every network wait', () => {
+    const lines = workflow.split('\n');
+    const curls = lines.filter((l) => /\bcurl /.test(l));
+    expect(curls.length).toBeGreaterThan(0);
+    for (const l of curls) expect(l).toMatch(/--max-time \d+/);
+    for (const l of lines.filter((x) => /\bpg_isready /.test(x))) expect(l).toMatch(/ -t \d+/);
+    // Every container that talks to the database ends within a bound: the
+    // server ones are polled by wait-health.sh (90 x 2 s) or detached.
+    for (const l of lines.filter((x) => /docker (run|exec) /.test(x) && !/ -d /.test(x))) {
+      expect(l, l.trim()).toMatch(/timeout \d+ docker (run|exec) /);
+    }
+  });
+
+  it('interpolates no attacker-controlled context', () => {
+    // Every expression in the file, none of them inside a run: script.
+    expect(new Set(workflow.match(/\$\{\{.*?\}\}/g))).toEqual(
+      new Set([
+        '${{ github.ref }}',
+        '${{ env.IMAGE }}',
+        "${{ github.event_name == 'push' && 'type=gha,scope=server-image,mode=max' || '' }}",
+      ])
+    );
+  });
+
+  it('boots the empty database with no override, and refuses the existing one', () => {
+    expect(workflow).not.toContain('VOXIUM_ALLOW_CUTOVER');
+    // The empty-database line, exactly as the entrypoint prints it.
+    const emptyLine = '[Voxium] No migration is recorded in this database: every migration is pending.';
+    expect(workflow).toContain(emptyLine);
+    expect(read('docker-entrypoint.sh')).toContain(`echo "${emptyLine}"`);
+    expect(workflow).toContain('FATAL: the always-on E2E cutover ($CUTOVER) has not been applied.');
+    expect(workflow).toMatch(/migration_name = '\$CUTOVER'/);
+  });
+});
