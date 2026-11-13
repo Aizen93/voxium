@@ -30,7 +30,35 @@ import {
 // injected client, so stub the module out entirely.
 vi.mock('../../services/api', () => ({ api: {} }));
 
+// The display gate (dmCrypto) reaches the service through getE2EService and
+// the signed-in user through authStore. The retry-on-key-arrival tests at the
+// end hand it the service under test; everywhere else nothing is handed in,
+// and getE2EService is the real one.
+const display = vi.hoisted(() => ({ service: null as unknown, userId: null as string | null }));
+vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/e2e/e2eService')>();
+  return {
+    ...actual,
+    getE2EService: (userId: string) =>
+      (display.service as ReturnType<typeof actual.getE2EService> | null) ?? actual.getE2EService(userId),
+  };
+});
+vi.mock('../../stores/authStore', () => ({
+  useAuthStore: { getState: () => ({ user: display.userId ? { id: display.userId } : null }) },
+}));
+// what the chat stores import beside the gate, none of it used by these tests
+vi.mock('../../i18n', () => ({ default: { t: (key: string) => key } }));
+vi.mock('../../services/socket', () => ({ getSocket: () => null }));
+vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
+
 import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
+import { watchKeyArrivals, redecryptPassesSettled } from '../../services/e2e/redecryptOnKeyArrival';
+import { RETRY_AFTER_VIEW_CHANGES } from '../../services/e2e/undecryptedRows';
+import { decryptMessageForDisplay, decryptMessagesForDisplay, DECRYPT_FAILED_CONTENT } from '../../services/e2e/dmCrypto';
+import { useChatStore } from '../../stores/chatStore';
+import { useDMStore } from '../../stores/dmStore';
+import { useServerStore } from '../../stores/serverStore';
+import type { Message } from '@voxium/shared';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
 import { E2EVault, E2EVaultClosedError, type PickleKeyProvider } from '../../services/e2e/vault';
@@ -6980,5 +7008,439 @@ describe('E2EService — lifecycle', () => {
         error.mockRestore();
       }
     });
+  });
+});
+
+describe('E2EService — inbound sessions announced (onSessionsAvailable)', () => {
+  const restartOf = (server: Server, party: { userId: string; keyProvider: PickleKeyProvider; vaultNamespace: string }) =>
+    makeDevice(server, party.userId, { keyProvider: party.keyProvider, vaultNamespace: party.vaultNamespace });
+
+  /** Every event a service announces, in order, each one's ids sorted. */
+  const listen = (service: E2EService) => {
+    const events: Array<{ scope: string; sessionIds: string[] }> = [];
+    service.onSessionsAvailable((event) => events.push({ scope: event.scope, sessionIds: [...event.sessionIds].sort() }));
+    return events;
+  };
+  const byScope = (events: Array<{ scope: string; sessionIds: string[] }>) =>
+    [...events].sort((a, b) => a.scope.localeCompare(b.scope));
+
+  it('announces what one claim stores once per scope, every session of the scope in one event', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const laptop = makeDevice(server, aliceId);
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await laptop.service.initialize();
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    await bob.service.claimMasterTransfers(); // queued behind Bob's start-up claim
+
+    // three sessions waiting in Bob's inbox: two in c1 (one per device of Alice), one in c2
+    const fromLaptop = await laptop.service.encryptMessage('c1', bob.userId, 'from the laptop');
+    const fromPhone = await phone.service.encryptMessage('c1', bob.userId, 'from the phone');
+    const elsewhere = await laptop.service.encryptMessage('c2', bob.userId, 'in another conversation');
+
+    const events = listen(bob.service);
+    // the miss on the first message claims the whole page
+    const read = await bob.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: aliceId, content: fromLaptop.envelope,
+    });
+    expect(read.text).toBe('from the laptop');
+
+    // announced by the time the decrypt that claimed them answers
+    expect(byScope(events)).toEqual([
+      { scope: 'c1', sessionIds: [sidOf(fromLaptop.envelope), sidOf(fromPhone.envelope)].sort() },
+      { scope: 'c2', sessionIds: [sidOf(elsewhere.envelope)] },
+    ]);
+
+    // a session the device holds already is not announced again
+    await bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: aliceId, content: fromPhone.envelope });
+    expect(events).toHaveLength(2);
+  });
+
+  it('announces a share kept from an earlier start when the next start imports it', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    await alice.service.dispose(); // the app is closed
+
+    const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'sent while you were away');
+
+    // a start that cannot look Bob up keeps the share and stores nothing
+    server.setDeviceListReadFailure(true);
+    const first = restartOf(server, alice);
+    const firstEvents = listen(first.service);
+    await first.service.initialize();
+    await first.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+    expect(firstEvents).toEqual([]);
+    await first.service.dispose();
+
+    // the next start imports the kept share and says so before anything is decrypted
+    server.setDeviceListReadFailure(false);
+    const second = restartOf(server, alice);
+    const events = listen(second.service);
+    await second.service.initialize();
+    await second.service.claimMasterTransfers(); // queued behind the start-up claim
+    expect(events).toEqual([{ scope: 'c1', sessionIds: [sidOf(envelope)] }]);
+    expect(
+      (await second.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope })).text
+    ).toBe('sent while you were away');
+  });
+
+  /** Alice's phone holds Bob's sessions in c1 and c2, backed up under the account key. */
+  async function historyOnPhone() {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const inC1 = await bob.service.encryptMessage('c1', aliceId, 'history in c1');
+    const inC2 = await bob.service.encryptMessage('c2', aliceId, 'history in c2');
+    await phone.service.decryptMessage({ id: 'h1', conversationId: 'c1', authorId: bob.userId, content: inC1.envelope });
+    await phone.service.decryptMessage({ id: 'h2', conversationId: 'c2', authorId: bob.userId, content: inC2.envelope });
+    const recoveryKey = await phone.service.createKeyBackup();
+    expect(await phone.service.backupMessageKeys()).toBe(2);
+    return {
+      server,
+      aliceId,
+      phone,
+      recoveryKey,
+      expected: [
+        { scope: 'c1', sessionIds: [sidOf(inC1.envelope)] },
+        { scope: 'c2', sessionIds: [sidOf(inC2.envelope)] },
+      ],
+    };
+  }
+
+  it('announces the sessions a recovery-key restore pulls from the history', async () => {
+    const { server, aliceId, recoveryKey, expected } = await historyOnPhone();
+    const laptop = makeDevice(server, aliceId);
+    await laptop.service.initialize();
+    await flushQueue();
+
+    const events = listen(laptop.service);
+    await laptop.service.restoreKeyBackup(recoveryKey);
+    expect(byScope(events)).toEqual(expected);
+  });
+
+  it('announces the sessions the history pull of an incoming device approval stores', async () => {
+    const { server, aliceId, phone, expected } = await historyOnPhone();
+    const laptop = makeDevice(server, aliceId);
+    await laptop.service.initialize();
+    await flushQueue();
+    await phone.service.approveDevice(laptop.service.deviceId);
+
+    const events = listen(laptop.service);
+    expect(await laptop.service.claimMasterTransfers()).toBe(true);
+    expect(byScope(events)).toEqual(expected);
+  });
+
+  it('announces nothing for the session this device creates for its own sends', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    const events = listen(alice.service);
+    await alice.service.encryptMessage('c1', bob.userId, 'a new session for this one');
+    const channelId = `chan-${uniq}`;
+    server.setChannelMembers(channelId, [alice.userId, bob.userId]);
+    await alice.service.encryptChannelMessage(channelId, 'and one for this channel');
+    expect(events).toEqual([]);
+  });
+
+  it('keeps announcing to the other listeners when one throws, and stops for an unsubscribed one', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    await bob.service.claimMasterTransfers(); // queued behind Bob's start-up claim
+
+    const first = await alice.service.encryptMessage('c1', bob.userId, 'one');
+    await alice.service.encryptMessage('c2', bob.userId, 'two');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      bob.service.onSessionsAvailable(() => {
+        throw new Error('listener failure');
+      });
+      const seen: string[] = [];
+      const unsubscribe = bob.service.onSessionsAvailable((event) => seen.push(event.scope));
+      await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: first.envelope });
+      expect(seen.sort()).toEqual(['c1', 'c2']);
+      expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/sessions-available listener threw/);
+
+      unsubscribe();
+      const third = await alice.service.encryptMessage('c3', bob.userId, 'three');
+      await bob.service.decryptMessage({ id: 'm3', conversationId: 'c3', authorId: alice.userId, content: third.envelope });
+      expect(seen.sort()).toEqual(['c1', 'c2']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('E2EService — a row on screen that could not be decrypted opens when its key arrives', () => {
+  it('opens in place through the display gate, asking the server nothing for it, and leaves a row under a missing session alone', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    // Bob's client: every request is recorded, and the key-share claims can be refused
+    const calls: string[] = [];
+    let refuseClaims = false;
+    const base = server.apiFor(bobId);
+    const bobApi = {
+      ...base,
+      async get(url: string) {
+        calls.push(`GET ${url}`);
+        if (refuseClaims && url.startsWith('/e2e/keyshares')) {
+          throw Object.assign(new Error('503: unavailable'), { response: { status: 503 } });
+        }
+        return base.get(url);
+      },
+      async post(url: string, body?: unknown) {
+        calls.push(`POST ${url}`);
+        return base.post(url, body as never);
+      },
+      async put(url: string, body?: unknown) {
+        calls.push(`PUT ${url}`);
+        return base.put(url, body as never);
+      },
+      async delete(url: string) {
+        calls.push(`DELETE ${url}`);
+        return base.delete(url);
+      },
+    };
+    const bob = new E2EService(bobId, {
+      api: bobApi as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    await alice.service.initialize();
+    await bob.initialize();
+    await flushQueue();
+    await bob.claimMasterTransfers(); // queued behind Bob's start-up claim
+
+    display.service = bob;
+    display.userId = bobId;
+    useServerStore.setState({ activeServerId: null, activeChannelId: null });
+    useDMStore.setState({ activeConversationId: 'c1' });
+    const stop = watchKeyArrivals(bobId, bob);
+    const realNow = Date.now.bind(Date);
+    let later: { mockRestore(): void } | undefined;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const author = { id: alice.userId, username: 'alice', displayName: 'Alice' };
+      const rowOf = (id: string, conversationId: string, content: string) =>
+        ({
+          id, type: 'user', content, channelId: null, conversationId, encrypted: true, author,
+          createdAt: '2026-11-01T10:00:00.000Z', editedAt: null, reactions: [], attachments: [],
+        }) as unknown as Message;
+
+      // Alice writes while Bob's claims are refused: the row stays closed, and
+      // so does one under a session that never reaches Bob
+      refuseClaims = true;
+      const sent = await alice.service.encryptMessage('c1', bobId, 'opened when the key arrived');
+      const missing = rowOf('m0', 'c1', buildMegolmEnvelope('bm90IGhlcmU', 'Y2lwaGVy'));
+      const waiting = rowOf('m1', 'c1', sent.envelope);
+      useChatStore.setState({ messages: await decryptMessagesForDisplay([missing, waiting]) });
+      expect(useChatStore.getState().messages.map((m) => m.content)).toEqual([DECRYPT_FAILED_CONTENT, DECRYPT_FAILED_CONTENT]);
+      refuseClaims = false;
+
+      // past the window in which a miss claims again: a decrypt of the row
+      // under the missing session would claim, so a GET would show it
+      later = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60_000);
+      const decrypts = vi.spyOn(bob, 'decryptMessage');
+
+      // a message in another conversation misses, and its claim brings both shares
+      const elsewhere = await alice.service.encryptMessage('c2', bobId, 'in another conversation');
+      const shown = await decryptMessageForDisplay(rowOf('m2', 'c2', elsewhere.envelope));
+      expect(shown?.content).toBe('in another conversation');
+      const before = calls.length;
+      await redecryptPassesSettled();
+
+      const [stillClosed, opened] = useChatStore.getState().messages;
+      expect(opened).toMatchObject({ id: 'm1', content: 'opened when the key arrived', encrypted: true });
+      expect(stillClosed).toMatchObject({ id: 'm0', content: DECRYPT_FAILED_CONTENT });
+      // the row was opened from the device alone; at most the claim's own
+      // acknowledgement went out beside it
+      expect(calls.slice(before).filter((c) => c !== 'POST /e2e/keyshares/ack')).toEqual([]);
+      expect(decrypts.mock.calls.map(([m]) => m.id)).toEqual(['m2', 'm1']);
+      // the try of the held row never claims
+      expect(decrypts.mock.calls[1][1]).toEqual({ claimMissing: false, storageFailureRejects: true });
+    } finally {
+      stop();
+      await redecryptPassesSettled();
+      later?.mockRestore();
+      warn.mockRestore();
+      display.service = null;
+      display.userId = null;
+      useChatStore.setState({ messages: [] });
+      useDMStore.setState({ activeConversationId: null });
+    }
+  });
+
+  it('keeps the row held when the vault fails during its try, and opens it after a few changes of the view', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    let refuseClaims = false;
+    const base = server.apiFor(bobId);
+    const bob = new E2EService(bobId, {
+      api: {
+        ...base,
+        async get(url: string) {
+          if (refuseClaims && url.startsWith('/e2e/keyshares')) {
+            throw Object.assign(new Error('503: unavailable'), { response: { status: 503 } });
+          }
+          return base.get(url);
+        },
+      } as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    await alice.service.initialize();
+    await bob.initialize();
+    await flushQueue();
+    await bob.claimMasterTransfers(); // queued behind Bob's start-up claim
+
+    display.service = bob;
+    display.userId = bobId;
+    useServerStore.setState({ activeServerId: null, activeChannelId: null });
+    useDMStore.setState({ activeConversationId: 'c1' });
+    const stop = watchKeyArrivals(bobId, bob);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const author = { id: alice.userId, username: 'alice', displayName: 'Alice' };
+      const rowOf = (id: string, conversationId: string, content: string, encrypted = true) =>
+        ({
+          id, type: 'user', content, channelId: null, conversationId, encrypted, author,
+          createdAt: '2026-11-01T10:00:00.000Z', editedAt: null, reactions: [], attachments: [],
+        }) as unknown as Message;
+
+      refuseClaims = true;
+      const sent = await alice.service.encryptMessage('c1', bobId, 'opened at the second try');
+      useChatStore.setState({ messages: await decryptMessagesForDisplay([rowOf('m1', 'c1', sent.envelope)]) });
+      expect(useChatStore.getState().messages[0].content).toBe(DECRYPT_FAILED_CONTENT);
+      refuseClaims = false;
+
+      // the session is stored by the claim; the try's write of its state fails once
+      const sid = sidOf(sent.envelope);
+      const vault = (bob as unknown as { vault: E2EVault }).vault;
+      const realPut = vault.putInboundGroupSession.bind(vault);
+      let writes = 0;
+      vi.spyOn(vault, 'putInboundGroupSession').mockImplementation(async (sessionId, record) => {
+        if (sessionId === sid && ++writes === 2) throw new DOMException('the disk is full', 'QuotaExceededError');
+        return realPut(sessionId, record);
+      });
+
+      const elsewhere = await alice.service.encryptMessage('c2', bobId, 'in another conversation');
+      await decryptMessageForDisplay(rowOf('m2', 'c2', elsewhere.envelope));
+      await redecryptPassesSettled();
+      expect(writes).toBe(2);
+      expect(useChatStore.getState().messages[0].content).toBe(DECRYPT_FAILED_CONTENT);
+
+      // tried again after a few changes of the view, not at each
+      for (let change = 1; change <= RETRY_AFTER_VIEW_CHANGES; change++) {
+        useChatStore.getState().addMessage(rowOf(`n${change}`, 'c1', 'a notice of some kind', false));
+        await redecryptPassesSettled();
+        if (change < RETRY_AFTER_VIEW_CHANGES) expect(writes).toBe(2);
+      }
+      expect(useChatStore.getState().messages[0]).toMatchObject({ id: 'm1', content: 'opened at the second try' });
+    } finally {
+      stop();
+      await redecryptPassesSettled();
+      warn.mockRestore();
+      display.service = null;
+      display.userId = null;
+      useChatStore.setState({ messages: [] });
+      useDMStore.setState({ activeConversationId: null });
+    }
+  });
+
+  it('a decrypt that must not claim answers a session the device lacks as a failure, asking the server nothing', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    const claims: string[] = [];
+    const base = server.apiFor(bobId);
+    const bob = new E2EService(bobId, {
+      api: {
+        ...base,
+        async get(url: string) {
+          if (url.startsWith('/e2e/keyshares')) claims.push(url);
+          return base.get(url);
+        },
+      } as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    await alice.service.initialize();
+    await bob.initialize();
+    await flushQueue();
+    await bob.claimMasterTransfers(); // queued behind Bob's start-up claim
+    const sent = await alice.service.encryptMessage('c1', bobId, 'its share waits in the inbox');
+    const message = { id: 'm1', conversationId: 'c1', authorId: alice.userId, content: sent.envelope };
+    const before = claims.length;
+
+    expect(await bob.decryptMessage(message, { claimMissing: false })).toEqual({ text: '', failed: true });
+    expect(claims.length).toBe(before);
+    // the ordinary decrypt claims the share and opens
+    expect(await bob.decryptMessage(message)).toEqual({ text: 'its share waits in the inbox' });
+    expect(claims.length).toBeGreaterThan(before);
+  });
+
+  it('a decrypt told to reject on a vault failure rejects with it; by default it answers failed', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    // the share is claimed and its session stored by a first message
+    const first = await alice.service.encryptMessage('c1', bob.userId, 'the first');
+    expect(
+      (await bob.service.decryptMessage({ id: 'm0', conversationId: 'c1', authorId: alice.userId, content: first.envelope })).text
+    ).toBe('the first');
+    const sent = await alice.service.encryptMessage('c1', bob.userId, 'stored once the disk has room');
+    const message = { id: 'm1', conversationId: 'c1', authorId: alice.userId, content: sent.envelope };
+
+    const vault = (bob.service as unknown as { vault: E2EVault }).vault;
+    const full = () => new DOMException('the disk is full', 'QuotaExceededError');
+    const put = vi.spyOn(vault, 'putInboundGroupSession').mockRejectedValueOnce(full()).mockRejectedValueOnce(full());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await bob.service.decryptMessage(message)).toEqual({ text: '', failed: true });
+      await expect(bob.service.decryptMessage(message, { storageFailureRejects: true })).rejects.toThrow('the disk is full');
+    } finally {
+      warn.mockRestore();
+      put.mockRestore();
+    }
+    // nothing about the message changed: it opens once the vault takes the write
+    expect(await bob.service.decryptMessage(message, { storageFailureRejects: true })).toEqual({ text: 'stored once the disk has room' });
   });
 });

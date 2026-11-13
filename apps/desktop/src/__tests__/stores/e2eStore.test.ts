@@ -6,6 +6,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // missing recomputations, not arithmetic.
 
 const listeners = new Set<(userId: string) => void>();
+/** Listeners of the service's "sessions stored" event (the key-arrival watch). */
+const sessionListeners = new Set<(event: { scope: string; sessionIds: string[] }) => void>();
 
 /** Shaped like the real thing (spec §15.2) so a leak is recognisable in a dump. */
 const RECOVERY_KEY = 'ABCD-EFGH-JKLM-NPQR-STUV-WXYZ-2345-6723';
@@ -49,6 +51,10 @@ function makeService(userId: string) {
     onDeviceListChanged(listener: (id: string) => void) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    onSessionsAvailable(listener: (event: { scope: string; sessionIds: string[] }) => void) {
+      sessionListeners.add(listener);
+      return () => sessionListeners.delete(listener);
     },
     deviceListStatus: vi.fn(async () => status),
     claimMasterTransfers: vi.fn(async () => false),
@@ -106,6 +112,7 @@ const pristine = useE2EStore.getState();
 
 beforeEach(() => {
   listeners.clear();
+  sessionListeners.clear();
   otherAccounts.clear();
   service = makeService(USER);
   useE2EStore.setState(pristine, true);
@@ -257,9 +264,45 @@ describe('e2eStore device-list subscription', () => {
   it('does not leave a stale subscription behind after a re-login', async () => {
     await useE2EStore.getState().initialize(USER);
     expect(listeners.size).toBe(1);
+    expect(sessionListeners.size).toBe(1);
 
     useE2EStore.setState({ ready: false, initializing: false });
     await useE2EStore.getState().initialize(USER);
+    expect(listeners.size).toBe(1);
+    expect(sessionListeners.size).toBe(1);
+  });
+
+  it('watches for stored sessions before the service starts, and stops at logout', async () => {
+    // The start-up claim imports shares (kept ones from an earlier start
+    // too): the watch that opens rows on screen with them must hear it
+    let heardDuringStart = 0;
+    service.initialize.mockImplementationOnce(async () => {
+      heardDuringStart = sessionListeners.size;
+    });
+    await useE2EStore.getState().initialize(USER);
+    expect(heardDuringStart).toBe(1);
+
+    stopE2EDeviceListWatch();
+    expect(sessionListeners.size).toBe(0);
+  });
+
+  it('keeps the key-arrival watch through a failed start, one subscription across the retry', async () => {
+    // The service stays active after a failed start and its decrypts go on
+    // storing sessions: each is announced once, so the watch must hear it
+    service.initialize.mockRejectedValueOnce(new Error('registration failed'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await useE2EStore.getState().initialize(USER);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(useE2EStore.getState().error).toBe('registration failed');
+    expect(sessionListeners.size).toBe(1);
+    // the device-list subscription is the one a retry makes again
+    expect(listeners.size).toBe(0);
+
+    await useE2EStore.getState().initialize(USER);
+    expect(sessionListeners.size).toBe(1);
     expect(listeners.size).toBe(1);
   });
 

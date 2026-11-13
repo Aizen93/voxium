@@ -11,6 +11,7 @@ import { useAnnotationLiveStore, resetAnnotationLiveModuleState } from './annota
 import { useMaskLayoutStore, resetMaskLayoutModuleState } from './maskLayoutStore';
 import { useDiscoveryStore, resetDiscoveryModuleState } from './discoveryStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
+import { resetUndecryptedRows } from '../services/e2e/undecryptedRows';
 import { stopE2EDeviceListWatch } from './e2eStore';
 import { resetServerPermissionsCache } from '../hooks/useServerPermissions';
 
@@ -90,6 +91,9 @@ export function resetAccountStores(): void {
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).
+  // The watch stops first, the key-arrival one with it: a pass still running
+  // applies nothing, and the rows it held go with the account
   stopE2EDeviceListWatch();
+  resetUndecryptedRows();
   disposeE2EService();
 }

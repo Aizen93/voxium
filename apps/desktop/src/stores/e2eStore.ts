@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../services/e2e/e2eService';
+import { watchKeyArrivals } from '../services/e2e/redecryptOnKeyArrival';
 
 // UI-facing E2E state. The crypto itself lives in services/e2e — this store
 // only tracks readiness and per-peer identity warnings so components can
@@ -7,6 +8,12 @@ import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../s
 
 /** Live device-list subscription; re-created per login, cleared on reset. */
 let unsubscribeDeviceListChanges: (() => void) | null = null;
+/**
+ * Undecrypted rows tried again as their sessions arrive: started at the first
+ * initialize of a login and kept through a failed start (the service stays
+ * active and its decrypts keep storing sessions), stopped only at logout.
+ */
+let stopKeyArrivalWatch: (() => void) | null = null;
 
 /**
  * Advanced when a session's E2E watch ends (logout). Work an earlier session
@@ -74,6 +81,10 @@ export class E2ELinkingCodeUnknownError extends Error {
 export function stopE2EDeviceListWatch(): void {
   sessionGeneration++;
   unsubscribeDeviceList();
+  if (stopKeyArrivalWatch) {
+    stopKeyArrivalWatch();
+    stopKeyArrivalWatch = null;
+  }
 }
 
 /** The device a linking code named: everything the user gets to check before approving. */
@@ -238,6 +249,10 @@ export const useE2EStore = create<E2EState>((set, get) => ({
             console.warn('e2e: device-list status check failed:', err instanceof Error ? err.message : err);
           });
       });
+      // Before initialize() too: what its start-up claim imports (the shares
+      // kept from an earlier start included) can open rows already on screen.
+      // A retry after a failed start keeps the same watch (watchKeyArrivals).
+      stopKeyArrivalWatch = watchKeyArrivals(userId, service);
       await service.initialize();
       if (!current()) return;
       set({
@@ -285,7 +300,9 @@ export const useE2EStore = create<E2EState>((set, get) => ({
         return;
       }
       console.warn('e2e: initialization failed:', message);
-      // a service that never started has nothing to report; the retry subscribes again
+      // A service that never started has no device list to report; the retry
+      // subscribes again. The key-arrival watch stays: the service stays
+      // active, and a session its decrypts store meanwhile is announced once.
       unsubscribeDeviceList();
       set({ ready: false, initializing: false, error: message });
     }
