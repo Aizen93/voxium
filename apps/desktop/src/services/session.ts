@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { API_BASE } from './apiBase';
 import { getAccessToken, getRefreshToken, setTokens, clearTokens, flushTokenStorage } from './tokenStorage';
 
 /**
@@ -22,7 +23,7 @@ import { getAccessToken, getRefreshToken, setTokens, clearTokens, flushTokenStor
  */
 
 /** The REST base every request is relative to; also the root the incoming-webhook URL is composed on (services/webhooks.ts). */
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
+export { API_BASE };
 
 /** A token expiring within this is treated as expired: a request sent with
  *  it would reach the server after the clock ran out. */

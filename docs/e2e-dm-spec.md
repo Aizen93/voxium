@@ -252,11 +252,13 @@ its copy after each use.
 
 **Storage (Phase C hardening, shipped):** in the Tauri desktop app the key
 lives in the **OS credential store** (Windows Credential Manager / macOS
-Keychain / Linux Secret Service) under service `app.voxium.e2e-pickle-key`,
+Keychain / Linux Secret Service) under service `app.voxium.e2e-pickle-key`
+(a desktop build for another server: `<its identifier>.e2e-pickle-key`),
 account = userId, via the `e2e_pickle_key_get/set` Tauri commands (`keyring`
-crate v3; the service name is hardcoded on the Rust side of the IPC boundary
-so webview code can only reach Voxium's own entries, and inputs are
-shape-validated). Pre-keychain installs are migrated out of localStorage on
+crate v3; the service name is derived on the Rust side of the IPC boundary
+from the identifier the build was compiled with, so webview code can only
+reach its own build's entries, and inputs are shape-validated). Pre-keychain
+installs are migrated out of localStorage on
 first load — the plaintext copy is deleted only after a verified read-back
 from the keychain. Browser dev builds (and keychain failures) fall back to
 localStorage (`voxium_e2e_pk_{userId}`) — fail-soft, because a key that can't

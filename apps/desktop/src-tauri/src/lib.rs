@@ -163,14 +163,59 @@ fn notify_with_avatar(
     }
 }
 
+// ─── Which credential-store services a build uses ────────────────────────────
+// The OS credential store is one per OS user, shared by every application:
+// the service name is what keeps one build's entries apart from another's.
+// Both services derive from the identifier the build was compiled with
+// (tauri.conf.json's `com.voxium.app` for the official app, a derived one for
+// a build made for another server: scripts/tauriSelfHosted.mjs), read from
+// the compiled configuration on this side of the IPC boundary. The webview
+// names an entry, never the service it lives in, so the set of entries a
+// build can reach stays closed, and builds for different servers keep
+// separate secrets.
+
+/// The identifier of the official release (tauri.conf.json).
+const OFFICIAL_IDENTIFIER: &str = "com.voxium.app";
+
+/// The credential-store services one build keeps its secrets under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeychainServices {
+    /// The session entries (`SESSION_SECRET_NAMES`).
+    session: String,
+    /// The E2E pickle keys, one entry per user id.
+    e2e_pickle_key: String,
+}
+
+/// The services of the build whose identifier is `identifier`. The only place
+/// their names are built.
+fn keychain_services(identifier: &str) -> KeychainServices {
+    if identifier == OFFICIAL_IDENTIFIER {
+        // The names every installed official app already keeps its session
+        // and its vault key under, byte for byte (a test pins them): one
+        // character off and the update signs every user out and loses the key
+        // to their vault
+        return KeychainServices {
+            session: "app.voxium.session".to_owned(),
+            e2e_pickle_key: "app.voxium.e2e-pickle-key".to_owned(),
+        };
+    }
+    KeychainServices {
+        session: format!("{identifier}.session"),
+        e2e_pickle_key: format!("{identifier}.e2e-pickle-key"),
+    }
+}
+
+/// The services of the running build, from its compiled configuration.
+fn build_keychain_services(app: &tauri::AppHandle) -> KeychainServices {
+    keychain_services(&app.config().identifier)
+}
+
 // ─── E2E pickle key in the OS keychain (docs/e2e-dm-spec.md §7.3) ────────────
 // The 32-byte vodozemac pickle key is the one secret the webview handles.
 // These commands move it from localStorage into the platform credential store
-// (Windows Credential Manager / macOS Keychain / Linux Secret Service). The
-// service name is hardcoded server-side of the IPC boundary so webview code
-// can only ever touch Voxium's own E2E entries.
-
-const E2E_KEYCHAIN_SERVICE: &str = "app.voxium.e2e-pickle-key";
+// (Windows Credential Manager / macOS Keychain / Linux Secret Service), under
+// the build's own service (`keychain_services`), so webview code can only
+// ever touch its own build's E2E entries.
 
 fn valid_e2e_user_id(user_id: &str) -> bool {
     !user_id.is_empty()
@@ -180,22 +225,23 @@ fn valid_e2e_user_id(user_id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-#[tauri::command]
-fn e2e_pickle_key_get(user_id: String) -> Result<Option<String>, String> {
-    if !valid_e2e_user_id(&user_id) {
+fn pickle_key_entry(service: &str, user_id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(service, user_id).map_err(|e| e.to_string())
+}
+
+fn read_pickle_key(service: &str, user_id: &str) -> Result<Option<String>, String> {
+    if !valid_e2e_user_id(user_id) {
         return Err("invalid user id".to_string());
     }
-    let entry = keyring::Entry::new(E2E_KEYCHAIN_SERVICE, &user_id).map_err(|e| e.to_string())?;
-    match entry.get_password() {
+    match pickle_key_entry(service, user_id)?.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }
 
-#[tauri::command]
-fn e2e_pickle_key_set(user_id: String, key_b64: String) -> Result<(), String> {
-    if !valid_e2e_user_id(&user_id) {
+fn write_pickle_key(service: &str, user_id: &str, key_b64: &str) -> Result<(), String> {
+    if !valid_e2e_user_id(user_id) {
         return Err("invalid user id".to_string());
     }
     // exactly one 32-byte base64 key (43 unpadded / 44 padded chars)
@@ -206,8 +252,27 @@ fn e2e_pickle_key_set(user_id: String, key_b64: String) -> Result<(), String> {
     if !valid_shape {
         return Err("invalid key format".to_string());
     }
-    let entry = keyring::Entry::new(E2E_KEYCHAIN_SERVICE, &user_id).map_err(|e| e.to_string())?;
-    entry.set_password(&key_b64).map_err(|e| e.to_string())
+    pickle_key_entry(service, user_id)?
+        .set_password(key_b64)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn e2e_pickle_key_get(app: tauri::AppHandle, user_id: String) -> Result<Option<String>, String> {
+    read_pickle_key(&build_keychain_services(&app).e2e_pickle_key, &user_id)
+}
+
+#[tauri::command]
+fn e2e_pickle_key_set(
+    app: tauri::AppHandle,
+    user_id: String,
+    key_b64: String,
+) -> Result<(), String> {
+    write_pickle_key(
+        &build_keychain_services(&app).e2e_pickle_key,
+        &user_id,
+        &key_b64,
+    )
 }
 
 // ─── Session credentials in the OS keychain ──────────────────────────────────
@@ -218,13 +283,16 @@ fn e2e_pickle_key_set(user_id: String, key_b64: String) -> Result<(), String> {
 // can read the user's files — and now live in the platform credential store,
 // like the pickle key above: encrypted at rest under the OS user's login
 // (macOS also gates access per application; Windows and the Secret Service
-// grant it to the user's processes). The same shape as the pickle key: a
-// fixed service name and a closed set of entry names on the Rust side of the
-// IPC boundary, so webview code can only ever reach Voxium's own entries, and
-// a value is shape-checked before it is written. The webview side is
-// services/tokenStorage.ts (`createKeychainSessionStore`).
+// grant it to the user's processes). The same shape as the pickle key: the
+// build's own service (`keychain_services`) and a closed set of entry names
+// on the Rust side of the IPC boundary, so webview code can only ever reach
+// its own build's entries, and a value is shape-checked before it is
+// written. The webview side is services/tokenStorage.ts
+// (`createKeychainSessionStore`). Builds with the same identifier (the
+// official app and `tauri dev`) share these entries, so the webview also
+// stamps each value with the origin of the API that issued it and never uses
+// a value stamped with another one.
 
-const SESSION_KEYCHAIN_SERVICE: &str = "app.voxium.session";
 const SESSION_SECRET_NAMES: &[&str] = &["tokens", "trusted-device"];
 /// Windows caps a generic credential's blob at 2560 bytes and the keyring
 /// crate stores a password as UTF-16: 1280 code units. Two JWTs in the JSON
@@ -232,11 +300,11 @@ const SESSION_SECRET_NAMES: &[&str] = &["tokens", "trusted-device"];
 /// is a bug, not a credential.
 const SESSION_SECRET_MAX_CHARS: usize = 1280;
 
-fn session_entry(name: &str) -> Result<keyring::Entry, String> {
+fn session_entry(service: &str, name: &str) -> Result<keyring::Entry, String> {
     if !SESSION_SECRET_NAMES.contains(&name) {
         return Err("unknown credential".to_string());
     }
-    keyring::Entry::new(SESSION_KEYCHAIN_SERVICE, name).map_err(|e| e.to_string())
+    keyring::Entry::new(service, name).map_err(|e| e.to_string())
 }
 
 /// Printable ASCII without spaces, bounded: a JWT (base64url and dots) or the
@@ -248,26 +316,26 @@ fn valid_session_secret_value(value: &str) -> bool {
 }
 
 /// The stored value, `None` when there is no such entry.
-fn read_session_secret(name: &str) -> Result<Option<String>, String> {
-    match session_entry(name)?.get_password() {
+fn read_session_secret(service: &str, name: &str) -> Result<Option<String>, String> {
+    match session_entry(service, name)?.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }
 
-fn write_session_secret(name: &str, value: &str) -> Result<(), String> {
+fn write_session_secret(service: &str, name: &str, value: &str) -> Result<(), String> {
     if !valid_session_secret_value(value) {
         return Err("invalid credential format".to_string());
     }
-    session_entry(name)?
+    session_entry(service, name)?
         .set_password(value)
         .map_err(|e| e.to_string())
 }
 
 /// Removing an entry that is not there is the state the caller asked for.
-fn delete_session_secret(name: &str) -> Result<(), String> {
-    match session_entry(name)?.delete_credential() {
+fn delete_session_secret(service: &str, name: &str) -> Result<(), String> {
+    match session_entry(service, name)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
@@ -278,22 +346,29 @@ fn delete_session_secret(name: &str) -> Result<(), String> {
 // that paints the window.
 
 #[tauri::command]
-async fn session_secret_get(name: String) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || read_session_secret(&name))
+async fn session_secret_get(app: tauri::AppHandle, name: String) -> Result<Option<String>, String> {
+    let service = build_keychain_services(&app).session;
+    tauri::async_runtime::spawn_blocking(move || read_session_secret(&service, &name))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn session_secret_set(name: String, value: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || write_session_secret(&name, &value))
+async fn session_secret_set(
+    app: tauri::AppHandle,
+    name: String,
+    value: String,
+) -> Result<(), String> {
+    let service = build_keychain_services(&app).session;
+    tauri::async_runtime::spawn_blocking(move || write_session_secret(&service, &name, &value))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn session_secret_delete(name: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || delete_session_secret(&name))
+async fn session_secret_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    let service = build_keychain_services(&app).session;
+    tauri::async_runtime::spawn_blocking(move || delete_session_secret(&service, &name))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -419,11 +494,16 @@ mod session_secret_tests {
         });
     }
 
+    /// The session service of the official app.
+    fn svc() -> String {
+        keychain_services(OFFICIAL_IDENTIFIER).session
+    }
+
     #[test]
     fn only_the_known_entry_names_resolve() {
         use_mock_store();
-        assert!(session_entry("tokens").is_ok());
-        assert!(session_entry("trusted-device").is_ok());
+        assert!(session_entry(&svc(), "tokens").is_ok());
+        assert!(session_entry(&svc(), "trusted-device").is_ok());
         for name in [
             "",
             "token",
@@ -433,17 +513,20 @@ mod session_secret_tests {
             "alice",
         ] {
             assert_eq!(
-                session_entry(name).unwrap_err(),
+                session_entry(&svc(), name).unwrap_err(),
                 "unknown credential",
                 "{name:?}"
             );
-            assert_eq!(read_session_secret(name).unwrap_err(), "unknown credential");
             assert_eq!(
-                write_session_secret(name, "abc").unwrap_err(),
+                read_session_secret(&svc(), name).unwrap_err(),
                 "unknown credential"
             );
             assert_eq!(
-                delete_session_secret(name).unwrap_err(),
+                write_session_secret(&svc(), name, "abc").unwrap_err(),
+                "unknown credential"
+            );
+            assert_eq!(
+                delete_session_secret(&svc(), name).unwrap_err(),
                 "unknown credential"
             );
         }
@@ -453,9 +536,9 @@ mod session_secret_tests {
     fn a_missing_entry_reads_as_none_and_deletes_as_ok() {
         use_mock_store();
         // the two entries are independent: this one is never written here
-        assert_eq!(read_session_secret("trusted-device"), Ok(None));
-        assert_eq!(delete_session_secret("trusted-device"), Ok(()));
-        assert_eq!(read_session_secret("trusted-device"), Ok(None));
+        assert_eq!(read_session_secret(&svc(), "trusted-device"), Ok(None));
+        assert_eq!(delete_session_secret(&svc(), "trusted-device"), Ok(()));
+        assert_eq!(read_session_secret(&svc(), "trusted-device"), Ok(None));
     }
 
     /// The mock store holds one credential PER `Entry` (no shared table), so a
@@ -468,14 +551,45 @@ mod session_secret_tests {
     fn the_pair_the_webview_writes_is_accepted() {
         use_mock_store();
         let pair = r#"{"accessToken":"eyJhbGciOiJIUzI1NiJ9.a.b","refreshToken":"eyJhbGciOiJIUzI1NiJ9.c.d"}"#;
-        assert_eq!(write_session_secret("tokens", pair), Ok(()));
+        assert_eq!(write_session_secret(&svc(), "tokens", pair), Ok(()));
         assert_eq!(
-            write_session_secret("trusted-device", "eyJhbGciOiJIUzI1NiJ9.a.b"),
+            write_session_secret(&svc(), "trusted-device", "eyJhbGciOiJIUzI1NiJ9.a.b"),
             Ok(())
         );
         // a second delete is still the state the caller asked for
-        assert_eq!(delete_session_secret("tokens"), Ok(()));
-        assert_eq!(delete_session_secret("tokens"), Ok(()));
+        assert_eq!(delete_session_secret(&svc(), "tokens"), Ok(()));
+        assert_eq!(delete_session_secret(&svc(), "tokens"), Ok(()));
+    }
+
+    /// The entries carry the origin of the API that issued them
+    /// (services/tokenStorage.ts): the pair with its origin as one JSON
+    /// object, the trusted-device token as `{ token, origin }`. Both stay
+    /// printable ASCII without spaces, and a long pair with a long origin
+    /// still fits the Windows cap.
+    #[test]
+    fn the_stamped_entries_the_webview_writes_are_accepted() {
+        use_mock_store();
+        let jwt = format!("eyJhbGciOiJIUzI1NiJ9.{}.sig", "a".repeat(380));
+        let host = format!("{}.example.org", "h".repeat(240));
+        let pair = format!(
+            "{{\"accessToken\":\"{jwt}\",\"refreshToken\":\"{jwt}\",\"origin\":\"https://{host}:8443\"}}"
+        );
+        assert!(
+            pair.len() <= SESSION_SECRET_MAX_CHARS,
+            "{} chars",
+            pair.len()
+        );
+        assert!(valid_session_secret_value(&pair));
+        assert_eq!(write_session_secret(&svc(), "tokens", &pair), Ok(()));
+
+        let trusted = format!("{{\"token\":\"{jwt}\",\"origin\":\"https://chat.example.org\"}}");
+        assert!(valid_session_secret_value(&trusted));
+        assert_eq!(
+            write_session_secret(&svc(), "trusted-device", &trusted),
+            Ok(())
+        );
+        // an older build's bare trusted-device token is still a valid value
+        assert!(valid_session_secret_value(&jwt));
     }
 
     #[test]
@@ -488,11 +602,11 @@ mod session_secret_tests {
             &"a".repeat(SESSION_SECRET_MAX_CHARS + 1),
         ] {
             assert_eq!(
-                write_session_secret("tokens", bad).unwrap_err(),
+                write_session_secret(&svc(), "tokens", bad).unwrap_err(),
                 "invalid credential format"
             );
         }
-        assert_eq!(read_session_secret("tokens"), Ok(None));
+        assert_eq!(read_session_secret(&svc(), "tokens"), Ok(None));
     }
 
     #[test]
@@ -515,5 +629,190 @@ mod session_secret_tests {
         assert!(!valid_session_secret_value("nul\0byte"));
         assert!(!valid_session_secret_value("héllo"));
         assert!(!valid_session_secret_value("\u{7f}"));
+    }
+
+    /// The pickle-key helpers keep the commands' checks, in the same order,
+    /// whatever service the build reads them under.
+    #[test]
+    fn a_pickle_key_is_shape_checked_before_the_store_is_touched() {
+        use_mock_store();
+        let key = "A".repeat(43);
+        for identifier in [
+            OFFICIAL_IDENTIFIER,
+            "com.voxium.selfhosted.s0123456789abcdef",
+        ] {
+            let service = keychain_services(identifier).e2e_pickle_key;
+            for bad_user in ["", "a.b", "../x", &"u".repeat(65)] {
+                assert_eq!(
+                    read_pickle_key(&service, bad_user).unwrap_err(),
+                    "invalid user id"
+                );
+                assert_eq!(
+                    write_pickle_key(&service, bad_user, &key).unwrap_err(),
+                    "invalid user id"
+                );
+            }
+            for bad_key in [
+                "",
+                "short",
+                &"A".repeat(45),
+                &format!("{}!", "A".repeat(42)),
+            ] {
+                assert_eq!(
+                    write_pickle_key(&service, "user_1", bad_key).unwrap_err(),
+                    "invalid key format"
+                );
+            }
+            assert_eq!(read_pickle_key(&service, "user_1"), Ok(None));
+            assert_eq!(write_pickle_key(&service, "user_1", &key), Ok(()));
+        }
+    }
+}
+
+/// The credential-store services every keychain command reads its entries
+/// under (`keychain_services`): the official app's names never move, and a
+/// build with another identifier never reaches them.
+#[cfg(test)]
+mod keychain_services_tests {
+    use super::*;
+
+    /// What `scripts/tauriSelfHosted.mjs` writes for a build for another server.
+    const SELF_HOSTED: &str = "com.voxium.selfhosted.s0123456789abcdef";
+
+    /// Byte for byte the services every installed official app (2.1.1 and
+    /// every release before it) holds its session and its vault key under:
+    /// an update that read anything else would sign every user out and lose
+    /// the key to their vault.
+    #[test]
+    fn the_official_identifier_keeps_the_names_every_install_uses() {
+        let services = keychain_services("com.voxium.app");
+        assert_eq!(services.session.as_bytes(), b"app.voxium.session");
+        assert_eq!(
+            services.e2e_pickle_key.as_bytes(),
+            b"app.voxium.e2e-pickle-key"
+        );
+    }
+
+    #[test]
+    fn the_official_identifier_is_the_one_tauri_conf_json_compiles_in() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json is JSON");
+        assert_eq!(conf["identifier"], OFFICIAL_IDENTIFIER);
+    }
+
+    #[test]
+    fn another_identifier_has_names_of_its_own() {
+        let official = keychain_services(OFFICIAL_IDENTIFIER);
+        let official_names = [official.session.as_str(), official.e2e_pickle_key.as_str()];
+        for identifier in [
+            SELF_HOSTED,
+            "com.voxium.selfhosted.sfedcba9876543210",
+            "com.voxium.app.dev",
+            "com.voxium",
+            "com.example.chat",
+        ] {
+            let services = keychain_services(identifier);
+            assert!(
+                !official_names.contains(&services.session.as_str()),
+                "{identifier}"
+            );
+            assert!(
+                !official_names.contains(&services.e2e_pickle_key.as_str()),
+                "{identifier}"
+            );
+            assert_ne!(services.session, services.e2e_pickle_key, "{identifier}");
+            assert_eq!(services.session, format!("{identifier}.session"));
+            assert_eq!(
+                services.e2e_pickle_key,
+                format!("{identifier}.e2e-pickle-key")
+            );
+        }
+    }
+
+    #[test]
+    fn two_servers_get_two_sets_of_names() {
+        let a = keychain_services(SELF_HOSTED);
+        let b = keychain_services("com.voxium.selfhosted.sfedcba9876543210");
+        assert_ne!(a.session, b.session);
+        assert_ne!(a.e2e_pickle_key, b.e2e_pickle_key);
+        assert_eq!(a, keychain_services(SELF_HOSTED));
+    }
+
+    /// The names are built in `keychain_services` alone, and the store is
+    /// opened only through the two helpers, with the service their caller
+    /// passes; every caller takes it from the compiled configuration, and no
+    /// command takes a service or an identifier from the webview.
+    #[test]
+    fn the_service_names_are_built_in_one_place() {
+        let source = include_str!("lib.rs");
+        let code = &source[..source
+            .find("\n#[cfg(test)]")
+            .expect("the tests follow the code")];
+
+        let start = code
+            .find("fn keychain_services(")
+            .expect("keychain_services");
+        let end = start + code[start..].find("\n}\n").expect("its end");
+        for literal in ["\"app.voxium.session\"", "\"app.voxium.e2e-pickle-key\""] {
+            assert_eq!(code.matches(literal).count(), 1, "{literal}");
+            let at = code.find(literal).expect("present");
+            assert!(
+                at > start && at < end,
+                "{literal} outside keychain_services"
+            );
+        }
+        for retired in ["SESSION_KEYCHAIN_SERVICE", "E2E_KEYCHAIN_SERVICE"] {
+            assert!(!code.contains(retired), "{retired}");
+        }
+
+        let opened: Vec<&str> = code
+            .match_indices("keyring::Entry::new(")
+            .map(|(at, m)| &code[at + m.len()..])
+            .collect();
+        assert_eq!(opened.len(), 2, "the store is opened by two helpers");
+        assert!(opened.iter().all(|rest| rest.starts_with("service, ")));
+        assert_eq!(
+            code.matches("keychain_services(&app.config().identifier)")
+                .count(),
+            1
+        );
+        assert_eq!(code.matches("build_keychain_services(&app)").count(), 5);
+        assert!(!code.contains("service: String"));
+        assert!(!code.contains("identifier: String"));
+    }
+}
+
+/// The updater plugin is registered in every build and deserialises
+/// `plugins > updater` when the app starts: a block it cannot read is an app
+/// that does not open. A self-hosted build without a feed ships the emptied
+/// block `scripts/tauriSelfHosted.mjs` writes (its test pins the same JSON).
+#[cfg(test)]
+mod updater_config_tests {
+    use tauri_plugin_updater::Config;
+
+    #[test]
+    fn a_build_without_a_feed_starts_with_the_emptied_block() {
+        let none: Config =
+            serde_json::from_value(serde_json::json!({ "endpoints": [], "pubkey": "" }))
+                .expect("the no-updater block must deserialise");
+        assert!(none.endpoints.is_empty());
+        assert!(none.pubkey.is_empty());
+    }
+
+    #[test]
+    fn a_removed_block_or_one_without_a_key_would_stop_the_app() {
+        assert!(serde_json::from_value::<Config>(serde_json::Value::Null).is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({ "endpoints": [] })).is_err());
+    }
+
+    #[test]
+    fn the_official_block_in_tauri_conf_json_deserialises_with_its_feed() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json is JSON");
+        let official: Config = serde_json::from_value(conf["plugins"]["updater"].clone())
+            .expect("the release updater block must deserialise");
+        assert!(!official.endpoints.is_empty());
+        assert!(official.endpoints.iter().all(|url| url.scheme() == "https"));
+        assert!(!official.pubkey.is_empty());
     }
 }
