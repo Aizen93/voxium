@@ -60,6 +60,7 @@ const webhookChanged = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/webhookLifecycle', () => ({ emitWebhookChanged: (...a: unknown[]) => webhookChanged(...a) }));
 
 import { removeMemberFromServer } from '../../utils/removeMember';
+import { ForbiddenError } from '../../utils/errors';
 
 const NO_SECURE = { userId: 'u-1', deleted: [], left: [] };
 
@@ -438,6 +439,14 @@ describe('removeMemberFromServer', () => {
       expect(prismaMock.channelRead.deleteMany).not.toHaveBeenCalled();
     });
 
+    it('a refusal while the space still exists stays the refusal (403)', async () => {
+      const refusal = new ForbiddenError('You do not have permission to kick members');
+      const authorize = vi.fn(async (db: unknown) => { if (db === tx) throw refusal; });
+
+      await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize })).rejects.toBe(refusal);
+      expect(prismaMock.server.findUnique).toHaveBeenCalledWith({ where: { id: 's-1' }, select: { id: true } });
+    });
+
     it('a check that refuses on a retried attempt is the answer: no transaction is opened for it, nothing is removed', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const refusal = Object.assign(new Error('Cannot kick a member with an equal or higher role'), { statusCode: 403 });
@@ -480,6 +489,28 @@ describe('removeMemberFromServer', () => {
       } finally {
         warn.mockRestore();
       }
+    });
+
+    it('a refusal from the check on a retried attempt (it ran against the space that is gone) answers 404 Server', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const authorize = vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new ForbiddenError('You do not have permission to kick members'));
+      prismaMock.$transaction.mockImplementationOnce(async () => { throw Object.assign(new Error('deadlock'), { code: 'P2034' }); });
+      try {
+        await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize }))
+          .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
+        expect(memberLeft).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a refusal from the check inside the first attempt\'s transaction, the space gone by the answer, answers 404 Server', async () => {
+      const authorize = vi.fn(async (db: unknown) => { if (db === tx) throw new ForbiddenError('You do not have permission to kick members'); });
+
+      await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
     });
 
     it('a space lookup that fails keeps the answer the error had (it is not read as "gone")', async () => {

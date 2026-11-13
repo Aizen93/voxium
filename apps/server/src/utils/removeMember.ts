@@ -228,8 +228,11 @@ export async function removeMemberFromServer(
     const missing = err instanceof MembershipGone;
     // A space deleted meanwhile (its delete takes the space row, then the
     // member rows, and wins a deadlock or simply commits first): the removal
-    // has nothing left to remove, and answers that the space is gone.
-    if ((missing || isTransactionConflict(err)) && !(await spaceExists(serverId))) {
+    // has nothing left to remove, and answers that the space is gone. So
+    // does a refusal from `authorize` on any attempt: a check run against a
+    // space that is gone refuses because nobody is a member of it.
+    const refused = err instanceof ForbiddenError;
+    if ((missing || refused || isTransactionConflict(err)) && !(await spaceExists(serverId))) {
       throw new NotFoundError('Server');
     }
     // The member left (or was removed) between the caller's membership check
