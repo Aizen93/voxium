@@ -26,6 +26,9 @@ const prismaMock = vi.hoisted(() => ({
   channelRead: { deleteMany: vi.fn() },
   // Read only when the transaction found the member gone or lost a deadlock
   server: { findUnique: vi.fn() },
+  // A kick's webhook rows, read and waited for before its transaction opens
+  webhook: { findMany: vi.fn() },
+  $queryRaw: vi.fn(),
   $transaction: vi.fn(),
 }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
@@ -61,6 +64,7 @@ vi.mock('../../utils/webhookLifecycle', () => ({ emitWebhookChanged: (...a: unkn
 
 import { removeMemberFromServer } from '../../utils/removeMember';
 import { ForbiddenError } from '../../utils/errors';
+import { lazyStatement } from '../helpers/lazyStatement';
 
 const NO_SECURE = { userId: 'u-1', deleted: [], left: [] };
 
@@ -83,6 +87,9 @@ beforeEach(() => {
   removeSecure.mockImplementation(async () => { order.push('secure'); return NO_SECURE; });
   prismaMock.channelRead.deleteMany.mockImplementation(async () => { order.push('reads'); return { count: 2 }; });
   prismaMock.server.findUnique.mockResolvedValue({ id: 's-1' });
+  prismaMock.webhook.findMany.mockResolvedValue([]);
+  prismaMock.$queryRaw.mockImplementation((_strings: TemplateStringsArray, ...values: unknown[]) =>
+    lazyStatement(order, `wait:webhook ${String(values[0])}`, [{ id: values[0] }]));
   tx.server.updateMany.mockImplementation(async () => { order.push('count'); return { count: 1 }; });
   prismaMock.$transaction.mockImplementation(async (fn: (client: typeof tx) => Promise<unknown>) => {
     order.push('txn:start');
@@ -562,7 +569,7 @@ describe('removeMemberFromServer: a kick disables the removed creator\'s webhook
     expect(args.data.creatorRemovedAt.getTime()).toBeGreaterThanOrEqual(before);
   });
 
-  it('rides in the SAME transaction as the membership delete, right after the membership row lock (a removal never commits without it; the row lock of a purge is waited for before the rows a create or a join needs)', async () => {
+  it('rides in the SAME transaction as the membership delete, right after the membership row lock (a removal never commits without it)', async () => {
     webhooksDisabled(1);
     await removeMemberFromServer('u-1', 's-1', KICK);
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
@@ -586,6 +593,51 @@ describe('removeMemberFromServer: a kick disables the removed creator\'s webhook
     // The decrement answers { count: 1 }: the count must be the webhook
     // statement's, never another one's
     expect(webhookChanged).not.toHaveBeenCalled();
+  });
+
+  describe('the webhook rows it disables are waited for, holding nothing, before its transaction opens', () => {
+    it('each row the member holds, in its own statement FOR NO KEY UPDATE on the shared client, before the transaction takes the membership row', async () => {
+      prismaMock.webhook.findMany.mockResolvedValue([{ id: 'wh-1' }, { id: 'wh-2' }]);
+      webhooksDisabled(2);
+
+      await removeMemberFromServer('u-1', 's-1', KICK);
+
+      expect(order.slice(0, order.indexOf('txn:start') + 2)).toEqual([
+        'attachment-keys', 'wait:webhook wh-1', 'wait:webhook wh-2', 'txn:start', 'lock:member',
+      ]);
+      // the rows the transaction's webhook statement updates
+      expect(prismaMock.webhook.findMany).toHaveBeenCalledWith({
+        where: tx.webhook.updateMany.mock.calls[0][0].where,
+        select: { id: true },
+      });
+      const [strings, ...values] = prismaMock.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+      expect(strings.join('?')).toBe('SELECT id FROM webhooks WHERE id = ? FOR NO KEY UPDATE');
+      expect(values).toEqual(['wh-1']);
+    });
+
+    it('waits again before every attempt', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.webhook.findMany.mockResolvedValue([{ id: 'wh-1' }]);
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { order.push('txn:aborted'); throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })
+        .mockImplementation(real);
+      try {
+        await removeMemberFromServer('u-1', 's-1', KICK);
+      } finally {
+        warn.mockRestore();
+      }
+      expect(order.slice(0, order.indexOf('txn:start') + 1)).toEqual([
+        'attachment-keys', 'wait:webhook wh-1', 'txn:aborted', 'wait:webhook wh-1', 'txn:start',
+      ]);
+    });
+
+    it('a voluntary leave waits for none', async () => {
+      prismaMock.webhook.findMany.mockResolvedValue([{ id: 'wh-1' }]);
+      await removeMemberFromServer('u-1', 's-1');
+      expect(prismaMock.webhook.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+    });
   });
 
   it('a voluntary leave (no ban) keeps the member\'s webhooks: no statement, no event', async () => {

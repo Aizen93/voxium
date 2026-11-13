@@ -230,7 +230,8 @@ const client: Record<string, any> = {
       return { count: 1 };
     },
   },
-  webhook: { updateMany: async () => ({ count: 0 }) },
+  // No webhooks in this model: a kick reads and waits for none
+  webhook: { updateMany: async () => ({ count: 0 }), findMany: async () => [] },
   channel: {
     findFirst: async ({ where }: any) => db.channels.find((c) => channelMatches(c, where)) ?? null,
     findUnique: async ({ where, select }: any) => {

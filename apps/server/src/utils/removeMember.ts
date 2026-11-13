@@ -13,6 +13,7 @@ import { isTransactionConflict, retryOnTransactionConflict } from './transaction
 import { broadcastMemberLeft } from './memberBroadcast';
 import { emitWebhookChanged } from './webhookLifecycle';
 import type { PermissionReadClient } from './permissionCalculator';
+import type { Prisma } from '../generated/prisma/client';
 
 /** False only when the space row is certainly gone (a failed read is not "gone"). */
 async function spaceExists(serverId: string): Promise<boolean> {
@@ -56,6 +57,30 @@ export interface RemoveMemberOptions {
 }
 
 /**
+ * The webhooks of `serverId` whose LIVE URL `userId` holds: created by them
+ * and never rotated since, or rotated last by them (a rotate hands its caller
+ * the only working URL).
+ */
+function webhooksHeldBy(userId: string, serverId: string): Prisma.WebhookWhereInput {
+  return { serverId, OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }] };
+}
+
+/**
+ * Before a kick's transaction: wait, holding nothing, for the webhook rows its
+ * webhook statement (step 2b) updates, so a transaction holding one of them
+ * (a purge-delete) is waited for before the membership row is taken. The rows
+ * are read without a lock, then each is waited for in its own statement, in
+ * the mode the update takes it (FOR NO KEY UPDATE), on the shared client and
+ * outside any transaction: no row is held while another is waited for.
+ */
+async function waitForHeldWebhookRows(userId: string, serverId: string): Promise<void> {
+  const rows = await prisma.webhook.findMany({ where: webhooksHeldBy(userId, serverId), select: { id: true } });
+  for (const { id } of rows) {
+    await prisma.$queryRaw`SELECT id FROM webhooks WHERE id = ${id} FOR NO KEY UPDATE`;
+  }
+}
+
+/**
  * The ONE path that removes a member from a server: the kick route's teardown
  * lifted out, plus the ban upsert, the join-request delete and the inline
  * memberCount decrement in its transaction. The leave route calls it without
@@ -89,8 +114,10 @@ export interface RemoveMemberOptions {
  *       credential that may have left with the kicked member, so it stops
  *       posting the moment they are out, and a row already disabled carries
  *       the mark too, so whoever enables it later is warned; any enable or a
- *       rotate clears the mark. A voluntary leave keeps them. Before the rows
- *       a create or a join needs: a purge-delete may hold one of these rows.
+ *       rotate clears the mark. A voluntary leave keeps them. Each attempt
+ *       first waits for these rows, holding nothing, before the transaction
+ *       opens (waitForHeldWebhookRows), so a purge-delete holding one is
+ *       waited for before the membership row is taken.
  *       Right after it (or right after a, without a ban), `authorize` again,
  *       on this transaction's client: the check in force when the membership
  *       row goes is the one made after every wait;
@@ -154,6 +181,9 @@ export async function removeMemberFromServer(
   let outcome: { disabledWebhooks: number; secure: SecureMembershipRemoval };
   try {
     outcome = await retryOnTransactionConflict(async () => {
+      // With a ban, the webhook rows step 2b updates, waited for holding
+      // nothing before the transaction takes the membership row
+      if (opts.ban) await waitForHeldWebhookRows(userId, serverId);
       // The caller's precondition for this attempt, BEFORE its transaction
       // opens: the early refusal (see `authorize`)
       if (opts.authorize) await opts.authorize(prisma);
@@ -166,13 +196,9 @@ export async function removeMemberFromServer(
         let disabled = 0;
         if (opts.ban) {
           ({ count: disabled } = await tx.webhook.updateMany({
-            where: {
-              serverId,
-              // The webhooks whose LIVE URL the member holds: created by them
-              // and never rotated since, or rotated last by them. Disabled or
-              // not: a disabled row gets the mark too, so a later enable is warned.
-              OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }],
-            },
+            // Disabled or not: a disabled row gets the mark too, so a later
+            // enable is warned.
+            where: webhooksHeldBy(userId, serverId),
             data: { enabled: false, creatorRemovedAt: new Date() },
           }));
         }
