@@ -92,4 +92,18 @@ describe('scripts/test-multi-node.ts', () => {
     expect(firstStart).toBeGreaterThan(-1);
     expect(check).toBeLessThan(firstStart);
   });
+
+  it('the stale-heartbeat scenario waits past the server\'s count cache and follow-up delay', () => {
+    const redis = readFileSync(path.resolve(__dirname, '../../utils/redis.ts'), 'utf8');
+    const visibility = readFileSync(path.resolve(__dirname, '../../utils/channelVisibilityRooms.ts'), 'utf8');
+    const value = (source: string, name: string): number => {
+      const match = new RegExp(`\\b${name}\\s*=\\s*([\\d_]+)`).exec(source);
+      expect(match, name).not.toBeNull();
+      return Number(match![1].replace(/_/g, ''));
+    };
+    expect(value(script, 'GHOST_HEARTBEAT_TTL_S')).toBe(value(redis, 'NODE_HEARTBEAT_TTL_S'));
+    expect(value(script, 'LIVE_NODES_MEMO_WAIT_MS')).toBeGreaterThan(value(visibility, 'LIVE_NODES_MEMO_MS'));
+    expect(value(script, 'FOLLOW_UP_WAIT_MS')).toBeGreaterThan(value(visibility, 'NODE_HEARTBEAT_TTL_MS') + value(visibility, 'RESYNC_FOLLOW_UP_MARGIN_MS'));
+    expect(script).toContain(`'${HEARTBEAT_PATTERN.replace('*', 'mn-ghost')}'`);
+  });
 });

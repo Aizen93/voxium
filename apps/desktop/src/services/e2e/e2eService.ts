@@ -83,6 +83,15 @@ export interface DecryptResult {
 /** Where a message sits in its group session's ratchet. */
 export type E2EMessagePosition = MessagePosition;
 
+/**
+ * Inbound group sessions this device stored for one scope (a DM conversation
+ * id, or `ch:{channelId}`) in one task of the serial queue (onSessionsAvailable).
+ */
+export interface E2ESessionsAvailable {
+  scope: string;
+  sessionIds: string[];
+}
+
 /** One published device of a user, after signature verification + TOFU pinning. */
 export interface E2EDeviceIdentity {
   deviceId: string;
@@ -666,6 +675,12 @@ export class E2EService {
   /** lateShareWrites of this vault when keptShares was last filled. */
   private keptSharesLateWrites = 0;
   private deviceListListeners = new Set<(userId: string) => void>();
+  private sessionsAvailableListeners = new Set<(event: E2ESessionsAvailable) => void>();
+  /**
+   * Inbound group sessions stored by the task of the queue that is running,
+   * scope → session ids: announced once that task is done (enqueue).
+   */
+  private sessionsStored = new Map<string, Set<string>>();
 
   constructor(
     private readonly userId: string,
@@ -756,12 +771,16 @@ export class E2EService {
 
   /** Serialize all crypto-state mutations (ratchet advance ⇒ pickle persist). */
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(() => {
-      // Queued before a dispose, started after it: refused, whether or not the
-      // teardown has freed what it would touch yet (a claim can hold it back)
-      this.assertLive();
-      return fn();
-    });
+    const run = this.queue
+      .then(() => {
+        // Queued before a dispose, started after it: refused, whether or not the
+        // teardown has freed what it would touch yet (a claim can hold it back)
+        this.assertLive();
+        return fn();
+      })
+      // The sessions the task stored are announced before the next task
+      // starts, whether it ended in an answer or an error
+      .finally(() => this.announceSessionsStored());
     this.queue = run.catch(() => undefined);
     return run;
   }
@@ -2447,6 +2466,54 @@ export class E2EService {
     }
   }
 
+  // ── Inbound group sessions stored (so rows that could not be decrypted are
+  //    tried again without a reload) ──
+
+  /**
+   * Subscribe to "inbound group sessions of this scope were stored": once per
+   * scope at the end of each task of the serial queue that stored any, with
+   * the ids of the sessions it stored. The tasks that store them are a claim
+   * run (the shares kept from an earlier run or start, then each claimed page),
+   * the kept shares a device-sealed decrypt imports first, and each page of a
+   * history pull, which a recovery-key restore and an incoming device approval
+   * start. The session this device creates for its own sends is not announced:
+   * no message is waiting for it. Nothing is announced once disposed. Returns
+   * an unsubscribe.
+   */
+  onSessionsAvailable(listener: (event: E2ESessionsAvailable) => void): () => void {
+    this.sessionsAvailableListeners.add(listener);
+    return () => this.sessionsAvailableListeners.delete(listener);
+  }
+
+  /** Note an inbound group session the running task stored (announceSessionsStored). */
+  private noteSessionStored(scope: string, sessionId: string): void {
+    let ids = this.sessionsStored.get(scope);
+    if (!ids) {
+      ids = new Set();
+      this.sessionsStored.set(scope, ids);
+    }
+    ids.add(sessionId);
+  }
+
+  /** At the end of each task of the queue: one event per scope for what it stored. */
+  private announceSessionsStored(): void {
+    if (this.sessionsStored.size === 0) return;
+    const stored = this.sessionsStored;
+    this.sessionsStored = new Map();
+    // what a claim finishing after a dispose stores is the next start's
+    if (this.disposed) return;
+    for (const [scope, ids] of stored) {
+      const event: E2ESessionsAvailable = { scope, sessionIds: [...ids] };
+      for (const listener of this.sessionsAvailableListeners) {
+        try {
+          listener(event);
+        } catch (err) {
+          console.warn('e2e: a sessions-available listener threw:', errText(err));
+        }
+      }
+    }
+  }
+
   /**
    * UI: the user has seen these devices — stop warning about them.
    *
@@ -2940,6 +3007,8 @@ export class E2EService {
       senderUserId: string;
       senderDeviceId: string;
       keyType?: 'session' | 'exported';
+      /** This device created the session for its own sends: nothing to announce. */
+      createdHere?: true;
     }
   ): Promise<boolean> {
     const existing = await this.loadInbound(meta.sessionId);
@@ -2972,6 +3041,7 @@ export class E2EService {
     }
     this.inbound.set(meta.sessionId, { session, record });
     this.pinSecureScope(meta.conversationId);
+    if (!meta.createdHere) this.noteSessionStored(meta.conversationId, meta.sessionId);
     return true;
   }
 
@@ -3135,6 +3205,7 @@ export class E2EService {
       conversationId,
       senderUserId: this.userId,
       senderDeviceId: this.deviceId,
+      createdHere: true,
     });
 
     const targets = [
@@ -3258,6 +3329,7 @@ export class E2EService {
       conversationId: scope,
       senderUserId: this.userId,
       senderDeviceId: this.deviceId,
+      createdHere: true,
     });
 
     const targets: Array<{ userId: string; deviceId: string }> = [];
@@ -4059,15 +4131,26 @@ export class E2EService {
    * or during the decrypt rejects (E2EServiceDisposedError, or
    * E2EVaultClosedError from the vault), which the display gate settles as
    * nothing to show (decryptMessageForDisplay).
+   *
+   * With `claimMissing: false` a group session this device does not hold is a
+   * failure at once: no key-share claim is started for it. With
+   * `storageFailureRejects: true` a failure of the vault (reading the session,
+   * writing its state, the position or the plaintext) rejects instead of
+   * answering `failed`: it says nothing about the message.
    */
-  async decryptMessage(message: {
-    id: string;
-    conversationId: string;
-    authorId: string;
-    content: string;
-    editedAt?: string | null;
-    createdAt?: string;
-  }): Promise<DecryptResult> {
+  async decryptMessage(
+    message: {
+      id: string;
+      conversationId: string;
+      authorId: string;
+      content: string;
+      editedAt?: string | null;
+      createdAt?: string;
+    },
+    opts: { claimMissing?: boolean; storageFailureRejects?: boolean } = {},
+  ): Promise<DecryptResult> {
+    const claimMissing = opts.claimMissing ?? true;
+    const storageFailureRejects = opts.storageFailureRejects ?? false;
     const version = message.editedAt ?? null;
     // off the queue: liveVault
     const cached = await this.liveVault.getPlaintext(message.id);
@@ -4100,7 +4183,7 @@ export class E2EService {
         // olm1 (legacy pairwise) carries no ratchet position to bind
         const decrypted =
           envelope.e === E2E_ENGINE_MEGOLM1
-            ? await this.decryptGroupMessage(message, envelope.sid, envelope.b)
+            ? await this.decryptGroupMessage(message, envelope.sid, envelope.b, claimMissing)
             : { text: await this.olmDecryptFromUser(message.authorId, envelope), position: undefined };
         if (decrypted === null || decrypted.text === null) return { text: '', failed: true };
         const { text, position } = decrypted;
@@ -4117,6 +4200,7 @@ export class E2EService {
       } catch (err) {
         // the session ended under this decrypt: said as such, never as a marker
         if (isE2ESessionEnded(err)) throw err;
+        if (storageFailureRejects && isStorageFailure(err)) throw err;
         console.warn(`e2e: failed to decrypt message ${message.id}:`, errText(err));
         return { text: '', failed: true };
       }
@@ -4145,10 +4229,11 @@ export class E2EService {
   private async decryptGroupMessage(
     message: { id: string; conversationId: string; authorId: string; editedAt?: string | null },
     sessionId: string,
-    body: string
+    body: string,
+    claimMissing = true
   ): Promise<{ text: string; position: E2EMessagePosition } | null> {
     let entry = await this.loadInbound(sessionId);
-    if (!entry) {
+    if (!entry && claimMissing) {
       // The key share may still be sitting in this device's inbox. One drain
       // per unknown session (retried after SHARE_CLAIM_RETRY_MS) — a backlog of
       // undecryptable messages must not turn into a request storm.

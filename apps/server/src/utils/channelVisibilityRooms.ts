@@ -34,6 +34,19 @@ export const LIVE_NODES_MEMO_MS = 5000;
  *  seconds, a database restart in minutes. A failure after the last of them is
  *  the pass's last (see afterFailedPass). */
 export const LOCAL_PASS_RETRY_DELAYS_MS: readonly number[] = [1000, 5000, 30_000, 120_000];
+/** How long a node's heartbeat lives: NODE_HEARTBEAT_TTL_S (redis.ts) in ms.
+ *  A copy, held equal to it by a test: an import, read at module load, would
+ *  have to be provided by every test suite that mocks redis.ts. */
+export const NODE_HEARTBEAT_TTL_MS = 30_000;
+/** What a follow-up waits past the heartbeat TTL (the margin the deferred boot
+ *  sweep in index.ts takes for the same wait). */
+export const RESYNC_FOLLOW_UP_MARGIN_MS = 5000;
+/** How long after a publish failed closed its scope is published again, once
+ *  (see scheduleFollowUp): past the TTL of every heartbeat that was live when
+ *  it failed. */
+export const RESYNC_FOLLOW_UP_DELAY_MS = NODE_HEARTBEAT_TTL_MS + RESYNC_FOLLOW_UP_MARGIN_MS;
+/** Scopes one space's pending follow-up holds before it widens to the space. */
+export const RESYNC_FOLLOW_UP_SCOPES_MAX = 8;
 
 /**
  * Re-sync `channel:{id}` room membership for connected members after a
@@ -74,23 +87,29 @@ export const LOCAL_PASS_RETRY_DELAYS_MS: readonly number[] = [1000, 5000, 30_000
  * from the database which users of the scope may not view which channel and
  * makes their sockets leave those rooms on every node through the adapter
  * (no reply awaited), sparing the sockets in that channel's `voice:{id}` room.
- * Grants are not part of the fallback: a member who gained a channel receives
- * it at their next connect, which is a delay, never a leak.
+ * Grants are not part of the fallback. Every node that received a copy ran the
+ * whole pass, grants included; a grant on a node that missed every copy, or
+ * one the fallback's own leaves took back, comes with the follow-up: the scope
+ * is published once more RESYNC_FOLLOW_UP_DELAY_MS later, when a heartbeat a
+ * node killed hard left behind has expired (scheduleFollowUp). A follow-up
+ * that fails closed too is not repeated; such a grant then reaches the member
+ * at their next connect, which is a delay, never a leak.
  *
  * What the fallback cannot cover: it is published on the same Redis client as
  * the resync, so when THIS node cannot reach Redis at all both wait in that
  * client's offline queue and go out, in order, when it reconnects (until then
  * nothing this node emits reaches a peer either). A node that misses both
  * messages — its config and adapter subscribers both down for the whole
- * window — keeps its stale rooms until its sockets reconnect. Three windows
+ * window — keeps its stale rooms until the follow-up reaches it, or, when it
+ * misses that too, until its sockets reconnect. Three windows
  * read as unconfirmed although no node with sockets missed anything: a node
  * killed hard keeps its heartbeat for up to its 30 s TTL; a booting node holds
  * its heartbeat a few seconds before it subscribes (index.ts starts the
  * heartbeat first, and no socket can connect to it before it listens); and a
  * node shutting down has deleted its heartbeat while its subscriber still
  * receives (one receiver too many, usually gone before the retries end). A
- * resync in any of them retries, then takes the fallback (logged): correct,
- * only slower.
+ * resync in any of them retries, then takes the fallback and its follow-up
+ * (logged): correct, only slower.
  *
  * Errors are logged, never thrown: a failed resync must not fail the
  * originating mutation, which fires and forgets it.
@@ -118,10 +137,114 @@ export async function recheckVisibilityAfterJoin(
   await resyncEveryNode({ serverId, channelId: opts.channelId, userId: opts.userId }, true);
 }
 
-async function resyncEveryNode(scope: ResyncScope, recheck: boolean): Promise<void> {
+/** `followUp`: this run is a failed publish's follow-up (see
+ *  scheduleFollowUp), which schedules none of its own. Never rejects. */
+async function resyncEveryNode(scope: ResyncScope, recheck: boolean, followUp = false): Promise<void> {
   // Independent halves, each catching its own errors: a database failure in
   // the local pass must not keep the peers from resyncing, nor the reverse
-  await Promise.all([resyncLocalSockets(passScope(scope)), fanOutResync(scope, recheck)]);
+  await Promise.all([
+    resyncLocalSockets(passScope(scope)),
+    fanOutResync(scope, recheck).then((confirmed) => afterFanOut(scope, confirmed, followUp)),
+  ]);
+}
+
+// ─── The follow-up of a publish that failed closed ──────────────────────────
+
+/** The follow-ups waiting on this node, per space: the scopes to publish
+ *  again, the one timer that fires them, and when. */
+const pendingFollowUps = new Map<string, { scopes: ResyncScope[]; timer: ReturnType<typeof setTimeout>; dueAt: number }>();
+/** Set by stopChannelVisibilitySync: a fan-out still retrying at the stop
+ *  schedules nothing. */
+let followUpsStopped = false;
+
+/** A scope as the log lines name it: ids only, as the other lines do. */
+function scopeLabel({ serverId, channelId, userId }: ResyncScope): string {
+  return `server ${serverId}${channelId ? `, channel ${channelId}` : ''}${userId ? `, member ${userId}` : ''}`;
+}
+
+/** What follows a fan-out: a follow-up's outcome logged, or a follow-up
+ *  scheduled for a publish that failed closed. Never throws. */
+function afterFanOut(scope: ResyncScope, confirmed: boolean, followUp: boolean): void {
+  if (followUp) {
+    if (confirmed) {
+      console.log(`[Visibility] Follow-up resync of ${scopeLabel(scope)} confirmed by every node`);
+    } else {
+      console.error(`[Visibility] Follow-up resync of ${scopeLabel(scope)} failed closed too; no further follow-up: a grant on a node that missed it reaches the member at their next connect`);
+    }
+    return;
+  }
+  if (!confirmed) scheduleFollowUp(scope);
+}
+
+/**
+ * After a publish of `scope` failed closed: publish it once more,
+ * RESYNC_FOLLOW_UP_DELAY_MS later, through resyncEveryNode (this node's pass
+ * in the space's queue, and a new message every other node applies in its own).
+ *
+ * What it is for. Every node that received a copy of the request ran the whole
+ * pass, grants included, and the fallback only takes rooms away. Two kinds of
+ * grant are left to a later pass: one on a node that missed every copy (its
+ * subscriber
+ * was down through the retries, which the receiver count cannot tell from a
+ * heartbeat a node killed hard leaves behind), and one the fallback's own
+ * leaves took back (the race it accepts, see revokeHiddenRoomsClusterWide).
+ * The delay outlasts the TTL of every heartbeat that was live when the publish
+ * failed, so the follow-up is judged against the live nodes only.
+ *
+ * It is a pass like any other: each node reads the database when its pass
+ * starts, behind the passes already queued for the space, and applies what is
+ * true then. It goes out as a re-check (`recheck: true`): it is no mutation,
+ * so it moves no join site's mark, here or on the peers. Counted, it would set
+ * the join sites racing it re-checking; a re-check that fails closed is
+ * followed up like any resync, and that follow-up would set them off again,
+ * with no end.
+ *
+ * Bounds. One follow-up per failure: a follow-up that fails closed too runs
+ * the fallback again and schedules nothing, since past the TTL a mismatch is a
+ * node that is up and does not receive, which another publish would not reach
+ * either. One timer per space, set by the first failure and never moved, so a
+ * stream of failures cannot postpone it; a later failure adds its scope to it:
+ * a scope one already held covers is absorbed, one that covers held scopes
+ * replaces them, and past RESYNC_FOLLOW_UP_SCOPES_MAX scopes the follow-up
+ * widens to the whole space. It is scheduled on the node that published, the
+ * only one that knows the publish failed; the timer never keeps the process
+ * alive, and a stop drops what is pending (stopChannelVisibilitySync).
+ */
+function scheduleFollowUp(scope: ResyncScope): void {
+  if (followUpsStopped) return;
+  const { serverId } = scope;
+  const held = { serverId, ...(scope.channelId ? { channelId: scope.channelId } : {}), ...(scope.userId ? { userId: scope.userId } : {}) };
+  let pending = pendingFollowUps.get(serverId);
+  if (!pending) {
+    const timer = setTimeout(() => runFollowUps(serverId), RESYNC_FOLLOW_UP_DELAY_MS);
+    timer.unref?.();
+    pending = { scopes: [held], timer, dueAt: Date.now() + RESYNC_FOLLOW_UP_DELAY_MS };
+    pendingFollowUps.set(serverId, pending);
+  } else if (!pending.scopes.some((s) => covers(passScope(s), passScope(held)))) {
+    const kept = pending.scopes.filter((s) => !covers(passScope(held), passScope(s)));
+    pending.scopes = kept.length + 1 > RESYNC_FOLLOW_UP_SCOPES_MAX ? [{ serverId }] : [...kept, held];
+  }
+  const dueIn = Math.max(0, pending.dueAt - Date.now());
+  console.warn(`[Visibility] Resync of ${scopeLabel(held)} failed closed; its scope is published again in ${dueIn} ms, past the heartbeat TTL, so a grant reaches the members of a node that missed it (${pending.scopes.length} scope(s) pending for the space)`);
+}
+
+/** Fire a space's follow-ups: the entry goes first, so a failure from now on
+ *  schedules a follow-up of its own. */
+function runFollowUps(serverId: string): void {
+  const pending = pendingFollowUps.get(serverId);
+  if (!pending) return;
+  pendingFollowUps.delete(serverId);
+  // resyncEveryNode never rejects
+  for (const scope of pending.scopes) void resyncEveryNode(scope, true, true);
+}
+
+/** Drop every pending follow-up and schedule no more (a stop). */
+function dropFollowUps(): void {
+  followUpsStopped = true;
+  if (pendingFollowUps.size === 0) return;
+  for (const { timer } of pendingFollowUps.values()) clearTimeout(timer);
+  console.warn(`[Visibility] ${pendingFollowUps.size} space(s) with a follow-up resync pending at shutdown; dropped`);
+  pendingFollowUps.clear();
 }
 
 // ─── Joins that raced a resync ──────────────────────────────────────────────
@@ -202,6 +325,7 @@ export function resyncRequestedSince(mark: number, serverId: string): boolean {
  * startup, after Socket.IO is initialised and before the server listens.
  */
 export async function initChannelVisibilitySync(): Promise<void> {
+  followUpsStopped = false;
   await getRedisConfigSub().subscribe(VISIBILITY_RESYNC_CHANNEL, (raw) => {
     handleResyncMessage(raw);
   });
@@ -215,9 +339,11 @@ export async function initChannelVisibilitySync(): Promise<void> {
  * sockets are disconnected next, so it has nothing left to resync. Bounded
  * by STOP_UNSUBSCRIBE_TIMEOUT_MS: an unsubscribe issued while the subscriber
  * reconnects waits in the client's offline queue, and a stop must never hang
- * on it. Never rejects.
+ * on it. The pending follow-ups are dropped first, before anything is awaited,
+ * and a fan-out still retrying schedules none. Never rejects.
  */
 export async function stopChannelVisibilitySync(): Promise<void> {
+  dropFollowUps();
   try {
     await withTimeout(getRedisConfigSub().unsubscribe(VISIBILITY_RESYNC_CHANNEL), STOP_UNSUBSCRIBE_TIMEOUT_MS);
   } catch (err) {
@@ -258,7 +384,8 @@ interface ResyncMessage extends ResyncScope {
   /** One id per resync request; its retries reuse it. */
   id: string;
   fromNode: string;
-  /** A join site's re-check, not a mutation (see recheckVisibilityAfterJoin). */
+  /** Not a mutation, so it moves no mark: a join site's re-check (see
+   *  recheckVisibilityAfterJoin) or a follow-up (see scheduleFollowUp). */
   recheck?: true;
 }
 
@@ -755,8 +882,9 @@ function expectedReceivers({ fresh = false }: { fresh?: boolean } = {}): Promise
   return liveNodesInFlight;
 }
 
-/** Forget the live-node count and the requests seen; the unit tests change
- *  them between cases. */
+/** Forget the live-node count, the requests seen, the queued passes and the
+ *  follow-ups pending; the unit tests change them between cases (a pass a
+ *  failed case left holding the queue must not hold the next case's). */
 export function _resetChannelVisibilityForTests(): void {
   liveNodesMemo = null;
   liveNodesInFlight = null;
@@ -764,6 +892,11 @@ export function _resetChannelVisibilityForTests(): void {
   lastRequestBySpace.clear();
   forgottenUpTo = 0;
   pendingMemberPasses.clear();
+  localPassTail.clear();
+  livePasses.clear();
+  for (const { timer } of pendingFollowUps.values()) clearTimeout(timer);
+  pendingFollowUps.clear();
+  followUpsStopped = false;
 }
 
 /** One publish; resolves with how many subscribers received it and how many
@@ -779,7 +912,9 @@ async function publishOnce(payload: string): Promise<{ received: number; expecte
 
 /**
  * Tell every other node to resync its sockets for `scope`; retried while
- * unconfirmed, then the fail-closed fallback (see the header).
+ * unconfirmed, then the fail-closed fallback (see the header). Resolves true
+ * when a publish was confirmed, false once the fallback has run; never
+ * rejects.
  *
  * Confirmed only when the receivers EQUAL the live nodes. More receivers than
  * heartbeats is not "everyone and then some": a node that is shutting down
@@ -796,16 +931,16 @@ async function publishOnce(payload: string): Promise<{ received: number; expecte
  * and is confirmed although the reconnecting node missed it; it keeps its
  * stale rooms until the next resync of the space or its sockets reconnect.
  */
-async function fanOutResync(scope: ResyncScope, recheck = false): Promise<void> {
+async function fanOutResync(scope: ResyncScope, recheck = false): Promise<boolean> {
   const message: ResyncMessage = { id: randomUUID(), fromNode: NODE_ID(), ...scope, ...(recheck ? { recheck: true as const } : {}) };
   const payload = JSON.stringify(message);
   let failure = 'not attempted';
   for (let attempt = 1; attempt <= RESYNC_PUBLISH_ATTEMPTS; attempt++) {
     try {
       const { received, expected } = await withTimeout(publishOnce(payload), RESYNC_PUBLISH_TIMEOUT_MS);
-      if (received === expected) return;
+      if (received === expected) return true;
       const live = await withTimeout(expectedReceivers({ fresh: true }), RESYNC_PUBLISH_TIMEOUT_MS);
-      if (received === live) return;
+      if (received === live) return true;
       failure = `${received} subscriber(s) received it, ${live} node(s) are live`;
     } catch (err) {
       failure = err instanceof Error ? err.message : String(err);
@@ -817,6 +952,7 @@ async function fanOutResync(scope: ResyncScope, recheck = false): Promise<void> 
   }
   console.error(`[Visibility] Resync of server ${scope.serverId} not confirmed by every node after ${RESYNC_PUBLISH_ATTEMPTS} attempts (${failure}): removing hidden channel rooms cluster-wide (fail closed)`);
   await revokeHiddenRoomsClusterWide(scope);
+  return false;
 }
 
 /**
@@ -870,9 +1006,11 @@ async function revokeHiddenRoomsClusterWide(scope: ResyncScope): Promise<void> {
       // the member first) is undone: the member loses that channel's live
       // events until they open it (a text channel: channel:join re-checks
       // VIEW), join its call (a voice channel), reconnect, or a later pass
-      // succeeds. It errs on the closed side, on a path already degraded, and
-      // closing it would mean holding the space's permission writes for the
-      // whole fallback.
+      // succeeds: the follow-up of this resync, when it is not one itself,
+      // reads the database after these leaves (scheduleFollowUp). It errs on
+      // the closed side, on a path already degraded, and closing it here
+      // would mean holding the space's permission writes for the whole
+      // fallback.
       const visibleByUser = await filterVisibleChannelsForUsers(batch, serverId, channels);
       const hides = (uid: string, channelId: string) => visibleByUser.get(uid)?.has(channelId) !== true;
 
@@ -903,7 +1041,7 @@ async function revokeHiddenRoomsClusterWide(scope: ResyncScope): Promise<void> {
         messages++;
       }
     }
-    console.warn(`[Visibility] Fail-closed fallback for server ${serverId}: ${messages} leave message(s) published for ${userIds.length} member(s); grants wait for each member's next connect`);
+    console.warn(`[Visibility] Fail-closed fallback for server ${serverId}: ${messages} leave message(s) published for ${userIds.length} member(s)`);
   } catch (err) {
     console.error(`[Visibility] Fail-closed fallback for server ${serverId} failed; revoked members on unconfirmed nodes keep their rooms until they reconnect:`, err);
   }

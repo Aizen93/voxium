@@ -17,7 +17,10 @@
 //   artifacts (so no signing key is needed) and no endpoint to ask;
 // - the app identifier is the server's own (`selfHostedIdentifier`), so a
 //   build for another server keeps its own local state: its webview data,
-//   and the credential-store entries lib.rs names after the identifier.
+//   and the credential-store entries lib.rs names after the identifier;
+// - the Windows installer runs the hooks of src-tauri/windows/installer-hooks.nsh,
+//   which give the app's existing shortcuts that identifier (the installer
+//   writes it only on a shortcut it creates).
 // The official release does not use this file: it builds tauri.conf.json as
 // is, with the storage origin from tauri-release-config.mjs.
 //
@@ -25,6 +28,13 @@
 
 import { createHash } from 'node:crypto';
 import { isCspHost, isTcpPort, parseAssetOrigins } from './tauriCsp.mjs';
+
+/**
+ * The NSIS hooks a self-hosted build's Windows installer includes, as a path
+ * from src-tauri (where tauri.conf.json is): see the file for what they do.
+ * The official release names no hooks.
+ */
+export const SELF_HOSTED_INSTALLER_HOOKS = 'windows/installer-hooks.nsh';
 
 const SERVER_DIRECTIVES = ['connect-src', 'img-src'];
 const SCHEME_SOURCE_RE = /^[a-z][a-z0-9+.-]*:$/i;
@@ -254,7 +264,7 @@ export function selfHostedConfig(tauriConf, { apiUrl, wsUrl, assetOrigin, update
   return {
     identifier: selfHostedIdentifier(apiUrl),
     app: { security: { csp } },
-    bundle: { createUpdaterArtifacts },
+    bundle: { createUpdaterArtifacts, windows: { nsis: { installerHooks: SELF_HOSTED_INSTALLER_HOOKS } } },
     plugins: { updater },
   };
 }

@@ -12,6 +12,7 @@ import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
 import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 import { isE2ESessionEnded } from './session';
+import { arrivalMark, noteQuoteAwaiting, noteUndecrypted } from './undecryptedRows';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
@@ -22,6 +23,12 @@ async function currentUserId(): Promise<string | null> {
   return useAuthStore.getState().user?.id ?? null;
 }
 
+/** A quote's text from the local cache: an entry of THIS channel written by the quoted author; null when there is none. */
+async function cachedQuoteText(scope: string, quote: NonNullable<Message['replyTo']>, userId: string): Promise<string | null> {
+  const cached = await getE2EService(userId).getCachedPlaintext(quote.id, { scope, authorId: quote.author?.id });
+  return cached ? parseE2EPlaintext(cached).text : null;
+}
+
 async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
   if (!message.replyTo) return message;
   // a quote names its author; one without is malformed and is dropped whole
@@ -30,12 +37,23 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
   // server's word and renders as the lock placeholder
   if (!message.replyTo.encrypted) return { ...message, replyTo: lockedQuote(message.replyTo) };
   const scope = message.channelId ? e2eChannelScope(message.channelId) : '';
-  const cached = await getE2EService(userId).getCachedPlaintext(message.replyTo.id, {
-    scope,
-    authorId: message.replyTo.author?.id,
-  });
-  const preview = cached ? parseE2EPlaintext(cached).text : '';
-  return { ...message, replyTo: { ...message.replyTo, content: preview } };
+  const text = await cachedQuoteText(scope, message.replyTo, userId);
+  const replyTo = { ...message.replyTo, content: text ?? '' };
+  // nothing yet: this very quote is looked up again once the quoted row opens here
+  if (text === null && scope) noteQuoteAwaiting(replyTo, scope);
+  return { ...message, replyTo };
+}
+
+/**
+ * The text the quote of `message` shows from the local cache, by the rule its
+ * gating followed (resolveReplyPreview), once the quoted row opened on this
+ * device. Null while the cache still has nothing, or when nobody is signed in.
+ */
+export async function quotedChannelTextFromCache(message: Message): Promise<string | null> {
+  if (!message.replyTo?.author || !message.channelId) return null;
+  const userId = await currentUserId();
+  if (!userId) return null;
+  return cachedQuoteText(e2eChannelScope(message.channelId), message.replyTo, userId);
 }
 
 /**
@@ -50,10 +68,16 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
  * A decrypt the session's end overtook settles as `null`, as in dmCrypto:
  * nothing of it may reach the next session's screen, and socket handlers
  * await this without a catch.
+ *
+ * `retry: true` never starts a key-share claim and rejects on a failure of
+ * the vault (see dmCrypto).
  */
-export async function decryptChannelMessageForDisplay(input: Message): Promise<Message | null> {
+export async function decryptChannelMessageForDisplay(
+  input: Message,
+  opts: { retry?: boolean } = {},
+): Promise<Message | null> {
   try {
-    return await decryptChannelOneForDisplay(input);
+    return await decryptChannelOneForDisplay(input, opts.retry === true);
   } catch (err) {
     if (!isE2ESessionEnded(err)) throw err;
     console.debug(`e2e: decrypt of ${input.id} ended with the session:`, err instanceof Error ? err.message : err);
@@ -61,7 +85,7 @@ export async function decryptChannelMessageForDisplay(input: Message): Promise<M
   }
 }
 
-async function decryptChannelOneForDisplay(input: Message): Promise<Message> {
+async function decryptChannelOneForDisplay(input: Message, retry: boolean): Promise<Message> {
   // e2eAttachments come out of the decrypted payload only, and mentions are
   // never resolved for encrypted rows (see dmCrypto)
   const message = withoutServerAssertions(input);
@@ -81,14 +105,19 @@ async function decryptChannelOneForDisplay(input: Message): Promise<Message> {
   const scope = e2eChannelScope(message.channelId);
   const own = message.author?.id === userId;
 
-  const result = await service.decryptMessage({
-    id: message.id,
-    conversationId: scope,
-    authorId: message.author?.id ?? '',
-    content: message.content,
-    editedAt: message.editedAt ?? null,
-    createdAt: message.createdAt,
-  });
+  // before the decrypt: a session stored while it runs makes this row due too
+  const mark = arrivalMark();
+  const result = await service.decryptMessage(
+    {
+      id: message.id,
+      conversationId: scope,
+      authorId: message.author?.id ?? '',
+      content: message.content,
+      editedAt: message.editedAt ?? null,
+      createdAt: message.createdAt,
+    },
+    { claimMissing: !retry, storageFailureRejects: retry },
+  );
   if (!result.failed) {
     return resolveReplyPreview(decryptedRow(message,result.text), userId);
   }
@@ -107,8 +136,12 @@ async function decryptChannelOneForDisplay(input: Message): Promise<Message> {
     }
   }
   // Nothing vouched for this row: the refused shape, its quote still resolvable
-  // from the local cache
-  return resolveReplyPreview(refusedRow(message), userId);
+  // from the local cache. The failure is noted for this version, so that its
+  // group session reaching this device later opens the row in place once the
+  // view shows it (redecryptOnKeyArrival.ts)
+  const refused = await resolveReplyPreview(refusedRow(message), userId);
+  noteUndecrypted(message, scope, mark);
+  return refused;
 }
 
 /** Decrypt a fetched page of secure-channel messages (order preserved). */
