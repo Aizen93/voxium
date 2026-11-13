@@ -15,6 +15,7 @@ import {
   hasChannelPermission,
   filterVisibleChannels,
   filterChannelsWithPermissions,
+  type ChannelPermissionReadClient,
   type PermissionReadClient,
 } from '../utils/permissionCalculator';
 import {
@@ -170,18 +171,21 @@ function bodyOf(body: unknown): Record<string, unknown> {
  *   through the calculator.
  * - All three are decided BEFORE the type check, so a hidden voice channel
  *   cannot leak "exists, but is voice".
+ *
+ * Reads through `db` when one is given (a transaction's client: the
+ * creation asks it again inside its transaction, on every attempt).
  */
-async function assertChannel(userId: string, serverId: string, channelId: string): Promise<void> {
-  const channel = await prisma.channel.findUnique({
+async function assertChannel(userId: string, serverId: string, channelId: string, db?: ChannelPermissionReadClient): Promise<void> {
+  const channel = await (db ?? prisma).channel.findUnique({
     where: { id: channelId },
     select: { id: true, serverId: true, type: true, secure: true },
   });
   if (!channel || channel.serverId !== serverId) throw new NotFoundError('Channel');
   if (channel.secure === true) throw new NotFoundError('Channel');
-  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL, db)) {
     throw new NotFoundError('Channel');
   }
-  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.SEND_MESSAGES)) {
+  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.SEND_MESSAGES, db)) {
     throw new ForbiddenError(NO_SEND);
   }
   if (channel.type !== 'text') throw new BadRequestError('Webhooks can only post to text channels');
@@ -374,7 +378,10 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
         // A space deleted since the checks answers as one
         const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
         if (space.length === 0) throw new NotFoundError('Server');
+        // Every check made before the transaction, made again on its client:
+        // the permission, then the channel (assertChannel)
         await refuseUnlessManager(tx, userId, serverId);
+        await assertChannel(userId, serverId, channelId, tx);
         const count = await tx.webhook.count({ where: { serverId } });
         if (count >= limits.maxWebhooksPerServer) {
           throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);

@@ -77,6 +77,9 @@ const txMock = {
   },
   // read by a refusal under the member row: is the space still there
   server: { findUnique: vi.fn() },
+  // the creation's channel check, made again on the transaction's client
+  // (the root mock's answer, so a test sets one channel for both reads)
+  channel: { findUnique: vi.fn((...args: unknown[]) => prismaMock.channel.findUnique(...args)) },
 };
 
 const prismaMock: Record<string, any> = {
@@ -729,7 +732,7 @@ describe('POST /servers/:serverId/webhooks', () => {
       h.hasChannelPermission.mockResolvedValueOnce(false);
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(404);
-      expect(h.hasChannelPermission).toHaveBeenCalledWith('user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL);
+      expect(h.hasChannelPermission).toHaveBeenCalledWith('user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL, undefined);
       const expected = await notFoundBody();
       expect(res.text).toBe(JSON.stringify(expected));
       expect(txMock.webhook.create).not.toHaveBeenCalled();
@@ -771,19 +774,41 @@ describe('POST /servers/:serverId/webhooks', () => {
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(403);
       expect(res.body).toEqual({ success: false, error: 'You do not have permission to send messages in this channel' });
-      expect(h.hasChannelPermission).toHaveBeenCalledWith('user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES);
+      expect(h.hasChannelPermission).toHaveBeenCalledWith('user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES, undefined);
       expect(prismaMock.$transaction).not.toHaveBeenCalled();
       expect(txMock.webhook.create).not.toHaveBeenCalled();
       expect(h.emitted).toHaveLength(0);
     });
 
-    it('VIEW and SEND granted: created, with VIEW asked first, then SEND', async () => {
+    it('VIEW and SEND granted: created, with VIEW asked first, then SEND, on the shared client and again on the transaction\'s', async () => {
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(201);
       expect(h.hasChannelPermission.mock.calls).toEqual([
-        ['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL],
-        ['user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES],
+        ['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL, undefined],
+        ['user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES, undefined],
+        ['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL, txMock],
+        ['user-1', 'ch-1', 'srv-1', Permissions.SEND_MESSAGES, txMock],
       ]);
+      expect(txMock.channel.findUnique).toHaveBeenCalledTimes(1);
+    });
+
+    it('the channel checks are made again inside the transaction: a channel the caller may no longer post in by then is the 403, nothing created', async () => {
+      // the early answer allows; the one on the transaction's client refuses SEND
+      h.hasChannelPermission.mockImplementation(async (...args: unknown[]) => !(args[4] === txMock && args[3] === Permissions.SEND_MESSAGES));
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ success: false, error: 'You do not have permission to send messages in this channel' });
+      expect(txMock.webhook.count).not.toHaveBeenCalled();
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
+      expect(h.emitted).toHaveLength(0);
+    });
+
+    it('the channel checks are made again inside the transaction: a channel deleted by then is the 404, nothing created', async () => {
+      txMock.channel.findUnique.mockResolvedValueOnce(null);
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ success: false, error: 'Channel not found' });
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
     });
 
     it('a secure channel is still the 404 first: no permission is asked, SEND or otherwise', async () => {
@@ -800,7 +825,7 @@ describe('POST /servers/:serverId/webhooks', () => {
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('Channel not found');
-      expect(h.hasChannelPermission.mock.calls).toEqual([['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL]]);
+      expect(h.hasChannelPermission.mock.calls).toEqual([['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL, undefined]]);
     });
 
     it('SEND is decided before the type: a visible read-only voice channel is the 403, not the text-only 400', async () => {
@@ -1937,8 +1962,8 @@ describe('PATCH: an enable asks SEND_MESSAGES (it turns the URL back into write 
     expect(res.status).toBe(200);
     expect(h.hasChannelPermission.mock.calls).toEqual([
       ['user-1', 'ch-1', 'srv-1', Permissions.VIEW_CHANNEL],
-      ['user-1', 'ch-2', 'srv-1', Permissions.VIEW_CHANNEL],
-      ['user-1', 'ch-2', 'srv-1', Permissions.SEND_MESSAGES],
+      ['user-1', 'ch-2', 'srv-1', Permissions.VIEW_CHANNEL, undefined],
+      ['user-1', 'ch-2', 'srv-1', Permissions.SEND_MESSAGES, undefined],
     ]);
     expect(prismaMock.webhook.update.mock.calls[0][0].data).toEqual({ enabled: true, channelId: 'ch-2', creatorRemovedAt: null });
   });

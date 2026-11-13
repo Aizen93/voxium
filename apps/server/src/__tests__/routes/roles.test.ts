@@ -37,8 +37,6 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
   },
   $transaction: vi.fn(),
-  // the member row lock the role assignment batch takes first
-  $queryRaw: vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ op: 'lock', sql: strings.join('?'), values })),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -762,44 +760,107 @@ describe('Role Routes', () => {
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { userId: 'member1' });
     });
 
-    describe('a member a removal holds, or removed meanwhile', () => {
-      /** An actor who outranks the member, assigning r2. */
+    describe('one transaction under the member row, every check made again inside it', () => {
+      /** The transaction's own client: its models are the root mocks, its identity its own. */
+      const tx = {
+        $queryRaw: vi.fn(),
+        serverMember: prismaMock.serverMember,
+        server: prismaMock.server,
+        role: prismaMock.role,
+        memberRole: { findMany: prismaMock.memberRole.findMany, deleteMany: vi.fn(), create: vi.fn() },
+      };
+      let order: string[] = [];
+      /** An actor who outranks the member, assigning r2; every statement named in `order`. */
       function assignable() {
-        mockHasServerPermission.mockResolvedValue(true);
+        order = [];
+        mockHasServerPermission.mockImplementation(async (...args: unknown[]) => { order.push(args[3] === tx ? 'tx:may-manage' : 'may-manage'); return true; });
         mockGetHighestRolePosition.mockResolvedValue(Infinity);
         prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'member1', serverId: 'srv1' });
         prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'user1' });
-        prismaMock.role.findMany
-          .mockResolvedValueOnce([{ id: 'r2', position: 2, isDefault: false }])
-          .mockResolvedValueOnce([{ permissions: permissionsToString(Permissions.VIEW_CHANNEL) }]);
-        prismaMock.memberRole.deleteMany.mockReturnValue({ op: 'roles.deleteMany' });
-        prismaMock.memberRole.create.mockReturnValue({ op: 'roles.create' });
+        // the checks' read of the roles, and the legacy field's
+        prismaMock.role.findMany.mockImplementation(async ({ select }: any) =>
+          (select.permissions ? [{ permissions: permissionsToString(Permissions.VIEW_CHANNEL) }] : [{ id: 'r2', position: 2, isDefault: false }]));
+        tx.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+          order.push(`tx:${strings.join('?')} [${values.join(',')}]`);
+          return [{ user_id: 'member1' }];
+        });
+        tx.memberRole.deleteMany.mockImplementation(async () => { order.push('tx:roles.deleteMany'); return { count: 0 }; });
+        tx.memberRole.create.mockImplementation(async ({ data }: any) => { order.push(`tx:roles.create ${data.roleId}`); return {}; });
         prismaMock.serverMember.update.mockResolvedValue({});
+        prismaMock.$transaction.mockImplementation(async (fn: (client: typeof tx) => unknown, opts?: unknown) => {
+          order.push(`txn ${JSON.stringify(opts)}`);
+          return fn(tx);
+        });
       }
-      // clearAllMocks keeps a queued answer a test that stopped early left
-      afterEach(() => { prismaMock.role.findMany.mockReset(); });
+      afterEach(() => {
+        prismaMock.role.findMany.mockReset();
+        mockHasServerPermission.mockReset();
+      });
       const assign = () => request(app).patch('/api/v1/servers/srv1/roles/members/member1').send({ roleIds: ['r2'] });
-      const memberKeyRefused = () => Object.assign(new Error('Foreign key constraint violated on the constraint: `member_roles_user_id_server_id_fkey`'), {
+      const keyRefused = (constraint: string) => Object.assign(new Error(`Foreign key constraint violated on the constraint: \`${constraint}\``), {
         code: 'P2003',
-        meta: { modelName: 'MemberRole', driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23503', kind: 'ForeignKeyConstraintViolation', constraint: { index: 'member_roles_user_id_server_id_fkey' } } } },
+        meta: { modelName: 'MemberRole', driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23503', kind: 'ForeignKeyConstraintViolation', constraint: { index: constraint } } } },
       });
 
-      it('locks the member row FIRST, FOR KEY SHARE, then replaces the roles, in one batch with the long budget', async () => {
+      it('the member row FIRST, FOR KEY SHARE, then the checks on the transaction\'s client, then the roles replaced, with the long budget', async () => {
         assignable();
-        prismaMock.$transaction.mockResolvedValue([]);
 
         expect((await assign()).status).toBe(200);
 
-        expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
-        const [batch] = prismaMock.$transaction.mock.calls[0] as [Array<{ op: string; sql?: string; values?: unknown[] }>];
-        expect(batch.map((s) => s.op)).toEqual(['lock', 'roles.deleteMany', 'roles.create']);
-        expect(batch[0].sql).toBe('SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR KEY SHARE');
-        expect(batch[0].values).toEqual(['member1', 'srv1']);
+        expect(order).toEqual([
+          'may-manage',
+          `txn ${JSON.stringify({ timeout: 60_000, maxWait: 10_000 })}`,
+          'tx:SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR KEY SHARE [member1,srv1]',
+          'tx:may-manage',
+          'tx:roles.deleteMany',
+          'tx:roles.create r2',
+        ]);
+        // every read of the checks, inside, went through the transaction's client
+        expect(mockGetHighestRolePosition).toHaveBeenCalledWith('user1', 'srv1', tx);
       });
 
-      it('a member removed before the batch ran: the new row\'s key is refused, 404 Member, nothing announced', async () => {
+      it('an actor who may no longer manage roles by the time the member row is theirs: 403, nothing written, nothing announced', async () => {
         assignable();
-        prismaMock.$transaction.mockRejectedValueOnce(memberKeyRefused());
+        mockHasServerPermission.mockImplementation(async (...args: unknown[]) => args[3] !== tx);
+
+        const res = await assign();
+
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe('You do not have permission to manage roles');
+        expect(tx.memberRole.deleteMany).not.toHaveBeenCalled();
+        expect(tx.memberRole.create).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a role no longer in the space by then: the check inside refuses it, nothing written', async () => {
+        assignable();
+        let reads = 0;
+        prismaMock.role.findMany.mockImplementation(async ({ select }: any) => {
+          if (select.permissions) return [];
+          return reads++ === 0 ? [{ id: 'r2', position: 2, isDefault: false }] : [];
+        });
+
+        const res = await assign();
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('One or more role IDs are invalid');
+        expect(tx.memberRole.create).not.toHaveBeenCalled();
+      });
+
+      it('a role deleted while the transaction runs: its key refused, 404 Role, nothing announced', async () => {
+        assignable();
+        tx.memberRole.create.mockRejectedValueOnce(keyRefused('member_roles_role_id_fkey'));
+
+        const res = await assign();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Role not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a member removed before the transaction ran: the new row\'s key is refused, 404 Member, nothing announced', async () => {
+        assignable();
+        tx.memberRole.create.mockRejectedValueOnce(keyRefused('member_roles_user_id_server_id_fkey'));
 
         const res = await assign();
 
@@ -811,7 +872,6 @@ describe('Role Routes', () => {
 
       it('a member removed before the legacy role update: no row (P2025), 404 Member, nothing announced', async () => {
         assignable();
-        prismaMock.$transaction.mockResolvedValue([]);
         prismaMock.serverMember.update.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
 
         const res = await assign();
@@ -821,25 +881,27 @@ describe('Role Routes', () => {
         expect(mockEmit).not.toHaveBeenCalled();
       });
 
-      it('a batch PostgreSQL aborted to break a deadlock is built again and run again', async () => {
+      it('a transaction PostgreSQL aborted to break a deadlock runs again whole, the member row and the checks included', async () => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         assignable();
+        const real = prismaMock.$transaction.getMockImplementation()!;
         prismaMock.$transaction
-          .mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }))
-          .mockResolvedValueOnce([]);
+          .mockImplementationOnce(async () => { order.push('txn aborted'); throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); })
+          .mockImplementation(real);
         try {
           expect((await assign()).status).toBe(200);
           expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
-          expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+          expect(order.filter((o) => o === 'tx:may-manage')).toHaveLength(1);
+          expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
         } finally {
           warn.mockRestore();
         }
       });
 
-      it('any other failure of the batch is still a 500', async () => {
+      it('any other failure of the transaction is still a 500', async () => {
         const err = vi.spyOn(console, 'error').mockImplementation(() => {});
         assignable();
-        prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Foreign key constraint violated on the constraint: `member_roles_role_id_fkey`'), { code: 'P2003' }));
+        tx.memberRole.create.mockRejectedValueOnce(keyRefused('member_roles_another_fkey'));
         try {
           expect((await assign()).status).toBe(500);
         } finally {
