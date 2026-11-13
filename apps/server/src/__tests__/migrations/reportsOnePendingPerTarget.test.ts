@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
- * 20261111140000_reports_one_pending_per_target makes the database refuse a
+ * 20261111150000_reports_one_pending_per_target makes the database refuse a
  * second PENDING report by one reporter against one target: three partial
  * unique indexes, after closing (never deleting) the duplicates written
  * before them. Its behaviour was exercised against a private PostgreSQL
@@ -16,7 +16,7 @@ import { resolve } from 'node:path';
  */
 
 const MIGRATIONS = resolve(__dirname, '../../../prisma/migrations');
-const NAME = '20261111140000_reports_one_pending_per_target';
+const NAME = '20261111150000_reports_one_pending_per_target';
 const sql = readFileSync(resolve(MIGRATIONS, NAME, 'migration.sql'), 'utf8');
 const code = sql
   .split(/\r?\n/)

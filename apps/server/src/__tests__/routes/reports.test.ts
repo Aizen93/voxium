@@ -384,7 +384,7 @@ describe('Report Routes — type: server', () => {
 // The look for a pending report and the insert are two statements: two
 // identical reports sent together both pass the look. The database refuses
 // the second insert (the partial unique indexes of migration
-// 20261111140000_reports_one_pending_per_target), and its unique violation
+// 20261111150000_reports_one_pending_per_target), and its unique violation
 // must get the look's own answer, never a 500.
 
 describe('Report Routes — the duplicate the look cannot see', () => {

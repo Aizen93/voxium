@@ -801,7 +801,7 @@ model Report {
   @@index([reportedUserId])
   @@index([messageId])
   // ALSO covered by three PARTIAL unique indexes, added in migration
-  // 20261111140000_reports_one_pending_per_target: one pending report per
+  // 20261111150000_reports_one_pending_per_target: one pending report per
   // reporter and target (`reports_pending_user_key`,
   // `reports_pending_message_key`, `reports_pending_server_key`, each
   // `WHERE status = 'pending' AND type = …`). This schema cannot express a

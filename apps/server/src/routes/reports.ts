@@ -198,7 +198,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       // report sent at the same time passes the look too. The database
       // refuses the second one (one pending report per reporter and target:
       // the partial unique indexes of migration
-      // 20261111140000_reports_one_pending_per_target, the only unique
+      // 20261111150000_reports_one_pending_per_target, the only unique
       // constraints on the table besides its random id), and it gets the
       // look's answer.
       if ((err as { code?: unknown } | null)?.code === 'P2002') throw new BadRequestError(DUPLICATE_REPORT_MESSAGE);
