@@ -13,6 +13,7 @@ import {
   selfHostedUpdater,
   selfHostedIdentifier,
   selfHostedConfig,
+  SELF_HOSTED_INSTALLER_HOOKS,
 } from '../../../scripts/tauriSelfHosted.mjs';
 import { releaseConfig } from '../../../scripts/tauriCsp.mjs';
 
@@ -377,7 +378,7 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
           csp: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://chat.example.org wss://chat.example.org; img-src 'self' blob: data: https://chat.example.org; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:",
         },
       },
-      bundle: { createUpdaterArtifacts: false },
+      bundle: { createUpdaterArtifacts: false, windows: { nsis: { installerHooks: 'windows/installer-hooks.nsh' } } },
       plugins: { updater: { endpoints: [], pubkey: '' } },
     });
   });
@@ -394,7 +395,7 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
     expect(directive(csp, 'connect-src')).toEqual(["'self'", 'https://api.example.org', 'https://ws.example.org', 'wss://ws.example.org', STORAGE, 'https://cdn.example.org:9000']);
     expect(directive(csp, 'img-src')).toEqual(["'self'", 'blob:', 'data:', 'https://api.example.org', STORAGE, 'https://cdn.example.org:9000']);
     expect(otherDirectives(csp)).toEqual(otherDirectives(BASE));
-    expect(overlay.bundle).toEqual({ createUpdaterArtifacts: true });
+    expect(overlay.bundle).toEqual({ createUpdaterArtifacts: true, windows: { nsis: { installerHooks: SELF_HOSTED_INSTALLER_HOOKS } } });
     expect(overlay.plugins).toEqual({ updater: { endpoints: [FEED], pubkey: KEY } });
   });
 
@@ -423,6 +424,64 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
     const selfHosted = build({ apiUrl: API, wsUrl: WS, assetOrigin: STORAGE });
     expect(Object.keys(selfHosted)).toEqual(['identifier', 'app', 'bundle', 'plugins']);
     expect(selfHosted.identifier).not.toBe(conf.identifier);
+  });
+
+  // Windows shows an installed app's notifications only when a Start Menu
+  // shortcut carries the app's identifier, and the installer writes it only on
+  // a shortcut it creates. A build for another server has its own identifier,
+  // so its installer also gives it to the shortcuts that already point at the
+  // app (an install over an existing one, an update in place).
+  describe('the Windows installer hooks of a self-hosted build', () => {
+    const hooksPath = join(DESKTOP, 'src-tauri', SELF_HOSTED_INSTALLER_HOOKS);
+    /** The statements of the hooks file, comments and blank lines dropped. */
+    const statements = () => readFileSync(hooksPath, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith(';'));
+    const START_MENU = '$SMPROGRAMS\\${PRODUCTNAME}.lnk';
+    const START_MENU_FOLDER = '$SMPROGRAMS\\$AppStartMenuFolder\\${PRODUCTNAME}.lnk';
+    const DESKTOP_LINK = '$DESKTOP\\${PRODUCTNAME}.lnk';
+    const APP = '$INSTDIR\\${MAINBINARYNAME}.exe';
+
+    it('the overlay names a file that exists, by its path from tauri.conf.json', () => {
+      expect(build({ apiUrl: API, wsUrl: WS }).bundle.windows.nsis.installerHooks).toBe('windows/installer-hooks.nsh');
+      expect(existsSync(hooksPath)).toBe(true);
+    });
+
+    it('runs after the install and defines no other hook', () => {
+      expect(statements().filter((l) => l.startsWith('!macro '))).toEqual(['!macro NSIS_HOOK_POSTINSTALL']);
+    });
+
+    it.each([
+      ['the Start Menu shortcut', START_MENU],
+      ['the Desktop shortcut', DESKTOP_LINK],
+      ['the shortcut in a Start Menu folder', START_MENU_FOLDER],
+    ])('gives %s the identifier only when it points at this app', (_what, shortcut) => {
+      const lines = statements();
+      const check = lines.indexOf(`!insertmacro IsShortcutTarget "${shortcut}" "${APP}"`);
+      expect(check).toBeGreaterThan(-1);
+      // the check's answer is read, and the identifier written inside that condition
+      expect(lines.slice(check + 1, check + 5)).toEqual([
+        'Pop $0',
+        '${If} $0 = 1',
+        `!insertmacro SetLnkAppUserModelId "${shortcut}"`,
+        '${EndIf}',
+      ]);
+    });
+
+    it('writes the identifier nowhere else', () => {
+      expect(statements().filter((l) => l.includes('SetLnkAppUserModelId'))).toHaveLength(3);
+    });
+
+    it('leaves the installer\'s registers as it found them', () => {
+      const lines = statements();
+      const firstCheck = lines.findIndex((l) => l.includes('IsShortcutTarget'));
+      const lastEndIf = lines.lastIndexOf('${EndIf}');
+      expect(lines.slice(0, firstCheck).filter((l) => l.startsWith('Push '))).toEqual(['Push $0', 'Push $1', 'Push $2', 'Push $3', 'Push $4', 'Push $5']);
+      expect(lines.slice(lastEndIf + 1).filter((l) => l.startsWith('Pop '))).toEqual(['Pop $5', 'Pop $4', 'Pop $3', 'Pop $2', 'Pop $1', 'Pop $0']);
+    });
+
+    it('the official release names no installer hooks', () => {
+      expect((conf as unknown as { bundle?: { windows?: unknown } }).bundle?.windows).toBeUndefined();
+      expect(JSON.stringify(releaseConfig(conf, STORAGE))).not.toContain('installerHooks');
+    });
   });
 
   it('refuses malformed inputs instead of shipping a weaker or broken build', () => {
