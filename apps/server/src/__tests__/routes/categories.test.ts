@@ -172,6 +172,33 @@ describe('Category Routes', () => {
       expect(res.body.data.serverId).toBe('srv-1');
     });
 
+    it('locks, counts, places and inserts on the transaction\'s OWN client: nothing of it on the shared one', async () => {
+      // A transaction client of its own, so a statement issued on the shared
+      // client inside the callback (outside the lock, on a second pool
+      // connection) is told apart from one on the transaction's
+      const txClient = {
+        $queryRaw: vi.fn().mockResolvedValue([{ id: 'srv-1' }]),
+        category: {
+          aggregate: vi.fn().mockResolvedValue({ _count: { _all: 2 }, _max: { position: 4 } }),
+          create: vi.fn(async ({ data }: any) => ({ id: 'cat-new', ...data })),
+        },
+      };
+      prismaMock.$transaction.mockImplementationOnce(async (fn: (tx: typeof txClient) => Promise<unknown>) => fn(txClient));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: 'Text Channels' });
+
+      expect(res.status).toBe(201);
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(txClient.category.aggregate).toHaveBeenCalledTimes(1);
+      expect(txClient.category.create).toHaveBeenCalledWith({ data: { name: 'Text Channels', serverId: 'srv-1', position: 5 } });
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+      expect(prismaMock.category.aggregate).not.toHaveBeenCalled();
+      expect(prismaMock.category.create).not.toHaveBeenCalled();
+    });
+
     it('gives the transaction the long budget: the space row it waits for is held through an account deletion\'s cascade', async () => {
       const token = makeToken();
       categoryStats(2);
