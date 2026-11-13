@@ -64,13 +64,15 @@ inviteRouter.post('/:code/join', rateLimitInviteUse, async (req: Request<{ code:
     // seeding) lives in joinServerMember. The invite delete rides in its
     // transaction as the extra write: a single-use invite that was consumed
     // between the lookup above and here finds no row, the transaction fails,
-    // and no membership is created.
+    // and no membership is created. The invite row is waited for before that
+    // transaction takes the space row (awaitRows).
     try {
       await joinServerMember(req.user!.userId, invite.serverId, {
         via: 'invite',
         // built on each attempt's transaction: a retried join consumes the
         // invite once, or finds it consumed and fails
         extraWrites: (tx) => [tx.invite.delete({ where: { code } })],
+        awaitRows: (db) => db.$queryRaw`SELECT code FROM invites WHERE code = ${code} FOR UPDATE`,
       });
     } catch (err) {
       // P2025 = the delete found no row: the invite was already consumed.

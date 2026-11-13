@@ -333,6 +333,9 @@ const client: Record<string, any> = {
         .map((c) => ({ id: c.id, server_id: c.serverId, created_by_id: c.createdById }));
     }
     if (/FROM channels/.test(sql)) return db.channels.filter((c) => c.id === values[0]).map((c) => ({ id: c.id }));
+    // the join's waits before its transaction (waitForJoinRows): locks taken
+    // and let go, nothing read from them
+    if (/FROM server_join_requests|FROM channel_members cm|FROM users WHERE/.test(sql)) return [];
     throw new Error(`unmodelled raw query: ${sql}`);
   },
   $transaction: async (arg: any, _opts?: unknown) => {

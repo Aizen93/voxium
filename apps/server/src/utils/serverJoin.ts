@@ -37,6 +37,39 @@ export interface JoinServerOptions {
    * invite from being consumed twice, on every attempt.
    */
   extraWrites?: (tx: Prisma.TransactionClient) => Array<Promise<unknown>>;
+  /**
+   * The rows the extra writes take, waited for before each attempt's
+   * transaction opens, on the client given (the shared one), outside any
+   * transaction: a statement that locks them and lets them go as soon as it
+   * has them (`SELECT … FOR UPDATE`). The invite route passes its invite. The
+   * approval route passes nothing: the join waits for the joiner's own join
+   * requests in the space itself (see waitForJoinRows).
+   */
+  awaitRows?: (db: typeof prisma) => Promise<unknown>;
+}
+
+/**
+ * Before a join's transaction: wait, holding nothing, for the existing rows
+ * that transaction takes after the space row, so that whatever transaction
+ * holds one of them is waited for before the space row is taken, and the
+ * space's other joins and creations do not queue behind this one. One
+ * statement per kind of row, each on the shared client and outside any
+ * transaction, so each lock is let go as soon as it is granted and no
+ * statement holds a row while it waits for the next. The rows: the joiner's
+ * join requests in the space (the sweep below, and the approval route's
+ * settle of the same row), the joiner's secure-channel rows in the space
+ * (the reset below), the joiner's account row in the mode the membership's
+ * key takes it, then the caller's rows (`awaitRows`). Inside the transaction
+ * the space row stays first, as in a space delete, which reaches invites and
+ * join requests through its cascade after the space row.
+ */
+async function waitForJoinRows(userId: string, serverId: string, opts: JoinServerOptions): Promise<void> {
+  await prisma.$queryRaw`SELECT id FROM server_join_requests WHERE server_id = ${serverId} AND user_id = ${userId} FOR UPDATE`;
+  await prisma.$queryRaw`
+    SELECT cm.channel_id FROM channel_members cm JOIN channels c ON c.id = cm.channel_id
+    WHERE cm.user_id = ${userId} AND c.server_id = ${serverId} FOR UPDATE OF cm`;
+  await prisma.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR KEY SHARE`;
+  if (opts.awaitRows) await opts.awaitRows(prisma);
 }
 
 /**
@@ -46,9 +79,10 @@ export interface JoinServerOptions {
  * the member limit, the duplicate check and the inline member count live here
  * and nowhere else (docs/local/server-discovery-plan.html).
  *
- * Order: ban (403) → already a member (400) → member limit (400) → one
- * transaction, retried on a deadlock and holding those three checks again
- * under the space row lock (extra writes, any secure-channel row an earlier
+ * Order: ban (403) → already a member (400) → member limit (400) → a wait,
+ * holding nothing, for the rows the transaction takes after the space row
+ * (waitForJoinRows) → one transaction, retried on a deadlock and holding
+ * those three checks again under the space row lock (extra writes, any secure-channel row an earlier
  * membership left, membership row, memberCount + 1) → the room
  * invariant (broadcastMemberJoined joins the sockets to `server:{id}` and the
  * visible `channel:{id}` rooms) → ChannelRead seeding for the server's
@@ -96,49 +130,52 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
 
   // The checks above are a fast answer; the transaction holds them again on
   // every attempt, since PostgreSQL may abort it to break a deadlock with a
-  // space delete or an account deletion and it then runs again: the space
-  // row first (FOR UPDATE, the order a space delete and a transfer take it
-  // in), so the member limit is counted with no other join in between, then
-  // the extra writes (a consumed invite fails them), the ban, the duplicate.
-  // The long budget: a space delete holds the space row through its cascade,
-  // and an account deletion every row its own cascade reached (an invite it
-  // created, a join request it decided) until it commits; a join merely
-  // waiting for either must not expire (LOCK_WAIT_TRANSACTION_OPTIONS).
+  // space delete or an account deletion and it then runs again. Each attempt
+  // first waits, holding nothing, for the rows it takes after the space row
+  // (waitForJoinRows). Then the transaction: the space row first (FOR
+  // UPDATE, the order a space delete and a transfer take it in), so the
+  // member limit is counted with no other join in between, then the extra
+  // writes (a consumed invite fails them), the ban, the duplicate. The long
+  // budget: a transaction holding the space row is waited for inside it
+  // (LOCK_WAIT_TRANSACTION_OPTIONS).
   try {
-    await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
-      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
-      if (space.length === 0) throw new NotFoundError('Server');
-      for (const write of opts.extraWrites?.(tx) ?? []) await write;
-      const bannedNow = await tx.serverBan.findUnique({
-        where: { serverId_userId: { serverId, userId } },
-        select: { userId: true },
-      });
-      if (bannedNow) throw new ForbiddenError('You are banned from this server');
-      const memberNow = await tx.serverMember.findUnique({
-        where: { userId_serverId: { userId, serverId } },
-        select: { userId: true },
-      });
-      if (memberNow) throw new BadRequestError('You are already a member of this server');
-      if (limits.maxMembersPerServer > 0) {
-        const countNow = await tx.serverMember.count({ where: { serverId } });
-        if (countNow >= limits.maxMembersPerServer) {
-          throw new BadRequestError(`This server has reached its member limit (${limits.maxMembersPerServer})`);
+    await retryOnTransactionConflict(async () => {
+      await waitForJoinRows(userId, serverId, opts);
+      return prisma.$transaction(async (tx) => {
+        const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+        if (space.length === 0) throw new NotFoundError('Server');
+        for (const write of opts.extraWrites?.(tx) ?? []) await write;
+        const bannedNow = await tx.serverBan.findUnique({
+          where: { serverId_userId: { serverId, userId } },
+          select: { userId: true },
+        });
+        if (bannedNow) throw new ForbiddenError('You are banned from this server');
+        const memberNow = await tx.serverMember.findUnique({
+          where: { userId_serverId: { userId, serverId } },
+          select: { userId: true },
+        });
+        if (memberNow) throw new BadRequestError('You are already a member of this server');
+        if (limits.maxMembersPerServer > 0) {
+          const countNow = await tx.serverMember.count({ where: { serverId } });
+          if (countNow >= limits.maxMembersPerServer) {
+            throw new BadRequestError(`This server has reached its member limit (${limits.maxMembersPerServer})`);
+          }
         }
-      }
-      // A membership replaces any request the joiner had open or declined
-      // here (an open-mode join after the owner switched modes, an invite
-      // used while a request was pending). The approval route still passes
-      // its single-row delete as an extra write: THAT one must fail when the
-      // row is gone (double approval), this one is a sweep.
-      await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
-      // A membership starts with no secure-channel row: access to a secure
-      // channel is derived from its ChannelMember rows alone, so one an
-      // earlier membership of this space left behind must not be honoured
-      // again. Every channel of the space (rows exist only for secure ones).
-      await tx.channelMember.deleteMany({ where: { userId, channel: { serverId } } });
-      await tx.serverMember.create({ data: { userId, serverId } });
-      await tx.server.update({ where: { id: serverId }, data: { memberCount: { increment: 1 } } });
-    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[ServerJoin] The join of ${userId} to ${serverId}`);
+        // A membership replaces any request the joiner had open or declined
+        // here (an open-mode join after the owner switched modes, an invite
+        // used while a request was pending). The approval route still passes
+        // its single-row delete as an extra write: THAT one must fail when the
+        // row is gone (double approval), this one is a sweep.
+        await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
+        // A membership starts with no secure-channel row: access to a secure
+        // channel is derived from its ChannelMember rows alone, so one an
+        // earlier membership of this space left behind must not be honoured
+        // again. Every channel of the space (rows exist only for secure ones).
+        await tx.channelMember.deleteMany({ where: { userId, channel: { serverId } } });
+        await tx.serverMember.create({ data: { userId, serverId } });
+        await tx.server.update({ where: { id: serverId }, data: { memberCount: { increment: 1 } } });
+      }, LOCK_WAIT_TRANSACTION_OPTIONS);
+    }, `[ServerJoin] The join of ${userId} to ${serverId}`);
   } catch (err) {
     // Two concurrent joins by the same user: the second one's create hits the
     // composite primary key. That is "already a member", not a 500.

@@ -292,6 +292,12 @@ function makeClient(txn: Txn | null): Record<string, any> {
         const [serverId, userIds] = values as [string, string[]];
         return rows('members').filter((m) => m.serverId === serverId && userIds.includes(m.userId)).map((m) => ({ user_id: m.userId }));
       }
+      if (/FROM server_join_requests|FROM channel_members cm|FROM users WHERE id = \? FOR KEY SHARE$/.test(sql)) {
+        // the join's waits before its transaction (waitForJoinRows): no
+        // transaction modelled here holds these rows
+        if (txn) throw new Error('the join waits outside its transaction');
+        return [];
+      }
       if (/FROM servers WHERE id = \? FOR UPDATE$/.test(sql)) {
         if (!txn) throw new Error('a row lock outside a transaction locks nothing');
         await lockRow(txn, `servers:${values[0] as string}`);

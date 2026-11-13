@@ -80,6 +80,8 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
   },
   $transaction: vi.fn(),
+  // the waits the join runs on the shared client before its transaction
+  $queryRaw: vi.fn(),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -189,6 +191,7 @@ describe('Invite Routes', () => {
     // Default: not banned from any server (joinServerMember checks first), no request pending
     prismaMock.serverBan.findUnique.mockResolvedValue(null);
     prismaMock.serverJoinRequest.findUnique.mockResolvedValue(null);
+    prismaMock.$queryRaw.mockResolvedValue([]);
   });
 
   // ── POST /api/v1/invites/servers/:serverId ──────────────────────────────
@@ -490,6 +493,28 @@ describe('Invite Routes', () => {
       expect(prismaMock.invite.delete).not.toHaveBeenCalled();
       expect(tx.serverMember.create).toHaveBeenCalledWith({ data: { userId: 'user-2', serverId: 'srv-1' } });
       expect(tx.server.update).toHaveBeenCalledWith({ where: { id: 'srv-1' }, data: { memberCount: { increment: 1 } } });
+    });
+
+    it('waits for the invite row before the join transaction opens: one lock-and-release statement on the shared client', async () => {
+      const token = makeToken({ userId: 'user-2' });
+      mockAuthUser({ id: 'user-2' });
+      prismaMock.invite.findUnique.mockResolvedValue({
+        id: 'inv-1', code: 'WAIT0001', serverId: 'srv-1', expiresAt: null, server: { ...mockServer, invitesLocked: false },
+      });
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      prismaMock.channel.findMany.mockResolvedValue([]);
+      const order: string[] = [];
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const sql = strings.join('?').replace(/\s+/g, ' ');
+        if (sql.includes('FROM invites')) order.push(`wait:invite ${sql} [${values.join(',')}]`);
+        return [];
+      });
+      prismaMock.$transaction.mockImplementationOnce(async () => { order.push('txn'); return []; });
+
+      const res = await request(app).post('/api/v1/invites/WAIT0001/join').set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(order).toEqual(['wait:invite SELECT code FROM invites WHERE code = ? FOR UPDATE [WAIT0001]', 'txn']);
     });
 
     it('an invite used while a join request was pending resolves that request for the moderators', async () => {
