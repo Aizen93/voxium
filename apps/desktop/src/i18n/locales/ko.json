@@ -1070,19 +1070,19 @@
         "routes": {
           "api": {
             "connection": "HTTPS",
-            "transport": "nginx 경유",
+            "transport": "TLS로 암호화",
             "destination": "Express API",
             "detail": "로그인, 권한 확인 및 메시지 저장"
           },
           "events": {
             "connection": "실시간 이벤트",
-            "transport": "nginx를 통한 WebSocket",
+            "transport": "TLS를 사용하는 WebSocket",
             "destination": "Socket.IO",
             "detail": "실시간 업데이트 및 통화 시그널링"
           },
           "media": {
             "connection": "그룹 미디어",
-            "transport": "미디어 포트로 직접 연결하는 WebRTC",
+            "transport": "WebRTC",
             "destination": "mediasoup",
             "detail": "그룹 음성과 화면 공유를 전달합니다"
           },

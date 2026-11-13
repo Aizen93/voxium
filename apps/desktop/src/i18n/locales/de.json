@@ -1072,19 +1072,19 @@
         "routes": {
           "api": {
             "connection": "HTTPS",
-            "transport": "Über nginx",
+            "transport": "TLS-verschlüsselt",
             "destination": "Express-API",
             "detail": "Anmeldung, Berechtigungen und Speichern von Nachrichten"
           },
           "events": {
             "connection": "Live-Ereignisse",
-            "transport": "WebSocket über nginx",
+            "transport": "WebSocket über TLS",
             "destination": "Socket.IO",
             "detail": "Live-Aktualisierungen und Anrufsignalisierung"
           },
           "media": {
             "connection": "Gruppenmedien",
-            "transport": "WebRTC zu den Medienports",
+            "transport": "WebRTC",
             "destination": "mediasoup",
             "detail": "Leitet Gruppenaudio und Bildschirmfreigaben weiter"
           },

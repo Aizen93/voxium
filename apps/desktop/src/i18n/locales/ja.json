@@ -1070,19 +1070,19 @@
         "routes": {
           "api": {
             "connection": "HTTPS",
-            "transport": "nginx 経由",
+            "transport": "TLS で暗号化",
             "destination": "Express API",
             "detail": "サインイン、権限確認、メッセージの保存"
           },
           "events": {
             "connection": "リアルタイムイベント",
-            "transport": "nginx 経由の WebSocket",
+            "transport": "TLS 上の WebSocket",
             "destination": "Socket.IO",
             "detail": "リアルタイム更新と通話シグナリング"
           },
           "media": {
             "connection": "グループメディア",
-            "transport": "メディアポートへの WebRTC",
+            "transport": "WebRTC",
             "destination": "mediasoup",
             "detail": "グループ音声と画面共有を転送します"
           },

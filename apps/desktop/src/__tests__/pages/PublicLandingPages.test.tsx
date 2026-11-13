@@ -27,6 +27,16 @@ afterEach(() => {
 });
 
 describe('public landing pages', () => {
+  it('describes transport protocols without naming the hosting setup in any locale', () => {
+    for (const { code } of SUPPORTED_LANGUAGES) {
+      const copy = i18n.getResource(code, 'translation', 'landing.publicPages');
+      expect(JSON.stringify(copy), code).not.toMatch(/nginx/i);
+      expect(copy.architecturePage.routes.api.transport, code).toContain('TLS');
+      expect(copy.architecturePage.routes.events.transport, code).toMatch(/^(?=.*WebSocket)(?=.*TLS)/);
+      expect(copy.architecturePage.routes.media.transport, code).toBe('WebRTC');
+    }
+  });
+
   it('provides every public-page string in all supported languages', () => {
     const populatedKeys = (branch: Record<string, unknown>): string[] => Object.entries(branch).flatMap(([key, value]) =>
       typeof value === 'string'

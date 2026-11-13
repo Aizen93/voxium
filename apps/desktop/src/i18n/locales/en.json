@@ -1070,9 +1070,9 @@
           "storage": "Storage & state"
         },
         "routes": {
-          "api": { "connection": "HTTPS", "transport": "Via nginx", "destination": "Express API", "detail": "Sign-in, permissions, and message writes" },
-          "events": { "connection": "Live events", "transport": "WebSocket via nginx", "destination": "Socket.IO", "detail": "Live updates and call signaling" },
-          "media": { "connection": "Group media", "transport": "WebRTC to media ports", "destination": "mediasoup", "detail": "Forwards group audio and screen shares" },
+          "api": { "connection": "HTTPS", "transport": "Encrypted with TLS", "destination": "Express API", "detail": "Sign-in, permissions, and message writes" },
+          "events": { "connection": "Live events", "transport": "WebSocket over TLS", "destination": "Socket.IO", "detail": "Live updates and call signaling" },
+          "media": { "connection": "Group media", "transport": "WebRTC", "destination": "mediasoup", "detail": "Forwards group audio and screen shares" },
           "peer": { "connection": "Private audio", "transport": "Peer-to-peer WebRTC", "destination": "The other person's app", "detail": "Receives private-call audio directly" }
         },
         "storage": {

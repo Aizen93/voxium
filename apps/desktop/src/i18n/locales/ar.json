@@ -1080,19 +1080,19 @@
         "routes": {
           "api": {
             "connection": "HTTPS",
-            "transport": "عبر nginx",
+            "transport": "مشفّر باستخدام TLS",
             "destination": "واجهة Express API",
             "detail": "تسجيل الدخول والأذونات وحفظ الرسائل"
           },
           "events": {
             "connection": "الأحداث الفورية",
-            "transport": "WebSocket عبر nginx",
+            "transport": "WebSocket عبر TLS",
             "destination": "Socket.IO",
             "detail": "التحديثات الفورية وإشارات المكالمات"
           },
           "media": {
             "connection": "وسائط المجموعة",
-            "transport": "WebRTC إلى منافذ الوسائط",
+            "transport": "WebRTC",
             "destination": "mediasoup",
             "detail": "يعيد توجيه صوت المجموعة ومشاركات الشاشة"
           },

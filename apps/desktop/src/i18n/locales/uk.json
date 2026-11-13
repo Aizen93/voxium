@@ -1076,19 +1076,19 @@
         "routes": {
           "api": {
             "connection": "HTTPS",
-            "transport": "Через nginx",
+            "transport": "Шифрування TLS",
             "destination": "API Express",
             "detail": "Вхід, дозволи та збереження повідомлень"
           },
           "events": {
             "connection": "Події наживо",
-            "transport": "WebSocket через nginx",
+            "transport": "WebSocket через TLS",
             "destination": "Socket.IO",
             "detail": "Оновлення наживо й сигналізація дзвінків"
           },
           "media": {
             "connection": "Групове медіа",
-            "transport": "WebRTC до медіапортів",
+            "transport": "WebRTC",
             "destination": "mediasoup",
             "detail": "Пересилає звук групи та демонстрації екрана"
           },

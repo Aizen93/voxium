@@ -1070,19 +1070,19 @@
         "routes": {
           "api": {
             "connection": "HTTPS",
-            "transport": "经由 nginx",
+            "transport": "通过 TLS 加密",
             "destination": "Express API",
             "detail": "登录、权限检查和保存消息"
           },
           "events": {
             "connection": "实时事件",
-            "transport": "经由 nginx 的 WebSocket",
+            "transport": "基于 TLS 的 WebSocket",
             "destination": "Socket.IO",
             "detail": "实时更新和通话信令"
           },
           "media": {
             "connection": "群组媒体",
-            "transport": "通过 WebRTC 连接媒体端口",
+            "transport": "WebRTC",
             "destination": "mediasoup",
             "detail": "转发群组音频和屏幕共享"
           },
