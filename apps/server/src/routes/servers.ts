@@ -833,10 +833,10 @@ serverRouter.post(
       // membership delete and the member count — lives in
       // removeMemberFromServer, nowhere else. It runs the permission and the
       // hierarchy check again on every attempt (`authorize`): before the
-      // attempt's transaction opens, and inside it on its own client right
-      // after the webhook statement, the one that can wait long, so a role
-      // change, a removal of the actor or a promotion of the target that
-      // commits meanwhile is seen before the membership row goes.
+      // attempt's transaction opens, and inside it on its own client after
+      // the membership row lock and the webhook statement, so a role change,
+      // a removal of the actor or a promotion of the target that commits
+      // meanwhile is seen before the membership row goes.
       await removeMemberFromServer(memberId, serverId, { ban: { by: actorId, reason }, authorize: assertMayKick });
 
       // Emit member:kicked directly to the kicked user's per-user room

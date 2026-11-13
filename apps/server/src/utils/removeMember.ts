@@ -43,14 +43,14 @@ export interface RemoveMemberOptions {
    * reading through the client it is given. Run twice on EVERY attempt:
    * before the attempt's transaction opens, on the shared client, a cheap
    * early refusal that opens no transaction and waits on no lock; then inside
-   * the transaction, on ITS client, right after the webhook statement, so the
-   * check that holds is the one made right before the membership delete, not
-   * one made before that statement's wait (up to a minute behind a webhook
-   * purge). Every read must go through the client given: one through the
-   * shared client from inside the transaction would hold its pool connection
-   * while waiting for a second, and enough concurrent kicks doing that stall
-   * the node. Throws the route's own refusal; inside, that rolls the
-   * transaction back. The owner rule is held by the delete itself.
+   * the transaction, on ITS client, after the statements that wait for other
+   * transactions (the membership row lock, then the webhook statement) and
+   * before the membership delete, so the check that holds is the one made
+   * after every wait. Every read must go through the client given: one
+   * through the shared client from inside the transaction would hold its
+   * pool connection while waiting for a second, and enough concurrent kicks
+   * doing that stall the node. Throws the route's own refusal; inside, that
+   * rolls the transaction back. The owner rule is held by the delete itself.
    */
   authorize?: (db: PermissionReadClient) => Promise<void>;
 }
@@ -177,8 +177,9 @@ export async function removeMemberFromServer(
           }));
         }
         // The caller's precondition again, on this transaction's client, after
-        // the one statement that can wait long: a refusal rolls back the
-        // webhook statement with the rest
+        // every statement that waits for another transaction (the membership
+        // row, the webhooks): a refusal rolls back the webhook statement with
+        // the rest
         if (opts.authorize) await opts.authorize(tx);
         await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
         // The owner is never removed, whatever the caller checked before the

@@ -69,8 +69,8 @@ const BAN_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 };
  *    KEY UPDATE, not FOR UPDATE. It conflicts with the deletion and with any
  *    other UPDATE of the row, but not with FOR KEY SHARE, which every insert
  *    of a row referencing the account takes, so a join, a message or a kick
- *    of that account (its webhook statement, then its ban row) never waits
- *    on a ban.
+ *    of that account (its membership row, its webhook statement, then its
+ *    ban row) never waits on a ban.
  *  - 'keep', an account this transaction only needs to still exist (a
  *    report's reporter, a reported account not being banned): FOR KEY SHARE.
  *    A DELETE still waits for it; an ordinary column update (the presence
