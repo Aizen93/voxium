@@ -90,7 +90,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     ...await readKeys({ channel: { createdById: userId, secure: true } }, 'the secure channels the account created'),
   ])];
 
-  const { secure, joinedSince } = await deleteAccountRows(userId);
+  const { secure, removedFrom } = await deleteAccountRows(userId);
 
   // Again, now that the row is gone: a socket whose handshake landed while
   // the row still existed joined user:{id} after the first pass and passed
@@ -99,10 +99,13 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
 
   deleteAttachmentBlobs(attachmentKeys, opts.logPrefix, 'a deleted account');
 
-  // The spaces the account joined after the notices above went out: their
-  // members hear the departure too. Each its own step, logged, never failing
-  // a deletion that has committed.
-  for (const serverId of joinedSince) {
+  // Every space the committed deletion removed a membership from that the
+  // notices above did not name (a membership that committed after the read
+  // above): its members hear the departure too. Each its own step, logged,
+  // never failing a deletion that has committed.
+  const announced = new Set(memberships.map((m) => m.serverId));
+  for (const serverId of new Set(removedFrom)) {
+    if (announced.has(serverId)) continue;
     try {
       await broadcastMemberLeft(userId, serverId);
     } catch (err) {
@@ -187,7 +190,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * the account committed answers OwnedServersError (below).
  */
 export async function deleteAccountRows(userId: string): Promise<AccountRowsDeleted> {
-  let committed: { removal: SecureMembershipRemoval; serverIds: string[]; joinedSince: string[] };
+  let committed: { removal: SecureMembershipRemoval; serverIds: string[] };
   try {
     committed = await runAccountDeletionTransaction(userId);
   } catch (err) {
@@ -214,7 +217,7 @@ export async function deleteAccountRows(userId: string): Promise<AccountRowsDele
   // what follows the commit (the second session revocation first of all)
   // must not wait with it. It never rejects.
   void lowerMemberCounts(committed.serverIds, userId);
-  return { secure: committed.removal, joinedSince: committed.joinedSince };
+  return { secure: committed.removal, removedFrom: committed.serverIds };
 }
 
 /** What a committed `deleteAccountRows` leaves its caller to announce. */
@@ -222,11 +225,11 @@ export interface AccountRowsDeleted {
   /** The secure-channel state removed (the notices follow the commit). */
   secure: SecureMembershipRemoval;
   /**
-   * The spaces whose membership committed after the first member-row delete
-   * (a join of the account meanwhile), removed by the second: their members
-   * have not been told of the departure.
+   * Every space the committed attempt removed a membership from, by either
+   * member-row delete: the caller announces the departure in each one it has
+   * not announced it in yet.
    */
-  joinedSince: string[];
+  removedFrom: string[];
 }
 
 function ownsASpaceNow(err: unknown): boolean {
@@ -279,7 +282,7 @@ async function lowerMemberCounts(serverIds: string[], userId: string): Promise<v
   }
 }
 
-function runAccountDeletionTransaction(userId: string): Promise<{ removal: SecureMembershipRemoval; serverIds: string[]; joinedSince: string[] }> {
+function runAccountDeletionTransaction(userId: string): Promise<{ removal: SecureMembershipRemoval; serverIds: string[] }> {
   // E2E key material has no FK to User (except the key backup), so it would
   // otherwise outlive the account it belongs to. One transaction with the
   // delete: purging a user who then survives strands every device they own.
@@ -312,7 +315,7 @@ function runAccountDeletionTransaction(userId: string): Promise<{ removal: Secur
     // The row, and with it the long cascade. The last statement: nothing in
     // this transaction touches a space row (see the lock order above).
     await tx.user.delete({ where: { id: userId } });
-    return { removal, serverIds: [...serverIds, ...joinedSince], joinedSince };
+    return { removal, serverIds: [...serverIds, ...joinedSince] };
   }, {
     // Deleting a user cascades across ~36 relations (messages, reactions,
     // reads, conversations, reports, tickets, themes…) plus six E2E deletes.

@@ -177,6 +177,28 @@ describe('deleteUserAccount', () => {
       expect(order.indexOf('left:s-1')).toBeLessThan(order.indexOf('txn:start'));
     });
 
+    it('a membership the earlier read missed and the first delete removed is announced after the commit, once', async () => {
+      // read before the transaction: s-1 and s-2; a join to s-4 committed
+      // before the first member-row delete, which removes it with the others
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+        const sql = strings.join('?');
+        if (/FROM users/.test(sql)) { order.push('lock:account'); return [{ id: 'u-1' }]; }
+        if (memberDeletes++ % 2 === 0) { order.push('memberships'); return [{ server_id: 's-1' }, { server_id: 's-2' }, { server_id: 's-4' }]; }
+        order.push('memberships:since');
+        return [];
+      });
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+      await vi.waitFor(() => expect(order).toContain('count:s-4'));
+
+      expect(order.filter((s) => s === 'left:s-4')).toHaveLength(1);
+      expect(order.indexOf('left:s-4')).toBeGreaterThan(order.indexOf('txn:end'));
+      // the spaces announced before the transaction are not announced again
+      expect(order.filter((s) => s === 'left:s-1')).toHaveLength(1);
+      expect(order.filter((s) => s === 'left:s-2')).toHaveLength(1);
+      expect(memberLeft).toHaveBeenCalledTimes(3);
+    });
+
     it('nothing joined meanwhile: no second announcement, no extra count', async () => {
       await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
       await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
@@ -533,6 +555,12 @@ describe('deleteUserAccount', () => {
       const lowered = (prismaMock.server.updateMany.mock.calls as Array<[{ where: { id: string } }]>).map(([args]) => args.where.id);
       // each of the committed attempt's spaces once; s-2 (left between the attempts) never
       expect(lowered).toEqual(['s-1', 's-3']);
+      // s-3, joined between the attempts, is announced after the commit, once;
+      // s-1 and s-2 were announced before the transaction and are not again
+      expect(order.filter((s) => s === 'left:s-3')).toHaveLength(1);
+      expect(order.lastIndexOf('left:s-3')).toBeGreaterThan(order.lastIndexOf('txn:end'));
+      expect(order.filter((s) => s === 'left:s-1')).toHaveLength(1);
+      expect(order.filter((s) => s === 'left:s-2')).toHaveLength(1);
     } finally {
       warn.mockRestore();
     }
