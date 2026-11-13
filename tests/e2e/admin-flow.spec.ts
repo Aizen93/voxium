@@ -95,7 +95,11 @@ test.describe('Admin flow: login -> manage users -> resolve report -> close tick
     const staffReply = `Staff response ${Date.now()}`;
     await page.getByPlaceholder('Type a message...').fill(staffReply);
     await page.keyboard.press('Enter');
-    await expect(page.getByText(staffReply)).toBeVisible({ timeout: 10_000 });
+    // A paragraph (the thread's message, or the ticket list's preview of it),
+    // not the text anywhere: until the composer clears, its textarea holds the
+    // same words, so a page-wide getByText matches it alone before the message
+    // exists, and both once it does (strict mode)
+    await expect(page.locator('p', { hasText: staffReply }).first()).toBeVisible({ timeout: 10_000 });
 
     // Close the ticket
     await page.getByRole('button', { name: 'Close', exact: true }).click();
