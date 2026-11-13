@@ -286,17 +286,24 @@ describe('e2eStore device-list subscription', () => {
     expect(sessionListeners.size).toBe(0);
   });
 
-  it('stops the watch when the start fails, so the retry subscribes once', async () => {
-    service.initialize.mockRejectedValueOnce(new Error('engine failed to load'));
+  it('keeps the key-arrival watch through a failed start, one subscription across the retry', async () => {
+    // The service stays active after a failed start and its decrypts go on
+    // storing sessions: each is announced once, so the watch must hear it
+    service.initialize.mockRejectedValueOnce(new Error('registration failed'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await useE2EStore.getState().initialize(USER);
     } finally {
       warn.mockRestore();
     }
-    expect(sessionListeners.size).toBe(0);
+    expect(useE2EStore.getState().error).toBe('registration failed');
+    expect(sessionListeners.size).toBe(1);
+    // the device-list subscription is the one a retry makes again
+    expect(listeners.size).toBe(0);
+
     await useE2EStore.getState().initialize(USER);
     expect(sessionListeners.size).toBe(1);
+    expect(listeners.size).toBe(1);
   });
 
   it('hears a device-list event the service emits while it is still initializing', async () => {
