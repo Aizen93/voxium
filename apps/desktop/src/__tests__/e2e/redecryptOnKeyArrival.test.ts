@@ -626,6 +626,72 @@ describe('once a row opens', () => {
     expect(getCachedPlaintext).toHaveBeenCalledWith('m1', { scope: 'c1', authorId: 'peer' });
   });
 
+  it('a quote the gate locked when its row came again stays locked, though the row once waited', async () => {
+    sessionsHere.add(SID_B);
+    const quote = (encrypted: boolean) => ({ id: 'm1', author: peer, encrypted, content: encrypted ? '' : 'the server says so' });
+    useChatStore.setState({
+      messages: await decryptMessagesForDisplay([
+        dmRow('m1', SID_A),
+        // m2's quote of m1 found nothing in the cache: it waits
+        dmRow('m2', SID_B, { replyTo: quote(true) } as Partial<Message>),
+      ]),
+    });
+    // the server sends m2 again, its quote now called unencrypted: the gate locks it
+    const again = await decryptMessageForDisplay(dmRow('m2', SID_B, { replyTo: quote(false) } as Partial<Message>));
+    useChatStore.getState().updateMessage(again!);
+    expect(rowById('m2')?.replyTo).toMatchObject({ content: '', encrypted: true });
+
+    arrive('c1', [SID_A]);
+    await redecryptPassesSettled();
+    expect(rowById('m1')?.content).toBe('text of m1');
+    expect(rowById('m2')?.replyTo?.content).toBe('');
+  });
+
+  it('a quote the gate locked while the waiting one was being looked up stays locked', async () => {
+    sessionsHere.add(SID_B);
+    const quote = (encrypted: boolean) => ({ id: 'm1', author: peer, encrypted, content: encrypted ? '' : 'the server says so' });
+    useChatStore.setState({
+      messages: await decryptMessagesForDisplay([
+        dmRow('m1', SID_A),
+        dmRow('m2', SID_B, { replyTo: quote(true) } as Partial<Message>),
+      ]),
+    });
+    // the lookup of m2's quote waits; meanwhile m2 comes again with its quote called unencrypted
+    const lookup = deferred<string | null>();
+    let lookedUp = false;
+    getCachedPlaintext.mockImplementationOnce(() => {
+      lookedUp = true;
+      return lookup.promise;
+    });
+    arrive('c1', [SID_A]);
+    await vi.waitFor(() => expect(lookedUp).toBe(true));
+    const again = await decryptMessageForDisplay(dmRow('m2', SID_B, { replyTo: quote(false) } as Partial<Message>));
+    useChatStore.getState().updateMessage(again!);
+    lookup.resolve(buildE2EPlaintext('text of m1'));
+    await redecryptPassesSettled();
+
+    expect(rowById('m1')?.content).toBe('text of m1');
+    expect(rowById('m2')?.replyTo?.content).toBe('');
+  });
+
+  it('a quote gated while its conversation was not on screen does not wait', async () => {
+    // gated by the socket path while c1 was not on screen
+    viewDM('c2');
+    sessionsHere.add(SID_B);
+    const quoting = await decryptMessageForDisplay(
+      dmRow('m2', SID_B, { replyTo: { id: 'm1', author: peer, encrypted: true, content: '' } } as Partial<Message>),
+    );
+    expect(quoting?.replyTo?.content).toBe('');
+
+    // c1 on screen, m1 held, m2 shown as it was gated
+    viewDM('c1');
+    useChatStore.setState({ messages: [...(await decryptMessagesForDisplay([dmRow('m1', SID_A)])), quoting!] });
+    arrive('c1', [SID_A]);
+    await redecryptPassesSettled();
+    expect(rowById('m1')?.content).toBe('text of m1');
+    expect(rowById('m2')?.replyTo?.content).toBe('');
+  });
+
   it('a secure channel quote of it shows its text', async () => {
     viewChannel('ch1');
     sessionsHere.add(SID_B);

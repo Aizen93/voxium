@@ -5,7 +5,6 @@ import type { Message } from '@voxium/shared';
 import {
   PENDING_FAILURES_MAX,
   SESSION_ARRIVALS_MAX,
-  QUOTE_WAITS_MAX,
   arrivalMark,
   noteSessionsAvailable,
   noteUndecrypted,
@@ -15,7 +14,7 @@ import {
   retryLater,
   setViewScopeSource,
   noteQuoteAwaiting,
-  takeQuotesAwaiting,
+  quoteAwaits,
   resetUndecryptedRows,
 } from '../../services/e2e/undecryptedRows';
 
@@ -198,27 +197,41 @@ describe('rows held to be decrypted again', () => {
     expect(ids(takeDueRows('c1'))).toEqual(['m2']);
   });
 
-  it(`hands each waiting quote over once, and keeps at most ${QUOTE_WAITS_MAX} quoted rows`, () => {
-    noteQuoteAwaiting('c1', 'q1', 'r1', 'peer');
-    noteQuoteAwaiting('c1', 'q1', 'r2', 'peer');
-    expect([...takeQuotesAwaiting('c1', 'q1')]).toEqual([['r1', 'peer'], ['r2', 'peer']]);
-    expect(takeQuotesAwaiting('c1', 'q1').size).toBe(0);
-    expect(takeQuotesAwaiting('c2', 'q1').size).toBe(0);
-
-    for (let i = 0; i <= QUOTE_WAITS_MAX; i++) noteQuoteAwaiting('c1', `q${i}`, 'r', 'peer');
-    expect(takeQuotesAwaiting('c1', 'q0').size).toBe(0);
-    expect(takeQuotesAwaiting('c1', `q${QUOTE_WAITS_MAX}`).size).toBe(1);
+  it('a quote waits as the very object the gate left empty, in its scope, for the row and author it names', () => {
+    const quote = { id: 'q1', author: peer, encrypted: true, content: '' } as NonNullable<Message['replyTo']>;
+    noteQuoteAwaiting(quote, 'c1');
+    expect(quoteAwaits(quote, 'c1', 'q1')).toBe(true);
+    expect(quoteAwaits(quote, 'c2', 'q1')).toBe(false);
+    expect(quoteAwaits(quote, 'c1', 'q2')).toBe(false);
+    // an equal quote that is another object never waited (a locked one, a row gated again)
+    expect(quoteAwaits({ ...quote }, 'c1', 'q1')).toBe(false);
+    // filled, or naming another author since, it no longer waits
+    expect(quoteAwaits({ ...quote, content: 'x' } as NonNullable<Message['replyTo']>, 'c1', 'q1')).toBe(false);
+    const renamed = quote as { author: { id: string } };
+    renamed.author = { ...peer, id: 'someone-else' };
+    expect(quoteAwaits(quote, 'c1', 'q1')).toBe(false);
   });
 
-  it('a reset drops failures, held rows, announcements and quotes', () => {
+  it('notes a waiting quote only for the scope on screen', () => {
+    setViewScopeSource(() => 'c1');
+    const elsewhere = { id: 'q1', author: peer, encrypted: true, content: '' } as NonNullable<Message['replyTo']>;
+    noteQuoteAwaiting(elsewhere, 'c2');
+    expect(quoteAwaits(elsewhere, 'c2', 'q1')).toBe(false);
+    const here = { ...elsewhere };
+    noteQuoteAwaiting(here, 'c1');
+    expect(quoteAwaits(here, 'c1', 'q1')).toBe(true);
+  });
+
+  it('a reset drops failures, held rows, announcements and waiting quotes', () => {
     const m1 = wire('m1', 'c2lkQQ');
     const mark = arrivalMark();
     noteSessionsAvailable('c1', ['c2lkQQ']);
     noteUndecrypted(m1, 'c1', mark);
-    noteQuoteAwaiting('c1', 'm1', 'r1', 'peer');
+    const quote = { id: 'm1', author: peer, encrypted: true, content: '' } as NonNullable<Message['replyTo']>;
+    noteQuoteAwaiting(quote, 'c1');
     resetUndecryptedRows();
     syncWithView('c1', [shown(m1)]);
     expect(hasDueRows('c1')).toBe(false);
-    expect(takeQuotesAwaiting('c1', 'm1').size).toBe(0);
+    expect(quoteAwaits(quote, 'c1', 'm1')).toBe(false);
   });
 });

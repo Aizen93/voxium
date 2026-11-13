@@ -5,9 +5,9 @@
 // due (undecryptedRows.ts), and each one the view still shows as "unable to
 // decrypt" goes through the same gate as the first time. A row that now
 // decrypts replaces the marker in place; one that still fails stays as it is.
-// The quotes of it that found nothing in the local cache, and the
-// conversation's preview of it, are then looked up in the cache again by the
-// rules their own gating follows.
+// The quotes of it the gate left empty because the cache had nothing (those
+// very quote objects, still shown), and the conversation's preview of it, are
+// then looked up in the cache again by the rules their own gating follows.
 //
 // Local only. A row is tried again only once its own session was announced,
 // and the try (retry: true) never starts a key-share claim: a session no
@@ -31,12 +31,12 @@ import { currentE2ESessionUser } from './session';
 import {
   hasDueRows,
   noteSessionsAvailable,
+  quoteAwaits,
   retryLater,
   rowInScope,
   setViewScopeSource,
   syncWithView,
   takeDueRows,
-  takeQuotesAwaiting,
 } from './undecryptedRows';
 
 type SessionsService = { onSessionsAvailable(listener: (event: E2ESessionsAvailable) => void): () => void };
@@ -102,28 +102,29 @@ function showOpened(heldRow: Message, opened: Message): boolean {
  */
 async function refreshWhatShowsIt(scope: string, opened: Message, live: () => boolean): Promise<void> {
   const inChannel = parseE2EScope(scope).kind === 'channel';
-  for (const [rowId, quotedAuthorId] of takeQuotesAwaiting(scope, opened.id)) {
-    const waits = (m: Message | undefined): m is Message =>
-      !!m && rowInScope(m, scope) && m.replyTo?.id === opened.id &&
-      m.replyTo.author?.id === quotedAuthorId && !m.replyTo.content;
-    const row = useChatStore.getState().messages.find((m) => m.id === rowId);
-    if (!waits(row)) continue;
+  // the quotes of it the view shows that the gate left empty, as those very objects
+  const quoting = useChatStore.getState().messages.filter(
+    (m) => rowInScope(m, scope) && quoteAwaits(m.replyTo, scope, opened.id),
+  );
+  for (const row of quoting) {
+    const waiting = row.replyTo;
     let text: string | null;
     try {
       text = inChannel ? await quotedChannelTextFromCache(row) : await quotedTextFromCache(row);
     } catch (err) {
       if (!live()) return;
-      console.warn(`e2e: the quote in message ${rowId} could not be read again:`, errorText(err));
+      console.warn(`e2e: the quote in message ${row.id} could not be read again:`, errorText(err));
       continue;
     }
     if (!live() || scopeOnScreen() !== scope) return;
     if (text === null) continue;
     useChatStore.setState((state) => {
-      const index = state.messages.findIndex((m) => m.id === rowId);
+      const index = state.messages.findIndex((m) => m.id === row.id);
       const latest = index === -1 ? undefined : state.messages[index];
-      if (!waits(latest)) return state;
+      // only over the quote that waited: a row gated again since shows another
+      if (!latest || latest.replyTo !== waiting || !quoteAwaits(waiting, scope, opened.id)) return state;
       const messages = state.messages.slice();
-      messages[index] = { ...latest, replyTo: { ...latest.replyTo!, content: text } };
+      messages[index] = { ...latest, replyTo: { ...waiting!, content: text } };
       return { messages };
     });
   }

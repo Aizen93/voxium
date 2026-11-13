@@ -50,9 +50,10 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
       : { ...message, replyTo: lockedQuote(message.replyTo) };
   }
   const text = await cachedQuoteText(scope, message.replyTo, userId);
-  // nothing yet: this quote is looked up again once the quoted row opens here
-  if (text === null && scope) noteQuoteAwaiting(scope, message.replyTo.id, message.id, message.replyTo.author.id);
-  return { ...message, replyTo: { ...message.replyTo, content: text ?? '' } };
+  const replyTo = { ...message.replyTo, content: text ?? '' };
+  // nothing yet: this very quote is looked up again once the quoted row opens here
+  if (text === null && scope) noteQuoteAwaiting(replyTo, scope);
+  return { ...message, replyTo };
 }
 
 /**

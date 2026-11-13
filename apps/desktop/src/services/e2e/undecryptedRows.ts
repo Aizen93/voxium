@@ -8,10 +8,12 @@
 // the gate notes each failure by version (scope, id, editedAt, author), and a
 // failure is held only once the view shows that version of the row in the
 // refused shape (syncWithView, on every change of the view). A gate answer the
-// view drops (a duplicate, a page overlapping what it shows) changes nothing
-// here; a row the view stops showing (deleted, opened, another version, another
-// scope on screen) is no longer held. So the held rows are bounded by the view
-// itself, and the failures waiting to reach it are bounded apart.
+// view drops (a duplicate, a page overlapping what it shows) never lets go of
+// a held row; a row the view stops showing (deleted, opened, another version,
+// another scope on screen) is no longer held. So the held rows are bounded by
+// the view itself, and the failures waiting to reach it are bounded apart.
+// Quotes the gate left empty are noted by the quote object itself, so a quote
+// waits only while the view shows that very object.
 //
 // No store, service or crypto import: dmCrypto and channelCrypto use this
 // module, and chatStore imports those.
@@ -26,8 +28,6 @@ import { isRefusedShape } from './displayGate';
 export const PENDING_FAILURES_MAX = 500;
 /** Announced sessions remembered at most (see arrivalMark); the oldest is dropped beyond. */
 export const SESSION_ARRIVALS_MAX = 2000;
-/** Quotes waiting for a quoted row to open, at most; the oldest is dropped beyond. */
-export const QUOTE_WAITS_MAX = 500;
 
 interface Failure {
   /** The row as the gate received it, the server's assertions dropped. */
@@ -46,6 +46,13 @@ interface HeldRow extends Failure {
   due: boolean;
 }
 
+/** What a quote the gate left empty waits for: the row it quotes, in which scope, by which author. */
+interface QuoteWait {
+  scope: string;
+  quotedId: string;
+  quotedAuthorId: string;
+}
+
 /** How many announcements of stored sessions there have been (noteSessionsAvailable). */
 let announcements = 0;
 /** `scope|sessionId` → the announcement that named it, oldest first. */
@@ -57,8 +64,14 @@ let heldScope: string | null = null;
 const held = new Map<string, HeldRow>();
 /** The scope on screen, as the watcher reads it; null until a watcher registers. */
 let viewScope: (() => string | null) | null = null;
-/** `scope|quotedId` → id of each row whose quote of it found no plaintext → the quoted author the quote named. */
-const quoteWaits = new Map<string, Map<string, string>>();
+/**
+ * The quote objects the gate left empty because the cache had nothing for the
+ * row they quote, each with what it waits for. Keyed by the object itself: a
+ * quote the gate locked, or the quote of a row gated again, is another object
+ * and was never noted, and an entry lives only as long as the row that shows
+ * its quote.
+ */
+let waitingQuotes = new WeakMap<object, QuoteWait>();
 
 const sessionKey = (scope: string, sessionId: string): string => `${scope}|${sessionId}`;
 
@@ -197,25 +210,25 @@ export function retryLater(row: Message): void {
   if (entry && entry.key === versionKey(row)) entry.due = true;
 }
 
-/** The gate resolved the quote of `rowId` from the cache and found nothing for `quotedId`, written by `quotedAuthorId`. */
-export function noteQuoteAwaiting(scope: string, quotedId: string, rowId: string, quotedAuthorId: string): void {
-  const key = `${scope}|${quotedId}`;
-  const rows = quoteWaits.get(key) ?? new Map<string, string>();
-  quoteWaits.delete(key);
-  rows.set(rowId, quotedAuthorId);
-  quoteWaits.set(key, rows);
-  for (const oldest of quoteWaits.keys()) {
-    if (quoteWaits.size <= QUOTE_WAITS_MAX) break;
-    quoteWaits.delete(oldest);
-  }
+/**
+ * The gate left `quote` (the quote object it put on its answer) empty: the
+ * cache had nothing for the row it quotes. Noted for the scope on screen only.
+ */
+export function noteQuoteAwaiting(quote: NonNullable<Message['replyTo']>, scope: string): void {
+  if (!quote.author) return;
+  if (viewScope && viewScope() !== scope) return;
+  waitingQuotes.set(quote, { scope, quotedId: quote.id, quotedAuthorId: quote.author.id });
 }
 
-/** The rows whose quote of `quotedId` waits for it (row id → the quoted author their quote named), handed over once. */
-export function takeQuotesAwaiting(scope: string, quotedId: string): Map<string, string> {
-  const key = `${scope}|${quotedId}`;
-  const rows = quoteWaits.get(key) ?? new Map<string, string>();
-  quoteWaits.delete(key);
-  return rows;
+/**
+ * Whether `quote` is one the gate left empty in `scope` waiting for
+ * `quotedId`, and still is: the same object, still empty, still naming the
+ * author it named then. A quote the gate locked never answers true.
+ */
+export function quoteAwaits(quote: Message['replyTo'] | undefined, scope: string, quotedId: string): boolean {
+  if (!quote || quote.content) return false;
+  const wait = waitingQuotes.get(quote);
+  return !!wait && wait.scope === scope && wait.quotedId === quotedId && quote.author?.id === wait.quotedAuthorId;
 }
 
 /** Logout (resetAccountStores): nothing of the account that is leaving stays. */
@@ -224,5 +237,5 @@ export function resetUndecryptedRows(): void {
   held.clear();
   heldScope = null;
   announcedAt.clear();
-  quoteWaits.clear();
+  waitingQuotes = new WeakMap();
 }
