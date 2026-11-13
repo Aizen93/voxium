@@ -1,7 +1,9 @@
 // Per-account local vault for E2E state (docs/e2e-dm-spec.md §7, §12).
 //
-// One IndexedDB database per logged-in user (`voxium-e2e-{userId}`), a single
-// key/value object store, and these key namespaces:
+// One IndexedDB database per logged-in user (`voxium-e2e-v2-{userId}`, with
+// the server's digest appended in a desktop build for another server: see
+// serverVaultNamespace), a single key/value object store, and these key
+// namespaces:
 //
 //   device_id                        this install's device id (spec §12, D2)
 //   account                          Olm account pickle (vodozemac-encrypted)
@@ -15,6 +17,8 @@
 //   gs:{conversationId}              our outbound Megolm session for a DM
 //   igs:{sessionId}                  an inbound Megolm session + its attribution
 //   pks:{createdAt}|{shareId}        a claimed key share not imported yet (§12.3)
+//   pka:{shareId}                    an acknowledgement of a claimed share still owed to the server (§12.3)
+//   history_pull                     where an unfinished history pull stands (§16.3)
 //   pt:{messageId}                   decrypted-plaintext cache entry
 //
 // `master_secret` holds the Ed25519 master private key that cross-signs this
@@ -31,6 +35,8 @@
 // (spec §7.3, providers in ./pickleKeyProvider). Keys never leave the device
 // either way.
 import { defaultPickleKeyProvider, type PickleKeyProvider } from './pickleKeyProvider';
+import { BUILD_API_ORIGIN, isOfficialOrigin } from '../sessionOrigin';
+import { sha256Hex } from '../../utils/sha256';
 
 export type { PickleKeyProvider };
 
@@ -127,8 +133,38 @@ export interface OutboundGroupSessionRecord {
 const VAULT_DB_PREFIX = 'voxium-e2e-v2-';
 const SUPERSEDED_DB_PREFIXES = ['voxium-e2e-'];
 
-/** The IndexedDB name of an account's vault on this device. */
-export function vaultDbName(userId: string, namespace?: string): string {
+/**
+ * The namespace a build names its vaults with, so that builds for different
+ * servers keep separate vaults: none in a browser build or the official
+ * desktop build (their vaults keep the name they always had), and in a
+ * desktop build for another server `s` and the first 16 hex digits of the
+ * SHA-256 of its API origin, the label of the identifier that build is made
+ * with (scripts/tauriSelfHosted.mjs).
+ *
+ * A vault is named after a user id the build's own server supplies. In the
+ * desktop app such a build has a webview data folder of its own, as Tauri
+ * derives it from the identifier on Windows and Linux; the name carries the
+ * server as well, for any platform where a data folder would be shared. A
+ * browser's storage is already the page origin's own, and a new name there
+ * would orphan every vault a self-hosted web client already holds.
+ */
+export function serverVaultNamespace(inTauri: boolean, apiOrigin: string): string | undefined {
+  if (!inTauri || isOfficialOrigin(apiOrigin)) return undefined;
+  return `s${sha256Hex(apiOrigin).slice(0, 16)}`;
+}
+
+/** This build's namespace: the one every vault it opens, and every vault it drops, is named with. */
+export const BUILD_VAULT_NAMESPACE: string | undefined = serverVaultNamespace(
+  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window,
+  BUILD_API_ORIGIN
+);
+
+/**
+ * The IndexedDB name of an account's vault on this device: with this build's
+ * namespace unless the caller names one (tests, two vaults of one account in
+ * one process), which takes its place.
+ */
+export function vaultDbName(userId: string, namespace: string | undefined = BUILD_VAULT_NAMESPACE): string {
   return `${VAULT_DB_PREFIX}${userId}${namespace ? `-${namespace}` : ''}`;
 }
 
@@ -159,15 +195,44 @@ export interface InboundGroupSessionRecord {
 
 /**
  * A key share as the inbox handed it out, kept until it is imported (spec
- * §12.3). The server deletes a share when it returns it, so from the claim on
- * this is the only copy. The body is the Olm ciphertext addressed to this
- * device: what the server held, no more.
+ * §12.3). Written before anything is done with it: a leasing claim leaves the
+ * share on the server until this device acknowledges it, but only for as long
+ * as its lease runs before handing it out again, and a server from before
+ * leases deleted it when it answered. The body is the Olm ciphertext addressed
+ * to this device: what the server held, no more.
  */
 export interface PendingKeyShare {
   share: Record<string, unknown>;
   /** Imports that had to wait because the sender could not be looked up. */
   attempts: number;
   receivedAt: number;
+  /**
+   * Handed out by a leasing claim: the server keeps the share until this
+   * device acknowledges it. Absent (records kept before leases, a server from
+   * before them): the claim deleted it, and there is nothing to acknowledge.
+   */
+  leased?: boolean;
+}
+
+/** A key share this device is done with, whose acknowledgement the server has not confirmed (spec §12.3). */
+export interface OwedShareAck {
+  /** The share's row id, as the inbox handed it out. */
+  id: string;
+  /** When it was settled: one older than the server's retention is dropped unsent. */
+  at: number;
+}
+
+/**
+ * A message-key history pull that has not reached its end (spec §16.3): the
+ * account key it reads under (public half only), the cursor of the page it
+ * reads next (null: from the start), and how many page requests it has made
+ * so far, across starts (the page cap bounds them all). Public material, a
+ * row id and a count.
+ */
+export interface HistoryPullMarker {
+  masterKey: string;
+  cursor: string | null;
+  pages: number;
 }
 
 export interface CachedPlaintext {
@@ -257,8 +322,13 @@ export class E2EVault {
   constructor(
     private readonly userId: string,
     private readonly keyProvider: PickleKeyProvider = defaultPickleKeyProvider(),
-    /** Isolates two vaults for the same account in one process (tests / multi-instance). */
-    private readonly namespace?: string
+    /** Isolates two vaults for the same account in one process (tests / multi-instance); by default this build's (see vaultDbName). */
+    private readonly namespace: string | undefined = BUILD_VAULT_NAMESPACE,
+    /**
+     * What a connection must wait for before it opens the database: the
+     * teardown of an earlier service on the same vault (see E2EService).
+     */
+    private readonly openAfter?: () => Promise<void> | undefined
   ) {}
 
   /** Throw if close() ran: called before every access and after every await. */
@@ -269,6 +339,12 @@ export class E2EVault {
   async open(): Promise<void> {
     this.assertNotClosed();
     if (this.db) return;
+    const before = this.openAfter?.();
+    if (before) {
+      await before;
+      this.assertNotClosed();
+      if (this.db) return;
+    }
     const name = vaultDbName(this.userId, this.namespace);
     // Anything under an older prefix belongs to key material the server no
     // longer has (the always-on cutover truncated it), so it can only produce
@@ -577,6 +653,17 @@ export class E2EVault {
     await this.put('bku:sessions', [...known]);
   }
 
+  // ── Where an unfinished message-key history pull stands (spec §16.3) ──
+  getHistoryPull(): Promise<HistoryPullMarker | undefined> {
+    return this.get('history_pull');
+  }
+  putHistoryPull(marker: HistoryPullMarker): Promise<void> {
+    return this.put('history_pull', marker);
+  }
+  deleteHistoryPull(): Promise<void> {
+    return this.delete('history_pull');
+  }
+
   // ── Key shares claimed but not imported yet (spec §12.3) ──
 
   /** Keep a claimed page in one transaction, before any of it is processed. */
@@ -606,6 +693,29 @@ export class E2EVault {
       ]);
       return keys.map((key, i) => ({ key: String(key), record: values[i] as PendingKeyShare }));
     });
+  }
+
+  // ── Acknowledgements owed for claimed key shares (spec §12.3) ──
+  // Share ids only (`pka:{shareId}`): what the server already holds, no more.
+
+  /** Note that this device owes the server an acknowledgement of this share. */
+  putShareAck(id: string): Promise<void> {
+    const owed: OwedShareAck = { id, at: Date.now() };
+    return this.put(`pka:${id}`, owed);
+  }
+
+  /** Every acknowledgement owed, in one transaction. */
+  listShareAcks(): Promise<OwedShareAck[]> {
+    const range = IDBKeyRange.bound('pka:', `pka:${KEY_MAX}`);
+    return this.withStore('readonly', (s) => requestToPromise(s.getAll(range))) as Promise<OwedShareAck[]>;
+  }
+
+  /** Forget acknowledgements the server has confirmed (or that are past its retention), in one transaction. */
+  deleteShareAcks(ids: string[]): Promise<void> {
+    if (ids.length === 0) return Promise.resolve();
+    return this.withStore('readwrite', (s) =>
+      Promise.all(ids.map((id) => requestToPromise(s.delete(`pka:${id}`)))).then(() => undefined)
+    );
   }
 
   /**
@@ -692,8 +802,10 @@ export class E2EVault {
    * close(), except that the open connection is kept for ONE late write of
    * claimed key shares (writePendingSharesLate), then released. Every other
    * access fails exactly as after close(). For a teardown that runs while a
-   * claim's answer is still on its way: the server deletes the shares it
-   * returns, so that answer has to land somewhere when it comes.
+   * claim's answer is still on its way: a server from before leases deleted
+   * the shares it returned, so that answer has to land somewhere when it
+   * comes, and a leasing one would hand them out again only once the lease
+   * passed, while written here the next start imports them at once.
    */
   closeKeepingConnectionForPendingShares(): void {
     this.lateDb = this.db;

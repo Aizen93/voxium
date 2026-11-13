@@ -92,10 +92,39 @@ export function deactivateSecurePins(): void {
   activePins = null;
 }
 
+/** Bumped per account by forgetSecurePins (see securePinGeneration). */
+const generations = new Map<string, number>();
+
+/** The pin generation of an account: work that captures it before a
+ *  forgetSecurePins (an account deletion) and pins after it pins nothing, so
+ *  late work never recreates a deleted account's pins. A logout does not bump
+ *  it, and work started after the forget (the same id signing in again)
+ *  captures the new one. */
+export function securePinGeneration(userId: string): number {
+  return generations.get(userId) ?? 0;
+}
+
 /** Pin a channel the device has seen as secure. Returns true when the pin is
- *  new. A no-op before activation (there is no account to pin it to). */
-export function pinSecure(channelId: string): boolean {
-  if (!activeUserId || !activePins || !isChannelId(channelId)) return false;
+ *  new. A no-op before activation (there is no account to pin it to).
+ *
+ *  `userId` names the account the sighting belongs to, active or not: work of
+ *  an account that has since signed out (a key-share claim finishing after a
+ *  logout) pins for that account, never for whoever is signed in now. With
+ *  `generation` (securePinGeneration, captured when that work began), nothing
+ *  is pinned once the account has been forgotten since. */
+export function pinSecure(channelId: string, userId?: string, generation?: number): boolean {
+  if (!isChannelId(channelId)) return false;
+  if (userId !== undefined && generation !== undefined && generation !== securePinGeneration(userId)) return false;
+  if (userId !== undefined && userId !== activeUserId) {
+    // the same Set an activation of that account merges in (memory)
+    const pins = memory.get(userId) ?? loadPins(userId);
+    memory.set(userId, pins);
+    if (pins.has(channelId)) return false;
+    pins.add(channelId);
+    savePins(userId, pins);
+    return true;
+  }
+  if (!activeUserId || !activePins) return false;
   if (activePins.has(channelId)) return false;
   activePins.add(channelId);
   savePins(activeUserId, activePins);
@@ -119,6 +148,8 @@ export function claimDowngradeWarning(channelId: string): boolean {
 
 /** Self-service account deletion only: every key the pins pair with is gone. */
 export function forgetSecurePins(userId: string): void {
+  // work begun before this pins nothing for the account any more (pinSecure)
+  generations.set(userId, securePinGeneration(userId) + 1);
   memory.delete(userId);
   if (activeUserId === userId && activePins) activePins = new Set<string>();
   try {

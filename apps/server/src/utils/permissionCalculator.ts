@@ -572,12 +572,16 @@ export async function filterVisibleChannelsForUsers<T extends { id: string; secu
 
   for (const userId of userIds) {
     const visible = result.get(userId)!;
+    // No longer a member of the space: nothing, secure channels included. A
+    // ChannelMember row that outlived the ServerMember one must never outrank
+    // it (computeUserChannelPermissions requires both the same way).
+    if (!memberSet.has(userId)) continue;
+
     // Secure channels are membership-only and are decided BEFORE the
     // owner/ADMINISTRATOR fast paths — a non-member owner sees nothing.
     const secureMemberships = secureByUser.get(userId);
     if (secureMemberships) for (const id of secureMemberships) visible.add(id);
 
-    if (!memberSet.has(userId)) continue; // no longer a member: plaintext all denied
     if (server.ownerId === userId) {
       for (const c of channels) if (!c.secure) visible.add(c.id);
       continue;

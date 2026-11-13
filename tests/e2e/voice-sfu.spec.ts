@@ -227,13 +227,18 @@ test.describe('Voice SFU', () => {
       page2.getByText(dataA.user.username, { exact: false }).first()
     ).toBeVisible({ timeout: 10_000 });
 
+    // B's own row in the voice channel's participant list on A's side: the
+    // username alone also matches B in the member list, which never goes away
+    const userBVoiceRow = page.getByTestId(`voice-user-${dataB.user.id}`);
+    await expect(userBVoiceRow.first()).toBeVisible({ timeout: 10_000 });
+
     // User B disconnects
     await page2.locator('button[title="Disconnect"]').click();
     await expect(page2.getByText('Voice Connected')).not.toBeVisible({ timeout: 5_000 });
 
-    // User A should no longer see User B in voice
-    // Give time for the voice:user_left event
-    await page.waitForTimeout(1_000);
+    // User A no longer sees User B in voice: voice:user_left has arrived and
+    // removed the row (this used to be a fixed 1 s wait that checked nothing)
+    await expect(userBVoiceRow).toHaveCount(0, { timeout: 10_000 });
 
     // User A disconnects
     await page.locator('button[title="Disconnect"]').click();

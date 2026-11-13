@@ -79,6 +79,8 @@ function makeService(userId: string) {
 }
 
 let service: ReturnType<typeof makeService>;
+/** Services of other accounts signed in on the same page; `service` answers for anyone else. */
+const otherAccounts = new Map<string, ReturnType<typeof makeService>>();
 
 vi.mock('../../services/e2e/e2eService', async () => {
   const actual = await vi.importActual<typeof import('../../services/e2e/e2eService')>(
@@ -86,7 +88,7 @@ vi.mock('../../services/e2e/e2eService', async () => {
   );
   return {
     ...actual,
-    getE2EService: () => service,
+    getE2EService: (userId: string) => otherAccounts.get(userId) ?? service,
     disposeE2EService: () => {},
   };
 });
@@ -104,6 +106,7 @@ const pristine = useE2EStore.getState();
 
 beforeEach(() => {
   listeners.clear();
+  otherAccounts.clear();
   service = makeService(USER);
   useE2EStore.setState(pristine, true);
 });
@@ -333,6 +336,35 @@ describe('e2eStore across a logout', () => {
     await first;
     await settle();
     expect(useE2EStore.getState().ready).toBe(true);
+    expect(listeners.size).toBe(1);
+  });
+
+  it('lets ANOTHER account signed in on the same page initialize, and keeps its state, while the overtaken start is still pending', async () => {
+    let finishFirst!: () => void;
+    service.initialize.mockImplementationOnce(() => new Promise<void>((resolve) => (finishFirst = resolve)));
+    const first = useE2EStore.getState().initialize(USER);
+    logout();
+
+    const carol = makeService('carol');
+    carol._masterSecret = true;
+    carol._canApprove = true;
+    otherAccounts.set('carol', carol);
+    await useE2EStore.getState().initialize('carol');
+    expect(carol.initialize).toHaveBeenCalledTimes(1);
+    expect(useE2EStore.getState().ready).toBe(true);
+
+    // Alice's start resumes after Carol's: it must not report Alice's service
+    // in Carol's session, nor start Alice's follow-up work
+    finishFirst();
+    await first;
+    await settle();
+    const state = useE2EStore.getState();
+    expect(state.ready).toBe(true);
+    expect(state.masterReady).toBe(true);
+    expect(state.canApprove).toBe(true);
+    expect(service.claimMasterTransfers).not.toHaveBeenCalled();
+    expect(service.deviceListStatus).not.toHaveBeenCalled();
+    expect(carol.claimMasterTransfers).toHaveBeenCalledTimes(1);
     expect(listeners.size).toBe(1);
   });
 });

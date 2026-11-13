@@ -139,6 +139,15 @@ vi.mock('../../websocket/socketServer', () => ({
   })),
 }));
 
+// Visibility resync: whether a request raced the new channel's audience
+const visibility = vi.hoisted(() => ({ mark: vi.fn(), requestedSince: vi.fn(), sync: vi.fn() }));
+vi.mock('../../utils/channelVisibilityRooms', () => ({
+  visibilityRequestMark: visibility.mark,
+  resyncRequestedSince: visibility.requestedSince,
+  // The join's own re-check: not a mutation, so it must not count as a request
+  recheckVisibilityAfterJoin: visibility.sync,
+}));
+
 // Rate limiters
 vi.mock('../../middleware/rateLimiter', () => {
   const passthrough = (_req: any, _res: any, next: () => void) => next();
@@ -978,6 +987,48 @@ describe('Channel Routes', () => {
 
       expect(mockTo).toHaveBeenCalledWith('server:srv-1');
       expect(mockEmit).toHaveBeenCalledWith('channel:created', createdChannel);
+    });
+
+    // Issue #71 review: the audience read and the adapter-wide join race the
+    // visibility resync; a role change whose pass ran between them was undone
+    // (or missed) by the join.
+    describe('a role change that raced the new channel\'s audience', () => {
+      async function createChannel() {
+        const token = makeToken();
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user-1', serverId: 'srv-1', role: 'admin' });
+        prismaMock.channel.groupBy.mockResolvedValue(channelCounts(0));
+        prismaMock.channel.create.mockResolvedValue({ id: 'ch-new', name: 'new-channel', type: 'text', serverId: 'srv-1', position: 0, categoryId: null });
+        return request(app)
+          .post('/api/v1/servers/srv-1/channels')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ name: 'new-channel', type: 'text' });
+      }
+
+      beforeEach(() => {
+        visibility.mark.mockReset().mockReturnValue(3);
+        visibility.requestedSince.mockReset().mockReturnValue(false);
+        visibility.sync.mockReset().mockResolvedValue(undefined);
+      });
+
+      it('takes the mark before the audience read and, when this node saw a resync request for the space since, resyncs the new channel on every node after the join', async () => {
+        visibility.requestedSince.mockReturnValue(true);
+
+        const res = await createChannel();
+
+        expect(res.status).toBe(201);
+        expect(visibility.mark.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.role.findFirst.mock.invocationCallOrder.at(-1)!);
+        expect(visibility.requestedSince).toHaveBeenCalledWith(3, 'srv-1');
+        expect(visibility.sync).toHaveBeenCalledWith('srv-1', { channelId: 'ch-new' });
+        expect(visibility.sync.mock.invocationCallOrder[0]).toBeGreaterThan(mockSocketsJoin.mock.invocationCallOrder.at(-1)!);
+      });
+
+      it('with no request since the mark, no resync', async () => {
+        const res = await createChannel();
+
+        expect(res.status).toBe(201);
+        expect(visibility.requestedSince).toHaveBeenCalledWith(3, 'srv-1');
+        expect(visibility.sync).not.toHaveBeenCalled();
+      });
     });
   });
 
