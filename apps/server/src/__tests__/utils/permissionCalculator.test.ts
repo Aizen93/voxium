@@ -1045,6 +1045,23 @@ describe('filterVisibleChannelsForUsers', () => {
     expect([...result.get('member')!]).toEqual([]);
   });
 
+  // The membership check used to come AFTER the secure rows were added, so a
+  // ChannelMember row that outlived its ServerMember one kept the secure
+  // channel visible (and its room joined by the visibility resync), unlike
+  // computeUserChannelPermissions, which requires both.
+  it('denies a secure channel to a user who holds its ChannelMember row but is no longer a server member', async () => {
+    prismaMock.serverMember.findMany.mockResolvedValue([{ userId: 'member' }]);
+    prismaMock.channelMember.findMany.mockResolvedValue([
+      { channelId: 'ch-sec', userId: 'member' },
+      { channelId: 'ch-sec', userId: 'departed' },
+    ]);
+
+    const result = await filterVisibleChannelsForUsers(['member', 'departed'], 'srv', [CH_PUB, CH_SEC]);
+
+    expect([...result.get('member')!].sort()).toEqual(['ch-pub', 'ch-sec']);
+    expect([...result.get('departed')!]).toEqual([]);
+  });
+
   it('returns an empty set per user when the server is gone', async () => {
     prismaMock.server.findUnique.mockResolvedValue(null);
 

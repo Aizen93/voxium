@@ -1,0 +1,24 @@
+Loaded Prisma config from prisma.config.ts.
+
+Prisma schema loaded from prisma/schema.prisma.
+Datasource "db": PostgreSQL database "voxium", schema "public" at "postgres:5432"
+
+56 migrations found in prisma/migrations
+Following migrations have not yet been applied:
+20260220223130_migration_version_1
+20260801140000_e2e_always_on
+20260812120000_secure_channels
+20260820020518_registration_abuse_hardening
+20260820210000_username_case_insensitive_unique
+20260822180000_registration_consent
+20261009120000_server_discovery
+20261018120000_webhooks
+20261019090000_webhook_owner_decisions
+20261024180000_message_mentions_everyone
+20261024190000_users_status_index
+20261026100000_mail_suppressions
+20261030100000_verified_signup
+20261030120000_secure_channel_limit
+
+To apply migrations in development run prisma migrate dev.
+To apply migrations in production run prisma migrate deploy.

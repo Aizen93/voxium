@@ -53,6 +53,18 @@ vi.mock('../../utils/permissionCalculator', () => ({
   filterVisibleChannels: mockFilterVisibleChannels,
 }));
 
+const visibility = vi.hoisted(() => ({
+  mark: vi.fn(),
+  requestedSince: vi.fn(),
+  sync: vi.fn(),
+}));
+vi.mock('../../utils/channelVisibilityRooms', () => ({
+  visibilityRequestMark: visibility.mark,
+  resyncRequestedSince: visibility.requestedSince,
+  // The join's own re-check: not a mutation, so it must not count as a request
+  recheckVisibilityAfterJoin: visibility.sync,
+}));
+
 // ─── Import after mocks ─────────────────────────────────────────────────────
 
 import {
@@ -75,6 +87,10 @@ function resetMockChains() {
   mockFilterVisibleChannels.mockImplementation(
     async (_userId: string, _serverId: string, channels: { id: string }[]) => channels,
   );
+  // Default: no resync request came in between the read and the join
+  visibility.mark.mockReturnValue(7);
+  visibility.requestedSince.mockReturnValue(false);
+  visibility.sync.mockResolvedValue(undefined);
 }
 
 const aliceRow = () => ({
@@ -550,5 +566,43 @@ describe('memberBroadcast — edge cases', () => {
         }),
       }),
     );
+  });
+});
+
+// Issue #71 review: the read and the adapter-wide join race the visibility
+// resync. A revocation (or grant) whose pass ran between them found the new
+// member's sockets outside the rooms, and the join applied the stale read.
+describe('memberBroadcast — a join that raced a visibility resync', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetMockChains();
+  });
+
+  it('takes the mark before the read and, when this node saw a resync request for the space since, resyncs the member on every node after the join', async () => {
+    mockPrisma.channel.findMany.mockResolvedValueOnce([{ id: 'ch-1' }]);
+    visibility.requestedSince.mockReturnValueOnce(true);
+
+    await joinServerRoom('user-1', 'server-1');
+
+    expect(visibility.mark.mock.invocationCallOrder[0]).toBeLessThan(mockPrisma.channel.findMany.mock.invocationCallOrder[0]);
+    expect(visibility.mark.mock.invocationCallOrder[0]).toBeLessThan(mockFilterVisibleChannels.mock.invocationCallOrder[0]);
+    expect(visibility.requestedSince).toHaveBeenCalledWith(7, 'server-1');
+    expect(visibility.sync).toHaveBeenCalledWith('server-1', { userId: 'user-1' });
+    expect(visibility.sync.mock.invocationCallOrder[0]).toBeGreaterThan(mockSocketsJoin.mock.invocationCallOrder[0]);
+  });
+
+  it('the same on the member-joined path', async () => {
+    visibility.requestedSince.mockReturnValueOnce(true);
+
+    await broadcastMemberJoined('user-1', 'server-1');
+
+    expect(visibility.sync).toHaveBeenCalledWith('server-1', { userId: 'user-1' });
+  });
+
+  it('with no request since the mark, no resync', async () => {
+    await joinServerRoom('user-1', 'server-1');
+
+    expect(visibility.requestedSince).toHaveBeenCalledWith(7, 'server-1');
+    expect(visibility.sync).not.toHaveBeenCalled();
   });
 });

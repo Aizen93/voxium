@@ -55,6 +55,7 @@ import { clearDMVoiceState } from './websocket/dmVoiceHandler';
 import { initVoiceCluster, stopVoiceCluster } from './websocket/voiceCluster';
 import { initVoiceRelay } from './websocket/voiceRelay';
 import { startPresenceReaper, stopPresenceReaper } from './utils/presenceReaper';
+import { initChannelVisibilitySync, stopChannelVisibilitySync } from './utils/channelVisibilityRooms';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -174,6 +175,12 @@ async function main() {
   await initVoiceCluster(io);
   console.log('[VoiceCluster] Initialized');
 
+  // Visibility resyncs: a node that changes who may view a channel resyncs
+  // its own sockets and asks every other node, through this channel, to
+  // resync theirs (no node waits on another's reply)
+  await initChannelVisibilitySync();
+  console.log('[Visibility] Resync channel subscribed');
+
   // Presence reconciliation: every minute, users whose last socket is gone
   // cluster-wide without a disconnect having unregistered it (a node killed
   // hard, a failed Redis command) are taken offline and their contacts told.
@@ -235,6 +242,10 @@ async function main() {
     // Drop our liveness key FIRST so peer reapers promptly clean up any voice
     // state this node owned, instead of waiting out the heartbeat TTL.
     await stopNodeHeartbeat().catch((err) => console.warn('[Shutdown] Heartbeat cleanup failed:', err));
+    // Right after the heartbeat: a subscriber that outlives it is one receiver
+    // more than the heartbeats, and every peer's resync until exit would
+    // retry and take the fail-closed fallback
+    await stopChannelVisibilitySync();
     // Gracefully disconnect all Socket.IO clients before closing HTTP server
     // .local: the adapter's disconnectSockets publishes a REMOTE_DISCONNECT
     // with an empty room filter, which every peer (and this node) applies to

@@ -162,6 +162,17 @@ describe('getAllRateLimits', () => {
   });
 });
 
+describe('E2E key-share acknowledgement limiter', () => {
+  it('has a row of its own, per user, apart from the share-upload budget', () => {
+    // A drain's acknowledgements (one per claimed page) must never starve the
+    // share uploads of a rotation: they get their own bucket and prefix.
+    const ack = getAllRateLimits().find((l) => l.name === 'e2eShareAck');
+    expect(ack).toMatchObject({ keyPrefix: 'rl:e2eack', points: 60, duration: 60, blockDuration: 0, keyType: 'userId' });
+    const shares = getAllRateLimits().find((l) => l.name === 'e2eShares');
+    expect(shares?.keyPrefix).not.toBe(ack?.keyPrefix);
+  });
+});
+
 describe('getAllRateLimits (key types)', () => {
   it('includes the interact limiter keyed by userId (P2 — NAT-shared IP budgets)', () => {
     const limits = getAllRateLimits();

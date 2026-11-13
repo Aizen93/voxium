@@ -9,13 +9,29 @@
 //     node scripts/tauri-release-config.mjs > "$RUNNER_TEMP/tauri.release.json"
 //   pnpm tauri build --config "$RUNNER_TEMP/tauri.release.json"
 //
-// The same works for `pnpm tauri dev --config …` when a dev store is remote.
+// It changes `csp` only, which names no localhost source. `tauri dev` is not
+// affected: on the desktop it loads the Vite dev server directly, and Tauri
+// adds the policy only to the pages it serves itself, so no policy applies
+// there and the dev build reaches localhost:3001.
+//
+// This is the project's own release: tauri.conf.json's hosts, update feed,
+// signing key and identifier (`com.voxium.app`, which every installed app
+// keeps its data and credential-store entries under: this overlay never sets
+// it). A build for another server is `pnpm tauri:build`
+// (tauri-build-config.mjs), which replaces all four.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { releaseConfig } from './tauriCsp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const conf = JSON.parse(readFileSync(join(here, '..', 'src-tauri', 'tauri.conf.json'), 'utf8'));
-const merged = releaseConfig(conf, process.env.TAURI_ASSET_ORIGIN);
-process.stdout.write(JSON.stringify(merged ?? {}, null, 2) + '\n');
+try {
+  const conf = JSON.parse(readFileSync(join(here, '..', 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  const merged = releaseConfig(conf, process.env.TAURI_ASSET_ORIGIN);
+  process.stdout.write(JSON.stringify(merged ?? {}, null, 2) + '\n');
+} catch (err) {
+  // The message alone: it names the rule broken and never the value (a
+  // secret in the release workflow, whose log is public)
+  console.error(`[tauri-release-config] ${err instanceof Error ? err.message : String(err)}`);
+  process.exitCode = 1;
+}
