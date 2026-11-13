@@ -1322,7 +1322,7 @@ serverRouter.post(
       const actorId = req.user!.userId;
       try {
         await retryOnTransactionConflict(async () => {
-          await waitForHeirRows(targetUserId, serverId, { member: true });
+          await waitForHeirRows(targetUserId, serverId);
           return prisma.$transaction([
             prisma.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR NO KEY UPDATE`,
             prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${targetUserId} AND server_id = ${serverId} FOR NO KEY UPDATE`,

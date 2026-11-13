@@ -277,6 +277,7 @@ vi.mock('../../utils/discoveryPageCache', () => ({
 import { prisma } from '../../utils/prisma';
 import { adminRouter } from '../../routes/admin';
 import { errorHandler } from '../../middleware/errorHandler';
+import { lazyStatement, runBatch } from '../helpers/lazyStatement';
 
 function createApp() {
   const app = express();
@@ -1283,42 +1284,64 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
       expect(batch).toHaveLength(5);
     });
 
-    describe('the heir\'s rows are waited for, holding nothing, before the batch takes the space row', () => {
-      const rawCalls = () => prismaMock.$queryRaw.mock.calls.map((call: unknown[], i: number) => ({
-        sql: (call[0] as string[]).join('?'),
-        values: call.slice(1),
-        order: prismaMock.$queryRaw.mock.invocationCallOrder[i] as number,
-      }));
-      const batchCallOrder = () => prismaMock.$transaction.mock.invocationCallOrder[
-        prismaMock.$transaction.mock.calls.findIndex(([arg]: [unknown]) => Array.isArray(arg))];
+    describe('the heir\'s rows are waited for, holding nothing, before the heir\'s membership is read and the batch takes the space row', () => {
+      const MEMBER_WAIT = 'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE';
+      const ACCOUNT_WAIT = 'SELECT id FROM users WHERE id = ? FOR KEY SHARE';
+      /**
+       * Every statement in the order it RUNS: a raw statement when it is
+       * awaited or run in a batch (built and never awaited, it never runs),
+       * the heir's membership read, and `batch` where the batch is handed to
+       * the client. Each raw statement keeps its { op, sql } shape for the
+       * batch assertions.
+       */
+      function recordRuns(heirRow: { userId: string } | null): string[] {
+        const ran: string[] = [];
+        prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+          const sql = strings.join('?');
+          const statement = { op: 'lock', sql };
+          Object.defineProperty(statement, 'then', { value: lazyStatement(ran, `${sql} [${values.join(',')}]`, []).then, enumerable: false });
+          return statement;
+        });
+        prismaMock.$transaction.mockImplementation((arg: any) => {
+          if (typeof arg === 'function') return arg(txMock);
+          ran.push('batch');
+          return runBatch(arg);
+        });
+        prismaMock.serverMember.findUnique.mockImplementation(async ({ where }: any) => {
+          if (where?.userId_serverId?.userId === 'heir-1' && where?.userId_serverId?.serverId === 'srv-b') ran.push('read:membership');
+          return heirRow;
+        });
+        return ran;
+      }
 
-      it('to an heir already a member: their member row FOR NO KEY UPDATE, then their account row FOR KEY SHARE, both run before the batch', async () => {
-        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      it('to an heir already a member: their member row FOR NO KEY UPDATE, then their account row FOR KEY SHARE, then the membership read, then the batch', async () => {
+        const ran = recordRuns({ userId: 'heir-1' });
 
         expect((await transferToHeir()).status).toBe(200);
 
-        const [memberWait, accountWait] = rawCalls();
-        expect(memberWait).toMatchObject({
-          sql: 'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE',
-          values: ['heir-1', 'srv-b'],
-        });
-        expect(accountWait).toMatchObject({ sql: 'SELECT id FROM users WHERE id = ? FOR KEY SHARE', values: ['heir-1'] });
-        // built (and awaited) before the batch runs: neither is one of its statements
-        const batch = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg))![0] as unknown[];
-        expect(batch).not.toContainEqual({ op: 'lock', sql: accountWait.sql });
-        expect(accountWait.order).toBeLessThan(batchCallOrder());
-        expect(memberWait.order).toBeLessThan(accountWait.order);
+        expect(ran.slice(0, ran.indexOf('batch') + 3)).toEqual([
+          `${MEMBER_WAIT} [heir-1,srv-b]`,
+          `${ACCOUNT_WAIT} [heir-1]`,
+          'read:membership',
+          'batch',
+          'SELECT id FROM servers WHERE id = ? FOR NO KEY UPDATE [srv-b]',
+          `${MEMBER_WAIT} [heir-1,srv-b]`,
+        ]);
       });
 
-      it('to an heir who joins with it: their account row FOR KEY SHARE alone (they have no member row yet), before the batch', async () => {
-        prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      it('to an heir who is not a member: the same two waits (no member row to wait for), then the read that picks the joining branch', async () => {
+        const ran = recordRuns(null);
 
         expect((await transferToHeir()).status).toBe(200);
 
-        const calls = rawCalls();
-        expect(calls.map((c) => c.sql)).not.toContain('SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE');
-        expect(calls[0]).toMatchObject({ sql: 'SELECT id FROM users WHERE id = ? FOR KEY SHARE', values: ['heir-1'] });
-        expect(calls[0].order).toBeLessThan(batchCallOrder());
+        expect(ran.slice(0, ran.indexOf('batch') + 1)).toEqual([
+          `${MEMBER_WAIT} [heir-1,srv-b]`,
+          `${ACCOUNT_WAIT} [heir-1]`,
+          'read:membership',
+          'batch',
+        ]);
+        // the joining branch: the heir's member row is created with the transfer
+        expect(prismaMock.serverMember.create).toHaveBeenCalled();
       });
     });
 

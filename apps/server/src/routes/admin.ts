@@ -772,14 +772,15 @@ export async function transferOwnedSpaceToHeir(
 ): Promise<{ joined: boolean; heirRequestPending: boolean; fromDemoted: boolean }> {
   try {
     return await retryOnTransactionConflict(async () => {
+      // The heir's rows the batch takes after the space row, waited for
+      // holding nothing (waitForHeirRows), then the heir's membership read:
+      // the branch is picked once a transaction holding the heir's member row
+      // (a removal or an account deletion of the heir) has ended
+      await waitForHeirRows(heirId, serverId);
       const existingMembership = await prisma.serverMember.findUnique({
         where: { userId_serverId: { userId: heirId, serverId } },
         select: { userId: true },
       });
-      // The heir's rows the batch takes after the space row, waited for
-      // holding nothing (waitForHeirRows): their member row when they are a
-      // member, their account row either way
-      await waitForHeirRows(heirId, serverId, { member: existingMembership !== null });
 
       if (existingMembership) {
         // Already a member: their row turns owner with the space row. The

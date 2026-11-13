@@ -9,13 +9,12 @@ import { prisma } from './prisma';
  * the shared client and outside any transaction, each in the mode the
  * transfer takes the row in, so the lock is let go as soon as it is granted:
  * the heir's member row FOR NO KEY UPDATE (a secure-channel writer's key
- * share on it is not waited for), then the heir's account row FOR KEY SHARE
- * (the mode the new owner's key takes it in). `member: false` for an heir
- * who is not a member yet: the transfer creates their member row.
+ * share on it is not waited for; an heir who is not a member has none), then
+ * the heir's account row FOR KEY SHARE (the mode the new owner's key takes
+ * it in). The caller reads the heir's membership after these, so it decides
+ * from what is true once a transaction holding the member row has ended.
  */
-export async function waitForHeirRows(heirId: string, serverId: string, opts: { member: boolean }): Promise<void> {
-  if (opts.member) {
-    await prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${heirId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
-  }
+export async function waitForHeirRows(heirId: string, serverId: string): Promise<void> {
+  await prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${heirId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
   await prisma.$queryRaw`SELECT id FROM users WHERE id = ${heirId} FOR KEY SHARE`;
 }
