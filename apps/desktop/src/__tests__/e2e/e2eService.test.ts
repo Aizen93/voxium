@@ -6982,3 +6982,186 @@ describe('E2EService — lifecycle', () => {
     });
   });
 });
+
+describe('E2EService — inbound sessions announced (onSessionsAvailable)', () => {
+  const restartOf = (server: Server, party: { userId: string; keyProvider: PickleKeyProvider; vaultNamespace: string }) =>
+    makeDevice(server, party.userId, { keyProvider: party.keyProvider, vaultNamespace: party.vaultNamespace });
+
+  /** Every event a service announces, in order, each one's ids sorted. */
+  const listen = (service: E2EService) => {
+    const events: Array<{ scope: string; sessionIds: string[] }> = [];
+    service.onSessionsAvailable((event) => events.push({ scope: event.scope, sessionIds: [...event.sessionIds].sort() }));
+    return events;
+  };
+  const byScope = (events: Array<{ scope: string; sessionIds: string[] }>) =>
+    [...events].sort((a, b) => a.scope.localeCompare(b.scope));
+
+  it('announces what one claim stores once per scope, every session of the scope in one event', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const laptop = makeDevice(server, aliceId);
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await laptop.service.initialize();
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    await bob.service.claimMasterTransfers(); // queued behind Bob's start-up claim
+
+    // three sessions waiting in Bob's inbox: two in c1 (one per device of Alice), one in c2
+    const fromLaptop = await laptop.service.encryptMessage('c1', bob.userId, 'from the laptop');
+    const fromPhone = await phone.service.encryptMessage('c1', bob.userId, 'from the phone');
+    const elsewhere = await laptop.service.encryptMessage('c2', bob.userId, 'in another conversation');
+
+    const events = listen(bob.service);
+    // the miss on the first message claims the whole page
+    const read = await bob.service.decryptMessage({
+      id: 'm1', conversationId: 'c1', authorId: aliceId, content: fromLaptop.envelope,
+    });
+    expect(read.text).toBe('from the laptop');
+
+    // announced by the time the decrypt that claimed them answers
+    expect(byScope(events)).toEqual([
+      { scope: 'c1', sessionIds: [sidOf(fromLaptop.envelope), sidOf(fromPhone.envelope)].sort() },
+      { scope: 'c2', sessionIds: [sidOf(elsewhere.envelope)] },
+    ]);
+
+    // a session the device holds already is not announced again
+    await bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: aliceId, content: fromPhone.envelope });
+    expect(events).toHaveLength(2);
+  });
+
+  it('announces a share kept from an earlier start when the next start imports it', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    await alice.service.dispose(); // the app is closed
+
+    const { envelope } = await bob.service.encryptMessage('c1', alice.userId, 'sent while you were away');
+
+    // a start that cannot look Bob up keeps the share and stores nothing
+    server.setDeviceListReadFailure(true);
+    const first = restartOf(server, alice);
+    const firstEvents = listen(first.service);
+    await first.service.initialize();
+    await first.service.claimMasterTransfers().catch(() => undefined); // queued behind the start-up claim
+    expect(firstEvents).toEqual([]);
+    await first.service.dispose();
+
+    // the next start imports the kept share and says so before anything is decrypted
+    server.setDeviceListReadFailure(false);
+    const second = restartOf(server, alice);
+    const events = listen(second.service);
+    await second.service.initialize();
+    await second.service.claimMasterTransfers(); // queued behind the start-up claim
+    expect(events).toEqual([{ scope: 'c1', sessionIds: [sidOf(envelope)] }]);
+    expect(
+      (await second.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: bob.userId, content: envelope })).text
+    ).toBe('sent while you were away');
+  });
+
+  /** Alice's phone holds Bob's sessions in c1 and c2, backed up under the account key. */
+  async function historyOnPhone() {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const phone = makeDevice(server, aliceId);
+    const bob = makeParty(server, 'bob');
+    await phone.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const inC1 = await bob.service.encryptMessage('c1', aliceId, 'history in c1');
+    const inC2 = await bob.service.encryptMessage('c2', aliceId, 'history in c2');
+    await phone.service.decryptMessage({ id: 'h1', conversationId: 'c1', authorId: bob.userId, content: inC1.envelope });
+    await phone.service.decryptMessage({ id: 'h2', conversationId: 'c2', authorId: bob.userId, content: inC2.envelope });
+    const recoveryKey = await phone.service.createKeyBackup();
+    expect(await phone.service.backupMessageKeys()).toBe(2);
+    return {
+      server,
+      aliceId,
+      phone,
+      recoveryKey,
+      expected: [
+        { scope: 'c1', sessionIds: [sidOf(inC1.envelope)] },
+        { scope: 'c2', sessionIds: [sidOf(inC2.envelope)] },
+      ],
+    };
+  }
+
+  it('announces the sessions a recovery-key restore pulls from the history', async () => {
+    const { server, aliceId, recoveryKey, expected } = await historyOnPhone();
+    const laptop = makeDevice(server, aliceId);
+    await laptop.service.initialize();
+    await flushQueue();
+
+    const events = listen(laptop.service);
+    await laptop.service.restoreKeyBackup(recoveryKey);
+    expect(byScope(events)).toEqual(expected);
+  });
+
+  it('announces the sessions the history pull of an incoming device approval stores', async () => {
+    const { server, aliceId, phone, expected } = await historyOnPhone();
+    const laptop = makeDevice(server, aliceId);
+    await laptop.service.initialize();
+    await flushQueue();
+    await phone.service.approveDevice(laptop.service.deviceId);
+
+    const events = listen(laptop.service);
+    expect(await laptop.service.claimMasterTransfers()).toBe(true);
+    expect(byScope(events)).toEqual(expected);
+  });
+
+  it('announces nothing for the session this device creates for its own sends', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+
+    const events = listen(alice.service);
+    await alice.service.encryptMessage('c1', bob.userId, 'a new session for this one');
+    const channelId = `chan-${uniq}`;
+    server.setChannelMembers(channelId, [alice.userId, bob.userId]);
+    await alice.service.encryptChannelMessage(channelId, 'and one for this channel');
+    expect(events).toEqual([]);
+  });
+
+  it('keeps announcing to the other listeners when one throws, and stops for an unsubscribed one', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    await bob.service.claimMasterTransfers(); // queued behind Bob's start-up claim
+
+    const first = await alice.service.encryptMessage('c1', bob.userId, 'one');
+    await alice.service.encryptMessage('c2', bob.userId, 'two');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      bob.service.onSessionsAvailable(() => {
+        throw new Error('listener failure');
+      });
+      const seen: string[] = [];
+      const unsubscribe = bob.service.onSessionsAvailable((event) => seen.push(event.scope));
+      await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: first.envelope });
+      expect(seen.sort()).toEqual(['c1', 'c2']);
+      expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/sessions-available listener threw/);
+
+      unsubscribe();
+      const third = await alice.service.encryptMessage('c3', bob.userId, 'three');
+      await bob.service.decryptMessage({ id: 'm3', conversationId: 'c3', authorId: alice.userId, content: third.envelope });
+      expect(seen.sort()).toEqual(['c1', 'c2']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
