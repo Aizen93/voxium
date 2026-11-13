@@ -7,6 +7,21 @@ import { broadcastMemberJoined } from './memberBroadcast';
 import { emitToModerators } from './moderatorAudience';
 import { WS_EVENTS } from '@voxium/shared';
 
+/**
+ * A foreign-key violation (P2003) on `constraint`, as the driver names it
+ * (the adapter's constraint index, or the message that quotes it).
+ */
+function violatesForeignKey(err: unknown, constraint: string): boolean {
+  const e = err as {
+    code?: unknown;
+    message?: unknown;
+    meta?: { constraint?: unknown; field_name?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
+  } | null;
+  if (e?.code !== 'P2003') return false;
+  const named = [e.message, e.meta?.constraint, e.meta?.field_name, e.meta?.driverAdapterError?.cause?.constraint?.index];
+  return named.some((v) => typeof v === 'string' && v.includes(constraint));
+}
+
 /** Which door the member came through — logged, never a branch. */
 export type JoinServerVia = 'invite' | 'discovery' | 'approval';
 
@@ -129,6 +144,11 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
     if ((err as { code?: unknown })?.code === 'P2002') {
       throw new BadRequestError('You are already a member of this server');
     }
+    // The membership's key to the space refused: the space is gone, the
+    // answer for a space that does not exist (the row lock above normally
+    // finds that first). A joiner whose own account is gone is another key,
+    // and stays what it is.
+    if (violatesForeignKey(err, 'server_members_server_id_fkey')) throw new NotFoundError('Server');
     throw err;
   }
 
@@ -172,19 +192,34 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   // Seed ChannelRead for all text channels so existing history doesn't show
   // as unread. Secure channels excluded: a joiner is not a member of any,
   // and seeding would leak their ids into the joiner's read rows.
-  const textChannels = await prisma.channel.findMany({
-    where: { serverId, type: 'text', secure: false },
-    select: { id: true },
-  });
-  if (textChannels.length > 0) {
-    const now = new Date();
-    await prisma.channelRead.createMany({
-      data: textChannels.map((ch) => ({
-        userId,
-        channelId: ch.id,
-        lastReadAt: now,
-      })),
-      skipDuplicates: true,
+  const seedReads = async (): Promise<void> => {
+    const textChannels = await prisma.channel.findMany({
+      where: { serverId, type: 'text', secure: false },
+      select: { id: true },
     });
+    if (textChannels.length > 0) {
+      const now = new Date();
+      await prisma.channelRead.createMany({
+        data: textChannels.map((ch) => ({
+          userId,
+          channelId: ch.id,
+          lastReadAt: now,
+        })),
+        skipDuplicates: true,
+      });
+    }
+  };
+  try {
+    await seedReads();
+  } catch (err) {
+    // A channel read above was deleted before the insert: the whole space,
+    // being deleted since the commit, answers as a space that does not
+    // exist; a single channel deleted meanwhile leaves the others to seed,
+    // read again once.
+    if (!violatesForeignKey(err, 'channel_reads_channel_id_fkey')) throw err;
+    const space = await prisma.server.findUnique({ where: { id: serverId }, select: { id: true } });
+    if (!space) throw new NotFoundError('Server');
+    console.warn(`[ServerJoin] A channel of ${serverId} was deleted while ${userId}'s read markers were seeded; seeding again`);
+    await seedReads();
   }
 }
