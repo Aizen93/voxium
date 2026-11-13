@@ -36,6 +36,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import axios from 'axios';
 import { killProcessTree } from './lib/processTree.mjs';
 import { portProblem } from './lib/portProbe.mjs';
+import { HEARTBEAT_PATTERN, foreignNodeProblem } from './lib/nodeHeartbeats.mjs';
 import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import path from 'path';
@@ -1102,6 +1103,36 @@ async function main() {
     const problem = await portProblem(port);
     if (problem) {
       console.error(`\nFATAL: port ${port} cannot be used: ${problem}. Stop whatever holds it and run again`);
+      process.exit(1);
+    }
+  }
+
+  // Step 0b: no other node's heartbeat in Redis. One left by a backend that
+  // was stopped moments ago is waited out (30 s at most); one that stays is a
+  // running server, and next to it this cluster would count three nodes for
+  // its two (scripts/lib/nodeHeartbeats.mjs).
+  {
+    const probe = createRedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+    let problem: string | null;
+    try {
+      await probe.connect();
+      problem = await foreignNodeProblem({
+        list: async () => {
+          const keys: string[] = [];
+          for await (const batch of probe.scanIterator({ MATCH: HEARTBEAT_PATTERN, COUNT: 100 })) {
+            keys.push(...(Array.isArray(batch) ? batch : [batch]));
+          }
+          return keys;
+        },
+        log: (line) => console.log(line),
+      });
+    } catch (err) {
+      problem = `the node heartbeats could not be read from Redis (${errorText(err)})`;
+    } finally {
+      await probe.quit().catch((err) => console.warn('Could not close the heartbeat check\'s Redis connection:', errorText(err)));
+    }
+    if (problem) {
+      console.error(`\nFATAL: ${problem}`);
       process.exit(1);
     }
   }
