@@ -11,6 +11,7 @@ import { hasServerPermission, hasChannelPermission, filterVisibleChannels, compu
 import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
+import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from '../utils/channelVisibilityRooms';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -253,11 +254,19 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
     // The emit and the join must keep the SAME audience: narrowing one alone
     // leaves clients showing a channel that never produces events, or vice
     // versa.
+    //
+    // The audience read and the adapter-wide join race the visibility resync:
+    // a role change whose pass runs between them is undone (or missed) by the
+    // join. When this node saw a resync request for the space since the mark,
+    // the new channel is resynced on every node after the join. A request
+    // only a peer had seen is the gap left (see resyncRequestedSince).
+    const visibilityMark = visibilityRequestMark();
     for (const room of await visibilityRoomsForNewChannel(serverId)) {
       getIO().to(room).emit('channel:created', channel as unknown as Channel);
       // Voice channels get the room too — it carries voice presence events.
       getIO().in(room).socketsJoin(`channel:${channel.id}`);
     }
+    if (resyncRequestedSince(visibilityMark, serverId)) void recheckVisibilityAfterJoin(serverId, { channelId: channel.id });
 
     // NOTE (MED-15): no per-member ChannelRead seeding here. A brand-new channel
     // has zero messages, so the unread computation (COALESCE(last_read_at, epoch))
