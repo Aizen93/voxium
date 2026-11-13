@@ -9,7 +9,6 @@ import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
 import { ownSentRow } from '../services/e2e/displayGate';
-import { clearUndecryptedRows } from '../services/e2e/undecryptedRows';
 import { isSecureChannelId } from '../utils/secureChannelGate';
 import {
   decryptChannelMessagesForDisplay,
@@ -504,10 +503,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Clear all typing timers
     typingTimers.forEach((timer) => clearTimeout(timer));
     typingTimers.clear();
-
-    // The rows held to be decrypted again belonged to the view being left;
-    // what the next view shows is fetched, and gated, afresh
-    clearUndecryptedRows();
 
     set({ messages: [], hasMore: false, hasMoreAfter: false, isLoading: false, typingUsers: new Map(), replyingTo: null, targetMessageId: null });
   },

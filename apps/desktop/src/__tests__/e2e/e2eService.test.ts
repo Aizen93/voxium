@@ -7282,10 +7282,89 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
       // acknowledgement went out beside it
       expect(calls.slice(before).filter((c) => c !== 'POST /e2e/keyshares/ack')).toEqual([]);
       expect(decrypts.mock.calls.map(([m]) => m.id)).toEqual(['m2', 'm1']);
+      // the try of the held row never claims
+      expect(decrypts.mock.calls[1][1]).toEqual({ claimMissing: false, storageFailureRejects: true });
     } finally {
       stop();
       await redecryptPassesSettled();
       later?.mockRestore();
+      warn.mockRestore();
+      display.service = null;
+      display.userId = null;
+      useChatStore.setState({ messages: [] });
+      useDMStore.setState({ activeConversationId: null });
+    }
+  });
+
+  it('keeps the row held when the vault fails during its try, and opens it at the next change of the view', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    let refuseClaims = false;
+    const base = server.apiFor(bobId);
+    const bob = new E2EService(bobId, {
+      api: {
+        ...base,
+        async get(url: string) {
+          if (refuseClaims && url.startsWith('/e2e/keyshares')) {
+            throw Object.assign(new Error('503: unavailable'), { response: { status: 503 } });
+          }
+          return base.get(url);
+        },
+      } as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    await alice.service.initialize();
+    await bob.initialize();
+    await flushQueue();
+    await bob.claimMasterTransfers(); // queued behind Bob's start-up claim
+
+    display.service = bob;
+    display.userId = bobId;
+    useServerStore.setState({ activeServerId: null, activeChannelId: null });
+    useDMStore.setState({ activeConversationId: 'c1' });
+    const stop = watchKeyArrivals(bobId, bob);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const author = { id: alice.userId, username: 'alice', displayName: 'Alice' };
+      const rowOf = (id: string, conversationId: string, content: string, encrypted = true) =>
+        ({
+          id, type: 'user', content, channelId: null, conversationId, encrypted, author,
+          createdAt: '2026-11-01T10:00:00.000Z', editedAt: null, reactions: [], attachments: [],
+        }) as unknown as Message;
+
+      refuseClaims = true;
+      const sent = await alice.service.encryptMessage('c1', bobId, 'opened at the second try');
+      useChatStore.setState({ messages: await decryptMessagesForDisplay([rowOf('m1', 'c1', sent.envelope)]) });
+      expect(useChatStore.getState().messages[0].content).toBe(DECRYPT_FAILED_CONTENT);
+      refuseClaims = false;
+
+      // the session is stored by the claim; the try's write of its state fails once
+      const sid = sidOf(sent.envelope);
+      const vault = (bob as unknown as { vault: E2EVault }).vault;
+      const realPut = vault.putInboundGroupSession.bind(vault);
+      let writes = 0;
+      vi.spyOn(vault, 'putInboundGroupSession').mockImplementation(async (sessionId, record) => {
+        if (sessionId === sid && ++writes === 2) throw new DOMException('the disk is full', 'QuotaExceededError');
+        return realPut(sessionId, record);
+      });
+
+      const elsewhere = await alice.service.encryptMessage('c2', bobId, 'in another conversation');
+      await decryptMessageForDisplay(rowOf('m2', 'c2', elsewhere.envelope));
+      await redecryptPassesSettled();
+      expect(writes).toBe(2);
+      expect(useChatStore.getState().messages[0].content).toBe(DECRYPT_FAILED_CONTENT);
+
+      useChatStore.getState().addMessage(rowOf('m3', 'c1', 'a notice of some kind', false));
+      await redecryptPassesSettled();
+      expect(useChatStore.getState().messages[0]).toMatchObject({ id: 'm1', content: 'opened at the second try' });
+    } finally {
+      stop();
+      await redecryptPassesSettled();
       warn.mockRestore();
       display.service = null;
       display.userId = null;
