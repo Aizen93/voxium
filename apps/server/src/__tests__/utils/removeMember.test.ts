@@ -79,7 +79,9 @@ beforeEach(() => {
   evict.mockImplementation(async () => { order.push('voice'); });
   prismaMock.messageAttachment.findMany.mockImplementation(async () => { order.push('attachment-keys'); return []; });
   webhooksDisabled(0);
-  tx.$queryRaw.mockImplementation(async () => { order.push('lock:member'); return [{ user_id: 'u-1' }]; });
+  // The lock recorded when it RUNS (awaited), as a PrismaPromise runs: a
+  // statement built and never awaited is never sent, and takes no lock
+  tx.$queryRaw.mockImplementation(() => lazyStatement(order, 'lock:member', [{ user_id: 'u-1' }]));
   tx.serverBan.upsert.mockImplementation(async () => { order.push('ban'); return {}; });
   tx.serverJoinRequest.deleteMany.mockImplementation(async () => { order.push('request'); return { count: 0 }; });
   tx.serverMember.deleteMany.mockImplementation(async () => { order.push('member'); return { count: 1 }; });
