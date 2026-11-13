@@ -652,16 +652,26 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
     const stillBannedIps = new Set(sharedWithOtherBanned.map((r) => r.ip));
     const ipsToRelease = ips.filter((ip) => !stillBannedIps.has(ip));
 
-    // Unban + IP release atomically — no half-unbanned state on failure
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: req.params.userId },
-        data: { bannedAt: null, banReason: null },
-      }),
-      ...(ipsToRelease.length > 0
-        ? [prisma.ipBan.deleteMany({ where: { ip: { in: ipsToRelease } } })]
-        : []),
-    ]);
+    // Unban + IP release atomically — no half-unbanned state on failure. The
+    // long budget (LOCK_WAIT_TRANSACTION_OPTIONS): an account deletion of
+    // this account holds its row through the cascade, and the batch expired
+    // under Prisma's 5 s default while it waited. An account deleted since
+    // the read above (P2025, the update found no row) answers as an unknown
+    // one, never a 500; nothing is released then.
+    try {
+      await prisma.$transaction([
+        prisma.user.update({
+          where: { id: req.params.userId },
+          data: { bannedAt: null, banReason: null },
+        }),
+        ...(ipsToRelease.length > 0
+          ? [prisma.ipBan.deleteMany({ where: { ip: { in: ipsToRelease } } })]
+          : []),
+      ], LOCK_WAIT_TRANSACTION_OPTIONS);
+    } catch (err) {
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('User');
+      throw err;
+    }
 
     // Their servers come back to the directory where the per-server inputs
     // (discoverable, invites unlocked, not admin-blocked) still allow it.
