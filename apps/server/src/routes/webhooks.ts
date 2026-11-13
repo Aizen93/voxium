@@ -10,7 +10,13 @@ import { newWebhookToken, hashWebhookTokenHex } from '../utils/webhookToken';
 import { isSecretBoxConfigured, sealSecret } from '../utils/secretBox';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
-import { hasServerPermission, hasChannelPermission, filterVisibleChannels, filterChannelsWithPermissions } from '../utils/permissionCalculator';
+import {
+  hasServerPermission,
+  hasChannelPermission,
+  filterVisibleChannels,
+  filterChannelsWithPermissions,
+  type PermissionReadClient,
+} from '../utils/permissionCalculator';
 import {
   webhookSelect,
   toWebhook,
@@ -78,7 +84,7 @@ webhookRouter.use(requireFeature('webhooks', WEBHOOKS_DISABLED_MESSAGE));
 webhookRouter.use(async (req: Request<{ serverId: string }>, _res: Response, next: NextFunction) => {
   try {
     const allowed = await hasServerPermission(req.user!.userId, req.params.serverId, Permissions.MANAGE_WEBHOOKS);
-    if (!allowed) throw new ForbiddenError('You do not have permission to manage webhooks');
+    if (!allowed) throw new ForbiddenError(NO_MANAGE);
     next();
   } catch (err) {
     next(err);
@@ -97,6 +103,34 @@ const GITHUB_UNCONFIGURED = 'GitHub webhooks are not configured on this server';
 // routes/messages.ts answers the same sentence for a refused SEND_MESSAGES
 const NO_SEND = 'You do not have permission to send messages in this channel';
 const ADMIN_DISABLED = 'This webhook was disabled by an administrator';
+const NO_MANAGE = 'You do not have permission to manage webhooks';
+
+/**
+ * A webhook is created, rotated or enabled only by a current member who may
+ * manage webhooks, checked under the member row. The transaction's first
+ * statement locks the caller's member row FOR KEY SHARE; a removal of the
+ * caller locks that row FOR UPDATE as its first statement, so the two queue
+ * on it. A removal that commits first leaves no row, and the check that
+ * follows (refuseUnlessManager) refuses; a removal that waits reads the
+ * webhook this transaction commits, and its webhook statement disables it
+ * with the others the member holds.
+ */
+async function lockCallerMemberRow(tx: { $queryRaw: typeof prisma.$queryRaw }, userId: string, serverId: string): Promise<void> {
+  await tx.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${userId} AND server_id = ${serverId} FOR KEY SHARE`;
+}
+
+/**
+ * The webhook-management permission read again on `db` (a transaction's
+ * client, after lockCallerMemberRow): 404 Server when the space is gone,
+ * otherwise the router's own 403 for a caller who is not a member or lacks
+ * the permission.
+ */
+async function refuseUnlessManager(db: PermissionReadClient, userId: string, serverId: string): Promise<void> {
+  if (await hasServerPermission(userId, serverId, Permissions.MANAGE_WEBHOOKS, db)) return;
+  const space = await db.server.findUnique({ where: { id: serverId }, select: { id: true } });
+  if (!space) throw new NotFoundError('Server');
+  throw new ForbiddenError(NO_MANAGE);
+}
 
 /** 503 unless a GitHub secret can be sealed: checked BEFORE anything is written. */
 function assertSecretBox(): void {
@@ -334,9 +368,13 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
       await prisma.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR KEY SHARE`;
       await prisma.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR KEY SHARE`;
       return prisma.$transaction(async (tx) => {
+        // The caller's member row first (lockCallerMemberRow), then the space
+        // row: the order a secure-channel creation takes them in
+        await lockCallerMemberRow(tx, userId, serverId);
         // A space deleted since the checks answers as one
         const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
         if (space.length === 0) throw new NotFoundError('Server');
+        await refuseUnlessManager(tx, userId, serverId);
         const count = await tx.webhook.count({ where: { serverId } });
         if (count >= limits.maxWebhooksPerServer) {
           throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);
@@ -422,13 +460,23 @@ webhookRouter.patch('/:webhookId', rateLimitWebhookManage, async (req: Request<{
     // admin disable landing after the check above makes the write match
     // nothing (the 404 of any row that changed under the caller), so the lock
     // never ends up set on an enabled webhook.
-    const row = await updateOrMissing(prisma.webhook.update({
+    const write = (db: Pick<typeof prisma, 'webhook'>) => updateOrMissing(db.webhook.update({
       where: enabling
         ? { id: webhookId, channelId: webhook.channelId, adminDisabledAt: null }
         : { id: webhookId, channelId: webhook.channelId },
       data: enabling ? { ...data, creatorRemovedAt: null } : data,
       select: webhookSelect,
     }));
+    // An enable re-arms the webhook's URL: under the caller's member row,
+    // after the permission read again there (lockCallerMemberRow). A rename,
+    // a move or a disable is the one statement.
+    const row = enabling
+      ? await prisma.$transaction(async (tx) => {
+        await lockCallerMemberRow(tx, userId, serverId);
+        await refuseUnlessManager(tx, userId, serverId);
+        return write(tx);
+      }, LOCK_WAIT_TRANSACTION_OPTIONS)
+      : await write(prisma);
 
     emitWebhookChanged(serverId);
 
@@ -468,13 +516,19 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
     // Only if it still posts to the channel loadOwnWebhook checked VIEW on:
     // a webhook moved meanwhile into a channel this caller cannot see must
     // not hand them a working token for it
-    const row = await updateOrMissing(prisma.webhook.update({
-      where: { id: webhookId, channelId: webhook.channelId },
-      data: signing
-        ? { tokenHash: hashWebhookTokenHex(token), secretEnc: signing.secretEnc, ...trace }
-        : { tokenHash: hashWebhookTokenHex(token), ...trace },
-      select: webhookSelect,
-    }));
+    // Under the caller's member row, after the permission read again there
+    // (lockCallerMemberRow)
+    const row = await prisma.$transaction(async (tx) => {
+      await lockCallerMemberRow(tx, req.user!.userId, serverId);
+      await refuseUnlessManager(tx, req.user!.userId, serverId);
+      return updateOrMissing(tx.webhook.update({
+        where: { id: webhookId, channelId: webhook.channelId },
+        data: signing
+          ? { tokenHash: hashWebhookTokenHex(token), secretEnc: signing.secretEnc, ...trace }
+          : { tokenHash: hashWebhookTokenHex(token), ...trace },
+        select: webhookSelect,
+      }));
+    }, LOCK_WAIT_TRANSACTION_OPTIONS);
 
     emitWebhookChanged(serverId);
 

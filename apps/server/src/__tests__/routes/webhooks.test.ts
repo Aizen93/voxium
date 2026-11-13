@@ -62,13 +62,21 @@ vi.mock('../../utils/serverLimits', async (importOriginal) => {
 });
 
 const txMock = {
-  // The row locks: the delete's on the webhook row, the create's on the server row
+  // The row locks: the delete's on the webhook row; the create's, rotate's and
+  // enable's on the caller's member row, and the create's on the server row
   $queryRaw: vi.fn(),
   message: { groupBy: vi.fn(), deleteMany: vi.fn() },
   // findUnique: the shared delete (utils/webhookLifecycle.ts) reads the row
   // again under its lock; see the beforeEach. count + create: the create's
-  // cap check and insert, under the server-row lock
-  webhook: { delete: vi.fn(), findUnique: vi.fn(), count: vi.fn(), create: vi.fn() },
+  // cap check and insert, under the server-row lock. update: a rotate's and
+  // an enable's write, under the caller's member row (the root mock's, so
+  // the assertions on the written row read one place)
+  webhook: {
+    delete: vi.fn(), findUnique: vi.fn(), count: vi.fn(), create: vi.fn(),
+    update: vi.fn((...args: unknown[]) => prismaMock.webhook.update(...args)),
+  },
+  // read by a refusal under the member row: is the space still there
+  server: { findUnique: vi.fn() },
 };
 
 const prismaMock: Record<string, any> = {
@@ -256,6 +264,7 @@ beforeEach(() => {
   prismaMock.serverLimits.findUnique.mockResolvedValue(null);
   prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof txMock) => unknown) => cb(txMock));
   txMock.$queryRaw.mockResolvedValue([{ id: 'wh-1' }]);
+  txMock.server.findUnique.mockResolvedValue({ id: 'srv-1' });
   txMock.message.groupBy.mockResolvedValue([]);
   txMock.message.deleteMany.mockResolvedValue({ count: 0 });
   txMock.webhook.delete.mockResolvedValue({ id: 'wh-1' });
@@ -902,8 +911,8 @@ describe('POST /servers/:serverId/webhooks', () => {
       'SELECT id FROM users WHERE id = ? FOR KEY SHARE [user-1]',
     ];
     expect(order).toEqual([...waits, 'txn aborted', ...waits, 'txn']);
-    // the space row is locked inside the transaction alone
-    expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);
+    // the member row and the space row are locked inside the transaction
+    expect(txMock.$queryRaw).toHaveBeenCalledTimes(2);
   });
 
   it('a refusal inside the transaction is never retried', async () => {
@@ -929,20 +938,40 @@ describe('POST /servers/:serverId/webhooks', () => {
       expect(getEffectiveLimits).toHaveBeenCalledWith('srv-1');
     });
 
-    it('counts and creates in ONE transaction whose FIRST statement locks the server row', async () => {
+    it('counts and creates in ONE transaction: the caller\'s member row FOR KEY SHARE, the space row FOR UPDATE, the permission read on the transaction\'s client, the count, the insert', async () => {
       const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
       expect(res.status).toBe(201);
 
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);
-      const [strings, ...values] = txMock.$queryRaw.mock.calls[0];
-      expect((strings as string[]).join('?')).toBe('SELECT id FROM servers WHERE id = ? FOR UPDATE');
-      expect(values).toEqual(['srv-1']);
-      const lock = txMock.$queryRaw.mock.invocationCallOrder[0];
+      expect(txMock.$queryRaw).toHaveBeenCalledTimes(2);
+      const statement = (i: number) => {
+        const [strings, ...values] = txMock.$queryRaw.mock.calls[i];
+        return [(strings as string[]).join('?'), values];
+      };
+      expect(statement(0)).toEqual(['SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR KEY SHARE', ['user-1', 'srv-1']]);
+      expect(statement(1)).toEqual(['SELECT id FROM servers WHERE id = ? FOR UPDATE', ['srv-1']]);
+      const memberLock = txMock.$queryRaw.mock.invocationCallOrder[0];
+      const spaceLock = txMock.$queryRaw.mock.invocationCallOrder[1];
+      const permissionCall = h.hasServerPermission.mock.calls.findIndex((c: unknown[]) => c[3] === txMock);
+      expect(h.hasServerPermission.mock.calls[permissionCall]).toEqual(['user-1', 'srv-1', Permissions.MANAGE_WEBHOOKS, txMock]);
+      const permission = h.hasServerPermission.mock.invocationCallOrder[permissionCall];
       const count = txMock.webhook.count.mock.invocationCallOrder[0];
       const insert = txMock.webhook.create.mock.invocationCallOrder[0];
-      expect(lock).toBeLessThan(count);
+      expect(memberLock).toBeLessThan(spaceLock);
+      expect(spaceLock).toBeLessThan(permission);
+      expect(permission).toBeLessThan(count);
       expect(count).toBeLessThan(insert);
+    });
+
+    it('a webhook is created only by a current member who may manage webhooks, checked under the member row: 403, nothing counted, inserted or emitted', async () => {
+      // the router's check passes; the one under the member row refuses
+      h.hasServerPermission.mockImplementation(async (...args: unknown[]) => args[3] !== txMock);
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ success: false, error: 'You do not have permission to manage webhooks' });
+      expect(txMock.webhook.count).not.toHaveBeenCalled();
+      expect(txMock.webhook.create).not.toHaveBeenCalled();
+      expect(h.emitted).toHaveLength(0);
     });
 
     it('gives the transaction the long budget: the server row it waits for is held through an account deletion\'s cascade', async () => {
@@ -977,7 +1006,9 @@ describe('POST /servers/:serverId/webhooks', () => {
         let release: (() => void) | undefined;
         const tx = {
           ...txMock,
-          $queryRaw: vi.fn(async () => {
+          $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+            // the caller's member row: shared, no waiting between the two
+            if (!strings.join('?').includes('FROM servers')) return [{ user_id: 'user-1' }];
             const previous = held;
             held = new Promise<void>((resolve) => { release = resolve; });
             await previous;
@@ -1017,7 +1048,7 @@ describe('POST /servers/:serverId/webhooks', () => {
       expect(res.status).toBe(400);
       expect(res.body).toEqual({ success: false, error: 'Server can have at most 10 webhooks' });
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(txMock.$queryRaw).toHaveBeenCalledTimes(2);
       expect(txMock.webhook.create).not.toHaveBeenCalled();
       expect(h.emitted).toHaveLength(0);
     });
@@ -2130,5 +2161,75 @@ describe('GET /servers/:serverId/webhooks/targets', () => {
     expect(res.status).toBe(500);
     expect(res.body).not.toHaveProperty('data');
     spy.mockRestore();
+  });
+});
+
+describe('a webhook is rotated or enabled only by a current member who may manage webhooks, checked under the member row', () => {
+  const rotate = () => request(app).post(`${BASE}/wh-1/rotate`);
+  const patch = (body: unknown) => request(app).patch(`${BASE}/wh-1`).send(body as object);
+  const MEMBER_LOCK = 'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR KEY SHARE';
+  const LONG = JSON.stringify({ timeout: 60_000, maxWait: 10_000 });
+
+  /** The statements in the order they run, on which client. */
+  function recordOrder(): string[] {
+    const order: string[] = [];
+    prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof txMock) => unknown, opts?: unknown) => {
+      order.push(`txn ${JSON.stringify(opts)}`);
+      return cb(txMock);
+    });
+    txMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      order.push(`tx:${strings.join('?')} [${values.join(',')}]`);
+      return [{ user_id: 'user-1' }];
+    });
+    h.hasServerPermission.mockImplementation(async (...args: unknown[]) => {
+      order.push(args[3] === txMock ? 'tx:permission' : 'permission');
+      return true;
+    });
+    txMock.webhook.update.mockImplementation((...args: unknown[]) => { order.push('tx:update'); return prismaMock.webhook.update(...args); });
+    return order;
+  }
+  afterEach(() => {
+    txMock.webhook.update.mockImplementation((...args: unknown[]) => prismaMock.webhook.update(...args));
+  });
+
+  for (const [label, call] of [['a rotate', () => rotate()], ['an enable', () => patch({ enabled: true })]] as const) {
+    it(`${label}: the caller's member row FOR KEY SHARE, the permission read on the transaction's client, then the write, in one transaction with the long budget`, async () => {
+      const order = recordOrder();
+      const res = await call();
+      expect(res.status).toBe(200);
+      expect(order.slice(order.indexOf(`txn ${LONG}`))).toEqual([
+        `txn ${LONG}`,
+        `tx:${MEMBER_LOCK} [user-1,srv-1]`,
+        'tx:permission',
+        'tx:update',
+      ]);
+    });
+
+    it(`${label}: refused under the member row (no longer a member, or no longer allowed): 403, nothing written or emitted`, async () => {
+      // the router's check passes; the one under the member row refuses
+      h.hasServerPermission.mockImplementation(async (...args: unknown[]) => args[3] !== txMock);
+      const res = await call();
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ success: false, error: 'You do not have permission to manage webhooks' });
+      expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+      expect(h.emitted).toHaveLength(0);
+    });
+
+    it(`${label}: refused under the member row in a space deleted meanwhile: 404 Server`, async () => {
+      h.hasServerPermission.mockImplementation(async (...args: unknown[]) => args[3] !== txMock);
+      txMock.server.findUnique.mockResolvedValue(null);
+      const res = await call();
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ success: false, error: 'Server not found' });
+      expect(prismaMock.webhook.update).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a rename or a disable is the one statement: no transaction, no member row lock', async () => {
+    await patch({ name: 'New' });
+    await patch({ enabled: false });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(txMock.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMock.webhook.update).toHaveBeenCalledTimes(2);
   });
 });
