@@ -334,17 +334,20 @@ did not vouch for:
   the gate opened it and the view still shows the marker for that version; a
   row that still fails stays as it is, and one whose try ends in an error (a
   failure of the vault included, which the try reports instead of answering
-  the marker) stays held for the next announcement or change of the view.
+  the marker) stays held and is tried again at the next announcement of its
+  session or after a few changes of the view, with one warning per row.
   One pass runs per scope at a time; a row that reaches the view after its
-  session was announced is tried when it lands. Once a row opens, the quotes of it that found nothing
-  in the local cache when their rows were gated, and the conversation-list
-  preview of it, are looked up in the cache again by their own rules (an
-  entry of this scope written by the author the quote or preview names); a
-  quote the gate locked because the server called it unencrypted stays
-  locked. The try never starts a key-share claim (a session no longer on the
-  device leaves the row as it is), fetches nothing and acknowledges nothing.
-  Rows of a scope not on screen are left alone; opening it fetches and gates
-  them again.
+  session was announced is tried when it lands. Once a row opens, the quotes
+  of it that the gate left empty for want of a cache entry (noted for the
+  scope on screen, as the quote object itself, so a quote waits only while
+  the view shows that very object) and the conversation-list preview of it
+  are looked up in the cache again by their own rules (an entry of this
+  scope written by the author the quote or preview names); a quote the gate
+  locked because the server called it unencrypted is never one of them and
+  stays locked. The try never starts a key-share claim (a session no longer
+  on the device leaves the row as it is), fetches nothing and acknowledges
+  nothing. Rows of a scope not on screen are left alone; opening it fetches
+  and gates them again.
 - **Decrypted rows** (`decryptedRow`): text and attachments come out of the
   payload only; the type is pinned to `user` (a notice is never encrypted).
 - **Server-asserted fields** are always dropped (`withoutServerAssertions`):
