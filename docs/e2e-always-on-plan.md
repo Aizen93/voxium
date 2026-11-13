@@ -336,9 +336,11 @@ individually revertible; step 7 is the point of no return.
       clone, CI, a newly provisioned node) passes the gate untouched.
 
       `VOXIUM_ALLOW_CUTOVER=1` is the matching entrypoint switch; without it a
-      container whose database still has the cutover pending refuses to start
-      rather than applying it. Leave it unset everywhere except the one boot
-      that performs the release.
+      container whose existing database (migrations applied before) still has
+      the cutover pending refuses to start rather than applying it. A new,
+      empty database has every migration pending and nothing to lose, and
+      migrates without it. Leave it unset everywhere except the one boot that
+      performs the release.
 
       Use `prisma migrate deploy` and nothing else. NOT `prisma db execute`: it
       does not wrap the file in a transaction, so a statement killed part-way

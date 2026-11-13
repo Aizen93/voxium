@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -28,12 +28,17 @@ const prismaMock: Record<string, any> = {
   report: {
     findUnique: vi.fn(),
     findMany: vi.fn().mockResolvedValue([]),
-    update: vi.fn().mockResolvedValue({}),
+    // The transition out of pending is conditional (one row, or none when it already left)
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     count: vi.fn().mockResolvedValue(0),
   },
   message: {
     findUnique: vi.fn(),
     delete: vi.fn(),
+    deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+  },
+  messageAttachment: {
+    findMany: vi.fn().mockResolvedValue([]),
   },
   serverMember: {
     findMany: vi.fn().mockResolvedValue([]),
@@ -41,6 +46,11 @@ const prismaMock: Record<string, any> = {
   auditLog: {
     create: vi.fn().mockResolvedValue({}),
   },
+  // The resolution is one interactive transaction; the callback gets this client
+  $transaction: vi.fn((arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg))),
+  // The account-row locks a resolution takes first
+  // The row locks: the row is there unless a test says it is gone
+  $queryRaw: vi.fn((_sql: TemplateStringsArray, id: string) => Promise.resolve([{ id }])),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -119,15 +129,19 @@ vi.mock('../../utils/memberBroadcast', () => ({
 }));
 
 // S3
+const mockDeleteMultipleFromS3 = vi.fn(async (keys: string[]) => keys.length);
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,
   VALID_ATTACHMENT_KEY_RE: /^attachments\//,
   listAllS3Objects: vi.fn().mockResolvedValue([]),
   deleteFromS3: vi.fn().mockResolvedValue(undefined),
+  deleteMultipleFromS3: (keys: string[]) => mockDeleteMultipleFromS3(keys),
 }));
 
 // Audit log
-vi.mock('../../utils/auditLog', () => ({
+// The fire-and-forget writer is observed; the row a ban commits with is the real shape
+vi.mock('../../utils/auditLog', async (importOriginal) => ({
+  auditLogData: (await importOriginal<typeof import('../../utils/auditLog')>()).auditLogData,
   logAuditEvent: vi.fn(),
 }));
 
@@ -192,7 +206,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
 
   beforeEach(() => {
     vi.clearAllMocks();
-    prismaMock.report.update.mockResolvedValue({});
+    prismaMock.report.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.report.count.mockResolvedValue(0);
     prismaMock.user.update.mockResolvedValue({});
     prismaMock.serverMember.findMany.mockResolvedValue([]);
@@ -236,11 +250,16 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     expect(mockFetchSockets).not.toHaveBeenCalled();
   });
 
-  it('signs the banned account out right after the ban is written, even when the fan-out after it fails', async () => {
+  it('signs the banned account out right after the ban commits, and a fan-out that fails after it still answers 200', async () => {
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
     mockPendingReport('target-1');
     const order: string[] = [];
     prismaMock.user.update.mockImplementation(async () => { order.push('ban'); return {}; });
+    prismaMock.$transaction.mockImplementation(async (arg: any) => {
+      const r = await arg(prismaMock);
+      order.push('commit');
+      return r;
+    });
     mockEmit.mockImplementation((ev: string) => { order.push(ev); });
     mockDisconnectSockets.mockImplementation(() => { order.push('disconnect'); });
     prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's1' }]);
@@ -252,15 +271,225 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ resolution: 'Spam confirmed', action: 'ban' });
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, message: 'Report resolved' });
     expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
     expect(mockLocalDisconnectSockets).toHaveBeenCalledWith(true);
     expect(mockDisconnectSockets).toHaveBeenCalledWith(true);
-    expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('ban'));
+    expect(order.indexOf('force:logout')).toBeGreaterThan(order.indexOf('commit'));
+    expect(order.indexOf('commit')).toBeGreaterThan(order.indexOf('ban'));
     expect(order.indexOf('disconnect')).toBeGreaterThan(order.indexOf('force:logout'));
+    expect(consoleSpy).toHaveBeenCalledWith('[Admin] User target-1 banned, but the member:left broadcast to s1 failed:', 'adapter gone');
+    // The pending-report count still went out after the failed step
+    expect(order).toContain('report:new');
     consoleSpy.mockRestore();
     mockEmit.mockReset();
     mockDisconnectSockets.mockReset();
+    prismaMock.$transaction.mockImplementation((arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg)));
+  });
+
+  describe('the audit rows commit with the resolution', () => {
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+      mockPendingReport('target-1');
+      prismaMock.auditLog.create.mockReset().mockResolvedValue({});
+      consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleSpy.mockRestore();
+      prismaMock.$transaction.mockImplementation((arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg)));
+      mockRecomputeListedForOwner.mockReset().mockResolvedValue(0);
+    });
+
+    const resolve = (body: Record<string, unknown> = { resolution: 'Spam confirmed', action: 'ban' }) => request(app)
+      .post('/api/v1/admin/reports/rep-1/resolve')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send(body);
+
+    it('writes user.ban and report.resolve INSIDE the transaction that resolves the report and bans the account', async () => {
+      const order: string[] = [];
+      prismaMock.$transaction.mockImplementation(async (arg: any) => {
+        order.push('tx:start');
+        const r = await arg(prismaMock);
+        order.push('tx:end');
+        return r;
+      });
+      prismaMock.report.updateMany.mockImplementation(async () => { order.push('report'); return { count: 1 }; });
+      prismaMock.user.update.mockImplementation(async () => { order.push('ban'); return {}; });
+      prismaMock.auditLog.create.mockImplementation(async ({ data }: any) => { order.push(`audit:${data.action}`); return {}; });
+      prismaMock.webhook.findMany.mockResolvedValueOnce([{ serverId: 's-1' }]);
+
+      const res = await resolve();
+
+      expect(res.status).toBe(200);
+      expect(order).toEqual(['tx:start', 'report', 'ban', 'audit:user.ban', 'audit:report.resolve', 'tx:end']);
+      expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'admin-1', action: 'user.ban', targetType: 'user', targetId: 'target-1',
+          metadata: { reason: 'Report resolved: Spam confirmed', webhooksDisarmed: 1 },
+        },
+      });
+      expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actorId: 'admin-1', action: 'report.resolve', targetType: 'report', targetId: 'rep-1',
+          metadata: { resolution: 'Spam confirmed', action: 'ban', messageDeleted: false },
+        },
+      });
+    });
+
+    it('runs every write of the resolution on the TRANSACTION client, with the ban route\'s budget', async () => {
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: 'msg-1' });
+      prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
+      const tx = {
+        $queryRaw: vi.fn((_sql: TemplateStringsArray, id: string) => Promise.resolve([{ id }])),
+        webhook: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+        report: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        message: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        user: { update: vi.fn().mockResolvedValue({}) },
+        serverJoinRequest: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        auditLog: { create: vi.fn().mockResolvedValue({}) },
+      };
+      prismaMock.$transaction.mockImplementation((fn: (client: unknown) => Promise<unknown>) => fn(tx));
+
+      const res = await resolve({ resolution: 'Spam confirmed', action: 'ban', deleteMessage: true });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+      expect(tx.webhook.findMany).toHaveBeenCalledTimes(1);
+      expect(tx.report.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'rep-1', status: 'pending' } }));
+      expect(tx.message.deleteMany).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+      expect(tx.user.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'target-1' } }));
+      expect(tx.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { userId: 'target-1' } });
+      expect(tx.auditLog.create).toHaveBeenCalledTimes(2);
+      // The account rows FIRST, in sorted id order (the reporter's and the
+      // reported account's: either deletion cascades into the report), before
+      // the webhook, report and message rows. The banned account FOR NO KEY
+      // UPDATE; the innocent reporter only FOR KEY SHARE, so its presence
+      // write never waits behind a disarm queued on a webhook purge
+      const locks = (tx.$queryRaw.mock.calls as [TemplateStringsArray, string][])
+        .map(([sql, id]) => [sql.join('?').replace(/\s+/g, ' '), id]);
+      expect(locks).toEqual([
+        ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'reporter-9'],
+        ['SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE', 'target-1'],
+        ['SELECT id FROM messages WHERE id = ? FOR UPDATE', 'msg-1'],
+      ]);
+      expect(tx.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(tx.webhook.findMany.mock.invocationCallOrder[0]);
+      expect(tx.webhook.findMany.mock.invocationCallOrder[0]).toBeLessThan(tx.report.updateMany.mock.invocationCallOrder[0]);
+      // The message row BEFORE the report's (its author's delete takes them in
+      // that order), the delete itself only after the pending check
+      expect(tx.$queryRaw.mock.invocationCallOrder[2]).toBeLessThan(tx.report.updateMany.mock.invocationCallOrder[0]);
+      expect(tx.message.deleteMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.report.updateMany.mock.invocationCallOrder[0]);
+      for (const topLevel of [prismaMock.report.updateMany, prismaMock.message.deleteMany, prismaMock.message.delete, prismaMock.user.update,
+        prismaMock.serverJoinRequest.deleteMany, prismaMock.auditLog.create]) {
+        expect(topLevel).not.toHaveBeenCalled();
+      }
+      // The second disarm pass runs after the commit, on the top-level client
+      expect(prismaMock.webhook.findMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.webhook.findMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.auditLog.create.mock.invocationCallOrder[1]);
+    });
+
+    it('a resolution without a ban writes no account: both rows are only kept from deletion (FOR KEY SHARE)', async () => {
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: null });
+      prismaMock.$queryRaw.mockClear();
+
+      const res = await resolve({ resolution: 'Not actionable' });
+
+      expect(res.status).toBe(200);
+      const locks = (prismaMock.$queryRaw.mock.calls as [TemplateStringsArray, string][])
+        .map(([sql, id]) => [sql.join('?').replace(/\s+/g, ' '), id]);
+      expect(locks).toEqual([
+        ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'reporter-9'],
+        ['SELECT id FROM users WHERE id = ? FOR KEY SHARE', 'target-1'],
+      ]);
+    });
+
+    it.each([
+      ['the reported account', 'target-1'],
+      ['the reporter', 'reporter-9'],
+    ])('%s deleted between the read and the lock took the report with it: 404, nothing written', async (_who, goneId) => {
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: null });
+      prismaMock.$queryRaw.mockImplementation((_sql: TemplateStringsArray, id: string) => Promise.resolve(id === goneId ? [] : [{ id }]));
+      try {
+        const res = await resolve();
+
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ success: false, error: 'Report not found' });
+        expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
+        expect(prismaMock.user.update).not.toHaveBeenCalled();
+        expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+      } finally {
+        prismaMock.$queryRaw.mockImplementation((_sql: TemplateStringsArray, id: string) => Promise.resolve([{ id }]));
+      }
+    });
+
+    it('a report resolved with a ban runs the second disarm pass too', async () => {
+      prismaMock.webhook.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ serverId: 's-late' }]);
+      prismaMock.webhook.updateMany.mockResolvedValue({ count: 1 });
+
+      const res = await resolve();
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+      expect(mockEmit).toHaveBeenCalledWith('webhook:changed', { serverId: 's-late' });
+    });
+
+    it('signs the banned account out right after the commit, before any notice', async () => {
+      prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', messageId: 'msg-1' });
+      prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
+      const order: string[] = [];
+      mockEmit.mockImplementation((ev: string) => { order.push(ev); });
+
+      const res = await resolve({ resolution: 'Spam confirmed', action: 'ban', deleteMessage: true });
+
+      expect(res.status).toBe(200);
+      expect(order.indexOf('force:logout')).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf('force:logout')).toBeLessThan(order.indexOf('message:delete'));
+      expect(order.indexOf('force:logout')).toBeLessThan(order.indexOf('report:new'));
+      mockEmit.mockReset();
+    });
+
+    it('a resolution whose transaction fails records nothing, bans nobody and signs nobody out', async () => {
+      prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+
+      const res = await resolve();
+
+      expect(res.status).toBe(500);
+      expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+      expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the directory recompute', () => mockRecomputeListedForOwner.mockRejectedValueOnce(new Error('step failed'))],
+      ['the join-request withdrawal notice to s-9', () => {
+        prismaMock.serverJoinRequest.findMany.mockResolvedValueOnce([{ serverId: 's-9' }]);
+        mockEmitToModerators.mockRejectedValueOnce(new Error('step failed'));
+      }],
+      ['the membership read', () => prismaMock.serverMember.findMany.mockRejectedValueOnce(new Error('step failed'))],
+    ])('a rejecting step after the commit (%s) is logged and the resolution still answers 200', async (step, arrange) => {
+      arrange();
+
+      const res = await resolve();
+
+      expect(res.status).toBe(200);
+      expect(consoleSpy).toHaveBeenCalledWith(`[Admin] User target-1 banned, but ${step} failed:`, 'step failed');
+      expect(mockEmit).toHaveBeenCalledWith('force:logout', { reason: 'Your account has been banned' });
+      expect(mockEmit).toHaveBeenCalledWith('report:new', { total: 0 });
+    });
+
+    it('a pending-report count that fails is logged and the resolution still answers 200', async () => {
+      prismaMock.report.count.mockRejectedValueOnce(new Error('db gone'));
+
+      const res = await resolve({ resolution: 'Not actionable' });
+
+      expect(res.status).toBe(200);
+      expect(consoleSpy).toHaveBeenCalledWith('[Admin] Report rep-1 resolved, but the pending-report count update failed:', 'db gone');
+    });
   });
 
   it('resolving WITHOUT a ban leaves the directory alone', async () => {
@@ -289,7 +518,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
     expect(res.status).toBe(403);
     expect(res.body.error).toContain('Only super admins can ban other admins');
     // Pre-validation: the report must be left untouched
-    expect(prismaMock.report.update).not.toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
     expect(prismaMock.user.update).not.toHaveBeenCalled();
   });
 
@@ -319,7 +548,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
 
     expect(res.status).toBe(403);
     expect(res.body.error).toContain('Cannot ban a super admin');
-    expect(prismaMock.report.update).not.toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
   });
 
   it('an admin cannot self-ban via a report against themselves', async () => {
@@ -333,7 +562,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
 
     expect(res.status).toBe(403);
     expect(res.body.error).toContain('Cannot ban yourself');
-    expect(prismaMock.report.update).not.toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).not.toHaveBeenCalled();
   });
 
   it('resolving WITHOUT a ban action never touches the reported user', async () => {
@@ -346,7 +575,7 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       .send({ resolution: 'No action needed' });
 
     expect(res.status).toBe(200);
-    expect(prismaMock.report.update).toHaveBeenCalled();
+    expect(prismaMock.report.updateMany).toHaveBeenCalled();
     expect(prismaMock.user.update).not.toHaveBeenCalled();
     expect(mockBroadcastMemberLeft).not.toHaveBeenCalled();
   });
@@ -366,6 +595,170 @@ describe('POST /admin/reports/:id/resolve — ban action hierarchy (HIGH-7)', ()
       .send({ action: 'ban' });
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe('POST /admin/reports/:id/resolve — deleting the reported message', () => {
+  const KEY = 'attachments/ch-chan1/clmsg1-photo.png';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.report.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.report.count.mockResolvedValue(0);
+    prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', messageId: 'msg-1' });
+    prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
+    prismaMock.message.deleteMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
+    mockDeleteMultipleFromS3.mockReset().mockImplementation(async (keys: string[]) => keys.length);
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+  });
+
+  const resolve = () => request(createApp())
+    .post('/api/v1/admin/reports/rep-1/resolve')
+    .set('Authorization', `Bearer ${makeToken()}`)
+    .send({ resolution: 'Removed', deleteMessage: true });
+
+  it('reads its attachment keys before the row and deletes the files after it', async () => {
+    prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+
+    const res = await resolve();
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.message.deleteMany).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+    expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { expired: false, message: { id: 'msg-1' } },
+    }));
+    expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([KEY]);
+    const deleteOrder = prismaMock.message.deleteMany.mock.invocationCallOrder[0];
+    expect(prismaMock.messageAttachment.findMany.mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
+    expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+    expect(mockEmit).toHaveBeenCalledWith('message:delete', { messageId: 'msg-1', channelId: 'chan1' });
+  });
+
+  it('touches storage not at all for a message without attachments', async () => {
+    const res = await resolve();
+
+    expect(res.status).toBe(200);
+    expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+  });
+
+  it('a resolution whose transaction fails deletes no file and announces no delete', async () => {
+    prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+    prismaMock.message.deleteMany.mockRejectedValueOnce(new Error('db gone'));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await resolve();
+
+      expect(res.status).toBe(500);
+      expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('a message its author deleted meanwhile still resolves the report, with nothing to announce', async () => {
+    prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+    prismaMock.message.deleteMany.mockResolvedValueOnce({ count: 0 });
+
+    const res = await resolve();
+
+    expect(res.status).toBe(200);
+    expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalledWith('message:delete', expect.anything());
+  });
+
+  it('a delete notice that throws still answers 200 and the files still go', async () => {
+    prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEY }]);
+    mockEmit.mockImplementationOnce(() => { throw new Error('adapter gone'); });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await resolve();
+
+      expect(res.status).toBe(200);
+      expect(mockDeleteMultipleFromS3).toHaveBeenCalledWith([KEY]);
+      expect(errorLog).toHaveBeenCalledWith('[Admin] Report rep-1 resolved, but the message delete notice failed:', 'adapter gone');
+    } finally {
+      errorLog.mockRestore();
+      mockEmit.mockReset();
+    }
+  });
+});
+
+describe('POST /admin/reports/:id/resolve|dismiss — a report leaves pending once', () => {
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.report.count.mockResolvedValue(0);
+    prismaMock.report.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.message.deleteMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.auditLog.create.mockReset().mockResolvedValue({});
+    prismaMock.user.update.mockReset().mockResolvedValue({});
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' } });
+    prismaMock.report.findUnique.mockResolvedValue({ id: 'rep-1', status: 'pending', reportedUserId: 'target-1', reporterId: 'reporter-9', messageId: 'msg-1' });
+    prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: 'chan1', conversationId: null });
+    errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorLog.mockRestore();
+  });
+
+  const post = (path: string, body: Record<string, unknown>) => request(createApp())
+    .post(`/api/v1/admin/reports/rep-1/${path}`)
+    .set('Authorization', `Bearer ${makeToken()}`)
+    .send(body);
+
+  it('a resolve that finds the report already resolved or dismissed by the time it writes answers the conflict and bans nobody', async () => {
+    // Read as pending, but another resolve (or a dismiss) committed first
+    prismaMock.report.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const res = await post('resolve', { resolution: 'Spam', action: 'ban', deleteMessage: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Report is already processed' });
+    expect(prismaMock.report.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'rep-1', status: 'pending' } }));
+    // The transaction stopped at the transition: no delete, no ban, no audit row, nobody signed out
+    expect(prismaMock.message.deleteMany).not.toHaveBeenCalled();
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalledWith('force:logout', expect.anything());
+  });
+
+  it('a dismiss that finds the report already resolved by the time it writes answers the conflict and audits nothing', async () => {
+    const { logAuditEvent } = await import('../../utils/auditLog');
+    prismaMock.report.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const res = await post('dismiss', {});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Report is already processed' });
+    expect(prismaMock.report.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'rep-1', status: 'pending' }, data: expect.objectContaining({ status: 'dismissed' }),
+    }));
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('a dismiss of a pending report still dismisses it', async () => {
+    const res = await post('dismiss', {});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, message: 'Report dismissed' });
+  });
+
+  it.each([
+    ['deleted it', 1, true],
+    ['found it already deleted by its author', 0, false],
+  ])('the report.resolve row says messageDeleted only when this resolution %s', async (_what, count, expected) => {
+    prismaMock.message.deleteMany.mockResolvedValueOnce({ count });
+
+    const res = await post('resolve', { resolution: 'Removed', deleteMessage: true });
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: 'report.resolve', metadata: expect.objectContaining({ messageDeleted: expected }) }),
+    });
   });
 });
 

@@ -15,6 +15,7 @@ import { trustsProxy, forwardedClientAddress } from '../utils/trustProxy';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { Permissions } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
+import { visibilityRequestMark, resyncAfterJoins } from '../utils/channelVisibilityRooms';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -167,6 +168,9 @@ export function initSocketServer(httpServer: HttpServer) {
     socket.on('channel:join', async (channelId: string) => {
       if (!socketRateLimit(socket, 'channel:join', 60)) return;
       if (typeof channelId !== 'string' || !channelId) return;
+      // Before the permission read: a resync of the space landing between
+      // that read and the join below gets the room re-checked after it
+      const visibilityMark = visibilityRequestMark();
       try {
         // Single query: find channel + verify membership in one shot
         const channel = await prisma.channel.findUnique({
@@ -189,6 +193,7 @@ export function initSocketServer(httpServer: HttpServer) {
         const canView = await hasChannelPermission(userId, channelId, channel.serverId, Permissions.VIEW_CHANNEL);
         if (!canView) return;
         socket.join(`channel:${channelId}`);
+        resyncAfterJoins(visibilityMark, userId, [channel.serverId], channelId);
         console.log(`[WS] ${userId} (${socket.id}) joined room channel:${channelId}`);
       } catch (err) {
         console.error(`[WS] channel:join auth check failed for ${userId}:`, err);
@@ -446,6 +451,10 @@ export function initSocketServer(httpServer: HttpServer) {
     let memberships: Array<{ serverId: string }> = [];
     let visibleChannels: Array<{ id: string; serverId: string; type: string; secure: boolean }> = [];
     try {
+      // Before the visibility read: a resync of one of these spaces landing
+      // between that read and the joins below gets the socket's rooms in that
+      // space re-checked after them (one comparison when none landed)
+      const visibilityMark = visibilityRequestMark();
       // Join rooms for all servers the user is a member of
       memberships = await prisma.serverMember.findMany({
         where: { userId },
@@ -475,6 +484,7 @@ export function initSocketServer(httpServer: HttpServer) {
       for (const ch of visibleChannels) {
         socket.join(`channel:${ch.id}`);
       }
+      resyncAfterJoins(visibilityMark, userId, memberships.map((m) => m.serverId));
     } catch (err) {
       console.error(`[WS] Error joining server/channel rooms for ${userId}:`, err);
     }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 
@@ -51,6 +51,13 @@ vi.mock('../../websocket/socketServer', () => ({
     in: mockIn,
     local: { in: mockLocalIn },
   }),
+}));
+
+// The DM call teardown (its own suite is websocket/dmVoiceHandler.test.ts):
+// the conversation delete ends a call in progress through it
+const mockEndDMCall = vi.hoisted(() => vi.fn().mockResolvedValue([]));
+vi.mock('../../websocket/dmVoiceHandler', () => ({
+  endDMCall: (...args: unknown[]) => mockEndDMCall(...args),
 }));
 
 // Mock S3
@@ -655,6 +662,30 @@ describe('DM routes — DELETE /:conversationId', () => {
     expect(mockEmit).toHaveBeenCalledWith('dm:conversation:deleted', { conversationId: 'conv-1' });
   });
 
+  it('reads the kept attachment keys in bounded batches before the row and deletes the files after it', async () => {
+    const { deleteMultipleFromS3 } = await import('../../utils/s3');
+    const keys = ['attachments/dm-conv-1/clmsg1-blob.bin', 'attachments/dm-conv-1/clmsg2-blob.bin'];
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([
+      { id: 'att-1', s3Key: keys[0] }, { id: 'att-2', s3Key: keys[1] },
+    ] as any);
+    vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
+
+    const res = await request(createApp()).delete('/api/v1/dm/conv-1');
+
+    expect(res.status).toBe(200);
+    expect(prisma.messageAttachment.findMany).toHaveBeenCalledWith({
+      where: { expired: false, message: { conversationId: 'conv-1' } },
+      select: { id: true, s3Key: true },
+      orderBy: { id: 'asc' },
+      take: 1000,
+    });
+    expect(deleteMultipleFromS3).toHaveBeenCalledWith(keys);
+    const deleteOrder = vi.mocked(prisma.conversation.delete).mock.invocationCallOrder[0];
+    expect(vi.mocked(prisma.messageAttachment.findMany).mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
+    expect(vi.mocked(deleteMultipleFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+  });
+
   it('returns 403 for non-participant', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
       ...mockConversation,
@@ -729,6 +760,113 @@ describe('DM routes — DELETE /:conversationId', () => {
       } finally {
         mockFetchSockets.mockResolvedValue([]);
       }
+    });
+  });
+
+  describe('a call in progress', () => {
+    const deleteConversation = () => {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
+      vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
+      return request(createApp()).delete('/api/v1/dm/conv-1');
+    };
+
+    beforeEach(() => {
+      mockEndDMCall.mockReset().mockResolvedValue(['user-1', 'user-2']);
+    });
+
+    it('ends with the conversation, without a "call ended" notice the deleted conversation could not hold', async () => {
+      const res = await deleteConversation();
+
+      expect(res.status).toBe(200);
+      expect(mockEndDMCall).toHaveBeenCalledTimes(1);
+      expect(mockEndDMCall).toHaveBeenCalledWith(expect.anything(), 'conv-1', { notice: false });
+    });
+
+    it('ends after the row is deleted, and before dm:{id} is emptied (dm:voice:ended goes to that room)', async () => {
+      await deleteConversation();
+
+      const endOrder = mockEndDMCall.mock.invocationCallOrder[0];
+      expect(endOrder).toBeGreaterThan(vi.mocked(prisma.conversation.delete).mock.invocationCallOrder[0]);
+      expect(endOrder).toBeLessThan(mockLocalSocketsLeave.mock.invocationCallOrder[0]);
+      expect(endOrder).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
+      const noticeIndex = mockEmit.mock.calls.findIndex(([event]) => event === 'dm:conversation:deleted');
+      expect(endOrder).toBeLessThan(mockEmit.mock.invocationCallOrder[noticeIndex]);
+    });
+
+    it('a call teardown that rejects still answers the delete, notifies the other side and empties the room', async () => {
+      mockEndDMCall.mockRejectedValueOnce(new Error('redis gone'));
+      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const res = await deleteConversation();
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ success: true, message: 'Conversation deleted' });
+        expect(mockEmit).toHaveBeenCalledWith('dm:conversation:deleted', { conversationId: 'conv-1' });
+        expect(mockLocalSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
+        expect(mockSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
+        expect(errorLog).toHaveBeenCalledWith('[DM] Conversation conv-1 deleted, but ending its call failed:', 'redis gone');
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
+  });
+
+  describe('the steps after the delete are best effort', () => {
+    let errorLog: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockEndDMCall.mockReset().mockResolvedValue([]);
+      errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      errorLog.mockRestore();
+      mockEmit.mockReset();
+      mockLocalSocketsLeave.mockReset();
+      mockSocketsLeave.mockReset();
+    });
+
+    const deleteConversation = () => {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
+      vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
+      return request(createApp()).delete('/api/v1/dm/conv-1');
+    };
+
+    it('a notice that throws still empties the room and answers 200', async () => {
+      mockEmit.mockImplementationOnce(() => { throw new Error('adapter publish failed'); });
+
+      const res = await deleteConversation();
+
+      expect(res.status).toBe(200);
+      expect(mockSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
+      expect(errorLog).toHaveBeenCalledWith('[DM] Conversation conv-1 deleted, but the dm:conversation:deleted notice failed:', 'adapter publish failed');
+    });
+
+    it('a local room leave that throws still runs the cluster one and answers 200', async () => {
+      mockLocalSocketsLeave.mockImplementationOnce(() => { throw new Error('local adapter failed'); });
+      mockSocketsLeave.mockImplementationOnce(() => { throw new Error('cluster adapter failed'); });
+
+      const res = await deleteConversation();
+
+      expect(res.status).toBe(200);
+      expect(mockSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
+      expect(errorLog).toHaveBeenCalledWith('[DM] Conversation conv-1 deleted, but the local room leave failed:', 'local adapter failed');
+      expect(errorLog).toHaveBeenCalledWith('[DM] Conversation conv-1 deleted, but the cluster room leave failed:', 'cluster adapter failed');
+    });
+
+    it('a row delete that fails ends no call and announces nothing', async () => {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
+      vi.mocked(prisma.conversation.delete).mockRejectedValueOnce(new Error('db gone'));
+
+      const res = await request(createApp()).delete('/api/v1/dm/conv-1');
+
+      expect(res.status).toBe(500);
+      expect(mockEndDMCall).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockSocketsLeave).not.toHaveBeenCalled();
     });
   });
 });

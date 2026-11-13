@@ -210,6 +210,8 @@ const ERROR_MAP: Record<string, string> = {
   'Too many verification emails requested — try again tomorrow': 'tooManyVerificationEmails',
   // The mailbox blocked Voxium mail ("Not you? …" in an earlier e-mail); only a resend can hear it
   'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again': 'mailBlocked',
+  // A resend whose mail could not be sent: the earlier link still works and the day's budget is untouched
+  'The verification email could not be sent — please try again later': 'verificationEmailSendFailed',
   'Registration challenge is invalid or expired — refresh and try again': 'registrationChallengeInvalid',
   // The registration proof of work fails on the CLIENT too (shared/pow.ts,
   // services/powSolver.ts) and reaches the form through the same helper

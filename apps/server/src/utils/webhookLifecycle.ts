@@ -1,4 +1,5 @@
 import { WS_EVENTS, type Webhook as WebhookDto, type WebhookType } from '@voxium/shared';
+import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { getIO } from '../websocket/socketServer';
 
@@ -232,13 +233,27 @@ async function detachOrPurgeInBatches(webhookId: string, purge: boolean): Promis
  * after their refetch hint went out. An unban does not re-arm them.
  */
 export async function disarmWebhooksHeldBy(userId: string): Promise<string[]> {
-  const held = { OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }] };
-  const rows = await prisma.webhook.findMany({ where: held, select: { serverId: true }, distinct: ['serverId'] });
-  if (rows.length === 0) return [];
-  await prisma.webhook.updateMany({ where: held, data: { enabled: false, creatorRemovedAt: new Date() } });
-  const serverIds = rows.map((r) => r.serverId);
+  const serverIds = await disarmWebhookRowsHeldBy(prisma, userId);
   for (const serverId of serverIds) emitWebhookChanged(serverId);
   return serverIds;
+}
+
+/**
+ * The write half of disarmWebhooksHeldBy, on the client given: the admin ban
+ * routes run it inside the ban's own transaction, so the URLs stop posting in
+ * the same commit as the ban, and send the `webhook:changed` hints for the
+ * returned servers after that commit. Two sequential statements, never in a
+ * Promise.all (a transaction's one connection runs one query at a time).
+ */
+export async function disarmWebhookRowsHeldBy(
+  client: Pick<Prisma.TransactionClient, 'webhook'>,
+  userId: string,
+): Promise<string[]> {
+  const held = { OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }] };
+  const rows = await client.webhook.findMany({ where: held, select: { serverId: true }, distinct: ['serverId'] });
+  if (rows.length === 0) return [];
+  await client.webhook.updateMany({ where: held, data: { enabled: false, creatorRemovedAt: new Date() } });
+  return rows.map((r) => r.serverId);
 }
 
 /**

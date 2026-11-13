@@ -1,8 +1,10 @@
+import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { purgeE2EMaterial } from './e2ePurge';
 import { purgeSecureChannelStateForAccount } from './secureChannelLifecycle';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { deleteFromS3 } from './s3';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
 import { revokeUserSessions } from './sessionRevocation';
 import { emitToModerators } from './moderatorAudience';
 import { WS_EVENTS } from '@voxium/shared';
@@ -11,7 +13,8 @@ import { WS_EVENTS } from '@voxium/shared';
  * Delete an account that owns NO servers, with everything that has to happen
  * around the row going: the surviving members of its servers told, its live
  * sessions ended, its secure channels and E2E key material purged, and its
- * avatar blob removed AFTER the row.
+ * avatar and the attachment files of the messages the delete cascades
+ * removed AFTER the row.
  *
  * Shared by the admin delete-user flow (which first resolves the servers
  * the account owns, by transfer or deletion) and the self-service
@@ -59,6 +62,32 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // membership lists refresh). Best-effort, before the delete.
   await purgeSecureChannelStateForAccount(userId);
 
+  // The user delete cascades every message the account wrote, in every
+  // channel, and both sides of every conversation it was in (Message.author
+  // and both Conversation users are onDelete: Cascade), attachment rows
+  // included. Their keys are read now and the files deleted once the delete
+  // has committed. (The secure channels the account created were deleted
+  // just above, with their own files.) One read per indexed column, merged:
+  // an OR across messages and conversations starts from no index and walked
+  // the attachments of every message ever sent. A message the account wrote
+  // in its own conversation is found twice, hence the Set. A read that fails
+  // must not stop the erasure: the sessions are already revoked and the
+  // secure channels already gone, so it is logged, those files are left to
+  // the nightly orphan sweep, and the deletion goes on.
+  const readKeys = async (messages: Prisma.MessageWhereInput, what: string): Promise<string[]> => {
+    try {
+      return await collectAttachmentKeys(messages);
+    } catch (err) {
+      console.error(`${opts.logPrefix} Reading the attachment keys of ${what} failed (the orphan sweep will reclaim those files):`, err instanceof Error ? err.message : err);
+      return [];
+    }
+  };
+  const attachmentKeys = [...new Set([
+    ...await readKeys({ authorId: userId }, "the account's messages"),
+    ...await readKeys({ conversation: { user1Id: userId } }, "the account's conversations (first side)"),
+    ...await readKeys({ conversation: { user2Id: userId } }, "the account's conversations (second side)"),
+  ])];
+
   // E2E key material has no FK to User (except the key backup), so it would
   // otherwise outlive the account it belongs to. One transaction with the
   // delete: purging a user who then survives strands every device they own.
@@ -88,6 +117,8 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // the row still existed joined user:{id} after the first pass and passed
   // the connection handler's re-check. Any later handshake finds no row.
   revokeUserSessions(userId, { forceLogoutReason: opts.reason });
+
+  deleteAttachmentBlobs(attachmentKeys, opts.logPrefix, 'a deleted account');
 
   for (const { serverId } of pendingRequests) {
     await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'cancelled' });

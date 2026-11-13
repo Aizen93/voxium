@@ -17,7 +17,10 @@ use windows_sys::Win32::System::Console::{
 /// The console events that end the app quietly. Anything else (log-off,
 /// shutdown) is left to the next handler, Windows' default.
 fn ends_the_process(ctrl_type: u32) -> bool {
-    matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT)
+    matches!(
+        ctrl_type,
+        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT
+    )
 }
 
 /// Runs on a thread Windows creates for the event.
