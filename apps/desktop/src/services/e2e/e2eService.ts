@@ -330,8 +330,9 @@ const MAX_CLAIM_REQUESTS = 25;
  * acknowledgements all failed. Dropping one costs a delivery, never a key:
  * its share, if the server still has it, is handed out again after its
  * lease, recognised by its session if it was imported (one discarded as
- * unusable has no session and is processed again), and acknowledged then. The cap bounds
- * the vault (an id and a time each) and what one pass of the sender sends
+ * unusable has no session and is processed again), and acknowledged then.
+ * The cap bounds the vault (an id and a time each) and what one pass of the
+ * sender sends
  * (40 requests, inside the server's 60 a minute for acknowledgements).
  */
 const MAX_OWED_SHARE_ACKS = 2 * MAX_CLAIM_PAGES * E2E_LIMITS.KEYSHARE_ACK_MAX;
@@ -3423,7 +3424,7 @@ export class E2EService {
               // no answer to write: the connection kept for one is not needed
               if (this.tornDown) this.vault.releaseLateConnection();
               // the server may have leased this page all the same
-                          else if (answerLost(err)) {
+              else if (answerLost(err)) {
                 lostInRun = true;
                 this.claimAgainAfterLease();
               }
@@ -3434,7 +3435,7 @@ export class E2EService {
             .finally(() => {
               this.claimPageInFlight = false;
             });
-                  answeredInRun = true;
+          answeredInRun = true;
           if (this.tornDown) {
             // Torn down while the answer was on its way: write it raw on the
             // connection the teardown kept for it, for the next start, and stop.
@@ -3461,7 +3462,7 @@ export class E2EService {
           // Not once disposed: the next start sends what this page settled
           this.sendShareAcksDetached();
           // the server's count, malformed elements included, decides whether more pages wait
-                  if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
+          if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
         }
       } finally {
         if (answeredInRun && !lostInRun) this.lostClaimRetries = 0;
@@ -3480,11 +3481,12 @@ export class E2EService {
    * lease passes, and nothing else claims again before the next decrypt miss
    * or start. One timer queues a claim once the lease has passed; a later lost
    * answer re-arms it, dispose() clears it. LOST_CLAIM_RETRY_MAX in a row at
-   * most (none while the device is offline: not armed, not counted), so a device that stays offline stops; a run that ends with no lost
-   * claim (one at least answered) starts the count again (claimKeyShares).
+   * most (none while the device is offline: not armed, not counted), so a
+   * device that stays offline stops; a run that ends with no lost claim (one
+   * at least answered) starts the count again (claimKeyShares).
    */
   private claimAgainAfterLease(): void {
-        if (this.disposed || this.lostClaimRetries >= LOST_CLAIM_RETRY_MAX) return;
+    if (this.disposed || this.lostClaimRetries >= LOST_CLAIM_RETRY_MAX) return;
     // Offline: nothing is armed and the attempt is not counted; the fetches of
     // the reconnect cause the next claim.
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;

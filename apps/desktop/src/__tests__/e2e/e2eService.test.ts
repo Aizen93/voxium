@@ -6375,7 +6375,7 @@ describe('E2EService — lifecycle', () => {
             state.inRun = 0;
             await after(again, 20_000); // past the decrypt-miss throttle
             expect((await again.decryptMessage(miss)).failed).toBe(true);
-                        expect(vi.getTimerCount()).toBe(1); // armed again: the count began at zero
+            expect(vi.getTimerCount()).toBe(1); // armed again: the count began at zero
           } finally {
             warn.mockRestore();
           }
@@ -6400,7 +6400,7 @@ describe('E2EService — lifecycle', () => {
             expect(vi.getTimerCount()).toBe(1);
             expect(retries()).toBe(1);
           } finally {
-                        warn.mockRestore();
+            warn.mockRestore();
             vi.unstubAllGlobals();
           }
         });

@@ -138,7 +138,7 @@ async function oneSession(): Promise<void> {
 async function twoSessions(): Promise<void> {
   {
     const all = await seed('inflight', 3);
-        const first = holdOpen(a, (tx) => leaseKeyShares(tx, user, 'inflight'));
+    const first = holdOpen(a, (tx) => leaseKeyShares(tx, user, 'inflight'));
     const mine = await first.inside;
     const holdTimer = setTimeout(first.release, CLAIM_HOLD_MS);
     const t0 = Date.now();
@@ -181,7 +181,7 @@ async function twoSessions(): Promise<void> {
   {
     const [x, y] = await seed('ack-first', 2);
     const ack = holdOpen(b, (tx) => acknowledgeKeyShares(tx, user, 'ack-first', [x]));
-        await ack.inside;
+    await ack.inside;
     const holdTimer = setTimeout(ack.release, CLAIM_HOLD_MS);
     const t0 = Date.now();
     const claimed = await leaseKeyShares(a, user, 'ack-first');
