@@ -180,11 +180,18 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * account's member row before any other row this transaction holds and waits
  * there; that rests on the order PostgreSQL fires the cascade triggers of
  * `servers` in (by constraint id: `server_members` ahead of `channels` on a
- * database built from these migrations). One cycle stays possible: a kick of
- * the account from a space it joined while this transaction runs, when the
- * kick locks that new member row after step 4 has locked the account row and
- * before the second member-row delete reaches the row (the kick's ban then
- * key-shares the account row). PostgreSQL aborts one side and the aborted
+ * database built from these migrations). Two cycles stay possible, both on a
+ * membership the account gained after step 1. A kick of the account from
+ * that space, when the kick locks the new member row after step 4 has locked
+ * the account row and before the second member-row delete reaches the row
+ * (the kick's ban then key-shares the account row). A transfer to the
+ * account in that space, when its batch has locked the space row and the new
+ * member row before step 4 locks the account row: its owner update then
+ * waits to key-share the account row while the second member-row delete
+ * waits for the member row. No single order serves a transfer against both
+ * member-row deletes: this transaction deletes the account's earlier member
+ * rows before it locks its account row, and its later ones after. PostgreSQL
+ * aborts one side and the aborted
  * side runs again whole: every transaction named here is retried
  * (retryOnTransactionConflict), and a retry of this one after a transfer to
  * the account committed answers OwnedServersError (below).

@@ -743,8 +743,11 @@ function demotedRow(result: unknown): boolean {
  * owner's transfer do (for an heir who is a member: the space row, then the
  * heir's member row, then the owner update that key-shares the heir's
  * account row), after a wait, holding nothing, for the heir's rows it takes
- * after the space row (waitForHeirRows). PostgreSQL may abort a batch to
- * break a deadlock nobody foresaw; the WHOLE attempt then runs again
+ * after the space row (waitForHeirRows). The two cycles the owner's transfer
+ * keeps are this batch's too (routes/servers.ts: a removal of the heir that
+ * locks the heir's member row between the wait and the batch, an account
+ * deletion of the heir for a membership gained during it). PostgreSQL aborts
+ * one side; the WHOLE attempt then runs again
  * (retryOnTransactionConflict), the heir's membership read included, so each
  * attempt picks its branch from what is true now. The statements carry the
  * checks, so a retry cannot outlive them: the space row is updated only while
@@ -787,7 +790,9 @@ export async function transferOwnedSpaceToHeir(
         // space row, then the heir's member row, both FOR NO KEY UPDATE,
         // before the owner update key-shares the heir's account row: the
         // order of the owner's transfer route (routes/servers.ts), so an
-        // account deletion of the heir queues with this batch on the member row
+        // account deletion of the heir queues with this batch on the member
+        // row, except for a membership the heir gained during that deletion
+        // (the cycle deleteAccountRows names, retried on both sides)
         const [, , , , demotion] = await prisma.$transaction([
           prisma.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR NO KEY UPDATE`,
           prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${heirId} AND server_id = ${serverId} FOR NO KEY UPDATE`,

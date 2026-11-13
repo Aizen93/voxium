@@ -137,9 +137,13 @@ async function waitForHeldWebhookRows(userId: string, serverId: string): Promise
  *       key-share lock on it), which every join, secure-channel creation and
  *       webhook creation also takes, so it is held for the shortest time,
  *       never across the cascade of a departing creator's channels.
- *    The whole transaction is run again (twice at most) when PostgreSQL
- *    aborts it to break a deadlock (retryOnTransactionConflict): a net for a
- *    lock order nobody foresaw, never for any other error.
+ *    The whole transaction is run again when PostgreSQL aborts it to break a
+ *    deadlock (retryOnTransactionConflict), never for any other error. Two
+ *    writers take this transaction's first and last rows in the other order:
+ *    a space delete (the space row, then the member rows) and a transfer to
+ *    the member (the space row, then this member row; it waits for the member
+ *    row first, holding nothing, so the cycle needs this transaction to lock
+ *    the row between that wait and the transfer's batch).
  * 3. After the commit, best effort: their ChannelRead rows in the space (they
  *    grant nothing, and outside the transaction they are not one more lock a
  *    channel delete's cascade takes in another order), the attachment files

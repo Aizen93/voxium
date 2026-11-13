@@ -1309,8 +1309,15 @@ serverRouter.post(
       // through its key, then the two member rows. The heir's member row is
       // locked before the heir's account row is key-shared: an account
       // deletion of the heir deletes its member rows before it locks its
-      // account row, so the two queue on the member row. PostgreSQL may abort
-      // the batch to break a deadlock nobody foresaw; it then runs again. The
+      // account row, so the two queue on the member row. Two cycles remain,
+      // and PostgreSQL aborts one side of either; an aborted batch runs again,
+      // its wait included. One is a removal of the heir that locks the heir's
+      // member row after the wait and before the batch does, then waits for
+      // the space row the batch holds: a space delete takes the space row
+      // before the member rows and a removal the member row before the space
+      // row, so no order of this batch serves both. The other is an account
+      // deletion of the heir, for a membership the heir gained after the
+      // deletion's first member-row delete (deleteAccountRows). The
       // checks above are carried by the statements themselves, so they hold
       // on every attempt: the space row only while the actor still owns it,
       // the actor's row only while it is the owner's, the heir's row only
