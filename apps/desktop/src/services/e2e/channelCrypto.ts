@@ -12,6 +12,7 @@ import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
 import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 import { isE2ESessionEnded } from './session';
+import { arrivalMark, forgetUndecrypted, holdUndecrypted } from './undecryptedRows';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
@@ -65,6 +66,9 @@ async function decryptChannelOneForDisplay(input: Message): Promise<Message> {
   // e2eAttachments come out of the decrypted payload only, and mentions are
   // never resolved for encrypted rows (see dmCrypto)
   const message = withoutServerAssertions(input);
+  // This answer replaces any earlier one for the id; held again below only
+  // when it is a decrypt failure (undecryptedRows.ts)
+  forgetUndecrypted(message.id);
   if (!message.encrypted) {
     // Secure channels have no server notices at all: every unencrypted row is
     // refused, `type: 'system'` included (the type is the server's word)
@@ -81,6 +85,8 @@ async function decryptChannelOneForDisplay(input: Message): Promise<Message> {
   const scope = e2eChannelScope(message.channelId);
   const own = message.author?.id === userId;
 
+  // before the decrypt: a session stored while it runs makes this row due too
+  const mark = arrivalMark();
   const result = await service.decryptMessage({
     id: message.id,
     conversationId: scope,
@@ -107,7 +113,9 @@ async function decryptChannelOneForDisplay(input: Message): Promise<Message> {
     }
   }
   // Nothing vouched for this row: the refused shape, its quote still resolvable
-  // from the local cache
+  // from the local cache. Held, so that its group session reaching this device
+  // later opens it in place (redecryptOnKeyArrival.ts)
+  holdUndecrypted(message, scope, mark);
   return resolveReplyPreview(refusedRow(message), userId);
 }
 

@@ -90,6 +90,15 @@ export function refusedRow(message: Message): Message {
 }
 
 /**
+ * Whether a row shows the "unable to decrypt" marker (MessageItem renders it
+ * for an encrypted row with no text and no file from the payload): the shape
+ * every failure path of the gate returns.
+ */
+export function isRefusedShape(message: Message): boolean {
+  return message.encrypted === true && !message.content && !message.e2eAttachments?.length;
+}
+
+/**
  * The quote on a message THIS client just sent, from the message it was
  * replying to — already through the gate when it was displayed — never from
  * the server's reply to the POST.

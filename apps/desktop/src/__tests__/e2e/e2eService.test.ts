@@ -30,7 +30,34 @@ import {
 // injected client, so stub the module out entirely.
 vi.mock('../../services/api', () => ({ api: {} }));
 
+// The display gate (dmCrypto) reaches the service through getE2EService and
+// the signed-in user through authStore. The retry-on-key-arrival tests at the
+// end hand it the service under test; everywhere else nothing is handed in,
+// and getE2EService is the real one.
+const display = vi.hoisted(() => ({ service: null as unknown, userId: null as string | null }));
+vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/e2e/e2eService')>();
+  return {
+    ...actual,
+    getE2EService: (userId: string) =>
+      (display.service as ReturnType<typeof actual.getE2EService> | null) ?? actual.getE2EService(userId),
+  };
+});
+vi.mock('../../stores/authStore', () => ({
+  useAuthStore: { getState: () => ({ user: display.userId ? { id: display.userId } : null }) },
+}));
+// what the chat stores import beside the gate, none of it used by these tests
+vi.mock('../../i18n', () => ({ default: { t: (key: string) => key } }));
+vi.mock('../../services/socket', () => ({ getSocket: () => null }));
+vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
+
 import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
+import { watchKeyArrivals, redecryptPassesSettled } from '../../services/e2e/redecryptOnKeyArrival';
+import { decryptMessageForDisplay, decryptMessagesForDisplay, DECRYPT_FAILED_CONTENT } from '../../services/e2e/dmCrypto';
+import { useChatStore } from '../../stores/chatStore';
+import { useDMStore } from '../../stores/dmStore';
+import { useServerStore } from '../../stores/serverStore';
+import type { Message } from '@voxium/shared';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
 import { E2EVault, E2EVaultClosedError, type PickleKeyProvider } from '../../services/e2e/vault';
@@ -7162,6 +7189,108 @@ describe('E2EService — inbound sessions announced (onSessionsAvailable)', () =
       expect(seen.sort()).toEqual(['c1', 'c2']);
     } finally {
       warn.mockRestore();
+    }
+  });
+});
+
+describe('E2EService — a row on screen that could not be decrypted opens when its key arrives', () => {
+  it('opens in place through the display gate, asking the server nothing for it, and leaves a row under a missing session alone', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bobId = `bob-${uniq}`;
+    // Bob's client: every request is recorded, and the key-share claims can be refused
+    const calls: string[] = [];
+    let refuseClaims = false;
+    const base = server.apiFor(bobId);
+    const bobApi = {
+      ...base,
+      async get(url: string) {
+        calls.push(`GET ${url}`);
+        if (refuseClaims && url.startsWith('/e2e/keyshares')) {
+          throw Object.assign(new Error('503: unavailable'), { response: { status: 503 } });
+        }
+        return base.get(url);
+      },
+      async post(url: string, body?: unknown) {
+        calls.push(`POST ${url}`);
+        return base.post(url, body as never);
+      },
+      async put(url: string, body?: unknown) {
+        calls.push(`PUT ${url}`);
+        return base.put(url, body as never);
+      },
+      async delete(url: string) {
+        calls.push(`DELETE ${url}`);
+        return base.delete(url);
+      },
+    };
+    const bob = new E2EService(bobId, {
+      api: bobApi as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    await alice.service.initialize();
+    await bob.initialize();
+    await flushQueue();
+    await bob.claimMasterTransfers(); // queued behind Bob's start-up claim
+
+    display.service = bob;
+    display.userId = bobId;
+    useServerStore.setState({ activeServerId: null, activeChannelId: null });
+    useDMStore.setState({ activeConversationId: 'c1' });
+    const stop = watchKeyArrivals(bobId, bob);
+    const realNow = Date.now.bind(Date);
+    let later: { mockRestore(): void } | undefined;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const author = { id: alice.userId, username: 'alice', displayName: 'Alice' };
+      const rowOf = (id: string, conversationId: string, content: string) =>
+        ({
+          id, type: 'user', content, channelId: null, conversationId, encrypted: true, author,
+          createdAt: '2026-11-01T10:00:00.000Z', editedAt: null, reactions: [], attachments: [],
+        }) as unknown as Message;
+
+      // Alice writes while Bob's claims are refused: the row stays closed, and
+      // so does one under a session that never reaches Bob
+      refuseClaims = true;
+      const sent = await alice.service.encryptMessage('c1', bobId, 'opened when the key arrived');
+      const missing = rowOf('m0', 'c1', buildMegolmEnvelope('bm90IGhlcmU', 'Y2lwaGVy'));
+      const waiting = rowOf('m1', 'c1', sent.envelope);
+      useChatStore.setState({ messages: await decryptMessagesForDisplay([missing, waiting]) });
+      expect(useChatStore.getState().messages.map((m) => m.content)).toEqual([DECRYPT_FAILED_CONTENT, DECRYPT_FAILED_CONTENT]);
+      refuseClaims = false;
+
+      // past the window in which a miss claims again: a decrypt of the row
+      // under the missing session would claim, so a GET would show it
+      later = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60_000);
+      const decrypts = vi.spyOn(bob, 'decryptMessage');
+
+      // a message in another conversation misses, and its claim brings both shares
+      const elsewhere = await alice.service.encryptMessage('c2', bobId, 'in another conversation');
+      const shown = await decryptMessageForDisplay(rowOf('m2', 'c2', elsewhere.envelope));
+      expect(shown?.content).toBe('in another conversation');
+      const before = calls.length;
+      await redecryptPassesSettled();
+
+      const [stillClosed, opened] = useChatStore.getState().messages;
+      expect(opened).toMatchObject({ id: 'm1', content: 'opened when the key arrived', encrypted: true });
+      expect(stillClosed).toMatchObject({ id: 'm0', content: DECRYPT_FAILED_CONTENT });
+      // the row was opened from the device alone; at most the claim's own
+      // acknowledgement went out beside it
+      expect(calls.slice(before).filter((c) => c !== 'POST /e2e/keyshares/ack')).toEqual([]);
+      expect(decrypts.mock.calls.map(([m]) => m.id)).toEqual(['m2', 'm1']);
+    } finally {
+      stop();
+      await redecryptPassesSettled();
+      later?.mockRestore();
+      warn.mockRestore();
+      display.service = null;
+      display.userId = null;
+      useChatStore.setState({ messages: [] });
+      useDMStore.setState({ activeConversationId: null });
     }
   });
 });

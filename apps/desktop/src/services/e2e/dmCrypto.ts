@@ -17,6 +17,7 @@ import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
 import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
 import { isE2ESessionEnded } from './session';
+import { arrivalMark, forgetUndecrypted, holdUndecrypted } from './undecryptedRows';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
@@ -71,6 +72,9 @@ export async function decryptMessageForDisplay(input: Message): Promise<Message 
 
 async function decryptOneForDisplay(input: Message): Promise<Message> {
   const message = withoutServerAssertions(input);
+  // This answer replaces any earlier one for the id; held again below only
+  // when it is a decrypt failure (undecryptedRows.ts)
+  forgetUndecrypted(message.id);
   if (!message.encrypted) {
     // After the always-on cutover there is no plaintext DM path: conversations
     // are born encrypted, the enable route is gone, and the send side throws
@@ -106,6 +110,8 @@ async function decryptOneForDisplay(input: Message): Promise<Message> {
   const service = getE2EService(userId);
   const own = message.author?.id === userId;
 
+  // before the decrypt: a session stored while it runs makes this row due too
+  const mark = arrivalMark();
   const result = await service.decryptMessage({
     id: message.id,
     conversationId: message.conversationId,
@@ -142,7 +148,9 @@ async function decryptOneForDisplay(input: Message): Promise<Message> {
     }
   }
   // Nothing vouched for this row: the refused shape, its quote still resolvable
-  // from the local cache
+  // from the local cache. Held, so that its group session reaching this device
+  // later opens it in place (redecryptOnKeyArrival.ts)
+  holdUndecrypted(message, message.conversationId, mark);
   return resolveReplyPreview(refusedRow(message), userId);
 }
 

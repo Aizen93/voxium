@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../services/e2e/e2eService';
+import { watchKeyArrivals } from '../services/e2e/redecryptOnKeyArrival';
 
 // UI-facing E2E state. The crypto itself lives in services/e2e — this store
 // only tracks readiness and per-peer identity warnings so components can
@@ -7,6 +8,8 @@ import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../s
 
 /** Live device-list subscription; re-created per login, cleared on reset. */
 let unsubscribeDeviceListChanges: (() => void) | null = null;
+/** Undecrypted rows tried again as their sessions arrive; re-created per login, stopped on reset. */
+let stopKeyArrivalWatch: (() => void) | null = null;
 
 /**
  * Advanced when a session's E2E watch ends (logout). Work an earlier session
@@ -16,10 +19,15 @@ let unsubscribeDeviceListChanges: (() => void) | null = null;
  */
 let sessionGeneration = 0;
 
-function unsubscribeDeviceList(): void {
+/** End this store's subscriptions to the service: the device-list events and the key-arrival watch. */
+function unsubscribeServiceWatches(): void {
   if (unsubscribeDeviceListChanges) {
     unsubscribeDeviceListChanges();
     unsubscribeDeviceListChanges = null;
+  }
+  if (stopKeyArrivalWatch) {
+    stopKeyArrivalWatch();
+    stopKeyArrivalWatch = null;
   }
 }
 
@@ -73,7 +81,7 @@ export class E2ELinkingCodeUnknownError extends Error {
 /** Called by resetAccountStores on logout — the service itself is disposed there. */
 export function stopE2EDeviceListWatch(): void {
   sessionGeneration++;
-  unsubscribeDeviceList();
+  unsubscribeServiceWatches();
 }
 
 /** The device a linking code named: everything the user gets to check before approving. */
@@ -210,7 +218,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
       // Subscribed BEFORE initialize(): the service can read and record a list
       // while it is still starting up, and an event nobody was listening for
       // is a warning the badge never shows.
-      unsubscribeDeviceList();
+      unsubscribeServiceWatches();
       unsubscribeDeviceListChanges = service.onDeviceListChanged((changedUserId) => {
         void service
           .deviceListStatus(changedUserId)
@@ -238,6 +246,9 @@ export const useE2EStore = create<E2EState>((set, get) => ({
             console.warn('e2e: device-list status check failed:', err instanceof Error ? err.message : err);
           });
       });
+      // Before initialize() too: what its start-up claim imports (the shares
+      // kept from an earlier start included) can open rows already on screen
+      stopKeyArrivalWatch = watchKeyArrivals(userId, service);
       await service.initialize();
       if (!current()) return;
       set({
@@ -286,7 +297,7 @@ export const useE2EStore = create<E2EState>((set, get) => ({
       }
       console.warn('e2e: initialization failed:', message);
       // a service that never started has nothing to report; the retry subscribes again
-      unsubscribeDeviceList();
+      unsubscribeServiceWatches();
       set({ ready: false, initializing: false, error: message });
     }
   },
