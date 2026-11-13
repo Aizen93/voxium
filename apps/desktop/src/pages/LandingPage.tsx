@@ -1529,7 +1529,7 @@ function FinalCTA() {
   );
 }
 
-function Footer() {
+function Footer({ showFunding }: { showFunding: boolean }) {
   const { t } = useTranslation();
 
   return (
@@ -1575,7 +1575,9 @@ function Footer() {
           <div className="md:col-span-2">
             <h4 className="text-sm font-semibold text-vox-text-primary mb-3">{t('landing.footer.community')}</h4>
             <ul className="space-y-2">
-              <li><Link to="/contributors" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.publicPages.contributorsAndSupporters')}</Link></li>
+              <li><Link to="/contributors" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">
+                {showFunding ? t('landing.publicPages.contributorsAndSupporters') : t('landing.publicPages.contributors')}
+              </Link></li>
               <li><a href={GITHUB_PROJECT_URL} target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">GitHub</a></li>
               <li><a href={`${GITHUB_PROJECT_URL}?tab=contributing-ov-file`} target="_blank" rel="noopener noreferrer" className="text-sm text-vox-text-muted hover:text-vox-text-primary transition-colors">{t('landing.footer.contributing')}</a></li>
             </ul>
@@ -1606,7 +1608,6 @@ export function LandingPage({ page = 'home' }: { page?: PublicPage }) {
   const { hash, pathname } = useLocation();
   const { t } = useTranslation();
   const pageTitle = page === 'home' ? undefined : t(`landing.publicPages.${page}`);
-  const hasFundingSection = page !== 'architecture';
 
   useEffect(() => {
     document.documentElement.classList.add('landing-scroll');
@@ -1637,7 +1638,6 @@ export function LandingPage({ page = 'home' }: { page?: PublicPage }) {
   }, [hash, pathname]);
 
   useEffect(() => {
-    if (!hasFundingSection) return;
     const controller = new AbortController();
     fetch(`${API_BASE}/feature-flags/public`, { signal: controller.signal })
       .then((response) => {
@@ -1653,7 +1653,7 @@ export function LandingPage({ page = 'home' }: { page?: PublicPage }) {
         console.warn('[Landing] Failed to fetch feature flags:', err);
       });
     return () => controller.abort();
-  }, [hasFundingSection]);
+  }, []);
 
   return (
     <div className="lp-root text-vox-text-primary">
@@ -1673,7 +1673,7 @@ export function LandingPage({ page = 'home' }: { page?: PublicPage }) {
       )}
       {page === 'architecture' && <ArchitectureContent />}
       {page === 'contributors' && <ContributorsContent showFunding={showFunding} />}
-      <Footer />
+      <Footer showFunding={showFunding} />
     </div>
   );
 }

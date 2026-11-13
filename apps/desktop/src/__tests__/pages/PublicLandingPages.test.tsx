@@ -17,6 +17,7 @@ beforeEach(async () => {
   document.body.appendChild(container);
   root = createRoot(container);
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: true, data: {} }))));
 });
 
 afterEach(() => {
@@ -103,13 +104,15 @@ describe('public landing pages', () => {
     { status: 200, payload: { success: true, data: { community_funding: false } } },
     { status: 200, payload: { success: true } },
     { status: 503, payload: { success: true, data: { community_funding: true } } },
-  ])('keeps the sponsor link hidden without an enabled flag in a successful response ($status)', async ({ status, payload }) => {
+  ])('hides supporter content unless the funding flag is enabled ($status)', async ({ status, payload }) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), { status })));
     await act(async () => root.render(
       <MemoryRouter initialEntries={['/contributors']}><LandingPage page="contributors" /></MemoryRouter>,
     ));
-    expect(container.querySelector('#supporters a[href*="/sponsors/"]')).toBeNull();
+    expect(container.querySelector('#supporters')).toBeNull();
+    expect(container.querySelector('a[href="#supporters"]')).toBeNull();
+    expect(container.querySelector('footer a[href="/contributors"]')?.textContent?.trim()).toBe('Contributors');
     expect(warn).toHaveBeenCalledTimes(status === 503 ? 1 : 0);
   });
 
@@ -131,6 +134,8 @@ describe('public landing pages', () => {
     expect(credits.map((entry) => entry.querySelector('img')?.getAttribute('src')))
       .toEqual(['/contributor-avatars/aizen93.jpg', '/contributor-avatars/jdotc1.jpg', '/contributor-avatars/xrafik.png']);
     expect(container.querySelector('#supporters a')?.getAttribute('href')).toBe('https://github.com/sponsors/Aizen93');
+    expect(container.querySelector('a[href="#supporters"]')).not.toBeNull();
+    expect(container.querySelector('footer a[href="/contributors"]')?.textContent?.trim()).toBe('Contributors & supporters');
     const avatar = credits[0].querySelector('.lp-public-avatar')!;
     act(() => { avatar.querySelector('img')!.dispatchEvent(new Event('error')); });
     expect(avatar.querySelector('img')).toBeNull();
@@ -139,14 +144,19 @@ describe('public landing pages', () => {
   });
 
   it('recognizes named and anonymous supporters and respects the funding switch', () => {
-    act(() => root.render(<SupporterAcknowledgments showFunding={false} supporters={[
+    const supporters = [
       { id: 'public', name: 'Public supporter', github: 'supporter' },
       { id: 'name-only', name: 'Name-only supporter' },
-      { id: 'private', anonymous: true },
-    ]} />));
+      { id: 'private', anonymous: true as const },
+    ];
+    act(() => root.render(<SupporterAcknowledgments showFunding supporters={supporters} />));
     expect([...container.querySelectorAll('#supporters li')].map((row) => row.textContent))
       .toEqual(['Public supporter ', 'Name-only supporter', 'Anonymous supporter']);
     expect(container.querySelector('#supporters a')?.getAttribute('href')).toBe('https://github.com/supporter');
-    expect(container.querySelector('#supporters a[href*="/sponsors/"]')).toBeNull();
+    expect(container.querySelector('#supporters a[href*="/sponsors/"]')).not.toBeNull();
+    act(() => root.render(<SupporterAcknowledgments showFunding={false} supporters={supporters} />));
+    expect(container.querySelector('#supporters')).toBeNull();
+    expect(container.textContent).not.toContain('Thank you for supporting Voxium');
+    expect(container.textContent).not.toContain('Donations help cover');
   });
 });

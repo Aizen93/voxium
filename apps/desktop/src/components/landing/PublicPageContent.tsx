@@ -271,6 +271,8 @@ export function SupporterAcknowledgments({ showFunding, supporters }: {
 }) {
   const { t } = useTranslation();
   const copy = 'landing.publicPages.contributorsPage';
+  if (!showFunding) return null;
+
   return (
     <section id="supporters" className="lp-public-supporters" aria-labelledby="supporters-title">
       <div className="lp-public-section-head">
@@ -295,11 +297,9 @@ export function SupporterAcknowledgments({ showFunding, supporters }: {
         <div className="lp-public-thanks">
           <h3><Heart aria-hidden="true" size={17} /> {t(`${copy}.thanks`)}</h3>
           <p>{t(`${copy}.supporterImpact`)}</p>
-          {showFunding && (
-            <ExternalLink href={GITHUB_SPONSORS_URL} className="lp-public-pill">
-              {t('landing.funding.sponsorGithub')}
-            </ExternalLink>
-          )}
+          <ExternalLink href={GITHUB_SPONSORS_URL} className="lp-public-pill">
+            {t('landing.funding.sponsorGithub')}
+          </ExternalLink>
         </div>
       </div>
     </section>
@@ -316,9 +316,11 @@ export function ContributorsContent({ showFunding }: { showFunding: boolean }) {
           <a className="lp-public-pill" href="#project-contributors">
             {t('landing.publicPages.contributors')} <ArrowDown aria-hidden="true" size={14} />
           </a>
-          <a className="lp-public-pill" href="#supporters">
-            {t('landing.publicPages.supporters')} <ArrowDown aria-hidden="true" size={14} />
-          </a>
+          {showFunding && (
+            <a className="lp-public-pill" href="#supporters">
+              {t('landing.publicPages.supporters')} <ArrowDown aria-hidden="true" size={14} />
+            </a>
+          )}
         </div>
       </PageHero>
       <div className="lp-public-wrap lp-public-section">
