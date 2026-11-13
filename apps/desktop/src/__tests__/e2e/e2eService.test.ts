@@ -6159,6 +6159,21 @@ describe('E2EService — lifecycle', () => {
             expect(await owedIn(alice)).toEqual([...owed.slice(6), row.id].sort());
           });
 
+                    it('drops the ones noted first, whatever order their ids sort in', async () => {
+            const { server, alice } = await bobWroteWhileAliceWasAway('ids against the age order');
+            // noted in descending id order: the vault lists them by id, so the
+            // oldest are the LAST it lists, and only the age sort finds them
+            const owed = owedIds(CAP + 5).reverse();
+            await oweIn(alice, owed);
+            const again = over(alice, acksDown(server.apiFor(alice.userId)));
+            await again.initialize();
+            await again.claimMasterTransfers(); // queued behind the start-up claim
+            await acksSent(again);
+            const [row] = sharesFor(server, alice.userId);
+            // 5 beyond the cap, plus the imported share's own: the 6 noted first are gone
+            expect(await owedIn(alice)).toEqual([...owed.slice(6), row.id].sort());
+          });
+
           it('drops the oldest when a run settles one more share at the cap', async () => {
             const { server, alice } = await bobWroteWhileAliceWasAway('one more at the cap');
             const owed = owedIds(CAP);
