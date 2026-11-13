@@ -390,15 +390,22 @@ describe('Report Routes — type: server', () => {
 describe('Report Routes — the duplicate the look cannot see', () => {
   const REASON = 'Harassing other members in the channel';
   const DUPLICATE = 'You already have a pending report against this target';
-  const p2002 = () => Object.assign(new Error('Unique constraint failed on the fields: (`reporter_id`,`reported_user_id`)'), { code: 'P2002' });
+  /** A unique violation as the pg adapter reports it (shape printed from a real one): the index named in `meta`. */
+  const p2002 = (index: string) => Object.assign(new Error(`Unique constraint failed on the constraint: \`${index}\``), {
+    code: 'P2002',
+    meta: {
+      modelName: 'Report',
+      driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23505', kind: 'UniqueConstraintViolation', constraint: { index }, table: 'reports' } },
+    },
+  });
 
   /** Two requests at once: both pass the look, the database admits the first insert and refuses the second. */
-  function databaseAdmitsOne() {
+  function databaseAdmitsOne(index: string) {
     vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
     let inserted = 0;
     vi.mocked(prisma.report.create).mockImplementation((async () => {
       inserted += 1;
-      if (inserted > 1) throw p2002();
+      if (inserted > 1) throw p2002(index);
       return {};
     }) as any);
   }
@@ -410,7 +417,7 @@ describe('Report Routes — the duplicate the look cannot see', () => {
   });
 
   it('two identical USER reports at once: one is filed, the other gets the existing 400', async () => {
-    databaseAdmitsOne();
+    databaseAdmitsOne('reports_pending_user_key');
     const send = () => request(createApp()).post('/api/v1/reports').send({ type: 'user', reportedUserId: 'user-2', reason: REASON });
 
     const [a, b] = await Promise.all([send(), send()]);
@@ -423,7 +430,7 @@ describe('Report Routes — the duplicate the look cannot see', () => {
   });
 
   it('two identical MESSAGE reports at once: one is filed, the other gets the existing 400', async () => {
-    databaseAdmitsOne();
+    databaseAdmitsOne('reports_pending_message_key');
     vi.mocked(prisma.message.findUnique).mockResolvedValue({
       id: 'msg-1', content: 'hi', encrypted: false, channelId: 'ch-1', conversationId: null, authorId: 'user-2',
       channel: { serverId: 'srv-1', secure: false },
@@ -438,7 +445,7 @@ describe('Report Routes — the duplicate the look cannot see', () => {
   });
 
   it('two identical SPACE reports at once: one is filed, the other gets the existing 400', async () => {
-    databaseAdmitsOne();
+    databaseAdmitsOne('reports_pending_server_key');
     vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
     const send = () => request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
 
@@ -446,6 +453,45 @@ describe('Report Routes — the duplicate the look cannot see', () => {
 
     expect([a.status, b.status].sort()).toEqual([201, 400]);
     expect((a.status === 400 ? a : b).body.error).toBe(DUPLICATE);
+  });
+
+  it('a unique violation of another index (the primary key) is not a duplicate report: it surfaces as the 500 it is', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
+    vi.mocked(prisma.report.create).mockRejectedValue(p2002('reports_pkey'));
+    try {
+      const res = await request(createApp()).post('/api/v1/reports').send({ type: 'user', reportedUserId: 'user-2', reason: REASON });
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).not.toBe(DUPLICATE);
+      expect(mockEmit).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('a unique violation whose meta names no index is not taken for a duplicate report either', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
+    // the message quotes a pending index, the meta does not: the meta decides
+    vi.mocked(prisma.report.create).mockRejectedValue(Object.assign(new Error('Unique constraint failed on the constraint: `reports_pending_user_key`'), { code: 'P2002' }));
+    try {
+      const res = await request(createApp()).post('/api/v1/reports').send({ type: 'user', reportedUserId: 'user-2', reason: REASON });
+      expect(res.status).toBe(500);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('the index named as the meta target (the form without the pg adapter) is a duplicate report too', async () => {
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null as any);
+    vi.mocked(prisma.report.create).mockRejectedValue(Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { target: 'reports_pending_server_key' } }));
+    vi.mocked(prisma.server.findUnique).mockResolvedValue({ id: 'srv-1', name: 'S', description: null, ownerId: 'owner-1', discoveryListed: true } as any);
+
+    const res = await request(createApp()).post('/api/v1/reports').send({ type: 'server', serverId: 'srv-1', reason: REASON });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(DUPLICATE);
   });
 
   it('any other failure of the insert still answers 500', async () => {

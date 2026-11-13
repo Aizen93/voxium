@@ -77,8 +77,13 @@ describe('the reports migration', () => {
     expect(schema).toMatch(/offer to DROP them as drift, do not let it/);
   });
 
-  it('the route answers the violation (P2002) as its look does', () => {
-    expect(route).toMatch(/code === 'P2002'\) throw new BadRequestError\(DUPLICATE_REPORT_MESSAGE\)/);
+  it('the route answers the violation of these indexes (P2002, matched on their prefix) as its look does', () => {
+    expect(route).toMatch(/if \(violatesPendingReportIndex\(err\)\) throw new BadRequestError\(DUPLICATE_REPORT_MESSAGE\)/);
+    expect(route).toContain("const PENDING_REPORT_INDEX_PREFIX = 'reports_pending_';");
     expect(route).toContain("const DUPLICATE_REPORT_MESSAGE = 'You already have a pending report against this target';");
+    // every index the migration builds carries the prefix the route matches
+    for (const name of code.match(/CREATE UNIQUE INDEX IF NOT EXISTS "([a-z_]+)"/g) ?? []) {
+      expect(name).toMatch(/"reports_pending_[a-z_]+"$/);
+    }
   });
 });
