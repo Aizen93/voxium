@@ -285,7 +285,7 @@ verification and shows a warning.
 
 | Surface | Behavior |
 |---|---|
-| Message timeline | decrypted before entering any store (the display gate, §9.1); lock placeholder on failure |
+| Message timeline | decrypted before entering any store (the display gate, §9.1); lock placeholder on failure, opened in place once the row's group session reaches the device |
 | DM list preview | encrypted: decrypted live, cache-hydrated on fetch, the server's `content` blanked on arrival, "🔒 Encrypted message" fallback; unencrypted: only a listed call notice |
 | Reply previews | encrypted quotes resolved from the plaintext cache (same conversation, quoted author); an unencrypted quote shows only when it is a listed call notice; lock placeholder otherwise; a quote without an author is dropped |
 | Notifications | client decrypts first → body shows plaintext locally (never leaves device) |
@@ -312,6 +312,24 @@ did not vouch for:
   locked. Every failure path returns it — unencrypted row, no conversation id,
   no signed-in user, decrypt failure, pipeline error; after a decrypt failure
   the quote may still resolve from the local cache.
+- **A refused row is tried again when its key arrives.** A Megolm row the
+  gate could not open is held outside every store and the DOM
+  (`undecryptedRows.ts`), with the session its envelope names; the gate's
+  next answer for the id replaces it. The service announces, once per scope
+  at the end of each task of its queue, the inbound sessions that task stored
+  (`onSessionsAvailable`: a claim run with the shares kept from an earlier
+  start, the kept shares a device-sealed decrypt imports first, each page of
+  a history pull, which a recovery-key restore and a device approval start;
+  never the session a device creates for its own sends). For the
+  conversation or secure channel on screen, each held row whose own session
+  was announced after its decrypt began goes through the same gate again
+  (`redecryptOnKeyArrival.ts`), and replaces the marker only when the gate
+  opened it and the view still shows the marker for that version; a row that
+  still fails stays as it is. One pass runs per scope at a time; a row that
+  reaches the view after its session was announced is tried when it lands.
+  It is local: the session is on the device, nothing is fetched, nothing is
+  acknowledged. Rows of a scope not on screen are left alone (they are
+  fetched and gated again when it is opened).
 - **Decrypted rows** (`decryptedRow`): text and attachments come out of the
   payload only; the type is pinned to `user` (a notice is never encrypted).
 - **Server-asserted fields** are always dropped (`withoutServerAssertions`):
