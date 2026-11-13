@@ -5,6 +5,8 @@ import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs'
 import { bumpDiscoveryPageCache } from './discoveryPageCache';
 import { getIO } from '../websocket/socketServer';
 import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
+import { retryOnTransactionConflict } from './transactionRetry';
+import { NotFoundError } from './errors';
 
 /** A step after the committing write failed: logged, never thrown (the space is gone either way). */
 function logFanOutFailure(logPrefix: string, step: string, serverId: string, err: unknown): void {
@@ -52,7 +54,17 @@ function logFanOutFailure(logPrefix: string, step: string, serverId: string, err
  */
 export async function deleteServerAndAnnounce(
   server: { id: string; iconUrl: string | null },
-  opts: { cacheReason: string; logPrefix: string },
+  opts: {
+    cacheReason: string;
+    logPrefix: string;
+    /**
+     * The caller's ownership check, carried by the delete itself so it holds
+     * on every attempt: the row is deleted only while `userId` still owns it
+     * (a transfer can commit during a retry's pause). Zero rows: `refusal()`
+     * for a space that is still there, 404 Server for one that is gone.
+     */
+    ownedBy?: { userId: string; refusal: () => Error };
+  },
 ): Promise<void> {
   const serverId = server.id;
   const channels = await prisma.channel.findMany({
@@ -62,8 +74,26 @@ export async function deleteServerAndAnnounce(
   const attachmentKeys = await collectAttachmentKeys({ channel: { serverId } });
 
   // The cascade takes channels, members, messages, attachments, reactions,
-  // reads, categories, invites, roles and webhooks with the row.
-  await prisma.server.delete({ where: { id: serverId } });
+  // reads, categories, invites, roles and webhooks with the row. It takes the
+  // space row first and the member and channel rows after it, the reverse of
+  // a removal or an account deletion: when PostgreSQL breaks the deadlock by
+  // aborting this delete, it runs again (one statement, nothing done yet).
+  const ownedBy = opts.ownedBy;
+  if (ownedBy) {
+    const { count } = await retryOnTransactionConflict(
+      () => prisma.server.deleteMany({ where: { id: serverId, ownerId: ownedBy.userId } }),
+      `${opts.logPrefix} The delete of space ${serverId}`,
+    );
+    if (count === 0) {
+      const still = await prisma.server.findUnique({ where: { id: serverId }, select: { id: true } });
+      throw still ? ownedBy.refusal() : new NotFoundError('Server');
+    }
+  } else {
+    await retryOnTransactionConflict(
+      () => prisma.server.delete({ where: { id: serverId } }),
+      `${opts.logPrefix} The delete of space ${serverId}`,
+    );
+  }
 
   await bumpDiscoveryPageCache(opts.cacheReason);
 

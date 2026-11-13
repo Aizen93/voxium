@@ -38,15 +38,27 @@ export const SECURE_VOICE_MEMBER_PERMISSIONS =
   Permissions.VIEW_CHANNEL | Permissions.CONNECT | Permissions.SPEAK;
 
 /**
+ * The models the server-level reads below use: the shared client by default,
+ * or a transaction's client, so a check can run inside a transaction and read
+ * what is true there (a kick's, in utils/removeMember.ts). A transaction
+ * must pass its own: a read through the shared client from inside one holds
+ * the transaction's pool connection while it waits for a second. The reads
+ * run one after the other, never in a Promise.all, since a transaction's
+ * statements share its one connection.
+ */
+export type PermissionReadClient = Pick<typeof prisma, 'server' | 'serverMember' | 'role' | 'memberRole'>;
+
+/**
  * Compute effective base permissions for a user in a server (no channel overrides).
- * Owner always gets ALL_PERMISSIONS.
+ * Owner always gets ALL_PERMISSIONS. Reads through `db` (see PermissionReadClient).
  */
 export async function computeServerPermissions(
   userId: string,
   serverId: string,
+  db: PermissionReadClient = prisma,
 ): Promise<bigint> {
   // Check if user is server owner (bypass)
-  const server = await prisma.server.findUnique({
+  const server = await db.server.findUnique({
     where: { id: serverId },
     select: { ownerId: true },
   });
@@ -54,14 +66,14 @@ export async function computeServerPermissions(
   if (server.ownerId === userId) return ALL_PERMISSIONS;
 
   // Verify user is a member — non-members get no permissions
-  const membership = await prisma.serverMember.findUnique({
+  const membership = await db.serverMember.findUnique({
     where: { userId_serverId: { userId, serverId } },
     select: { userId: true },
   });
   if (!membership) return 0n;
 
   // Get @everyone role
-  const everyoneRole = await prisma.role.findFirst({
+  const everyoneRole = await db.role.findFirst({
     where: { serverId, isDefault: true },
     select: { permissions: true },
   });
@@ -70,7 +82,7 @@ export async function computeServerPermissions(
     : DEFAULT_EVERYONE_PERMISSIONS;
 
   // Get user's assigned roles
-  const memberRoles = await prisma.memberRole.findMany({
+  const memberRoles = await db.memberRole.findMany({
     where: { userId, serverId },
     include: { role: { select: { permissions: true } } },
   });
@@ -174,13 +186,15 @@ export async function computeUserChannelPermissions(
 
 /**
  * Check if a user has a specific permission in a server (base level).
+ * Reads through `db` (see PermissionReadClient).
  */
 export async function hasServerPermission(
   userId: string,
   serverId: string,
   permission: bigint,
+  db: PermissionReadClient = prisma,
 ): Promise<boolean> {
-  const perms = await computeServerPermissions(userId, serverId);
+  const perms = await computeServerPermissions(userId, serverId, db);
   return hasFlag(perms, permission);
 }
 
@@ -200,19 +214,20 @@ export async function hasChannelPermission(
 /**
  * Get the highest role position for a user in a server.
  * Used for role hierarchy enforcement.
- * Owner returns Infinity.
+ * Owner returns Infinity. Reads through `db` (see PermissionReadClient).
  */
 export async function getHighestRolePosition(
   userId: string,
   serverId: string,
+  db: PermissionReadClient = prisma,
 ): Promise<number> {
-  const server = await prisma.server.findUnique({
+  const server = await db.server.findUnique({
     where: { id: serverId },
     select: { ownerId: true },
   });
   if (server?.ownerId === userId) return Infinity;
 
-  const memberRoles = await prisma.memberRole.findMany({
+  const memberRoles = await db.memberRole.findMany({
     where: { userId, serverId },
     include: { role: { select: { position: true } } },
   });

@@ -64,6 +64,12 @@ const SESSION_ROWS: StorageRow[] = withFrenchSpacing([
     where: 'Application de bureau : le gestionnaire d’identifiants. Navigateur : stockage local',
     duration: '30 jours ; conservé lorsque vous vous déconnectez, supprimé lorsque vous désactivez l’authentification à deux facteurs ou supprimez votre compte sur cet appareil ; changer votre mot de passe l’invalide',
   },
+  {
+    item: 'voxium_session_origin, voxium_trusted_device_origin',
+    purpose: 'L’adresse du serveur qui a délivré les jetons ci-dessus, afin que l’application ne les renvoie qu’à ce serveur',
+    where: 'Navigateur : à côté des jetons. Application de bureau : dans l’entrée de chaque jeton du gestionnaire d’identifiants',
+    duration: 'Supprimée avec le jeton auquel elle se rapporte',
+  },
 ]);
 
 const ENCRYPTION_ROWS: StorageRow[] = withFrenchSpacing([
@@ -130,7 +136,7 @@ export function CookiePolicyContentFr() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Politique de cookies</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 25 octobre 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 12 novembre 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>

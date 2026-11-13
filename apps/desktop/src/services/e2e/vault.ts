@@ -1,7 +1,9 @@
 // Per-account local vault for E2E state (docs/e2e-dm-spec.md §7, §12).
 //
-// One IndexedDB database per logged-in user (`voxium-e2e-{userId}`), a single
-// key/value object store, and these key namespaces:
+// One IndexedDB database per logged-in user (`voxium-e2e-v2-{userId}`, with
+// the server's digest appended in a desktop build for another server: see
+// serverVaultNamespace), a single key/value object store, and these key
+// namespaces:
 //
 //   device_id                        this install's device id (spec §12, D2)
 //   account                          Olm account pickle (vodozemac-encrypted)
@@ -33,6 +35,8 @@
 // (spec §7.3, providers in ./pickleKeyProvider). Keys never leave the device
 // either way.
 import { defaultPickleKeyProvider, type PickleKeyProvider } from './pickleKeyProvider';
+import { BUILD_API_ORIGIN, isOfficialOrigin } from '../sessionOrigin';
+import { sha256Hex } from '../../utils/sha256';
 
 export type { PickleKeyProvider };
 
@@ -129,8 +133,38 @@ export interface OutboundGroupSessionRecord {
 const VAULT_DB_PREFIX = 'voxium-e2e-v2-';
 const SUPERSEDED_DB_PREFIXES = ['voxium-e2e-'];
 
-/** The IndexedDB name of an account's vault on this device. */
-export function vaultDbName(userId: string, namespace?: string): string {
+/**
+ * The namespace a build names its vaults with, so that builds for different
+ * servers keep separate vaults: none in a browser build or the official
+ * desktop build (their vaults keep the name they always had), and in a
+ * desktop build for another server `s` and the first 16 hex digits of the
+ * SHA-256 of its API origin, the label of the identifier that build is made
+ * with (scripts/tauriSelfHosted.mjs).
+ *
+ * A vault is named after a user id the build's own server supplies. In the
+ * desktop app such a build has a webview data folder of its own, as Tauri
+ * derives it from the identifier on Windows and Linux; the name carries the
+ * server as well, for any platform where a data folder would be shared. A
+ * browser's storage is already the page origin's own, and a new name there
+ * would orphan every vault a self-hosted web client already holds.
+ */
+export function serverVaultNamespace(inTauri: boolean, apiOrigin: string): string | undefined {
+  if (!inTauri || isOfficialOrigin(apiOrigin)) return undefined;
+  return `s${sha256Hex(apiOrigin).slice(0, 16)}`;
+}
+
+/** This build's namespace: the one every vault it opens, and every vault it drops, is named with. */
+export const BUILD_VAULT_NAMESPACE: string | undefined = serverVaultNamespace(
+  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window,
+  BUILD_API_ORIGIN
+);
+
+/**
+ * The IndexedDB name of an account's vault on this device: with this build's
+ * namespace unless the caller names one (tests, two vaults of one account in
+ * one process), which takes its place.
+ */
+export function vaultDbName(userId: string, namespace: string | undefined = BUILD_VAULT_NAMESPACE): string {
   return `${VAULT_DB_PREFIX}${userId}${namespace ? `-${namespace}` : ''}`;
 }
 
@@ -288,8 +322,8 @@ export class E2EVault {
   constructor(
     private readonly userId: string,
     private readonly keyProvider: PickleKeyProvider = defaultPickleKeyProvider(),
-    /** Isolates two vaults for the same account in one process (tests / multi-instance). */
-    private readonly namespace?: string,
+    /** Isolates two vaults for the same account in one process (tests / multi-instance); by default this build's (see vaultDbName). */
+    private readonly namespace: string | undefined = BUILD_VAULT_NAMESPACE,
     /**
      * What a connection must wait for before it opens the database: the
      * teardown of an earlier service on the same vault (see E2EService).

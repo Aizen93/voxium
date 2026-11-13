@@ -3753,11 +3753,35 @@ describe('E2E routes — shared secure channel as an E2E context', () => {
       expect.objectContaining({
         where: {
           userId: 'user-1',
-          channel: { secure: true, members: { some: { userId: 'user-2' } } },
+          channel: {
+            secure: true,
+            members: { some: { userId: 'user-2' } },
+            // a shared channel counts only while BOTH are members of its space
+            server: {
+              AND: [
+                { members: { some: { userId: 'user-1' } } },
+                { members: { some: { userId: 'user-2' } } },
+              ],
+            },
+          },
         },
         select: { channelId: true },
       }),
     );
+  });
+
+  it('a bundle claim checks the same shared-channel context, space membership of both included', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.channelMember.findFirst).mockResolvedValue(null);
+
+    const res = await request(createApp()).post('/api/v1/e2e/bundles/user-2/DEVICE0001');
+
+    expect(res.status).toBe(403);
+    const where = vi.mocked(prisma.channelMember.findFirst).mock.calls[0][0]!.where as any;
+    expect(where.channel.server.AND).toEqual([
+      { members: { some: { userId: 'user-1' } } },
+      { members: { some: { userId: 'user-2' } } },
+    ]);
   });
 
   it('still 403 with neither a DM nor a shared secure channel', async () => {

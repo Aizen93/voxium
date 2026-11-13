@@ -8,11 +8,14 @@ import { replayVoiceState } from '../websocket/voiceHandler';
 import { rateLimitSecureChannelManage, rateLimitMemberManage } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { hasServerPermission } from '../utils/permissionCalculator';
 import {
   broadcastSecureMembersUpdated,
   getSecureChannelMembersPayload,
+  lockServerMemberRows,
   removeSecureMember,
+  undoRoomJoinsOfRemovedMembers,
 } from '../utils/secureChannelLifecycle';
 
 /**
@@ -43,8 +46,9 @@ async function getSecureChannelForMemberOrThrow(channelId: string, serverId: str
       where: { channelId_userId: { channelId, userId } },
       select: { isCreator: true },
     }),
-    // Defense in depth against a stale ChannelMember row (a purge that failed
-    // mid-leave): someone no longer in the SERVER gets nothing here either
+    // A ChannelMember row counts only with the space membership behind it.
+    // A departure removes both in one transaction and a join starts with no
+    // row, so they agree; this read keeps the rule here on its own too
     prisma.serverMember.findUnique({
       where: { userId_serverId: { userId, serverId } },
       select: { userId: true },
@@ -91,7 +95,8 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
       throw new BadRequestError('Channel type must be "text" or "voice"');
     }
 
-    // Invitees: optional, deduped, never the creator, capped, all server members
+    // Invitees: optional, deduped, never the creator, capped, all server
+    // members (checked in the transaction below)
     const rawMemberIds = req.body.memberIds ?? [];
     if (!Array.isArray(rawMemberIds) || rawMemberIds.some((id) => typeof id !== 'string')) {
       throw new BadRequestError('memberIds must be an array of user ids');
@@ -101,15 +106,6 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
       throw new BadRequestError(
         `A secure channel can have at most ${E2E_LIMITS.SECURE_CHANNEL_MEMBER_CAP} members`,
       );
-    }
-    if (memberIds.length > 0) {
-      const serverMembers = await prisma.serverMember.findMany({
-        where: { serverId, userId: { in: memberIds } },
-        select: { userId: true },
-      });
-      if (serverMembers.length !== memberIds.length) {
-        throw new BadRequestError('All invited users must be members of this server');
-      }
     }
 
     // Secure channels have their own limit (maxSecureChannelsPerServer), apart
@@ -121,10 +117,27 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
 
     const now = new Date();
     const allMemberIds = [userId, ...memberIds];
-    const channel = await prisma.$transaction(async (tx) => {
+    // Run again when PostgreSQL aborts it to break a deadlock (a space delete
+    // takes the space row, then the member rows): the second run then finds
+    // the space gone and answers so
+    const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      // Every row written below belongs to a current member of the space,
+      // the creator included: their membership rows are locked FIRST (a
+      // removal of one of them waits for this transaction, then deletes what
+      // it wrote, or committed before and the row is gone) and before the
+      // space row, the order a removal takes them in.
+      const members = await lockServerMemberRows(tx, serverId, allMemberIds);
       // Count and insert under the space row lock, so two concurrent creations
-      // cannot both pass the limit
-      await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      // cannot both pass the limit. A space deleted since the permission check
+      // answers as one: not found.
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
+      if (!members.has(userId)) {
+        throw new ForbiddenError('You do not have permission to create secure channels');
+      }
+      if (members.size !== allMemberIds.length) {
+        throw new BadRequestError('All invited users must be members of this server');
+      }
       const secureCount = await tx.channel.count({ where: { serverId, secure: true } });
       if (secureCount >= limits.maxSecureChannelsPerServer) {
         throw new BadRequestError(`Server can have at most ${limits.maxSecureChannelsPerServer} secure channels`);
@@ -156,7 +169,7 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
         });
       }
       return ch;
-    });
+    }), '[SecureChannels] A secure-channel creation');
 
     // Members-only fanout: their sidebars gain the channel, their sockets join
     // the room. The server room is deliberately never touched.
@@ -165,6 +178,9 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
       io.to(`user:${uid}`).emit(WS_EVENTS.CHANNEL_CREATED, channel as unknown as Channel);
       io.in(`user:${uid}`).socketsJoin(`channel:${channel.id}`);
     }
+    // A member removed since the commit got their room leave before this
+    // join: take them back out
+    await undoRoomJoinsOfRemovedMembers(channel.id, allMemberIds);
 
     res.status(201).json({ success: true, data: channel });
   } catch (err) {
@@ -179,7 +195,7 @@ secureChannelRouter.get('/:channelId/members', async (req: Request<{ serverId: s
     const { serverId, channelId } = req.params;
     await getSecureChannelForMemberOrThrow(channelId, serverId, req.user!.userId);
 
-    const members = await getSecureChannelMembersPayload(channelId);
+    const members = await getSecureChannelMembersPayload(channelId, serverId);
     res.json({ success: true, data: members });
   } catch (err) {
     next(err);
@@ -201,19 +217,30 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
       throw new BadRequestError('userId is required');
     }
 
-    const targetMembership = await prisma.serverMember.findUnique({
-      where: { userId_serverId: { userId: targetUserId, serverId } },
-      select: { userId: true },
-    });
-    if (!targetMembership) throw new BadRequestError('User is not a member of this server');
+    // Run again when PostgreSQL aborts it to break a deadlock (a space
+    // delete): the second run then finds the channel gone and answers so.
+    // The long budget: an account deletion of the target holds their member
+    // row, and one of another member the channel row, through its whole
+    // cascade, and an invite waiting for either must not expire meanwhile.
+    const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      // The target's space membership is checked HERE, under a lock on its
+      // row, taken first (before the channel row, the order a removal takes
+      // them in): a removal of the target waits for this transaction and then
+      // deletes the row written below, or it committed first and there is no
+      // row to lock.
+      const members = await lockServerMemberRows(tx, serverId, [targetUserId]);
 
-    // Cap + duplicate checks live INSIDE the transaction, serialized by a row
-    // lock on the channel: two concurrent invites both reading count=24 under
-    // READ COMMITTED would otherwise both insert — and an over-cap channel is
-    // not just untidy, the CLIENT refuses to encrypt to more than the cap, so
-    // every member's sends would break.
-    const channel = await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR UPDATE`;
+      // Cap + duplicate checks live INSIDE the transaction, serialized by a
+      // row lock on the channel: two concurrent invites both reading count=24
+      // under READ COMMITTED would otherwise both insert — and an over-cap
+      // channel is not just untidy, the CLIENT refuses to encrypt to more than
+      // the cap, so every member's sends would break. A channel deleted since
+      // the gate above (its creator's departure or its space's delete) answers
+      // like any other missing channel, before the target's membership.
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM channels WHERE id = ${channelId} AND server_id = ${serverId} AND secure = true FOR UPDATE`;
+      if (locked.length === 0) throw new NotFoundError('Channel');
+      if (!members.has(targetUserId)) throw new BadRequestError('User is not a member of this server');
 
       // One after the other, never Promise.all: Prisma gives a findUnique its
       // own batch, so issued together these two ran at once on the
@@ -247,25 +274,30 @@ secureChannelRouter.post('/:channelId/members', rateLimitMemberManage, async (re
         });
       }
       return ch;
-    });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), '[SecureChannels] A secure-channel invite');
 
     // The invitee's sidebar gains the channel; their sockets join the room
     const io = getIO();
     io.to(`user:${targetUserId}`).emit(WS_EVENTS.CHANNEL_CREATED, channel as unknown as Channel);
     io.in(`user:${targetUserId}`).socketsJoin(`channel:${channelId}`);
+    // An invitee removed since the commit got their room leave before this
+    // join: take them back out, and replay them nothing
+    const stillMember = (await undoRoomJoinsOfRemovedMembers(channelId, [targetUserId])).has(targetUserId);
     // Every voice event in that room happened before their sockets were in
     // it: replay the occupants, as the connect path does, or a call already
     // in progress reads empty to the invitee until someone moves. Best
     // effort — the invitation stands either way.
-    try {
-      await replayVoiceState(io.to(`user:${targetUserId}`), [serverId], new Set([channelId]), { source: 'connect' });
-    } catch (err) {
-      console.warn('[SecureChannels] Could not replay voice occupancy to the invitee:', err instanceof Error ? err.message : err);
+    if (stillMember) {
+      try {
+        await replayVoiceState(io.to(`user:${targetUserId}`), [serverId], new Set([channelId]), { source: 'connect' });
+      } catch (err) {
+        console.warn('[SecureChannels] Could not replay voice occupancy to the invitee:', err instanceof Error ? err.message : err);
+      }
     }
 
     await broadcastSecureMembersUpdated(channelId, serverId);
 
-    res.status(201).json({ success: true, data: await getSecureChannelMembersPayload(channelId) });
+    res.status(201).json({ success: true, data: await getSecureChannelMembersPayload(channelId, serverId) });
   } catch (err) {
     next(err);
   }

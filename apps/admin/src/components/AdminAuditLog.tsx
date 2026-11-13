@@ -10,6 +10,7 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   'user.delete': 'User Deleted',
   'user.role_change': 'Role Changed',
   'server.delete': 'Server Deleted',
+  'server.transfer': 'Server Transferred',
   'server.discovery_feature': 'Server Featured',
   'server.discovery_unfeature': 'Server Unfeatured',
   'server.discovery_block': 'Server Blocked from Directory',
@@ -45,6 +46,7 @@ const ACTION_COLORS: Record<string, string> = {
   'user.delete': 'bg-red-500/20 text-red-400',
   'user.role_change': 'bg-blue-500/20 text-blue-400',
   'server.delete': 'bg-red-500/20 text-red-400',
+  'server.transfer': 'bg-blue-500/20 text-blue-400',
   'server.discovery_feature': 'bg-purple-500/20 text-purple-400',
   'server.discovery_unfeature': 'bg-blue-500/20 text-blue-400',
   'server.discovery_block': 'bg-orange-500/20 text-orange-400',
@@ -135,6 +137,8 @@ function formatMetadata(action: AuditAction, metadata: Record<string, unknown> |
       return `${metadata.username}: ${metadata.oldRole} -> ${metadata.newRole}`;
     case 'server.delete':
       return metadata.serverName ? `"${metadata.serverName}"` : '';
+    case 'server.transfer':
+      return metadata.newOwnerId ? `${metadata.serverName ? `"${metadata.serverName}" ` : ''}to ${metadata.newOwnerId}` : '';
     case 'ip_ban.create':
       return metadata.reason ? `Reason: ${metadata.reason}` : '';
     case 'storage.cleanup_orphans':
@@ -188,7 +192,7 @@ function isSystemActor(log: { action: AuditAction; metadata: Record<string, unkn
 
 const ALL_ACTIONS: AuditAction[] = [
   'user.ban', 'user.unban', 'user.delete', 'user.role_change',
-  'server.delete',
+  'server.delete', 'server.transfer',
   'server.discovery_feature', 'server.discovery_unfeature', 'server.discovery_block', 'server.discovery_unblock',
   'ip_ban.create', 'ip_ban.delete',
   'storage.file_delete', 'storage.cleanup_orphans',
