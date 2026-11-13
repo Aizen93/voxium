@@ -1488,6 +1488,33 @@ describe('Server Routes', () => {
       await expect(authorize()).resolves.toBeUndefined();
     });
 
+    it('the check reads through the client it is handed: inside the removal\'s transaction, every read on that transaction\'s client', async () => {
+      const token = makeToken();
+      mockTarget();
+
+      await request(app)
+        .post('/api/v1/servers/srv-1/members/user-2/kick')
+        .set('Authorization', `Bearer ${token}`)
+        .send({});
+      const { authorize } = mockRemoveMemberFromServer.mock.calls[0][2];
+      mockHasServerPermission.mockClear();
+      mockGetHighestRolePosition.mockClear();
+
+      const txClient = { tag: 'the transaction client' };
+      await expect(authorize(txClient)).resolves.toBeUndefined();
+
+      // a read through the shared client from inside the transaction would hold
+      // its pool connection while waiting for a second one
+      expect(mockHasServerPermission.mock.calls).toEqual([['user-1', 'srv-1', Permissions.KICK_MEMBERS, txClient]]);
+      expect(mockGetHighestRolePosition.mock.calls).toEqual([['user-1', 'srv-1', txClient], ['user-2', 'srv-1', txClient]]);
+
+      // refused inside the transaction exactly as outside it
+      mockHasServerPermission.mockResolvedValueOnce(false);
+      await expect(authorize(txClient)).rejects.toMatchObject({ statusCode: 403, message: 'You do not have permission to kick members' });
+      mockGetHighestRolePosition.mockImplementation(async () => 10);
+      await expect(authorize(txClient)).rejects.toMatchObject({ statusCode: 403, message: 'Cannot kick a member with an equal or higher role' });
+    });
+
     it('bans with a null reason when the body is empty (the client sends none today) or the reason is blank', async () => {
       const token = makeToken();
       mockTarget();

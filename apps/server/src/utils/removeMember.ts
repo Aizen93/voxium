@@ -12,6 +12,7 @@ import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs'
 import { isTransactionConflict, retryOnTransactionConflict } from './transactionRetry';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { emitWebhookChanged } from './webhookLifecycle';
+import type { PermissionReadClient } from './permissionCalculator';
 
 /** False only when the space row is certainly gone (a failed read is not "gone"). */
 async function spaceExists(serverId: string): Promise<boolean> {
@@ -38,16 +39,20 @@ export interface RemoveMemberOptions {
    */
   ban?: { by: string; reason: string | null };
   /**
-   * The caller's precondition (a kick's permission and role hierarchy), run
-   * on EVERY attempt, right before that attempt's transaction opens: a
-   * removal the transaction retry runs again must not act on a check an
-   * earlier attempt passed. Throws the route's own refusal. Never inside the
-   * transaction: its reads go through the shared client, and a transaction
-   * holding a pool connection while it waits for a second one stalls the
-   * node once enough of them do it at once. Those reads take no lock, so the
-   * guarantee is the same; the owner rule is held by the delete itself.
+   * The caller's precondition (a kick's permission and role hierarchy),
+   * reading through the client it is given. Run twice on EVERY attempt:
+   * before the attempt's transaction opens, on the shared client, a cheap
+   * early refusal that opens no transaction and waits on no lock; then inside
+   * the transaction, on ITS client, right after the webhook statement, so the
+   * check that holds is the one made right before the membership delete, not
+   * one made before that statement's wait (up to a minute behind a webhook
+   * purge). Every read must go through the client given: one through the
+   * shared client from inside the transaction would hold its pool connection
+   * while waiting for a second, and enough concurrent kicks doing that stall
+   * the node. Throws the route's own refusal; inside, that rolls the
+   * transaction back. The owner rule is held by the delete itself.
    */
-  authorize?: () => Promise<void>;
+  authorize?: (db: PermissionReadClient) => Promise<void>;
 }
 
 /**
@@ -61,7 +66,8 @@ export interface RemoveMemberOptions {
  * permission or hierarchy rule applies) for a fast answer; the transaction
  * holds the rules again on every attempt: the owner's row is never deleted
  * (the delete matches only a row whose role is not owner) and `authorize`
- * re-runs the caller's own check. Order is load-bearing:
+ * re-runs the caller's own check, before the transaction opens and again
+ * inside it. Order is load-bearing:
  *
  * 1. Voice eviction — a departed member must not keep a live media session.
  *    Cross-node via the Redis reverse lookup + the cluster eviction fan-out
@@ -76,7 +82,10 @@ export interface RemoveMemberOptions {
  *       the mark too, so whoever enables it later is warned; any enable or a
  *       rotate clears the mark. A voluntary leave keeps them. First because a
  *       60 s purge-delete may hold one of these rows, and that wait must come
- *       before this transaction takes any row a create or a join needs;
+ *       before this transaction takes any row a create or a join needs.
+ *       Right after it (or first, without a ban), `authorize` again, on this
+ *       transaction's client, taking no lock: a check made before that wait
+ *       is not the one in force when the membership row goes;
  *    b. the pending/declined join request gone;
  *    c. the membership row gone. Every writer of a secure-channel row locks
  *       that row first (FOR KEY SHARE), so this delete waits for one in progress.
@@ -139,9 +148,9 @@ export async function removeMemberFromServer(
   let outcome: { disabledWebhooks: number; secure: SecureMembershipRemoval };
   try {
     outcome = await retryOnTransactionConflict(async () => {
-      // The caller's precondition, read again for this attempt BEFORE its
-      // transaction opens (see `authorize`)
-      if (opts.authorize) await opts.authorize();
+      // The caller's precondition for this attempt, BEFORE its transaction
+      // opens: the early refusal (see `authorize`)
+      if (opts.authorize) await opts.authorize(prisma);
       return prisma.$transaction(async (tx) => {
         // One statement after the other: they share the transaction's one
         // connection, and the order is the one documented above. Nothing in
@@ -159,6 +168,10 @@ export async function removeMemberFromServer(
             data: { enabled: false, creatorRemovedAt: new Date() },
           }));
         }
+        // The caller's precondition again, on this transaction's client, after
+        // the one statement that can wait long: a refusal rolls back the
+        // webhook statement with the rest
+        if (opts.authorize) await opts.authorize(tx);
         await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
         // The owner is never removed, whatever the caller checked before the
         // transaction: the precondition is in the delete itself, so it holds on

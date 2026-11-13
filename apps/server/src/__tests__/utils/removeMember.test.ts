@@ -361,14 +361,14 @@ describe('removeMemberFromServer', () => {
       }
     });
 
-    it('runs the caller\'s check before each attempt\'s transaction opens, on every attempt, NEVER while one is open', async () => {
-      // A check inside the transaction would hold the transaction's pool
-      // connection while it waits for a second one for its own reads: enough
-      // concurrent kicks exhaust the pool and stall the node
+    it('runs the caller\'s check on every attempt twice: before its transaction opens on the shared client, then inside it on the transaction\'s client, right after the webhook statement', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       let open = 0;
-      const seenOpen: number[] = [];
-      const authorize = vi.fn(async () => { seenOpen.push(open); order.push('authorize'); });
+      const seen: Array<{ open: number; client: 'shared' | 'tx' | 'other' }> = [];
+      const authorize = vi.fn(async (db: unknown) => {
+        seen.push({ open, client: db === prismaMock ? 'shared' : db === tx ? 'tx' : 'other' });
+        order.push(db === tx ? 'authorize:tx' : 'authorize:shared');
+      });
       const real = prismaMock.$transaction.getMockImplementation()!;
       const tracked = (impl: (fn: (client: typeof tx) => Promise<unknown>) => Promise<unknown>) =>
         async (fn: (client: typeof tx) => Promise<unknown>) => {
@@ -381,15 +381,40 @@ describe('removeMemberFromServer', () => {
       try {
         await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize });
 
-        expect(authorize).toHaveBeenCalledTimes(2);
-        expect(seenOpen).toEqual([0, 0]);
-        // and before the attempt's statements
-        const lastAttempt = order.slice(order.lastIndexOf('authorize'));
-        expect(lastAttempt.indexOf('txn:start')).toBeGreaterThan(0);
-        expect(lastAttempt.indexOf('member')).toBeGreaterThan(lastAttempt.indexOf('txn:start'));
+        // the early refusal with no transaction open, then the one that holds,
+        // inside the transaction and on its client: on each of the two attempts
+        expect(seen).toEqual([
+          { open: 0, client: 'shared' }, { open: 1, client: 'tx' },
+          { open: 0, client: 'shared' }, { open: 1, client: 'tx' },
+        ]);
+        const lastAttempt = order.slice(order.lastIndexOf('authorize:shared'));
+        expect(lastAttempt.slice(0, 5)).toEqual(['authorize:shared', 'txn:start', 'webhooks.disable', 'authorize:tx', 'request']);
+        expect(lastAttempt.indexOf('member')).toBeGreaterThan(lastAttempt.indexOf('authorize:tx'));
       } finally {
         warn.mockRestore();
       }
+    });
+
+    it('a check that passes before the transaction and refuses inside it (the actor demoted while the webhook statement waited) rolls everything back: 403, nobody removed, nobody banned', async () => {
+      const refusal = Object.assign(new Error('You do not have permission to kick members'), { statusCode: 403 });
+      const authorize = vi.fn(async (db: unknown) => { if (db === tx) throw refusal; });
+      webhooksDisabled(1);
+
+      await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize }))
+        .rejects.toBe(refusal);
+
+      expect(authorize).toHaveBeenCalledTimes(2);
+      // a refusal is the answer, never a retry
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(tx.serverJoinRequest.deleteMany).not.toHaveBeenCalled();
+      expect(tx.serverMember.deleteMany).not.toHaveBeenCalled();
+      expect(tx.serverBan.upsert).not.toHaveBeenCalled();
+      expect(tx.server.updateMany).not.toHaveBeenCalled();
+      // the webhook statement before it rolls back with the transaction: no event for it
+      expect(webhookChanged).not.toHaveBeenCalled();
+      expect(announceSecure).not.toHaveBeenCalled();
+      expect(memberLeft).not.toHaveBeenCalled();
+      expect(prismaMock.channelRead.deleteMany).not.toHaveBeenCalled();
     });
 
     it('a check that refuses on a retried attempt is the answer: no transaction is opened for it, nothing is removed', async () => {

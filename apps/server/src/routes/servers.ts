@@ -16,7 +16,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitMemberRead, rateLimitMemberLookup, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { adoptImageAssetUpload } from '../utils/uploadVerification';
-import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
+import { hasServerPermission, getHighestRolePosition, filterVisibleChannels, type PermissionReadClient } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
 import { deleteServerAndAnnounce } from '../utils/serverDeletion';
 import { isFeatureEnabled } from '../utils/featureFlags';
@@ -800,12 +800,14 @@ serverRouter.post(
       }
 
       const actorId = req.user!.userId;
-      const assertMayKick = async () => {
-        const canKick = await hasServerPermission(actorId, serverId, Permissions.KICK_MEMBERS);
+      // Every read through `db`: the removal runs this inside its transaction
+      // too, on the transaction's client (see removeMemberFromServer)
+      const assertMayKick = async (db: PermissionReadClient = prisma) => {
+        const canKick = await hasServerPermission(actorId, serverId, Permissions.KICK_MEMBERS, db);
         if (!canKick) throw new ForbiddenError('You do not have permission to kick members');
         // Role hierarchy check: actor must outrank target
-        const actorHighest = await getHighestRolePosition(actorId, serverId);
-        const targetHighest = await getHighestRolePosition(memberId, serverId);
+        const actorHighest = await getHighestRolePosition(actorId, serverId, db);
+        const targetHighest = await getHighestRolePosition(memberId, serverId, db);
         if (actorHighest <= targetHighest) throw new ForbiddenError(KICK_OUTRANKED_MESSAGE);
       };
 
@@ -822,10 +824,12 @@ serverRouter.post(
       // The teardown — voice eviction, secure-channel state, read markers,
       // and one transaction with the ban row, the join-request delete, the
       // membership delete and the member count — lives in
-      // removeMemberFromServer, nowhere else. The permission and the
-      // hierarchy are checked again inside its transaction, on every attempt
-      // (`authorize`): a retried removal must not act on a check made before
-      // a role change committed.
+      // removeMemberFromServer, nowhere else. It runs the permission and the
+      // hierarchy check again on every attempt (`authorize`): before the
+      // attempt's transaction opens, and inside it on its own client right
+      // after the webhook statement, the one that can wait long, so a role
+      // change, a removal of the actor or a promotion of the target that
+      // commits meanwhile is seen before the membership row goes.
       await removeMemberFromServer(memberId, serverId, { ban: { by: actorId, reason }, authorize: assertMayKick });
 
       // Emit member:kicked directly to the kicked user's per-user room
