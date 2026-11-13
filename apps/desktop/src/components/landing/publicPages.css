@@ -1,17 +1,3 @@
-.lp-public-nav-link {
-  padding: 0.45rem 0.75rem;
-  border-radius: 999px;
-  color: var(--vox-text-secondary);
-  font-size: 0.875rem;
-  font-weight: 600;
-}
-
-.lp-public-nav-link:hover,
-.lp-public-nav-link[aria-current='page'] {
-  background: #252342;
-  color: #e2d9ff;
-}
-
 .lp-public-page {
   --public-panel: #111125;
   --public-raised: #17172c;
@@ -21,8 +7,7 @@
   overflow-wrap: anywhere;
 }
 
-.lp-public-page :focus-visible,
-.lp-public-nav-link:focus-visible {
+.lp-public-page :focus-visible {
   outline: 2px solid #83c0ff;
   outline-offset: 3px;
 }
@@ -413,6 +398,5 @@
 }
 
 @media (pointer: coarse) {
-  .lp-public-pill, .lp-public-nav-link, .lp-public-flow-controls button { min-height: 44px; }
-  .lp-public-nav-link { display: flex; align-items: center; }
+  .lp-public-pill, .lp-public-flow-controls button { min-height: 44px; }
 }

@@ -288,6 +288,29 @@ function LandingStyles() {
         box-shadow: 0 16px 48px -24px rgba(0, 0, 0, 0.7);
       }
 
+      .lp-public-nav-link {
+        padding: 0.45rem 0.75rem;
+        border-radius: 999px;
+        color: var(--vox-text-secondary);
+        font-size: 0.875rem;
+        font-weight: 600;
+      }
+
+      .lp-public-nav-link:hover,
+      .lp-public-nav-link[aria-current='page'] {
+        background: #252342;
+        color: #e2d9ff;
+      }
+
+      .lp-public-nav-link:focus-visible {
+        outline: 2px solid #83c0ff;
+        outline-offset: 3px;
+      }
+
+      @media (pointer: coarse) {
+        .lp-public-nav-link { display: flex; align-items: center; min-height: 44px; }
+      }
+
       /* Scroll reveal (transition-based, for headers/blocks) */
       .lp-reveal {
         opacity: 0;
