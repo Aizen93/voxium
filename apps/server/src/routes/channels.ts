@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
 import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
@@ -102,6 +102,11 @@ function categoryGoneAsMissing(err: unknown): never {
   throw err;
 }
 
+/** Sort entries by id: the one order a reorder updates its rows in (see the reorder route). */
+function byId(a: { id: string }, b: { id: string }): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /** One entry of a reorder: a channel id, its new position and, optionally, its category (null: none). */
 function isChannelOrderEntry(entry: unknown): entry is { id: string; position: number; categoryId?: string | null } {
   if (!entry || typeof entry !== 'object') return false;
@@ -160,15 +165,31 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
       }
     }
 
-    // Update positions + categoryId in a transaction
-    await prisma.$transaction(
-      order.map((o: { id: string; position: number; categoryId?: string | null }) =>
-        prisma.channel.update({
-          where: { id: o.id },
-          data: { position: o.position, categoryId: o.categoryId ?? null },
-        })
-      )
-    );
+    // Update positions + categoryId in a transaction, one row after the other
+    // in ONE fixed order, sorted by id, whatever order the client sent: two
+    // reorders of the same rows then lock them in the same order and one
+    // waits for the other, where in the clients' orders two reversed
+    // reorders each held a row the other needed (a deadlock, a 500). A row
+    // the validation saw and that is gone by the update (a channel or a
+    // category deleted meanwhile) answers as an unknown one, never a 500.
+    const sorted = [...order].sort(byId);
+    try {
+      await prisma.$transaction(
+        sorted.map((o: { id: string; position: number; categoryId?: string | null }) =>
+          prisma.channel.update({
+            where: { id: o.id },
+            data: { position: o.position, categoryId: o.categoryId ?? null },
+          })
+        )
+      );
+    } catch (err) {
+      const code = prismaErrorCode(err);
+      // The channel row is gone: the update found nothing to update
+      if (code === 'P2025') throw new NotFoundError('Channel');
+      // The category it was moved into is gone: its foreign key refused it
+      if (code === 'P2003') throw new NotFoundError('Category');
+      throw err;
+    }
 
     // Re-read updated channels and emit events
     const updated = await prisma.channel.findMany({

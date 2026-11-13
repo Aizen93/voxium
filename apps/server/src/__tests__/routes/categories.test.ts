@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -858,5 +858,64 @@ describe('Category Routes', () => {
 
       expect(res.status).toBe(200);
     });
+
+    describe('the updates', () => {
+      const reorder = (order: unknown) => request(app)
+        .put('/api/v1/servers/srv-1/categories/reorder')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ order });
+      const ORDER = [{ id: 'cat-c', position: 0 }, { id: 'cat-a', position: 1 }, { id: 'cat-b', position: 2 }];
+      // mockReset: a test that stops before the re-read leaves a queued answer,
+      // and clearAllMocks keeps the *Once queue
+      const found = () => prismaMock.category.findMany.mockReset()
+        .mockResolvedValueOnce([{ id: 'cat-a' }, { id: 'cat-b' }, { id: 'cat-c' }])
+        .mockResolvedValueOnce([]);
+      beforeEach(() => {
+        found();
+        prismaMock.category.update.mockImplementation(async ({ where }: any) => ({ id: where.id }));
+      });
+      afterEach(() => { prismaMock.category.findMany.mockReset(); });
+
+      it('updates the rows in ONE fixed order, by id, whatever order the client sent (two reversed reorders cannot deadlock)', async () => {
+        expect((await reorder(ORDER)).status).toBe(200);
+
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+        expect(Array.isArray(prismaMock.$transaction.mock.calls[0][0])).toBe(true);
+        expect(prismaMock.category.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['cat-a', 'cat-b', 'cat-c']);
+        expect(prismaMock.category.update).toHaveBeenCalledWith({ where: { id: 'cat-c' }, data: { position: 0 } });
+
+        prismaMock.category.update.mockClear();
+        found();
+        expect((await reorder([...ORDER].reverse())).status).toBe(200);
+        expect(prismaMock.category.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['cat-a', 'cat-b', 'cat-c']);
+      });
+
+      it('a category deleted between the validation and the update answers 404 Category, not a 500, and announces nothing', async () => {
+        prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
+
+        const res = await reorder(ORDER);
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Category not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('any other failure is not turned into a not-found', async () => {
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+        try {
+          expect((await reorder(ORDER)).status).toBe(500);
+        } finally {
+          errSpy.mockRestore();
+        }
+      });
+    });
+  });
+
+  it('registers PUT /reorder before every /:categoryId route (Express would read "reorder" as a category id)', () => {
+    const paths = (categoryRouter.stack as Array<{ route?: { path: string } }>).map((l) => l.route?.path).filter(Boolean);
+    const reorderAt = paths.indexOf('/reorder');
+    expect(reorderAt).toBeGreaterThanOrEqual(0);
+    paths.forEach((p, i) => { if (p!.startsWith('/:categoryId')) expect(i).toBeGreaterThan(reorderAt); });
   });
 });

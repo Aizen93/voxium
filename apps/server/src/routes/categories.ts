@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
 import { validateCategoryName, WS_EVENTS, Permissions } from '@voxium/shared';
 import type { Category, Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
@@ -49,12 +49,23 @@ categoryRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ se
       throw new BadRequestError('One or more category IDs do not belong to this server');
     }
 
-    // Update positions in a transaction
-    await prisma.$transaction(
-      order.map((o: { id: string; position: number }) =>
-        prisma.category.update({ where: { id: o.id }, data: { position: o.position } })
-      )
-    );
+    // Update positions in a transaction, one row after the other in ONE
+    // fixed order, sorted by id, whatever order the client sent: two reorders
+    // of the same rows then lock them in the same order and one waits for the
+    // other, where in the clients' orders two reversed reorders each held a
+    // row the other needed (a deadlock, a 500). A category the validation saw
+    // and that is gone by the update answers as an unknown one, never a 500.
+    const sorted = [...order].sort((a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    try {
+      await prisma.$transaction(
+        sorted.map((o: { id: string; position: number }) =>
+          prisma.category.update({ where: { id: o.id }, data: { position: o.position } })
+        )
+      );
+    } catch (err) {
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Category');
+      throw err;
+    }
 
     // Re-read updated categories and emit events
     const updated = await prisma.category.findMany({

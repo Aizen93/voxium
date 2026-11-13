@@ -1606,4 +1606,90 @@ describe('Channel Routes', () => {
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     });
   });
+
+  // ── PUT /reorder: the updates ──────────────────────────────────────────
+
+  describe('PUT /reorder: the updates', () => {
+    const reorder = (order: unknown) => request(app)
+      .put('/api/v1/servers/srv-1/channels/reorder')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ order });
+    const ORDER = [
+      { id: 'ch-c', position: 0, categoryId: null },
+      { id: 'ch-a', position: 1, categoryId: 'cat-1' },
+      { id: 'ch-b', position: 2, categoryId: null },
+    ];
+    beforeEach(() => {
+      // mockReset: a test that stops before the re-read leaves a queued answer,
+      // and clearAllMocks keeps the *Once queue
+      prismaMock.channel.findMany.mockReset()
+        .mockResolvedValueOnce([{ id: 'ch-a' }, { id: 'ch-b' }, { id: 'ch-c' }])
+        .mockResolvedValueOnce([]);
+      prismaMock.category.findMany.mockReset().mockResolvedValueOnce([{ id: 'cat-1' }]);
+      prismaMock.channel.update.mockImplementation(async ({ where }: any) => ({ id: where.id }));
+    });
+    afterEach(() => {
+      prismaMock.channel.findMany.mockReset();
+      prismaMock.category.findMany.mockReset();
+    });
+
+    it('updates the rows in ONE fixed order, by id, whatever order the client sent (two reversed reorders cannot deadlock)', async () => {
+      const res = await reorder(ORDER);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      const batch = prismaMock.$transaction.mock.calls[0][0];
+      expect(Array.isArray(batch)).toBe(true);
+      expect(prismaMock.channel.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['ch-a', 'ch-b', 'ch-c']);
+      // each row still gets the position and the category the client asked for
+      expect(prismaMock.channel.update).toHaveBeenCalledWith({ where: { id: 'ch-a' }, data: { position: 1, categoryId: 'cat-1' } });
+      expect(prismaMock.channel.update).toHaveBeenCalledWith({ where: { id: 'ch-c' }, data: { position: 0, categoryId: null } });
+
+      // the reversed order issues the same sequence
+      prismaMock.channel.update.mockClear();
+      prismaMock.channel.findMany
+        .mockResolvedValueOnce([{ id: 'ch-a' }, { id: 'ch-b' }, { id: 'ch-c' }])
+        .mockResolvedValueOnce([]);
+      prismaMock.category.findMany.mockResolvedValueOnce([{ id: 'cat-1' }]);
+      expect((await reorder([...ORDER].reverse())).status).toBe(200);
+      expect(prismaMock.channel.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['ch-a', 'ch-b', 'ch-c']);
+    });
+
+    it('a channel deleted between the validation and the update answers 404 Channel, not a 500, and announces nothing', async () => {
+      prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
+
+      const res = await reorder(ORDER);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Channel not found');
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('a category deleted between the validation and the update answers 404 Category, not a 500', async () => {
+      prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' }));
+
+      const res = await reorder(ORDER);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Category not found');
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('any other failure is not turned into a not-found', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+      try {
+        expect((await reorder(ORDER)).status).toBe(500);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+  });
+
+  it('registers PUT /reorder before every /:channelId route (Express would read "reorder" as a channel id)', () => {
+    const paths = (channelRouter.stack as Array<{ route?: { path: string } }>).map((l) => l.route?.path).filter(Boolean);
+    const reorderAt = paths.indexOf('/reorder');
+    expect(reorderAt).toBeGreaterThanOrEqual(0);
+    paths.forEach((p, i) => { if (p!.startsWith('/:channelId')) expect(i).toBeGreaterThan(reorderAt); });
+  });
 });
