@@ -157,10 +157,17 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * deleted here, while step 4 waits for that key share) and a kick of this
  * account (it holds the webhooks the account created or rotated, then waits
  * for the member row, while the cascade waits for those webhooks). PostgreSQL
- * aborts this transaction, which runs again whole; after a transfer that
- * committed meanwhile the retry answers OwnedServersError (below). A space
- * delete closes no cycle with it: its cascade reaches this account's member
- * row before any other row this transaction holds, and waits there.
+ * aborts one side, usually this transaction (the side that began waiting
+ * last, when the other had waited longer than the deadlock check's delay),
+ * and the aborted side runs again whole: the transfer and the kick are
+ * retried as this transaction is. After a transfer that committed meanwhile
+ * this transaction's retry answers OwnedServersError (below). A space delete
+ * was not seen to close a cycle with it: its cascade reaches this account's
+ * member row before any other row this transaction holds, and waits there.
+ * That rests on the order PostgreSQL fires the cascade triggers of `servers`
+ * in (by constraint id: `server_members` ahead of `channels` on a database
+ * built from these migrations). A migration that drops and re-creates one of
+ * those keys changes the order, and the retry is then what settles it.
  */
 export async function deleteAccountRows(userId: string): Promise<SecureMembershipRemoval> {
   let committed: { removal: SecureMembershipRemoval; serverIds: string[] };
