@@ -188,8 +188,9 @@
 }
 
 .lp-public-map {
+  --map-route-columns: minmax(0, 0.85fr) minmax(0, 1.15fr) minmax(0, 1.05fr);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr) minmax(0, 1.15fr) minmax(0, 1.05fr);
+  grid-template-columns: minmax(0, 1fr) var(--map-route-columns);
   gap: 0.5rem 0.8rem;
   padding: 1rem;
   background: radial-gradient(circle, #69639238 1px, transparent 1px) 0 0 / 17px 17px;
@@ -207,7 +208,9 @@
 .lp-public-map-row {
   display: grid;
   grid-column: 2 / -1;
+  grid-template-columns: var(--map-route-columns);
   grid-template-columns: subgrid;
+  gap: inherit;
 }
 
 .lp-public-map-row[data-route='api'] { --signal: #c0aeff; --trace: solid; }
@@ -271,8 +274,15 @@
 .lp-public-data { gap: 0.45rem; border-style: dashed; background: #121224; }
 .lp-public-map [data-active='false'] { filter: saturate(0.18) brightness(0.88); }
 .lp-public-destination[data-active='true'] {
-  border-color: color-mix(in srgb, var(--signal) 60%, #25243d);
-  background: color-mix(in srgb, var(--signal) 11%, #16162b);
+  border-color: var(--signal);
+  background: #211e38;
+}
+
+@supports (color: color-mix(in srgb, black, white)) {
+  .lp-public-destination[data-active='true'] {
+    border-color: color-mix(in srgb, var(--signal) 60%, #25243d);
+    background: color-mix(in srgb, var(--signal) 11%, #16162b);
+  }
 }
 .lp-public-data [data-active='true'] strong { color: var(--signal); }
 
@@ -386,7 +396,11 @@
   .lp-public-art { width: 70%; opacity: 0.33; }
   .lp-public-diagram-bar, .lp-public-diagram-detail { padding: 0.75rem; }
   .lp-public-diagram-bar { flex-direction: column; align-items: start; }
-  .lp-public-map { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr); padding: 0.65rem; }
+  .lp-public-map {
+    --map-route-columns: minmax(0, 0.9fr) minmax(0, 1.2fr);
+    grid-template-columns: var(--map-route-columns);
+    padding: 0.65rem;
+  }
   .lp-public-column { display: none; }
   .lp-public-device { grid-column: 1 / -1; grid-row: auto; display: grid; grid-template-columns: auto 1fr; column-gap: 0.8rem; }
   .lp-public-device svg { grid-row: span 2; align-self: center; }
