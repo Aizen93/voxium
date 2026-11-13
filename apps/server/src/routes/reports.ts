@@ -9,6 +9,27 @@ import { LIMITS } from '@voxium/shared';
 
 export const reportsRouter = Router();
 
+const DUPLICATE_REPORT_MESSAGE = 'You already have a pending report against this target';
+
+/** The prefix of the three partial unique indexes that allow one pending report per reporter and target. */
+const PENDING_REPORT_INDEX_PREFIX = 'reports_pending_';
+
+/**
+ * A unique violation (P2002) of one of the pending-report indexes, as the
+ * driver names the index in the error's `meta` (the pg adapter's
+ * `driverAdapterError.cause.constraint.index`, or `target` when it is the
+ * index name).
+ */
+function violatesPendingReportIndex(err: unknown): boolean {
+  const e = err as {
+    code?: unknown;
+    meta?: { target?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
+  } | null;
+  if (e?.code !== 'P2002') return false;
+  const named = [e.meta?.driverAdapterError?.cause?.constraint?.index, e.meta?.target];
+  return named.some((v) => typeof v === 'string' && v.startsWith(PENDING_REPORT_INDEX_PREFIX));
+}
+
 reportsRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
 // ─── Submit a report ─────────────────────────────────────────────────────────
@@ -70,7 +91,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         select: { id: true },
       });
       if (existingReport) {
-        throw new BadRequestError('You already have a pending report against this target');
+        throw new BadRequestError(DUPLICATE_REPORT_MESSAGE);
       }
 
       reportedUserId = server.ownerId;
@@ -101,7 +122,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         },
       });
       if (existingReport) {
-        throw new BadRequestError('You already have a pending report against this target');
+        throw new BadRequestError(DUPLICATE_REPORT_MESSAGE);
       }
     }
 
@@ -176,20 +197,33 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
       }
     }
 
-    await prisma.report.create({
-      data: {
-        type,
-        reason,
-        reporterId: userId,
-        reportedUserId,
-        messageId: type === 'message' ? messageId : null,
-        messageContent,
-        contentSource,
-        channelId,
-        conversationId,
-        serverId,
-      },
-    });
+    try {
+      await prisma.report.create({
+        data: {
+          type,
+          reason,
+          reporterId: userId,
+          reportedUserId,
+          messageId: type === 'message' ? messageId : null,
+          messageContent,
+          contentSource,
+          channelId,
+          conversationId,
+          serverId,
+        },
+      });
+    } catch (err) {
+      // The look above and this insert are two statements: an identical
+      // report sent at the same time passes the look too. The database
+      // refuses the second one (one pending report per reporter and target:
+      // the partial unique indexes of migration
+      // 20261111150000_reports_one_pending_per_target), and it gets the
+      // look's answer. Only those indexes: any other unique violation (the
+      // primary key, an index added later) is not a duplicate report and
+      // surfaces as the error it is.
+      if (violatesPendingReportIndex(err)) throw new BadRequestError(DUPLICATE_REPORT_MESSAGE);
+      throw err;
+    }
 
     // Notify admin report subscribers
     const pendingCount = await prisma.report.count({ where: { status: 'pending' } });

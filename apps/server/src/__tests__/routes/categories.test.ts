@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -41,11 +41,14 @@ const prismaMock: Record<string, any> = {
     update: vi.fn(),
     delete: vi.fn(),
     count: vi.fn(),
+    aggregate: vi.fn(),
   },
   channel: {
     findMany: vi.fn(),
   },
   $transaction: vi.fn(),
+  // The space row lock the create takes in its transaction
+  $queryRaw: vi.fn(),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -111,6 +114,14 @@ function mockAuthUser(overrides: Record<string, unknown> = {}) {
   prismaMock.user.findUnique.mockResolvedValue({ ...defaults, ...overrides });
 }
 
+/** The space's category count and highest position (default: positions 0..count-1), read under the space row lock. */
+function categoryStats(count: number, highest: number | null = count > 0 ? count - 1 : null) {
+  prismaMock.category.aggregate.mockResolvedValue({ _count: { _all: count }, _max: { position: highest } });
+}
+
+/** Set while a `$transaction` callback runs, so a mock can tell where it was called. */
+let inTransaction = false;
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe('Category Routes', () => {
@@ -121,6 +132,20 @@ describe('Category Routes', () => {
     app = createApp();
     mockAuthUser();
     mockHasServerPermission.mockResolvedValue(true);
+    // An interactive transaction runs its callback on the same mocks; an
+    // array one (the reorder) awaits its statements
+    inTransaction = false;
+    prismaMock.$transaction.mockImplementation(async (arg: any) => {
+      if (Array.isArray(arg)) return Promise.all(arg);
+      inTransaction = true;
+      try {
+        return await arg(new Proxy({} as any, { get: (_t, prop) => prismaMock[prop as string] }));
+      } finally {
+        inTransaction = false;
+      }
+    });
+    // The space row lock finds the space
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'srv-1' }]);
   });
 
   // ── POST /api/v1/servers/:serverId/categories ──────────────────────────
@@ -128,7 +153,7 @@ describe('Category Routes', () => {
   describe('POST /api/v1/servers/:serverId/categories', () => {
     it('creates a category', async () => {
       const token = makeToken();
-      prismaMock.category.count.mockResolvedValue(2);
+      categoryStats(2);
       prismaMock.category.create.mockResolvedValue({
         id: 'cat-1',
         name: 'Text Channels',
@@ -147,9 +172,52 @@ describe('Category Routes', () => {
       expect(res.body.data.serverId).toBe('srv-1');
     });
 
+    it('locks, counts, places and inserts on the transaction\'s OWN client: nothing of it on the shared one', async () => {
+      // A transaction client of its own, so a statement issued on the shared
+      // client inside the callback (outside the lock, on a second pool
+      // connection) is told apart from one on the transaction's
+      const txClient = {
+        $queryRaw: vi.fn().mockResolvedValue([{ id: 'srv-1' }]),
+        category: {
+          aggregate: vi.fn().mockResolvedValue({ _count: { _all: 2 }, _max: { position: 4 } }),
+          create: vi.fn(async ({ data }: any) => ({ id: 'cat-new', ...data })),
+        },
+      };
+      prismaMock.$transaction.mockImplementationOnce(async (fn: (tx: typeof txClient) => Promise<unknown>) => fn(txClient));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: 'Text Channels' });
+
+      expect(res.status).toBe(201);
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(txClient.category.aggregate).toHaveBeenCalledTimes(1);
+      expect(txClient.category.create).toHaveBeenCalledWith({ data: { name: 'Text Channels', serverId: 'srv-1', position: 5 } });
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+      expect(prismaMock.category.aggregate).not.toHaveBeenCalled();
+      expect(prismaMock.category.create).not.toHaveBeenCalled();
+    });
+
+    it('gives the transaction the long budget: the space row it waits for is held through an account deletion\'s cascade', async () => {
+      const token = makeToken();
+      categoryStats(2);
+      prismaMock.category.create.mockResolvedValue({ id: 'cat-1', name: 'Text Channels', serverId: 'srv-1', position: 2 });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'Text Channels' });
+
+      expect(res.status).toBe(201);
+      // Under Prisma's 5 s default the wait alone expired the creation (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
     it('emits category:created socket event', async () => {
       const token = makeToken();
-      prismaMock.category.count.mockResolvedValue(0);
+      categoryStats(0);
       const createdCategory = {
         id: 'cat-1',
         name: 'Text Channels',
@@ -217,7 +285,7 @@ describe('Category Routes', () => {
 
     it('respects maxCategoriesPerServer limit', async () => {
       const token = makeToken();
-      prismaMock.category.count.mockResolvedValue(12); // at the default limit
+      categoryStats(12); // at the default limit
 
       const res = await request(app)
         .post('/api/v1/servers/srv-1/categories')
@@ -230,7 +298,7 @@ describe('Category Routes', () => {
 
     it('respects custom lower category limit', async () => {
       const token = makeToken();
-      prismaMock.category.count.mockResolvedValue(3);
+      categoryStats(3);
       (getEffectiveLimits as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         maxChannelsPerServer: 20,
         maxVoiceUsersPerChannel: 12,
@@ -249,7 +317,7 @@ describe('Category Routes', () => {
 
     it('sanitizes HTML from category name', async () => {
       const token = makeToken();
-      prismaMock.category.count.mockResolvedValue(0);
+      categoryStats(0);
       prismaMock.category.create.mockResolvedValue({
         id: 'cat-1',
         name: 'Clean Name',
@@ -264,6 +332,116 @@ describe('Category Routes', () => {
 
       const createCall = prismaMock.category.create.mock.calls[0]?.[0];
       expect(createCall?.data?.name).toBe('Clean Name');
+    });
+
+    // ── The limit and the position, under the space row lock ─────────────
+
+    it('locks the space row, then counts and places, then inserts, all inside ONE transaction', async () => {
+      const order: string[] = [];
+      const where = () => (inTransaction ? 'tx' : 'outside');
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        order.push(`lock:${where()}`);
+        expect(strings.join('?')).toBe('SELECT id FROM servers WHERE id = ? FOR UPDATE');
+        expect(values).toEqual(['srv-1']);
+        return [{ id: 'srv-1' }];
+      });
+      prismaMock.category.aggregate.mockImplementation(async () => {
+        order.push(`count:${where()}`);
+        return { _count: { _all: 2 }, _max: { position: 1 } };
+      });
+      prismaMock.category.create.mockImplementation(async ({ data }: any) => {
+        order.push(`create:${where()}`);
+        return { id: 'cat-new', ...data };
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: 'Voice' });
+
+      expect(res.status).toBe(201);
+      expect(order).toEqual(['lock:tx', 'count:tx', 'create:tx']);
+      // one read: the count and the highest position
+      expect(prismaMock.category.aggregate).toHaveBeenCalledWith({
+        where: { serverId: 'srv-1' },
+        _count: { _all: true },
+        _max: { position: true },
+      });
+      expect(prismaMock.category.count).not.toHaveBeenCalled();
+    });
+
+    it('places the category after the highest position, not after the count, and at 0 in a space without one', async () => {
+      categoryStats(2, 7);
+      prismaMock.category.create.mockImplementation(async ({ data }: any) => ({ id: 'cat-new', ...data }));
+      let res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: 'Voice' });
+      expect(res.status).toBe(201);
+      expect(prismaMock.category.create).toHaveBeenLastCalledWith({ data: { name: 'Voice', serverId: 'srv-1', position: 8 } });
+
+      categoryStats(0);
+      res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: 'Text' });
+      expect(res.status).toBe(201);
+      expect(prismaMock.category.create).toHaveBeenLastCalledWith({ data: { name: 'Text', serverId: 'srv-1', position: 0 } });
+    });
+
+    it('a limit of 0 freezes category creation', async () => {
+      categoryStats(0);
+      (getEffectiveLimits as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 0, maxMembersPerServer: 0,
+      });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: 'Voice' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Server can have at most 0 categories');
+      expect(prismaMock.category.create).not.toHaveBeenCalled();
+    });
+
+    it('404 Server when the space was deleted since the permission check, creating and announcing nothing', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]);
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: 'Voice' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
+      expect(prismaMock.category.aggregate).not.toHaveBeenCalled();
+      expect(prismaMock.category.create).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('a creation PostgreSQL aborted to break a deadlock is run again and succeeds', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => {
+          throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+        })
+        .mockImplementation(real);
+      categoryStats(1);
+      prismaMock.category.create.mockImplementation(async ({ data }: any) => ({ id: 'cat-new', ...data }));
+      try {
+        const res = await request(app)
+          .post('/api/v1/servers/srv-1/categories')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ name: 'Voice' });
+
+        expect(res.status).toBe(201);
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(prismaMock.category.create).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('returns 401 without auth', async () => {
@@ -670,5 +848,130 @@ describe('Category Routes', () => {
 
       expect(res.status).toBe(401);
     });
+
+    // A creation places the new category after the highest position in the
+    // space, so a reorder must not write one near the column's ceiling, and a
+    // malformed entry is a 400, not a 500 from the database
+    it.each([
+      ['a negative position', [{ id: 'cat-1', position: -1 }]],
+      ['a fractional position', [{ id: 'cat-1', position: 0.5 }]],
+      ['a position past the bound', [{ id: 'cat-1', position: 1_000_001 }]],
+      ['a position given as a string', [{ id: 'cat-1', position: '0' }]],
+      ['no position', [{ id: 'cat-1' }]],
+      ['a numeric id', [{ id: 1, position: 0 }]],
+      ['an entry that is not an object', ['cat-1']],
+    ])('returns 400 for %s, before any read or write', async (_label, order) => {
+      const res = await request(app)
+        .put('/api/v1/servers/srv-1/categories/reorder')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ order });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Each order entry needs a category id and a whole-number position from 0 to 1000000');
+      expect(prismaMock.category.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('accepts 0 and the bound itself', async () => {
+      prismaMock.category.findMany
+        .mockResolvedValueOnce([{ id: 'cat-1' }, { id: 'cat-2' }])
+        .mockResolvedValueOnce([]);
+      prismaMock.$transaction.mockResolvedValue([]);
+
+      const res = await request(app)
+        .put('/api/v1/servers/srv-1/categories/reorder')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ order: [{ id: 'cat-1', position: 0 }, { id: 'cat-2', position: 1_000_000 }] });
+
+      expect(res.status).toBe(200);
+    });
+
+    describe('the updates', () => {
+      const reorder = (order: unknown) => request(app)
+        .put('/api/v1/servers/srv-1/categories/reorder')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ order });
+      const ORDER = [{ id: 'cat-c', position: 0 }, { id: 'cat-a', position: 1 }, { id: 'cat-b', position: 2 }];
+      // mockReset: a test that stops before the re-read leaves a queued answer,
+      // and clearAllMocks keeps the *Once queue
+      const found = () => prismaMock.category.findMany.mockReset()
+        .mockResolvedValueOnce([{ id: 'cat-a' }, { id: 'cat-b' }, { id: 'cat-c' }])
+        .mockResolvedValueOnce([]);
+      beforeEach(() => {
+        found();
+        prismaMock.category.update.mockImplementation(async ({ where }: any) => ({ id: where.id }));
+      });
+      afterEach(() => { prismaMock.category.findMany.mockReset(); });
+
+      it('updates the rows in ONE fixed order, by id, whatever order the client sent (two reversed reorders cannot deadlock)', async () => {
+        expect((await reorder(ORDER)).status).toBe(200);
+
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+        expect(Array.isArray(prismaMock.$transaction.mock.calls[0][0])).toBe(true);
+        expect(prismaMock.category.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['cat-a', 'cat-b', 'cat-c']);
+        expect(prismaMock.category.update).toHaveBeenCalledWith({ where: { id: 'cat-c' }, data: { position: 0 } });
+
+        prismaMock.category.update.mockClear();
+        found();
+        expect((await reorder([...ORDER].reverse())).status).toBe(200);
+        expect(prismaMock.category.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['cat-a', 'cat-b', 'cat-c']);
+      });
+
+      it('runs the batch with the long budget: a reorder waiting on a category row a long delete holds does not expire', async () => {
+        expect((await reorder(ORDER)).status).toBe(200);
+
+        expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+      });
+
+      it('a batch PostgreSQL aborted to break a deadlock is built again and run again', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }));
+        try {
+          const res = await reorder(ORDER);
+
+          expect(res.status).toBe(200);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+          const [first, second] = prismaMock.$transaction.mock.calls.map(([batch]: any[]) => batch);
+          // fresh statements for the second attempt, in the same fixed order
+          expect(second).not.toBe(first);
+          expect(second).toHaveLength(3);
+          expect(prismaMock.category.update.mock.calls.map(([args]: any[]) => args.where.id)).toEqual(['cat-a', 'cat-b', 'cat-c', 'cat-a', 'cat-b', 'cat-c']);
+          expect(prismaMock.$transaction).toHaveBeenLastCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+          expect(warn).toHaveBeenCalledWith(expect.stringMatching(/reorder of categories in srv-1 was aborted by a deadlock or a serialization failure; retrying \(1 of 2\)/));
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('a category deleted between the validation and the update answers 404 Category, not a 500, and announces nothing', async () => {
+        prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
+
+        const res = await reorder(ORDER);
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Category not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+        // the answer, never retried
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      });
+
+      it('any other failure is not turned into a not-found', async () => {
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+        try {
+          expect((await reorder(ORDER)).status).toBe(500);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+        } finally {
+          errSpy.mockRestore();
+        }
+      });
+    });
+  });
+
+  it('registers PUT /reorder before every /:categoryId route (Express would read "reorder" as a category id)', () => {
+    const paths = (categoryRouter.stack as Array<{ route?: { path: string } }>).map((l) => l.route?.path).filter(Boolean);
+    const reorderAt = paths.indexOf('/reorder');
+    expect(reorderAt).toBeGreaterThanOrEqual(0);
+    paths.forEach((p, i) => { if (p!.startsWith('/:categoryId')) expect(i).toBeGreaterThan(reorderAt); });
   });
 });

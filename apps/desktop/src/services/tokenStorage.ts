@@ -29,11 +29,30 @@
  * a page reload (a reload that outran the persisted clear would restore the
  * refused tokens and loop). Whatever the store, a clear removes any copy in
  * the page's storage AT ONCE: that part never waits on the queue.
+ *
+ * Every stored session is bound to the API origin that issued it
+ * (services/sessionOrigin.ts): a refresh token handed to the wrong server is
+ * a stolen session. A desktop build for another server keeps its entries
+ * apart by its own identifier (lib.rs `keychain_services`); builds that share
+ * one (the official app and `tauri dev`) share the entries. Each entry
+ * carries the origin of the build that wrote it, and a store hands back only
+ * what names its own build's origin; a load leaves another origin's entry as
+ * it is. An entry from before the stamp (no origin) is the official
+ * service's: an official build keeps and stamps it, any other desktop build
+ * leaves it unread. The web store accepts an unmarked pair as the page's own:
+ * browser storage belongs to one page origin, which no other deployment
+ * shares.
  */
+
+import { BUILD_API_ORIGIN, isOfficialOrigin } from './sessionOrigin';
 
 const ACCESS_KEY = 'voxium_access_token';
 const REFRESH_KEY = 'voxium_refresh_token';
 const TRUSTED_DEVICE_KEY = 'voxium_trusted_device';
+/** The origin the pair in the same storage area was issued by (the web store). */
+const SESSION_ORIGIN_KEY = 'voxium_session_origin';
+/** The origin the trusted-device token was issued by (the web store). */
+const TRUSTED_DEVICE_ORIGIN_KEY = 'voxium_trusted_device_origin';
 
 /** The keychain entries, by the names the Rust side accepts (lib.rs `SESSION_SECRET_NAMES`). */
 const TOKENS_ENTRY = 'tokens';
@@ -73,6 +92,17 @@ export interface SessionStore {
   clearTrustedDeviceToken(): void | Promise<void>;
 }
 
+/** The page's own storage, which other tabs of the same page write too. */
+interface WebSessionStore extends SessionStore {
+  /** The API origin this store binds the session to. */
+  readonly apiOrigin: string;
+}
+
+export interface SessionStoreOptions {
+  /** The origin of the API the build talks to (default: the one it is compiled for). */
+  apiOrigin?: string;
+}
+
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -88,6 +118,7 @@ function readPair(area: Storage): TokenPair | null {
 function removePair(area: Storage): void {
   area.removeItem(ACCESS_KEY);
   area.removeItem(REFRESH_KEY);
+  area.removeItem(SESSION_ORIGIN_KEY);
 }
 
 /** Every copy of the pair the page's storage holds, gone — synchronously. */
@@ -96,7 +127,13 @@ function removeLegacyPairs(): void {
   removePair(sessionStorage);
 }
 
-/** What an older build (or the browser store) keeps in the page's storage. */
+/** The page's trusted-device token and its mark, gone — synchronously. */
+function removeTrustedCopy(): void {
+  localStorage.removeItem(TRUSTED_DEVICE_KEY);
+  localStorage.removeItem(TRUSTED_DEVICE_ORIGIN_KEY);
+}
+
+/** What an older desktop build left in the page's storage (no origin mark: it predates it). */
 function legacyCopies(): { local: TokenPair | null; session: TokenPair | null; trusted: string | null } {
   return {
     local: readPair(localStorage),
@@ -105,62 +142,128 @@ function legacyCopies(): { local: TokenPair | null; session: TokenPair | null; t
   };
 }
 
+const NO_LEGACY_COPIES = { local: null, session: null, trusted: null } as const;
+
+/**
+ * Whether the web store may use what `area` holds under `originKey`: unmarked
+ * (the page's own, written before the mark existed: it gets the mark) or
+ * marked with `apiOrigin`. A mark of another origin is removed with what it
+ * marks, never read.
+ */
+function webAreaOwned(area: Storage, originKey: string, keys: readonly string[], apiOrigin: string): boolean {
+  const mark = area.getItem(originKey);
+  if (mark === apiOrigin) return true;
+  if (mark !== null) {
+    for (const key of [...keys, originKey]) area.removeItem(key);
+    console.warn('[Session] The page held a session issued by another server — dropped unread');
+    return false;
+  }
+  if (keys.some((key) => area.getItem(key) !== null)) area.setItem(originKey, apiOrigin);
+  return true;
+}
+
 /**
  * localStorage ("Remember me") or sessionStorage: the page's own storage,
  * for the web client. Reads the two tokens independently, as the module
- * always did (an access token alone still serves until it expires).
+ * always did (an access token alone still serves until it expires). Each
+ * area's pair, and the trusted-device token, carry the API origin they were
+ * issued by; the mark is written BEFORE the tokens, so another tab never sees
+ * a pair without it.
  */
-export const webSessionStore: SessionStore = {
-  async load() {
-    const remembered = localStorage.getItem(ACCESS_KEY) !== null;
-    return {
-      accessToken: localStorage.getItem(ACCESS_KEY) ?? sessionStorage.getItem(ACCESS_KEY),
-      refreshToken: localStorage.getItem(REFRESH_KEY) ?? sessionStorage.getItem(REFRESH_KEY),
-      remembered,
-      trustedDeviceToken: localStorage.getItem(TRUSTED_DEVICE_KEY),
-      reachable: true,
-    };
-  },
-  saveTokens(accessToken, refreshToken, remembered) {
-    const [into, outOf] = remembered ? [localStorage, sessionStorage] : [sessionStorage, localStorage];
-    removePair(outOf);
-    into.setItem(ACCESS_KEY, accessToken);
-    into.setItem(REFRESH_KEY, refreshToken);
-  },
-  clearTokens() {
-    removeLegacyPairs();
-  },
-  saveTrustedDeviceToken(token) {
-    localStorage.setItem(TRUSTED_DEVICE_KEY, token);
-  },
-  clearTrustedDeviceToken() {
-    localStorage.removeItem(TRUSTED_DEVICE_KEY);
-  },
-};
+export function createWebSessionStore({ apiOrigin = BUILD_API_ORIGIN }: SessionStoreOptions = {}): WebSessionStore {
+  const PAIR_KEYS = [ACCESS_KEY, REFRESH_KEY] as const;
+  return {
+    apiOrigin,
+    async load() {
+      const local = webAreaOwned(localStorage, SESSION_ORIGIN_KEY, PAIR_KEYS, apiOrigin);
+      const session = webAreaOwned(sessionStorage, SESSION_ORIGIN_KEY, PAIR_KEYS, apiOrigin);
+      const trusted = webAreaOwned(localStorage, TRUSTED_DEVICE_ORIGIN_KEY, [TRUSTED_DEVICE_KEY], apiOrigin);
+      const fromLocal = (key: string) => (local ? localStorage.getItem(key) : null);
+      const fromSession = (key: string) => (session ? sessionStorage.getItem(key) : null);
+      return {
+        accessToken: fromLocal(ACCESS_KEY) ?? fromSession(ACCESS_KEY),
+        refreshToken: fromLocal(REFRESH_KEY) ?? fromSession(REFRESH_KEY),
+        remembered: fromLocal(ACCESS_KEY) !== null,
+        trustedDeviceToken: trusted ? localStorage.getItem(TRUSTED_DEVICE_KEY) : null,
+        reachable: true,
+      };
+    },
+    saveTokens(accessToken, refreshToken, remembered) {
+      const [into, outOf] = remembered ? [localStorage, sessionStorage] : [sessionStorage, localStorage];
+      removePair(outOf);
+      into.setItem(SESSION_ORIGIN_KEY, apiOrigin);
+      into.setItem(ACCESS_KEY, accessToken);
+      into.setItem(REFRESH_KEY, refreshToken);
+    },
+    clearTokens() {
+      removeLegacyPairs();
+    },
+    saveTrustedDeviceToken(token) {
+      localStorage.setItem(TRUSTED_DEVICE_ORIGIN_KEY, apiOrigin);
+      localStorage.setItem(TRUSTED_DEVICE_KEY, token);
+    },
+    clearTrustedDeviceToken() {
+      removeTrustedCopy();
+    },
+  };
+}
+
+/** The web client's store, bound to the API the build is compiled for. */
+export const webSessionStore: SessionStore = createWebSessionStore();
 
 // ─── The OS credential store (Tauri) ─────────────────────────────────────────
 
 /** Test/DI hook so unit tests don't need a real Tauri runtime. */
 type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
-function encodePair(accessToken: string, refreshToken: string): string {
-  return JSON.stringify({ accessToken, refreshToken });
+/** What an entry holds and the API origin it was issued by (null: written before the stamp existed). */
+interface Stamped<T> {
+  value: T;
+  origin: string | null;
+}
+
+/** The `tokens` entry: one JSON object, the pair and its origin, so they are written together or not at all. */
+function encodePair(accessToken: string, refreshToken: string, origin: string): string {
+  return JSON.stringify({ accessToken, refreshToken, origin });
 }
 
 /** The pair an entry holds, or null for an empty or unreadable entry (logged
  *  without the content: a parse error's message quotes its input, and the
- *  input is a token). */
-function decodePair(raw: string | null): TokenPair | null {
+ *  input is a token). An entry without `origin` predates the stamp. */
+function decodePair(raw: string | null): Stamped<TokenPair> | null {
   if (raw === null) return null;
   try {
-    const parsed = JSON.parse(raw) as Partial<TokenPair> | null;
+    const parsed = JSON.parse(raw) as (Partial<TokenPair> & { origin?: unknown }) | null;
     if (parsed && typeof parsed.accessToken === 'string' && typeof parsed.refreshToken === 'string') {
-      return { accessToken: parsed.accessToken, refreshToken: parsed.refreshToken };
+      const value = { accessToken: parsed.accessToken, refreshToken: parsed.refreshToken };
+      if (!('origin' in parsed)) return { value, origin: null };
+      if (typeof parsed.origin === 'string') return { value, origin: parsed.origin };
     }
   } catch {
     // Reported just below, like the wrong shape: the entry is ours to rewrite
   }
   console.error('[Session] The stored session could not be decoded — ignoring it');
+  return null;
+}
+
+/** The `trusted-device` entry: `{ token, origin }` as JSON. Builds before the stamp stored the bare token. */
+function encodeTrusted(token: string, origin: string): string {
+  return JSON.stringify({ token, origin });
+}
+
+function decodeTrusted(raw: string | null): Stamped<string> | null {
+  if (raw === null || raw === '') return null;
+  // A bare token (a JWT never starts with a brace) is an entry from before the stamp
+  if (!raw.startsWith('{')) return { value: raw, origin: null };
+  try {
+    const parsed = JSON.parse(raw) as { token?: unknown; origin?: unknown } | null;
+    if (parsed && typeof parsed.token === 'string' && parsed.token && typeof parsed.origin === 'string') {
+      return { value: parsed.token, origin: parsed.origin };
+    }
+  } catch {
+    // Reported just below, without the content
+  }
+  console.error('[Session] The stored trusted-device token could not be decoded — ignoring it');
   return null;
 }
 
@@ -175,8 +278,19 @@ function decodePair(raw: string | null): TokenPair | null {
  * removes the page-storage copy of that slot first: once the memory has been
  * written, a copy on disk can only be stale, and a stale refresh token is
  * still a working credential (the refresh is stateless).
+ *
+ * The entries live under the build's own service (lib.rs names it after the
+ * build's identifier): only builds with the same identifier, the official
+ * app and `tauri dev`, share them, so each carries the origin of the API it
+ * was issued by. An entry of another origin reads as no session, and a load
+ * leaves it as it is; this build's own writes and clears replace or remove
+ * it. An entry without an origin, like the page-storage copies older builds
+ * left, is the official service's: only a build whose API is the official
+ * one reads, migrates and stamps it.
  */
-export function createKeychainSessionStore(invokeFn?: InvokeFn): SessionStore {
+export function createKeychainSessionStore(invokeFn?: InvokeFn, { apiOrigin = BUILD_API_ORIGIN }: SessionStoreOptions = {}): SessionStore {
+  const ownsUnstamped = isOfficialOrigin(apiOrigin);
+  const owns = (origin: string | null) => origin === apiOrigin || (origin === null && ownsUnstamped);
   const doInvoke: InvokeFn = async (cmd, args) => {
     if (invokeFn) return invokeFn(cmd, args);
     const { invoke } = await import('@tauri-apps/api/core');
@@ -212,21 +326,42 @@ export function createKeychainSessionStore(invokeFn?: InvokeFn): SessionStore {
     }
   }
 
+  /** An entry of ours written before the stamp, rewritten with it; a failure only logs (the entry still reads as ours). */
+  async function stamp(name: string, value: string): Promise<void> {
+    try {
+      await write(name, value);
+    } catch (err) {
+      console.warn(`[Session] Could not stamp ${name} with its server:`, describe(err));
+    }
+  }
+
+  let foreignReported = false;
+  function reportForeign(): void {
+    if (foreignReported) return;
+    foreignReported = true;
+    console.info('[Session] The OS credential store holds a session of another Voxium build (another server) — not used here');
+  }
+
   return {
     async load() {
-      const legacy = legacyCopies();
-      let pair: TokenPair | null;
-      let remembered: boolean;
+      // The copies older builds left in the page's storage carry no origin:
+      // the official service's, read by an official build only
+      const legacy = ownsUnstamped ? legacyCopies() : NO_LEGACY_COPIES;
+      let pair: TokenPair | null = null;
+      let remembered = false;
       try {
         // The pair first, on its own: it decides whether there is a session.
         // Sequential, not parallel — a locked keychain prompts once per read
-        pair = decodePair(await read(TOKENS_ENTRY));
-        remembered = pair !== null;
-        if (pair) {
+        const stored = decodePair(await read(TOKENS_ENTRY));
+        if (stored && !owns(stored.origin)) reportForeign();
+        if (stored && owns(stored.origin)) {
+          pair = stored.value;
+          remembered = true;
           // The keychain is authoritative: a stale copy on disk is a credential too
-          removeLegacyPairs();
+          if (ownsUnstamped) removeLegacyPairs();
+          if (stored.origin === null) await stamp(TOKENS_ENTRY, encodePair(pair.accessToken, pair.refreshToken, apiOrigin));
         } else if (legacy.local) {
-          await migrate(TOKENS_ENTRY, encodePair(legacy.local.accessToken, legacy.local.refreshToken), () => removePair(localStorage));
+          await migrate(TOKENS_ENTRY, encodePair(legacy.local.accessToken, legacy.local.refreshToken, apiOrigin), () => removePair(localStorage));
           pair = legacy.local;
           remembered = true;
           removePair(sessionStorage);
@@ -256,15 +391,17 @@ export function createKeychainSessionStore(invokeFn?: InvokeFn): SessionStore {
       }
 
       // The trusted-device token on its own: a failure here must not cost
-      // the session that was just read
-      let trustedDeviceToken = legacy.trusted;
+      // the session that was just read. Same origin rule as the pair
+      let trustedDeviceToken: string | null = legacy.trusted;
       try {
-        const stored = await read(TRUSTED_DEVICE_ENTRY);
-        if (stored) {
-          trustedDeviceToken = stored;
-          localStorage.removeItem(TRUSTED_DEVICE_KEY);
+        const stored = decodeTrusted(await read(TRUSTED_DEVICE_ENTRY));
+        if (stored && !owns(stored.origin)) reportForeign();
+        if (stored && owns(stored.origin)) {
+          trustedDeviceToken = stored.value;
+          if (ownsUnstamped) localStorage.removeItem(TRUSTED_DEVICE_KEY);
+          if (stored.origin === null) await stamp(TRUSTED_DEVICE_ENTRY, encodeTrusted(stored.value, apiOrigin));
         } else if (legacy.trusted) {
-          await migrate(TRUSTED_DEVICE_ENTRY, legacy.trusted, () => localStorage.removeItem(TRUSTED_DEVICE_KEY));
+          await migrate(TRUSTED_DEVICE_ENTRY, encodeTrusted(legacy.trusted, apiOrigin), () => localStorage.removeItem(TRUSTED_DEVICE_KEY));
         }
       } catch (err) {
         console.warn('[Session] The trusted-device token could not be read from the OS credential store (the device may need its TOTP code once):', describe(err));
@@ -280,7 +417,7 @@ export function createKeychainSessionStore(invokeFn?: InvokeFn): SessionStore {
     },
     async saveTokens(accessToken, refreshToken, remembered) {
       removeLegacyPairs();
-      if (remembered) await write(TOKENS_ENTRY, encodePair(accessToken, refreshToken));
+      if (remembered) await write(TOKENS_ENTRY, encodePair(accessToken, refreshToken, apiOrigin));
       else await remove(TOKENS_ENTRY);
     },
     async clearTokens() {
@@ -288,11 +425,11 @@ export function createKeychainSessionStore(invokeFn?: InvokeFn): SessionStore {
       await remove(TOKENS_ENTRY);
     },
     async saveTrustedDeviceToken(token) {
-      localStorage.removeItem(TRUSTED_DEVICE_KEY);
-      await write(TRUSTED_DEVICE_ENTRY, token);
+      removeTrustedCopy();
+      await write(TRUSTED_DEVICE_ENTRY, encodeTrusted(token, apiOrigin));
     },
     async clearTrustedDeviceToken() {
-      localStorage.removeItem(TRUSTED_DEVICE_KEY);
+      removeTrustedCopy();
       await remove(TRUSTED_DEVICE_ENTRY);
     },
   };
@@ -381,7 +518,7 @@ export function setTrustedDeviceToken(token: string): void {
 export function clearTrustedDeviceToken(): void {
   memory = { ...memory, trustedDeviceToken: null };
   trustedWritten = true;
-  localStorage.removeItem(TRUSTED_DEVICE_KEY);
+  removeTrustedCopy();
   enqueue('Could not clear the trusted-device token', (s) => s.clearTrustedDeviceToken());
 }
 
@@ -459,14 +596,25 @@ export function flushTokenStorage(timeoutMs: number = TOKEN_STORAGE_FLUSH_TIMEOU
 // `storage` event fires in the OTHER tabs only, for localStorage only — a
 // not-remembered session (sessionStorage) is this tab's own and is left alone
 // when a remembered one goes away elsewhere.
+function isWebStore(s: SessionStore): s is WebSessionStore {
+  return 'apiOrigin' in s;
+}
+
 function followOtherTabs(event: StorageEvent): void {
-  if (store !== webSessionStore || event.storageArea !== localStorage) return;
+  if (!isWebStore(store) || event.storageArea !== localStorage) return;
+  const { apiOrigin } = store;
+  // An unmarked value is the page's own, as at load; one marked for another
+  // server is not this build's to send anywhere
+  const markedOwn = (originKey: string) => {
+    const mark = localStorage.getItem(originKey);
+    return mark === null || mark === apiOrigin;
+  };
   const wholeStore = event.key === null;
-  if (wholeStore || event.key === TRUSTED_DEVICE_KEY) {
-    memory = { ...memory, trustedDeviceToken: localStorage.getItem(TRUSTED_DEVICE_KEY) };
+  if (wholeStore || event.key === TRUSTED_DEVICE_KEY || event.key === TRUSTED_DEVICE_ORIGIN_KEY) {
+    memory = { ...memory, trustedDeviceToken: markedOwn(TRUSTED_DEVICE_ORIGIN_KEY) ? localStorage.getItem(TRUSTED_DEVICE_KEY) : null };
   }
-  if (wholeStore || event.key === ACCESS_KEY || event.key === REFRESH_KEY) {
-    const pair = readPair(localStorage);
+  if (wholeStore || event.key === ACCESS_KEY || event.key === REFRESH_KEY || event.key === SESSION_ORIGIN_KEY) {
+    const pair = markedOwn(SESSION_ORIGIN_KEY) ? readPair(localStorage) : null;
     if (pair) {
       memory = { ...memory, accessToken: pair.accessToken, refreshToken: pair.refreshToken, remembered: true };
     } else if (memory.remembered) {

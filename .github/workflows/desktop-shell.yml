@@ -2,9 +2,12 @@ name: Desktop shell
 
 # The Tauri shell (apps/desktop/src-tauri) is the one part of the repository
 # that CI never compiled: a Cargo change could pass every check and fail at
-# the release build. This job compiles it on every change to the shell, on
-# Windows, where share_bar.rs (cfg(windows)) is part of the build and the
-# webview2-com / windows-core versions can be checked.
+# the release build. The `check` job compiles, lints and tests it on every
+# change to the shell, on Windows, where share_bar.rs (cfg(windows)) and the
+# debug-only dev_console.rs are part of the build and the webview2-com /
+# windows-core versions can be checked. The `audit` job checks its Cargo.lock
+# against the RustSec database on the same changes and once a week, since a new
+# advisory arrives without any change here.
 on:
   push:
     branches: [develop]
@@ -15,6 +18,9 @@ on:
     paths:
       - 'apps/desktop/src-tauri/**'
       - '.github/workflows/desktop-shell.yml'
+  schedule:
+    - cron: '41 6 * * 1' # weekly, Monday 06:41 UTC
+  workflow_dispatch:
 
 concurrency:
   group: desktop-shell-${{ github.ref }}
@@ -26,7 +32,11 @@ permissions:
 jobs:
   check:
     name: cargo check & test (Windows)
+    # The weekly run is for the advisory database; the code has not changed
+    if: github.event_name != 'schedule'
     runs-on: windows-latest
+    # A cold build takes about six minutes; past this the run is hung
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -36,10 +46,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The action installs the minimal profile: rustfmt and clippy are asked for
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
+          components: rustfmt, clippy
 
       - name: Cache Cargo
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -52,11 +64,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
+      # No build needed: a formatting difference fails here, in seconds
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
       # A debug check embeds no frontend (build.devUrl is set), so the Vite
       # build is not needed here; --locked refuses a Cargo.lock that does not
       # match Cargo.toml instead of rewriting it.
       - name: cargo check
         run: cargo check --locked
+
+      # --all-targets lints the test modules too; any warning fails the step
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: cargo test
         run: cargo test --locked --lib
@@ -73,3 +93,31 @@ jobs:
             cargo tree -i webview2-com --locked
             exit 1
           fi
+
+  # RustSec advisories against the locked tree, every platform's crates
+  # included. The policy and every ignored advisory, each with its reason, live
+  # in apps/desktop/src-tauri/.cargo/audit.toml, which cargo-audit reads from
+  # the directory it runs in. Installed and run as crypto-deps-watch.yml does
+  # for the crypto engine.
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    # Building cargo-audit takes a few minutes; past this the run is hung
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - name: RustSec advisory audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit

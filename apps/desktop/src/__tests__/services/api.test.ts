@@ -427,6 +427,8 @@ describe('api — the coalescing adapter', () => {
     expect(coalescingKey(getConfig('/servers', { signal: new AbortController().signal }) as never)).toBeNull();
     expect(coalescingKey(getConfig('/servers', { params: { big: BigInt(1) } }) as never)).toBeNull();
     expect(coalescingKey(getConfig('/e2e/keyshares') as never)).toBeNull();
+    // the leasing claim the E2E service sends: a second one in flight gets none of the first one's shares
+    expect(coalescingKey(getConfig('/e2e/keyshares?deviceId=d1&lease=1') as never)).toBeNull();
     expect(coalescingKey(getConfig('/servers', { paramsSerializer: { indexes: null } }) as never)).toBeNull();
   });
 });

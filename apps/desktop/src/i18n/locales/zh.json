@@ -1357,6 +1357,7 @@
     "emailAlreadyVerified": "你的邮箱地址已验证",
     "tooManyVerificationEmails": "请求的验证邮件过多 — 请明天再试",
     "mailBlocked": "发送至此地址的邮件已被屏蔽 — 请使用之前 Voxium 邮件中的链接重新允许",
+    "verificationEmailSendFailed": "无法发送验证邮件 — 请稍后再试",
     "registrationChallengeInvalid": "注册校验无效或已过期 — 请刷新后重试",
     "powExpired": "注册校验耗时过长 — 请重试",
     "powUnavailable": "此浏览器无法执行注册校验（WebCrypto 不可用）",

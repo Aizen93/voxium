@@ -44,6 +44,20 @@ export class ConflictError extends AppError {
   }
 }
 
+/**
+ * 409 carrying the spaces an account must transfer or delete before it can
+ * be deleted: the self-service DELETE /auth/account answers it with
+ * `data.ownedServers`, which the client's owned-spaces dialog lists. Thrown
+ * by the route's own check and by the account deletion itself when a
+ * transfer to the account committed after that check.
+ */
+export class OwnedServersError extends ConflictError {
+  constructor(public readonly servers: Array<{ id: string; name: string }>) {
+    super('Transfer or delete the servers you own before deleting your account');
+    this.name = 'OwnedServersError';
+  }
+}
+
 export class UnsupportedMediaTypeError extends AppError {
   constructor(message: string) {
     super(message, 415);

@@ -10,17 +10,51 @@
 // Pure functions here, so the desktop test suite can pin them; the CLI is
 // tauri-release-config.mjs.
 
-const ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/i;
+// A host the policy can name: dot-separated labels, none empty (an optional
+// final dot is still a valid DNS name and CSP host). Anything else, an IPv6
+// literal included, is not a CSP host-source: the webview drops such a source
+// with a console warning and the policy silently loses it.
+const HOST_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?$/i;
+const ORIGIN_RE = /^https?:\/\/([^/:?#]+)(?::(\d{1,5}))?$/i;
 const DIRECTIVES = ['img-src', 'connect-src'];
 
-/** Split `TAURI_ASSET_ORIGIN` ("https://a.example, https://b.example") into origins, refusing anything that is not a bare scheme://host[:port]. */
+/** Whether `host` is a hostname a CSP host-source can name. */
+export function isCspHost(host) {
+  return typeof host === 'string' && HOST_RE.test(host);
+}
+
+/** Whether `port` (digits) is a TCP port, 1..65535. */
+export function isTcpPort(port) {
+  const n = Number(port);
+  return Number.isInteger(n) && n >= 1 && n <= 65535;
+}
+
+/** Why `part` is not a bare scheme://host[:port], in words that quote nothing of it; null when it is one. */
+function originRuleBroken(part) {
+  if (!/^https?:\/\//i.test(part)) return 'it must start with http:// or https://';
+  if (part.slice(part.indexOf('//') + 2).includes('@')) return 'it must carry no credentials';
+  const m = ORIGIN_RE.exec(part);
+  if (!m) return 'nothing may follow the host and port (no path, query or trailing slash)';
+  if (!isCspHost(m[1])) return 'its host must be dot-separated labels of letters, digits and hyphens (no IPv6 literal, wildcard or underscore)';
+  if (m[2] !== undefined && !isTcpPort(m[2])) return 'its port must be 1 to 65535';
+  return null;
+}
+
+/**
+ * Split `TAURI_ASSET_ORIGIN` ("https://a.example, https://b.example") into
+ * origins, refusing anything that is not a bare scheme://host[:port]. The
+ * error names the entry's position and the rule it breaks, never the value:
+ * the release workflow reads the variable from a secret, its log is public,
+ * and GitHub masks the whole secret, not one part of a comma-separated value.
+ */
 export function parseAssetOrigins(value) {
   const parts = (value ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  for (const p of parts) {
-    if (!ORIGIN_RE.test(p)) {
-      throw new Error(`TAURI_ASSET_ORIGIN must hold origins like https://host[:port], got "${p}"`);
+  parts.forEach((part, i) => {
+    const broken = originRuleBroken(part);
+    if (broken) {
+      throw new Error(`TAURI_ASSET_ORIGIN entry ${i + 1} of ${parts.length} is not an origin like https://host[:port]: ${broken}`);
     }
-  }
+  });
   return Array.from(new Set(parts));
 }
 

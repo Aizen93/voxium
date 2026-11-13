@@ -1,0 +1,5 @@
+Loaded Prisma config from prisma.config.ts.
+
+Prisma schema loaded from prisma/schema.prisma.
+Datasource "db": PostgreSQL database "voxium", schema "public" at "postgres:5432"
+Error: P1003: Database `voxium` does not exist

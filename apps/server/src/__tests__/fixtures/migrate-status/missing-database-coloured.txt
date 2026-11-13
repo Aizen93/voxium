@@ -1,0 +1,5 @@
+[2mLoaded Prisma config from prisma.config.ts.
+[22m
+[2mPrisma schema loaded from prisma/schema.prisma.[22m
+[2mDatasource "db": PostgreSQL database "voxium", schema "public" at "postgres:5432"[22m
+[1m[31mError: [39m[22mP1003: Database `voxium` does not exist

@@ -323,18 +323,42 @@ NODE_ENV=production node dist/index.js
 ```
 
 ### Build the Desktop App
+
+`pnpm tauri:build` builds the desktop app for **your** server. The settings below are read at build time; nothing in the repository needs editing.
+
 ```bash
 cd apps/desktop
+VITE_API_URL=https://chat.example.org/api/v1 \
+VITE_WS_URL=https://chat.example.org \
+TAURI_ASSET_ORIGIN=https://storage.example.org \
 pnpm tauri:build
 ```
 
-Avatars and space icons load from your object storage, which the app's Content Security Policy must name. Set `TAURI_ASSET_ORIGIN` to that storage's origin (`https://host[:port]`) and build with the generated overlay instead:
+| Setting | Example | What it feeds |
+|---------|---------|---------------|
+| `VITE_API_URL` | `https://chat.example.org/api/v1` | **Required.** The API the app is compiled for. Its origin goes into the Content Security Policy's `connect-src` (requests) and `img-src` (avatars and icons are `<img>` loads from `/uploads/`). |
+| `VITE_WS_URL` | `https://chat.example.org` | **Required.** The socket server. `connect-src` gets its origin in both forms the client uses: `https://` (polling) and `wss://` (WebSocket); `http://` gives `http://` + `ws://`. |
+| `TAURI_ASSET_ORIGIN` | `https://storage.example.org` | Your object storage's origin (`https://host[:port]`, comma-separated for several). The server answers avatar and icon requests with a redirect there and uploads are sent straight to it, so it goes into `img-src` and `connect-src`. Without it, images and uploads work only if the storage answers on the API origin. |
+| `TAURI_UPDATER_ENDPOINTS` | `https://updates.example.org/voxium/latest.json` | Optional, with `TAURI_UPDATER_PUBKEY`: your own update feed (`https` only, comma-separated for several; Tauri's `{{target}}` / `{{arch}}` / `{{current_version}}` placeholders work). |
+| `TAURI_UPDATER_PUBKEY` | the `.pub` content `pnpm tauri signer generate` prints | Optional, with `TAURI_UPDATER_ENDPOINTS`: the public key your updates are signed with. |
+| `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) | the private key from `tauri signer generate` | Needed only with your own feed: `tauri build` signs the update artifacts with it. |
 
-```bash
-cd apps/desktop
-TAURI_ASSET_ORIGIN=https://objects.example.com node scripts/tauri-release-config.mjs > /tmp/tauri.release.json
-pnpm tauri build --config /tmp/tauri.release.json
-```
+The `VITE_*` values are read exactly as the frontend build reads them, through Vite (the environment first, then `apps/desktop/.env.production.local`, `.env.production`, `.env.local`, `.env`), so the policy always names the server the app talks to. The build stops with the reason when a URL is missing or malformed (no credentials, query or IPv6 literal), or when only one of the two updater settings is set.
+
+**Content Security Policy.** Before `tauri build`, `scripts/tauri-build-config.mjs` writes an overlay to `src-tauri/target/tauri.self-hosted.json` that the Tauri CLI merges over `tauri.conf.json` (`tauri build --config`). Its `connect-src` and `img-src` name `'self'` (plus `blob:` / `data:` for images) and the origins above, nothing else: none of the Voxium project's own hosts, and no localhost unless your URLs point there. Every other directive stays as `tauri.conf.json` has it. To check it before building, run `node scripts/tauri-build-config.mjs`, which prints the overlay.
+
+**Updater.** Without `TAURI_UPDATER_ENDPOINTS` / `TAURI_UPDATER_PUBKEY` the build has no updater: no update artifacts are produced, no signing key is asked for, and the app never checks for updates. To ship updates to your users, generate a key pair once (`pnpm tauri signer generate -w ~/.tauri/voxium.key`), keep the private key out of the repository, set the three settings above, and publish each release's `latest.json` and signed artifacts at your feed. When your feed announces a newer version, the app shows a mandatory "Update Required" dialog.
+
+**Do not reuse the project's feed or key.** `tauri.conf.json` holds the official release's settings: the Voxium project's domains in the policy, its update feed (`https://github.com/Aizen93/voxium/releases/…`) and its public key. With that key no update you sign could ever install, and a build pointed at that feed would show your users a mandatory update at every upstream release, which then fails (with your own key, an update the project signed cannot install). `pnpm tauri:build` refuses the project's key, and refuses its feed as written in `tauri.conf.json`: that check only catches a value copied by accident, and another spelling of the same URL passes it, so do not rely on it. Do not build with a plain `pnpm tauri build` or `scripts/tauri-release-config.mjs` either: they produce the official configuration, with the project's hosts, feed and key. Without the project's private key, `tauri build` reports the missing `TAURI_SIGNING_PRIVATE_KEY` only after it has written the installers, and `--no-sign` skips that check altogether, so those installers exist and carry the project's feed, key and hosts. `pnpm tauri:build` is the supported way to build for your server. In a CI of your own, write the overlay with `node scripts/tauri-build-config.mjs --out <file>` and pass `--config <file>` to `tauri build`.
+
+**A build for your server keeps its own data.** `pnpm tauri:build` gives the app an identifier of its own, `com.voxium.selfhosted.` followed by a digest of the origin of `VITE_API_URL`, so the same server gets the same identifier on every rebuild. The identifier names the app's data folders and its entries in the OS credential store: your build keeps its own sessions, end-to-end encryption vault and settings, separate from the official app's and from the builds made for other servers. Each stored session (and the two-factor "trusted device" token) also carries the address of the server that issued it, and a build only ever uses the ones of its own server.
+
+- **On Windows**, your build installs in place of the official app (or the official app in place of yours), because the product name is the same: one entry in the installed apps, one install folder. Each keeps its own data: reinstalling the official app finds its session and vault where they were, unless the uninstaller's option to delete the app data was ticked.
+- **Users of a desktop build you made before this change** start on a fresh profile once they update to a build made with it: they sign in again, and restore their message history with their recovery key.
+- **Desktop notifications on Windows:** Windows shows an installed app's notifications only when its Start Menu shortcut carries the app's identifier, and the installer writes the identifier only on a shortcut it creates. The installer of a build made with `pnpm tauri:build` therefore also gives its identifier to the shortcuts that already point at the app, so installing your build over an existing install, or updating in place a build made before this change, keeps its notifications. The official installer has no such step: installing the official app over a build of yours leaves your build's identifier on the shortcut, so uninstall your build first, leaving its data in place, then install.
+- **What stays shared by design:** builds with the official identifier, the official app and `pnpm tauri:dev`, share one store; there the server address stamped on each session keeps one server's session from another's, and that check is made by the app, not by the operating system.
+
+`pnpm tauri:dev` is not affected: the development build loads the Vite dev server directly, and Tauri adds its Content Security Policy only to the pages it serves itself, so no policy applies there and it reaches `localhost:3001` as before.
 
 This creates platform-specific installers in `apps/desktop/src-tauri/target/release/bundle/`:
 - **Windows:** `.msi` and `.exe` installers
@@ -434,7 +458,9 @@ This starts three services:
 | `voxium-postgres` | PostgreSQL 16            | internal |
 | `voxium-redis`    | Redis 7                  | internal |
 
-Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed.
+Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed. On a new, empty database the first start applies all of them. Unless `VOXIUM_ALLOW_CUTOVER=1` is set (below), the container first reads `prisma migrate status` until the database answers (10 attempts, 3 s apart, each failed read logged with its error) and does not migrate a database it could not read: if PostgreSQL stays unreachable, the server container exits and its log shows the last error.
+
+> **`VOXIUM_ALLOW_CUTOVER`:** one migration, the always-on E2E cutover (`20260801140000_e2e_always_on`), deletes all DM history and every E2E key, and there is no rollback. When a database that already holds an install (migrations applied before) still has it pending, the container refuses to start instead of applying it on an ordinary restart. Apply it deliberately, after a snapshot and inside a maintenance window, following `docs/e2e-always-on-plan.md` §7.7. On a database that holds DMs or E2E keys, setting `VOXIUM_ALLOW_CUTOVER=1` for that one start is not enough on its own: the migration also requires the authorisation that procedure describes (the `e2e_cutover_authorised` table), and without it the migration refuses and leaves a failed-migration record (P3009 naming the cutover), which is marked rolled back, never cleared by recreating the database. Remove the variable afterwards. A new, empty database never needs it. A first start that was interrupted part-way, or a second replica starting while the first one migrates, leaves a database that is no longer empty and reads as an existing one: the refusal message says how to go on when that database never served users.
 
 ### 4. Verify It's Running
 
@@ -456,6 +482,8 @@ Point the Voxium desktop app (or web client) to your server by setting these in 
 VITE_API_URL=http://YOUR_SERVER_IP:3001/api/v1
 VITE_WS_URL=http://YOUR_SERVER_IP:3001
 ```
+
+The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
 
 > **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
 
@@ -507,6 +535,8 @@ Demo seed creates:
 - **Messages:** Sample messages in #general
 
 > **Note:** usernames are kept case-insensitively unique by a functional index Prisma cannot express, so `prisma migrate dev` reports it as drift and may offer to reset the database or drop it. Do not accept — keep the index.
+
+> **No update check:** the Prisma CLI reports to `checkpoint.prisma.io` on every run unless `CHECKPOINT_DISABLE` is set. `apps/server/prisma.config.ts` sets it, so every Prisma command run from `apps/server` (the ones above, CI, the Docker entrypoint) skips the check, and the Docker image sets it for both of its stages.
 
 ---
 
@@ -579,6 +609,8 @@ curl http://localhost:3001/api/v1/servers \
 | `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
 | `VITE_STUN_URL` | `stun:<VITE_WS_URL host>:3478` | Optional STUN server for DM calls (`stun:`/`stuns:` only). Compiled into the build. |
+
+The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VITE_WS_URL`, and also reads `TAURI_ASSET_ORIGIN`, `TAURI_UPDATER_ENDPOINTS` and `TAURI_UPDATER_PUBKEY` from the environment: see [Build the Desktop App](#build-the-desktop-app).
 
 ### Admin Dashboard Environment Variables (`apps/admin/.env`)
 
@@ -709,6 +741,7 @@ tagged; no spec is tagged at the moment.
 | `npx tsx scripts/test-permissions.ts` | Run permission system integration test against a running backend (11 phases) |
 | `npx tsx scripts/test-multi-node.ts` | Spawn two server nodes and validate cross-node behavior, including real voice media and owner-crash takeover |
 | `npx tsx scripts/load-test-voice.ts` | Voice channel load test with real WebRTC media |
+| `KEYSHARE_INBOX_CHECK=1 DATABASE_URL=<url> npx tsx scripts/check-keyshare-inbox.ts` | Check the key-share lease and acknowledgement statements on the migrated database `DATABASE_URL` names (the script reads no `.env`; build the shared package first), two-session races included (writes and then deletes rows of its own only); CI runs it in the e2e job |
 
 ---
 

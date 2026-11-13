@@ -89,6 +89,7 @@ import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { useDiscoveryStore } from '../../stores/discoveryStore';
 import { api } from '../../services/api';
+import { arrivalMark, hasDueRows, noteSessionsAvailable, noteUndecrypted, syncWithView } from '../../services/e2e/undecryptedRows';
 import type { Server, ServerMember, Conversation, Friendship, Message } from '@voxium/shared';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -260,6 +261,29 @@ describe('resetAccountStores (HIGH-14b)', () => {
     useVoiceStore.setState({ activeChannelId: 'ch-1' });
     useAnnotationStore.getState().undo(); // nothing left to undo: the stack itself is gone
     expect(useAnnotationStore.getState()).toMatchObject({ canUndo: false, canRedo: false });
+  });
+
+  it('drops the rows held to be decrypted again, which also live outside the stores', () => {
+    // a row the gate could not open, its session announced while its decrypt
+    // ran: due for the leaving account until the reset
+    const row = (id: string) =>
+      ({ id, content: '{"v":1,"e":"megolm1","sid":"c2Vzc2lvbg","b":"Y2lwaGVy"}', encrypted: true, conversationId: 'conv-1' }) as Message;
+    const shown = (id: string) => ({ ...row(id), content: '' }) as Message;
+    const mark = arrivalMark();
+    noteSessionsAvailable('conv-1', ['c2Vzc2lvbg']);
+    noteUndecrypted(row('m-1'), 'conv-1', mark);
+    noteUndecrypted(row('m-2'), 'conv-1', mark);
+    syncWithView('conv-1', [shown('m-1')]);
+    expect(hasDueRows('conv-1')).toBe(true);
+
+    resetAccountStores();
+
+    // neither the held row, nor the failure still waiting for the view, nor the announcement
+    syncWithView('conv-1', [shown('m-1'), shown('m-2')]);
+    expect(hasDueRows('conv-1')).toBe(false);
+    noteUndecrypted(row('m-3'), 'conv-1', mark);
+    syncWithView('conv-1', [shown('m-3')]);
+    expect(hasDueRows('conv-1')).toBe(false);
   });
 
   it('store actions still work after a replace-reset', () => {

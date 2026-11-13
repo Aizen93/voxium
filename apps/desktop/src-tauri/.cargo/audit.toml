@@ -1,0 +1,30 @@
+# `cargo audit` settings for the desktop shell's Cargo.lock. cargo-audit reads
+# this file from .cargo/audit.toml under the directory it runs in, so run it
+# from apps/desktop/src-tauri, as the audit job of
+# .github/workflows/desktop-shell.yml does.
+#
+# Policy: a vulnerability fails the audit (cargo-audit's default) and so does
+# an "unsound" advisory, safe code that can reach undefined behaviour.
+# "unmaintained" and "yanked" are printed as warnings and do not fail it.
+#
+# Every ignore names the advisory, the crate and the reason it cannot be fixed
+# from this repository, and what lifts it. Look at each again on every Tauri
+# upgrade, and drop the entry the day the crate leaves Cargo.lock.
+
+[advisories]
+ignore = [
+  # glib 0.18.5: RUSTSEC-2024-0429 (GHSA-wrw7-89jp-8q8g), unsound Iterator and
+  # DoubleEndedIterator impls of glib::VariantStrIter, fixed in glib 0.20.
+  # glib is part of the Linux build only, pulled by the GTK3 bindings Tauri's
+  # Linux backend (tao and wry) is built on: gtk, gdk, gio and pango 0.18,
+  # webkit2gtk 2.0, soup3, libappindicator. 0.18 is the last release of those
+  # bindings, so no glib 0.20 fits them. Upstream-blocked until Tauri's Linux
+  # backend leaves the GTK3 bindings. The shell's own code does not use glib.
+  # Recorded 2026-11-11.
+  "RUSTSEC-2024-0429",
+]
+
+[output]
+deny = ["unsound"]
+# cargo-audit refuses an [output] table without it
+quiet = false

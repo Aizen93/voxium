@@ -380,7 +380,9 @@ model Channel {
   server   Server       @relation(fields: [serverId], references: [id], onDelete: Cascade)
   category Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   // Cascade is the DB backstop only: app code deletes a creator's secure
-  // channels explicitly (events + S3 cleanup) before removing the user.
+  // channels explicitly, in the transaction that ends the membership or
+  // removes the user (removeSecureMembershipsInTx), with the events and the
+  // S3 cleanup after its commit.
   createdBy User?       @relation("SecureChannelCreator", fields: [createdById], references: [id], onDelete: Cascade)
   messages Message[]
   reads    ChannelRead[]
@@ -518,6 +520,11 @@ model MessageAttachment {
   @@unique([s3Key])
   @@index([messageId])
   @@index([createdAt])
+  // The live rows in id order (utils/attachmentBlobs.ts): expired rows are kept
+  // forever for the placeholder, so without it every read of the live files of
+  // a delete walked the table's whole history. Not a partial index: Prisma
+  // cannot express one and `migrate dev` would read it as drift.
+  @@index([expired, id])
   @@map("message_attachments")
 }
 
@@ -793,6 +800,21 @@ model Report {
   @@index([reporterId])
   @@index([reportedUserId])
   @@index([messageId])
+  // ALSO covered by three PARTIAL unique indexes, added in migration
+  // 20261111150000_reports_one_pending_per_target: one pending report per
+  // reporter and target (`reports_pending_user_key`,
+  // `reports_pending_message_key`, `reports_pending_server_key`, each
+  // `WHERE status = 'pending' AND type = …`). They are created in SQL there,
+  // and are invisible here, because this schema does not enable Prisma's
+  // `partialIndexes` preview feature, the one that lets a schema declare a
+  // partial index (`prisma migrate diff` against a migrated database leaves
+  // them alone while it is off). Enabling it without declaring the three
+  // here would make `prisma migrate dev` read them as drift and drop them
+  // (__tests__/migrations/reportsOnePendingPerTarget.test.ts refuses that
+  // schema). Should `prisma migrate dev` ever
+  // offer to DROP them as drift, do not let it: they are what refuses two
+  // identical reports sent at once, which the route's look for a pending
+  // report both passes (it answers their P2002).
   @@map("reports")
 }
 
@@ -959,17 +981,24 @@ model E2EMessageKeyBackup {
 
 /// A pending Megolm group-session key, encrypted pairwise with Olm for exactly
 /// one recipient device. `body` is an opaque olm1 envelope — the server never
-/// sees the session key. Claim-and-delete: Olm pre-key bodies are one-shot.
+/// sees the session key. Leased, then acknowledged (spec §12.3): a leasing
+/// claim reserves a share for its answer until `leasedUntil` (Olm pre-key
+/// bodies are one-shot, so no two claims may hold one at once), and the row is
+/// deleted when the device acknowledges it. A legacy claim (no `lease=1`)
+/// still deletes what it hands out.
 model E2EKeyShare {
-  id                String   @id @default(cuid())
-  recipientUserId   String   @map("recipient_user_id")
-  recipientDeviceId String   @map("recipient_device_id")
-  senderUserId      String   @map("sender_user_id")
-  senderDeviceId    String   @map("sender_device_id")
-  conversationId    String   @map("conversation_id")
-  sessionId         String   @map("session_id")
+  id                String    @id @default(cuid())
+  recipientUserId   String    @map("recipient_user_id")
+  recipientDeviceId String    @map("recipient_device_id")
+  senderUserId      String    @map("sender_user_id")
+  senderDeviceId    String    @map("sender_device_id")
+  conversationId    String    @map("conversation_id")
+  sessionId         String    @map("session_id")
   body              String // olm1 envelope (JSON string)
-  createdAt         DateTime @default(now()) @map("created_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  /// UTC, written and compared on the database clock; null until a leasing
+  /// claim hands the share out
+  leasedUntil       DateTime? @map("leased_until")
 
   @@index([recipientUserId, recipientDeviceId, createdAt])
   // the retention sweep deletes by age across all recipients
@@ -994,7 +1023,8 @@ model E2EMasterKey {
 
 /// A pending master-secret handoff between two devices of the SAME account
 /// (device approval, spec §14). `body` is an opaque olm1 envelope — the server
-/// never sees the master secret. Claim-and-delete, like key shares.
+/// never sees the master secret. Read, then acknowledged (POST
+/// /e2e/master-transfers/ack): a read never consumes it (§14.6).
 model E2EMasterTransfer {
   id                String   @id @default(cuid())
   userId            String   @map("user_id") // owner: both sender and recipient
