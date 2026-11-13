@@ -20,8 +20,6 @@ import { ToastContainer } from './components/layout/ToastContainer';
 import { UpdateChecker } from './components/updater/UpdateChecker';
 import { TitleBar } from './components/layout/TitleBar';
 
-const isTauri = '__TAURI_INTERNALS__' in window;
-
 const PENDING_REDIRECT_KEY = 'voxium_pending_redirect';
 
 /** Redirects to the pending invite path (if any) or "/" after login. */
@@ -45,6 +43,8 @@ function SaveAndRedirect() {
 
 export function App({ onReady }: { onReady?: () => void }) {
   const { isAuthenticated, checkAuth, isLoading, user } = useAuthStore();
+  const isTauri = '__TAURI_INTERNALS__' in window;
+  const showPublicLanding = !isAuthenticated && !isTauri;
   const emailVerified = user?.emailVerified ?? false;
   // Accounts created before consent was collected at signup must accept the
   // Terms of Service and Privacy Policy before anything else (CNIL/GDPR); the
@@ -121,8 +121,8 @@ export function App({ onReady }: { onReady?: () => void }) {
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/cookies" element={<CookiePolicyPage />} />
-          <Route path="/architecture" element={<LandingPage page="architecture" />} />
-          <Route path="/contributors" element={<LandingPage page="contributors" />} />
+          <Route path="/architecture" element={showPublicLanding ? <LandingPage page="architecture" /> : <Navigate to="/" replace />} />
+          <Route path="/contributors" element={showPublicLanding ? <LandingPage page="contributors" /> : <Navigate to="/" replace />} />
           <Route
             path="/"
             element={
