@@ -290,37 +290,43 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
     // longer both pass it, nor two creations take one position. Past the
     // space row, the insert only key-shares the category row through its
     // foreign key, and the one writer that locks a category row (its delete)
-    // never takes a space row. Run again when PostgreSQL aborts it to break a
-    // deadlock. The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space
-    // delete holds the space row through its cascade (every channel and
-    // message of the space), and a creation merely waiting for it must not
-    // expire.
-    const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
-      // A space deleted since the permission check answers as one
-      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
-      if (space.length === 0) throw new NotFoundError('Server');
-      // Secure channels count against their own limit (secureChannels.ts);
-      // every channel, secure ones included, holds a position. One grouped
-      // read gives the count and the highest position.
-      const bySecure = await tx.channel.groupBy({
-        by: ['secure'],
-        where: { serverId },
-        _count: { _all: true },
-        _max: { position: true },
-      });
-      let regularCount = 0;
-      let highest: number | null = null;
-      for (const row of bySecure) {
-        if (!row.secure) regularCount += row._count._all;
-        if (row._max.position !== null && (highest === null || row._max.position > highest)) highest = row._max.position;
-      }
-      if (regularCount >= limits.maxChannelsPerServer) {
-        throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
-      }
-      return tx.channel.create({
-        data: { name, type, serverId, position: positionAfter(highest), categoryId: categoryId || null },
-      });
-    }, LOCK_WAIT_TRANSACTION_OPTIONS), '[Channels] A channel creation').catch(categoryGoneAsMissing);
+    // never takes a space row. Each attempt first waits for that category
+    // row, holding nothing (one statement on the shared client, outside any
+    // transaction, in the mode the insert's key takes it), so a category
+    // delete holding it is waited for before the space row is taken. Run
+    // again when PostgreSQL aborts it to break a deadlock. The long budget
+    // (LOCK_WAIT_TRANSACTION_OPTIONS): a space delete holds the space row
+    // through its cascade (every channel and message of the space), and a
+    // creation merely waiting for it must not expire.
+    const channel = await retryOnTransactionConflict(async () => {
+      if (categoryId) await prisma.$queryRaw`SELECT id FROM categories WHERE id = ${categoryId} FOR KEY SHARE`;
+      return prisma.$transaction(async (tx) => {
+        // A space deleted since the permission check answers as one
+        const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+        if (space.length === 0) throw new NotFoundError('Server');
+        // Secure channels count against their own limit (secureChannels.ts);
+        // every channel, secure ones included, holds a position. One grouped
+        // read gives the count and the highest position.
+        const bySecure = await tx.channel.groupBy({
+          by: ['secure'],
+          where: { serverId },
+          _count: { _all: true },
+          _max: { position: true },
+        });
+        let regularCount = 0;
+        let highest: number | null = null;
+        for (const row of bySecure) {
+          if (!row.secure) regularCount += row._count._all;
+          if (row._max.position !== null && (highest === null || row._max.position > highest)) highest = row._max.position;
+        }
+        if (regularCount >= limits.maxChannelsPerServer) {
+          throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
+        }
+        return tx.channel.create({
+          data: { name, type, serverId, position: positionAfter(highest), categoryId: categoryId || null },
+        });
+      }, LOCK_WAIT_TRANSACTION_OPTIONS);
+    }, '[Channels] A channel creation').catch(categoryGoneAsMissing);
 
     // Announce to — and subscribe — exactly the members who can VIEW the new
     // channel, and nobody else. The old code did both server-wide on the

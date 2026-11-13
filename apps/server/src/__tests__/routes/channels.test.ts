@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
+import { lazyStatement } from '../helpers/lazyStatement';
 import jwt from 'jsonwebtoken';
 import { Permissions, permissionsToString, DEFAULT_EVERYONE_PERMISSIONS, ALL_PERMISSIONS } from '@voxium/shared';
 
@@ -639,6 +640,65 @@ describe('Channel Routes', () => {
       expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
       expect(prismaMock.channel.groupBy).not.toHaveBeenCalled();
       expect(prismaMock.channel.create).not.toHaveBeenCalled();
+    });
+
+    describe('a creation in a category waits for the category row, holding nothing, before its transaction takes the space row', () => {
+      /** Statements in the order they RUN (a raw one when awaited), `txn` where each attempt's transaction opens. */
+      function recordRuns() {
+        const ran: string[] = [];
+        prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) =>
+          lazyStatement(ran, `${strings.join('?')} [${values.join(',')}]`, [{ id: values[0] }]));
+        const txClient = {
+          $queryRaw: vi.fn(async () => { ran.push('tx:lock space'); return [{ id: 'srv-1' }]; }),
+          channel: {
+            groupBy: vi.fn().mockResolvedValue(channelCounts(1)),
+            create: vi.fn(async ({ data }: any) => ({ id: 'ch-new', ...data })),
+          },
+        };
+        prismaMock.$transaction.mockImplementation(async (fn: (tx: typeof txClient) => Promise<unknown>) => {
+          ran.push('txn');
+          return fn(txClient);
+        });
+        return ran;
+      }
+      const createIn = (categoryId?: string) => request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send(categoryId ? { name: 'new-channel', type: 'text', categoryId } : { name: 'new-channel', type: 'text' });
+      const CATEGORY_WAIT = 'SELECT id FROM categories WHERE id = ? FOR KEY SHARE [cat-1]';
+
+      it('the category row FOR KEY SHARE, on the shared client, then the transaction', async () => {
+        prismaMock.category.findFirst.mockResolvedValue({ id: 'cat-1', serverId: 'srv-1' });
+        const ran = recordRuns();
+
+        expect((await createIn('cat-1')).status).toBe(201);
+
+        expect(ran).toEqual([CATEGORY_WAIT, 'txn', 'tx:lock space']);
+      });
+
+      it('waits again before every attempt', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.category.findFirst.mockResolvedValue({ id: 'cat-1', serverId: 'srv-1' });
+        const ran = recordRuns();
+        const real = prismaMock.$transaction.getMockImplementation()!;
+        prismaMock.$transaction
+          .mockImplementationOnce(async () => { ran.push('txn aborted'); throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })
+          .mockImplementation(real);
+        try {
+          expect((await createIn('cat-1')).status).toBe(201);
+        } finally {
+          warn.mockRestore();
+        }
+        expect(ran).toEqual([CATEGORY_WAIT, 'txn aborted', CATEGORY_WAIT, 'txn', 'tx:lock space']);
+      });
+
+      it('a creation outside any category waits for none', async () => {
+        const ran = recordRuns();
+
+        expect((await createIn()).status).toBe(201);
+
+        expect(ran).toEqual(['txn', 'tx:lock space']);
+      });
     });
 
     it('gives the transaction the long budget: the space row it waits for is held through an account deletion\'s cascade', async () => {
