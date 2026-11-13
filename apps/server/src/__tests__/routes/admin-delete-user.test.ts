@@ -84,6 +84,8 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn().mockResolvedValue(null),
     update: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue({}),
+    // an owned space's `delete` action: only while the account still owns it
+    deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   serverMember: {
     findMany: vi.fn().mockResolvedValue([]),
@@ -354,7 +356,7 @@ beforeEach(() => {
     typeof arg === 'function' ? arg(txMock) : Promise.all(arg));
   prismaMock.serverMember.findMany.mockResolvedValue([]);
   prismaMock.server.findMany.mockResolvedValue([]);
-  prismaMock.server.delete.mockResolvedValue({});
+  prismaMock.server.deleteMany.mockResolvedValue({ count: 1 });
   prismaMock.server.findUnique.mockResolvedValue(null);
   // Back to the declared defaults: clearAllMocks keeps both the implementations
   // a test set and the *Once queues a test left unconsumed
@@ -444,10 +446,10 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+    expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-owned', ownerId: 'target-1' } });
     // the deleted space leaves the cached Explore pages (bumped after the delete)
     expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('admin server delete');
-    expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     expectAtomicPurgeAndDelete('target-1');
   });
 
@@ -607,11 +609,11 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     const noticeIndex = mockEmit.mock.calls.findIndex(([event]: [string]) => event === 'server:deleted');
     expect(noticeIndex).toBeGreaterThanOrEqual(0);
     const noticeOrder = mockEmit.mock.invocationCallOrder[noticeIndex];
-    expect(noticeOrder).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(noticeOrder).toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
     expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
     // The channel ids are read while the rows still exist
-    expect(prismaMock.channel.findMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(prismaMock.channel.findMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
   });
 
   it('a rejecting voice cleanup and a throwing notice still delete the space AND the account', async () => {
@@ -624,9 +626,9 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     const res = await deleteOwner();
 
     expect(res.status).toBe(200);
-    expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+    expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-owned', ownerId: 'target-1' } });
     expect(vi.mocked(broadcastServerVoiceCleanup).mock.invocationCallOrder[0])
-      .toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+      .toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     expect(mockSocketsLeave).toHaveBeenCalledWith(rooms);
     // The account deletion after the loop still ran
     expectAtomicPurgeAndDelete('target-1');
@@ -651,7 +653,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
       const spaceCall = mockDeleteMultipleFromS3.mock.calls.findIndex(([keys]) => keys[0] === spaceKey);
       const accountCall = mockDeleteMultipleFromS3.mock.calls.findIndex(([keys]) => keys[0] === accountKey);
       expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[spaceCall])
-        .toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+        .toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
       expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[accountCall])
         .toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
     } finally {
@@ -660,7 +662,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
   });
 
   it('a space row delete that fails stops the deletion before any notice, with the account untouched', async () => {
-    prismaMock.server.delete.mockRejectedValueOnce(new Error('db gone'));
+    prismaMock.server.deleteMany.mockRejectedValueOnce(new Error('db gone'));
     const { broadcastServerVoiceCleanup } = await import('../../websocket/voiceCluster');
 
     const res = await deleteOwner();
@@ -670,6 +672,53 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     expect(mockEmit).not.toHaveBeenCalledWith('server:deleted', expect.anything());
     expect(mockSocketsLeave).not.toHaveBeenCalled();
     expect(txMock.user.delete).not.toHaveBeenCalled();
+  });
+
+  describe('a space that changed owner after the owned-spaces read', () => {
+    // The delete matches only a row the account still owns: it found none,
+    // and the space is still there (handed to someone else meanwhile)
+    beforeEach(() => {
+      prismaMock.server.deleteMany.mockResolvedValue({ count: 0 });
+      prismaMock.server.findUnique.mockImplementation(async ({ select }: any) =>
+        (select?.iconUrl ? { iconUrl: 'server-icons/srv-owned-1700000000000-0123456789ab.webp' } : { id: 'srv-owned' }));
+    });
+
+    it('is not deleted: the request stops with the 400 the dashboard shows, and nothing of that space is touched', async () => {
+      const { broadcastServerVoiceCleanup } = await import('../../websocket/voiceCluster');
+
+      const res = await deleteOwner();
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Server "srv-owned" is not owned by this user');
+      // the one statement: the space only while the departing account owns it
+      expect(prismaMock.server.deleteMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-owned', ownerId: 'target-1' } });
+      expect(prismaMock.server.delete).not.toHaveBeenCalled();
+      // no room emptied, no voice torn down, no notice, no cache bump, no file deleted
+      expect(mockLocalSocketsLeave).not.toHaveBeenCalled();
+      expect(mockSocketsLeave).not.toHaveBeenCalled();
+      expect(broadcastServerVoiceCleanup).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('server:deleted', expect.anything());
+      expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
+      expect(mockDeleteFromS3).not.toHaveBeenCalled();
+      expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      // the account is not deleted, and nothing claims it or the space was
+      expect(purgeE2EMaterialMock).not.toHaveBeenCalled();
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+      expect(mockLogAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'server.delete' }));
+      expect(mockLogAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'user.delete' }));
+    });
+
+    it('a space gone meanwhile answers 404 Server, as the owner\'s own delete does', async () => {
+      prismaMock.server.findUnique.mockImplementation(async ({ select }: any) => (select?.iconUrl ? { iconUrl: null } : null));
+
+      const res = await deleteOwner();
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
+      expect(mockSocketsLeave).not.toHaveBeenCalled();
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+    });
   });
 
   it('leaves only the server room when the space has no channels', async () => {
@@ -692,7 +741,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     expect(res.status).toBe(200);
     expect(mockDeleteFromS3).toHaveBeenCalledTimes(1);
     expect(mockDeleteFromS3).toHaveBeenCalledWith(icon);
-    expect(mockDeleteFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(mockDeleteFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     expectAtomicPurgeAndDelete('target-1');
   });
 
@@ -722,7 +771,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
 
       expect(res.status).toBe(200);
       expect(mockFetchSockets).not.toHaveBeenCalled();
-      expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+      expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-owned', ownerId: 'target-1' } });
       expectAtomicPurgeAndDelete('target-1');
     } finally {
       mockFetchSockets.mockResolvedValue([]);
@@ -977,7 +1026,7 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
   });
 
   function expectNothingDestroyed() {
-    expect(prismaMock.server.delete).not.toHaveBeenCalled();
+    expect(prismaMock.server.deleteMany).not.toHaveBeenCalled();
     expect(prismaMock.server.update).not.toHaveBeenCalled();
     expect(purgeE2EMaterialMock).not.toHaveBeenCalled();
     expect(txMock.user.delete).not.toHaveBeenCalled();
@@ -1143,8 +1192,8 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
     ] });
 
     expect(res.status).toBe(200);
-    expect(prismaMock.server.delete).toHaveBeenCalledTimes(1);
-    expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-a' } });
+    expect(prismaMock.server.deleteMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-a', ownerId: 'target-1' } });
     expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-b', ownerId: 'target-1' }, data: { ownerId: 'heir-1' } });
     expectAtomicPurgeAndDelete('target-1');
   });

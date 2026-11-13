@@ -953,10 +953,22 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           // space announced as gone, the space still there and the account
           // half processed; a failed row delete still does, before any notice.
           // The icon key is read BEFORE the row goes, its blob deleted after.
+          // Only while the account being deleted still owns the space, a check
+          // the delete itself carries (`ownedBy`, as the owner's own delete):
+          // the account can still hand the space to someone else after the
+          // owned-spaces read above, and a space that changed owner is not
+          // the one the administrator chose to delete. The request then stops
+          // here with the 400 the validation above gives, before any room,
+          // state or file of that space is touched; the actions before it
+          // stay done (each audited) and the account is not deleted.
           const doomed = await prisma.server.findUnique({ where: { id: action.serverId }, select: { iconUrl: true } });
           await deleteServerAndAnnounce(
             { id: action.serverId, iconUrl: doomed?.iconUrl ?? null },
-            { cacheReason: 'admin server delete', logPrefix: '[Admin]' },
+            {
+              cacheReason: 'admin server delete',
+              logPrefix: '[Admin]',
+              ownedBy: { userId: targetId, refusal: () => new BadRequestError(`Server "${action.serverId}" is not owned by this user`) },
+            },
           );
           logAuditEvent({
             actorId: req.user!.userId,
