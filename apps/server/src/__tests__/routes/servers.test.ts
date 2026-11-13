@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -86,6 +86,10 @@ const prismaMock: Record<string, any> = {
   channel: {
     findMany: vi.fn(),
     createMany: vi.fn(),
+  },
+  // The attachment keys a space delete reads before the cascade takes them
+  messageAttachment: {
+    findMany: vi.fn().mockResolvedValue([]),
   },
   category: {
     create: vi.fn(),
@@ -216,7 +220,9 @@ vi.mock('../../utils/moderatorAudience', () => ({
 // S3
 vi.mock('../../utils/s3', () => ({
   VALID_S3_KEY_RE: /^[a-zA-Z0-9\/_.-]+$/,
+  VALID_ATTACHMENT_KEY_RE: /^attachments\/(ch|dm)-[\w-]+\/[\w]+-[\w][\w.-]*$/,
   deleteFromS3: vi.fn().mockResolvedValue(undefined),
+  deleteMultipleFromS3: vi.fn().mockImplementation(async (keys: string[]) => keys.length),
 }));
 
 // Upload read-back (its own unit tests cover the S3 side)
@@ -234,6 +240,12 @@ vi.mock('../../utils/featureFlags', () => ({
 vi.mock('../../websocket/voiceHandler', () => ({
   leaveCurrentVoiceChannel: vi.fn(),
   cleanupServerVoice: vi.fn(),
+}));
+
+// Voice teardown on every node when a space is deleted
+const mockBroadcastServerVoiceCleanup = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../websocket/voiceCluster', () => ({
+  broadcastServerVoiceCleanup: (...args: unknown[]) => mockBroadcastServerVoiceCleanup(...args),
 }));
 
 // Server limits
@@ -1002,14 +1014,21 @@ describe('Server Routes', () => {
         expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
       });
 
-      it('leaves the rooms after the server:deleted notice and before the row is deleted', async () => {
+      it('leaves the rooms after the row is deleted and after the server:deleted notice', async () => {
         await deleteServer();
 
         const noticeOrder = mockEmit.mock.invocationCallOrder[mockEmit.mock.calls.findIndex(([event]) => event === 'server:deleted')];
         expect(noticeOrder).toBeDefined();
+        const deleteOrder = prismaMock.server.delete.mock.invocationCallOrder[0];
+        expect(noticeOrder).toBeGreaterThan(deleteOrder);
         expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
         expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
-        expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+      });
+
+      it('reads the channel ids for the leave BEFORE the row goes (the cascade takes them)', async () => {
+        await deleteServer();
+
+        expect(prismaMock.channel.findMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
       });
 
       it('leaves only the server room when the space has no channels', async () => {
@@ -1036,6 +1055,193 @@ describe('Server Routes', () => {
           expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
         } finally {
           mockFetchSockets.mockResolvedValue([]);
+        }
+      });
+    });
+
+    describe('the row delete does not depend on the fan-out', () => {
+      const ICON = 'server-icons/srv-1-1700000000000-0123456789ab.webp';
+      const allRooms = ['server:srv-1', 'channel:ch-text', 'channel:ch-voice'];
+      let errorLog: ReturnType<typeof vi.spyOn>;
+
+      beforeEach(async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'Test Server', iconUrl: ICON, ownerId: 'user-1' });
+        prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-text' }, { id: 'ch-voice' }]);
+        prismaMock.server.delete.mockReset().mockResolvedValue({});
+        const { deleteFromS3 } = await import('../../utils/s3');
+        vi.mocked(deleteFromS3).mockReset().mockResolvedValue(undefined);
+        errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      });
+
+      afterEach(() => {
+        errorLog.mockRestore();
+        mockBroadcastServerVoiceCleanup.mockReset().mockResolvedValue(undefined);
+        mockEmit.mockReset();
+        mockLocalSocketsLeave.mockReset();
+        mockSocketsLeave.mockReset();
+      });
+
+      const deleteServer = () => request(app)
+        .delete('/api/v1/servers/srv-1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+
+      it('deletes the row BEFORE the voice cleanup, the notice and the room leaves', async () => {
+        await deleteServer();
+
+        const deleteOrder = prismaMock.server.delete.mock.invocationCallOrder[0];
+        expect(mockBroadcastServerVoiceCleanup).toHaveBeenCalledWith(expect.anything(), 'srv-1');
+        expect(mockBroadcastServerVoiceCleanup.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+        expect(mockEmit.mock.invocationCallOrder[0]).toBeGreaterThan(mockBroadcastServerVoiceCleanup.mock.invocationCallOrder[0]);
+        expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+      });
+
+      it('commits the delete and answers 200 when the voice cleanup broadcast rejects, and still notifies and clears the rooms', async () => {
+        mockBroadcastServerVoiceCleanup.mockRejectedValueOnce(new Error('mediasoup router close failed'));
+
+        const res = await deleteServer();
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ success: true, message: 'Server deleted' });
+        expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        expect(mockEmit).toHaveBeenCalledWith('server:deleted', { serverId: 'srv-1' });
+        expect(mockLocalSocketsLeave).toHaveBeenCalledWith(allRooms);
+        expect(mockSocketsLeave).toHaveBeenCalledWith(allRooms);
+        const { deleteFromS3 } = await import('../../utils/s3');
+        expect(deleteFromS3).toHaveBeenCalledWith(ICON);
+        expect(errorLog).toHaveBeenCalledWith('[Servers] Space srv-1 deleted, but the voice cleanup failed:', 'mediasoup router close failed');
+      });
+
+      it('commits the delete when the server:deleted broadcast throws, and still clears the rooms', async () => {
+        mockEmit.mockImplementationOnce(() => { throw new Error('adapter publish failed'); });
+
+        const res = await deleteServer();
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        expect(mockLocalSocketsLeave).toHaveBeenCalledWith(allRooms);
+        expect(mockSocketsLeave).toHaveBeenCalledWith(allRooms);
+        expect(errorLog).toHaveBeenCalledWith('[Servers] Space srv-1 deleted, but the server:deleted notice failed:', 'adapter publish failed');
+      });
+
+      it('commits the delete when a room leave throws, and still runs the other one', async () => {
+        mockLocalSocketsLeave.mockImplementationOnce(() => { throw new Error('local adapter failed'); });
+        mockSocketsLeave.mockImplementationOnce(() => { throw new Error('cluster adapter failed'); });
+
+        const res = await deleteServer();
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-1' } });
+        expect(mockSocketsLeave).toHaveBeenCalledWith(allRooms);
+        expect(errorLog).toHaveBeenCalledWith('[Servers] Space srv-1 deleted, but the local room leave failed:', 'local adapter failed');
+        expect(errorLog).toHaveBeenCalledWith('[Servers] Space srv-1 deleted, but the cluster room leave failed:', 'cluster adapter failed');
+      });
+
+      it('a row delete that fails announces nothing: no voice teardown, no notice, no leave, no blob delete', async () => {
+        prismaMock.server.delete.mockRejectedValueOnce(new Error('db gone'));
+
+        const res = await deleteServer();
+
+        expect(res.status).toBe(500);
+        expect(mockBroadcastServerVoiceCleanup).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalledWith('server:deleted', expect.anything());
+        expect(mockLocalSocketsLeave).not.toHaveBeenCalled();
+        expect(mockSocketsLeave).not.toHaveBeenCalled();
+        expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
+        const { deleteFromS3 } = await import('../../utils/s3');
+        expect(deleteFromS3).not.toHaveBeenCalled();
+      });
+
+      it('deletes the icon blob after the row', async () => {
+        await deleteServer();
+
+        const { deleteFromS3 } = await import('../../utils/s3');
+        expect(deleteFromS3).toHaveBeenCalledWith(ICON);
+        expect(vi.mocked(deleteFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+      });
+    });
+
+    describe('attachment files', () => {
+      const KEYS = ['attachments/ch-text/clmsg1-report.pdf', 'attachments/ch-secure/clmsg2-blob.bin'];
+
+      beforeEach(async () => {
+        prismaMock.server.findUnique.mockResolvedValue({ id: 'srv-1', name: 'Test Server', iconUrl: null, ownerId: 'user-1' });
+        prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-text' }, { id: 'ch-secure' }]);
+        prismaMock.server.delete.mockReset().mockResolvedValue({});
+        prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        vi.mocked(deleteMultipleFromS3).mockReset().mockImplementation(async (keys: string[]) => keys.length);
+      });
+
+      const deleteServer = () => request(app)
+        .delete('/api/v1/servers/srv-1')
+        .set('Authorization', `Bearer ${makeToken()}`);
+
+      it('reads the kept attachment keys of every channel of the space BEFORE the row, and deletes the files AFTER it', async () => {
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([
+          { id: 'att-1', s3Key: KEYS[0] }, { id: 'att-2', s3Key: KEYS[1] },
+        ]);
+
+        const res = await deleteServer();
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.messageAttachment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+          where: { expired: false, message: { channel: { serverId: 'srv-1' } } },
+        }));
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        expect(deleteMultipleFromS3).toHaveBeenCalledTimes(1);
+        expect(deleteMultipleFromS3).toHaveBeenCalledWith(KEYS);
+        const deleteOrder = prismaMock.server.delete.mock.invocationCallOrder[0];
+        expect(prismaMock.messageAttachment.findMany.mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
+        expect(vi.mocked(deleteMultipleFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
+      });
+
+      it('touches storage not at all when the space holds no kept attachment', async () => {
+        await deleteServer();
+
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+      });
+
+      it('a storage failure is logged and the delete still answers 200', async () => {
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        vi.mocked(deleteMultipleFromS3).mockRejectedValueOnce(new Error('S3 unavailable'));
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const res = await deleteServer();
+
+          expect(res.status).toBe(200);
+          expect(res.body).toEqual({ success: true, message: 'Server deleted' });
+          await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+            '[Servers] Attachment file cleanup failed for space srv-1 (the orphan sweep will reclaim them):', 'S3 unavailable'));
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('a row delete that fails deletes no file', async () => {
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
+        prismaMock.server.delete.mockRejectedValueOnce(new Error('db gone'));
+
+        const res = await deleteServer();
+
+        expect(res.status).toBe(500);
+        const { deleteMultipleFromS3 } = await import('../../utils/s3');
+        expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+      });
+
+      it('a fan-out that fails does not skip the files', async () => {
+        prismaMock.messageAttachment.findMany.mockResolvedValueOnce([{ id: 'att-1', s3Key: KEYS[0] }]);
+        mockBroadcastServerVoiceCleanup.mockRejectedValueOnce(new Error('mediasoup router close failed'));
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          const res = await deleteServer();
+
+          expect(res.status).toBe(200);
+          const { deleteMultipleFromS3 } = await import('../../utils/s3');
+          expect(deleteMultipleFromS3).toHaveBeenCalledWith([KEYS[0]]);
+        } finally {
+          errorLog.mockRestore();
         }
       });
     });

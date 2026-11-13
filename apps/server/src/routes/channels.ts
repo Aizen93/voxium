@@ -11,6 +11,7 @@ import { hasServerPermission, hasChannelPermission, filterVisibleChannels, compu
 import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
 import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from '../utils/channelVisibilityRooms';
 
 export const channelRouter = Router({ mergeParams: true });
@@ -20,6 +21,11 @@ channelRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 /** User rooms per broadcast when the audience has to be enumerated. Bounds the
  *  size of a single adapter message on a large staff-gated server. */
 const ROOM_FANOUT_BATCH = 500;
+
+/** A step after a channel's row delete committed failed: logged, never thrown. */
+function logChannelDeleteFanOutFailure(channelId: string, step: string, err: unknown): void {
+  console.error(`[Channels] Channel ${channelId} deleted, but ${step} failed:`, err instanceof Error ? err.message : err);
+}
 
 /**
  * The rooms to announce a BRAND-NEW channel to. A new channel has no overrides
@@ -417,18 +423,41 @@ channelRouter.delete('/:channelId', rateLimitCategoryManage, async (req: Request
     // webhook manager who could not see the channel would keep a stale "N of M"
     // in the Integrations tab. webhook:changed carries the server id alone.
     const webhooks = await prisma.webhook.count({ where: { channelId } });
+    // The cascade takes the attachment rows with the messages: their keys are
+    // read now and the files deleted once the row is gone
+    const attachmentKeys = await collectAttachmentKeys({ channelId });
 
     await prisma.channel.delete({ where: { id: channelId } });
+    deleteAttachmentBlobs(attachmentKeys, '[Channels]', `channel ${channelId}`);
+
+    // The row is gone: every step below is best effort, each on its own, so
+    // one that throws is logged and never answers 500 for a delete that
+    // happened (the client would keep a channel that no longer exists).
+    const io = getIO();
 
     // Same audience as every other lifecycle event for this channel: the people
     // who could see it. Nobody else has it in their sidebar to remove.
-    getIO().to(`channel:${channelId}`).emit('channel:deleted', { channelId, serverId });
-    if (webhooks > 0) emitWebhookChanged(serverId);
+    try {
+      io.to(`channel:${channelId}`).emit('channel:deleted', { channelId, serverId });
+    } catch (err) {
+      logChannelDeleteFanOutFailure(channelId, 'the channel:deleted notice', err);
+    }
+    if (webhooks > 0) {
+      try {
+        emitWebhookChanged(serverId);
+      } catch (err) {
+        logChannelDeleteFanOutFailure(channelId, 'the webhook:changed notice', err);
+      }
+    }
 
     // Live voice must die with the channel on every node — participants used
     // to keep their transports (and the Redis mirror entry) until they left
     // manually. (deleteSecureChannel does the same for the secure branch.)
-    await broadcastChannelVoiceCleanup(getIO(), channelId);
+    try {
+      await broadcastChannelVoiceCleanup(io, channelId);
+    } catch (err) {
+      logChannelDeleteFanOutFailure(channelId, 'the voice cleanup', err);
+    }
 
     res.json({ success: true, message: 'Channel deleted' });
   } catch (err) {
