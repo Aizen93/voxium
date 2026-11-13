@@ -101,9 +101,10 @@ categoryRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId
     // one after the other: each counts, and places itself after, the
     // categories committed before it. The space row is the only existing row
     // this transaction locks. Run again when PostgreSQL aborts it to break a
-    // deadlock. The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): an account
-    // deletion of a member holds the space row through its whole cascade, and
-    // a creation merely waiting for it must not expire.
+    // deadlock. The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space
+    // delete holds the space row through its cascade (every channel and
+    // message of the space), and a creation merely waiting for it must not
+    // expire.
     const category = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // A space deleted since the permission check answers as one
       const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;

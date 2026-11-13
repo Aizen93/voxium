@@ -738,10 +738,10 @@ function demotedRow(result: unknown): boolean {
  * A batch that finds a check no longer true answers what the route answers
  * for it (the space gone, no longer this account's, the heir's account gone,
  * the heir joining meanwhile). Both batches carry the long budget
- * (LOCK_WAIT_TRANSACTION_OPTIONS): the space row they update is held by an
- * account deletion of any of its members through that deletion's cascade,
- * and a batch, like an interactive transaction, expires after Prisma's 5 s
- * default while it waits.
+ * (LOCK_WAIT_TRANSACTION_OPTIONS): the heir's member and account rows are
+ * held by an account deletion of the heir through its cascade, and the space
+ * row by a space delete through its own; a batch, like an interactive
+ * transaction, expires after Prisma's 5 s default while it waits.
  *
  * Both batches also demote the departing account's own member row from
  * owner to admin: the account deletion that follows can still fail (the

@@ -1282,9 +1282,10 @@ serverRouter.post(
       // row only while the actor still owns it, the actor's row only while it
       // is the owner's, the heir's row only while they are a member (P2025
       // otherwise, or P2003 when the heir's account is gone). The long
-      // budget: an account deletion of any member holds the space row through
-      // its cascade, and a batch waiting for it expires under Prisma's 5 s
-      // default like an interactive transaction.
+      // budget: an account deletion of the heir holds their member row
+      // through its cascade, and a space delete the space row through its
+      // own; a batch waiting for either expires under Prisma's 5 s default
+      // like an interactive transaction.
       const actorId = req.user!.userId;
       try {
         await retryOnTransactionConflict(() => prisma.$transaction([

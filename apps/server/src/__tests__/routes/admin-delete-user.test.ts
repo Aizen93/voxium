@@ -47,8 +47,9 @@ function makeTxMock() {
         return {};
       }),
     },
-    // The inline member counts (server discovery) move with the cascade, in
-    // the same transaction as the delete.
+    // Here only to prove the delete transaction touches no space row: the
+    // inline member counts (server discovery) move after its commit, on the
+    // shared client.
     server: {
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
@@ -86,6 +87,8 @@ const prismaMock: Record<string, any> = {
     delete: vi.fn().mockResolvedValue({}),
     // an owned space's `delete` action: only while the account still owns it
     deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+    // the deleted account's member counts, lowered after the delete committed
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   serverMember: {
     findMany: vi.fn().mockResolvedValue([]),
@@ -555,12 +558,14 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expect(heirTx![1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
     expect(mockEmitToModerators).toHaveBeenCalledWith('srv-owned', 'server:join_request_resolved', { serverId: 'srv-owned', userId: 'heir-1', outcome: 'joined' });
     expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
-    // the deleted account's own membership is decremented inside the delete transaction
-    expect(txMock.server.updateMany).toHaveBeenCalledWith({
+    // the deleted account's own membership leaves the count once the delete
+    // transaction has committed, never inside it (it would lock the space row)
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['srv-owned'] }, memberCount: { gt: 0 } },
       data: { memberCount: { decrement: 1 } },
     });
-    expect(txMock.server.updateMany.mock.invocationCallOrder[0]).toBeLessThan(txMock.user.delete.mock.invocationCallOrder[0]);
+    expect(prismaMock.server.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
+    expect(txMock.server.updateMany).not.toHaveBeenCalled();
     expectAtomicPurgeAndDelete('target-1');
   });
 
@@ -589,11 +594,12 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
       where: { id: 'srv-owned', ownerId: 'target-1' },
       data: { ownerId: 'heir-1', memberCount: { increment: 1 } },
     });
-    // and the departing account's own row leaves the count in the deletion transaction
-    expect(txMock.server.updateMany).toHaveBeenCalledWith({
+    // and the departing account's own row leaves the count after its deletion committed
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['srv-owned'] }, memberCount: { gt: 0 } },
       data: { memberCount: { decrement: 1 } },
     });
+    expect(txMock.server.updateMany).not.toHaveBeenCalled();
   });
 
   it('purges the TARGET user, never the acting admin', async () => {

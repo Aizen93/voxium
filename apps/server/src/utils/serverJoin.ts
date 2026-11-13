@@ -100,9 +100,10 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   // row first (FOR UPDATE, the order a space delete and a transfer take it
   // in), so the member limit is counted with no other join in between, then
   // the extra writes (a consumed invite fails them), the ban, the duplicate.
-  // The long budget: an account deletion of a member holds the space row
-  // through its whole cascade, and a join merely waiting for it must not
-  // expire (LOCK_WAIT_TRANSACTION_OPTIONS).
+  // The long budget: a space delete holds the space row through its cascade,
+  // and an account deletion every row its own cascade reached (an invite it
+  // created, a join request it decided) until it commits; a join merely
+  // waiting for either must not expire (LOCK_WAIT_TRANSACTION_OPTIONS).
   try {
     await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
@@ -157,8 +158,9 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   // has just been undone by the create. Nothing has been broadcast or joined
   // yet, so re-read the ban after the commit and compensate: the row and the
   // counter, only if the row is still ours to remove. The same long budget:
-  // its channel delete and its count update wait on the rows an account
-  // deletion holds through its cascade.
+  // its channel delete waits on a secure channel an account deletion holds
+  // through its cascade, its count update on the space row a space delete
+  // holds through its own.
   const banAfter = await prisma.serverBan.findUnique({
     where: { serverId_userId: { serverId, userId } },
     select: { userId: true },

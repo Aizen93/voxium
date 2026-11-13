@@ -310,9 +310,9 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
     // for one server run one after the other and each counts the ones before
     // it: the cap holds exactly (a cap of 0 freezes creation). The channel,
     // secure-channel and category creations take the same lock for theirs.
-    // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): an account deletion of
-    // a member holds the space row through its whole cascade, and a creation
-    // merely waiting for it must not expire.
+    // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space delete holds
+    // the space row through its cascade (every channel and message of the
+    // space), and a creation merely waiting for it must not expire.
     const row = await prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
       const count = await tx.webhook.count({ where: { serverId } });
