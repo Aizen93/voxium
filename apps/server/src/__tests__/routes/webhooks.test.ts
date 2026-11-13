@@ -187,12 +187,20 @@ function recordNotFound() {
   });
 }
 
-/** What Prisma throws when a written channel id no longer exists (the FK). */
-function foreignKeyViolation() {
-  return Object.assign(new Error('Foreign key constraint violated on the constraint: `webhooks_channel_id_fkey`'), {
+/**
+ * What the pg adapter throws for a refused foreign key of `webhooks`, shape
+ * copied from a real one: the channel's key by default. `quoted: false` drops
+ * the constraint from the message, leaving only the adapter's constraint index.
+ */
+function foreignKeyViolation(constraint = 'webhooks_channel_id_fkey', quoted = true) {
+  return Object.assign(new Error(quoted ? `Foreign key constraint violated on the constraint: \`${constraint}\`` : 'Foreign key constraint violated'), {
     name: 'PrismaClientKnownRequestError',
     code: 'P2003',
     clientVersion: '7.0.0',
+    meta: {
+      modelName: 'Webhook',
+      driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23503', kind: 'ForeignKeyConstraintViolation', constraint: { index: constraint } } },
+    },
   });
 }
 
@@ -805,6 +813,56 @@ describe('POST /servers/:serverId/webhooks', () => {
     spy.mockRestore();
   });
 
+  it('the channel\'s key named only by the adapter (not in the message) is still 404 "Channel not found"', async () => {
+    txMock.webhook.create.mockRejectedValueOnce(foreignKeyViolation('webhooks_channel_id_fkey', false));
+    const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Channel not found' });
+  });
+
+  it('the creator\'s key refused (the caller\'s account deleted meanwhile) answers 404 "User not found", nothing emitted', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    txMock.webhook.create.mockRejectedValueOnce(foreignKeyViolation('webhooks_created_by_id_fkey'));
+    const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'User not found' });
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('any other foreign key refused surfaces as itself (a 500), not as a missing channel', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    txMock.webhook.create.mockRejectedValueOnce(foreignKeyViolation('webhooks_server_id_fkey'));
+    const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+    expect(res.status).toBe(500);
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('a creation PostgreSQL aborted to break a deadlock is run again whole: one webhook, one event', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }));
+    try {
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(201);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+      expect(prismaMock.$transaction).toHaveBeenLastCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+      expect(txMock.webhook.create).toHaveBeenCalledTimes(1);
+      expectChangedOnce();
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/creation of a webhook in srv-1 was aborted by a deadlock or a serialization failure; retrying \(1 of 2\)/));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a refusal inside the transaction is never retried', async () => {
+    txMock.webhook.count.mockResolvedValueOnce(10);
+    const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+    expect(res.status).toBe(400);
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+  });
+
   it('any other insert failure is still a 500, and emits nothing', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     txMock.webhook.create.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'P1017' }));
@@ -1172,6 +1230,16 @@ describe('PATCH /servers/:serverId/webhooks/:webhookId', () => {
     spy.mockRestore();
   });
 
+  it('a move whose write is refused on any other key surfaces as itself (a 500), not as a missing channel', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-2' });
+    prismaMock.webhook.update.mockRejectedValueOnce(foreignKeyViolation('webhooks_server_id_fkey'));
+    const res = await patch({ channelId: 'ch-2' });
+    expect(res.status).toBe(500);
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
   it('moving into a channel the caller can see but not SEND in is the 403; nothing updated or emitted', async () => {
     prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-ro' });
     h.hasChannelPermission.mockImplementation(async (...args: unknown[]) => !(args[1] === 'ch-ro' && args[3] === Permissions.SEND_MESSAGES));
@@ -1384,6 +1452,17 @@ describe('POST /servers/:serverId/webhooks/:webhookId/rotate', () => {
     const res = await rotate();
     expect(res.status).toBe(500);
     expect(res.body).not.toHaveProperty('data');
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('the rotator\'s key refused (the caller\'s account deleted meanwhile) answers 404 "User not found": no credential, nothing emitted', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.webhook.update.mockRejectedValueOnce(foreignKeyViolation('webhooks_last_rotated_by_id_fkey'));
+    const res = await rotate();
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'User not found' });
+    expect(spy).not.toHaveBeenCalled();
     expect(h.emitted).toHaveLength(0);
     spy.mockRestore();
   });

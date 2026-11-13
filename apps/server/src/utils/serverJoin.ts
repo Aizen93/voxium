@@ -1,26 +1,11 @@
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from './errors';
+import { BadRequestError, ForbiddenError, NotFoundError, violatesForeignKey } from './errors';
 import { getEffectiveLimits } from './serverLimits';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from './transactionRetry';
 import { broadcastMemberJoined } from './memberBroadcast';
 import { emitToModerators } from './moderatorAudience';
 import { WS_EVENTS } from '@voxium/shared';
-
-/**
- * A foreign-key violation (P2003) on `constraint`, as the driver names it
- * (the adapter's constraint index, or the message that quotes it).
- */
-function violatesForeignKey(err: unknown, constraint: string): boolean {
-  const e = err as {
-    code?: unknown;
-    message?: unknown;
-    meta?: { constraint?: unknown; field_name?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
-  } | null;
-  if (e?.code !== 'P2003') return false;
-  const named = [e.message, e.meta?.constraint, e.meta?.field_name, e.meta?.driverAdapterError?.cause?.constraint?.index];
-  return named.some((v) => typeof v === 'string' && v.includes(constraint));
-}
 
 /** Which door the member came through — logged, never a branch. */
 export type JoinServerVia = 'invite' | 'discovery' | 'approval';

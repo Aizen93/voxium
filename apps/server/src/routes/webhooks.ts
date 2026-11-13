@@ -4,12 +4,12 @@ import { authenticate, requireVerifiedEmail, requireConsent } from '../middlewar
 import { requireFeature } from '../middleware/requireFeature';
 import { rateLimitWebhookManage, rateLimitWebhookRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError, ServiceUnavailableError, prismaErrorCode } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, ServiceUnavailableError, prismaErrorCode, violatesForeignKey } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
 import { newWebhookToken, hashWebhookTokenHex } from '../utils/webhookToken';
 import { isSecretBoxConfigured, sealSecret } from '../utils/secretBox';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { LOCK_WAIT_TRANSACTION_OPTIONS } from '../utils/transactionRetry';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { hasServerPermission, hasChannelPermission, filterVisibleChannels, filterChannelsWithPermissions } from '../utils/permissionCalculator';
 import {
   webhookSelect,
@@ -178,12 +178,18 @@ async function loadOwnWebhook(
 }
 
 /**
- * P2003 on a write that sets a channel id: the target channel was deleted
- * between assertChannel and the write (the webhook FK). Answer the missing
- * channel it now is, never a 500 with a logged stack.
+ * A webhook write's foreign-key refusal (P2003), answered by the key the
+ * driver names. The channel's key (the channel deleted between assertChannel
+ * and the write) answers the missing channel it now is. The caller's own key,
+ * the creator's on a create and the rotator's on a rotate (the caller's
+ * account deleted meanwhile), answers the missing user. Anything else is
+ * thrown as it is.
  */
-function channelGoneAsNotFound(err: unknown): never {
-  if (prismaErrorCode(err) === 'P2003') throw new NotFoundError('Channel');
+function foreignKeyRefusedAsNotFound(err: unknown): never {
+  if (violatesForeignKey(err, 'webhooks_channel_id_fkey')) throw new NotFoundError('Channel');
+  if (violatesForeignKey(err, 'webhooks_created_by_id_fkey') || violatesForeignKey(err, 'webhooks_last_rotated_by_id_fkey')) {
+    throw new NotFoundError('User');
+  }
   throw err;
 }
 
@@ -198,14 +204,15 @@ function channelGoneAsNotFound(err: unknown): never {
  * - another moderator MOVED it meanwhile, maybe into a channel this caller
  *   cannot see: the write matches nothing, so a rotate never hands out a
  *   working token for a hidden channel, and a PATCH never edits one.
- * A P2003 is a PATCH's target channel deleted meanwhile (channelGoneAsNotFound).
+ * A P2003 is answered by the key it names (foreignKeyRefusedAsNotFound): a
+ * PATCH's target channel deleted meanwhile, a rotate's caller deleted meanwhile.
  */
 async function updateOrMissing<T>(write: Promise<T>): Promise<T> {
   try {
     return await write;
   } catch (err) {
     if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Webhook');
-    return channelGoneAsNotFound(err);
+    return foreignKeyRefusedAsNotFound(err);
   }
 }
 
@@ -312,8 +319,11 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
     // secure-channel and category creations take the same lock for theirs.
     // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space delete holds
     // the space row through its cascade (every channel and message of the
-    // space), and a creation merely waiting for it must not expire.
-    const row = await prisma.$transaction(async (tx) => {
+    // space), and a creation merely waiting for it must not expire. Run again
+    // whole when PostgreSQL aborts it to break a deadlock, as every creation
+    // under the space row lock is: an aborted attempt leaves nothing, and the
+    // count is read again under the lock.
+    const row = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
       const count = await tx.webhook.count({ where: { serverId } });
       if (count >= limits.maxWebhooksPerServer) {
@@ -331,7 +341,7 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
         },
         select: webhookSelect,
       });
-    }, LOCK_WAIT_TRANSACTION_OPTIONS).catch(channelGoneAsNotFound);
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Webhooks] The creation of a webhook in ${serverId}`).catch(foreignKeyRefusedAsNotFound);
 
     emitWebhookChanged(serverId);
 

@@ -83,6 +83,21 @@ export function prismaErrorCode(err: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined;
 }
 
+/**
+ * A foreign-key violation (P2003) on `constraint`, as the driver names it
+ * (the adapter's constraint index, or the message that quotes it).
+ */
+export function violatesForeignKey(err: unknown, constraint: string): boolean {
+  const e = err as {
+    code?: unknown;
+    message?: unknown;
+    meta?: { constraint?: unknown; field_name?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
+  } | null;
+  if (e?.code !== 'P2003') return false;
+  const named = [e.message, e.meta?.constraint, e.meta?.field_name, e.meta?.driverAdapterError?.cause?.constraint?.index];
+  return named.some((v) => typeof v === 'string' && v.includes(constraint));
+}
+
 /** Parse a date string query parameter, throwing BadRequestError if invalid. */
 export function parseDateParam(value: string, name = 'date'): Date {
   const date = new Date(value);
