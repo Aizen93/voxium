@@ -20,6 +20,7 @@ import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroad
 import { emitToModerators } from '../utils/moderatorAudience';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import { waitForHeirRows } from '../utils/heirRows';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
@@ -741,8 +742,9 @@ function demotedRow(result: unknown): boolean {
  * takes the space row and member rows in the order a space delete and the
  * owner's transfer do (for an heir who is a member: the space row, then the
  * heir's member row, then the owner update that key-shares the heir's
- * account row), so PostgreSQL may abort it to break a deadlock with a
- * removal of the heir (member row, then space row); the WHOLE attempt then runs again
+ * account row), after a wait, holding nothing, for the heir's rows it takes
+ * after the space row (waitForHeirRows). PostgreSQL may abort a batch to
+ * break a deadlock nobody foresaw; the WHOLE attempt then runs again
  * (retryOnTransactionConflict), the heir's membership read included, so each
  * attempt picks its branch from what is true now. The statements carry the
  * checks, so a retry cannot outlive them: the space row is updated only while
@@ -774,6 +776,10 @@ export async function transferOwnedSpaceToHeir(
         where: { userId_serverId: { userId: heirId, serverId } },
         select: { userId: true },
       });
+      // The heir's rows the batch takes after the space row, waited for
+      // holding nothing (waitForHeirRows): their member row when they are a
+      // member, their account row either way
+      await waitForHeirRows(heirId, serverId, { member: existingMembership !== null });
 
       if (existingMembership) {
         // Already a member: their row turns owner with the space row. The

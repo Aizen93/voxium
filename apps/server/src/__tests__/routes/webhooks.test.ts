@@ -856,6 +856,34 @@ describe('POST /servers/:serverId/webhooks', () => {
     }
   });
 
+  it('waits, holding nothing, for the channel row and the creator\'s account row before each attempt\'s transaction takes the space row', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const order: string[] = [];
+    prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      order.push(`${strings.join('?')} [${values.join(',')}]`);
+      return [];
+    });
+    const realTransaction = prismaMock.$transaction.getMockImplementation();
+    prismaMock.$transaction
+      .mockImplementationOnce(async () => { order.push('txn aborted'); throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })
+      .mockImplementationOnce(async (...args: unknown[]) => { order.push('txn'); return realTransaction!(...args); });
+    try {
+      const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+      expect(res.status).toBe(201);
+    } finally {
+      warn.mockRestore();
+      prismaMock.$queryRaw.mockResolvedValue([]);
+    }
+
+    const waits = [
+      'SELECT id FROM channels WHERE id = ? FOR KEY SHARE [ch-1]',
+      'SELECT id FROM users WHERE id = ? FOR KEY SHARE [user-1]',
+    ];
+    expect(order).toEqual([...waits, 'txn aborted', ...waits, 'txn']);
+    // the space row is locked inside the transaction alone
+    expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
   it('a refusal inside the transaction is never retried', async () => {
     txMock.webhook.count.mockResolvedValueOnce(10);
     const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });

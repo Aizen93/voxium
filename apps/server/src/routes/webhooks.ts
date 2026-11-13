@@ -322,26 +322,35 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
     // space), and a creation merely waiting for it must not expire. Run again
     // whole when PostgreSQL aborts it to break a deadlock, as every creation
     // under the space row lock is: an aborted attempt leaves nothing, and the
-    // count is read again under the lock.
-    const row = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
-      const count = await tx.webhook.count({ where: { serverId } });
-      if (count >= limits.maxWebhooksPerServer) {
-        throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);
-      }
-      return tx.webhook.create({
-        data: {
-          serverId,
-          channelId,
-          name,
-          type,
-          tokenHash: hashWebhookTokenHex(token),
-          secretEnc: signing ? signing.secretEnc : null,
-          createdById: userId,
-        },
-        select: webhookSelect,
-      });
-    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Webhooks] The creation of a webhook in ${serverId}`).catch(foreignKeyRefusedAsNotFound);
+    // count is read again under the lock. Each attempt first waits, holding
+    // nothing, for the existing rows the insert key-shares after the space
+    // row (the channel, the creator's account), one statement each on the
+    // shared client and outside any transaction, so a transaction holding
+    // one of them (a channel delete, an account deletion of the creator) is
+    // waited for before the space row is taken.
+    const row = await retryOnTransactionConflict(async () => {
+      await prisma.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR KEY SHARE`;
+      await prisma.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR KEY SHARE`;
+      return prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+        const count = await tx.webhook.count({ where: { serverId } });
+        if (count >= limits.maxWebhooksPerServer) {
+          throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);
+        }
+        return tx.webhook.create({
+          data: {
+            serverId,
+            channelId,
+            name,
+            type,
+            tokenHash: hashWebhookTokenHex(token),
+            secretEnc: signing ? signing.secretEnc : null,
+            createdById: userId,
+          },
+          select: webhookSelect,
+        });
+      }, LOCK_WAIT_TRANSACTION_OPTIONS);
+    }, `[Webhooks] The creation of a webhook in ${serverId}`).catch(foreignKeyRefusedAsNotFound);
 
     emitWebhookChanged(serverId);
 

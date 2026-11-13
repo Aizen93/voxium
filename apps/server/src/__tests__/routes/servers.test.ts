@@ -2507,7 +2507,7 @@ describe('Server Routes', () => {
         });
       });
 
-      it('locks the space row, then the heir\'s member row, both FOR NO KEY UPDATE, before the owner update key-shares the heir\'s account row', async () => {
+      it('waits for the heir\'s member row and account row outside the batch, then locks the space row and the heir\'s member row, both FOR NO KEY UPDATE, before the owner update key-shares the heir\'s account row', async () => {
         const built: string[] = [];
         prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
           built.push(`${strings.join('?')} [${values.join(',')}]`);
@@ -2515,18 +2515,54 @@ describe('Server Routes', () => {
         });
         prismaMock.server.update.mockImplementation(() => { built.push('server.update'); return { op: 'owner' }; });
         prismaMock.serverMember.update.mockImplementation(({ where }: any) => { built.push(`member.update ${where.userId_serverId.userId}`); return { op: 'member' }; });
-        prismaMock.$transaction.mockResolvedValue([]);
+        prismaMock.$transaction.mockImplementation(async () => { built.push('txn'); return []; });
 
         expect((await transfer()).status).toBe(200);
 
-        // the batch's statements, in the order they run
+        // the waits for the heir's rows, holding nothing, before the batch;
+        // then the batch's statements, in the order they run
         expect(built).toEqual([
+          'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE [user-2,srv-1]',
+          'SELECT id FROM users WHERE id = ? FOR KEY SHARE [user-2]',
           'SELECT id FROM servers WHERE id = ? FOR NO KEY UPDATE [srv-1]',
           'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE [user-2,srv-1]',
           'server.update', 'member.update user-2', 'member.update user-1',
+          'txn',
         ]);
         const [batch] = prismaMock.$transaction.mock.calls[0] as [unknown[]];
         expect(batch).toEqual([{ op: 'lock' }, { op: 'lock' }, { op: 'owner' }, { op: 'member' }, { op: 'member' }]);
+      });
+
+      it('waits for the heir\'s rows again before each attempt, never inside the batch', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const order: string[] = [];
+        const pending: string[] = [];
+        prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray) => {
+          const sql = strings.join('?');
+          const label = sql.startsWith('SELECT id FROM users') ? 'wait account'
+            : sql.startsWith('SELECT user_id FROM server_members') ? 'member'
+              : 'space';
+          pending.push(label);
+          return { op: label };
+        });
+        prismaMock.$transaction
+          .mockImplementationOnce(async () => { order.push(...pending.splice(0), 'txn aborted'); throw deadlock(); })
+          .mockImplementationOnce(async () => { order.push(...pending.splice(0), 'txn'); return []; });
+        try {
+          expect((await transfer()).status).toBe(200);
+        } finally {
+          warn.mockRestore();
+        }
+
+        // per attempt: the member wait and the account wait run (and are
+        // awaited) before the batch is built; the batch then holds the space
+        // lock and the member lock
+        expect(order).toEqual([
+          'member', 'wait account', 'space', 'member', 'txn aborted',
+          'member', 'wait account', 'space', 'member', 'txn',
+        ]);
+        const [firstBatch] = prismaMock.$transaction.mock.calls[0] as [unknown[]];
+        expect(firstBatch.slice(0, 2)).toEqual([{ op: 'space' }, { op: 'member' }]);
       });
 
       it('runs with the long budget: an account deletion of any member holds the space row through its cascade', async () => {

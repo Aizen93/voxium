@@ -24,6 +24,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { removeMemberFromServer, OWNER_CANNOT_LEAVE_MESSAGE, KICK_OUTRANKED_MESSAGE } from '../utils/removeMember';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import { waitForHeirRows } from '../utils/heirRows';
 import { recomputeListed } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
@@ -1297,40 +1298,45 @@ serverRouter.post(
       const targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { bannedAt: true } });
       if (targetUser?.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
 
-      // The space row, then the heir's member row, both locked FOR NO KEY
-      // UPDATE (the strength the updates below take, so a secure-channel
-      // writer's key share on the member row and a ban's key share on the
-      // space row are not waited for), then the owner update, which
-      // key-shares the heir's account row through its key, then the two
-      // member rows. The heir's member row is locked before the heir's
-      // account row is key-shared: an account deletion of the heir deletes
-      // its member rows before it locks its account row, so the two queue on
-      // the member row. A kick of the heir takes the member row and then the
-      // space row, so PostgreSQL may abort the batch to break a deadlock with
-      // it; it then runs again. The checks above are carried by the
-      // statements themselves, so they hold on every attempt: the space row
-      // only while the actor still owns it, the actor's row only while it is
-      // the owner's, the heir's row only while they are a member (P2025
-      // otherwise, or P2003 when the heir's account is gone). The long budget
-      // (LOCK_WAIT_TRANSACTION_OPTIONS): a space delete holds the space row
-      // through its cascade, and an account deletion of the heir their member
-      // row; the batch form is bound by Prisma's default budget as an
-      // interactive transaction is, so it carries the long one too.
+      // Each attempt first waits, holding nothing, for the heir's member row
+      // and account row (waitForHeirRows), so a transaction holding either
+      // (an account deletion or a removal of the heir) is waited for before
+      // the space row is taken. Then the batch: the space row, then the
+      // heir's member row, both locked FOR NO KEY UPDATE (the strength the
+      // updates below take, so a secure-channel writer's key share on the
+      // member row and a ban's key share on the space row are not waited
+      // for), then the owner update, which key-shares the heir's account row
+      // through its key, then the two member rows. The heir's member row is
+      // locked before the heir's account row is key-shared: an account
+      // deletion of the heir deletes its member rows before it locks its
+      // account row, so the two queue on the member row. PostgreSQL may abort
+      // the batch to break a deadlock nobody foresaw; it then runs again. The
+      // checks above are carried by the statements themselves, so they hold
+      // on every attempt: the space row only while the actor still owns it,
+      // the actor's row only while it is the owner's, the heir's row only
+      // while they are a member (P2025 otherwise, or P2003 when the heir's
+      // account is gone). The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a
+      // space delete holds the space row through its cascade; the batch form
+      // is bound by Prisma's default budget as an interactive transaction is,
+      // so it carries the long one too.
       const actorId = req.user!.userId;
       try {
-        await retryOnTransactionConflict(() => prisma.$transaction([
-          prisma.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR NO KEY UPDATE`,
-          prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${targetUserId} AND server_id = ${serverId} FOR NO KEY UPDATE`,
-          prisma.server.update({ where: { id: serverId, ownerId: actorId }, data: { ownerId: targetUserId } }),
-          prisma.serverMember.update({
-            where: { userId_serverId: { userId: targetUserId, serverId } },
-            data: { role: 'owner' },
-          }),
-          prisma.serverMember.update({
-            where: { userId_serverId: { userId: actorId, serverId }, role: 'owner' },
-            data: { role: 'admin' },
-          }),
-        ], LOCK_WAIT_TRANSACTION_OPTIONS), `[Servers] The transfer of space ${serverId}`);
+        await retryOnTransactionConflict(async () => {
+          await waitForHeirRows(targetUserId, serverId, { member: true });
+          return prisma.$transaction([
+            prisma.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR NO KEY UPDATE`,
+            prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${targetUserId} AND server_id = ${serverId} FOR NO KEY UPDATE`,
+            prisma.server.update({ where: { id: serverId, ownerId: actorId }, data: { ownerId: targetUserId } }),
+            prisma.serverMember.update({
+              where: { userId_serverId: { userId: targetUserId, serverId } },
+              data: { role: 'owner' },
+            }),
+            prisma.serverMember.update({
+              where: { userId_serverId: { userId: actorId, serverId }, role: 'owner' },
+              data: { role: 'admin' },
+            }),
+          ], LOCK_WAIT_TRANSACTION_OPTIONS);
+        }, `[Servers] The transfer of space ${serverId}`);
       } catch (err) {
         const code = (err as { code?: unknown })?.code;
         if (code !== 'P2025' && code !== 'P2003') throw err;
