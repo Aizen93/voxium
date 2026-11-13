@@ -75,6 +75,17 @@ function holdOpen<T>(client: Db, body: (tx: Tx) => Promise<T>) {
   return { inside, release, done };
 }
 
+/**
+ * A claim racing a transaction that holds a row must not wait for it. The
+ * holder is released by a timer after CLAIM_HOLD_MS, so a claim that did wait
+ * would come back after about that long; CLAIM_MAX_WAIT_MS is the longest a
+ * claim that did not wait may take. A claim that skips takes milliseconds, so
+ * 3 s leaves a slow CI runner a wide margin, and half the hold keeps a claim
+ * that waited out the hold (about 6 s) clearly over it.
+ */
+const CLAIM_HOLD_MS = 6000;
+const CLAIM_MAX_WAIT_MS = 3000;
+
 const settledWithin = (p: Promise<unknown>, ms: number) =>
   Promise.race([p.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms))]);
 
@@ -127,15 +138,17 @@ async function oneSession(): Promise<void> {
 async function twoSessions(): Promise<void> {
   {
     const all = await seed('inflight', 3);
-    const first = holdOpen(a, (tx) => leaseKeyShares(tx, user, 'inflight'));
+        const first = holdOpen(a, (tx) => leaseKeyShares(tx, user, 'inflight'));
     const mine = await first.inside;
+    const holdTimer = setTimeout(first.release, CLAIM_HOLD_MS);
     const t0 = Date.now();
     const other = await leaseKeyShares(b, user, 'inflight');
     const waited = Date.now() - t0;
+    clearTimeout(holdTimer);
     first.release();
     await first.done;
     check('two claims in flight: the first holds the page', ids(mine) === all.join(','));
-    check('two claims in flight: the second gets none of it, without waiting', other.length === 0 && waited < 1000, `${waited} ms`);
+    check('two claims in flight: the second gets none of it, without waiting', other.length === 0 && waited < CLAIM_MAX_WAIT_MS, `${waited} ms`);
     check('a claim after the first committed gets nothing while the lease runs', (await leaseKeyShares(b, user, 'inflight')).length === 0);
   }
   {
@@ -168,15 +181,17 @@ async function twoSessions(): Promise<void> {
   {
     const [x, y] = await seed('ack-first', 2);
     const ack = holdOpen(b, (tx) => acknowledgeKeyShares(tx, user, 'ack-first', [x]));
-    await ack.inside;
+        await ack.inside;
+    const holdTimer = setTimeout(ack.release, CLAIM_HOLD_MS);
     const t0 = Date.now();
     const claimed = await leaseKeyShares(a, user, 'ack-first');
     const waited = Date.now() - t0;
+    clearTimeout(holdTimer);
     ack.release();
     await ack.done;
     check(
       'a claim racing an acknowledgement that holds a share skips it without waiting',
-      ids(claimed) === y && waited < 1000 && (await remaining('ack-first')) === y,
+      ids(claimed) === y && waited < CLAIM_MAX_WAIT_MS && (await remaining('ack-first')) === y,
       `${waited} ms`
     );
   }
