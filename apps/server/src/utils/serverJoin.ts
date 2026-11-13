@@ -55,9 +55,10 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   });
   if (existing) throw new BadRequestError('You are already a member of this server');
 
-  // Enforce max members per server. The authoritative count, not the inline
-  // column — the column is for ranking and the nightly pass may still be
-  // correcting it.
+  // Enforce max members per server (0: no limit). The authoritative count,
+  // not the inline column — the column is for ranking and the nightly pass
+  // may still be correcting it. This count only refuses a full space early,
+  // without writing; the one that holds is counted again in the transaction.
   const limits = await getEffectiveLimits(serverId);
   if (limits.maxMembersPerServer > 0) {
     const memberCount = await prisma.serverMember.count({ where: { serverId } });

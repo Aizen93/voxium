@@ -372,6 +372,7 @@ vi.mock('../../middleware/auth', () => ({
 import { channelRouter } from '../../routes/channels';
 import { secureChannelRouter } from '../../routes/secureChannels';
 import { categoryRouter } from '../../routes/categories';
+import { joinServerMember } from '../../utils/serverJoin';
 import { errorHandler } from '../../middleware/errorHandler';
 
 const app = express();
@@ -482,6 +483,76 @@ describe('two concurrent category creations in one space', () => {
 
     expect([a.status, b.status]).toEqual([201, 201]);
     expect([a.body.data.position, b.body.data.position].sort()).toEqual([2, 3]);
+  });
+});
+
+// ─── Members ────────────────────────────────────────────────────────────────
+
+/** `n` members besides the owner. */
+function seedMembers(n: number): void {
+  for (let i = 0; i < n; i++) committed.members.push({ userId: `member-${i}`, serverId: S });
+  committed.servers[0].memberCount = committed.members.length;
+}
+
+/** How each join ended: 'joined', or the message it was refused with. */
+function settle(joins: Array<Promise<void>>): Promise<string[]> {
+  return Promise.all(joins.map((j) => j.then(() => 'joined', (err: Error) => err.message)));
+}
+
+describe('concurrent joins of one space', () => {
+  it('two joins one below the member limit: exactly one joins, the other gets the limit answer', async () => {
+    limits.maxMembersPerServer = 3;
+    seedMembers(1); // the owner and one member
+    armRace(2);
+
+    const outcomes = await settle([
+      joinServerMember('alice', S, { via: 'discovery' }),
+      joinServerMember('bob', S, { via: 'discovery' }),
+    ]);
+
+    expect([...outcomes].sort()).toEqual(['This server has reached its member limit (3)', 'joined']);
+    expect(committed.members).toHaveLength(3);
+    // the inline counter rolled back with the refused join
+    expect(committed.servers[0].memberCount).toBe(3);
+  });
+
+  it('a burst of eight joins three below the limit: exactly three join', async () => {
+    limits.maxMembersPerServer = 5;
+    seedMembers(1);
+    const joiners = Array.from({ length: 8 }, (_, i) => `joiner-${i}`);
+    armRace(joiners.length);
+
+    const outcomes = await settle(joiners.map((u) => joinServerMember(u, S, { via: 'discovery' })));
+
+    expect(outcomes.filter((o) => o === 'joined')).toHaveLength(3);
+    expect(outcomes.filter((o) => o === 'This server has reached its member limit (5)')).toHaveLength(5);
+    expect(committed.members).toHaveLength(5);
+    expect(committed.servers[0].memberCount).toBe(5);
+  });
+
+  it('a refused invite join keeps its invite: the invite delete rolls back with it', async () => {
+    limits.maxMembersPerServer = 2;
+    committed.invites.push({ code: 'INVITE-A', serverId: S }, { code: 'INVITE-B', serverId: S });
+    armRace(2);
+
+    const outcomes = await settle([
+      joinServerMember('alice', S, { via: 'invite', extraWrites: (tx) => [tx.invite.delete({ where: { code: 'INVITE-A' } })] }),
+      joinServerMember('bob', S, { via: 'invite', extraWrites: (tx) => [tx.invite.delete({ where: { code: 'INVITE-B' } })] }),
+    ]);
+
+    expect([...outcomes].sort()).toEqual(['This server has reached its member limit (2)', 'joined']);
+    const joined = outcomes[0] === 'joined' ? 'INVITE-A' : 'INVITE-B';
+    expect(committed.invites.map((i) => i.code)).toEqual([joined === 'INVITE-A' ? 'INVITE-B' : 'INVITE-A']);
+  });
+
+  it('without a limit (0), every concurrent join commits and the counter follows', async () => {
+    const joiners = Array.from({ length: 6 }, (_, i) => `joiner-${i}`);
+
+    const outcomes = await settle(joiners.map((u) => joinServerMember(u, S, { via: 'discovery' })));
+
+    expect(outcomes).toEqual(joiners.map(() => 'joined'));
+    expect(committed.members).toHaveLength(7);
+    expect(committed.servers[0].memberCount).toBe(7);
   });
 });
 

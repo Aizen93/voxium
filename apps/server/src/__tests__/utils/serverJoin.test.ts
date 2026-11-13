@@ -189,6 +189,33 @@ describe('joinServerMember', () => {
       expect(prismaMock.serverMember.create).not.toHaveBeenCalled();
     });
 
+    it('a refusal at the limit inside the transaction is the answer: never retried, the extra writes roll back with it', async () => {
+      getEffectiveLimits.mockResolvedValue({ maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 10 });
+      // nine when it looked; ten under the lock, a join committed meanwhile
+      prismaMock.serverMember.count.mockResolvedValueOnce(9).mockResolvedValueOnce(10);
+      const inviteDelete = vi.fn(async () => ({}));
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'invite', extraWrites: () => [inviteDelete()] }))
+        .rejects.toMatchObject({ statusCode: 400, message: 'This server has reached its member limit (10)' });
+
+      // the invite delete ran in the transaction the refusal rolls back
+      expect(inviteDelete).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.server.update).not.toHaveBeenCalled();
+      expect(broadcastMemberJoined).not.toHaveBeenCalled();
+      expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
+    });
+
+    it('admits the join that brings the space exactly to its limit', async () => {
+      getEffectiveLimits.mockResolvedValue({ maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 10 });
+      // nine members under the lock, before this join's own row
+      prismaMock.serverMember.count.mockResolvedValueOnce(8).mockResolvedValueOnce(9);
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'discovery' })).resolves.toBeUndefined();
+      expect(prismaMock.serverMember.create).toHaveBeenCalledTimes(1);
+      expect(broadcastMemberJoined).toHaveBeenCalledTimes(1);
+    });
+
     it('a space deleted since the first check answers 404 Server, not a foreign-key 500', async () => {
       prismaMock.$queryRaw.mockResolvedValue([]);
 
