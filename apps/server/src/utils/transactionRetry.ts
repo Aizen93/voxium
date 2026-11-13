@@ -15,9 +15,10 @@
 
 /**
  * The budget of a transaction that waits on a row another transaction can
- * hold for a long time: a space row, a secure channel's row or a member row
- * (an account deletion holds them through its whole cascade, tens of seconds
- * on a heavy account), a webhook row (its purge-delete). Prisma's default (5 s
+ * hold for a long time: a secure channel's row, a member row or any row its
+ * cascade reached (an account deletion holds them through that cascade, tens
+ * of seconds on a heavy account), a space row (a space delete holds it
+ * through its own), a webhook row (its purge-delete). Prisma's default (5 s
  * for the transaction, 2 s for a connection) expired such a transaction while
  * it merely waited, and answered 500 for work that would have gone through.
  * The batch form of `$transaction([...])` is bound by the same default.

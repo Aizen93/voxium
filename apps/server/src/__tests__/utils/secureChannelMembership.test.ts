@@ -247,6 +247,10 @@ const client: Record<string, any> = {
     },
     findMany: async ({ where }: any) => db.channels.filter((c) => channelMatches(c, where)),
     count: async ({ where }: any) => db.channels.filter((c) => channelMatches(c, where)).length,
+    aggregate: async ({ where }: any) => {
+      const positions = db.channels.filter((c) => channelMatches(c, where)).map((c) => c.position);
+      return { _max: { position: positions.length > 0 ? Math.max(...positions) : null } };
+    },
     create: async ({ data }: any) => {
       const row: ChannelRow = { id: `ch-new-${db.channels.length + 1}`, categoryId: null, createdById: null, ...data };
       db.channels.push(row);

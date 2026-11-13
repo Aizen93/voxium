@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
 import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
@@ -12,6 +12,8 @@ import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
+import { isSortPosition, MAX_SORT_POSITION, positionAfter } from '../utils/sortPosition';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { visibilityRequestMark, resyncRequestedSince, recheckVisibilityAfterJoin } from '../utils/channelVisibilityRooms';
 
 export const channelRouter = Router({ mergeParams: true });
@@ -90,6 +92,31 @@ async function visibilityRoomsForNewChannel(serverId: string): Promise<(string |
   return batches;
 }
 
+/**
+ * A creation's foreign-key violation (P2003). With the space row locked and
+ * found, the one key that can fail is the category's: deleted between the
+ * check before the transaction and the insert. Answered as that check
+ * answers, never a 500.
+ */
+function categoryGoneAsMissing(err: unknown): never {
+  if ((err as { code?: unknown } | null)?.code === 'P2003') throw new BadRequestError('Category not found in this server');
+  throw err;
+}
+
+/** Sort entries by id: the one order a reorder updates its rows in (see the reorder route). */
+function byId(a: { id: string }, b: { id: string }): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** One entry of a reorder: a channel id, its new position and, optionally, its category (null: none). */
+function isChannelOrderEntry(entry: unknown): entry is { id: string; position: number; categoryId?: string | null } {
+  if (!entry || typeof entry !== 'object') return false;
+  const { id, position, categoryId } = entry as Record<string, unknown>;
+  return typeof id === 'string'
+    && isSortPosition(position)
+    && (categoryId === undefined || categoryId === null || typeof categoryId === 'string');
+}
+
 // Bulk reorder channels (with optional category reassignment)
 channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
@@ -101,6 +128,9 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
     const { order } = req.body;
     if (!Array.isArray(order) || order.length === 0) {
       throw new BadRequestError('order must be a non-empty array');
+    }
+    if (!order.every(isChannelOrderEntry)) {
+      throw new BadRequestError(`Each order entry needs a channel id and a whole-number position from 0 to ${MAX_SORT_POSITION}`);
     }
 
     // Validate all channel IDs belong to this server. Secure channels are
@@ -136,15 +166,39 @@ channelRouter.put('/reorder', rateLimitCategoryManage, async (req: Request<{ ser
       }
     }
 
-    // Update positions + categoryId in a transaction
-    await prisma.$transaction(
-      order.map((o: { id: string; position: number; categoryId?: string | null }) =>
-        prisma.channel.update({
-          where: { id: o.id },
-          data: { position: o.position, categoryId: o.categoryId ?? null },
-        })
-      )
-    );
+    // Update positions + categoryId in a transaction, one row after the other
+    // in ONE fixed order, sorted by id, whatever order the client sent: two
+    // reorders of the same rows then lock them in the same order and one
+    // waits for the other, where in the clients' orders two reversed
+    // reorders each held a row the other needed (a deadlock, a 500). A row
+    // the validation saw and that is gone by the update (a channel or a
+    // category deleted meanwhile) answers as an unknown one, never a 500.
+    // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a channel delete holds
+    // the channel row through its cascade (every message of the channel), a
+    // category delete the category a channel is moved into, a space delete
+    // all of them, and a reorder merely waiting for one must not expire. The
+    // batch is built again for each attempt and run again whole when
+    // PostgreSQL aborts it to break a deadlock: it writes absolute positions,
+    // so a second run writes what the first would have.
+    const sorted = [...order].sort(byId);
+    try {
+      await retryOnTransactionConflict(() => prisma.$transaction(
+        sorted.map((o: { id: string; position: number; categoryId?: string | null }) =>
+          prisma.channel.update({
+            where: { id: o.id },
+            data: { position: o.position, categoryId: o.categoryId ?? null },
+          })
+        ),
+        LOCK_WAIT_TRANSACTION_OPTIONS,
+      ), `[Channels] The reorder of channels in ${serverId}`);
+    } catch (err) {
+      const code = prismaErrorCode(err);
+      // The channel row is gone: the update found nothing to update
+      if (code === 'P2025') throw new NotFoundError('Channel');
+      // The category it was moved into is gone: its foreign key refused it
+      if (code === 'P2003') throw new NotFoundError('Category');
+      throw err;
+    }
 
     // Re-read updated channels and emit events
     const updated = await prisma.channel.findMany({
@@ -226,25 +280,47 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
       if (!category) throw new BadRequestError('Category not found in this server');
     }
 
-    // Secure channels count against their own limit (secureChannels.ts); the
-    // total only places the new channel last. One grouped count gives both.
-    const [countsBySecure, limits] = await Promise.all([
-      prisma.channel.groupBy({ by: ['secure'], where: { serverId }, _count: { _all: true } }),
-      getEffectiveLimits(serverId),
-    ]);
-    let channelCount = 0;
-    let regularCount = 0;
-    for (const row of countsBySecure) {
-      channelCount += row._count._all;
-      if (!row.secure) regularCount += row._count._all;
-    }
-    if (regularCount >= limits.maxChannelsPerServer) {
-      throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
-    }
+    const limits = await getEffectiveLimits(serverId);
 
-    const channel = await prisma.channel.create({
-      data: { name, type, serverId, position: channelCount, categoryId: categoryId || null },
-    });
+    // Count, place and insert under the space row lock (FOR UPDATE, the lock
+    // a secure-channel or webhook creation takes too), so concurrent
+    // creations in one space run one after the other: each counts, and
+    // places itself after, the channels committed before it (each statement
+    // reads afresh under READ COMMITTED). Two creations at the limit can no
+    // longer both pass it, nor two creations take one position. Past the
+    // space row, the insert only key-shares the category row through its
+    // foreign key, and the one writer that locks a category row (its delete)
+    // never takes a space row. Run again when PostgreSQL aborts it to break a
+    // deadlock. The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space
+    // delete holds the space row through its cascade (every channel and
+    // message of the space), and a creation merely waiting for it must not
+    // expire.
+    const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      // A space deleted since the permission check answers as one
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
+      // Secure channels count against their own limit (secureChannels.ts);
+      // every channel, secure ones included, holds a position. One grouped
+      // read gives the count and the highest position.
+      const bySecure = await tx.channel.groupBy({
+        by: ['secure'],
+        where: { serverId },
+        _count: { _all: true },
+        _max: { position: true },
+      });
+      let regularCount = 0;
+      let highest: number | null = null;
+      for (const row of bySecure) {
+        if (!row.secure) regularCount += row._count._all;
+        if (row._max.position !== null && (highest === null || row._max.position > highest)) highest = row._max.position;
+      }
+      if (regularCount >= limits.maxChannelsPerServer) {
+        throw new BadRequestError(`Server can have at most ${limits.maxChannelsPerServer} channels`);
+      }
+      return tx.channel.create({
+        data: { name, type, serverId, position: positionAfter(highest), categoryId: categoryId || null },
+      });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), '[Channels] A channel creation').catch(categoryGoneAsMissing);
 
     // Announce to — and subscribe — exactly the members who can VIEW the new
     // channel, and nobody else. The old code did both server-wide on the

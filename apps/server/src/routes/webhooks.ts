@@ -9,6 +9,7 @@ import { sanitizeText } from '../utils/sanitize';
 import { newWebhookToken, hashWebhookTokenHex } from '../utils/webhookToken';
 import { isSecretBoxConfigured, sealSecret } from '../utils/secretBox';
 import { getEffectiveLimits } from '../utils/serverLimits';
+import { LOCK_WAIT_TRANSACTION_OPTIONS } from '../utils/transactionRetry';
 import { hasServerPermission, hasChannelPermission, filterVisibleChannels, filterChannelsWithPermissions } from '../utils/permissionCalculator';
 import {
   webhookSelect,
@@ -307,9 +308,11 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
 
     // Count-then-create under a row lock on the SERVER, so concurrent creates
     // for one server run one after the other and each counts the ones before
-    // it: the cap holds exactly (a cap of 0 freezes creation). The channel
-    // cap (channels.ts) has the same count-then-create race and is left
-    // alone; a webhook is a public write endpoint, so its cap must hold.
+    // it: the cap holds exactly (a cap of 0 freezes creation). The channel,
+    // secure-channel and category creations take the same lock for theirs.
+    // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space delete holds
+    // the space row through its cascade (every channel and message of the
+    // space), and a creation merely waiting for it must not expire.
     const row = await prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
       const count = await tx.webhook.count({ where: { serverId } });
@@ -328,7 +331,7 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
         },
         select: webhookSelect,
       });
-    }).catch(channelGoneAsNotFound);
+    }, LOCK_WAIT_TRANSACTION_OPTIONS).catch(channelGoneAsNotFound);
 
     emitWebhookChanged(serverId);
 

@@ -1748,8 +1748,6 @@ describe('Server Routes', () => {
 
     it('approve: runs the join helper with the row delete as the extra write, then notifies the requester and the moderators', async () => {
       prismaMock.serverJoinRequest.findUnique.mockResolvedValue({ id: 'req-1', status: 'pending' });
-      const DELETE = { op: 'request.delete' };
-      prismaMock.serverJoinRequest.delete.mockReturnValue(DELETE);
       prismaMock.server.findUnique.mockResolvedValue(SERVER_ROW);
 
       const res = await request(app).post('/api/v1/servers/srv-1/join-requests/user-2/approve').set('Authorization', `Bearer ${makeToken()}`);
@@ -1757,13 +1755,18 @@ describe('Server Routes', () => {
       expect(res.status).toBe(200);
       // the row delete is built on each attempt's transaction client
       expect(mockJoinServerMember).toHaveBeenCalledWith('user-2', 'srv-1', { via: 'approval', extraWrites: expect.any(Function) });
-      const { extraWrites } = mockJoinServerMember.mock.calls[0][2];
-      expect(extraWrites(prismaMock)).toEqual([DELETE]);
       expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
       // a request names a non-member: the whole server never hears about it
       expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
-      // status-scoped: a decline that committed first leaves a row this delete must not find
-      expect(prismaMock.serverJoinRequest.delete).toHaveBeenCalledWith({ where: { id: 'req-1', status: 'pending' } });
+      // The extra write is issued on the join's transaction client, never
+      // the root one: status-scoped, so a decline that committed first
+      // leaves a row this delete must not find
+      expect(prismaMock.serverJoinRequest.delete).not.toHaveBeenCalled();
+      const { extraWrites } = mockJoinServerMember.mock.calls[0][2];
+      const tx = { serverJoinRequest: { delete: vi.fn().mockResolvedValue({}) } };
+      await Promise.all(extraWrites(tx));
+      expect(tx.serverJoinRequest.delete).toHaveBeenCalledWith({ where: { id: 'req-1', status: 'pending' } });
+      expect(prismaMock.serverJoinRequest.delete).not.toHaveBeenCalled();
       expect(mockTo).toHaveBeenCalledWith('user:user-2');
       expect(mockEmit).toHaveBeenCalledWith('server:join_approved', { server: SERVER_ROW });
       expect(mockEmitToModerators).toHaveBeenCalledWith('srv-1', 'server:join_request_resolved', { serverId: 'srv-1', userId: 'user-2', outcome: 'approved' });

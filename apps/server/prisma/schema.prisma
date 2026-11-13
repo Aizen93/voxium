@@ -800,6 +800,21 @@ model Report {
   @@index([reporterId])
   @@index([reportedUserId])
   @@index([messageId])
+  // ALSO covered by three PARTIAL unique indexes, added in migration
+  // 20261111150000_reports_one_pending_per_target: one pending report per
+  // reporter and target (`reports_pending_user_key`,
+  // `reports_pending_message_key`, `reports_pending_server_key`, each
+  // `WHERE status = 'pending' AND type = …`). They are created in SQL there,
+  // and are invisible here, because this schema does not enable Prisma's
+  // `partialIndexes` preview feature, the one that lets a schema declare a
+  // partial index (`prisma migrate diff` against a migrated database leaves
+  // them alone while it is off). Enabling it without declaring the three
+  // here would make `prisma migrate dev` read them as drift and drop them
+  // (__tests__/migrations/reportsOnePendingPerTarget.test.ts refuses that
+  // schema). Should `prisma migrate dev` ever
+  // offer to DROP them as drift, do not let it: they are what refuses two
+  // identical reports sent at once, which the route's look for a pending
+  // report both passes (it answers their P2002).
   @@map("reports")
 }
 

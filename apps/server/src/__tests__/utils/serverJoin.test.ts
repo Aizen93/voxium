@@ -9,7 +9,7 @@ const prismaMock = vi.hoisted(() => ({
   serverBan: { findUnique: vi.fn() },
   serverJoinRequest: { deleteMany: vi.fn(), findUnique: vi.fn() },
   serverMember: { findUnique: vi.fn(), count: vi.fn(), create: vi.fn(), deleteMany: vi.fn() },
-  server: { update: vi.fn(), updateMany: vi.fn() },
+  server: { update: vi.fn(), updateMany: vi.fn(), findUnique: vi.fn() },
   channel: { findMany: vi.fn(), deleteMany: vi.fn() },
   channelMember: { deleteMany: vi.fn() },
   channelRead: { createMany: vi.fn() },
@@ -189,6 +189,33 @@ describe('joinServerMember', () => {
       expect(prismaMock.serverMember.create).not.toHaveBeenCalled();
     });
 
+    it('a refusal at the limit inside the transaction is the answer: never retried, the extra writes roll back with it', async () => {
+      getEffectiveLimits.mockResolvedValue({ maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 10 });
+      // nine when it looked; ten under the lock, a join committed meanwhile
+      prismaMock.serverMember.count.mockResolvedValueOnce(9).mockResolvedValueOnce(10);
+      const inviteDelete = vi.fn(async () => ({}));
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'invite', extraWrites: () => [inviteDelete()] }))
+        .rejects.toMatchObject({ statusCode: 400, message: 'This server has reached its member limit (10)' });
+
+      // the invite delete ran in the transaction the refusal rolls back
+      expect(inviteDelete).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.server.update).not.toHaveBeenCalled();
+      expect(broadcastMemberJoined).not.toHaveBeenCalled();
+      expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
+    });
+
+    it('admits the join that brings the space exactly to its limit', async () => {
+      getEffectiveLimits.mockResolvedValue({ maxChannelsPerServer: 20, maxVoiceUsersPerChannel: 12, maxCategoriesPerServer: 12, maxMembersPerServer: 10 });
+      // nine members under the lock, before this join's own row
+      prismaMock.serverMember.count.mockResolvedValueOnce(8).mockResolvedValueOnce(9);
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'discovery' })).resolves.toBeUndefined();
+      expect(prismaMock.serverMember.create).toHaveBeenCalledTimes(1);
+      expect(broadcastMemberJoined).toHaveBeenCalledTimes(1);
+    });
+
     it('a space deleted since the first check answers 404 Server, not a foreign-key 500', async () => {
       prismaMock.$queryRaw.mockResolvedValue([]);
 
@@ -320,6 +347,109 @@ describe('joinServerMember', () => {
     expect(prismaMock.server.updateMany).not.toHaveBeenCalled();
     // the kick's own transaction removed the secure-channel rows with the membership
     expect(prismaMock.channel.deleteMany).not.toHaveBeenCalled();
+  });
+
+  describe('a space deleted while the join runs answers 404 Server, never a foreign-key 500', () => {
+    /** A foreign-key violation as the pg adapter reports it (shape printed from a real one). */
+    const fk = (constraint: string, table: string) => Object.assign(
+      new Error(`Foreign key constraint violated on the constraint: \`${constraint}\``),
+      {
+        code: 'P2003',
+        meta: {
+          modelName: table,
+          driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23503', kind: 'ForeignKeyConstraintViolation', constraint: { index: constraint } } },
+        },
+      },
+    );
+
+    it('the membership\'s key to the space refused inside the transaction', async () => {
+      prismaMock.$transaction.mockRejectedValue(fk('server_members_server_id_fkey', 'ServerMember'));
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'discovery' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
+      expect(broadcastMemberJoined).not.toHaveBeenCalled();
+    });
+
+    it('matched by the constraint the adapter names, even when the message does not quote it', async () => {
+      const err = fk('server_members_server_id_fkey', 'ServerMember');
+      err.message = 'Foreign key constraint violated';
+      prismaMock.$transaction.mockRejectedValue(err);
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'discovery' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
+    });
+
+    it('a joiner whose account was deleted while the join ran answers 404 User, not a missing space nor a 500', async () => {
+      prismaMock.$transaction.mockRejectedValue(fk('server_members_user_id_fkey', 'ServerMember'));
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'invite' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'User not found' });
+      expect(broadcastMemberJoined).not.toHaveBeenCalled();
+      expect(prismaMock.channelRead.createMany).not.toHaveBeenCalled();
+    });
+
+    it('the joiner\'s key matched by the constraint the adapter names, even when the message does not quote it', async () => {
+      const err = fk('server_members_user_id_fkey', 'ServerMember');
+      err.message = 'Foreign key constraint violated';
+      prismaMock.$transaction.mockRejectedValue(err);
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'approval' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'User not found' });
+    });
+
+    it('any other foreign key stays what it is', async () => {
+      const err = fk('channel_members_channel_id_fkey', 'ChannelMember');
+      prismaMock.$transaction.mockRejectedValue(err);
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'discovery' })).rejects.toBe(err);
+    });
+
+    it('the joiner\'s account deleted after the commit, before the read markers are seeded, answers 404 User', async () => {
+      prismaMock.channelRead.createMany.mockRejectedValueOnce(fk('channel_reads_user_id_fkey', 'ChannelRead'));
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'discovery' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'User not found' });
+      // seeded once, never read again as if a channel had gone
+      expect(prismaMock.channelRead.createMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.server.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('the space deleted after the commit, before the read markers are seeded (its channels went with it)', async () => {
+      prismaMock.channelRead.createMany.mockRejectedValueOnce(fk('channel_reads_channel_id_fkey', 'ChannelRead'));
+      prismaMock.server.findUnique.mockResolvedValueOnce(null);
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'invite' }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
+      expect(prismaMock.server.findUnique).toHaveBeenCalledWith({ where: { id: 's-1' }, select: { id: true } });
+      expect(prismaMock.channelRead.createMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('one channel deleted before the markers are seeded, the space still there: the channels are read again and seeded once more', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.channelRead.createMany.mockRejectedValueOnce(fk('channel_reads_channel_id_fkey', 'ChannelRead'));
+      prismaMock.channel.findMany
+        .mockResolvedValueOnce([{ id: 'ch-1' }, { id: 'ch-gone' }])
+        .mockResolvedValueOnce([{ id: 'ch-1' }]);
+      prismaMock.server.findUnique.mockResolvedValueOnce({ id: 's-1' });
+      try {
+        await expect(joinServerMember('u-1', 's-1', { via: 'invite' })).resolves.toBeUndefined();
+        expect(prismaMock.channelRead.createMany).toHaveBeenCalledTimes(2);
+        expect(prismaMock.channelRead.createMany).toHaveBeenLastCalledWith({
+          data: [expect.objectContaining({ userId: 'u-1', channelId: 'ch-1' })],
+          skipDuplicates: true,
+        });
+        expect(warn).toHaveBeenCalledWith('[ServerJoin] A channel of s-1 was deleted while u-1\'s read markers were seeded; seeding again');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('any other seeding failure is not turned into a not-found', async () => {
+      const err = new Error('db gone');
+      prismaMock.channelRead.createMany.mockRejectedValueOnce(err);
+
+      await expect(joinServerMember('u-1', 's-1', { via: 'invite' })).rejects.toBe(err);
+    });
   });
 
   it('maps a concurrent duplicate join (P2002 on the composite key) to "already a member", not a 500', async () => {

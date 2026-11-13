@@ -47,8 +47,9 @@ function makeTxMock() {
         return {};
       }),
     },
-    // The inline member counts (server discovery) move with the cascade, in
-    // the same transaction as the delete.
+    // Here only to prove the delete transaction touches no space row: the
+    // inline member counts (server discovery) move after its commit, on the
+    // shared client.
     server: {
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
@@ -86,6 +87,8 @@ const prismaMock: Record<string, any> = {
     delete: vi.fn().mockResolvedValue({}),
     // an owned space's `delete` action: only while the account still owns it
     deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+    // the deleted account's member counts, lowered after the delete committed
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   serverMember: {
     findMany: vi.fn().mockResolvedValue([]),
@@ -94,6 +97,8 @@ const prismaMock: Record<string, any> = {
     update: vi.fn().mockResolvedValue({}),
     // the departing owner's own row, demoted in the transfer batch
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    // never read by the heir transfer: the member limit is not applied there
+    count: vi.fn().mockResolvedValue(0),
   },
   channel: {
     findMany: vi.fn().mockResolvedValue([]),
@@ -198,6 +203,8 @@ vi.mock('../../mediasoup/mediasoupManager', () => ({
 // Server limits
 vi.mock('../../utils/serverLimits', () => ({
   getGlobalLimits: vi.fn().mockResolvedValue({}),
+  // a space at its member limit: the heir transfer must not consult it
+  getEffectiveLimits: vi.fn().mockResolvedValue({ maxMembersPerServer: 1 }),
 }));
 
 // Sanitize
@@ -551,13 +558,48 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expect(heirTx![1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
     expect(mockEmitToModerators).toHaveBeenCalledWith('srv-owned', 'server:join_request_resolved', { serverId: 'srv-owned', userId: 'heir-1', outcome: 'joined' });
     expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
-    // the deleted account's own membership is decremented inside the delete transaction
-    expect(txMock.server.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['srv-owned'] }, memberCount: { gt: 0 } },
+    // the deleted account's own membership leaves the count once the delete
+    // transaction has committed, never inside it (it would lock the space row)
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
+      where: { id: 'srv-owned', memberCount: { gt: 0 } },
       data: { memberCount: { decrement: 1 } },
     });
-    expect(txMock.server.updateMany.mock.invocationCallOrder[0]).toBeLessThan(txMock.user.delete.mock.invocationCallOrder[0]);
+    expect(prismaMock.server.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
+    expect(txMock.server.updateMany).not.toHaveBeenCalled();
     expectAtomicPurgeAndDelete('target-1');
+  });
+
+  it('an heir who is not a member joins past the space\'s member limit (deliberately not applied), the inline count moving with the row in the same batch', async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' }, 'heir-1': { role: 'user' } });
+    prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-owned', name: 'Owned' }]);
+    prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-owned' }]);
+    prismaMock.serverMember.findUnique.mockResolvedValue(null); // not a member yet
+    prismaMock.serverMember.count.mockResolvedValue(1); // the space is full
+    const { getEffectiveLimits } = await import('../../utils/serverLimits');
+
+    const res = await request(app)
+      .delete('/api/v1/admin/users/target-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ serverActions: [{ serverId: 'srv-owned', action: 'transfer', newOwnerId: 'heir-1' }] });
+
+    expect(res.status).toBe(200);
+    // no limit read, no member count: an administrator's transfer may take the space past it
+    expect(getEffectiveLimits).not.toHaveBeenCalled();
+    expect(prismaMock.serverMember.count).not.toHaveBeenCalled();
+    // the membership row and the count + 1 commit together, or neither does
+    const heirTx = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg))![0];
+    expect(heirTx).toContain(prismaMock.serverMember.create.mock.results[0].value);
+    expect(heirTx).toContain(prismaMock.server.update.mock.results[0].value);
+    expect(prismaMock.server.update).toHaveBeenCalledWith({
+      where: { id: 'srv-owned', ownerId: 'target-1' },
+      data: { ownerId: 'heir-1', memberCount: { increment: 1 } },
+    });
+    // and the departing account's own row leaves the count after its deletion committed
+    expect(prismaMock.server.updateMany).toHaveBeenCalledWith({
+      where: { id: 'srv-owned', memberCount: { gt: 0 } },
+      data: { memberCount: { decrement: 1 } },
+    });
+    expect(txMock.server.updateMany).not.toHaveBeenCalled();
   });
 
   it('purges the TARGET user, never the acting admin', async () => {

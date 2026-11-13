@@ -114,36 +114,65 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
 }
 
 /**
- * The delete transaction of `deleteUserAccount`: the account's E2E material,
- * memberships, secure-channel state, member counts and the row itself, in
- * one transaction, run again as a whole (retryOnTransactionConflict) when
- * PostgreSQL aborts it to break a deadlock. Everything `deleteUserAccount`
- * does before it (the member:left notices, the first session revocation, the
- * key reads) is idempotent, so a retry needs nothing redone.
+ * The delete transaction of `deleteUserAccount`: the account's memberships,
+ * secure-channel state, E2E material and the row itself, in one transaction,
+ * run again as a whole (retryOnTransactionConflict) when PostgreSQL aborts it
+ * to break a deadlock. Everything `deleteUserAccount` does before it (the
+ * member:left notices, the first session revocation, the key reads) is
+ * idempotent, so a retry needs nothing redone. The inline member counts of
+ * the spaces the account was in follow the commit (`lowerMemberCounts`).
  *
- * Lock order, the one a removal and a secure-channel creation or invite take
- * their rows in:
+ * Lock order (1 to 3 are the order a removal and a secure-channel creation
+ * or invite take their rows in):
  *  1. the member rows (the explicit DELETE);
  *  2. the secure channels, FOR UPDATE, in id order;
  *  3. the key shares and the rest of the account's E2E material;
- *  4. the space rows (the member counts).
- * Why each comes where it does:
+ *  4. the account row and every row its delete cascades to or sets null
+ *     (messages, reactions, reads, invites it created, join requests it
+ *     decided, bans it issued, webhooks it created or rotated, …): the long
+ *     part, tens of seconds on a heavy account.
+ * It takes NO space row. Why each comes where it does:
  *  - 2 before 3: a member's removal from one secure channel
  *    (removeSecureMember) locks the channel, then deletes the key shares
  *    addressed to that member there. With the purge first (as this
  *    transaction once ran it), it held a share that removal waited for while
  *    it waited for the channel the removal held.
- *  - 2 before 4: a removal holds a secure channel and takes the space row
- *    last. With the space rows first (to match a space delete and an
- *    ownership transfer), this transaction would hold the space row and wait
- *    for that channel.
- * Against a space delete or a transfer to this account (space row, then
- * member rows) a deadlock stays possible either way; PostgreSQL aborts one
- * side and both sides retry.
+ *  - no space row: every join, channel, category, secure-channel and webhook
+ *    creation, kick and ownership transfer in a space takes that space's
+ *    row, and this is the longest transaction there is, so it holds none.
+ *    A statement on `servers` ahead of the user delete would keep those
+ *    rows through the whole cascade; behind it, it would be the last lock
+ *    taken and close a cycle with every transaction that takes a space row
+ *    first and then needs a row this one holds (a join through an invite
+ *    this account created, a webhook it creates, a transfer to it). The
+ *    member counts, the one statement that locks space rows, therefore
+ *    follow the commit. The cascade itself locks no space row: the one key
+ *    from `servers` to `users` is the owner's (Restrict, and an account
+ *    deleted here owns no space), and nothing it sets null lives in
+ *    `servers`.
+ * Two deadlocks stay possible, both with a transaction that starts between
+ * step 1 and step 4 (a short window, longer when the account created secure
+ * channels with a long history): a transfer to this account (it key-shares
+ * the account row through the new owner's key, then waits for the member row
+ * deleted here, while step 4 waits for that key share) and a kick of this
+ * account (it holds the webhooks the account created or rotated, then waits
+ * for the member row, while the cascade waits for those webhooks). PostgreSQL
+ * aborts one side, usually this transaction (the side that began waiting
+ * last, when the other had waited longer than the deadlock check's delay),
+ * and the aborted side runs again whole: the transfer and the kick are
+ * retried as this transaction is. After a transfer that committed meanwhile
+ * this transaction's retry answers OwnedServersError (below). A space delete
+ * was not seen to close a cycle with it: its cascade reaches this account's
+ * member row before any other row this transaction holds, and waits there.
+ * That rests on the order PostgreSQL fires the cascade triggers of `servers`
+ * in (by constraint id: `server_members` ahead of `channels` on a database
+ * built from these migrations). A migration that drops and re-creates one of
+ * those keys changes the order, and the retry is then what settles it.
  */
 export async function deleteAccountRows(userId: string): Promise<SecureMembershipRemoval> {
+  let committed: { removal: SecureMembershipRemoval; serverIds: string[] };
   try {
-    return await runAccountDeletionTransaction(userId);
+    committed = await runAccountDeletionTransaction(userId);
   } catch (err) {
     // `Server.owner` is onDelete: Restrict: the account came to own a space
     // after `deleteUserAccount` checked it owned none (a transfer to it, which
@@ -163,6 +192,12 @@ export async function deleteAccountRows(userId: string): Promise<SecureMembershi
     }
     throw err;
   }
+  // Not awaited: each of its statements waits for a space row while another
+  // transaction holds it (a space delete holds one through its cascade), and
+  // what follows the commit (the second session revocation first of all)
+  // must not wait with it. It never rejects.
+  void lowerMemberCounts(committed.serverIds, userId);
+  return committed.removal;
 }
 
 function ownsASpaceNow(err: unknown): boolean {
@@ -172,16 +207,59 @@ function ownsASpaceNow(err: unknown): boolean {
   return named.some((v) => v.includes('servers_owner_id_fkey'));
 }
 
-function runAccountDeletionTransaction(userId: string): Promise<SecureMembershipRemoval> {
+/**
+ * The inline member counts (the directory's figure and the member list's
+ * total) of the spaces a deleted account was a member of: lowered once the
+ * delete has committed, outside its transaction (see the lock order above:
+ * these are the statements that lock space rows). Best effort, like every
+ * step that follows a committed delete: nothing decides on this figure (the
+ * member limit counts the rows), a failure is logged and the nightly drift
+ * correction (discoveryStats.ts) recounts. The spaces are the ones the
+ * committed attempt removed a row from, so a retried transaction lowers each
+ * count once.
+ *
+ * ONE STATEMENT PER SPACE, one after the other, never one statement for all
+ * of them: a statement over several rows keeps the rows it has already
+ * updated locked while it waits for the next, so a space row another
+ * transaction holds for long (a space delete, through its cascade) would
+ * keep the account's OTHER spaces locked for as long, with every join and
+ * creation there queued behind them. A statement over one row holds nothing
+ * while it waits and commits as soon as it has its row, so it can neither
+ * hold up another space nor be part of a deadlock; a row held for long only
+ * delays the counts that come after it.
+ */
+async function lowerMemberCounts(serverIds: string[], userId: string): Promise<void> {
+  let failed = 0;
+  let lastError: unknown;
+  for (const serverId of serverIds) {
+    try {
+      await prisma.server.updateMany({
+        where: { id: serverId, memberCount: { gt: 0 } },
+        data: { memberCount: { decrement: 1 } },
+      });
+    } catch (err) {
+      failed++;
+      lastError = err;
+    }
+  }
+  if (failed > 0) {
+    console.warn(
+      `[Accounts] The member count of ${failed} of ${serverIds.length} space(s) was not lowered after the deletion of account ${userId} (the nightly recount corrects it):`,
+      lastError instanceof Error ? lastError.message : lastError,
+    );
+  }
+}
+
+function runAccountDeletionTransaction(userId: string): Promise<{ removal: SecureMembershipRemoval; serverIds: string[] }> {
   // E2E key material has no FK to User (except the key backup), so it would
   // otherwise outlive the account it belongs to. One transaction with the
   // delete: purging a user who then survives strands every device they own.
   return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
     // The memberships first, explicitly (the cascade would take them with the
-    // row, last): see the lock order above. The spaces whose count moves are
-    // the ones this very statement removed a row from, on this attempt: a
-    // list read before the transaction would miscount after a join or a
-    // removal committed between two attempts.
+    // row, last): see the lock order above. The spaces whose count moves
+    // after the commit are the ones this very statement removed a row from,
+    // on this attempt: a list read before the transaction would miscount
+    // after a join or a removal committed between two attempts.
     const removedFrom = await tx.$queryRaw<Array<{ server_id: string }>>`
       DELETE FROM server_members WHERE user_id = ${userId} RETURNING server_id`;
     const serverIds = removedFrom.map((r) => r.server_id);
@@ -194,17 +272,10 @@ function runAccountDeletionTransaction(userId: string): Promise<SecureMembership
     // other deletes: the secure-channel step reads channels and their member
     // rows, the purge deletes by user id alone.
     await purgeE2EMaterial(userId, tx);
-    // The inline member counts (server discovery) follow in the same
-    // transaction so the directory never shows a departed member until the
-    // nightly recount.
-    if (serverIds.length > 0) {
-      await tx.server.updateMany({
-        where: { id: { in: serverIds }, memberCount: { gt: 0 } },
-        data: { memberCount: { decrement: 1 } },
-      });
-    }
+    // The row, and with it the long cascade. The last statement: nothing in
+    // this transaction touches a space row (see the lock order above).
     await tx.user.delete({ where: { id: userId } });
-    return removal;
+    return { removal, serverIds };
   }, {
     // Deleting a user cascades across ~36 relations (messages, reactions,
     // reads, conversations, reports, tickets, themes…) plus six E2E deletes.

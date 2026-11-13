@@ -7,6 +7,21 @@ import { broadcastMemberJoined } from './memberBroadcast';
 import { emitToModerators } from './moderatorAudience';
 import { WS_EVENTS } from '@voxium/shared';
 
+/**
+ * A foreign-key violation (P2003) on `constraint`, as the driver names it
+ * (the adapter's constraint index, or the message that quotes it).
+ */
+function violatesForeignKey(err: unknown, constraint: string): boolean {
+  const e = err as {
+    code?: unknown;
+    message?: unknown;
+    meta?: { constraint?: unknown; field_name?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
+  } | null;
+  if (e?.code !== 'P2003') return false;
+  const named = [e.message, e.meta?.constraint, e.meta?.field_name, e.meta?.driverAdapterError?.cause?.constraint?.index];
+  return named.some((v) => typeof v === 'string' && v.includes(constraint));
+}
+
 /** Which door the member came through — logged, never a branch. */
 export type JoinServerVia = 'invite' | 'discovery' | 'approval';
 
@@ -55,9 +70,10 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   });
   if (existing) throw new BadRequestError('You are already a member of this server');
 
-  // Enforce max members per server. The authoritative count, not the inline
-  // column — the column is for ranking and the nightly pass may still be
-  // correcting it.
+  // Enforce max members per server (0: no limit). The authoritative count,
+  // not the inline column — the column is for ranking and the nightly pass
+  // may still be correcting it. This count only refuses a full space early,
+  // without writing; the one that holds is counted again in the transaction.
   const limits = await getEffectiveLimits(serverId);
   if (limits.maxMembersPerServer > 0) {
     const memberCount = await prisma.serverMember.count({ where: { serverId } });
@@ -84,9 +100,10 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   // row first (FOR UPDATE, the order a space delete and a transfer take it
   // in), so the member limit is counted with no other join in between, then
   // the extra writes (a consumed invite fails them), the ban, the duplicate.
-  // The long budget: an account deletion of a member holds the space row
-  // through its whole cascade, and a join merely waiting for it must not
-  // expire (LOCK_WAIT_TRANSACTION_OPTIONS).
+  // The long budget: a space delete holds the space row through its cascade,
+  // and an account deletion every row its own cascade reached (an invite it
+  // created, a join request it decided) until it commits; a join merely
+  // waiting for either must not expire (LOCK_WAIT_TRANSACTION_OPTIONS).
   try {
     await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
@@ -128,6 +145,17 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
     if ((err as { code?: unknown })?.code === 'P2002') {
       throw new BadRequestError('You are already a member of this server');
     }
+    // The membership's key to the space refused: the space is gone, the
+    // answer for a space that does not exist (the row lock above normally
+    // finds that first).
+    if (violatesForeignKey(err, 'server_members_server_id_fkey')) throw new NotFoundError('Server');
+    // Its key to the joiner refused: the joiner's account was deleted while
+    // the join ran (the insert's key check waits for that deletion, which
+    // holds the account row through its cascade, then finds no row). The
+    // joiner is the caller of an invite or discovery join, the requester of
+    // an approval (whose request goes with the account, so that route
+    // usually meets the missing request first): the account does not exist.
+    if (violatesForeignKey(err, 'server_members_user_id_fkey')) throw new NotFoundError('User');
     throw err;
   }
 
@@ -136,8 +164,9 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   // has just been undone by the create. Nothing has been broadcast or joined
   // yet, so re-read the ban after the commit and compensate: the row and the
   // counter, only if the row is still ours to remove. The same long budget:
-  // its channel delete and its count update wait on the rows an account
-  // deletion holds through its cascade.
+  // its channel delete waits on a secure channel an account deletion holds
+  // through its cascade, its count update on the space row a space delete
+  // holds through its own.
   const banAfter = await prisma.serverBan.findUnique({
     where: { serverId_userId: { serverId, userId } },
     select: { userId: true },
@@ -171,19 +200,37 @@ export async function joinServerMember(userId: string, serverId: string, opts: J
   // Seed ChannelRead for all text channels so existing history doesn't show
   // as unread. Secure channels excluded: a joiner is not a member of any,
   // and seeding would leak their ids into the joiner's read rows.
-  const textChannels = await prisma.channel.findMany({
-    where: { serverId, type: 'text', secure: false },
-    select: { id: true },
-  });
-  if (textChannels.length > 0) {
-    const now = new Date();
-    await prisma.channelRead.createMany({
-      data: textChannels.map((ch) => ({
-        userId,
-        channelId: ch.id,
-        lastReadAt: now,
-      })),
-      skipDuplicates: true,
+  const seedReads = async (): Promise<void> => {
+    const textChannels = await prisma.channel.findMany({
+      where: { serverId, type: 'text', secure: false },
+      select: { id: true },
     });
+    if (textChannels.length > 0) {
+      const now = new Date();
+      await prisma.channelRead.createMany({
+        data: textChannels.map((ch) => ({
+          userId,
+          channelId: ch.id,
+          lastReadAt: now,
+        })),
+        skipDuplicates: true,
+      });
+    }
+  };
+  try {
+    await seedReads();
+  } catch (err) {
+    // The joiner's account deleted since the commit (its deletion took the
+    // new membership with the row): the account does not exist.
+    if (violatesForeignKey(err, 'channel_reads_user_id_fkey')) throw new NotFoundError('User');
+    // A channel read above was deleted before the insert: the whole space,
+    // being deleted since the commit, answers as a space that does not
+    // exist; a single channel deleted meanwhile leaves the others to seed,
+    // read again once.
+    if (!violatesForeignKey(err, 'channel_reads_channel_id_fkey')) throw err;
+    const space = await prisma.server.findUnique({ where: { id: serverId }, select: { id: true } });
+    if (!space) throw new NotFoundError('Server');
+    console.warn(`[ServerJoin] A channel of ${serverId} was deleted while ${userId}'s read markers were seeded; seeding again`);
+    await seedReads();
   }
 }

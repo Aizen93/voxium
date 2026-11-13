@@ -652,16 +652,26 @@ adminRouter.post('/users/:userId/unban', async (req: Request<{ userId: string }>
     const stillBannedIps = new Set(sharedWithOtherBanned.map((r) => r.ip));
     const ipsToRelease = ips.filter((ip) => !stillBannedIps.has(ip));
 
-    // Unban + IP release atomically — no half-unbanned state on failure
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: req.params.userId },
-        data: { bannedAt: null, banReason: null },
-      }),
-      ...(ipsToRelease.length > 0
-        ? [prisma.ipBan.deleteMany({ where: { ip: { in: ipsToRelease } } })]
-        : []),
-    ]);
+    // Unban + IP release atomically — no half-unbanned state on failure. The
+    // long budget (LOCK_WAIT_TRANSACTION_OPTIONS): an account deletion of
+    // this account holds its row through the cascade, and the batch expired
+    // under Prisma's 5 s default while it waited. An account deleted since
+    // the read above (P2025, the update found no row) answers as an unknown
+    // one, never a 500; nothing is released then.
+    try {
+      await prisma.$transaction([
+        prisma.user.update({
+          where: { id: req.params.userId },
+          data: { bannedAt: null, banReason: null },
+        }),
+        ...(ipsToRelease.length > 0
+          ? [prisma.ipBan.deleteMany({ where: { ip: { in: ipsToRelease } } })]
+          : []),
+      ], LOCK_WAIT_TRANSACTION_OPTIONS);
+    } catch (err) {
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('User');
+      throw err;
+    }
 
     // Their servers come back to the directory where the per-server inputs
     // (discoverable, invites unlocked, not admin-blocked) still allow it.
@@ -738,10 +748,10 @@ function demotedRow(result: unknown): boolean {
  * A batch that finds a check no longer true answers what the route answers
  * for it (the space gone, no longer this account's, the heir's account gone,
  * the heir joining meanwhile). Both batches carry the long budget
- * (LOCK_WAIT_TRANSACTION_OPTIONS): the space row they update is held by an
- * account deletion of any of its members through that deletion's cascade,
- * and a batch, like an interactive transaction, expires after Prisma's 5 s
- * default while it waits.
+ * (LOCK_WAIT_TRANSACTION_OPTIONS): the heir's member and account rows are
+ * held by an account deletion of the heir through its cascade, and the space
+ * row by a space delete through its own; a batch, like an interactive
+ * transaction, expires after Prisma's 5 s default while it waits.
  *
  * Both batches also demote the departing account's own member row from
  * owner to admin: the account deletion that follows can still fail (the
@@ -792,7 +802,11 @@ export async function transferOwnedSpaceToHeir(
       const results = await prisma.$transaction([
         // This is the one path besides server creation that makes a member
         // without joinServerMember's ban check: an admin-chosen heir is an
-        // explicit unban, so the row (if any) goes with it.
+        // explicit unban, so the row (if any) goes with it. Nor does it
+        // apply the member limit (maxMembersPerServer), deliberately: an
+        // administrator handing a space to its heir may take it past the
+        // limit, which only refuses joins. What must hold, and does, is the
+        // inline member count: it moves with the row, in this batch (below).
         prisma.serverBan.deleteMany({ where: { serverId, userId: heirId } }),
         prisma.serverJoinRequest.deleteMany({ where: { serverId, userId: heirId } }),
         // The heir's membership starts with no secure-channel row, as every

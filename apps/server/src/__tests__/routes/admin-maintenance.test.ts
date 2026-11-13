@@ -175,6 +175,7 @@ vi.mock('../../utils/discoveryListing', () => ({
 import { adminRouter } from '../../routes/admin';
 import { errorHandler } from '../../middleware/errorHandler';
 import { listAllS3Objects } from '../../utils/s3';
+import { logAuditEvent } from '../../utils/auditLog';
 
 function createApp() {
   const app = express();
@@ -714,6 +715,55 @@ describe('POST /admin/users/:userId/unban — shared-IP-aware release (MED-13)',
 
     expect(res.status).toBe(400);
     expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
+  });
+
+  it('runs the batch with the long budget: an account deletion of the same account holds its row through the cascade', async () => {
+    mockUnbanTarget();
+    prismaMock.ipRecord.findMany.mockResolvedValue([]);
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Array), { timeout: 60_000, maxWait: 10_000 });
+  });
+
+  it('an account deleted between the read and the batch answers 404 User, recomputes nothing and audits nothing', async () => {
+    mockUnbanTarget();
+    prismaMock.ipRecord.findMany.mockResolvedValue([]);
+    prismaMock.$transaction.mockRejectedValueOnce(Object.assign(
+      new Error('An operation failed because it depends on one or more records that were required but not found. No record was found for an update.'),
+      { code: 'P2025', meta: { modelName: 'User', cause: 'No record was found for an update.' } },
+    ));
+
+    const res = await request(app)
+      .post('/api/v1/admin/users/target-1/unban')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({});
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('User not found');
+    expect(mockRecomputeListedForOwner).not.toHaveBeenCalled();
+    expect(vi.mocked(logAuditEvent)).not.toHaveBeenCalled();
+  });
+
+  it('any other failure of the batch is not turned into a not-found', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockUnbanTarget();
+    prismaMock.ipRecord.findMany.mockResolvedValue([]);
+    prismaMock.$transaction.mockRejectedValueOnce(new Error('db gone'));
+    try {
+      const res = await request(app)
+        .post('/api/v1/admin/users/target-1/unban')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({});
+
+      expect(res.status).toBe(500);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 
