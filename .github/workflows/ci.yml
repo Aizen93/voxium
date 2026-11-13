@@ -16,6 +16,8 @@ jobs:
   lint-typecheck:
     name: Lint & Typecheck (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # About 3 minutes (unit tests included); past 20 the run is hung
+    timeout-minutes: 20
     # 26 is the supported runtime; 24 (maintenance until 2028-04) stays covered
     # for self-hosters until it is dropped from engines.node.
     strategy:
@@ -46,10 +48,21 @@ jobs:
           [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
           npm install -g "pnpm@$PNPM_VERSION"
 
+      # The store is where pnpm puts it by default (~/.local/share/pnpm/store
+      # on Linux, under LOCALAPPDATA on Windows), never ~/.pnpm-store: that path
+      # never existed, so this cache saved nothing ("Path Validation Error").
+      - name: Locate the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: |
+          dir=$(pnpm store path --silent)
+          [ -n "$dir" ] || { echo "::error::pnpm named no store path"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - name: Cache pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.pnpm-store
+          path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
@@ -195,10 +208,21 @@ jobs:
           [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
           npm install -g "pnpm@$PNPM_VERSION"
 
+      # The store is where pnpm puts it by default (~/.local/share/pnpm/store
+      # on Linux, under LOCALAPPDATA on Windows), never ~/.pnpm-store: that path
+      # never existed, so this cache saved nothing ("Path Validation Error").
+      - name: Locate the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: |
+          dir=$(pnpm store path --silent)
+          [ -n "$dir" ] || { echo "::error::pnpm named no store path"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - name: Cache pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.pnpm-store
+          path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
@@ -218,7 +242,10 @@ jobs:
       # RELEASE.2025-07-23, pinned by digest so a tag move cannot change what
       # runs. Its entrypoint starts the server itself (no `server /data`
       # argument) and honours MINIO_ROOT_USER / MINIO_ROOT_PASSWORD.
+      # The image pull has no limit of its own: a registry that stops
+      # answering would hold the step until the job's 30 minutes
       - name: Start MinIO and create the assets bucket
+        timeout-minutes: 5
         run: |
           docker run -d --name minio \
             -p 9000:9000 \
@@ -231,7 +258,7 @@ jobs:
           # loop used to fall through to the bucket call, which hid the cause.
           ready=
           for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready; then ready=1; break; fi
+            if curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:9000/minio/health/ready; then ready=1; break; fi
             sleep 2
           done
           if [ -z "$ready" ]; then
@@ -278,15 +305,22 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # The browser binaries only; the OS packages are the next step's, on
+      # both branches of the cache.
       - name: Install Playwright browsers
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium firefox
+        timeout-minutes: 10
+        run: npx playwright install chromium firefox
 
-      # OS libraries are not part of the cached path and must be present
-      # either way; this apt pass is ~30s.
-      - name: Install Playwright system deps (cache hit)
-        if: steps.pw-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium firefox
+      # OS libraries are not part of the cached path and are installed on every
+      # run: an apt pass of about 20 s. The script bounds and retries it, and
+      # when the package mirrors cannot be reached it lets the job go on only
+      # if both browsers start with what the runner image has. Unbounded, a
+      # mirror outage (2026-11-11) ended three runs at the job's 30-minute
+      # limit before a single test had started.
+      - name: Install Playwright system deps
+        timeout-minutes: 10
+        run: bash .github/scripts/playwright-system-deps.sh
 
       # Playwright's webServer block boots the server, desktop and admin apps
       # and waits on their health checks.
@@ -318,7 +352,9 @@ jobs:
         env:
           NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
           PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
-        run: npx playwright test --grep-invert @quarantine --reporter=github,line
+          # Read by "Tests that passed only on a retry" below
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/playwright-chromium.json
+        run: npx playwright test --grep-invert @quarantine --reporter=github,line,json
 
       # The flagship E2E-voice proof is the one place a second browser engine
       # earns its runtime: it exercises the RTCRtpScriptTransform path that
@@ -327,19 +363,26 @@ jobs:
         env:
           NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
           PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
-        run: npx playwright test secure-voice --config=playwright-firefox.config.ts --reporter=github,line
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/playwright-firefox.json
+        run: npx playwright test secure-voice --config=playwright-firefox.config.ts --reporter=github,line,json
 
       # Visible but non-blocking, so a quarantined spec cannot rot silently:
-      # the step goes red in the UI while the job still passes. With nothing
-      # tagged it matches no test, which --pass-with-no-tests reports as a pass
-      # (Playwright still starts the stack before it finds that out). Its
-      # overlap records go to a file of their own, reported as a warning only.
+      # the step goes red in the UI while the job still passes. The script
+      # lists the tagged specs first and, when there is none, ends without
+      # starting the stack (Playwright would boot all three apps to find
+      # nothing); a listing it cannot read runs them as before. Its overlap
+      # records go to a file of their own, reported as a warning only, and it
+      # tells the next step whether it ran (`ran`). The limit keeps a hung
+      # quarantined run from spending the rest of the job's 30 minutes, which
+      # would fail the job: past it the step fails, and stays non-blocking.
       - name: E2E quarantined specs (non-blocking)
+        id: quarantine
         continue-on-error: true
+        timeout-minutes: 10
         env:
           NODE_OPTIONS: --require ${{ github.workspace }}/scripts/lib/pg-overlap-guard.cjs --trace-deprecation
           PG_OVERLAP_REPORT: ${{ runner.temp }}/pg-overlaps-quarantine.jsonl
-        run: npx playwright test --grep @quarantine --pass-with-no-tests --reporter=github,line
+        run: bash .github/scripts/e2e-quarantine.sh --reporter=github,line
 
       # Two queries at once on one pg connection: pg 8 queues them (and warns
       # once per process, from the third), pg 9 removes the queueing. The
@@ -349,15 +392,21 @@ jobs:
         env:
           REPORT: ${{ runner.temp }}/pg-overlaps.jsonl
           QUARANTINE_REPORT: ${{ runner.temp }}/pg-overlaps-quarantine.jsonl
+          # 'false' only when no spec was tagged and the stack never started
+          QUARANTINE_RAN: ${{ steps.quarantine.outputs.ran }}
         run: |
           # An empty report proves nothing unless the guard armed in the
           # server itself: each arming process leaves a line in <report>.armed
-          if ! grep -qs 'apps/server/src/index.ts' "$QUARANTINE_REPORT.armed"; then
-            echo "::warning::the pg overlap guard did not arm in the server during the quarantined specs"
-          fi
-          if [ -s "$QUARANTINE_REPORT" ]; then
-            echo "::warning::$(wc -l < "$QUARANTINE_REPORT") pg queries issued on a busy client during the quarantined specs"
-            cat "$QUARANTINE_REPORT"
+          if [ "$QUARANTINE_RAN" = "false" ]; then
+            echo "No spec is tagged @quarantine: no quarantined run to check."
+          else
+            if ! grep -qs 'apps/server/src/index.ts' "$QUARANTINE_REPORT.armed"; then
+              echo "::warning::the pg overlap guard did not arm in the server during the quarantined specs"
+            fi
+            if [ -s "$QUARANTINE_REPORT" ]; then
+              echo "::warning::$(wc -l < "$QUARANTINE_REPORT") pg queries issued on a busy client during the quarantined specs"
+              cat "$QUARANTINE_REPORT"
+            fi
           fi
           if ! grep -qs 'apps/server/src/index.ts' "$REPORT.armed"; then
             echo "::error::the pg overlap guard never armed in the server process (no apps/server/src/index.ts line in $REPORT.armed), so an empty report would prove nothing. Is @prisma/adapter-pg still resolvable from apps/server?"
@@ -370,6 +419,20 @@ jobs:
             exit 1
           fi
           echo "No query was issued on a busy pg client (guard armed in: $(grep -c 'apps/server/src/index.ts' "$REPORT.armed") server process(es))."
+
+      # The gate retries a failed test twice (playwright.config.ts), so a test
+      # that fails at random still passes it. Every such test of the two
+      # blocking runs is listed in the job summary and as a warning on its own
+      # line; this step never fails the job (whether a flaky test should is a
+      # decision of its own), so a fault of the script itself shows on the step
+      # and stops nothing.
+      - name: Tests that passed only on a retry
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          CHROMIUM_REPORT: ${{ runner.temp }}/playwright-chromium.json
+          FIREFOX_REPORT: ${{ runner.temp }}/playwright-firefox.json
+        run: node .github/scripts/playwright-flaky-summary.mjs "Chromium=$CHROMIUM_REPORT" "Firefox secure voice=$FIREFOX_REPORT"
 
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
@@ -389,6 +452,8 @@ jobs:
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    # Seconds in practice
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -406,6 +471,8 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    # About a minute; past 15 the run is hung
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -430,10 +497,21 @@ jobs:
           [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
           npm install -g "pnpm@$PNPM_VERSION"
 
+      # The store is where pnpm puts it by default (~/.local/share/pnpm/store
+      # on Linux, under LOCALAPPDATA on Windows), never ~/.pnpm-store: that path
+      # never existed, so this cache saved nothing ("Path Validation Error").
+      - name: Locate the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: |
+          dir=$(pnpm store path --silent)
+          [ -n "$dir" ] || { echo "::error::pnpm named no store path"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - name: Cache pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.pnpm-store
+          path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-

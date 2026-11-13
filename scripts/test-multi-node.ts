@@ -11,7 +11,12 @@
  *    channel-affinity ownership, signaling relay for remote participants,
  *    bidirectional RTP through the owner node, cross-node mute/moderation/
  *    screen-share slot authority, cleanup on leave
- * 7. Owner-node crash: dead owner's channel taken over by the surviving node
+ * 7. Visibility resync across nodes, with a silent peer on the adapter's
+ *    request channel (issue #71): a member on node-2 loses and regains a
+ *    private channel's `message:new` live, without reconnecting, when the
+ *    owner changes their role, the channel's override or deletes the role
+ *    through node-1
+ * 8. Owner-node crash: dead owner's channel taken over by the surviving node
  *    (skip with SKIP_CRASH_TEST=1 — it waits out the 30s heartbeat TTL)
  *
  * Usage:
@@ -31,7 +36,9 @@ import { spawn, type ChildProcess } from 'child_process';
 import axios from 'axios';
 import { killProcessTree } from './lib/processTree.mjs';
 import { portProblem } from './lib/portProbe.mjs';
+import { HEARTBEAT_PATTERN, foreignNodeProblem } from './lib/nodeHeartbeats.mjs';
 import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
+import { signInOrRegister } from './lib/signInOrRegister';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import path from 'path';
 import { createClient as createRedisClient } from 'redis';
@@ -78,6 +85,8 @@ let node1: ChildProcess | null = null;
 let node2: ChildProcess | null = null;
 /** The space this run created, deleted by cleanup() as its owner. */
 let testSpace: { id: string; ownerToken: string } | null = null;
+/** Everything each node printed so far, by node id (see startServer). */
+const nodeOutput: Record<string, string> = {};
 let passed = 0;
 let failed = 0;
 const results: Array<{ name: string; pass: boolean; detail?: string }> = [];
@@ -140,14 +149,18 @@ function startServer(port: number, nodeId: string, mediasoupMinPort: number, med
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  // Prefix output with node ID
+  // Prefix output with node ID, and keep it for the tests that read it
+  // (nodeOutput): one string per node, both streams, chunks as they came
+  nodeOutput[nodeId] = '';
   child.stdout?.on('data', (data: Buffer) => {
+    nodeOutput[nodeId] += data.toString();
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       if (line.trim()) console.log(`    [${nodeId}] ${line}`);
     }
   });
   child.stderr?.on('data', (data: Buffer) => {
+    nodeOutput[nodeId] += data.toString();
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       if (line.trim()) console.log(`    [${nodeId}:err] ${line}`);
@@ -163,22 +176,13 @@ async function login(api: string, username: string): Promise<string> {
 }
 
 async function registerUser(api: string, username: string): Promise<string> {
-  try {
-    // Verify-first registration: proof-of-work + consent (dev difficulty is
-    // tiny; same code path as production), then the known code set in the DB
-    const data = await registerTestUser(api, {
-      username,
-      email: `${username}@multinode.test`,
-      password: PASSWORD,
-    });
-    return data.accessToken;
-  } catch (err: any) {
-    if (err.response?.status === 409) {
-      // Already exists, login
-      const res = await axios.post(`${api}/auth/login`, {
-        email: `${username}@multinode.test`,
-        password: PASSWORD,
-      });
+  const email = `${username}@multinode.test`;
+  // Signed in first, registered only when the account does not exist yet
+  // (scripts/lib/signInOrRegister.ts: a registration started for an account
+  // that exists is a failed attempt the server counts against this address)
+  return signInOrRegister(
+    async () => {
+      const res = await axios.post(`${api}/auth/login`, { email, password: PASSWORD });
       const token = res.data.data.accessToken;
       // An account left over from a run before consent-at-signup existed has
       // null acceptance timestamps, and the server refuses it everything —
@@ -188,9 +192,14 @@ async function registerUser(api: string, username: string): Promise<string> {
         await axios.post(`${api}/auth/consent`, { acceptTerms: true, acceptPrivacy: true }, { headers: { Authorization: `Bearer ${token}` } });
       }
       return token;
-    }
-    throw err;
-  }
+    },
+    async () => {
+      // Verify-first registration: proof-of-work + consent (dev difficulty is
+      // tiny; same code path as production), then the known code set in the DB
+      const data = await registerTestUser(api, { username, email, password: PASSWORD });
+      return data.accessToken;
+    },
+  );
 }
 
 function connectSocket(ws: string, token: string): Promise<Socket> {
@@ -916,6 +925,167 @@ async function testOwnerCrashTakeover(redis: any, token1: string, token2: string
   }
 }
 
+// ─── Visibility resync across nodes (issue #71) ─────────────────────────────
+
+/** Permissions.VIEW_CHANNEL (1n << 0n), as the role routes take it. */
+const VIEW_CHANNEL = '1';
+/** The Redis adapter's request channel for the default namespace: every node
+ *  subscribes to it, and its subscriber count is how many replies a
+ *  cluster-wide fetchSockets() waits for. */
+const ADAPTER_REQUEST_CHANNEL = 'socket.io-request#/#';
+
+/**
+ * A member connected to node-2 sees a private channel through a role. The
+ * owner, through node-1, takes the role away, gives it back, flips the role's
+ * channel override both ways and finally deletes the role: after each step the
+ * member's socket stops (or starts) receiving the channel's `message:new`
+ * live, on the same socket, never reconnected.
+ *
+ * Throughout, a SILENT PEER is subscribed to the adapter's request channel: it
+ * counts as a node but never answers a cluster request, like the stalled node
+ * that shared the Redis on 2026-11-09. The old resync waited on every node's
+ * answer to `io.in(room).fetchSockets()` and gave up after 5 s, so every
+ * revocation below failed open. (Every cluster snapshot times out while it is
+ * subscribed, so it is scoped to this test and always removed.)
+ */
+async function testVisibilityResyncCrossNode(redis: any, ownerToken: string, memberToken: string, serverId: string) {
+  console.log('\n── Test: Visibility Resync Across Nodes, One Peer Silent ──');
+
+  const requestSubscribers = async (): Promise<number> =>
+    Number(((await redis.sendCommand(['PUBSUB', 'NUMSUB', ADAPTER_REQUEST_CHANNEL])) as [string, number])[1]);
+  const before = await requestSubscribers();
+  const silentPeer = redis.duplicate();
+
+  // Where each node's output stood when the test began: every resync below
+  // must be CONFIRMED by both nodes. A peer applies the first publish
+  // whatever its count, so the checks on message:new alone cannot tell a
+  // confirmed fan-out from one that went through every retry to the fallback.
+  const outputMark = Object.fromEntries(Object.entries(nodeOutput).map(([id, out]) => [id, out.length]));
+
+  let member: Socket | null = null;
+  try {
+    await silentPeer.connect();
+    await silentPeer.subscribe(ADAPTER_REQUEST_CHANNEL, () => { /* never answers */ });
+    // Without this the checks below pass vacuously: a renamed adapter channel
+    // would leave the silent peer counted by nobody
+    const after = await requestSubscribers();
+    assert(
+      before >= 2 && after === before + 1,
+      'The silent peer counts as a node on the adapter\'s request channel',
+      `subscribers before=${before} after=${after}`,
+    );
+
+    const memberId: string = (await axios.get(`${API2}/auth/me`, auth(memberToken))).data.data.id;
+    const channels = (await axios.get(`${API1}/servers/${serverId}/channels`, auth(ownerToken))).data.data as Array<{ id: string; type: string }>;
+    const publicChannel = channels.find((c) => c.type === 'text');
+    if (!publicChannel) throw new Error('the test space has no text channel');
+    const privateChannel: string = (await axios.post(`${API1}/servers/${serverId}/channels`, { name: 'mn-private', type: 'text' }, auth(ownerToken))).data.data.id;
+    const roles = (await axios.get(`${API1}/servers/${serverId}/roles`, auth(ownerToken))).data.data as Array<{ id: string; isDefault: boolean }>;
+    const everyone = roles.find((r) => r.isDefault);
+    if (!everyone) throw new Error('the test space has no @everyone role');
+    const viewer: string = (await axios.post(`${API1}/servers/${serverId}/roles`, { name: 'mn-viewer' }, auth(ownerToken))).data.data.id;
+
+    const override = (roleId: string, allow: string, deny: string) =>
+      axios.put(`${API1}/servers/${serverId}/roles/channels/${privateChannel}/permissions/${roleId}`, { allow, deny }, auth(ownerToken));
+    const assignRoles = (roleIds: string[]) =>
+      axios.patch(`${API1}/servers/${serverId}/roles/members/${memberId}`, { roleIds }, auth(ownerToken));
+
+    // Private: hidden from @everyone, shown to the role, the member holds the role
+    await override(everyone.id, '0', VIEW_CHANNEL);
+    await override(viewer, VIEW_CHANNEL, '0');
+    await assignRoles([viewer]);
+
+    member = await connectSocket(WS2, memberToken);
+    const sock = member;
+    const socketId = sock.id;
+    let disconnects = 0;
+    sock.on('disconnect', () => { disconnects++; });
+
+    let probe = 0;
+    /** Does the member receive a message posted to the private channel? A
+     *  sentinel posted to the public channel right after it answers "no"
+     *  without a bare sleep: node-1 publishes both in order on one connection,
+     *  so once the sentinel is in, the private message would be too. */
+    const receivesPrivate = async (): Promise<boolean> => {
+      const tag = `mn-visibility-${Date.now()}-${++probe}`;
+      let gotPrivate = false;
+      let sentinelIn!: () => void;
+      const sentinel = new Promise<void>((resolve) => { sentinelIn = resolve; });
+      const onMessage = (msg: any) => {
+        if (msg?.channelId === privateChannel && msg?.content === `${tag} private`) gotPrivate = true;
+        if (msg?.channelId === publicChannel.id && msg?.content === `${tag} sentinel`) sentinelIn();
+      };
+      sock.on('message:new', onMessage);
+      try {
+        await axios.post(`${API1}/channels/${privateChannel}/messages`, { content: `${tag} private` }, auth(ownerToken));
+        await axios.post(`${API1}/channels/${publicChannel.id}/messages`, { content: `${tag} sentinel` }, auth(ownerToken));
+        const arrived = await Promise.race([sentinel.then(() => true), sleep(5000).then(() => false)]);
+        if (!arrived) throw new Error('the sentinel in the public channel never reached the member');
+        return gotPrivate;
+      } finally {
+        sock.off('message:new', onMessage);
+      }
+    };
+    /** The resync is fire-and-forget after the response: look a few times
+     *  (each look posts two messages; the owner may post 30 a minute). */
+    const settlesTo = async (expected: boolean): Promise<boolean> => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await sleep(500);
+        if ((await receivesPrivate()) === expected) return true;
+      }
+      return false;
+    };
+
+    assert(await settlesTo(true), 'Baseline: the member on node-2 receives the private channel through the role');
+
+    await assignRoles([]);
+    assert(await settlesTo(false), 'Role taken away on node-1: the member on node-2 stops receiving the private channel (member-scoped resync)');
+    await assignRoles([viewer]);
+    assert(await settlesTo(true), 'Role given back: the member receives the private channel again, live');
+
+    await override(viewer, '0', VIEW_CHANNEL);
+    assert(await settlesTo(false), 'The role\'s channel override flipped to deny: the member stops receiving (channel-scoped resync)');
+    await override(viewer, VIEW_CHANNEL, '0');
+    assert(await settlesTo(true), 'The override flipped back to allow: the member receives the private channel again, live');
+
+    await axios.delete(`${API1}/servers/${serverId}/roles/${viewer}`, auth(ownerToken));
+    assert(await settlesTo(false), 'The role deleted: the member stops receiving (space-wide resync)');
+
+    assert(
+      sock.connected && sock.id === socketId && disconnects === 0,
+      'The member\'s socket was never reconnected',
+      `connected=${sock.connected} sameId=${sock.id === socketId} disconnects=${disconnects}`,
+    );
+
+    // A first attempt that timed out would log within the publish bound (2 s)
+    await sleep(2500);
+    const unconfirmed = Object.entries(nodeOutput).flatMap(([id, out]) =>
+      out.slice(outputMark[id] ?? 0).split('\n')
+        .filter((line) => /\[Visibility\].*not confirmed/.test(line))
+        .map((line) => `${id}: ${line.trim()}`));
+    assert(
+      unconfirmed.length === 0,
+      'Every resync of the test was confirmed by both nodes at the first publish (no retry, no fallback)',
+      unconfirmed.slice(0, 3).join(' | '),
+    );
+  } finally {
+    member?.disconnect();
+    // Each step on its own: a failed unsubscribe must not leave the
+    // connection open (it would keep this process alive and the peer counted)
+    try {
+      await silentPeer.unsubscribe(ADAPTER_REQUEST_CHANNEL);
+    } catch (err: any) {
+      console.warn('Could not unsubscribe the silent peer:', err?.message ?? err);
+    }
+    try {
+      await silentPeer.quit();
+    } catch (err: any) {
+      console.warn('Could not close the silent peer\'s Redis connection:', err?.message ?? err);
+    }
+    await sleep(500);
+  }
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -930,6 +1100,36 @@ async function main() {
     const problem = await portProblem(port);
     if (problem) {
       console.error(`\nFATAL: port ${port} cannot be used: ${problem}. Stop whatever holds it and run again`);
+      process.exit(1);
+    }
+  }
+
+  // Step 0b: no other node's heartbeat in Redis. One left by a backend that
+  // was stopped moments ago is waited out (30 s at most); one that stays is a
+  // running server, and next to it this cluster would count three nodes for
+  // its two (scripts/lib/nodeHeartbeats.mjs).
+  {
+    const probe = createRedisClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+    let problem: string | null;
+    try {
+      await probe.connect();
+      problem = await foreignNodeProblem({
+        list: async () => {
+          const keys: string[] = [];
+          for await (const batch of probe.scanIterator({ MATCH: HEARTBEAT_PATTERN, COUNT: 100 })) {
+            keys.push(...(Array.isArray(batch) ? batch : [batch]));
+          }
+          return keys;
+        },
+        log: (line) => console.log(line),
+      });
+    } catch (err) {
+      problem = `the node heartbeats could not be read from Redis (${errorText(err)})`;
+    } finally {
+      await probe.quit().catch((err) => console.warn('Could not close the heartbeat check\'s Redis connection:', errorText(err)));
+    }
+    if (problem) {
+      console.error(`\nFATAL: ${problem}`);
       process.exit(1);
     }
   }
@@ -1032,6 +1232,12 @@ async function main() {
       await testServerVoiceCrossNode(redis, user1Token, user2Token, serverId);
     } catch (err: any) {
       assert(false, 'Server voice cross-node test', err.message);
+    }
+
+    try {
+      await testVisibilityResyncCrossNode(redis, user1Token, user2Token, serverId);
+    } catch (err: any) {
+      assert(false, 'Visibility resync cross-node test', errorText(err));
     }
 
     if (process.env.SKIP_CRASH_TEST === '1') {

@@ -2,6 +2,35 @@ import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
 import { registerUser, sendFriendRequest, acceptFriendRequest, API_URL } from './helpers/api';
 import { dmHeading } from './helpers/selectors';
+import type { Page } from '@playwright/test';
+
+/**
+ * Tells the page it became visible again and resolves once the DM list
+ * refresh that starts (services/resume.ts: `fetchConversations`) has been
+ * answered: the GET /dm has completed in the page, a task later its handlers
+ * have run, and two frames later the list on screen is the one built from
+ * that answer. Fails after 15 s if no GET /dm completes at all.
+ */
+async function resumeAndWaitForDmList(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        const isDmList = (url: string) => new URL(url, location.href).pathname.endsWith('/api/v1/dm');
+        const observer = new PerformanceObserver((entries) => {
+          if (!entries.getEntries().some((e) => isDmList(e.name))) return;
+          observer.disconnect();
+          clearTimeout(limit);
+          setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())), 0);
+        });
+        observer.observe({ type: 'resource' });
+        const limit = setTimeout(() => {
+          observer.disconnect();
+          reject(new Error('the resume sent no GET /dm that completed within 15 s'));
+        }, 15_000);
+        document.dispatchEvent(new Event('visibilitychange'));
+      }),
+  );
+}
 
 test.describe('DM flow: friend request -> accept -> message', () => {
   test('send friend request, accept, and exchange DMs', async ({ page, request, browser }) => {
@@ -98,9 +127,17 @@ test.describe('DM flow: friend request -> accept -> message', () => {
 
     // Twice: the symptom recurred on every hide/restore, so once would not
     // catch a recovery that only works the first time.
+    //
+    // Each round waits for the refresh it starts to have finished, instead of
+    // a fixed 700 ms: the GET /dm it sends (services/resume.ts) answered and
+    // handled in the page, then B's encrypted preview hydrated again from the
+    // local cache. That answer arrives with the preview locked
+    // (withLockedPreview), so the preview reading msgB again is the hydration
+    // having run: the step that used to raise the false failure.
+    const previewOfB = page.locator('[role="button"]', { hasText: userB.username }).locator('p');
     for (let i = 0; i < 2; i++) {
-      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-      await page.waitForTimeout(700);
+      await resumeAndWaitForDmList(page);
+      await expect(previewOfB, `round ${i + 1}: B's preview hydrated again`).toHaveText(msgB, { timeout: 10_000 });
     }
 
     await expect(page.getByText('Failed to load conversations')).toHaveCount(0);

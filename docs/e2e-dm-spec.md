@@ -215,6 +215,7 @@ the always-on cutover and is dropped when the new one opens):
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
 | `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
 | `pks:{createdAt}\|{shareId}` | a claimed key share not imported yet, as the inbox returned it (Olm ciphertext + routing fields, §12.3) |
+| `history_pull` | an unfinished message-key history pull: the account key's public half, the cursor of the next page and the page requests made so far (§16.3) |
 | `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 
@@ -479,15 +480,70 @@ reached the device another way, or once the server has refused the look-up of
 its sender (403/404) in five starts of the client, one start counting once
 however many claims it makes. A failure that says nothing about the sender
 (401, 429, 5xx, offline) is never counted, so such a share stays kept until
-the look-up succeeds. A storage failure while its session is written (a full
-disk) keeps the share too, with the Olm state its message advanced left
-unwritten; it and its sender's later shares wait for the next start, where
-that message decrypts again from the state on disk. Disposing the service
-(logout, account switch) while a claim is in flight lets the claim finish
-the page it holds, for at most 10 s; whatever it had not processed by then
-stays kept, and a page whose answer only arrives after that is still written,
-raw, on the one vault connection the teardown keeps open for it (released at
-once on a version change, i.e. an account deletion).
+the look-up succeeds. The Olm layer of a share is decrypted first on a copy of
+the state it would advance (the pairwise session, or the account for a
+pre-key message that opens one), and the live state moves past the message
+only once the group session it carries is stored. A storage failure while
+that session is written (a full disk) therefore keeps the share with nothing
+consumed: whatever else is written meanwhile, the account (another sender's
+pre-key share, a replenishment) or that pairwise session (a reply, a call
+signal), the message still decrypts, and the next claim retries it, its
+sender's later shares behind it. Disposing the service (logout, account
+switch) while a claim is in flight lets the claim finish the page it holds,
+for at most 10 s, and nothing else: from the dispose on no other request of
+that service goes out, nothing else in it reads or writes the vault, and the
+claim itself asks the server nothing more, so a share whose sender it would
+still have to look up stays kept, uncounted (logout has dropped the tokens by
+then, and after a new sign-in on the same page the request would carry the
+next account's bearer). A service started meanwhile for the same account on
+this device (signing back in) opens the vault only once that teardown has run,
+so it never loads an account the claim is still advancing. Whatever the claim
+had not processed by then stays kept, and a page whose answer only arrives
+after that is still written, raw, on the one vault connection the teardown
+keeps open for it (released at once on a version change, i.e. an account
+deletion): the one write that can still land beside a newer service, only of
+kept shares, which that service's next claim lists. A secure channel that the
+claim's sessions reveal is pinned (§19.7) for the account that claimed them,
+never for whoever has signed in since.
+
+A key share and the later Olm messages of the same sender device ride one
+pairwise session but travel apart: the share through the inbox, a DM call's
+signals and a secure-voice key over the socket, decrypted as they arrive. A
+newer message decrypted first leaves the share's message only to what
+vodozemac (0.11.2) keeps for skipped messages: at most 40 message keys per
+receiving chain, none for a message more than 40 behind the one that opened
+the gap, and 5 receiving chains per session, so five ratchet turns of the
+sender (each a reply of ours followed by one of theirs) put it out of reach.
+A kept share is therefore imported before any newer Olm message of its device
+is decrypted: the device-sealed decrypt imports that device's kept shares
+first, its sender pinned by then. That includes a page an earlier service of
+the account wrote late beside the current one (it makes the in-memory index of
+kept shares unknown, so the next device-sealed decrypt lists the vault again).
+If the import itself fails (reading the kept shares, or a write while one is
+processed), the newer message is decrypted anyway rather than dropped, and the
+shares wait for the next claim or signal.
+
+**Residual: a share overtaken while it is still in the inbox, while its
+session cannot be stored, or while importing it fails.** Nothing orders a
+share the client has not claimed yet against a signal that arrives over the
+socket first, short of claiming before every device-sealed decrypt (a request
+per call signal); a share whose session store keeps failing, or whose import
+in front of a signal fails, is retried, but the signals are decrypted
+meanwhile. Each is discarded as unusable at its claim once overtaken beyond
+the bounds above. Decrypting a share's Olm layer before its sender is pinned,
+and leaving only the sender check pending, is not a way out within this
+protocol: a session opened by a pre-key message is created against the pinned
+identity of its sender (§4.3), and one created before that check would sit in
+the device's slot, where every later send to that device reuses it unchecked;
+the decrypted payload is a raw Megolm session key, which the vault keeps only
+inside a pickle (§7), so holding it pending means an inbound session that
+every reader must refuse until the check passes, a new trust state; and the
+engine exposes no identity key of a pre-key message to check against later.
+Also lost, by design: a kept share sent under an identity the user then
+accepts as replaced (`acceptNewIdentity` re-pins and drops the old sessions),
+one that continues a pairwise session that is reset, and in principle one
+whose one-time key vodozemac has evicted (it keeps the newest 5,000) or whose
+fallback key was replaced twice (it keeps the current and the previous one).
 
 ### 12.4 Rotation
 
@@ -1041,7 +1097,32 @@ whole session rather than only the part the uploading device happened to see.
 - `restoreMessageKeys()` pages through every stored key and imports what is
   missing, through the same path a key share takes — so the session-id check
   that rejects a mislabelled key applies here too. One unreadable row is skipped
-  rather than abandoning the rest of someone's history.
+  rather than abandoning the rest of someone's history. Each page is one step
+  of the client's serial crypto queue: sends, decrypts and call signals run
+  between two pages, so restoring thousands of sessions holds none of them up
+  for the whole pull. A page that finds the account key replaced since the
+  pull began (only another restore can: a reset keeps a key the device
+  holds, and a pull runs only under a held key) stops the pull, and so does a
+  dispose.
+  The pull asks for at most as many pages as the server can store for one
+  account plus two (`MESSAGE_KEY_STORE_CAP / MESSAGE_KEY_PAGE_MAX + 2`, 102:
+  the server's cap is checked before an insert without a lock, so two devices
+  backing up at once can leave an account slightly over it), counting every
+  request it makes across starts, failed ones included; at that count it stops
+  for good, so a server that never ends its cursor, or fails its last page,
+  cannot keep it going.
+- A pull that stops before its end (the app closed, a dispose, a failed
+  request) goes on at the next start of the account from the page it had not
+  read, as long as the device still holds the same account key: before each
+  page request the vault records that key's public half, the page's cursor
+  and the number of requests made so far, this one included (`history_pull`,
+  §7), and the record is dropped once the pull reaches the end or the cap. A
+  page that failed is the first, and only, request of the next start until it
+  answers. A restore or a device approval that installs an account key
+  records a pull from the start in the same step, so a key installed just
+  before the app closed still has its history read at the next start. A
+  record left under another account key is dropped unread. A newer pull supersedes a running one: it reads from its own start
+  and owns the record from then on.
 - Only a device holding the master secret can seal or open, which is the same
   condition as being able to approve devices.
 

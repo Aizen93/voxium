@@ -15,6 +15,7 @@
 //   gs:{conversationId}              our outbound Megolm session for a DM
 //   igs:{sessionId}                  an inbound Megolm session + its attribution
 //   pks:{createdAt}|{shareId}        a claimed key share not imported yet (§12.3)
+//   history_pull                     where an unfinished history pull stands (§16.3)
 //   pt:{messageId}                   decrypted-plaintext cache entry
 //
 // `master_secret` holds the Ed25519 master private key that cross-signs this
@@ -170,6 +171,19 @@ export interface PendingKeyShare {
   receivedAt: number;
 }
 
+/**
+ * A message-key history pull that has not reached its end (spec §16.3): the
+ * account key it reads under (public half only), the cursor of the page it
+ * reads next (null: from the start), and how many page requests it has made
+ * so far, across starts (the page cap bounds them all). Public material, a
+ * row id and a count.
+ */
+export interface HistoryPullMarker {
+  masterKey: string;
+  cursor: string | null;
+  pages: number;
+}
+
 export interface CachedPlaintext {
   conversationId: string;
   text: string;
@@ -258,7 +272,12 @@ export class E2EVault {
     private readonly userId: string,
     private readonly keyProvider: PickleKeyProvider = defaultPickleKeyProvider(),
     /** Isolates two vaults for the same account in one process (tests / multi-instance). */
-    private readonly namespace?: string
+    private readonly namespace?: string,
+    /**
+     * What a connection must wait for before it opens the database: the
+     * teardown of an earlier service on the same vault (see E2EService).
+     */
+    private readonly openAfter?: () => Promise<void> | undefined
   ) {}
 
   /** Throw if close() ran: called before every access and after every await. */
@@ -269,6 +288,12 @@ export class E2EVault {
   async open(): Promise<void> {
     this.assertNotClosed();
     if (this.db) return;
+    const before = this.openAfter?.();
+    if (before) {
+      await before;
+      this.assertNotClosed();
+      if (this.db) return;
+    }
     const name = vaultDbName(this.userId, this.namespace);
     // Anything under an older prefix belongs to key material the server no
     // longer has (the always-on cutover truncated it), so it can only produce
@@ -575,6 +600,17 @@ export class E2EVault {
     const known = new Set(await this.getBackedUpSessionIds());
     for (const id of sessionIds) known.add(id);
     await this.put('bku:sessions', [...known]);
+  }
+
+  // ── Where an unfinished message-key history pull stands (spec §16.3) ──
+  getHistoryPull(): Promise<HistoryPullMarker | undefined> {
+    return this.get('history_pull');
+  }
+  putHistoryPull(marker: HistoryPullMarker): Promise<void> {
+    return this.put('history_pull', marker);
+  }
+  deleteHistoryPull(): Promise<void> {
+    return this.delete('history_pull');
   }
 
   // ── Key shares claimed but not imported yet (spec §12.3) ──

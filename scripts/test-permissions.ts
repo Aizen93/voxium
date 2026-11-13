@@ -9,6 +9,7 @@
 
 import axios, { type AxiosError } from 'axios';
 import { registerTestUser, closeRegisterTestUserDb } from './lib/registerTestUser';
+import { signInOrRegister } from './lib/signInOrRegister';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import pg from 'pg';
 import { readFileSync, existsSync } from 'fs';
@@ -90,7 +91,7 @@ function fail(desc: string, err: unknown) {
 
 const h = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
 
-const LIMITS_TO_RAISE = ['login', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'powChallenge', 'admin', 'general', 'roleManage', 'memberManage', 'categoryManage', 'upload', 'messageSend', 'search', 'markRead'];
+const LIMITS_TO_RAISE = ['login', 'loginSubnet', 'register', 'registerAttempt', 'registerAttemptSubnet', 'registerDaily', 'registerSubnet', 'registerComplete', 'registerDomain', 'powChallenge', 'admin', 'general', 'roleManage', 'memberManage', 'categoryManage', 'upload', 'messageSend', 'search', 'markRead'];
 
 async function login(email: string): Promise<{ token: string; userId: string }> {
   const { data } = await axios.post(`${API}/auth/login`, { email, password: PASSWORD });
@@ -129,16 +130,18 @@ async function resetRateLimits(token: string): Promise<void> {
 }
 
 async function registerUser(username: string, email: string): Promise<{ token: string; userId: string }> {
-  try {
-    // Verify-first registration (proof-of-work + consent, then the code): the
-    // shared helper sets a known code in the DB and completes, so the account
-    // is created verified.
-    const data = await registerTestUser(API, { username, email, password: PASSWORD });
-    return { token: data.accessToken, userId: data.user.id };
-  } catch (err) {
-    if (!axios.isAxiosError(err) || err.response?.status !== 409) throw err; // 409 = username taken
-  }
-  return login(email);
+  // Signed in first, registered only when the account does not exist yet
+  // (scripts/lib/signInOrRegister.ts)
+  return signInOrRegister(
+    () => login(email),
+    async () => {
+      // Verify-first registration (proof-of-work + consent, then the code): the
+      // shared helper sets a known code in the DB and completes, so the account
+      // is created verified.
+      const data = await registerTestUser(API, { username, email, password: PASSWORD });
+      return { token: data.accessToken, userId: data.user.id };
+    },
+  );
 }
 
 /** Promote a user to superadmin directly in PostgreSQL. */
