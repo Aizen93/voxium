@@ -792,7 +792,11 @@ export async function transferOwnedSpaceToHeir(
       const results = await prisma.$transaction([
         // This is the one path besides server creation that makes a member
         // without joinServerMember's ban check: an admin-chosen heir is an
-        // explicit unban, so the row (if any) goes with it.
+        // explicit unban, so the row (if any) goes with it. Nor does it
+        // apply the member limit (maxMembersPerServer), deliberately: an
+        // administrator handing a space to its heir may take it past the
+        // limit, which only refuses joins. What must hold, and does, is the
+        // inline member count: it moves with the row, in this batch (below).
         prisma.serverBan.deleteMany({ where: { serverId, userId: heirId } }),
         prisma.serverJoinRequest.deleteMany({ where: { serverId, userId: heirId } }),
         // The heir's membership starts with no secure-channel row, as every
