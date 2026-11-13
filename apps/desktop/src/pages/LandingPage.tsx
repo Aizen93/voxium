@@ -1627,9 +1627,16 @@ export function LandingPage({ page = 'home' }: { page?: PublicPage }) {
   useEffect(() => {
     if (!pageTitle) return;
     const previousTitle = document.title;
+    const canonical = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+    const previousCanonical = canonical?.getAttribute('href');
     document.title = `${pageTitle} | Voxium`;
-    return () => { document.title = previousTitle; };
-  }, [pageTitle]);
+    canonical?.setAttribute('href', `https://voxium.app/${page}`);
+    return () => {
+      document.title = previousTitle;
+      if (previousCanonical == null) canonical?.removeAttribute('href');
+      else canonical?.setAttribute('href', previousCanonical);
+    };
+  }, [page, pageTitle]);
 
   useEffect(() => {
     const anchor = hash && document.getElementById(hash.slice(1));

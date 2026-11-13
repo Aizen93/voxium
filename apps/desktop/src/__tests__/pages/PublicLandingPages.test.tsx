@@ -28,6 +28,24 @@ afterEach(() => {
 });
 
 describe('public landing pages', () => {
+  it('sets the canonical URL for each public page and restores the home URL on unmount', () => {
+    const canonical = document.createElement('link');
+    canonical.rel = 'canonical';
+    canonical.href = 'https://voxium.app/';
+    document.head.append(canonical);
+
+    try {
+      for (const page of ['architecture', 'contributors'] as const) {
+        act(() => root.render(<MemoryRouter><LandingPage page={page} /></MemoryRouter>));
+        expect(canonical.getAttribute('href')).toBe(`https://voxium.app/${page}`);
+      }
+      act(() => root.render(null));
+      expect(canonical.getAttribute('href')).toBe('https://voxium.app/');
+    } finally {
+      canonical.remove();
+    }
+  });
+
   it('describes transport protocols without naming the hosting setup in any locale', () => {
     for (const { code } of SUPPORTED_LANGUAGES) {
       const copy = i18n.getResource(code, 'translation', 'landing.publicPages');
