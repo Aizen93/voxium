@@ -719,6 +719,12 @@ function parseOwnedServerActions(raw: unknown, targetId: string): OwnedServerAct
   });
 }
 
+/** Whether the batch's demotion of the departing owner's row changed a row. */
+function demotedRow(result: unknown): boolean {
+  const count = (result as { count?: unknown } | null | undefined)?.count;
+  return typeof count === 'number' && count > 0;
+}
+
 /**
  * Hand a space the account being deleted owns to its heir: the heir becomes a
  * member first when they are not one, or their row turns owner. Its batch
@@ -742,12 +748,14 @@ function parseOwnedServerActions(raw: unknown, targetId: string): OwnedServerAct
  * account came to own a space, its retries ran out, its timeout), and an
  * account surviving with role owner beside the heir would outrank them (the
  * heir could not kick it, it could not leave) and keep an owner's powers.
+ * `fromDemoted` says whether that row was demoted, for the caller to announce
+ * after the commit.
  */
 export async function transferOwnedSpaceToHeir(
   serverId: string,
   fromId: string,
   heirId: string,
-): Promise<{ joined: boolean; heirRequestPending: boolean }> {
+): Promise<{ joined: boolean; heirRequestPending: boolean; fromDemoted: boolean }> {
   try {
     return await retryOnTransactionConflict(async () => {
       const existingMembership = await prisma.serverMember.findUnique({
@@ -757,7 +765,7 @@ export async function transferOwnedSpaceToHeir(
 
       if (existingMembership) {
         // Already a member: their row turns owner with the space row
-        await prisma.$transaction([
+        const [, , demotion] = await prisma.$transaction([
           prisma.server.update({ where: { id: serverId, ownerId: fromId }, data: { ownerId: heirId } }),
           prisma.serverMember.update({
             where: { userId_serverId: { userId: heirId, serverId } },
@@ -765,7 +773,7 @@ export async function transferOwnedSpaceToHeir(
           }),
           prisma.serverMember.updateMany({ where: { userId: fromId, serverId, role: 'owner' }, data: { role: 'admin' } }),
         ], LOCK_WAIT_TRANSACTION_OPTIONS);
-        return { joined: false, heirRequestPending: false };
+        return { joined: false, heirRequestPending: false, fromDemoted: demotedRow(demotion) };
       }
 
       // Add them as a member first, seed ChannelRead records (secure
@@ -781,7 +789,7 @@ export async function transferOwnedSpaceToHeir(
         select: { status: true },
       });
 
-      await prisma.$transaction([
+      const results = await prisma.$transaction([
         // This is the one path besides server creation that makes a member
         // without joinServerMember's ban check: an admin-chosen heir is an
         // explicit unban, so the row (if any) goes with it.
@@ -806,9 +814,10 @@ export async function transferOwnedSpaceToHeir(
           where: { id: serverId, ownerId: fromId },
           data: { ownerId: heirId, memberCount: { increment: 1 } },
         }),
+        // LAST: its result is the batch's last
         prisma.serverMember.updateMany({ where: { userId: fromId, serverId, role: 'owner' }, data: { role: 'admin' } }),
       ], LOCK_WAIT_TRANSACTION_OPTIONS);
-      return { joined: true, heirRequestPending: heirRequest?.status === 'pending' };
+      return { joined: true, heirRequestPending: heirRequest?.status === 'pending', fromDemoted: demotedRow(results[results.length - 1]) };
     }, `[Admin] The transfer of space ${serverId}`);
   } catch (err) {
     const code = prismaErrorCode(err);
@@ -927,6 +936,21 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
             userId: action.newOwnerId,
             role: 'owner' as MemberRole,
           });
+
+          // The departing account's own row went from owner to admin in the
+          // same batch: announced as the owner's own transfer announces the
+          // outgoing owner, after the commit and outside the batch's retry.
+          // It loses the owner fast path, so its channel:{id} rooms are
+          // recomputed too; until the account deletion below commits (it can
+          // still fail), it is an admin like any other.
+          if (outcome.fromDemoted) {
+            void syncChannelVisibilityRooms(action.serverId, { userId: targetId });
+            io.to(`server:${action.serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
+              serverId: action.serverId,
+              userId: targetId,
+              role: 'admin' as MemberRole,
+            });
+          }
 
           const updatedServer = await prisma.server.findUnique({
             where: { id: action.serverId },

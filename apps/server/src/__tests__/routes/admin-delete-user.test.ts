@@ -1228,6 +1228,58 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
       expect(batch).toContain(prismaMock.serverMember.updateMany.mock.results[0].value);
     });
 
+    describe('the departing owner\'s demotion is announced', () => {
+      const demotedNotice = ['member:role_updated', { serverId: 'srv-b', userId: 'target-1', role: 'admin' }];
+      const batchOrder = () => prismaMock.$transaction.mock.invocationCallOrder[
+        prismaMock.$transaction.mock.calls.findIndex(([arg]: [unknown]) => Array.isArray(arg))];
+      const noticeOrder = () => mockEmit.mock.invocationCallOrder[
+        mockEmit.mock.calls.findIndex((c: unknown[]) => c[0] === 'member:role_updated' && (c[1] as { userId: string }).userId === 'target-1')];
+
+      for (const [label, heirRow] of [['an heir already a member', { userId: 'heir-1' }], ['an heir who joins with it', null]] as const) {
+        it(`to ${label}: member:role_updated (admin) to the space room and its rooms recomputed, after the batch`, async () => {
+          prismaMock.serverMember.findUnique.mockResolvedValue(heirRow);
+
+          expect((await transferToHeir()).status).toBe(200);
+
+          expect(mockTo).toHaveBeenCalledWith('server:srv-b');
+          expect(mockEmit).toHaveBeenCalledWith(...demotedNotice);
+          // it loses the owner fast path: its channel:{id} rooms are recomputed
+          expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-b', { userId: 'target-1' });
+          expect(noticeOrder()).toBeGreaterThan(batchOrder());
+          expect(mockSyncVisibilityRooms.mock.invocationCallOrder[
+            mockSyncVisibilityRooms.mock.calls.findIndex(([, o]: [string, { userId: string }]) => o.userId === 'target-1')]).toBeGreaterThan(batchOrder());
+        });
+      }
+
+      it('once, after the commit, when the batch had to run again', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+        prismaMock.$transaction.mockImplementationOnce(async () => {
+          throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+        });
+        try {
+          expect((await transferToHeir()).status).toBe(200);
+
+          expect(mockEmit.mock.calls.filter((c: unknown[]) => c[0] === demotedNotice[0] && (c[1] as { userId: string }).userId === 'target-1')).toHaveLength(1);
+          expect(mockSyncVisibilityRooms.mock.calls.filter(([, o]: [string, { userId: string }]) => o.userId === 'target-1')).toHaveLength(1);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('not at all when the batch demoted no row (the departing account held no owner row there)', async () => {
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+        prismaMock.serverMember.updateMany.mockResolvedValueOnce({ count: 0 });
+
+        expect((await transferToHeir()).status).toBe(200);
+
+        expect(mockEmit).not.toHaveBeenCalledWith(...demotedNotice);
+        expect(mockSyncVisibilityRooms).not.toHaveBeenCalledWith('srv-b', { userId: 'target-1' });
+        // the heir's own announcement is unchanged
+        expect(mockEmit).toHaveBeenCalledWith('member:role_updated', { serverId: 'srv-b', userId: 'heir-1', role: 'owner' });
+      });
+    });
+
     it('audits each transfer and delete the moment it commits, so a deletion that fails after them still leaves their record', async () => {
       prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-a', name: 'A' }, { id: 'srv-b', name: 'B' }]);
       prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
