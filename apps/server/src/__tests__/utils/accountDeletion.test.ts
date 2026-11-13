@@ -95,7 +95,7 @@ describe('deleteUserAccount', () => {
     expect(order).toEqual([
       'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect',
       'attachment-keys', 'attachment-keys', 'attachment-keys', 'attachment-keys',
-      'txn:start', 'e2e', 'memberships', 'secure', 'counts', 'delete', 'txn:end',
+      'txn:start', 'memberships', 'secure', 'e2e', 'counts', 'delete', 'txn:end',
       'force:logout', 'disconnect:local', 'disconnect', 'secure:notices', 's3',
     ]);
     expect(purgeE2E).toHaveBeenCalledWith('u-1', expect.objectContaining({ user: prismaMock.user }));
@@ -116,6 +116,19 @@ describe('deleteUserAccount', () => {
     // secure-channel row takes them in
     expect(order.indexOf('memberships')).toBeLessThan(order.indexOf('secure'));
     expect(order.indexOf('secure')).toBeLessThan(order.indexOf('counts'));
+  });
+
+  it('purges the key shares and the rest of the E2E material AFTER the secure channels are locked, before the space rows', async () => {
+    await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+    // A removal from one secure channel locks the channel, then deletes the
+    // key shares addressed to the member there: purged first, a share that
+    // removal waits for was held while this transaction waited for its channel
+    expect(order.indexOf('secure')).toBeLessThan(order.indexOf('e2e'));
+    expect(order.indexOf('e2e')).toBeLessThan(order.indexOf('counts'));
+    // on the transaction's client, inside it
+    expect(purgeE2E).toHaveBeenCalledWith('u-1', expect.objectContaining({ $queryRaw: prismaMock.$queryRaw }));
+    expect(order.indexOf('e2e')).toBeLessThan(order.indexOf('txn:end'));
   });
 
   it('announces the secure-channel removal only after the delete committed', async () => {

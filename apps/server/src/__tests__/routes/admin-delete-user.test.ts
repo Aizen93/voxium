@@ -326,6 +326,9 @@ function expectAtomicPurgeAndDelete(targetId: string) {
   expect(memberDelete.slice(1)).toEqual([targetId]);
   expect(txMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(mockRemoveSecureInTx.mock.invocationCallOrder[0]);
   expect(mockRemoveSecureInTx.mock.invocationCallOrder[0]).toBeLessThan(txMock.user.delete.mock.invocationCallOrder[0]);
+  // the E2E purge (key shares first) after the secure channels are locked:
+  // the order a removal from one secure channel takes the channel and the shares in
+  expect(mockRemoveSecureInTx.mock.invocationCallOrder[0]).toBeLessThan(purgeE2EMaterialMock.mock.invocationCallOrder[0]);
   expect(mockAnnounceSecureRemoved).toHaveBeenCalledWith({ userId: targetId, deleted: [], left: [] });
   expect(mockAnnounceSecureRemoved.mock.invocationCallOrder[0]).toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
 

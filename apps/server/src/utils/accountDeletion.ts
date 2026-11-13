@@ -121,16 +121,25 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * does before it (the member:left notices, the first session revocation, the
  * key reads) is idempotent, so a retry needs nothing redone.
  *
- * Lock order: the member rows, then the secure channels (FOR UPDATE, in id
- * order), then the space rows (the member counts), the order a removal and a
- * secure-channel creation or invite take them in. Taking the space rows
- * first instead (as this transaction once did), to match a space delete and
- * an ownership transfer, would close a cycle with a removal: the removal
- * holds a secure channel and waits for the space row last, this transaction
- * would hold the space row and wait for that channel. Against a space delete
- * or a transfer to this account (space row, then member rows) a deadlock
- * stays possible either way; PostgreSQL aborts one side and both sides
- * retry.
+ * Lock order, the one a removal and a secure-channel creation or invite take
+ * their rows in:
+ *  1. the member rows (the explicit DELETE);
+ *  2. the secure channels, FOR UPDATE, in id order;
+ *  3. the key shares and the rest of the account's E2E material;
+ *  4. the space rows (the member counts).
+ * Why each comes where it does:
+ *  - 2 before 3: a member's removal from one secure channel
+ *    (removeSecureMember) locks the channel, then deletes the key shares
+ *    addressed to that member there. With the purge first (as this
+ *    transaction once ran it), it held a share that removal waited for while
+ *    it waited for the channel the removal held.
+ *  - 2 before 4: a removal holds a secure channel and takes the space row
+ *    last. With the space rows first (to match a space delete and an
+ *    ownership transfer), this transaction would hold the space row and wait
+ *    for that channel.
+ * Against a space delete or a transfer to this account (space row, then
+ * member rows) a deadlock stays possible either way; PostgreSQL aborts one
+ * side and both sides retry.
  */
 export async function deleteAccountRows(userId: string): Promise<SecureMembershipRemoval> {
   try {
@@ -168,7 +177,6 @@ function runAccountDeletionTransaction(userId: string): Promise<SecureMembership
   // otherwise outlive the account it belongs to. One transaction with the
   // delete: purging a user who then survives strands every device they own.
   return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
-    await purgeE2EMaterial(userId, tx);
     // The memberships first, explicitly (the cascade would take them with the
     // row, last): see the lock order above. The spaces whose count moves are
     // the ones this very statement removed a row from, on this attempt: a
@@ -181,6 +189,11 @@ function runAccountDeletionTransaction(userId: string): Promise<SecureMembership
     // the account created (with every member's row), its rows in the others,
     // the key shares addressed to it there. The notices go out after the commit.
     const removal = await removeSecureMembershipsInTx(tx, userId);
+    // Then every other key share and E2E row of the account, after the
+    // secure channels (see the lock order above). Neither step reads what the
+    // other deletes: the secure-channel step reads channels and their member
+    // rows, the purge deletes by user id alone.
+    await purgeE2EMaterial(userId, tx);
     // The inline member counts (server discovery) follow in the same
     // transaction so the directory never shows a departed member until the
     // nightly recount.
