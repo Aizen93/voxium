@@ -3,18 +3,18 @@ import { API_BASE } from './apiBase';
 /**
  * Which server a stored session belongs to.
  *
- * Every desktop build shares the same OS credential entries and the same
- * webview storage: the keychain service names are fixed in lib.rs and the
- * bundle identifier is the same, whether the app was built by the project or
- * by someone else for their own server (`pnpm tauri:build`). A token pair is
- * a credential of the server that issued it, so the session storage stamps
- * every entry with the origin of the API this build talks to, and never hands
- * a build an entry stamped with another origin: a community's build must not
- * send the official app's refresh token to the community's server, nor the
- * reverse.
+ * A token pair is a credential of the server that issued it, so the session
+ * storage stamps every entry with the origin of the API this build talks to,
+ * and never hands a build an entry stamped with another origin. A desktop
+ * build for another server (`pnpm tauri:build`) has an identifier of its
+ * own, and with it its own credential-store entries (lib.rs
+ * `keychain_services`) and webview storage. Builds that share an identifier,
+ * the official app and `tauri dev`, share one store: there the stamp is what
+ * keeps one server's session from another's, and it is checked here, by the
+ * app, not by the operating system.
  *
  * Entries written before the stamp existed carry no origin. Every desktop
- * build that could talk to its server until now was the official one (the
+ * build that could talk to its server until then was the official one (the
  * official policy refused any other server), so an unstamped entry is the
  * official service's: an official build keeps it (and stamps it), any other
  * build leaves it unread.

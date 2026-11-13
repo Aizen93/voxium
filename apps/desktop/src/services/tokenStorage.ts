@@ -31,15 +31,17 @@
  * the page's storage AT ONCE: that part never waits on the queue.
  *
  * Every stored session is bound to the API origin that issued it
- * (services/sessionOrigin.ts): the official app and a build made for another
- * server share the keychain entries and the webview storage, and a refresh
- * token handed to the wrong server is a stolen session. Each entry carries
- * the origin of the build that wrote it; a store hands back only what names
- * its own build's origin, and never deletes another build's entry by reading
- * it. An entry from before the stamp (no origin) is the official service's:
- * an official build keeps and stamps it, any other desktop build leaves it
- * unread. The web store accepts an unmarked pair as the page's own: browser
- * storage belongs to one page origin, which no other deployment shares.
+ * (services/sessionOrigin.ts): a refresh token handed to the wrong server is
+ * a stolen session. A desktop build for another server keeps its entries
+ * apart by its own identifier (lib.rs `keychain_services`); builds that share
+ * one (the official app and `tauri dev`) share the entries. Each entry
+ * carries the origin of the build that wrote it, and a store hands back only
+ * what names its own build's origin; a load leaves another origin's entry as
+ * it is. An entry from before the stamp (no origin) is the official
+ * service's: an official build keeps and stamps it, any other desktop build
+ * leaves it unread. The web store accepts an unmarked pair as the page's own:
+ * browser storage belongs to one page origin, which no other deployment
+ * shares.
  */
 
 import { BUILD_API_ORIGIN, isOfficialOrigin } from './sessionOrigin';
@@ -277,13 +279,14 @@ function decodeTrusted(raw: string | null): Stamped<string> | null {
  * written, a copy on disk can only be stale, and a stale refresh token is
  * still a working credential (the refresh is stateless).
  *
- * The entries are shared by every build on the machine (fixed service and
- * entry names), so each one carries the origin of the API it was issued by.
- * An entry of another origin is left exactly as it is and reads as no session
- * (signing in here overwrites it: two builds on one machine take turns). An
- * entry without an origin, like the page-storage copies older builds left, is
- * the official service's: only a build whose API is the official one reads,
- * migrates and stamps it.
+ * The entries live under the build's own service (lib.rs names it after the
+ * build's identifier): only builds with the same identifier, the official
+ * app and `tauri dev`, share them, so each carries the origin of the API it
+ * was issued by. An entry of another origin reads as no session, and a load
+ * leaves it as it is; this build's own writes and clears replace or remove
+ * it. An entry without an origin, like the page-storage copies older builds
+ * left, is the official service's: only a build whose API is the official
+ * one reads, migrates and stamps it.
  */
 export function createKeychainSessionStore(invokeFn?: InvokeFn, { apiOrigin = BUILD_API_ORIGIN }: SessionStoreOptions = {}): SessionStore {
   const ownsUnstamped = isOfficialOrigin(apiOrigin);
