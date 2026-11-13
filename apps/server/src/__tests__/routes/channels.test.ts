@@ -603,6 +603,22 @@ describe('Channel Routes', () => {
       });
     });
 
+    it('gives the transaction the long budget: the space row it waits for is held through an account deletion\'s cascade', async () => {
+      const token = makeToken();
+      prismaMock.channel.groupBy.mockResolvedValue(channelCounts(1));
+      prismaMock.channel.create.mockImplementation(async ({ data }: any) => ({ id: 'ch-new', categoryId: null, ...data }));
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/channels')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'new-channel', type: 'text' });
+
+      expect(res.status).toBe(201);
+      // Under Prisma's 5 s default the wait alone expired the creation (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
     it('places the channel after the highest position, so a gap a delete left never gives a second channel the same one', async () => {
       // Three regular channels at positions 0, 4 and 9 (one between them was
       // deleted): the count (3) is a position a channel already holds

@@ -13,7 +13,7 @@ import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
 import { isSortPosition, MAX_SORT_POSITION, positionAfter } from '../utils/sortPosition';
-import { retryOnTransactionConflict } from '../utils/transactionRetry';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 
 export const channelRouter = Router({ mergeParams: true });
 
@@ -261,7 +261,9 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
     // space row, the insert only key-shares the category row through its
     // foreign key, and the one writer that locks a category row (its delete)
     // never takes a space row. Run again when PostgreSQL aborts it to break a
-    // deadlock.
+    // deadlock. The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): an account
+    // deletion of a member holds the space row through its whole cascade, and
+    // a creation merely waiting for it must not expire.
     const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // A space deleted since the permission check answers as one
       const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
@@ -287,7 +289,7 @@ channelRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId:
       return tx.channel.create({
         data: { name, type, serverId, position: positionAfter(highest), categoryId: categoryId || null },
       });
-    }), '[Channels] A channel creation').catch(categoryGoneAsMissing);
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), '[Channels] A channel creation').catch(categoryGoneAsMissing);
 
     // Announce to — and subscribe — exactly the members who can VIEW the new
     // channel, and nobody else. The old code did both server-wide on the

@@ -10,7 +10,7 @@ import { rateLimitCategoryManage } from '../middleware/rateLimiter';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission } from '../utils/permissionCalculator';
 import { isSortPosition, MAX_SORT_POSITION, positionAfter } from '../utils/sortPosition';
-import { retryOnTransactionConflict } from '../utils/transactionRetry';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 
 export const categoryRouter = Router({ mergeParams: true });
 
@@ -90,7 +90,9 @@ categoryRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId
     // one after the other: each counts, and places itself after, the
     // categories committed before it. The space row is the only existing row
     // this transaction locks. Run again when PostgreSQL aborts it to break a
-    // deadlock.
+    // deadlock. The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): an account
+    // deletion of a member holds the space row through its whole cascade, and
+    // a creation merely waiting for it must not expire.
     const category = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // A space deleted since the permission check answers as one
       const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
@@ -106,7 +108,7 @@ categoryRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId
       return tx.category.create({
         data: { name, serverId, position: positionAfter(_max.position) },
       });
-    }), '[Categories] A category creation');
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), '[Categories] A category creation');
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.CATEGORY_CREATED, category as unknown as Category);
 

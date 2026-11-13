@@ -250,6 +250,17 @@ describe('Secure Channel Routes', () => {
       expect(mockSocketsJoin).toHaveBeenCalledWith(`channel:${CH.id}`);
     });
 
+    it('gives the transaction the long budget: the member rows and the space row it waits for are held through an account deletion\'s cascade', async () => {
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/secure-channels')
+        .send({ name: 'covert-ops', memberIds: ['user-2', 'user-3'] });
+
+      expect(res.status).toBe(201);
+      // Under Prisma's 5 s default the wait alone expired the creation (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
     it('403 without CREATE_SECURE_CHANNELS', async () => {
       mockHasServerPermission.mockResolvedValue(false);
 

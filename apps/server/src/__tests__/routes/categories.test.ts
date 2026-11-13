@@ -172,6 +172,22 @@ describe('Category Routes', () => {
       expect(res.body.data.serverId).toBe('srv-1');
     });
 
+    it('gives the transaction the long budget: the space row it waits for is held through an account deletion\'s cascade', async () => {
+      const token = makeToken();
+      categoryStats(2);
+      prismaMock.category.create.mockResolvedValue({ id: 'cat-1', name: 'Text Channels', serverId: 'srv-1', position: 2 });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: 'Text Channels' });
+
+      expect(res.status).toBe(201);
+      // Under Prisma's 5 s default the wait alone expired the creation (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
     it('emits category:created socket event', async () => {
       const token = makeToken();
       categoryStats(0);

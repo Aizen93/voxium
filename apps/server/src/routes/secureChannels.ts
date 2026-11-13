@@ -117,7 +117,10 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
     const allMemberIds = [userId, ...memberIds];
     // Run again when PostgreSQL aborts it to break a deadlock (a space delete
     // takes the space row, then the member rows): the second run then finds
-    // the space gone and answers so
+    // the space gone and answers so. The long budget: an account deletion of
+    // a listed member holds their member row, and one of any member the space
+    // row, through its whole cascade; a creation waiting for either must not
+    // expire meanwhile.
     const channel = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       // Every row written below belongs to a current member of the space,
       // the creator included: their membership rows are locked FIRST (a
@@ -170,7 +173,7 @@ secureChannelRouter.post('/', rateLimitSecureChannelManage, async (req: Request<
         });
       }
       return ch;
-    }), '[SecureChannels] A secure-channel creation');
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), '[SecureChannels] A secure-channel creation');
 
     // Members-only fanout: their sidebars gain the channel, their sockets join
     // the room. The server room is deliberately never touched.
