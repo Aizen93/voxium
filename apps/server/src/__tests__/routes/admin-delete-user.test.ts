@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -52,6 +52,10 @@ function makeTxMock() {
     server: {
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
+    // The memberships go first, explicitly, ahead of the secure-channel state,
+    // with RETURNING server_id: the spaces whose member count moves
+    $queryRaw: vi.fn(async () =>
+      ((await prismaMock.serverMember.findMany()) as Array<{ serverId: string }>).map((m) => ({ server_id: m.serverId }))),
     // The E2E tables purgeE2EMaterial touches — present so the REAL purge can
     // be driven against this client, not just the observing mock.
     e2EKeyShare: { deleteMany: deleteMany() },
@@ -80,12 +84,16 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn().mockResolvedValue(null),
     update: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue({}),
+    // an owned space's `delete` action: only while the account still owns it
+    deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   serverMember: {
     findMany: vi.fn().mockResolvedValue([]),
     findUnique: vi.fn().mockResolvedValue(null),
     create: vi.fn().mockResolvedValue({}),
     update: vi.fn().mockResolvedValue({}),
+    // the departing owner's own row, demoted in the transfer batch
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
   },
   channel: {
     findMany: vi.fn().mockResolvedValue([]),
@@ -96,6 +104,9 @@ const prismaMock: Record<string, any> = {
   },
   channelRead: {
     upsert: vi.fn().mockResolvedValue({}),
+  },
+  channelMember: {
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
   },
   serverBan: {
     deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -203,11 +214,13 @@ vi.mock('../../utils/memberBroadcast', () => ({
   broadcastMemberLeft: (...args: any[]) => mockBroadcastMemberLeft(...args),
 }));
 
-// Secure-channel lifecycle (account deletion purges secure state for events)
-const mockPurgeSecureForAccount = vi.fn().mockResolvedValue(undefined);
+// Secure-channel lifecycle: the account's secure-channel state goes in the
+// delete transaction, the notices after it
+const mockRemoveSecureInTx = vi.fn(async (_tx: unknown, userId: string) => ({ userId, deleted: [], left: [] }));
+const mockAnnounceSecureRemoved = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../utils/secureChannelLifecycle', () => ({
-  purgeSecureChannelState: vi.fn().mockResolvedValue(undefined),
-  purgeSecureChannelStateForAccount: (...args: any[]) => mockPurgeSecureForAccount(...args),
+  removeSecureMembershipsInTx: (tx: unknown, userId: string) => mockRemoveSecureInTx(tx, userId),
+  announceSecureMembershipsRemoved: (...args: any[]) => mockAnnounceSecureRemoved(...args),
   deleteSecureChannel: vi.fn().mockResolvedValue(true),
 }));
 
@@ -223,8 +236,9 @@ vi.mock('../../utils/s3', () => ({
 }));
 
 // Audit log
+const mockLogAuditEvent = vi.fn();
 vi.mock('../../utils/auditLog', () => ({
-  logAuditEvent: vi.fn(),
+  logAuditEvent: (...args: any[]) => mockLogAuditEvent(...args),
 }));
 
 // Feature flags
@@ -304,6 +318,20 @@ function expectAtomicPurgeAndDelete(targetId: string) {
   expect(client).toBe(txMock);
   expect(client).not.toBe(prisma);
 
+  // The secure-channel rows go in the same transaction, on its client, after
+  // the memberships and before the row; the notices only after the commit
+  expect(mockRemoveSecureInTx).toHaveBeenCalledWith(txMock, targetId);
+  const memberDelete = txMock.$queryRaw.mock.calls[0] as unknown as [string[], ...unknown[]];
+  expect(memberDelete[0].join('?')).toMatch(/DELETE FROM server_members WHERE user_id = \? RETURNING server_id/);
+  expect(memberDelete.slice(1)).toEqual([targetId]);
+  expect(txMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(mockRemoveSecureInTx.mock.invocationCallOrder[0]);
+  expect(mockRemoveSecureInTx.mock.invocationCallOrder[0]).toBeLessThan(txMock.user.delete.mock.invocationCallOrder[0]);
+  // the E2E purge (key shares first) after the secure channels are locked:
+  // the order a removal from one secure channel takes the channel and the shares in
+  expect(mockRemoveSecureInTx.mock.invocationCallOrder[0]).toBeLessThan(purgeE2EMaterialMock.mock.invocationCallOrder[0]);
+  expect(mockAnnounceSecureRemoved).toHaveBeenCalledWith({ userId: targetId, deleted: [], left: [] });
+  expect(mockAnnounceSecureRemoved.mock.invocationCallOrder[0]).toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
+
   // Purge FIRST: a delete that lands first can commit alone if the purge then
   // throws under a driver that does not roll back the way we assume.
   expect(order).toEqual(['purge', 'tx.user.delete']);
@@ -331,7 +359,7 @@ beforeEach(() => {
     typeof arg === 'function' ? arg(txMock) : Promise.all(arg));
   prismaMock.serverMember.findMany.mockResolvedValue([]);
   prismaMock.server.findMany.mockResolvedValue([]);
-  prismaMock.server.delete.mockResolvedValue({});
+  prismaMock.server.deleteMany.mockResolvedValue({ count: 1 });
   prismaMock.server.findUnique.mockResolvedValue(null);
   // Back to the declared defaults: clearAllMocks keeps both the implementations
   // a test set and the *Once queues a test left unconsumed
@@ -421,10 +449,10 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+    expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-owned', ownerId: 'target-1' } });
     // the deleted space leaves the cached Explore pages (bumped after the delete)
     expect(mockBumpDiscoveryPageCache).toHaveBeenCalledWith('admin server delete');
-    expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(mockBumpDiscoveryPageCache.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     expectAtomicPurgeAndDelete('target-1');
   });
 
@@ -460,8 +488,12 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     const arrayTxns = prismaMock.$transaction.mock.calls.filter(
       ([arg]: [unknown]) => Array.isArray(arg));
     expect(arrayTxns).toHaveLength(1);
+    // with the long budget: an account deletion of any member holds the space
+    // row through its cascade, and a batch expires under the 5 s default too
+    expect(arrayTxns[0][1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
+    // only while the departing account still owns the space
     expect(prismaMock.server.update).toHaveBeenCalledWith({
-      where: { id: 'srv-owned' },
+      where: { id: 'srv-owned', ownerId: 'target-1' },
       data: { ownerId: 'heir-1' },
     });
     // …and the purge+delete are still atomic on their own.
@@ -501,7 +533,7 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
       data: { userId: 'heir-1', serverId: 'srv-owned', role: 'owner' },
     });
     expect(prismaMock.server.update).toHaveBeenCalledWith({
-      where: { id: 'srv-owned' },
+      where: { id: 'srv-owned', ownerId: 'target-1' },
       data: { ownerId: 'heir-1', memberCount: { increment: 1 } },
     });
     // an admin-chosen heir is an explicit unban — this path creates a member
@@ -509,6 +541,14 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expect(prismaMock.serverBan.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
     // ...and so does a request they had open on this server, settled as joined for the moderators
     expect(prismaMock.serverJoinRequest.deleteMany).toHaveBeenCalledWith({ where: { serverId: 'srv-owned', userId: 'heir-1' } });
+    // the heir's membership starts with no secure-channel row an earlier one
+    // left, in the same transaction as the membership (built before it)
+    expect(prismaMock.channelMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'heir-1', channel: { serverId: 'srv-owned' } } });
+    expect(prismaMock.channelMember.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.serverMember.create.mock.invocationCallOrder[0]);
+    const heirTx = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg));
+    expect(heirTx![0]).toContain(prismaMock.channelMember.deleteMany.mock.results[0].value);
+    // the long budget, as the existing-member batch
+    expect(heirTx![1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
     expect(mockEmitToModerators).toHaveBeenCalledWith('srv-owned', 'server:join_request_resolved', { serverId: 'srv-owned', userId: 'heir-1', outcome: 'joined' });
     expect(mockRecomputeListed).toHaveBeenCalledWith('srv-owned');
     // the deleted account's own membership is decremented inside the delete transaction
@@ -572,11 +612,11 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     const noticeIndex = mockEmit.mock.calls.findIndex(([event]: [string]) => event === 'server:deleted');
     expect(noticeIndex).toBeGreaterThanOrEqual(0);
     const noticeOrder = mockEmit.mock.invocationCallOrder[noticeIndex];
-    expect(noticeOrder).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(noticeOrder).toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
     expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
     // The channel ids are read while the rows still exist
-    expect(prismaMock.channel.findMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(prismaMock.channel.findMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
   });
 
   it('a rejecting voice cleanup and a throwing notice still delete the space AND the account', async () => {
@@ -589,9 +629,9 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     const res = await deleteOwner();
 
     expect(res.status).toBe(200);
-    expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+    expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-owned', ownerId: 'target-1' } });
     expect(vi.mocked(broadcastServerVoiceCleanup).mock.invocationCallOrder[0])
-      .toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+      .toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     expect(mockSocketsLeave).toHaveBeenCalledWith(rooms);
     // The account deletion after the loop still ran
     expectAtomicPurgeAndDelete('target-1');
@@ -616,7 +656,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
       const spaceCall = mockDeleteMultipleFromS3.mock.calls.findIndex(([keys]) => keys[0] === spaceKey);
       const accountCall = mockDeleteMultipleFromS3.mock.calls.findIndex(([keys]) => keys[0] === accountKey);
       expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[spaceCall])
-        .toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+        .toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
       expect(mockDeleteMultipleFromS3.mock.invocationCallOrder[accountCall])
         .toBeGreaterThan(txMock.user.delete.mock.invocationCallOrder[0]);
     } finally {
@@ -625,7 +665,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
   });
 
   it('a space row delete that fails stops the deletion before any notice, with the account untouched', async () => {
-    prismaMock.server.delete.mockRejectedValueOnce(new Error('db gone'));
+    prismaMock.server.deleteMany.mockRejectedValueOnce(new Error('db gone'));
     const { broadcastServerVoiceCleanup } = await import('../../websocket/voiceCluster');
 
     const res = await deleteOwner();
@@ -635,6 +675,53 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     expect(mockEmit).not.toHaveBeenCalledWith('server:deleted', expect.anything());
     expect(mockSocketsLeave).not.toHaveBeenCalled();
     expect(txMock.user.delete).not.toHaveBeenCalled();
+  });
+
+  describe('a space that changed owner after the owned-spaces read', () => {
+    // The delete matches only a row the account still owns: it found none,
+    // and the space is still there (handed to someone else meanwhile)
+    beforeEach(() => {
+      prismaMock.server.deleteMany.mockResolvedValue({ count: 0 });
+      prismaMock.server.findUnique.mockImplementation(async ({ select }: any) =>
+        (select?.iconUrl ? { iconUrl: 'server-icons/srv-owned-1700000000000-0123456789ab.webp' } : { id: 'srv-owned' }));
+    });
+
+    it('is not deleted: the request stops with the 400 the dashboard shows, and nothing of that space is touched', async () => {
+      const { broadcastServerVoiceCleanup } = await import('../../websocket/voiceCluster');
+
+      const res = await deleteOwner();
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Server "srv-owned" is not owned by this user');
+      // the one statement: the space only while the departing account owns it
+      expect(prismaMock.server.deleteMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-owned', ownerId: 'target-1' } });
+      expect(prismaMock.server.delete).not.toHaveBeenCalled();
+      // no room emptied, no voice torn down, no notice, no cache bump, no file deleted
+      expect(mockLocalSocketsLeave).not.toHaveBeenCalled();
+      expect(mockSocketsLeave).not.toHaveBeenCalled();
+      expect(broadcastServerVoiceCleanup).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalledWith('server:deleted', expect.anything());
+      expect(mockBumpDiscoveryPageCache).not.toHaveBeenCalled();
+      expect(mockDeleteFromS3).not.toHaveBeenCalled();
+      expect(mockDeleteMultipleFromS3).not.toHaveBeenCalled();
+      // the account is not deleted, and nothing claims it or the space was
+      expect(purgeE2EMaterialMock).not.toHaveBeenCalled();
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+      expect(mockLogAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'server.delete' }));
+      expect(mockLogAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'user.delete' }));
+    });
+
+    it('a space gone meanwhile answers 404 Server, as the owner\'s own delete does', async () => {
+      prismaMock.server.findUnique.mockImplementation(async ({ select }: any) => (select?.iconUrl ? { iconUrl: null } : null));
+
+      const res = await deleteOwner();
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
+      expect(mockSocketsLeave).not.toHaveBeenCalled();
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+    });
   });
 
   it('leaves only the server room when the space has no channels', async () => {
@@ -657,7 +744,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
     expect(res.status).toBe(200);
     expect(mockDeleteFromS3).toHaveBeenCalledTimes(1);
     expect(mockDeleteFromS3).toHaveBeenCalledWith(icon);
-    expect(mockDeleteFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.delete.mock.invocationCallOrder[0]);
+    expect(mockDeleteFromS3.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.server.deleteMany.mock.invocationCallOrder[0]);
     expectAtomicPurgeAndDelete('target-1');
   });
 
@@ -687,7 +774,7 @@ describe('DELETE /admin/users/:userId — an owned space deleted with the accoun
 
       expect(res.status).toBe(200);
       expect(mockFetchSockets).not.toHaveBeenCalled();
-      expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-owned' } });
+      expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-owned', ownerId: 'target-1' } });
       expectAtomicPurgeAndDelete('target-1');
     } finally {
       mockFetchSockets.mockResolvedValue([]);
@@ -942,7 +1029,7 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
   });
 
   function expectNothingDestroyed() {
-    expect(prismaMock.server.delete).not.toHaveBeenCalled();
+    expect(prismaMock.server.deleteMany).not.toHaveBeenCalled();
     expect(prismaMock.server.update).not.toHaveBeenCalled();
     expect(purgeE2EMaterialMock).not.toHaveBeenCalled();
     expect(txMock.user.delete).not.toHaveBeenCalled();
@@ -1108,9 +1195,204 @@ describe('DELETE /admin/users/:userId — the request as the dashboard sends it'
     ] });
 
     expect(res.status).toBe(200);
-    expect(prismaMock.server.delete).toHaveBeenCalledTimes(1);
-    expect(prismaMock.server.delete).toHaveBeenCalledWith({ where: { id: 'srv-a' } });
-    expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-b' }, data: { ownerId: 'heir-1' } });
+    expect(prismaMock.server.deleteMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.server.deleteMany).toHaveBeenCalledWith({ where: { id: 'srv-a', ownerId: 'target-1' } });
+    expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-b', ownerId: 'target-1' }, data: { ownerId: 'heir-1' } });
     expectAtomicPurgeAndDelete('target-1');
+  });
+
+  describe('a transfer leaves no second owner if the account deletion then fails', () => {
+    beforeEach(() => {
+      prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-b', name: 'B' }]);
+    });
+    const transferToHeir = () => del().send({ serverActions: [{ serverId: 'srv-b', action: 'transfer', newOwnerId: 'heir-1' }] });
+    const demotion = { where: { userId: 'target-1', serverId: 'srv-b', role: 'owner' }, data: { role: 'admin' } };
+
+    it('to an heir already a member: the departing account\'s own row is demoted to admin in the same batch', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+
+      expect((await transferToHeir()).status).toBe(200);
+
+      expect(prismaMock.serverMember.updateMany).toHaveBeenCalledWith(demotion);
+      const batch = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg))![0];
+      expect(batch).toContain(prismaMock.serverMember.updateMany.mock.results[0].value);
+    });
+
+    it('to an heir who joins with it: the departing account\'s own row is demoted to admin in the same batch', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+
+      expect((await transferToHeir()).status).toBe(200);
+
+      expect(prismaMock.serverMember.updateMany).toHaveBeenCalledWith(demotion);
+      const batch = prismaMock.$transaction.mock.calls.find(([arg]: [unknown]) => Array.isArray(arg))![0];
+      expect(batch).toContain(prismaMock.serverMember.updateMany.mock.results[0].value);
+    });
+
+    describe('the departing owner\'s demotion is announced', () => {
+      const demotedNotice = ['member:role_updated', { serverId: 'srv-b', userId: 'target-1', role: 'admin' }];
+      const batchOrder = () => prismaMock.$transaction.mock.invocationCallOrder[
+        prismaMock.$transaction.mock.calls.findIndex(([arg]: [unknown]) => Array.isArray(arg))];
+      const noticeOrder = () => mockEmit.mock.invocationCallOrder[
+        mockEmit.mock.calls.findIndex((c: unknown[]) => c[0] === 'member:role_updated' && (c[1] as { userId: string }).userId === 'target-1')];
+
+      for (const [label, heirRow] of [['an heir already a member', { userId: 'heir-1' }], ['an heir who joins with it', null]] as const) {
+        it(`to ${label}: member:role_updated (admin) to the space room and its rooms recomputed, after the batch`, async () => {
+          prismaMock.serverMember.findUnique.mockResolvedValue(heirRow);
+
+          expect((await transferToHeir()).status).toBe(200);
+
+          expect(mockTo).toHaveBeenCalledWith('server:srv-b');
+          expect(mockEmit).toHaveBeenCalledWith(...demotedNotice);
+          // it loses the owner fast path: its channel:{id} rooms are recomputed
+          expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv-b', { userId: 'target-1' });
+          expect(noticeOrder()).toBeGreaterThan(batchOrder());
+          expect(mockSyncVisibilityRooms.mock.invocationCallOrder[
+            mockSyncVisibilityRooms.mock.calls.findIndex(([, o]: [string, { userId: string }]) => o.userId === 'target-1')]).toBeGreaterThan(batchOrder());
+        });
+      }
+
+      it('once, after the commit, when the batch had to run again', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+        prismaMock.$transaction.mockImplementationOnce(async () => {
+          throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+        });
+        try {
+          expect((await transferToHeir()).status).toBe(200);
+
+          expect(mockEmit.mock.calls.filter((c: unknown[]) => c[0] === demotedNotice[0] && (c[1] as { userId: string }).userId === 'target-1')).toHaveLength(1);
+          expect(mockSyncVisibilityRooms.mock.calls.filter(([, o]: [string, { userId: string }]) => o.userId === 'target-1')).toHaveLength(1);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('not at all when the batch demoted no row (the departing account held no owner row there)', async () => {
+        prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+        prismaMock.serverMember.updateMany.mockResolvedValueOnce({ count: 0 });
+
+        expect((await transferToHeir()).status).toBe(200);
+
+        expect(mockEmit).not.toHaveBeenCalledWith(...demotedNotice);
+        expect(mockSyncVisibilityRooms).not.toHaveBeenCalledWith('srv-b', { userId: 'target-1' });
+        // the heir's own announcement is unchanged
+        expect(mockEmit).toHaveBeenCalledWith('member:role_updated', { serverId: 'srv-b', userId: 'heir-1', role: 'owner' });
+      });
+    });
+
+    it('audits each transfer and delete the moment it commits, so a deletion that fails after them still leaves their record', async () => {
+      prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-a', name: 'A' }, { id: 'srv-b', name: 'B' }]);
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      // the account deletion fails after both spaces were handled
+      prismaMock.$transaction.mockImplementation((arg: any) =>
+        (typeof arg === 'function' ? Promise.reject(new Error('db gone')) : Promise.all(arg)));
+
+      const res = await del().send({ serverActions: [
+        { serverId: 'srv-a', action: 'delete' },
+        { serverId: 'srv-b', action: 'transfer', newOwnerId: 'heir-1' },
+      ] });
+
+      expect(res.status).toBe(500);
+      expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'server.delete', targetType: 'server', targetId: 'srv-a',
+        metadata: expect.objectContaining({ serverName: 'A', ownerId: 'target-1', via: 'user.delete' }),
+      }));
+      expect(mockLogAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'server.transfer', targetType: 'server', targetId: 'srv-b',
+        metadata: expect.objectContaining({ serverName: 'B', fromUserId: 'target-1', newOwnerId: 'heir-1', via: 'user.delete' }),
+      }));
+      // ...and no row claims the account was deleted
+      expect(mockLogAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'user.delete' }));
+    });
+  });
+
+  describe('a transfer batch PostgreSQL aborted, or whose check went stale', () => {
+    const deadlock = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-b', name: 'B' }]);
+    });
+    afterEach(() => { warn.mockRestore(); });
+    const transferToHeir = () => del().send({ serverActions: [{ serverId: 'srv-b', action: 'transfer', newOwnerId: 'heir-1' }] });
+
+    it('runs the whole attempt again, the heir\'s membership read included, so a retry picks its branch from what is true now', async () => {
+      // The heir was not a member when the first attempt read it; by the
+      // retry they are one (a join committed meanwhile)
+      prismaMock.serverMember.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ userId: 'heir-1' });
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { throw deadlock(); });
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.serverMember.findUnique).toHaveBeenCalledTimes(2);
+      // the retried attempt took the member branch: no second membership
+      expect(prismaMock.serverMember.create).toHaveBeenCalledTimes(1);
+      expect(prismaMock.serverMember.update).toHaveBeenLastCalledWith({
+        where: { userId_serverId: { userId: 'heir-1', serverId: 'srv-b' } },
+        data: { role: 'owner' },
+      });
+      expect(warn).toHaveBeenCalledWith('[Admin] The transfer of space srv-b was aborted by a deadlock or a serialization failure; retrying (1 of 2)');
+      expectAtomicPurgeAndDelete('target-1');
+    });
+
+    it('a batch that finds the space no longer the departing account\'s refuses, and the account is not deleted', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      prismaMock.$transaction.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Record to update not found.'), { code: 'P2025' });
+      });
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'someone-else' });
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Server "srv-b" is not owned by this user');
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('a batch that finds the heir\'s account gone answers 404 Transfer target user, not a 500', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      prismaMock.$transaction.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' });
+      });
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'target-1' });
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Transfer target user not found');
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('an heir who left between the membership read and the existing-member batch answers 404 Transfer target user, not a 500', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      prismaMock.$transaction.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Record to update not found.'), { code: 'P2025' });
+      });
+      // the space is still the departing account's: the heir's row is what went
+      prismaMock.server.findUnique.mockResolvedValue({ ownerId: 'target-1' });
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Transfer target user not found');
+      expect(txMock.user.delete).not.toHaveBeenCalled();
+    });
+
+    it('a batch that finds the space gone answers 404 Server', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'heir-1' });
+      prismaMock.$transaction.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('Record to update not found.'), { code: 'P2025' });
+      });
+      prismaMock.server.findUnique.mockResolvedValue(null);
+
+      const res = await transferToHeir();
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Server not found');
+    });
   });
 });

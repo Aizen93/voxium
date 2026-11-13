@@ -16,13 +16,14 @@ import { sanitizeText } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitMemberRead, rateLimitMemberLookup, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { adoptImageAssetUpload } from '../utils/uploadVerification';
-import { hasServerPermission, getHighestRolePosition, filterVisibleChannels } from '../utils/permissionCalculator';
+import { hasServerPermission, getHighestRolePosition, filterVisibleChannels, type PermissionReadClient } from '../utils/permissionCalculator';
 import { Permissions } from '@voxium/shared';
 import { deleteServerAndAnnounce } from '../utils/serverDeletion';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
-import { removeMemberFromServer } from '../utils/removeMember';
+import { removeMemberFromServer, OWNER_CANNOT_LEAVE_MESSAGE, KICK_OUTRANKED_MESSAGE } from '../utils/removeMember';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { recomputeListed } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
@@ -572,7 +573,9 @@ serverRouter.post('/:serverId/leave', rateLimitMemberManage, async (req: Request
       where: { userId_serverId: { userId: req.user!.userId, serverId } },
     });
     if (!membership) throw new NotFoundError('Server membership');
-    if (membership.role === 'owner') throw new ForbiddenError('Server owner cannot leave. Transfer ownership first.');
+    // A fast answer; the removal holds the same rule in its own delete, on
+    // every attempt (a transfer to this member can commit in between)
+    if (membership.role === 'owner') throw new ForbiddenError(OWNER_CANNOT_LEAVE_MESSAGE);
 
     // The teardown (voice eviction, secure-channel purge, read markers, the
     // membership + count transaction, member:left) is removeMemberFromServer's.
@@ -705,13 +708,20 @@ serverRouter.delete('/:serverId', rateLimitMemberManage, async (req: Request<{ s
 
     const server = await prisma.server.findUnique({ where: { id: serverId } });
     if (!server) throw new NotFoundError('Server');
-    if (server.ownerId !== req.user!.userId) throw new ForbiddenError('Only the server owner can delete it');
+    const refusal = () => new ForbiddenError('Only the server owner can delete it');
+    if (server.ownerId !== req.user!.userId) throw refusal();
 
     // The row first, then voice, the notice, the room leaves and the icon
     // blob, each best effort (utils/serverDeletion.ts, shared with the admin
     // deletes): a fan-out step that throws no longer leaves members told the
     // space is gone while it is still there.
-    await deleteServerAndAnnounce(server, { cacheReason: 'server delete', logPrefix: '[Servers]' });
+    // The ownership check above is carried by the delete too, so a transfer
+    // committing while it retries never gets the heir's space deleted
+    await deleteServerAndAnnounce(server, {
+      cacheReason: 'server delete',
+      logPrefix: '[Servers]',
+      ownedBy: { userId: req.user!.userId, refusal },
+    });
 
     res.json({ success: true, message: 'Server deleted' });
   } catch (err) {
@@ -789,7 +799,19 @@ serverRouter.post(
         reason = sanitized.length > 0 ? sanitized : null;
       }
 
-      const canKick = await hasServerPermission(req.user!.userId, serverId, Permissions.KICK_MEMBERS);
+      const actorId = req.user!.userId;
+      // Every read through `db`: the removal runs this inside its transaction
+      // too, on the transaction's client (see removeMemberFromServer)
+      const assertMayKick = async (db: PermissionReadClient = prisma) => {
+        const canKick = await hasServerPermission(actorId, serverId, Permissions.KICK_MEMBERS, db);
+        if (!canKick) throw new ForbiddenError('You do not have permission to kick members');
+        // Role hierarchy check: actor must outrank target
+        const actorHighest = await getHighestRolePosition(actorId, serverId, db);
+        const targetHighest = await getHighestRolePosition(memberId, serverId, db);
+        if (actorHighest <= targetHighest) throw new ForbiddenError(KICK_OUTRANKED_MESSAGE);
+      };
+
+      const canKick = await hasServerPermission(actorId, serverId, Permissions.KICK_MEMBERS);
       if (!canKick) throw new ForbiddenError('You do not have permission to kick members');
 
       const targetMembership = await prisma.serverMember.findUnique({
@@ -797,18 +819,18 @@ serverRouter.post(
       });
       if (!targetMembership) throw new NotFoundError('Member');
 
-      // Role hierarchy check: actor must outrank target
-      const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
-      const targetHighest = await getHighestRolePosition(memberId, serverId);
-      if (actorHighest <= targetHighest) {
-        throw new ForbiddenError('Cannot kick a member with an equal or higher role');
-      }
+      await assertMayKick();
 
-      // The teardown — voice eviction, secure-channel purge, read markers,
+      // The teardown — voice eviction, secure-channel state, read markers,
       // and one transaction with the ban row, the join-request delete, the
       // membership delete and the member count — lives in
-      // removeMemberFromServer, nowhere else.
-      await removeMemberFromServer(memberId, serverId, { ban: { by: req.user!.userId, reason } });
+      // removeMemberFromServer, nowhere else. It runs the permission and the
+      // hierarchy check again on every attempt (`authorize`): before the
+      // attempt's transaction opens, and inside it on its own client right
+      // after the webhook statement, the one that can wait long, so a role
+      // change, a removal of the actor or a promotion of the target that
+      // commits meanwhile is seen before the membership row goes.
+      await removeMemberFromServer(memberId, serverId, { ban: { by: actorId, reason }, authorize: assertMayKick });
 
       // Emit member:kicked directly to the kicked user's per-user room
       // (they're already out of the server room)
@@ -1054,7 +1076,7 @@ serverRouter.post(
           // status in the where: a decline that commits between the read
           // above and this transaction leaves a row this delete must NOT
           // find, so the approval fails instead of admitting a declined user
-          extraWrites: [prisma.serverJoinRequest.delete({ where: { id: request.id, status: 'pending' } })],
+          extraWrites: (tx) => [tx.serverJoinRequest.delete({ where: { id: request.id, status: 'pending' } })],
         });
       } catch (err) {
         const e = err as { code?: unknown; statusCode?: unknown; message?: unknown };
@@ -1253,17 +1275,43 @@ serverRouter.post(
       const targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { bannedAt: true } });
       if (targetUser?.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
 
-      await prisma.$transaction([
-        prisma.server.update({ where: { id: serverId }, data: { ownerId: targetUserId } }),
-        prisma.serverMember.update({
-          where: { userId_serverId: { userId: targetUserId, serverId } },
-          data: { role: 'owner' },
-        }),
-        prisma.serverMember.update({
-          where: { userId_serverId: { userId: req.user!.userId, serverId } },
-          data: { role: 'admin' },
-        }),
-      ]);
+      // The space row, then the two member rows: the reverse of a removal or
+      // an account deletion of the heir, so PostgreSQL may abort the batch to
+      // break a deadlock; it then runs again. The checks above are carried by
+      // the statements themselves, so they hold on every attempt: the space
+      // row only while the actor still owns it, the actor's row only while it
+      // is the owner's, the heir's row only while they are a member (P2025
+      // otherwise, or P2003 when the heir's account is gone). The long
+      // budget: an account deletion of any member holds the space row through
+      // its cascade, and a batch waiting for it expires under Prisma's 5 s
+      // default like an interactive transaction.
+      const actorId = req.user!.userId;
+      try {
+        await retryOnTransactionConflict(() => prisma.$transaction([
+          prisma.server.update({ where: { id: serverId, ownerId: actorId }, data: { ownerId: targetUserId } }),
+          prisma.serverMember.update({
+            where: { userId_serverId: { userId: targetUserId, serverId } },
+            data: { role: 'owner' },
+          }),
+          prisma.serverMember.update({
+            where: { userId_serverId: { userId: actorId, serverId }, role: 'owner' },
+            data: { role: 'admin' },
+          }),
+        ], LOCK_WAIT_TRANSACTION_OPTIONS), `[Servers] The transfer of space ${serverId}`);
+      } catch (err) {
+        const code = (err as { code?: unknown })?.code;
+        if (code !== 'P2025' && code !== 'P2003') throw err;
+        // Something the checks above saw changed before this attempt: answer
+        // what they would answer now
+        const [space, heir] = await Promise.all([
+          prisma.server.findUnique({ where: { id: serverId }, select: { ownerId: true } }),
+          prisma.serverMember.findUnique({ where: { userId_serverId: { userId: targetUserId, serverId } }, select: { userId: true } }),
+        ]);
+        if (!space) throw new NotFoundError('Server');
+        if (space.ownerId !== actorId) throw new ForbiddenError('Only the server owner can transfer ownership');
+        if (!heir) throw new NotFoundError('Target member');
+        throw err;
+      }
 
       // ownerId decides WHOSE ban state is one of the listing column's four
       // inputs — recompute after the commit (never throws).

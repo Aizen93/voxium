@@ -70,6 +70,9 @@ const prismaMock: Record<string, any> = {
   channelRead: {
     createMany: vi.fn(),
   },
+  channelMember: {
+    deleteMany: vi.fn(),
+  },
   globalConfig: {
     findUnique: vi.fn(),
   },
@@ -458,16 +461,21 @@ describe('Invite Routes', () => {
         server: { ...mockServer, invitesLocked: false },
       });
       prismaMock.serverMember.findUnique.mockResolvedValue(null);
-      const INVITE_DELETE = { op: 'invite.delete' };
-      const REQ = { op: 'request.deleteMany' };
-      const CREATE = { op: 'member.create' };
-      const COUNT = { op: 'server.update' };
-      prismaMock.invite.delete.mockReturnValue(INVITE_DELETE);
-      prismaMock.serverJoinRequest.deleteMany.mockReturnValue(REQ);
-      prismaMock.serverMember.create.mockReturnValue(CREATE);
-      prismaMock.server.update.mockReturnValue(COUNT);
-      prismaMock.$transaction.mockResolvedValue([]);
       prismaMock.channel.findMany.mockResolvedValue([]);
+      // The join's interactive transaction, on a client of its own that
+      // records each statement
+      const steps: string[] = [];
+      const step = (name: string, value: unknown = {}) => vi.fn(async () => { steps.push(name); return value; });
+      const tx = {
+        $queryRaw: step('lock:space', [{ id: 'srv-1' }]),
+        invite: { delete: step('invite.delete') },
+        serverBan: { findUnique: step('ban?', null) },
+        serverMember: { findUnique: step('member?', null), count: step('count?', 0), create: step('member.create') },
+        serverJoinRequest: { deleteMany: step('request.deleteMany', { count: 0 }) },
+        channelMember: { deleteMany: step('channelMember.deleteMany', { count: 0 }) },
+        server: { update: step('server.update') },
+      };
+      prismaMock.$transaction.mockImplementationOnce(async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx));
 
       const res = await request(app)
         .post('/api/v1/invites/ATOMIC01/join')
@@ -475,10 +483,13 @@ describe('Invite Routes', () => {
 
       expect(res.status).toBe(200);
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      expect(prismaMock.$transaction).toHaveBeenCalledWith([INVITE_DELETE, REQ, CREATE, COUNT]);
-      expect(prismaMock.invite.delete).toHaveBeenCalledWith({ where: { code: 'ATOMIC01' } });
-      expect(prismaMock.serverMember.create).toHaveBeenCalledWith({ data: { userId: 'user-2', serverId: 'srv-1' } });
-      expect(prismaMock.server.update).toHaveBeenCalledWith({ where: { id: 'srv-1' }, data: { memberCount: { increment: 1 } } });
+      // the invite is consumed by THIS transaction, before the membership
+      // and the count, on its own client
+      expect(steps).toEqual(['lock:space', 'invite.delete', 'ban?', 'member?', 'request.deleteMany', 'channelMember.deleteMany', 'member.create', 'server.update']);
+      expect(tx.invite.delete).toHaveBeenCalledWith({ where: { code: 'ATOMIC01' } });
+      expect(prismaMock.invite.delete).not.toHaveBeenCalled();
+      expect(tx.serverMember.create).toHaveBeenCalledWith({ data: { userId: 'user-2', serverId: 'srv-1' } });
+      expect(tx.server.update).toHaveBeenCalledWith({ where: { id: 'srv-1' }, data: { memberCount: { increment: 1 } } });
     });
 
     it('an invite used while a join request was pending resolves that request for the moderators', async () => {

@@ -10,6 +10,7 @@ const prismaMock: Record<string, any> = {
   e2EKeyShare: { deleteMany: vi.fn() },
   messageAttachment: { findMany: vi.fn() },
   $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -36,16 +37,20 @@ vi.mock('../../utils/s3', () => ({
 
 // Live voice in a deleted secure voice channel dies with it, on every node
 const mockBroadcastChannelVoiceCleanup = vi.fn().mockResolvedValue(undefined);
+const mockBroadcastVoiceEvictUser = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../websocket/voiceCluster', () => ({
   broadcastChannelVoiceCleanup: (...args: any[]) => mockBroadcastChannelVoiceCleanup(...args),
-  broadcastVoiceEvictUser: vi.fn().mockResolvedValue(undefined),
+  broadcastVoiceEvictUser: (...args: any[]) => mockBroadcastVoiceEvictUser(...args),
 }));
 
 import {
   deleteSecureChannel,
-  deleteSecureChannelsOwnedBy,
   removeSecureMember,
-  purgeSecureChannelState,
+  removeSecureMembershipsInTx,
+  announceSecureMembershipsRemoved,
+  getSecureChannelMembersPayload,
+  lockServerMemberRows,
+  undoRoomJoinsOfRemovedMembers,
 } from '../../utils/secureChannelLifecycle';
 
 describe('secureChannelLifecycle', () => {
@@ -54,6 +59,7 @@ describe('secureChannelLifecycle', () => {
     mockDeleteMultipleFromS3.mockResolvedValue(undefined);
     prismaMock.messageAttachment.findMany.mockReset().mockResolvedValue([]);
     mockBroadcastChannelVoiceCleanup.mockReset().mockResolvedValue(undefined);
+    mockBroadcastVoiceEvictUser.mockReset().mockResolvedValue(undefined);
     prismaMock.$transaction.mockImplementation(async (arg: any) =>
       Array.isArray(arg) ? Promise.all(arg) : arg(prismaMock),
     );
@@ -224,6 +230,46 @@ describe('secureChannelLifecycle', () => {
   });
 
   describe('removeSecureMember', () => {
+    it('locks the channel row FIRST, then deletes the rows, in one transaction (the order every delete in the channel takes)', async () => {
+      const order: string[] = [];
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => { order.push(strings.join('?').includes('FOR UPDATE') ? 'lock' : 'other'); return [{ id: 'sec-1' }]; });
+      prismaMock.channelMember.deleteMany.mockImplementation(async () => { order.push('member'); return { count: 1 }; });
+      prismaMock.channelRead.deleteMany.mockImplementation(async () => { order.push('read'); return { count: 1 }; });
+      prismaMock.e2EKeyShare.deleteMany.mockImplementation(async () => { order.push('shares'); return { count: 0 }; });
+
+      await removeSecureMember('sec-1', 'srv-1', 'u2');
+
+      expect(order.slice(0, 4)).toEqual(['lock', 'member', 'read', 'shares']);
+      expect((prismaMock.$queryRaw.mock.calls[0][0] as string[]).join('?')).toMatch(/SELECT id FROM channels WHERE id = \? FOR UPDATE/);
+      expect(prismaMock.$queryRaw.mock.calls[0][1]).toBe('sec-1');
+      expect(typeof prismaMock.$transaction.mock.calls[0][0]).toBe('function');
+    });
+
+    it('gives the transaction the long budget: the channel row it waits for is held through an account deletion\'s cascade', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([{ id: 'sec-1' }]);
+
+      await removeSecureMember('sec-1', 'srv-1', 'u2');
+
+      // Under Prisma's 5 s default the wait alone expired the transaction (P2028, a 500)
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    });
+
+    it('a removal PostgreSQL aborted to break a deadlock (its creator leaving at once) runs again instead of answering 500', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.$queryRaw.mockResolvedValue([{ id: 'sec-1' }]);
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })
+        .mockImplementation(real);
+      try {
+        await expect(removeSecureMember('sec-1', 'srv-1', 'u2')).resolves.toBeUndefined();
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_DELETED, { channelId: 'sec-1', serverId: 'srv-1' });
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('deletes membership+read rows, tells the removed user, refreshes the member list', async () => {
       prismaMock.channelMember.findMany.mockResolvedValue([
         {
@@ -258,47 +304,210 @@ describe('secureChannelLifecycle', () => {
     });
   });
 
-  describe('purgeSecureChannelState (leave/kick)', () => {
-    it('deletes created channels and removes other memberships', async () => {
-      // deleteSecureChannelsOwnedBy: one created channel
-      prismaMock.channel.findMany.mockResolvedValue([{ id: 'sec-own' }]);
-      prismaMock.channel.findUnique.mockResolvedValue({
-        id: 'sec-own', secure: true, serverId: 'srv-1',
-        members: [{ userId: 'u1' }, { userId: 'u9' }], messages: [],
-      });
-      prismaMock.channel.delete.mockResolvedValue({});
-      // remaining membership in someone else's channel
-      prismaMock.channelMember.findMany
-        .mockResolvedValueOnce([{ channelId: 'sec-other' }]) // memberships query
-        .mockResolvedValue([]); // members payload for broadcast
+  describe('lockServerMemberRows', () => {
+    it('takes FOR KEY SHARE on the member rows, in id order, and answers the ids that are members', async () => {
+      const tx = { $queryRaw: vi.fn().mockResolvedValue([{ user_id: 'u1' }, { user_id: 'u3' }]) };
 
-      await purgeSecureChannelState('u1', 'srv-1');
+      const members = await lockServerMemberRows(tx as any, 'srv-1', ['u3', 'u1', 'u2']);
 
-      expect(prismaMock.channel.findMany).toHaveBeenCalledWith({
-        where: { createdById: 'u1', secure: true, serverId: 'srv-1' },
-        select: { id: true },
+      const sql = (tx.$queryRaw.mock.calls[0][0] as string[]).join('?');
+      // KEY SHARE: the removal's DELETE of the row waits for it, an UPDATE of
+      // the row (an ownership transfer takes the space row, then the member
+      // rows) does not, so the two never deadlock. FOR SHARE blocked it.
+      expect(sql).toMatch(/ORDER BY user_id\s+FOR KEY SHARE$/);
+      expect(sql).not.toMatch(/FOR SHARE/);
+      expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['srv-1', ['u3', 'u1', 'u2']]);
+      expect(members).toEqual(new Set(['u1', 'u3']));
+    });
+  });
+
+  describe('undoRoomJoinsOfRemovedMembers', () => {
+    it('re-reads the rows of the users just joined and takes those without one back out of the room', async () => {
+      prismaMock.channelMember.findMany.mockResolvedValue([{ userId: 'u1' }]);
+
+      const still = await undoRoomJoinsOfRemovedMembers('sec-1', ['u1', 'u2']);
+
+      expect(prismaMock.channelMember.findMany).toHaveBeenCalledWith({
+        where: { channelId: 'sec-1', userId: { in: ['u1', 'u2'] } },
+        select: { userId: true },
       });
-      expect(prismaMock.channel.delete).toHaveBeenCalledWith({ where: { id: 'sec-own' } });
-      expect(prismaMock.channelMember.deleteMany).toHaveBeenCalledWith({
-        where: { channelId: 'sec-other', userId: 'u1' },
+      // by user room, adapter-wide
+      expect(mockIn).toHaveBeenCalledTimes(1);
+      expect(mockIn).toHaveBeenCalledWith('user:u2');
+      expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-1');
+      expect(still).toEqual(new Set(['u1']));
+    });
+
+    it('a failed re-read confirms nobody: every join is taken back, and it is logged', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.channelMember.findMany.mockRejectedValue(new Error('db hiccup'));
+      try {
+        const still = await undoRoomJoinsOfRemovedMembers('sec-1', ['u1', 'u2']);
+
+        expect(still).toEqual(new Set());
+        expect(mockIn).toHaveBeenCalledWith('user:u1');
+        expect(mockIn).toHaveBeenCalledWith('user:u2');
+        expect(mockSocketsLeave).toHaveBeenCalledTimes(2);
+        expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-1');
+        expect(warn).toHaveBeenCalledWith('[SecureChannel] Could not re-check the members joined to channel:sec-1; taking every join back:', 'db hiccup');
+      } finally {
+        warn.mockRestore();
+        prismaMock.channelMember.findMany.mockReset().mockResolvedValue([]);
+      }
+    });
+  });
+
+  describe('getSecureChannelMembersPayload', () => {
+    it('lists only the rows whose user is a member of the channel\'s space', async () => {
+      await getSecureChannelMembersPayload('sec-1', 'srv-1');
+
+      expect(prismaMock.channelMember.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { channelId: 'sec-1', user: { memberships: { some: { serverId: 'srv-1' } } } },
+      }));
+    });
+
+    it('the members-updated broadcast reads the list of the space it names', async () => {
+      await removeSecureMember('sec-1', 'srv-1', 'u2');
+
+      const listRead = prismaMock.channelMember.findMany.mock.calls.at(-1)[0];
+      expect(listRead.where).toEqual({ channelId: 'sec-1', user: { memberships: { some: { serverId: 'srv-1' } } } });
+    });
+  });
+
+  describe('removeSecureMembershipsInTx (inside the transaction that ends a membership)', () => {
+    const order: string[] = [];
+    let tx: Record<string, any>;
+
+    beforeEach(() => {
+      order.length = 0;
+      tx = {
+        $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+          order.push(`lock:${strings.join('?').includes('c.server_id = ?') ? 'space' : 'account'}`);
+          // one channel the user created, one they were invited to, id order
+          return [
+            { id: 'sec-other', server_id: 'srv-1', created_by_id: 'u5' },
+            { id: 'sec-own', server_id: 'srv-1', created_by_id: 'u1' },
+          ];
+        }),
+        channelMember: {
+          findMany: vi.fn(async () => {
+            order.push('read:created-members');
+            return [{ channelId: 'sec-own', userId: 'u1' }, { channelId: 'sec-own', userId: 'u9' }];
+          }),
+          deleteMany: vi.fn(async () => { order.push('delete:rows'); return { count: 1 }; }),
+        },
+        channel: { deleteMany: vi.fn(async () => { order.push('delete:created'); return { count: 1 }; }) },
+        e2EKeyShare: { deleteMany: vi.fn(async () => { order.push('delete:shares'); return { count: 0 }; }) },
+        channelRead: { deleteMany: vi.fn() },
+      };
+    });
+
+    it('locks EVERY secure channel the user created or belongs to, in id order, before deleting anything', async () => {
+      await removeSecureMembershipsInTx(tx as any, 'u1', 'srv-1');
+
+      // The lock is the first statement: a channel delete, another departure
+      // and an invite all take the channel row first too, so they queue on it
+      // in one order instead of each holding a row the other needs
+      expect(order[0]).toBe('lock:space');
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+      const lockSql = (tx.$queryRaw.mock.calls[0][0] as string[]).join('?');
+      expect(lockSql).toMatch(/c\.secure = true AND c\.server_id = \?/);
+      expect(lockSql).toMatch(/c\.created_by_id = \?\s+OR EXISTS \(SELECT 1 FROM channel_members cm WHERE cm\.channel_id = c\.id AND cm\.user_id = \?\)/);
+      expect(lockSql).toMatch(/ORDER BY c\.id\s+FOR UPDATE OF c$/);
+      expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['srv-1', 'u1', 'u1']);
+    });
+
+    it('then deletes the channels the user created, their rows in the others and the key shares; the read markers are not its business', async () => {
+      const removal = await removeSecureMembershipsInTx(tx as any, 'u1', 'srv-1');
+
+      expect(order).toEqual(['lock:space', 'read:created-members', 'delete:created', 'delete:rows', 'delete:shares']);
+      expect(tx.channel.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['sec-own'] }, secure: true } });
+      // Every channel of the space, not only the secure ones: no row may
+      // survive the membership
+      expect(tx.channelMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1', channel: { serverId: 'srv-1' } } });
+      expect(tx.e2EKeyShare.deleteMany).toHaveBeenCalledWith({
+        where: { recipientUserId: 'u1', conversationId: { in: ['ch:sec-own', 'ch:sec-other'] } },
+      });
+      // A read marker grants nothing; deleting it here would be one more row
+      // locked in an order a channel delete's cascade does not share
+      expect(tx.channelRead.deleteMany).not.toHaveBeenCalled();
+      expect(removal).toEqual({
+        userId: 'u1',
+        deleted: [{ channelId: 'sec-own', serverId: 'srv-1', memberIds: ['u1', 'u9'] }],
+        left: [{ channelId: 'sec-other', serverId: 'srv-1' }],
       });
     });
 
-    it('one failing channel delete does not abort the rest', async () => {
-      const consoleErr = vi.spyOn(console, 'error').mockImplementation(() => {});
-      prismaMock.channel.findMany.mockResolvedValue([{ id: 'sec-a' }, { id: 'sec-b' }]);
-      prismaMock.channel.findUnique
-        .mockRejectedValueOnce(new Error('db hiccup'))
-        .mockResolvedValueOnce({
-          id: 'sec-b', secure: true, serverId: 'srv-1', members: [], messages: [],
-        });
-      prismaMock.channel.delete.mockResolvedValue({});
+    it('without a space (account deletion) covers every space the user is in', async () => {
+      await removeSecureMembershipsInTx(tx as any, 'u1');
 
-      await deleteSecureChannelsOwnedBy('u1', 'srv-1');
+      expect(order[0]).toBe('lock:account');
+      expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['u1', 'u1']);
+      expect(tx.channelMember.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } });
+    });
 
-      expect(prismaMock.channel.delete).toHaveBeenCalledWith({ where: { id: 'sec-b' } });
-      expect(consoleErr).toHaveBeenCalled();
-      consoleErr.mockRestore();
+    it('a user who created nothing and belongs to no secure channel: no channel delete, no key-share statement', async () => {
+      tx.$queryRaw.mockResolvedValue([]);
+
+      const removal = await removeSecureMembershipsInTx(tx as any, 'u1', 'srv-1');
+
+      expect(tx.channel.deleteMany).not.toHaveBeenCalled();
+      expect(tx.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+      // the row delete still runs: it is what catches a row nothing listed
+      expect(tx.channelMember.deleteMany).toHaveBeenCalledTimes(1);
+      expect(removal).toEqual({ userId: 'u1', deleted: [], left: [] });
+    });
+
+    it('a statement that throws is thrown to the transaction, never swallowed', async () => {
+      tx.channel.deleteMany.mockRejectedValue(new Error('db hiccup'));
+
+      await expect(removeSecureMembershipsInTx(tx as any, 'u1', 'srv-1')).rejects.toThrow('db hiccup');
+      expect(tx.channelMember.deleteMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('announceSecureMembershipsRemoved (after the commit)', () => {
+    const removal = {
+      userId: 'u1',
+      deleted: [{ channelId: 'sec-own', serverId: 'srv-1', memberIds: ['u1', 'u9'] }],
+      left: [{ channelId: 'sec-other', serverId: 'srv-1' }],
+    };
+
+    it('deleted channels: channel:deleted to every member, the room emptied, live voice torn down', async () => {
+      await announceSecureMembershipsRemoved(removal);
+
+      expect(mockTo).toHaveBeenCalledWith('user:u9');
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_DELETED, { channelId: 'sec-own', serverId: 'srv-1' });
+      expect(mockIn).toHaveBeenCalledWith('channel:sec-own');
+      expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-own');
+      expect(mockBroadcastChannelVoiceCleanup).toHaveBeenCalledWith(expect.anything(), 'sec-own');
+    });
+
+    it('channels left: the user told and out of the room, their voice session ended, the others refreshed', async () => {
+      await announceSecureMembershipsRemoved(removal);
+
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_DELETED, { channelId: 'sec-other', serverId: 'srv-1' });
+      expect(mockIn).toHaveBeenCalledWith('user:u1');
+      expect(mockSocketsLeave).toHaveBeenCalledWith('channel:sec-other');
+      expect(mockBroadcastVoiceEvictUser).toHaveBeenCalledWith(expect.anything(), 'sec-other', 'u1');
+      expect(mockTo).toHaveBeenCalledWith('channel:sec-other');
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_MEMBERS_UPDATED, expect.objectContaining({ channelId: 'sec-other', serverId: 'srv-1' }));
+    });
+
+    it('every step is best effort: one that throws is logged and the next still runs, nothing is thrown', async () => {
+      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockBroadcastChannelVoiceCleanup.mockRejectedValueOnce(new Error('voice cleanup failed'));
+      mockBroadcastVoiceEvictUser.mockRejectedValueOnce(new Error('evict failed'));
+      try {
+        await expect(announceSecureMembershipsRemoved(removal)).resolves.toBeUndefined();
+
+        expect(errorLog).toHaveBeenCalledWith('[SecureChannel] Channel sec-own deleted, but the voice cleanup failed:', 'voice cleanup failed');
+        expect(errorLog).toHaveBeenCalledWith('[SecureChannel] Member removed from sec-other, but the voice eviction failed:', 'evict failed');
+        // the members still get their refreshed list
+        expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_MEMBERS_UPDATED, expect.objectContaining({ channelId: 'sec-other' }));
+      } finally {
+        errorLog.mockRestore();
+      }
     });
   });
 });

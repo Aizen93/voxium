@@ -1407,6 +1407,19 @@ machinery above, not a second protocol. The crypto engine is unchanged.
 - Members can leave; only the creator invites/removes/renames/deletes. A
   creator leaving the server (kick, leave, account deletion) deletes their
   channels, with member-scoped events and S3 blob cleanup.
+- A `ChannelMember` row exists only while its user is a member of the
+  channel's server. Every end of a server membership removes that user's rows
+  in the server (and deletes the channels they created) in the SAME
+  transaction as the membership row, so the departure commits whole or not at
+  all; the events, the voice eviction and the blob cleanup follow the commit.
+  Every write of a row (creation, invitation) checks its user's server
+  membership inside the writing transaction, under a `FOR KEY SHARE` lock on
+  the membership row (the weakest lock the removal's DELETE still waits for;
+  an UPDATE of the row does not), so a concurrent removal is ordered before
+  or after it.
+  A new membership starts with none: every join deletes any row of its user
+  in that server in the join's transaction, so a rejoin never restores a
+  channel without a new invitation.
 
 ### 19.2 Scopes
 
@@ -1436,7 +1449,7 @@ members × `MAX_DEVICES` = 125 shares worst case — inside the key-share caps).
   membership row is gone.
 - `assertSharesE2EContext` extends the bundle-claim/device-list guard: sharing
   a secure channel is an E2E context, so co-members can build Olm sessions
-  without ever opening a DM.
+  without ever opening a DM — while both are members of the channel's server.
 
 ### 19.4 Rotation and the product guarantees
 
