@@ -1146,7 +1146,7 @@
         "githubContributors": "Voir les contributeurs sur GitHub",
         "founderRole": "Fondateur et mainteneur",
         "profile": "Profil GitHub",
-        "profileLabel": "@{{username}} sur GitHub",
+        "profileLabel": "Profil GitHub de @{{username}}",
         "credits": {
           "founder": "A créé Voxium et développé les bases de la voix en temps réel, de la messagerie et de l’application de bureau.",
           "pins": "A renforcé les autorisations d’épinglage et de désépinglage des messages.",

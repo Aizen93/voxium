@@ -119,6 +119,7 @@ describe('public landing pages', () => {
       const localized = i18n.getResource(code, 'translation', 'landing.publicPages');
       expect(populatedKeys(localized).sort(), code).toEqual(keys);
       expect(localized.contributorsPage.profileLabel, code).toContain('{{username}}');
+      expect(localized.contributorsPage.profileLabel, code).toContain(localized.contributorsPage.profile);
     }
   });
 
@@ -200,6 +201,11 @@ describe('public landing pages', () => {
       .toEqual(['Oussama Aouessar · Founder and maintainer', 'Jeff', undefined]);
     expect(credits.map((entry) => entry.querySelector('a')?.getAttribute('href')))
       .toEqual(['https://github.com/Aizen93', 'https://github.com/jdotc1', 'https://github.com/XRafik']);
+    for (const credit of credits) {
+      const link = credit.querySelector('a')!;
+      expect(link.getAttribute('aria-label')).toBe(`GitHub profile of ${credit.querySelector('h3')?.textContent}`);
+      expect(link.getAttribute('aria-label')).toContain(link.textContent?.trim());
+    }
     expect(credits.map((entry) => entry.querySelector('img')?.getAttribute('src')))
       .toEqual(['/contributor-avatars/aizen93.jpg', '/contributor-avatars/jdotc1.jpg', '/contributor-avatars/xrafik.png']);
     expect(container.querySelector('#supporters a')?.getAttribute('href')).toBe('https://github.com/sponsors/Aizen93');

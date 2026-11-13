@@ -1144,7 +1144,7 @@
         "githubContributors": "GitHub에서 기여자 보기",
         "founderRole": "창립자 및 메인테이너",
         "profile": "GitHub 프로필",
-        "profileLabel": "GitHub의 @{{username}}",
+        "profileLabel": "@{{username}}의 GitHub 프로필",
         "credits": {
           "founder": "Voxium을 시작하고 실시간 음성, 메시지 및 데스크톱 앱의 기반을 개발했습니다.",
           "pins": "메시지 고정과 고정 해제에 필요한 권한을 강화했습니다.",

@@ -1154,7 +1154,7 @@
         "githubContributors": "عرض المساهمين على GitHub",
         "founderRole": "المؤسس والمشرف على الصيانة",
         "profile": "الملف الشخصي على GitHub",
-        "profileLabel": "‏@{{username}} على GitHub",
+        "profileLabel": "الملف الشخصي على GitHub لـ ⁦@{{username}}⁩",
         "credits": {
           "founder": "أسس Voxium وطوّر أساس وظائف الصوت الفوري والمراسلة وتطبيق سطح المكتب.",
           "pins": "عزّز ضوابط الأذونات لتثبيت الرسائل وإلغاء تثبيتها.",

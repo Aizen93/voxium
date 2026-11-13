@@ -1144,7 +1144,7 @@
         "githubContributors": "GitHub で貢献者を見る",
         "founderRole": "創設者・メンテナー",
         "profile": "GitHub プロフィール",
-        "profileLabel": "GitHub の @{{username}}",
+        "profileLabel": "@{{username}} の GitHub プロフィール",
         "credits": {
           "founder": "Voxium を立ち上げ、リアルタイム音声、メッセージ、デスクトップアプリの基盤を開発しました。",
           "pins": "メッセージのピン留めと解除に必要な権限を厳格化しました。",

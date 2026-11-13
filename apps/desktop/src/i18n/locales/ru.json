@@ -1150,7 +1150,7 @@
         "githubContributors": "Посмотреть участников проекта на GitHub",
         "founderRole": "Основатель и сопровождающий",
         "profile": "Профиль GitHub",
-        "profileLabel": "@{{username}} на GitHub",
+        "profileLabel": "Профиль GitHub пользователя @{{username}}",
         "credits": {
           "founder": "Основал Voxium и разработал основу голосовой связи, обмена сообщениями и настольного приложения.",
           "pins": "Ужесточил права на закрепление и открепление сообщений.",

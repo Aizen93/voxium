@@ -1144,7 +1144,7 @@
         "githubContributors": "在 GitHub 上查看贡献者",
         "founderRole": "创始人和维护者",
         "profile": "GitHub 个人资料",
-        "profileLabel": "GitHub 上的 @{{username}}",
+        "profileLabel": "@{{username}} 的 GitHub 个人资料",
         "credits": {
           "founder": "创立了 Voxium，并开发了实时语音、消息和桌面应用的核心功能。",
           "pins": "收紧了置顶和取消置顶消息的权限。",

@@ -1099,7 +1099,7 @@
         "githubContributors": "View GitHub contributors",
         "founderRole": "Founder and maintainer",
         "profile": "GitHub profile",
-        "profileLabel": "@{{username}} on GitHub",
+        "profileLabel": "GitHub profile of @{{username}}",
         "credits": {
           "founder": "Started Voxium and built its core real-time voice, messaging, and desktop experience.",
           "pins": "Tightened permissions for pinning and unpinning messages.",
