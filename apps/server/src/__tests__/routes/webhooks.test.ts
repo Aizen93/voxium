@@ -831,9 +831,31 @@ describe('POST /servers/:serverId/webhooks', () => {
     spy.mockRestore();
   });
 
-  it('any other foreign key refused surfaces as itself (a 500), not as a missing channel', async () => {
+  it('the space\'s key refused (the space deleted meanwhile) answers 404 "Server not found", nothing emitted', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     txMock.webhook.create.mockRejectedValueOnce(foreignKeyViolation('webhooks_server_id_fkey'));
+    const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Server not found' });
+    expect(spy).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('a space the transaction finds gone under its lock answers 404 "Server not found": nothing counted, nothing inserted, nothing emitted', async () => {
+    txMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) =>
+      (strings.join('?').includes('FROM servers') ? [] : [{ user_id: 'user-1' }]));
+    const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'Server not found' });
+    expect(txMock.webhook.count).not.toHaveBeenCalled();
+    expect(txMock.webhook.create).not.toHaveBeenCalled();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('any other foreign key refused surfaces as itself (a 500), not as a missing row', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    txMock.webhook.create.mockRejectedValueOnce(foreignKeyViolation('webhooks_another_fkey'));
     const res = await create({ channelId: 'ch-1', name: 'CI', type: 'generic' });
     expect(res.status).toBe(500);
     expect(h.emitted).toHaveLength(0);
@@ -1261,7 +1283,7 @@ describe('PATCH /servers/:serverId/webhooks/:webhookId', () => {
   it('a move whose write is refused on any other key surfaces as itself (a 500), not as a missing channel', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     prismaMock.channel.findUnique.mockResolvedValue({ ...textChannel, id: 'ch-2' });
-    prismaMock.webhook.update.mockRejectedValueOnce(foreignKeyViolation('webhooks_server_id_fkey'));
+    prismaMock.webhook.update.mockRejectedValueOnce(foreignKeyViolation('webhooks_another_fkey'));
     const res = await patch({ channelId: 'ch-2' });
     expect(res.status).toBe(500);
     expect(h.emitted).toHaveLength(0);

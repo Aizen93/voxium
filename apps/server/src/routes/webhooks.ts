@@ -179,13 +179,15 @@ async function loadOwnWebhook(
 
 /**
  * A webhook write's foreign-key refusal (P2003), answered by the key the
- * driver names. The channel's key (the channel deleted between assertChannel
- * and the write) answers the missing channel it now is. The caller's own key,
- * the creator's on a create and the rotator's on a rotate (the caller's
+ * driver names. The space's key (the space deleted meanwhile) answers the
+ * missing space it now is. The channel's key (the channel deleted between
+ * assertChannel and the write) answers the missing channel. The caller's own
+ * key, the creator's on a create and the rotator's on a rotate (the caller's
  * account deleted meanwhile), answers the missing user. Anything else is
  * thrown as it is.
  */
 function foreignKeyRefusedAsNotFound(err: unknown): never {
+  if (violatesForeignKey(err, 'webhooks_server_id_fkey')) throw new NotFoundError('Server');
   if (violatesForeignKey(err, 'webhooks_channel_id_fkey')) throw new NotFoundError('Channel');
   if (violatesForeignKey(err, 'webhooks_created_by_id_fkey') || violatesForeignKey(err, 'webhooks_last_rotated_by_id_fkey')) {
     throw new NotFoundError('User');
@@ -332,7 +334,9 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
       await prisma.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR KEY SHARE`;
       await prisma.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR KEY SHARE`;
       return prisma.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+        // A space deleted since the checks answers as one
+        const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+        if (space.length === 0) throw new NotFoundError('Server');
         const count = await tx.webhook.count({ where: { serverId } });
         if (count >= limits.maxWebhooksPerServer) {
           throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);
