@@ -28,6 +28,25 @@ afterEach(() => {
 });
 
 describe('public landing pages', () => {
+  it.each([
+    ["en","infrastructure","self-hosted","private audio"] as const,
+    ["fr","infrastructure","auto-hébergé","audio de l’appel privé"] as const,
+    ["de","Infrastruktur","selbst gehostete","Ton des privaten Anrufs"] as const,
+    ["es","infraestructura","autoalojado","audio de la llamada privada"] as const,
+    ["pt","infraestrutura","auto-hospedado","áudio privado"] as const,
+    ["ru","инфраструктуру","размещает самостоятельно","звуком личного звонка"] as const,
+    ["uk","інфраструктуру","розміщує самостійно","звуком приватного дзвінка"] as const,
+    ["zh","基础设施","自托管","私密音频"] as const,
+    ["ja","インフラ","セルフホスト","プライベート通話の音声"] as const,
+    ["ko","인프라","자체 호스팅","비공개 오디오"] as const,
+    ["ar","البنية التحتية","ذاتية الاستضافة","الصوت الخاص"] as const,
+  ])('preserves infrastructure, self-hosting, and private audio terminology in %s', (locale, infrastructure, selfHosted, privateAudio) => {
+    const copy = i18n.getResource(locale, 'translation', 'landing.publicPages.architecturePage');
+    expect(copy.intro).toContain(infrastructure);
+    expect(copy.notes.stun.detail).toContain(selfHosted);
+    expect(copy.flows.private.detail).toContain(privateAudio);
+  });
+
   it('sets the canonical URL for each public page and restores the home URL on unmount', () => {
     const canonical = document.createElement('link');
     canonical.rel = 'canonical';

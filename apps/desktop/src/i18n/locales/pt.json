@@ -1055,7 +1055,7 @@
       "architecturePage": {
         "title": "Como o Voxium",
         "highlight": "funciona.",
-        "intro": "Acompanhe uma mensagem, entre em um canal de voz ou faça uma chamada privada. Veja o que fica no seu dispositivo e o que passa por um servidor Voxium.",
+        "intro": "Acompanhe uma mensagem, entre em um canal de voz ou faça uma chamada privada. Veja o que fica no seu dispositivo e o que passa pela infraestrutura do Voxium.",
         "mapTitle": "Acompanhe a conexão",
         "mapIntro": "Escolha uma ação para acompanhar seu percurso no Voxium.",
         "mapLabel": "Mapa do sistema",
@@ -1124,7 +1124,7 @@
           },
           "private": {
             "label": "Fazer uma chamada privada",
-            "detail": "Socket.IO transporta a sinalização. Após a conexão, os dois aplicativos trocam áudio privado diretamente via WebRTC."
+            "detail": "Socket.IO transporta a sinalização da chamada. Após a conexão, os dois aplicativos trocam áudio privado diretamente via WebRTC."
           }
         },
         "notes": {
@@ -1134,7 +1134,7 @@
           },
           "stun": {
             "title": "Como as chamadas privadas se conectam",
-            "detail": "O serviço STUN hospedado pelo Voxium ajuda os dois aplicativos a estabelecer uma conexão direta de áudio."
+            "detail": "O serviço STUN auto-hospedado do Voxium ajuda os dois aplicativos a estabelecer uma conexão direta de áudio."
           }
         }
       },

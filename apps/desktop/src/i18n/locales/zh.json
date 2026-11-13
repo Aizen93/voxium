@@ -1053,7 +1053,7 @@
       "architecturePage": {
         "title": "Voxium 如何",
         "highlight": "运作？",
-        "intro": "追踪一条消息、加入语音频道，或发起私密通话。看看哪些内容留在设备上，哪些经过 Voxium 服务器。",
+        "intro": "追踪一条消息、加入语音频道，或发起私密通话。看看哪些内容留在设备上，哪些经过 Voxium 的基础设施。",
         "mapTitle": "追踪连接",
         "mapIntro": "选择一个操作，查看它在 Voxium 中的路径。",
         "mapLabel": "系统架构图",
@@ -1139,7 +1139,7 @@
       "contributorsPage": {
         "eyebrow": "社区",
         "title": "Voxium 背后的",
-        "highlight": "贡献者与赞助者",
+        "highlight": "每一位参与者",
         "intro": "感谢所有参与开发 Voxium 并帮助它持续运行的人。",
         "githubContributors": "在 GitHub 上查看贡献者",
         "founderRole": "创始人和维护者",

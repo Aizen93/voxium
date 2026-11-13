@@ -1055,7 +1055,7 @@
       "architecturePage": {
         "title": "Cómo funciona",
         "highlight": "Voxium.",
-        "intro": "Sigue un mensaje, entra en un canal de voz o haz una llamada privada. Descubre qué se queda en tu dispositivo y qué pasa por un servidor de Voxium.",
+        "intro": "Sigue un mensaje, entra en un canal de voz o haz una llamada privada. Descubre qué se queda en tu dispositivo y qué pasa por la infraestructura de Voxium.",
         "mapTitle": "Sigue la conexión",
         "mapIntro": "Elige una acción para seguir su recorrido por Voxium.",
         "mapLabel": "Mapa del sistema",
@@ -1120,11 +1120,11 @@
           },
           "voice": {
             "label": "Entrar en un canal de voz",
-            "detail": "Socket.IO coordina la conexión y Redis mantiene el estado de voz. Tu aplicación envía el audio directamente a mediasoup, que lo retransmite al canal."
+            "detail": "Socket.IO coordina la entrada y Redis mantiene el estado de voz. Tu aplicación envía el audio directamente a mediasoup, que lo retransmite al canal."
           },
           "private": {
             "label": "Hacer una llamada privada",
-            "detail": "Socket.IO lleva la señalización. Una vez conectadas, las dos aplicaciones intercambian audio directamente mediante WebRTC."
+            "detail": "Socket.IO transmite la señalización de la llamada. Una vez conectadas, las dos aplicaciones intercambian directamente el audio de la llamada privada mediante WebRTC."
           }
         },
         "notes": {
@@ -1134,7 +1134,7 @@
           },
           "stun": {
             "title": "Cómo se conectan las llamadas privadas",
-            "detail": "El servicio STUN de Voxium ayuda a las dos aplicaciones a establecer una conexión de audio directa."
+            "detail": "El servicio STUN autoalojado de Voxium ayuda a las dos aplicaciones a establecer una conexión de audio directa."
           }
         }
       },

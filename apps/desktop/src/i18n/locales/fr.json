@@ -1055,7 +1055,7 @@
       "architecturePage": {
         "title": "Comment fonctionne",
         "highlight": "Voxium.",
-        "intro": "Suivez un message, rejoignez un salon vocal ou passez un appel privé. Découvrez ce qui reste sur votre appareil et ce qui transite par un serveur Voxium.",
+        "intro": "Suivez un message, rejoignez un salon vocal ou passez un appel privé. Découvrez ce qui reste sur votre appareil et ce qui transite par l’infrastructure de Voxium.",
         "mapTitle": "Suivez la connexion",
         "mapIntro": "Choisissez une action pour suivre son parcours dans Voxium.",
         "mapLabel": "Schéma du système",
@@ -1120,11 +1120,11 @@
           },
           "voice": {
             "label": "Rejoindre un salon vocal",
-            "detail": "Socket.IO coordonne la connexion et Redis suit l’état du salon vocal. Votre application envoie l’audio à mediasoup, qui le relaie au salon."
+            "detail": "Socket.IO coordonne l’accès au salon et Redis suit l’état du salon vocal. Votre application envoie l’audio directement à mediasoup, qui le relaie au salon."
           },
           "private": {
             "label": "Passer un appel privé",
-            "detail": "Socket.IO transmet la signalisation. Une fois connectées, les deux applications échangent l’audio directement via WebRTC."
+            "detail": "Socket.IO transmet la signalisation des appels. Une fois connectées, les deux applications échangent directement l’audio de l’appel privé via WebRTC."
           }
         },
         "notes": {

@@ -1055,7 +1055,7 @@
       "architecturePage": {
         "title": "So funktioniert",
         "highlight": "Voxium.",
-        "intro": "Verfolge eine Nachricht, tritt einem Sprachkanal bei oder führe einen privaten Anruf. Sieh, was auf deinem Gerät bleibt und was über einen Voxium-Server läuft.",
+        "intro": "Verfolge eine Nachricht, tritt einem Sprachkanal bei oder führe einen privaten Anruf. Sieh, was auf deinem Gerät bleibt und was über die Infrastruktur von Voxium läuft.",
         "mapTitle": "Verfolge die Verbindung",
         "mapIntro": "Wähle eine Aktion, um ihren Weg durch Voxium zu verfolgen.",
         "mapLabel": "Systemübersicht",
@@ -1124,7 +1124,7 @@
           },
           "private": {
             "label": "Privaten Anruf starten",
-            "detail": "Socket.IO überträgt die Anrufsignalisierung. Nach dem Verbindungsaufbau tauschen die beiden Apps den Ton direkt über WebRTC aus."
+            "detail": "Socket.IO überträgt die Anrufsignalisierung. Nach dem Verbindungsaufbau tauschen die beiden Apps den Ton des privaten Anrufs direkt über WebRTC aus."
           }
         },
         "notes": {
@@ -1149,10 +1149,10 @@
         "profileLabel": "@{{username}} auf GitHub",
         "credits": {
           "founder": "Hat Voxium gegründet und die Grundlagen für Echtzeit-Sprache, Nachrichten und die Desktop-App entwickelt.",
-          "pins": "Hat die Berechtigungen zum Anheften und Lösen von Nachrichten präzisiert.",
+          "pins": "Hat die Berechtigungen zum Anheften und Lösen von Nachrichten verschärft.",
           "nickname": "Hat Fehler beim Speichern von Spitznamen sichtbar gemacht und doppelte Anfragen verhindert."
         },
-        "anonymous": "Anonyme Unterstützung",
+        "anonymous": "Anonyme unterstützende Person",
         "supporterPrivacy": "Wir nennen Unterstützende, wenn sie das möchten. Danke an alle, die privat spenden.",
         "thanks": "Danke für deine Unterstützung von Voxium",
         "supporterImpact": "Spenden helfen, die Infrastruktur für den Betrieb von Voxium zu finanzieren."
