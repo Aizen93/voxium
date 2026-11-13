@@ -9,10 +9,12 @@ import { resolve } from 'node:path';
  * before them. Its behaviour was exercised against a private PostgreSQL
  * cluster: applied by `prisma migrate deploy` over seeded duplicates of every
  * kind, and inside a transaction that was rolled back, with a second run
- * changing nothing. Prisma cannot express a partial index, so `prisma migrate
- * dev` reads these as drift and offers to drop them. What this pins is the
- * shape that made it safe, the schema's warning, and the route's mapping of
- * their violation.
+ * changing nothing. They are created in SQL because the schema does not
+ * enable Prisma's `partialIndexes` preview feature: `prisma migrate dev` may
+ * read them as drift and offer to drop them, and would, were the feature
+ * enabled without the schema declaring them. What this pins is the shape
+ * that made it safe, the schema's warning, that guard, and the route's
+ * mapping of their violation.
  */
 
 const MIGRATIONS = resolve(__dirname, '../../../prisma/migrations');
@@ -24,6 +26,34 @@ const code = sql
   .join('\n');
 const schema = readFileSync(resolve(__dirname, '../../../prisma/schema.prisma'), 'utf8');
 const route = readFileSync(resolve(__dirname, '../../routes/reports.ts'), 'utf8');
+
+const PENDING_INDEXES = ['reports_pending_user_key', 'reports_pending_message_key', 'reports_pending_server_key'];
+
+/** The schema text without its `//` comments (a name in a comment declares nothing). */
+function withoutComments(text: string): string {
+  return text.split(/\r?\n/).map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+}
+
+/** The preview features the schema's client generator enables. */
+function previewFeatures(text: string): string[] {
+  const generator = /generator\s+client\s*\{([\s\S]*?)\}/.exec(withoutComments(text));
+  const list = generator && /previewFeatures\s*=\s*\[([^\]]*)\]/.exec(generator[1]);
+  return list ? [...list[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]) : [];
+}
+
+/**
+ * With `partialIndexes` enabled, Prisma reads the partial indexes the schema
+ * does not declare as drift and `migrate dev` drops them: the pending-report
+ * indexes the schema would leave undeclared then (none while the feature is
+ * off, since they are created in SQL). Declared means named (`map: "…"`) by a
+ * `@@unique` or `@@index` attribute.
+ */
+function pendingIndexesUndeclaredUnderPartialIndexes(text: string): string[] {
+  if (!previewFeatures(text).includes('partialIndexes')) return [];
+  const code = withoutComments(text);
+  return PENDING_INDEXES.filter((name) =>
+    !new RegExp(`@@(?:unique|index)\\((?:[^()]|\\([^()]*\\))*map:\\s*"${name}"`).test(code));
+}
 
 describe('the reports migration', () => {
   it('sorts after the migration before it, so a deploy applies it after the ones already shipped', () => {
@@ -67,6 +97,36 @@ describe('the reports migration', () => {
     expect(code).toMatch(/\("type" = 'message' AND "message_id" IS NOT NULL\)/);
     // no moderator decided: the resolver stays empty
     expect(code).not.toMatch(/resolved_by_id/);
+  });
+
+  it('if the schema ever enables the partialIndexes preview feature, it declares the three pending-report indexes (or migrate dev drops them)', () => {
+    expect(pendingIndexesUndeclaredUnderPartialIndexes(schema)).toEqual([]);
+  });
+
+  describe('the partialIndexes guard itself', () => {
+    const withFlag = schema.replace(/previewFeatures\s*=\s*\[([^\]]*)\]/, (_m, list: string) => `previewFeatures = [${list}, "partialIndexes"]`);
+
+    it('reads the preview features of the generator, not a comment', () => {
+      expect(previewFeatures(schema)).toEqual(['relationJoins']);
+      expect(previewFeatures(withFlag)).toEqual(['relationJoins', 'partialIndexes']);
+      expect(previewFeatures(`// previewFeatures = ["partialIndexes"]\n${schema}`)).toEqual(['relationJoins']);
+    });
+
+    it('refuses a schema that enables the feature and declares none of them (the names in the comment declare nothing)', () => {
+      expect(withFlag).toContain('reports_pending_user_key'); // in the Report comment
+      expect(pendingIndexesUndeclaredUnderPartialIndexes(withFlag)).toEqual(PENDING_INDEXES);
+    });
+
+    it('accepts it once each index is declared on Report, and names the one still missing', () => {
+      const declared = withFlag.replace('@@map("reports")', [
+        '@@unique([reporterId, reportedUserId], map: "reports_pending_user_key", where: raw("status = \'pending\' AND type = \'user\'"))',
+        '@@unique([reporterId, messageId], map: "reports_pending_message_key", where: raw("status = \'pending\' AND type = \'message\'"))',
+        '@@map("reports")',
+      ].join('\n  '));
+      expect(pendingIndexesUndeclaredUnderPartialIndexes(declared)).toEqual(['reports_pending_server_key']);
+      const all = declared.replace('@@map("reports")', '@@unique([reporterId, serverId], map: "reports_pending_server_key", where: raw("status = \'pending\' AND type = \'server\'"))\n  @@map("reports")');
+      expect(pendingIndexesUndeclaredUnderPartialIndexes(all)).toEqual([]);
+    });
   });
 
   it('names the indexes in schema.prisma, and warns never to let migrate dev drop them', () => {

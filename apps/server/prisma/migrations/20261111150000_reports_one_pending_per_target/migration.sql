@@ -19,10 +19,13 @@
 -- keeps a NULL message_id (SET NULL), and NULLs never collide in a unique
 -- index, so those stay as they are.
 --
--- Prisma cannot express a partial index in schema.prisma, so these are
--- invisible to the schema (see the note on Report there; `prisma migrate
--- diff` against a migrated database leaves them alone). Should `prisma
--- migrate dev` ever offer to DROP them as drift, do not let it.
+-- They are created here, in SQL, and are invisible to schema.prisma, because
+-- the schema does not enable Prisma's `partialIndexes` preview feature, the
+-- one that lets a schema declare a partial index (see the note on Report
+-- there; `prisma migrate diff` against a migrated database leaves them alone
+-- while it is off). Enabling it without declaring these three in the schema
+-- would make `prisma migrate dev` read them as drift and drop them. Should
+-- `prisma migrate dev` ever offer to DROP them as drift, do not let it.
 --
 -- ONE statement, so it holds on any connection that runs it: the lock in
 -- step 0 lasts until step 2's indexes exist, whether or not the statements
