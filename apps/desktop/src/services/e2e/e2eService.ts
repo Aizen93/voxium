@@ -3402,58 +3402,69 @@ export class E2EService {
       // stopping at one page would let queued older shares delay a live one.
       // A page of shares all held here already does not count (MAX_CLAIM_REQUESTS).
       let pages = 0;
-      for (let request = 0; request < MAX_CLAIM_REQUESTS && pages < MAX_CLAIM_PAGES; request++) {
-        // Disposed meanwhile: this page is imported (dispose() waits for it),
-        // the next one stays on the server.
-        if (this.disposed) break;
-        // The unguarded client: an answer that comes back after the teardown
-        // (the dispose deadline passed) still holds shares this device has not
-        // stored, and must reach the vault rather than be thrown away.
-        this.claimPageInFlight = true;
-        const res = await this.client
-          .get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}&lease=1`, {
-            timeout: KEYSHARE_REQUEST_TIMEOUT_MS,
-          })
-          .catch((err: unknown) => {
-            // no answer to write: the connection kept for one is not needed
-            if (this.tornDown) this.vault.releaseLateConnection();
-            // the server may have leased this page all the same
-            else if (answerLost(err)) this.claimAgainAfterLease();
-            // a refusal is an answer: the next lost one counts from zero
-            else this.lostClaimRetries = 0;
-            throw err;
-          })
-          .finally(() => {
-            this.claimPageInFlight = false;
-          });
-        this.lostClaimRetries = 0;
-        if (this.tornDown) {
-          // Torn down while the answer was on its way: write it raw on the
-          // connection the teardown kept for it, for the next start, and stop.
-          // The release covers the parsing too: a malformed answer must not
-          // keep that connection open.
-          try {
-            await this.vault.writePendingSharesLate(this.notHeldYet(claimedPageEntries(res).entries));
-          } finally {
-            this.vault.releaseLateConnection();
-            // a newer service on this vault has not listed these (lateShareWrites)
-            lateShareWrites.set(this.vaultName, (lateShareWrites.get(this.vaultName) ?? 0) + 1);
+      // The count of lost answers (lostClaimRetries) starts again only for a run
+      // in which a claim was answered and none lost its answer.
+      let answeredInRun = false;
+      let lostInRun = false;
+      try {
+        for (let request = 0; request < MAX_CLAIM_REQUESTS && pages < MAX_CLAIM_PAGES; request++) {
+          // Disposed meanwhile: this page is imported (dispose() waits for it),
+          // the next one stays on the server.
+          if (this.disposed) break;
+          // The unguarded client: an answer that comes back after the teardown
+          // (the dispose deadline passed) still holds shares this device has not
+          // stored, and must reach the vault rather than be thrown away.
+          this.claimPageInFlight = true;
+          const res = await this.client
+            .get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}&lease=1`, {
+              timeout: KEYSHARE_REQUEST_TIMEOUT_MS,
+            })
+            .catch((err: unknown) => {
+              // no answer to write: the connection kept for one is not needed
+              if (this.tornDown) this.vault.releaseLateConnection();
+              // the server may have leased this page all the same
+                          else if (answerLost(err)) {
+                lostInRun = true;
+                this.claimAgainAfterLease();
+              }
+              // a refusal is an answer: the next lost one counts from zero
+              else this.lostClaimRetries = 0;
+              throw err;
+            })
+            .finally(() => {
+              this.claimPageInFlight = false;
+            });
+                  answeredInRun = true;
+          if (this.tornDown) {
+            // Torn down while the answer was on its way: write it raw on the
+            // connection the teardown kept for it, for the next start, and stop.
+            // The release covers the parsing too: a malformed answer must not
+            // keep that connection open.
+            try {
+              await this.vault.writePendingSharesLate(this.notHeldYet(claimedPageEntries(res).entries));
+            } finally {
+              this.vault.releaseLateConnection();
+              // a newer service on this vault has not listed these (lateShareWrites)
+              lateShareWrites.set(this.vaultName, (lateShareWrites.get(this.vaultName) ?? 0) + 1);
+            }
+            throw new E2EServiceDisposedError();
           }
-          throw new E2EServiceDisposedError();
+          // Written before anything else is done
+          const { served, entries } = claimedPageEntries(res);
+          if (served === 0) break;
+          const fresh = this.notHeldYet(entries);
+          // every element read, and every one held here already: not a page that counts
+          if (fresh.length > 0 || entries.length < served) pages++;
+          await this.keepShares(fresh);
+          imported += await this.processPendingShares(fresh, deferredSenders);
+          await this.capShareAcks();
+          // Not once disposed: the next start sends what this page settled
+          this.sendShareAcksDetached();
+          // the server's count, malformed elements included, decides whether more pages wait
+                  if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
         }
-        // Written before anything else is done
-        const { served, entries } = claimedPageEntries(res);
-        if (served === 0) break;
-        const fresh = this.notHeldYet(entries);
-        // every element read, and every one held here already: not a page that counts
-        if (fresh.length > 0 || entries.length < served) pages++;
-        await this.keepShares(fresh);
-        imported += await this.processPendingShares(fresh, deferredSenders);
-        await this.capShareAcks();
-        // Not once disposed: the next start sends what this page settled
-        this.sendShareAcksDetached();
-        // the server's count, malformed elements included, decides whether more pages wait
-        if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
+      } finally {
+        if (answeredInRun && !lostInRun) this.lostClaimRetries = 0;
       }
       return imported;
     })().finally(() => {
@@ -3469,8 +3480,8 @@ export class E2EService {
    * lease passes, and nothing else claims again before the next decrypt miss
    * or start. One timer queues a claim once the lease has passed; a later lost
    * answer re-arms it, dispose() clears it. LOST_CLAIM_RETRY_MAX in a row at
-   * most, so a device that stays offline stops; a claim the server answers
-   * starts the count again (claimKeyShares).
+   * most, so a device that stays offline stops; a run that ends with no lost
+   * claim (one at least answered) starts the count again (claimKeyShares).
    */
   private claimAgainAfterLease(): void {
     if (this.disposed || this.lostClaimRetries >= LOST_CLAIM_RETRY_MAX) return;

@@ -6290,10 +6290,84 @@ describe('E2EService — lifecycle', () => {
           await after(again, 20_000); // past the decrypt-miss throttle of that session
           expect((await again.decryptMessage(miss)).failed).toBe(true);
           expect(claims).toHaveLength(6);
-          await after(again, AFTER_LEASE);
+                    await after(again, AFTER_LEASE);
           expect(claims).toHaveLength(7);
         });
+
+        /**
+         * Alice restarts over a client whose claims the test scripts: in 'pair'
+         * mode the first claim of a run is answered with a full page (so the
+         * run goes on) and the second loses its answer; in 'answered' mode
+         * every claim is answered with an empty page.
+         */
+        async function scriptedClaims() {
+          const { server, alice, bob } = await bobWroteWhileAliceWasAway('scripted claims');
+          const base = server.apiFor(alice.userId);
+          const state = { mode: 'pair' as 'pair' | 'answered', claims: 0, inRun: 0 };
+          const fullPage = { data: { data: { shares: Array.from({ length: E2E_LIMITS.KEYSHARE_CLAIM_MAX }, () => null), leaseMs: E2E_LIMITS.KEYSHARE_LEASE_MS } } };
+          const emptyPage = { data: { data: { shares: [], leaseMs: E2E_LIMITS.KEYSHARE_LEASE_MS } } };
+          const api = {
+            ...base,
+            async get(url: string) {
+              if (!url.startsWith('/e2e/keyshares?')) return base.get(url);
+              state.claims++;
+              if (state.mode === 'answered') return emptyPage;
+              state.inRun++;
+              if (state.inRun === 1) return fullPage;
+              state.inRun = 0;
+              throw networkError();
+            },
+          };
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+          const again = over(alice, api);
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined); // the page's malformed elements
+          await again.initialize();
+          await queueFree(again); // the start-up claim has run: its second claim lost its answer
+          return { alice, bob, again, state, warn };
+        }
+
+        it('counts runs, not claims: a run whose first claim is answered and second is lost leaves the count', async () => {
+          const { again, state, warn } = await scriptedClaims();
+          try {
+            expect(state.claims).toBe(2);
+            expect(vi.getTimerCount()).toBe(1); // run 1
+            await after(again, AFTER_LEASE);
+            expect(state.claims).toBe(4);
+            expect(vi.getTimerCount()).toBe(1); // run 2
+            await after(again, AFTER_LEASE);
+            expect(state.claims).toBe(6);
+            expect(vi.getTimerCount()).toBe(1); // run 3: the last timer
+            await after(again, AFTER_LEASE);
+            expect(state.claims).toBe(8);
+            expect(vi.getTimerCount()).toBe(0); // run 4: three in a row, none armed
+            await after(again, 10 * AFTER_LEASE);
+            expect(state.claims).toBe(8);
+          } finally {
+            warn.mockRestore();
+          }
+        });
+
+        it('starts the count again after a run that ends with no lost claim', async () => {
+          const { alice, bob, again, state, warn } = await scriptedClaims();
+          try {
+            for (let i = 0; i < 4; i++) await after(again, AFTER_LEASE);
+            expect(vi.getTimerCount()).toBe(0); // the limit is reached
+            state.mode = 'answered';
+            const miss = { id: 'mr', conversationId: 'c1', authorId: bob.userId, content: buildMegolmEnvelope('cmVzZXQ', 'Y2lwaGVy') };
+            expect((await again.decryptMessage(miss)).failed).toBe(true); // a run with no lost claim
+            expect(vi.getTimerCount()).toBe(0);
+            state.mode = 'pair';
+            state.inRun = 0;
+            await after(again, 20_000); // past the decrypt-miss throttle
+            expect((await again.decryptMessage(miss)).failed).toBe(true);
+            expect(vi.getTimerCount()).toBe(1); // armed again: the count began at zero
+          } finally {
+            warn.mockRestore();
+          }
+          void alice;
+        });
       });
+
 
       describe('acknowledgements are sent beside the claims, never waited for', () => {
         const ACK = 'POST /e2e/keyshares/ack';

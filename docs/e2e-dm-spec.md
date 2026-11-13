@@ -588,8 +588,9 @@ the same, and no claim gets those shares until the lease passes: the client
 claims again by itself once, 65 s later (the lease, and 5 s for the time the
 request took to reach the server). A later lost answer replaces that timer, a
 dispose clears it, and after three in a row with no answer (a device that
-stays offline) none is armed until a claim the server answers starts the count
-again; a refusal is an answer and arms nothing. A run reads at most 20 pages that hold a share the device does not hold yet
+stays offline) none is armed until a run that ends with no lost claim, one at least
+answered, starts the count again (a run whose first claim is answered and
+second is lost leaves it); a refusal is an answer and arms nothing. A run reads at most 20 pages that hold a share the device does not hold yet
 or an element it cannot read. A page made only of shares it
 holds already (kept here unacknowledged, or done with and owed) does not
 count: the server hands those out again, oldest first, after each lease, and
