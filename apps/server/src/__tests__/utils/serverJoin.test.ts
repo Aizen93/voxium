@@ -159,8 +159,8 @@ describe('joinServerMember', () => {
 
       expect(seen.slice(0, seen.indexOf('tx:lock:space') + 1)).toEqual(['wait:requests', 'wait:secure-rows', 'wait:account', 'wait:invite', 'txn', 'tx:lock:space']);
       // the caller's statement runs on the shared client, outside the transaction
-      expect(awaitRows).toHaveBeenCalledWith(prismaMock);
-      expect(awaitRows).not.toHaveBeenCalledWith(tx);
+      expect(awaitRows).toHaveBeenCalledTimes(1);
+      expect(awaitRows.mock.calls[0][0]).toBe(prismaMock);
       expect(sqlOf(0)).toEqual({ sql: 'SELECT id FROM server_join_requests WHERE server_id = ? AND user_id = ? FOR UPDATE', values: ['s-1', 'u-1'] });
       expect(sqlOf(1).sql).toMatch(/FROM channel_members cm JOIN channels c ON c\.id = cm\.channel_id WHERE cm\.user_id = \? AND c\.server_id = \? FOR UPDATE OF cm/);
       expect(sqlOf(1).values).toEqual(['u-1', 's-1']);

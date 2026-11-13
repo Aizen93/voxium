@@ -61,7 +61,10 @@ import {
  * kick or ban disables the webhooks whose live URL the member holds (created
  * by them and never rotated by another, or last rotated by them) and marks
  * them (`creatorRemovedAt`, utils/removeMember.ts): any enable, the owner's
- * or an admin's, or a rotate clears the mark, as having reviewed it.
+ * or an admin's, or a rotate clears the mark, as having reviewed it. A
+ * create, a rotate and an enable run under the caller's member row
+ * (lockCallerMemberRow): only a current member who may manage webhooks makes,
+ * re-mints or re-arms a URL.
  *
  * The token is the credential: 256 random bits, only its SHA-256 is stored,
  * and the plaintext leaves the server exactly twice: in the create and in the
@@ -115,6 +118,15 @@ const NO_MANAGE = 'You do not have permission to manage webhooks';
  * follows (refuseUnlessManager) refuses; a removal that waits reads the
  * webhook this transaction commits, and its webhook statement disables it
  * with the others the member holds.
+ *
+ * A rotate and an enable then write the webhook row, and every other writer
+ * that takes both rows takes them in that order: a removal and an account
+ * deletion take the member row first, and a space delete's cascade reaches
+ * `server_members` before `channels` and `webhooks` (the order PostgreSQL
+ * fires the cascade triggers of `servers` in, by constraint id, on a database
+ * built from these migrations). A channel delete, a purge-delete and a
+ * platform ban's disarm take no member row. So neither runs inside
+ * retryOnTransactionConflict.
  */
 async function lockCallerMemberRow(tx: { $queryRaw: typeof prisma.$queryRaw }, userId: string, serverId: string): Promise<void> {
   await tx.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${userId} AND server_id = ${serverId} FOR KEY SHARE`;
@@ -373,7 +385,11 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
       await prisma.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR KEY SHARE`;
       return prisma.$transaction(async (tx) => {
         // The caller's member row first (lockCallerMemberRow), then the space
-        // row: the order a secure-channel creation takes them in
+        // row: the order a secure-channel creation takes them in. A space
+        // delete takes the space row and then, through its cascade, the
+        // member rows: when it reaches the caller's row after this
+        // transaction locked it, PostgreSQL aborts one side; both are retried,
+        // and the creation's retry answers 404 Server.
         await lockCallerMemberRow(tx, userId, serverId);
         // A space deleted since the checks answers as one
         const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
