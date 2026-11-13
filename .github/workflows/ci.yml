@@ -247,15 +247,24 @@ jobs:
       - name: Start MinIO and create the assets bucket
         timeout-minutes: 5
         run: |
+          # MINIO_SKIP_CLIENT: without it the image's entrypoint starts the
+          # server in the background to configure its bundled client, stops
+          # it, and starts it again. The readiness probe answers during that
+          # first start, and a bucket call that meets the stop is reset: the
+          # failure of 2026-11-13 on a PR branch (create reset, then no
+          # bucket), and what the earlier ones are consistent with (develop
+          # 2026-10-09, twice; a PR branch on 2026-11-09). The job uses the
+          # root credentials and creates its bucket itself, so it needs none
+          # of that setup, and with the variable the server starts once.
           docker run -d --name minio \
             -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
+            -e MINIO_SKIP_CLIENT=yes \
             bitnamilegacy/minio:2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
-          # A successful /minio/health/live was followed by a reset CreateBucket
-          # (2026-11-09), so the wait is on the readiness probe, and the step
-          # fails here, with the container's log, when it never answers: the
-          # loop used to fall through to the bucket call, which hid the cause.
+          # The step fails here, with the container's log, when the readiness
+          # probe never answers: the loop used to fall through to the bucket
+          # call, which hid the cause.
           ready=
           for i in $(seq 1 30); do
             if curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:9000/minio/health/ready; then ready=1; break; fi
@@ -266,21 +275,36 @@ jobs:
             docker logs minio
             exit 1
           fi
-          # A connection reset during CreateBucket makes the AWS CLI retry on
-          # its own: the first attempt had created the bucket, the retry was
-          # answered BucketAlreadyOwnedByYou, and `s3 mb` failed on a bucket
-          # that existed (develop 2026-10-09, twice; a PR branch 2026-11-09).
-          # An existing bucket is the state this step wants, so it is read as
-          # success: head-bucket first, create when missing, head-bucket again
-          # when the create call failed.
+          # The bucket is there when head-bucket says so, and only then. Each
+          # round asks, and creates when the answer is no; a create call whose
+          # answer was lost, or that the server reset, is settled by the next
+          # round's question, never by its own exit code (the CLI's own retry
+          # of a create that had landed was answered BucketAlreadyOwnedByYou
+          # and failed the step on a bucket that existed). The CLI makes one
+          # attempt per call, with time limits (AWS_MAX_ATTEMPTS below, the
+          # two --cli timeouts), so this loop is the only retry, and it is
+          # bounded.
           endpoint=http://127.0.0.1:9000
-          aws --endpoint-url "$endpoint" s3api head-bucket --bucket "$S3_ASSETS_BUCKET" 2>/dev/null \
-            || aws --endpoint-url "$endpoint" s3 mb "s3://$S3_ASSETS_BUCKET" \
-            || aws --endpoint-url "$endpoint" s3api head-bucket --bucket "$S3_ASSETS_BUCKET"
+          limits="--cli-connect-timeout 3 --cli-read-timeout 5"
+          created=
+          for i in $(seq 1 10); do
+            if aws $limits --endpoint-url "$endpoint" s3api head-bucket --bucket "$S3_ASSETS_BUCKET" 2>/dev/null; then created=1; break; fi
+            # Created: the next round confirms it at once. Not created: wait.
+            aws $limits --endpoint-url "$endpoint" s3 mb "s3://$S3_ASSETS_BUCKET" && continue
+            sleep 2
+          done
+          # The last round may have created it: one more question decides, and
+          # its answer is printed when it is no.
+          if [ -z "$created" ] && ! aws $limits --endpoint-url "$endpoint" s3api head-bucket --bucket "$S3_ASSETS_BUCKET"; then
+            echo "The assets bucket was not there after 10 rounds"
+            docker logs minio
+            exit 1
+          fi
         env:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
           AWS_DEFAULT_REGION: us-east-1
+          AWS_MAX_ATTEMPTS: 1
 
       - name: Generate Prisma client (v7 — reads prisma.config.ts)
         working-directory: apps/server
