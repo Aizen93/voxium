@@ -225,7 +225,12 @@ export async function resendRegistrationCode(pendingId: string): Promise<SignupS
 
 async function resendInBackground(pendingId: string): Promise<void> {
   const now = Date.now();
-  const row = await prisma.pendingRegistration.findUnique({ where: { id: pendingId } });
+  // The columns the checks below read, never the row: it holds the chosen
+  // password's hash and the current code's hash
+  const row = await prisma.pendingRegistration.findUnique({
+    where: { id: pendingId },
+    select: { email: true, lastSentAt: true, expiresAt: true, resends: true, attempts: true },
+  });
   if (
     !row
     || !row.lastSentAt // a row that never mailed a code never mails one
@@ -251,6 +256,7 @@ async function resendInBackground(pendingId: string): Promise<void> {
   await prisma.pendingRegistration.update({
     where: { id: pendingId },
     data: { codeHash: signupCodeHash(pendingId, code), codeExpiresAt: new Date(now + SIGNUP.CODE_TTL_MINUTES * MINUTE) },
+    select: { id: true },
   });
   sendSignupCodeEmail(row.email, code, SIGNUP.CODE_TTL_MINUTES).catch((err) => logSendFailure('code', err));
 }

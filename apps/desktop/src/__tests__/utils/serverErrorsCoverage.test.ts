@@ -66,6 +66,7 @@ const EXACT: Row[] = [
   { msg: 'Email already verified', key: 'emailAlreadyVerified' },
   { msg: 'Too many verification emails requested — try again tomorrow', key: 'tooManyVerificationEmails' },
   { msg: 'Mail to this address is blocked — use the link in an earlier Voxium email to allow it again', key: 'mailBlocked' },
+  { msg: 'The verification email could not be sent — please try again later', key: 'verificationEmailSendFailed' },
   { msg: 'Registration challenge is invalid or expired — refresh and try again', key: 'registrationChallengeInvalid' },
   { msg: 'Registration challenge expired before it was solved', key: 'powExpired' },
   { msg: 'WebCrypto unavailable — cannot solve registration challenge', key: 'powUnavailable' },

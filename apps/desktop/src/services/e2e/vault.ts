@@ -15,6 +15,7 @@
 //   gs:{conversationId}              our outbound Megolm session for a DM
 //   igs:{sessionId}                  an inbound Megolm session + its attribution
 //   pks:{createdAt}|{shareId}        a claimed key share not imported yet (§12.3)
+//   pka:{shareId}                    an acknowledgement of a claimed share still owed to the server (§12.3)
 //   history_pull                     where an unfinished history pull stands (§16.3)
 //   pt:{messageId}                   decrypted-plaintext cache entry
 //
@@ -160,15 +161,31 @@ export interface InboundGroupSessionRecord {
 
 /**
  * A key share as the inbox handed it out, kept until it is imported (spec
- * §12.3). The server deletes a share when it returns it, so from the claim on
- * this is the only copy. The body is the Olm ciphertext addressed to this
- * device: what the server held, no more.
+ * §12.3). Written before anything is done with it: a leasing claim leaves the
+ * share on the server until this device acknowledges it, but only for as long
+ * as its lease runs before handing it out again, and a server from before
+ * leases deleted it when it answered. The body is the Olm ciphertext addressed
+ * to this device: what the server held, no more.
  */
 export interface PendingKeyShare {
   share: Record<string, unknown>;
   /** Imports that had to wait because the sender could not be looked up. */
   attempts: number;
   receivedAt: number;
+  /**
+   * Handed out by a leasing claim: the server keeps the share until this
+   * device acknowledges it. Absent (records kept before leases, a server from
+   * before them): the claim deleted it, and there is nothing to acknowledge.
+   */
+  leased?: boolean;
+}
+
+/** A key share this device is done with, whose acknowledgement the server has not confirmed (spec §12.3). */
+export interface OwedShareAck {
+  /** The share's row id, as the inbox handed it out. */
+  id: string;
+  /** When it was settled: one older than the server's retention is dropped unsent. */
+  at: number;
 }
 
 /**
@@ -644,6 +661,29 @@ export class E2EVault {
     });
   }
 
+  // ── Acknowledgements owed for claimed key shares (spec §12.3) ──
+  // Share ids only (`pka:{shareId}`): what the server already holds, no more.
+
+  /** Note that this device owes the server an acknowledgement of this share. */
+  putShareAck(id: string): Promise<void> {
+    const owed: OwedShareAck = { id, at: Date.now() };
+    return this.put(`pka:${id}`, owed);
+  }
+
+  /** Every acknowledgement owed, in one transaction. */
+  listShareAcks(): Promise<OwedShareAck[]> {
+    const range = IDBKeyRange.bound('pka:', `pka:${KEY_MAX}`);
+    return this.withStore('readonly', (s) => requestToPromise(s.getAll(range))) as Promise<OwedShareAck[]>;
+  }
+
+  /** Forget acknowledgements the server has confirmed (or that are past its retention), in one transaction. */
+  deleteShareAcks(ids: string[]): Promise<void> {
+    if (ids.length === 0) return Promise.resolve();
+    return this.withStore('readwrite', (s) =>
+      Promise.all(ids.map((id) => requestToPromise(s.delete(`pka:${id}`)))).then(() => undefined)
+    );
+  }
+
   /**
    * Every inbound group session this device holds (spec §16 backup), read in
    * ONE transaction: the backup pass runs this at every start, and a read per
@@ -728,8 +768,10 @@ export class E2EVault {
    * close(), except that the open connection is kept for ONE late write of
    * claimed key shares (writePendingSharesLate), then released. Every other
    * access fails exactly as after close(). For a teardown that runs while a
-   * claim's answer is still on its way: the server deletes the shares it
-   * returns, so that answer has to land somewhere when it comes.
+   * claim's answer is still on its way: a server from before leases deleted
+   * the shares it returned, so that answer has to land somewhere when it
+   * comes, and a leasing one would hand them out again only once the lease
+   * passed, while written here the next start imports them at once.
    */
   closeKeepingConnectionForPendingShares(): void {
     this.lateDb = this.db;

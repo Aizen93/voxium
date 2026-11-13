@@ -5,6 +5,7 @@ const prismaMock = vi.hoisted(() => ({
   server: { updateMany: vi.fn() },
   serverMember: { findMany: vi.fn() },
   serverJoinRequest: { findMany: vi.fn() },
+  messageAttachment: { findMany: vi.fn() },
   $transaction: vi.fn(),
 }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
@@ -16,7 +17,12 @@ vi.mock('../../utils/secureChannelLifecycle', () => ({ purgeSecureChannelStateFo
 const memberLeft = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/memberBroadcast', () => ({ broadcastMemberLeft: (...a: unknown[]) => memberLeft(...a) }));
 const deleteFromS3 = vi.hoisted(() => vi.fn());
-vi.mock('../../utils/s3', () => ({ deleteFromS3: (...a: unknown[]) => deleteFromS3(...a) }));
+const deleteMultipleFromS3 = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/s3', () => ({
+  deleteFromS3: (...a: unknown[]) => deleteFromS3(...a),
+  deleteMultipleFromS3: (...a: unknown[]) => deleteMultipleFromS3(...a),
+  VALID_ATTACHMENT_KEY_RE: /^attachments\/(ch|dm)-[\w-]+\/[\w]+-[\w][\w.-]*$/,
+}));
 const emitMods = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: unknown[]) => emitMods(...a) }));
 
@@ -59,6 +65,8 @@ beforeEach(() => {
     order.push('txn:end');
   });
   deleteFromS3.mockImplementation(async () => { order.push('s3'); });
+  prismaMock.messageAttachment.findMany.mockImplementation(async () => { order.push('attachment-keys'); return []; });
+  deleteMultipleFromS3.mockImplementation(async (keys: string[]) => { order.push('s3:attachments'); return keys.length; });
 });
 
 describe('deleteUserAccount', () => {
@@ -71,6 +79,7 @@ describe('deleteUserAccount', () => {
     // without its avatar)
     expect(order).toEqual([
       'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect', 'secure',
+      'attachment-keys', 'attachment-keys', 'attachment-keys',
       'txn:start', 'e2e', 'counts', 'delete', 'txn:end',
       'force:logout', 'disconnect:local', 'disconnect', 's3',
     ]);
@@ -159,6 +168,105 @@ describe('deleteUserAccount', () => {
     prismaMock.serverMember.findMany.mockResolvedValue([]);
     await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
     expect(prismaMock.server.updateMany).not.toHaveBeenCalled();
+  });
+
+  describe('the attachment files of the messages the delete cascades', () => {
+    const OWN = 'attachments/ch-general/clmsg1-photo.png';
+    const PEER = 'attachments/dm-conv1/clmsg2-blob.bin';
+
+    it('are read before the transaction, one read per indexed column: the account\'s messages and each side of its conversations', async () => {
+      prismaMock.messageAttachment.findMany.mockImplementation(async () => {
+        order.push('attachment-keys');
+        return [];
+      });
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+      const shapes = prismaMock.messageAttachment.findMany.mock.calls.map(([args]: [any]) => args.where);
+      expect(shapes).toEqual([
+        { expired: false, message: { authorId: 'u-1' } },
+        { expired: false, message: { conversation: { user1Id: 'u-1' } } },
+        { expired: false, message: { conversation: { user2Id: 'u-1' } } },
+      ]);
+      // No OR across the joined tables: it started from no index
+      expect(JSON.stringify(shapes)).not.toContain('"OR"');
+      // After the secure-channel purge (those channels delete their own
+      // files), before the delete transaction takes the rows
+      expect(order.indexOf('attachment-keys')).toBeGreaterThan(order.indexOf('secure'));
+      expect(order.lastIndexOf('attachment-keys')).toBeLessThan(order.indexOf('txn:start'));
+    });
+
+    it('are deleted only after the delete committed, each file once though two reads found it', async () => {
+      // OWN was written by the account in its own conversation: the author
+      // read and the conversation read both return it
+      prismaMock.messageAttachment.findMany
+        .mockResolvedValueOnce([{ id: 'att-1', s3Key: OWN }])
+        .mockResolvedValueOnce([{ id: 'att-1', s3Key: OWN }, { id: 'att-2', s3Key: PEER }])
+        .mockResolvedValueOnce([]);
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+      expect(deleteMultipleFromS3).toHaveBeenCalledTimes(1);
+      expect(deleteMultipleFromS3).toHaveBeenCalledWith([OWN, PEER]);
+      expect(order.indexOf('s3:attachments')).toBeGreaterThan(order.indexOf('txn:end'));
+    });
+
+    it('a key read that fails is logged and the erasure goes on, deleting the files the other reads found', async () => {
+      prismaMock.messageAttachment.findMany
+        .mockRejectedValueOnce(new Error('db gone'))
+        .mockResolvedValueOnce([{ id: 'att-2', s3Key: PEER }])
+        .mockResolvedValueOnce([]);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
+
+        // The sessions were revoked and the secure channels purged before the
+        // read: stopping there would leave the account half erased
+        expect(prismaMock.user.delete).toHaveBeenCalledWith({ where: { id: 'u-1' } });
+        expect(order.lastIndexOf('disconnect')).toBeGreaterThan(order.indexOf('txn:end'));
+        expect(deleteFromS3).toHaveBeenCalledWith('avatars/u-1.webp');
+        expect(deleteMultipleFromS3).toHaveBeenCalledWith([PEER]);
+        expect(error).toHaveBeenCalledWith(
+          "[T] Reading the attachment keys of the account's messages failed (the orphan sweep will reclaim those files):", 'db gone');
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it('every key read failing still erases the account, with no file delete', async () => {
+      prismaMock.messageAttachment.findMany.mockRejectedValue(new Error('db gone'));
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
+
+        expect(prismaMock.user.delete).toHaveBeenCalled();
+        expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+        expect(error).toHaveBeenCalledTimes(3);
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it('stay when the delete fails (the account and its messages survive)', async () => {
+      prismaMock.messageAttachment.findMany.mockResolvedValue([{ id: 'att-1', s3Key: OWN }]);
+      prismaMock.$transaction.mockRejectedValue(new Error('db gone'));
+
+      await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).rejects.toThrow('db gone');
+      expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    });
+
+    it('a storage failure is logged and the deletion still completes', async () => {
+      prismaMock.messageAttachment.findMany.mockResolvedValue([{ id: 'att-1', s3Key: OWN }]);
+      deleteMultipleFromS3.mockRejectedValue(new Error('S3 unavailable'));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
+        await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+          '[T] Attachment file cleanup failed for a deleted account (the orphan sweep will reclaim them):', 'S3 unavailable'));
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   it('does nothing for an account that no longer exists', async () => {

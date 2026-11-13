@@ -214,7 +214,8 @@ the always-on cutover and is dropped when the new one opens):
 | `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5); first written by the first list that names a device or an account key |
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
 | `igs:{sessionId}` | an inbound Megolm session + the attribution it arrived under |
-| `pks:{createdAt}\|{shareId}` | a claimed key share not imported yet, as the inbox returned it (Olm ciphertext + routing fields, §12.3) |
+| `pks:{createdAt}\|{shareId}` | a claimed key share not imported yet, as the inbox returned it (Olm ciphertext + routing fields, whether a leasing claim handed it out, refused look-ups counted; §12.3) |
+| `pka:{shareId}` | an acknowledgement this device owes the server for a claimed share it is done with: the share id and when it was noted, nothing else (§12.3) |
 | `history_pull` | an unfinished message-key history pull: the account key's public half, the cursor of the next page and the page requests made so far (§16.3) |
 | `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
@@ -439,8 +440,11 @@ Server-side rules — every one of these is load-bearing:
   cap would let anyone who can DM a victim flood the mailbox and evict the
   session keys a legitimate peer had queued — remote, unprivileged censorship of
   an E2E conversation.
-- Claiming (`GET /e2e/keyshares?deviceId=`) is **claim-and-delete**, ownership
-  checked, `FOR UPDATE SKIP LOCKED` (Olm pre-key bodies are one-shot).
+- Claiming is **leased, then acknowledged** (below): ownership checked, one
+  statement, `FOR UPDATE SKIP LOCKED`, so no two claims hold one share at the
+  same time (Olm pre-key bodies are one-shot), and a share is deleted only
+  once its device acknowledges it. The legacy claim of desktop 2.1.x still
+  deletes on read.
 - Bodies are capped at `KEYSHARE_BODY_MAX` (2 KB — a real Olm share is ~600
   bytes; `ENVELOPE_MAX` would allow 50x that), and a sender may hold at most
   `KEYSHARE_SENDER_TOTAL_CAP` (2000) undelivered shares across **all**
@@ -448,13 +452,77 @@ Server-side rules — every one of these is load-bearing:
   can open a DM with any user, making "number of conversations" attacker-chosen.
 - Recipient-device existence is checked **inside** the write transaction, so a
   concurrent revoke cannot leave orphaned rows.
-- Undelivered shares are swept after `KEYSHARE_MAX_AGE_MS` (30 days) by
-  `utils/keyShareCleanup.ts`, which is indexed on `created_at` (the sweep runs
-  across all recipients; the recipient-scoped composite index cannot serve it).
-  The table intentionally has no FK to `User`, so the sweep is also what
-  reclaims rows after account deletion.
+- Undelivered or unacknowledged shares are swept after `KEYSHARE_MAX_AGE_MS`
+  (30 days), whatever their lease says, by `utils/keyShareCleanup.ts`, which
+  is indexed on `created_at` (the sweep runs across all recipients; the
+  recipient-scoped composite index cannot serve it). The table intentionally
+  has no FK to `User`, so the sweep is also what reclaims rows after account
+  deletion.
 - Claiming drains **every** page, not just the first: the inbox is oldest-first,
-  so stopping at one page would let queued older shares delay a live one.
+  so stopping at one page would let queued older shares delay a live one. A
+  page is answered oldest first, ties by id (`RETURNING` keeps no order, and
+  the client imports a page in the order it is given).
+
+**The claim, the lease and the acknowledgement.** Three requests:
+
+- `GET /e2e/keyshares?deviceId=<id>&lease=1`, the leasing claim (current
+  clients), answers `{ shares: [{ id, senderUserId, senderDeviceId,
+  conversationId, sessionId, body, createdAt }], leaseMs }`: up to
+  `KEYSHARE_CLAIM_MAX` (100) shares, each now held for this answer until
+  `leased_until`, `KEYSHARE_LEASE_MS` (60 s) on, and none deleted. `leaseMs`
+  is what tells the client its answer was leased and is to be acknowledged.
+- `POST /e2e/keyshares/ack` with `{ deviceId, ids }`, 1 to `KEYSHARE_ACK_MAX`
+  (100) ids of the `E2E_ROW_ID_RE` shape, deletes exactly the named shares
+  addressed to that device of the caller's account, whatever their lease says
+  (an acknowledgement after the lease passed still deletes), and answers
+  `{ cleared }`, how many it deleted. An id of another device or account
+  counts like an id that names nothing, and a device the caller does not own
+  is the same 403 `Unknown device` as on the claim. Share ids only: an
+  acknowledgement carries no key material, and nothing the server did not
+  hand out.
+- `GET /e2e/keyshares?deviceId=<id>` without `lease`, the legacy claim of
+  desktop 2.1.x and earlier, still deletes what it hands out, so a client that never
+  acknowledges leaves nothing behind against the inbox caps; any other `lease`
+  value is a 400. The server tells the two clients apart by that parameter
+  alone, never by a user agent.
+
+Deployment order: the migration that adds `leased_until` first, then the
+server, then the clients, current and legacy in either order. Server code
+running before its migration answers 500 to every claim, the legacy one
+included, because the legacy statement reads the new column too.
+
+Both claims are one statement (`utils/keyShareInbox.ts`) and take only shares
+no live lease holds. A share another claim is taking at that moment is
+skipped (`SKIP LOCKED`, never waited for), and one a claim took and committed
+is re-checked against the lease on its new version and left out. So no two
+claims, leasing or legacy, hold one share at the same time; a legacy claim
+never deletes a share a leasing one is importing (a stale tab beside an
+updated one); an acknowledgement racing a claim either deletes the share
+before the claim reaches it or waits for the claim and deletes it after, and
+the client then recognises the share it got (below); a share stored while a
+claim runs is seen by the next claim. The lease is written and compared on the
+database clock, in UTC like the table's other timestamps, never a node's. The
+claims keep the `e2eShares` budget (30 a minute per user, shared with the
+uploads); the acknowledgement has its own (`e2eShareAck`, 60 a minute): an
+acknowledgement carries up to 100 ids, and a device sends one per 100 it
+owes, what each page of a run settles and whatever earlier runs left owed
+(up to 4000, so 40 requests, below), which on the shared budget would starve
+the uploads of a rotation, while a refused acknowledgement only means the
+share is handed out once more.
+
+Why 60 s. The lease is not a correctness bound: whatever comes back after it,
+the client recognises (below), so a lease that runs out while a page is still
+being imported costs a second delivery, which the service's claim run
+recognises, not a second import (its runs are one at a time, and each page is
+done with before the next is asked for). It is how soon
+a claim whose answer was lost heals (the client claims again by itself once
+it has passed, below), and it covers what a page normally takes:
+the answer, the vault write, a sender look-up per unknown device, the
+acknowledgement, and the 10 s a logout gives a claim in flight. A share stays
+on the server, counted against `KEYSHARE_STORE_CAP_PER_SENDER` and
+`KEYSHARE_SENDER_TOTAL_CAP`, until it is acknowledged or swept; a sender over
+its cap evicts its oldest rows, leased ones included, and a leased share
+evicted while its answer is lost is gone like an unclaimed one.
 
 Client-side, the importer verifies the share's `sessionId` and `conversationId`
 match the row, takes sender attribution from the **authenticated Olm session**
@@ -466,11 +534,78 @@ And each message index of a session is bound, on this device, to the one
 in the vault, §7): an index served under another id or version, or below the
 newest version the id has shown in the same session, is refused (§9.1).
 
-Since the claim deletes, the client writes every claimed page to the vault
-(`pks:{createdAt}|{shareId}`, §7) before it processes any of it, and removes a
-share only once it is imported or found unusable. A malformed element of a
-page is logged and skipped; the rest of the page is kept. A share whose sender
-device is not pinned yet and whose device list cannot be read now (signed out,
+The client claims with `lease=1` and writes every claimed page to the vault
+(`pks:{createdAt}|{shareId}`, §7) before it processes any of it: a leasing
+server hands a share out again only once its lease has passed, and a server
+from before leases deleted it when it answered. It removes a share from the
+vault only once it is done with it, which for a leased share is also when it
+owes the server its acknowledgement:
+
+- its group session is stored (imported);
+- its session is already on the device, checked before any Olm decrypt, on
+  every share: one handed out again after a lost acknowledgement carries an
+  Olm message already spent, and is acknowledged, not counted as unusable (a
+  re-share, a restored backup, a kept copy a cut run left are the same case);
+- it is unusable for good: malformed, its Olm layer or payload refused, or
+  its sender refused in five starts (below).
+
+The acknowledgements owed are written to the vault (`pka:{shareId}`, share ids
+only) before the kept copy is removed, so a run cut in between leaves both and
+never neither. A sender of their own sends them, off the service's serial
+queue: a claim run starts it before its first claim and after each page, and
+neither the run nor a decrypt waiting on the run waits for the server to
+answer it. One sender runs at a time; one already running sends what a later
+page settled once its request is answered. It sends the oldest first, one
+request per 100 owed ids, each with a 15 s deadline. The deadline bounds each transport attempt; a
+token renewal before the request and the single retry after a 401 each have
+their own. Whether an
+acknowledgement or the next claim reaches the server first does not matter: a
+share handed out again while its acknowledgement is owed is recognised by its
+id and left out of the page. One the server confirmed is done with, whatever
+the server counted for it (it may have gone already: acknowledged before,
+swept, evicted). One it did not confirm (the request or its answer lost, the
+deadline passed, a 429, a 5xx) stays owed: the sender stops there, and it goes
+out again after the next page of the same run, or with the next run; the
+server counts nothing for one it had deleted already, and that settles it. A
+400, 403 or 404 is final for that request (ids the server never takes from
+this device; a device that is not the caller's, revoked with its shares; a server from
+before leases; or an account the auth gates refuse for now, whose claims are
+refused too, so nothing is handed out meanwhile): its ids are dropped with one warning that names
+none of them, and the next request goes out, so a refused one never holds
+back the rest. A device keeps at most 4000 owed (two full runs' worth: the run
+in progress and one before it whose acknowledgements all failed), the oldest
+dropped beyond, and drops unsent one owed for longer than the server keeps
+shares. A dropped acknowledgement costs a delivery, never a key: its share, if
+the server still has it, comes back after its lease, is recognised by its session if it was imported, and acknowledged then; one
+discarded as unusable or dropped at the attempt cap has no session and is
+processed again. An answer without `leaseMs` (a server from
+before leases) is never acknowledged; its shares had their vault copy as their
+only copy, as before.
+
+Each claim has a 15 s deadline too. A claim that gets no answer (a network
+error, the deadline) may have reached the server, which leased its page all
+the same, and no claim gets those shares until the lease passes: the client
+claims again by itself once, 65 s later (the lease, and 5 s for the time the
+request took to reach the server). A later lost answer replaces that timer, a
+dispose clears it, and after three in a row with no answer (a device that
+stays offline) none is armed until a run that ends with no lost claim, one at least
+answered, starts the count again (a run whose first claim is answered and
+second is lost leaves it); a refusal is an answer and arms nothing, and so does a lost answer while the
+device is offline, which is not counted either (the fetches of the reconnect
+cause the next claim). A run reads at most 20 pages that hold a share the device does not hold yet
+or an element it cannot read. A page made only of shares it
+holds already (kept here unacknowledged, or done with and owed) does not
+count: the server hands those out again, oldest first, after each lease, and
+20 pages of them would keep a run from ever reaching a share stored after
+them. Each claim leases its page, so the next claim gets the page after it;
+every claim counts toward a ceiling of 25 per run, under the 30 a minute of `e2eShares`, which the claims share with the
+share uploads, the master-secret transfers and the message-key backup writes. More held shares than one run reaches (about
+2500) leave a newer share to a run started within their leases, which starts
+past them, or to the held ones being settled.
+
+A passing failure acknowledges nothing. A malformed element of a page is
+logged and skipped; the rest of the page is kept. A share whose sender device
+is not pinned yet and whose device list cannot be read now (signed out,
 offline, refused; an identity change is not this case) is kept and retried by
 the next claim, at the latest at the next start of the account. Later shares
 from the same sender wait behind it, since they may need the Olm session it
@@ -478,33 +613,47 @@ sets up; they are not counted while they wait, and once the first one is
 dropped each is counted on its own. A kept share is dropped once its session
 reached the device another way, or once the server has refused the look-up of
 its sender (403/404) in five starts of the client, one start counting once
-however many claims it makes. A failure that says nothing about the sender
-(401, 429, 5xx, offline) is never counted, so such a share stays kept until
-the look-up succeeds. The Olm layer of a share is decrypted first on a copy of
+however many claims it makes, and acknowledged then. A failure that says
+nothing about the sender (401, 429, 5xx, offline) is never counted, so such a
+share stays kept until the look-up succeeds. Unacknowledged meanwhile, a kept
+share is handed out again by the first claim after each lease: the client
+leaves its kept record as it is (written over, its refused look-ups would
+count from zero and it would be kept for ever) and lets the kept pass of the
+run, which went through it already, be what processes it, so it is neither
+imported twice nor counted afresh; each lease it waits costs a delivery of
+about 600 bytes. The Olm layer of a share is decrypted first on a copy of
 the state it would advance (the pairwise session, or the account for a
 pre-key message that opens one), and the live state moves past the message
 only once the group session it carries is stored. A storage failure while
-that session is written (a full disk) therefore keeps the share with nothing
-consumed: whatever else is written meanwhile, the account (another sender's
-pre-key share, a replenishment) or that pairwise session (a reply, a call
-signal), the message still decrypts, and the next claim retries it, its
-sender's later shares behind it. Disposing the service (logout, account
-switch) while a claim is in flight lets the claim finish the page it holds,
-for at most 10 s, and nothing else: from the dispose on no other request of
-that service goes out, nothing else in it reads or writes the vault, and the
-claim itself asks the server nothing more, so a share whose sender it would
-still have to look up stays kept, uncounted (logout has dropped the tokens by
-then, and after a new sign-in on the same page the request would carry the
-next account's bearer). A service started meanwhile for the same account on
-this device (signing back in) opens the vault only once that teardown has run,
-so it never loads an account the claim is still advancing. Whatever the claim
-had not processed by then stays kept, and a page whose answer only arrives
-after that is still written, raw, on the one vault connection the teardown
-keeps open for it (released at once on a version change, i.e. an account
+that session is written (a full disk) therefore keeps the share, with nothing
+consumed and nothing acknowledged: whatever else is written meanwhile, the
+account (another sender's pre-key share, a replenishment) or that pairwise
+session (a reply, a call signal), the message still decrypts, and the next
+claim retries it, its sender's later shares behind it.
+
+Disposing the service (logout, account switch) while a claim is in flight
+lets the claim finish the page it holds, for at most 10 s, and nothing else:
+from the dispose on no other request of that service goes out, nothing else in
+it reads or writes the vault, and the claim itself asks the server nothing
+more, so a share whose sender it would still have to look up stays kept,
+uncounted, and what it imports is acknowledged by no request of its own: the
+acknowledgements it owes stay in the vault, and the next start of the account
+sends them (logout has dropped the tokens by then, and after a new sign-in on
+the same page a request would carry the next account's bearer). The
+acknowledgement sender stops too: one of its requests still on its way is not
+confirmed on the device (its answer is dropped), so the next start sends those
+ids again, which the server counts as nothing; and the timer of a lost claim
+answer is cleared. A service started meanwhile for the same account on this
+device (signing back in) opens the vault only once that teardown has run, so it
+never loads an account the claim is still advancing. Whatever the claim had
+not processed by then stays kept, and a page whose answer only arrives after
+that is still written, raw, on the one vault connection the teardown keeps
+open for it (released at once on a version change, i.e. an account
 deletion): the one write that can still land beside a newer service, only of
-kept shares, which that service's next claim lists. A secure channel that the
-claim's sessions reveal is pinned (§19.7) for the account that claimed them,
-never for whoever has signed in since.
+kept shares, which that service's next claim lists, imports at once rather
+than wait for their lease to pass, and acknowledges. A secure channel that
+the claim's sessions reveal is pinned (§19.7) for the account that claimed
+them, never for whoever has signed in since.
 
 A key share and the later Olm messages of the same sender device ride one
 pairwise session but travel apart: the share through the inbox, a DM call's
@@ -521,7 +670,9 @@ the account wrote late beside the current one (it makes the in-memory index of
 kept shares unknown, so the next device-sealed decrypt lists the vault again).
 If the import itself fails (reading the kept shares, or a write while one is
 processed), the newer message is decrypted anyway rather than dropped, and the
-shares wait for the next claim or signal.
+shares wait for the next claim or signal. What this import settles is
+acknowledged by the next claim run, never by a request on the way to the
+message.
 
 **Residual: a share overtaken while it is still in the inbox, while its
 session cannot be stored, or while importing it fails.** Nothing orders a
@@ -530,7 +681,9 @@ socket first, short of claiming before every device-sealed decrypt (a request
 per call signal); a share whose session store keeps failing, or whose import
 in front of a signal fails, is retried, but the signals are decrypted
 meanwhile. Each is discarded as unusable at its claim once overtaken beyond
-the bounds above. Decrypting a share's Olm layer before its sender is pinned,
+the bounds above. The lease does not change this: a share still on the server,
+leased or not, is as far from the device as one never claimed. Decrypting a
+share's Olm layer before its sender is pinned,
 and leaving only the sender check pending, is not a way out within this
 protocol: a session opened by a pre-key message is created against the pinned
 identity of its sender (§4.3), and one created before that check would sit in
@@ -631,6 +784,11 @@ read.
   by `rateLimitE2EDevice` (5/hour) and harmless (a 6th device is still fully
   authenticated).
 - History does not follow a new device (no key backup) — by design, §11.
+- A key share kept unacknowledged (its sender could not be checked yet, its
+  session could not be stored) is handed out again by the first claim after
+  each lease until it is imported or dropped, and counts against its sender's
+  inbox caps until then, as an unclaimed one does (§12.3). A share acknowledged
+  is deleted at once; one never acknowledged is swept after 30 days.
 - Ratchet-position bindings (§9.1) are per device and per session: a new
   device or wiped vault binds history as it is served, and an edit rolled
   back to a version sent under an EARLIER session is not detected.

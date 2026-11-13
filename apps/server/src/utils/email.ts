@@ -52,13 +52,56 @@ function formatDuration(ms: number): string {
  */
 export function describeEmailError(err: unknown): string {
   if (err && typeof err === 'object') {
-    const e = err as { code?: unknown; responseCode?: unknown };
+    const e = err as { code?: unknown; responseCode?: unknown; command?: unknown };
     if (typeof e.code === 'string') {
       return typeof e.responseCode === 'number' ? `${e.code} (SMTP ${e.responseCode})` : e.code;
     }
+    // An SMTP reply without a code still quotes the server, address included
+    if (typeof e.responseCode === 'number') return `SMTP ${e.responseCode}`;
+    if (typeof e.command === 'string') return `SMTP error (${e.command})`;
     if (err instanceof Error) return err.message;
   }
   return String(err);
+}
+
+/** SMTP commands that are only ever in flight before the envelope: the greeting, STARTTLS, the login. */
+const PRE_ENVELOPE_COMMAND_RE = /^(?:EHLO|HELO|LHLO|STARTTLS|AUTH(?: .+)?)$/;
+/** nodemailer codes raised only while resolving, securing or logging in to the relay. */
+const PRE_ENVELOPE_CODES = new Set(['EDNS', 'ETLS', 'EAUTH']);
+/** nodemailer's timeoutType of the setup phases (a SOCKET_TIMEOUT can strike at any point, DATA included). */
+const SETUP_TIMEOUTS = new Set(['CONNECT_TIMEOUT', 'GREETING_TIMEOUT', 'UPGRADE_TIMEOUT']);
+/**
+ * System errors that mean no connection was ever established. Not
+ * EHOSTUNREACH or ENETUNREACH: an established session's socket can raise
+ * them too (a route lost mid-transfer, DATA included), and nodemailer gives
+ * that the same ESOCKET/CONN shape as a failed connect.
+ */
+const NEVER_CONNECTED = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+
+/**
+ * Whether a send failure PROVES no recipient was reached: the relay could not
+ * be resolved, connected to, greeted, secured or logged in to. Read from what
+ * nodemailer actually sets (smtp-connection): its `command` is a fixed 'CONN'
+ * for every socket error, close and inactivity timeout, whatever phase the
+ * session was in, so 'CONN' proves nothing by itself, and neither does
+ * ECONNECTION, which a connection closed during DATA also carries. What does
+ * prove it: a command only sent before the envelope (EHLO, HELO, LHLO,
+ * STARTTLS, AUTH …), a code only raised during setup (EDNS, ETLS, EAUTH), a
+ * setup-phase `timeoutType`, or a system error meaning the TCP connection was
+ * never made. Everything else, a refused recipient or sender, anything during
+ * or after DATA, a socket timeout, a dropped connection, is no proof.
+ */
+export function failedBeforeAnyRecipient(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const { code, command, timeoutType, originalCode } = err as {
+    code?: unknown; command?: unknown; timeoutType?: unknown; originalCode?: unknown;
+  };
+  if (typeof command === 'string' && PRE_ENVELOPE_COMMAND_RE.test(command)) return true;
+  if (typeof code !== 'string') return false;
+  if (PRE_ENVELOPE_CODES.has(code)) return true;
+  if (code === 'ETIMEDOUT') return typeof timeoutType === 'string' && SETUP_TIMEOUTS.has(timeoutType);
+  if (code === 'ESOCKET') return typeof originalCode === 'string' && NEVER_CONNECTED.has(originalCode);
+  return false;
 }
 
 export interface CleanupReport {

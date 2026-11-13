@@ -17,6 +17,7 @@ import {
   E2E_ENGINE_MEGOLM1,
   E2E_DEVICE_ID_RE,
   E2E_KEY_B64_RE,
+  E2E_ROW_ID_RE,
   E2E_SIGNATURE_B64_RE,
   e2eDeviceCanonical,
   e2eDeviceCrossCanonical,
@@ -209,8 +210,9 @@ class E2EUnusableTransferError extends Error {
 /**
  * A key share that cannot be imported NOW: its sender's device is not pinned
  * and their list cannot be read (signed out, offline, refused). The share is
- * kept in the vault and retried, never discarded — the server already deleted
- * it, and nothing about the share itself is wrong.
+ * kept in the vault and retried, never discarded and never acknowledged —
+ * nothing about the share itself is wrong, and the server may already have
+ * deleted it (a server from before leases) or will hand it out again.
  */
 class E2EShareDeferredError extends Error {
   constructor(
@@ -234,6 +236,15 @@ class E2EShareDeferredError extends Error {
  */
 function isStorageFailure(err: unknown): boolean {
   return typeof DOMException !== 'undefined' && err instanceof DOMException;
+}
+
+/**
+ * A request that failed with no answer from the server (a network error, its
+ * deadline): the server may have acted on it all the same. A refusal is an
+ * answer, and a dispose is not a failure of the request.
+ */
+function answerLost(err: unknown): boolean {
+  return !isE2ESessionEnded(err) && (err as { response?: unknown } | null)?.response === undefined;
 }
 
 /** A 403 or 404 from the server: an answer about the request, not about the connection. */
@@ -292,8 +303,39 @@ const DEVICE_LIST_CACHE_MS = 10_000;
 const SHARE_RETRY_BACKOFF_MS = 30_000;
 /** Give up on a target after this many failed retry rounds (see spec §12.4). */
 const MAX_SHARE_RETRIES = 10;
-/** Hard stop when draining the key-share inbox (guards a hostile server). */
+/**
+ * Hard stop when draining the key-share inbox (guards a hostile server): the
+ * pages one run reads that hold a share this device does not hold yet.
+ */
 const MAX_CLAIM_PAGES = 20;
+/**
+ * Hard stop on the claims of one run, whatever their pages hold. A page made
+ * only of shares this device holds already (kept here until their sender can
+ * be checked, or done with and their acknowledgement owed) does not count
+ * toward MAX_CLAIM_PAGES: the server hands those out again, oldest first,
+ * after each lease, and MAX_CLAIM_PAGES pages of them would keep a run from
+ * ever reaching a share stored after them. Each claim leases its page, so the
+ * next one gets the page after it. 25 of the 30 claims a minute the server
+ * allows (e2eShares, which the claims share with the share uploads, the
+ * master-secret transfers and the message-key backup writes), so a run leaves
+ * those of that minute some room; more held shares than a run reaches wait
+ * for a run within those leases (the next one starts past them) or for the
+ * held ones to be settled.
+ */
+const MAX_CLAIM_REQUESTS = 25;
+/**
+ * Owed key-share acknowledgements (`pka:`) kept at most, the oldest dropped
+ * beyond: the debts of two full claim runs (MAX_CLAIM_PAGES pages of
+ * KEYSHARE_ACK_MAX), the run in progress and one before it whose
+ * acknowledgements all failed. Dropping one costs a delivery, never a key:
+ * its share, if the server still has it, is handed out again after its
+ * lease, recognised by its session if it was imported (one discarded as
+ * unusable has no session and is processed again), and acknowledged then.
+ * The cap bounds the vault (an id and a time each) and what one pass of the
+ * sender sends
+ * (40 requests, inside the server's 60 a minute for acknowledgements).
+ */
+const MAX_OWED_SHARE_ACKS = 2 * MAX_CLAIM_PAGES * E2E_LIMITS.KEYSHARE_ACK_MAX;
 /**
  * Hard stop for the message-key history pull (guards a hostile server's
  * endless cursor): as many pages as the server holds for one account, plus
@@ -312,6 +354,41 @@ const MAX_RESTORE_PAGES = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMIT
 const MAX_PENDING_SHARE_ATTEMPTS = 5;
 /** How long a dispose waits for a key-share claim in flight before tearing down anyway. */
 const TEARDOWN_DEADLINE_MS = 10_000;
+/**
+ * Deadline of the key-share claim's GET and of the acknowledgement POST, the
+ * one the session refresh has (REFRESH_TIMEOUT_MS): the api sets none, and a
+ * request hung on a dead connection would hold the claim run, and the queue
+ * behind it, or the acknowledgement sender, until the browser gave up. A
+ * claim that times out is a claim whose answer was lost.
+ */
+const KEYSHARE_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * A claim whose answer never came (a network error, its deadline) may have
+ * leased its page on the server all the same, and no claim gets those shares
+ * until the lease passes: the service claims again then, this long after
+ * the lease length, which covers the time the request took to reach the
+ * server (the lease starts there, the failure is seen later).
+ */
+const LOST_CLAIM_RETRY_MARGIN_MS = 5_000;
+/**
+ * Claims after a lost answer, in a row, at most: a device that stays offline
+ * stops after this many, and the next decrypt miss or start claims as
+ * before. Any claim the server answers starts the count again.
+ */
+const LOST_CLAIM_RETRY_MAX = 3;
+/**
+ * Answers that refuse an acknowledgement for good: sent again it gets the
+ * same answer, and kept it would go first in every later request, holding
+ * back every acknowledgement after it for as long as the vault keeps one.
+ * 400: the server takes these ids from this device never (the client sends
+ * only ids of the shape it takes, a page at most); 403: the device is not
+ * the caller's (revoked, its shares deleted with it); 404: no such route (a
+ * server from before leases, which deleted what it handed out). Settled,
+ * a share the server still has comes back after its lease, is recognised by
+ * its session, and is acknowledged again. A 429, a 5xx or no answer at all
+ * leaves the acknowledgement owed.
+ */
+const ACK_REFUSED_FOR_GOOD = new Set([400, 403, 404]);
 
 const noop = (): void => {};
 
@@ -347,16 +424,20 @@ function pendingShareKey(share: Record<string, unknown>): string {
 }
 
 /**
- * A claimed page as vault entries. Tolerant by necessity: the server deleted
- * the page when it answered, so one malformed element (logged and skipped)
- * must not cost the others, and an answer without a page is an empty one.
- * `served` is what the server sent, malformed elements included.
+ * A claimed page as vault entries. Tolerant by necessity: a server from before
+ * leases deleted the page when it answered, so one malformed element (logged
+ * and skipped) must not cost the others, and an answer without a page is an
+ * empty one. `served` is what the server sent, malformed elements included.
+ * An answer that names its lease (`leaseMs`) came from a leasing claim: its
+ * shares stay on the server until this device acknowledges them (spec §12.3).
  */
 function claimedPageEntries(res: unknown): {
   served: number;
   entries: Array<{ key: string; record: PendingKeyShare }>;
 } {
-  const shares = (res as { data?: { data?: { shares?: unknown } } } | null)?.data?.data?.shares;
+  const data = (res as { data?: { data?: { shares?: unknown; leaseMs?: unknown } } } | null)?.data?.data;
+  const shares = data?.shares;
+  const leased = typeof data?.leaseMs === 'number';
   const page: unknown[] = Array.isArray(shares) ? shares : [];
   const receivedAt = Date.now();
   const entries: Array<{ key: string; record: PendingKeyShare }> = [];
@@ -366,9 +447,21 @@ function claimedPageEntries(res: unknown): {
       continue;
     }
     const share = element as Record<string, unknown>;
-    entries.push({ key: pendingShareKey(share), record: { share, attempts: 0, receivedAt } });
+    const record: PendingKeyShare = leased ? { share, attempts: 0, receivedAt, leased } : { share, attempts: 0, receivedAt };
+    entries.push({ key: pendingShareKey(share), record });
   }
   return { served: page.length, entries };
+}
+
+/**
+ * The id a kept share is acknowledged by: only one a leasing claim handed out
+ * (a server from before leases deleted the rest when it answered), and only an
+ * id of the shape the server takes back, since one malformed id refuses the
+ * whole acknowledgement.
+ */
+function shareAckId(record: PendingKeyShare): string | null {
+  const id = record.share.id;
+  return record.leased === true && typeof id === 'string' && E2E_ROW_ID_RE.test(id) ? id : null;
 }
 
 /** The sender device a kept share names, as `userId|deviceId` (fields as the inbox served them). */
@@ -535,6 +628,10 @@ export class E2EService {
   private claimInFlight: Promise<number> | null = null;
   /** A claim's GET is on its way: a teardown keeps one vault connection for its answer. */
   private claimPageInFlight = false;
+  /** Claims again once the lease of a lost claim answer has passed (claimAgainAfterLease); cleared by dispose(). */
+  private lostClaimTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Claims armed after lost answers since the server last answered one (LOST_CLAIM_RETRY_MAX). */
+  private lostClaimRetries = 0;
   /** session id → last time we drained the inbox looking for it */
   private missingSessions = new Map<string, number>();
   /** Kept shares whose refused look-up was already counted in this start (see processPendingShares). */
@@ -550,6 +647,20 @@ export class E2EService {
    * (dispose()), makes the index unknown again (lateShareWrites).
    */
   private keptShares: Map<string, string> | null = null;
+  /**
+   * Ids of the key shares this device is done with whose acknowledgement the
+   * server has not confirmed (spec §12.3): the vault's `pka:` entries, read
+   * back at the start of every claim run. An id stays here until the server
+   * confirms it, also while a request carrying it is on its way: a share
+   * handed out again meanwhile is recognised by it (notHeldYet). Each id maps
+   * to when it was noted, oldest first: the order they are sent in, and
+   * dropped in beyond MAX_OWED_SHARE_ACKS.
+   */
+  private shareAcksOwed = new Map<string, number>();
+  /** The acknowledgement sender is running (sendShareAcks): one at a time, off the queue. */
+  private shareAckSenderRunning = false;
+  /** The acknowledgement sender started last, settled or not: nothing in the service awaits it. */
+  private shareAckSending: Promise<void> = Promise.resolve();
   /** The latest history pull started (pullHistory): an older one stops at its next page. */
   private historyPull = 0;
   /** lateShareWrites of this vault when keptShares was last filled. */
@@ -586,12 +697,14 @@ export class E2EService {
    * writes anything.
    *
    * The one request that may still be answered after a dispose is a key-share
-   * claim's GET, already on its way (the server deletes what it hands out):
-   * it uses the unguarded client (claimKeyShares). Everything else the claim
-   * would ask the server afterwards, such as the look-up of a sender it does
-   * not know, is refused here: logout has dropped the tokens by then, and the
+   * claim's GET, already on its way (its answer holds session keys this
+   * device has not stored yet): it uses the unguarded client (claimKeyShares).
+   * Everything else the claim would ask the server afterwards, such as the
+   * look-up of a sender it does not know or the acknowledgement of what it
+   * imported, is refused here: logout has dropped the tokens by then, and the
    * client attaches whatever bearer is current, which after a new sign-in is
-   * the next account's. The share it was for is kept for the next start.
+   * the next account's. The share it was for is kept, and the acknowledgement
+   * owed, for the next start.
    */
   private guardedApi(client: typeof defaultApi): typeof defaultApi {
     const guard = async <R>(call: () => Promise<R>): Promise<R> => {
@@ -788,12 +901,16 @@ export class E2EService {
    * End this service: no new work starts, no request goes out, and the engine
    * objects are freed and the vault closed.
    *
-   * Except while a key-share claim is in flight. The server deletes the shares
-   * it hands out (claim-and-delete, one-shot Olm bodies), so a claim answered
-   * after this point holds the only copy of those session keys. The teardown
-   * then waits for the claim to import them, or to keep the ones it cannot
-   * (pks:, see claimKeyShares), where the next start of this account finds
-   * them; the claim reads no further page and asks the server nothing more.
+   * Except while a key-share claim is in flight. A claim answered after this
+   * point holds session keys this device has not stored: the server keeps
+   * them under a lease until they are acknowledged, but hands them out again
+   * only once it passes, and a server from before leases deleted them when it
+   * answered. The teardown then waits for the claim to import them, or to
+   * keep the ones it cannot (pks:, see claimKeyShares), where the next start
+   * of this account finds them; the claim reads no further page and asks the
+   * server nothing more, its acknowledgements included (they stay owed in the
+   * vault, and the next start sends them; one already on its way is not
+   * confirmed there, and goes out again).
    * Until the teardown, that claim is the only thing that touches the vault:
    * in this service the queue starts nothing, a decrypt that waited on the
    * claim stops there, and every path off the queue is refused by the guarded
@@ -807,6 +924,8 @@ export class E2EService {
   dispose(): Promise<void> {
     // First, so work resuming after this point sees it before any freed handle
     this.disposed = true;
+    clearTimeout(this.lostClaimTimer);
+    this.lostClaimTimer = undefined;
     if (this.teardownDone) return this.teardownDone;
     const claim = this.claimInFlight;
     if (!claim) {
@@ -815,7 +934,8 @@ export class E2EService {
     }
     // the claim may use the open connection, never a new one
     this.vault.stopReopening();
-    // Bounded: a request can hang (the client sets no timeout). At the
+    // Bounded: the claim's request has a longer deadline of its own
+    // (KEYSHARE_REQUEST_TIMEOUT_MS), and a page takes time to import. At this
     // deadline the teardown runs anyway, and what the claim had not imported
     // stays kept in the vault for the next start.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -864,8 +984,8 @@ export class E2EService {
     for (const { session } of this.inbound.values()) session.free();
     this.inbound.clear();
     this.deviceListCache.clear();
-    // A claim's answer still on its way holds shares the server already
-    // deleted: one connection stays open for writing that page, raw, and
+    // A claim's answer still on its way holds shares this device has not
+    // stored: one connection stays open for writing that page, raw, and
     // nothing else (claimKeyShares). A version change closes it at once.
     if (this.claimPageInFlight) this.vault.closeKeepingConnectionForPendingShares();
     else this.vault.close();
@@ -3228,18 +3348,29 @@ export class E2EService {
   // ─── Key-share inbox ────────────────────────────────────────────────────────
 
   /**
-   * Claim (and thereby delete) this device's pending key shares and import the
-   * group sessions they carry. Olm pre-key bodies are one-shot, so the server
-   * hands each share out exactly once.
+   * Claim this device's pending key shares under a lease and import the group
+   * sessions they carry (spec §12.3). Olm pre-key bodies are one-shot, so the
+   * server hands a share to one claim at a time; it deletes one only when this
+   * device acknowledges it (POST /e2e/keyshares/ack), and hands out again,
+   * once its lease has passed, one that never was. A server from before
+   * leases ignores the request for one and deletes what it hands out: its
+   * answer carries no lease, and nothing of it is acknowledged.
    *
    * Every claimed page is written to the vault (`pks:`) before anything is
-   * done with it, and each share leaves it only once it is imported or found
-   * unusable: a run cut short (a logout, the teardown deadline, a closed
-   * window) leaves the rest there, and the next run starts with them. So does
-   * a share whose sender cannot be looked up right now (see
+   * done with it, and each share leaves it only once it is imported, found
+   * imported already, or found unusable, which is also when its
+   * acknowledgement is owed (`pka:`): a run cut short (a logout, the teardown
+   * deadline, a closed window) leaves the rest there, and the next run starts
+   * with them. So does a share whose sender cannot be looked up right now (see
    * E2EShareDeferredError), up to MAX_PENDING_SHARE_ATTEMPTS runs, and one
    * whose session could not be stored (its Olm decrypt is not committed, see
-   * olmDecryptStaged).
+   * olmDecryptStaged); neither is acknowledged meanwhile, so the server hands
+   * it out again after its lease, and the run that gets it leaves the kept
+   * copy as it is (notHeldYet). The acknowledgements owed are sent beside the
+   * run, started before its first claim and after each page and awaited by
+   * nobody (sendShareAcksDetached), never after a dispose. A claim that gets
+   * no answer may have leased its page anyway: it is claimed again once that
+   * lease has passed (claimAgainAfterLease).
    *
    * A kept share is imported before any newer Olm message of its sender
    * device (importKeptSharesFrom), unless that import fails: the message is
@@ -3260,49 +3391,81 @@ export class E2EService {
       // Senders whose shares wait in this run: a later share of theirs waits
       // behind, since it may ride the Olm session an earlier one sets up.
       const deferredSenders = new Set<string>();
+      // What earlier runs and starts still owe the server, as the vault has it
+      await this.loadShareAcks();
       // Kept shares first: they are older than anything still on the server.
-      let imported = await this.processPendingShares(await this.listKeptShares(), deferredSenders, true);
+      let imported = await this.processPendingShares(await this.listKeptShares(), deferredSenders);
+      await this.capShareAcks();
+      // Started before the first claim, never waited for: what the server
+      // hands out again meanwhile is recognised by its owed id (notHeldYet)
+      this.sendShareAcksDetached();
       // Drain every page: the inbox is oldest-first and capped per response, so
       // stopping at one page would let queued older shares delay a live one.
-      for (let page = 0; page < MAX_CLAIM_PAGES; page++) {
-        // Disposed meanwhile: this page is imported (dispose() waits for it),
-        // the next one stays on the server.
-        if (this.disposed) break;
-        // The unguarded client: an answer that comes back after the teardown
-        // (the dispose deadline passed) still holds shares the server has
-        // deleted, and must reach the vault rather than be thrown away.
-        this.claimPageInFlight = true;
-        const res = await this.client
-          .get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}`)
-          .catch((err: unknown) => {
-            // no answer to write: the connection kept for one is not needed
-            if (this.tornDown) this.vault.releaseLateConnection();
-            throw err;
-          })
-          .finally(() => {
-            this.claimPageInFlight = false;
-          });
-        if (this.tornDown) {
-          // Torn down while the answer was on its way: write it raw on the
-          // connection the teardown kept for it, for the next start, and stop.
-          // The release covers the parsing too: a malformed answer must not
-          // keep that connection open.
-          try {
-            await this.vault.writePendingSharesLate(claimedPageEntries(res).entries);
-          } finally {
-            this.vault.releaseLateConnection();
-            // a newer service on this vault has not listed these (lateShareWrites)
-            lateShareWrites.set(this.vaultName, (lateShareWrites.get(this.vaultName) ?? 0) + 1);
+      // A page of shares all held here already does not count (MAX_CLAIM_REQUESTS).
+      let pages = 0;
+      // The count of lost answers (lostClaimRetries) starts again only for a run
+      // in which a claim was answered and none lost its answer.
+      let answeredInRun = false;
+      let lostInRun = false;
+      try {
+        for (let request = 0; request < MAX_CLAIM_REQUESTS && pages < MAX_CLAIM_PAGES; request++) {
+          // Disposed meanwhile: this page is imported (dispose() waits for it),
+          // the next one stays on the server.
+          if (this.disposed) break;
+          // The unguarded client: an answer that comes back after the teardown
+          // (the dispose deadline passed) still holds shares this device has not
+          // stored, and must reach the vault rather than be thrown away.
+          this.claimPageInFlight = true;
+          const res = await this.client
+            .get(`/e2e/keyshares?deviceId=${encodeURIComponent(this.deviceId)}&lease=1`, {
+              timeout: KEYSHARE_REQUEST_TIMEOUT_MS,
+            })
+            .catch((err: unknown) => {
+              // no answer to write: the connection kept for one is not needed
+              if (this.tornDown) this.vault.releaseLateConnection();
+              // the server may have leased this page all the same
+              else if (answerLost(err)) {
+                lostInRun = true;
+                this.claimAgainAfterLease();
+              }
+              // a refusal is an answer: the next lost one counts from zero
+              else this.lostClaimRetries = 0;
+              throw err;
+            })
+            .finally(() => {
+              this.claimPageInFlight = false;
+            });
+          answeredInRun = true;
+          if (this.tornDown) {
+            // Torn down while the answer was on its way: write it raw on the
+            // connection the teardown kept for it, for the next start, and stop.
+            // The release covers the parsing too: a malformed answer must not
+            // keep that connection open.
+            try {
+              await this.vault.writePendingSharesLate(this.notHeldYet(claimedPageEntries(res).entries));
+            } finally {
+              this.vault.releaseLateConnection();
+              // a newer service on this vault has not listed these (lateShareWrites)
+              lateShareWrites.set(this.vaultName, (lateShareWrites.get(this.vaultName) ?? 0) + 1);
+            }
+            throw new E2EServiceDisposedError();
           }
-          throw new E2EServiceDisposedError();
+          // Written before anything else is done
+          const { served, entries } = claimedPageEntries(res);
+          if (served === 0) break;
+          const fresh = this.notHeldYet(entries);
+          // every element read, and every one held here already: not a page that counts
+          if (fresh.length > 0 || entries.length < served) pages++;
+          await this.keepShares(fresh);
+          imported += await this.processPendingShares(fresh, deferredSenders);
+          await this.capShareAcks();
+          // Not once disposed: the next start sends what this page settled
+          this.sendShareAcksDetached();
+          // the server's count, malformed elements included, decides whether more pages wait
+          if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
         }
-        // The server has deleted these: written before anything else is done
-        const { served, entries } = claimedPageEntries(res);
-        if (served === 0) break;
-        await this.keepShares(entries);
-        imported += await this.processPendingShares(entries, deferredSenders, false);
-        // the server's count, malformed elements included, decides whether more pages wait
-        if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
+      } finally {
+        if (answeredInRun && !lostInRun) this.lostClaimRetries = 0;
       }
       return imported;
     })().finally(() => {
@@ -3310,6 +3473,32 @@ export class E2EService {
     });
     this.claimInFlight = run;
     return run;
+  }
+
+  /**
+   * A claim got no answer (a network error, its deadline), and the server may
+   * have leased its page all the same: those shares go to no claim until the
+   * lease passes, and nothing else claims again before the next decrypt miss
+   * or start. One timer queues a claim once the lease has passed; a later lost
+   * answer re-arms it, dispose() clears it. LOST_CLAIM_RETRY_MAX in a row at
+   * most (none while the device is offline: not armed, not counted), so a
+   * device that stays offline stops; a run that ends with no lost claim (one
+   * at least answered) starts the count again (claimKeyShares).
+   */
+  private claimAgainAfterLease(): void {
+    if (this.disposed || this.lostClaimRetries >= LOST_CLAIM_RETRY_MAX) return;
+    // Offline: nothing is armed and the attempt is not counted; the fetches of
+    // the reconnect cause the next claim.
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    this.lostClaimRetries++;
+    clearTimeout(this.lostClaimTimer);
+    this.lostClaimTimer = setTimeout(() => {
+      this.lostClaimTimer = undefined;
+      if (this.disposed) return;
+      this.enqueue(() => this.claimKeyShares()).catch((err: unknown) => {
+        this.logStartupTaskFailure('key-share claim after a lost answer', err);
+      });
+    }, E2E_LIMITS.KEYSHARE_LEASE_MS + LOST_CLAIM_RETRY_MARGIN_MS);
   }
 
   // Every read, write and delete of a kept share goes through these three, so
@@ -3331,30 +3520,180 @@ export class E2EService {
     await this.vault.putPendingShares(entries);
   }
 
-  /** Drop one kept share; forgotten only once the vault has dropped it. */
-  private async forgetKeptShare(key: string): Promise<void> {
+  /**
+   * Drop one kept share this device is done with (imported, imported already,
+   * unusable, or dropped at the attempt cap); forgotten only once the vault has
+   * dropped it. One a leasing claim handed out is still on the server: its
+   * acknowledgement is noted as owed first, so a run cut in between leaves
+   * both and never neither (the next run settles the kept copy again).
+   */
+  private async forgetKeptShare(key: string, record: PendingKeyShare): Promise<void> {
+    const ackId = shareAckId(record);
+    if (ackId) {
+      await this.vault.putShareAck(ackId);
+      // the newest: noted again, it moves to the end
+      this.shareAcksOwed.delete(ackId);
+      this.shareAcksOwed.set(ackId, Date.now());
+    }
     await this.vault.deletePendingShare(key);
     this.keptShares?.delete(key);
   }
 
   /**
-   * Import kept key shares in order, removing each one that is done with.
-   * `retry` marks shares kept by an earlier run: one whose session reached this
-   * device another way meanwhile (a re-share, a restored backup) is dropped
-   * without being decrypted again.
+   * The entries of a claimed page this device does not hold yet. A leasing
+   * claim hands a share out again once its lease has passed, and two kinds of
+   * share come back that way. One kept here unacknowledged (its sender could
+   * not be checked yet, its session could not be stored) keeps the record it
+   * has, its refused look-ups counted, and is left to the kept pass of a run,
+   * which went through it at the start of this one: written again it would
+   * start its count over, and the share would be kept forever. One this
+   * device is done with but still owes the acknowledgement of is acknowledged
+   * with the rest of the page, never processed again. Anything else that comes
+   * back (an acknowledgement confirmed, a record lost) is processed, and
+   * recognised there by its session if it was imported (processPendingShares).
+   * A share whose kept copy a failed write left unwritten still has an entry
+   * in keptShares until the next run lists the vault: it is skipped here,
+   * unacknowledged, and comes back once more after its lease.
+   */
+  private notHeldYet(entries: Array<{ key: string; record: PendingKeyShare }>): Array<{ key: string; record: PendingKeyShare }> {
+    return entries.filter(({ key, record }) => {
+      if (this.keptShares?.has(key)) return false;
+      const id = record.share.id;
+      return !(typeof id === 'string' && this.shareAcksOwed.has(id));
+    });
+  }
+
+  /**
+   * Read back the acknowledgements owed (the vault is the record: what a run a
+   * dispose cut short, or an earlier start, noted there is sent by this one).
+   * One older than the server's retention is dropped unsent: the share it was
+   * for has been swept. So are the oldest beyond MAX_OWED_SHARE_ACKS.
+   */
+  private async loadShareAcks(): Promise<void> {
+    const cutoff = Date.now() - E2E_LIMITS.KEYSHARE_MAX_AGE_MS;
+    const owed: Array<{ id: string; at: number }> = [];
+    const stale: string[] = [];
+    for (const entry of await this.vault.listShareAcks()) {
+      if (typeof entry?.id !== 'string') continue;
+      if (typeof entry.at === 'number' && entry.at >= cutoff) owed.push({ id: entry.id, at: entry.at });
+      else stale.push(entry.id);
+    }
+    // oldest first (the vault lists them by id)
+    owed.sort((a, b) => a.at - b.at);
+    this.shareAcksOwed = new Map(owed.map(({ id, at }) => [id, at]));
+    if (stale.length > 0) await this.vault.deleteShareAcks(stale);
+    await this.capShareAcks();
+  }
+
+  /**
+   * Keep at most MAX_OWED_SHARE_ACKS owed acknowledgements, the oldest
+   * dropped (see there for why that costs no key). On the queue: when a run
+   * reads them back, and after each part of a run that settles shares.
+   */
+  private async capShareAcks(): Promise<void> {
+    const excess = this.shareAcksOwed.size - MAX_OWED_SHARE_ACKS;
+    if (excess <= 0) return;
+    const dropped = [...this.shareAcksOwed.keys()].slice(0, excess);
+    for (const id of dropped) this.shareAcksOwed.delete(id);
+    console.warn(
+      `e2e: dropping the ${excess} oldest owed key-share acknowledgement(s) beyond ${MAX_OWED_SHARE_ACKS} (acknowledged when their shares are handed out again)`
+    );
+    await this.vault.deleteShareAcks(dropped);
+  }
+
+  /**
+   * Start sending the acknowledgements owed (sendShareAcks), off the queue
+   * and awaited by nobody: neither a claim run nor a decrypt waiting on one
+   * waits for the server to confirm an acknowledgement, or for a request that
+   * never answers. One sender at a time: one already running sends what is
+   * owed now when it gets there. Whether an acknowledgement or the next claim
+   * reaches the server first does not matter: a share handed out again before
+   * its acknowledgement is confirmed is recognised by its owed id (notHeldYet).
+   */
+  private sendShareAcksDetached(): void {
+    if (this.shareAckSenderRunning || this.disposed || this.shareAcksOwed.size === 0) return;
+    this.shareAckSenderRunning = true;
+    // runs up to its first request now, so the request leaves before anything the caller sends next
+    this.shareAckSending = this.sendShareAcks().catch((err: unknown) => {
+      // sendShareAcks handles what it expects; nothing else awaits this promise
+      console.warn('e2e: the key-share acknowledgement sender stopped:', errText(err));
+    });
+  }
+
+  /**
+   * Acknowledge the key shares this device is done with (spec §12.3), a page
+   * of ids per request, oldest first, so the server deletes them: until none
+   * is owed, a request fails, or the service is disposed. Off the queue, so
+   * the vault is reached through liveVault: once disposed, nothing is sent
+   * and nothing forgotten, and the vault keeps what is owed for the next
+   * start (an answer that comes back after the dispose is dropped by the
+   * guarded client, and the server counts nothing for it when it comes
+   * again). An acknowledgement the server did not confirm stays owed and goes
+   * out again after the next page of a claim run, or with the next run. A
+   * confirmed id is done with whatever the server counted for it (it may have
+   * gone already: acknowledged before, swept, evicted).
+   */
+  private async sendShareAcks(): Promise<void> {
+    try {
+      while (this.shareAcksOwed.size > 0 && !this.disposed) {
+        const ids = [...this.shareAcksOwed.keys()].slice(0, E2E_LIMITS.KEYSHARE_ACK_MAX);
+        try {
+          await this.api.post(
+            '/e2e/keyshares/ack',
+            { deviceId: this.deviceId, ids },
+            { timeout: KEYSHARE_REQUEST_TIMEOUT_MS }
+          );
+        } catch (err) {
+          const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
+          if (this.disposed || typeof status !== 'number' || !ACK_REFUSED_FOR_GOOD.has(status)) {
+            // a dispose that overtook it is not a failure to report
+            if (!(this.disposed && isE2ESessionEnded(err))) {
+              console.warn('e2e: could not acknowledge claimed key shares (sent again by the next claim):', errText(err));
+            }
+            return;
+          }
+          // Refused for good (ACK_REFUSED_FOR_GOOD): settled like a confirmed
+          // one, so it holds back none of the requests after it. Neither the
+          // ids nor the server's words are logged.
+          console.warn(
+            `e2e: the server refused an acknowledgement of ${ids.length} claimed key share(s) for good (HTTP ${status}); not sending it again`
+          );
+        }
+        // settled: forgotten here, then in the vault (refused once disposed)
+        for (const id of ids) this.shareAcksOwed.delete(id);
+        try {
+          await this.liveVault.deleteShareAcks(ids);
+        } catch (err) {
+          if (isE2ESessionEnded(err)) return;
+          // read back and sent again by the next run, which the server counts as nothing
+          console.warn('e2e: could not forget acknowledged key shares:', errText(err));
+        }
+      }
+    } finally {
+      // In the step that decides to stop: a kick after it starts a new
+      // sender, one before it found this one still running.
+      this.shareAckSenderRunning = false;
+    }
+  }
+
+  /**
+   * Import kept key shares in order, removing each one that is done with. One
+   * whose session reached this device already is dropped without being
+   * decrypted again: a share a leasing claim handed out again (its
+   * acknowledgement was lost, so its Olm message is spent), a re-share, a
+   * restored backup, or a kept copy a run cut short left behind.
    */
   private async processPendingShares(
     entries: Array<{ key: string; record: PendingKeyShare }>,
-    deferredSenders: Set<string>,
-    retry: boolean
+    deferredSenders: Set<string>
   ): Promise<number> {
     let imported = 0;
     for (const { key, record } of entries) {
       const { share } = record;
       const sender = typeof share.senderUserId === 'string' ? share.senderUserId : '';
       try {
-        if (retry && typeof share.sessionId === 'string' && (await this.loadInbound(share.sessionId))) {
-          await this.forgetKeptShare(key);
+        if (typeof share.sessionId === 'string' && (await this.loadInbound(share.sessionId))) {
+          await this.forgetKeptShare(key, record);
           continue;
         }
         if (deferredSenders.has(sender)) {
@@ -3366,7 +3705,7 @@ export class E2EService {
         // copy goes, and only then the Olm state its message advanced is
         // written. Cut before this point, the share is still kept and still
         // decrypts from the state on disk.
-        await this.forgetKeptShare(key);
+        await this.forgetKeptShare(key, record);
         try {
           await outcome.persistOlm();
         } catch (err) {
@@ -3385,7 +3724,7 @@ export class E2EService {
           const attempts = record.attempts + 1;
           if (attempts >= MAX_PENDING_SHARE_ATTEMPTS) {
             console.warn(`e2e: dropping a key share after ${attempts} refused look-ups of its sender:`, errText(err));
-            await this.forgetKeptShare(key);
+            await this.forgetKeptShare(key, record);
           } else {
             await this.keepShares([{ key, record: { ...record, attempts } }]);
           }
@@ -3404,7 +3743,7 @@ export class E2EService {
           continue;
         }
         console.warn('e2e: discarding an unusable key share:', errText(err));
-        await this.forgetKeptShare(key);
+        await this.forgetKeptShare(key, record);
       }
     }
     return imported;
@@ -3615,7 +3954,9 @@ export class E2EService {
    * those would leave a kept share's message only to vodozemac's skipped
    * message keys, whose receiving chains a few turns of a call push out
    * (spec §12.3). The device is pinned by now (decryptFromDevice), so this
-   * asks the server nothing. Callers must hold the serial queue.
+   * asks the server nothing, not even the acknowledgement of what it imports:
+   * that is owed, and the next claim run sends it, never a request on the way
+   * to a call signal. Callers must hold the serial queue.
    */
   private async importKeptSharesFrom(userId: string, deviceId: string): Promise<void> {
     const sender = `${userId}|${deviceId}`;
@@ -3625,7 +3966,7 @@ export class E2EService {
     const current = this.keptSharesLateWrites === (lateShareWrites.get(this.vaultName) ?? 0);
     if (index && current && ![...index.values()].includes(sender)) return;
     const kept = (await this.listKeptShares()).filter(({ record }) => keptShareSender(record) === sender);
-    if (kept.length > 0) await this.processPendingShares(kept, new Set(), true);
+    if (kept.length > 0) await this.processPendingShares(kept, new Set());
   }
 
   /**

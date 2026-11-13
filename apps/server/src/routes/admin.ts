@@ -10,7 +10,8 @@ import { revokeUserSessions } from '../utils/sessionRevocation';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
-import { broadcastServerVoiceCleanup } from '../websocket/voiceCluster';
+import { deleteServerAndAnnounce } from '../utils/serverDeletion';
+import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
 import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
@@ -23,12 +24,13 @@ import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanClea
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
 import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode, Server, AdminWebhook } from '@voxium/shared';
 import { WS_EVENTS, LIMITS } from '@voxium/shared';
-import { logAuditEvent } from '../utils/auditLog';
+import { logAuditEvent, auditLogData } from '../utils/auditLog';
 import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { serverSelect } from '../utils/serverSelect';
+import type { Prisma } from '../generated/prisma/client';
 import {
-  webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhooksHeldBy,
+  webhookSelect, toWebhook, isPurgeRequested, emitWebhookChanged, deleteWebhookWithPurge, emitWebhookDeletion, disarmWebhookRowsHeldBy,
 } from '../utils/webhookLifecycle';
 
 export const adminRouter = Router();
@@ -41,28 +43,131 @@ function forceLogoutUser(userId: string, reason: string): void {
 }
 
 /**
- * Make every socket in a space about to be deleted leave its rooms, on every
- * node: the server room AND every channel room, the owner route's list
- * (DELETE /servers/:serverId). Addressed to the union of the rooms, because a
- * socket can be in a `channel:{id}` room without `server:{id}`.
- *
- * Adapter-wide room operations, never a `fetchSockets()` round trip: it waits
- * for every node's reply and throws after 5 s when one peer is unresponsive,
- * which failed the delete after the notice had gone out. Local form first,
- * then cluster-wide (see utils/memberBroadcast.ts: the Redis adapter applies
- * the cluster form on this node only when its own message comes back). The
- * callers emit `server:deleted` first; the leave is published after it on the
- * same Redis connection, so every peer delivers the notice before the leave.
+ * Both ban transactions (the ban route, a report resolved with a ban). Right
+ * after the account row they disarm the webhook rows the account holds, and a
+ * delete-with-purge holds such a row under its own 60 s budget
+ * (utils/webhookLifecycle.ts): the 5 s default would fail a ban queued
+ * behind it, where the ban used to commit and disarm afterwards.
  */
-async function clearServerRooms(serverId: string): Promise<void> {
-  const io = getIO();
-  const channels = await prisma.channel.findMany({
-    where: { serverId },
-    select: { id: true },
-  });
-  const rooms = [`server:${serverId}`, ...channels.map((c) => `channel:${c.id}`)];
-  io.local.in(rooms).socketsLeave(rooms);
-  io.in(rooms).socketsLeave(rooms);
+const BAN_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 };
+
+/**
+ * Lock the account rows a ban or a report resolution depends on, FIRST in
+ * its transaction and in one fixed order (sorted ids, so two of these never
+ * wait on each other crosswise). An account deletion (utils/accountDeletion.ts)
+ * deletes the account row first and only then reaches its webhooks (SetNull),
+ * reports and messages (Cascade) through the foreign keys; a transaction that
+ * held one of those rows and then waited on the account row closed a cycle,
+ * and when Postgres aborted the deletion its notices, revocations and purges
+ * had already run. Taking the account row first means both sides queue on
+ * the same row and nothing else.
+ *
+ * Two strengths, each the weakest that still makes a deletion wait:
+ *  - 'update', the account this transaction writes (the one banned): FOR NO
+ *    KEY UPDATE, not FOR UPDATE. It conflicts with the deletion and with any
+ *    other UPDATE of the row, but not with FOR KEY SHARE, which every insert
+ *    of a row referencing the account takes, so a join, a message or a kick
+ *    of that account (its webhook statement, then its ban row) never waits
+ *    on a ban.
+ *  - 'keep', an account this transaction only needs to still exist (a
+ *    report's reporter, a reported account not being banned): FOR KEY SHARE.
+ *    A DELETE still waits for it; an ordinary column update (the presence
+ *    write of a reporter who connects while the disarm waits on a webhook
+ *    purge) does not.
+ * A webhook purge-delete locks the webhook row and never the account's, so it
+ * cannot close a cycle with the webhook disarm that follows.
+ */
+async function lockAccountRows(
+  tx: Prisma.TransactionClient,
+  rows: { id: string | null | undefined; mode: 'update' | 'keep' }[],
+): Promise<Set<string>> {
+  // One lock per account, the stronger when it is asked for twice
+  const modes = new Map<string, 'update' | 'keep'>();
+  for (const { id, mode } of rows) {
+    if (!id) continue;
+    if (modes.get(id) !== 'update') modes.set(id, mode);
+  }
+  // The accounts that still exist, now held: one deleted since the caller
+  // read it locks nothing, and the caller answers as for a missing one
+  const locked = new Set<string>();
+  for (const id of [...modes.keys()].sort()) {
+    const found = modes.get(id) === 'update'
+      ? await tx.$queryRaw<{ id: string }[]>`SELECT id FROM users WHERE id = ${id} FOR NO KEY UPDATE`
+      : await tx.$queryRaw<{ id: string }[]>`SELECT id FROM users WHERE id = ${id} FOR KEY SHARE`;
+    if (found.length > 0) locked.add(id);
+  }
+  return locked;
+}
+
+/** A step after a committed ban failed: logged, never thrown (the ban holds). */
+function logBanFanOutFailure(userId: string, step: string, err: unknown): void {
+  console.error(`[Admin] User ${userId} banned, but ${step} failed:`, err instanceof Error ? err.message : err);
+}
+
+/**
+ * What a committed platform ban tells everyone else, shared by the ban route
+ * and a report resolved with a ban. Called after the ban's transaction (the
+ * ban, the disarmed webhook rows, the withdrawn join requests and the audit
+ * row all committed) and after the sessions were revoked. Best effort, each
+ * step on its own: one that throws is logged, the next still runs, and none
+ * of them can fail the request.
+ */
+async function announceCommittedBan(
+  userId: string,
+  disarmedServerIds: string[],
+  withdrawnRequests: { serverId: string }[],
+): Promise<void> {
+  // A banned owner's servers leave the directory (owner.bannedAt is one of
+  // the listing column's inputs)
+  try {
+    await recomputeListedForOwner(userId);
+  } catch (err) {
+    logBanFanOutFailure(userId, 'the directory recompute', err);
+  }
+
+  // A second disarm pass, now that the ban has committed and the sessions are
+  // revoked: a webhook the account created or rotated after the transaction's
+  // disarm statement (its request had passed authentication before the ban),
+  // or a rotate that waited on a disarmed row and cleared its mark on commit,
+  // is held again and the first pass could not see it
+  let lateServerIds: string[] = [];
+  try {
+    lateServerIds = await disarmWebhookRowsHeldBy(prisma, userId);
+  } catch (err) {
+    logBanFanOutFailure(userId, 'the second webhook disarm', err);
+  }
+
+  // The servers whose webhooks were disarmed refetch their Integrations tab
+  for (const serverId of new Set([...disarmedServerIds, ...lateServerIds])) {
+    try {
+      emitWebhookChanged(serverId);
+    } catch (err) {
+      logBanFanOutFailure(userId, `the webhook:changed hint to ${serverId}`, err);
+    }
+  }
+
+  for (const { serverId } of withdrawnRequests) {
+    try {
+      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'cancelled' });
+    } catch (err) {
+      logBanFanOutFailure(userId, `the join-request withdrawal notice to ${serverId}`, err);
+    }
+  }
+
+  // Every server's member list and rooms drop the banned account
+  let memberships: { serverId: string }[] = [];
+  try {
+    memberships = await prisma.serverMember.findMany({ where: { userId }, select: { serverId: true } });
+  } catch (err) {
+    logBanFanOutFailure(userId, 'the membership read', err);
+  }
+  for (const { serverId } of memberships) {
+    try {
+      await broadcastMemberLeft(userId, serverId);
+    } catch (err) {
+      logBanFanOutFailure(userId, `the member:left broadcast to ${serverId}`, err);
+    }
+  }
 }
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
@@ -440,10 +545,6 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
 
     const sanitizedReason = reason ? sanitizeText(reason) : null;
 
-    // Ban the account + all known IPs ATOMICALLY (MED-13). The old flow updated
-    // the user, then upserted IP bans one-by-one in a loop — a failure midway
-    // left a half-banned state, and N known IPs meant N+1 statements.
-    let ipsBanned = 0;
     const ipRecords = banIps
       ? await prisma.ipRecord.findMany({ where: { userId: targetId }, select: { ip: true } })
       : [];
@@ -456,58 +557,56 @@ adminRouter.post('/users/:userId/ban', async (req: Request<{ userId: string }>, 
       select: { serverId: true },
     });
 
-    const [, ipBanResult] = await prisma.$transaction([
-      prisma.user.update({
+    // ONE transaction holds everything the ban is (MED-13: a half-banned
+    // state is worse than none): the webhook URLs the account holds disarmed,
+    // the account banned and its tokens invalidated, its known IPs banned, its
+    // join requests withdrawn, and the audit row. The audit row commits with
+    // the ban, so no later step's failure can leave a ban nobody recorded.
+    const { ipsBanned, disarmedServerIds } = await prisma.$transaction(async (tx) => {
+      // The account row FIRST (lockAccountRows): an account deletion takes it
+      // first too, then reaches the webhooks and reports through its foreign
+      // keys, so taking the webhook rows before it formed a cycle
+      // An account deleted since the read above locks nothing: the same 404
+      // as an unknown id, never the 500 its update's P2025 used to answer
+      const locked = await lockAccountRows(tx, [{ id: targetId, mode: 'update' }]);
+      if (!locked.has(targetId)) throw new NotFoundError('User');
+      const disarmed = await disarmWebhookRowsHeldBy(tx, targetId);
+      await tx.user.update({
         where: { id: targetId },
         data: {
           bannedAt: new Date(),
           banReason: sanitizedReason,
           tokenVersion: { increment: 1 }, // Invalidate all tokens
         },
-      }),
-      prisma.ipBan.createMany({
+      });
+      const ipBanResult = await tx.ipBan.createMany({
         data: ipRecords.map((r) => ({ ip: r.ip, reason: sanitizedReason, bannedBy: req.user!.userId })),
         skipDuplicates: true, // already-banned IPs are fine
-      }),
-      prisma.serverJoinRequest.deleteMany({ where: { userId: targetId } }),
-    ]);
-    ipsBanned = ipBanResult.count;
+      });
+      await tx.serverJoinRequest.deleteMany({ where: { userId: targetId } });
+      await tx.auditLog.create({
+        data: auditLogData({
+          actorId: req.user!.userId,
+          action: 'user.ban',
+          targetType: 'user',
+          targetId,
+          // knownIps distinguishes "user had no IPs" from "all IPs already banned"
+          // (createMany with skipDuplicates only counts NEWLY inserted bans)
+          metadata: {
+            reason: sanitizedReason, banIps: !!banIps, ipsBanned: ipBanResult.count,
+            knownIps: ipRecords.length, webhooksDisarmed: disarmed.length,
+          },
+        }),
+      });
+      return { ipsBanned: ipBanResult.count, disarmedServerIds: disarmed };
+    }, BAN_TRANSACTION_OPTIONS);
 
     // The ban is committed: sign the account out everywhere NOW (force:logout,
-    // then a room-filtered disconnect on every node), before the fan-out
-    // below, whose awaits may throw into next(err).
+    // then a room-filtered disconnect on every node; never throws), then the
+    // fan-out, best effort and each step on its own (logBanFanOutFailure): a
+    // step that throws is logged and never answers 500 for a ban that holds.
     forceLogoutUser(targetId, 'Your account has been banned');
-
-    // A banned owner's servers leave the directory without anyone having to
-    // think about it (owner.bannedAt is one of the listing column's inputs).
-    await recomputeListedForOwner(targetId);
-
-    // The incoming-webhook URLs the account holds stop posting with it, in
-    // every server (the kick rule one level up; utils/webhookLifecycle.ts)
-    const webhooksDisarmed = (await disarmWebhooksHeldBy(targetId)).length;
-
-    for (const { serverId } of pendingRequests) {
-      await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: targetId, outcome: 'cancelled' });
-    }
-
-    // Notify servers that user left
-    const memberships = await prisma.serverMember.findMany({
-      where: { userId: targetId },
-      select: { serverId: true },
-    });
-    for (const { serverId } of memberships) {
-      await broadcastMemberLeft(targetId, serverId);
-    }
-
-    logAuditEvent({
-      actorId: req.user!.userId,
-      action: 'user.ban',
-      targetType: 'user',
-      targetId: targetId,
-      // knownIps distinguishes "user had no IPs" from "all IPs already banned"
-      // (createMany with skipDuplicates only counts NEWLY inserted bans)
-      metadata: { reason: sanitizedReason, banIps: !!banIps, ipsBanned, knownIps: ipRecords.length, webhooksDisarmed },
-    });
+    await announceCommittedBan(targetId, disarmedServerIds, pendingRequests);
 
     const message = !banIps
       ? 'User banned'
@@ -782,22 +881,18 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
           // (member:left for the transferred server is broadcast by
           // deleteUserAccount, which re-reads the surviving memberships.)
         } else {
-          // action === 'delete' — clean up and delete the server (voice cleanup
-          // fans out to every node; mediasoup objects are node-local)
-          await broadcastServerVoiceCleanup(io, action.serverId);
-          io.to(`server:${action.serverId}`).emit('server:deleted', { serverId: action.serverId });
-          await clearServerRooms(action.serverId);
-          // Read the icon key BEFORE the row goes; delete the blob after, so a
-          // failed delete never strands a live server without its icon. The
-          // user-facing DELETE /servers/:id already does exactly this, and
-          // like it (and DELETE /admin/servers/:id) never waits on storage.
+          // action === 'delete' — the owner route's sequence
+          // (utils/serverDeletion.ts): the row first, then voice on every
+          // node, the notice, the room leaves and the icon blob, each best
+          // effort. A failed fan-out step no longer stops this loop with the
+          // space announced as gone, the space still there and the account
+          // half processed; a failed row delete still does, before any notice.
+          // The icon key is read BEFORE the row goes, its blob deleted after.
           const doomed = await prisma.server.findUnique({ where: { id: action.serverId }, select: { iconUrl: true } });
-          await prisma.server.delete({ where: { id: action.serverId } });
-          await bumpDiscoveryPageCache('admin server delete');
-          if (doomed?.iconUrl) {
-            deleteFromS3(doomed.iconUrl).catch((err) =>
-              console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
-          }
+          await deleteServerAndAnnounce(
+            { id: action.serverId, iconUrl: doomed?.iconUrl ?? null },
+            { cacheReason: 'admin server delete', logPrefix: '[Admin]' },
+          );
         }
       }
 
@@ -1241,29 +1336,11 @@ adminRouter.delete('/servers/:serverId', async (req: Request<{ serverId: string 
     });
     if (!server) throw new NotFoundError('Server');
 
-    const io = getIO();
-
-    // Clean up voice state on every node (mediasoup objects are node-local)
-    await broadcastServerVoiceCleanup(io, server.id);
-
-    // Notify members
-    io.to(`server:${server.id}`).emit('server:deleted', { serverId: server.id });
-
-    // Remove all sockets from the server room and every channel room (all nodes)
-    await clearServerRooms(server.id);
-
-    // Cascade delete
-    await prisma.server.delete({ where: { id: server.id } });
-    // A deleted space must not stay on a cached Explore page (never throws)
-    await bumpDiscoveryPageCache('admin server delete');
-
-    // The icon blob goes AFTER the row, so a failed delete never strands a
-    // live space without its icon. Best-effort and never awaited, as on the
-    // owner's DELETE /servers/:serverId: the response does not wait on S3.
-    if (server.iconUrl) {
-      deleteFromS3(server.iconUrl).catch((err) =>
-        console.warn('[Admin] Server icon cleanup failed (the orphan sweep will reclaim it):', err instanceof Error ? err.message : err));
-    }
+    // The owner route's sequence (utils/serverDeletion.ts): the row first,
+    // then voice on every node, the notice, the room leaves and the icon blob
+    // (after the row, never awaited), each best effort, so a fan-out step that
+    // throws cannot leave a space announced as deleted but still present.
+    await deleteServerAndAnnounce(server, { cacheReason: 'admin server delete', logPrefix: '[Admin]' });
 
     logAuditEvent({
       actorId: req.user!.userId,
@@ -2709,84 +2786,127 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
       }
     }
 
-    await prisma.report.update({
-      where: { id },
-      data: {
-        status: 'resolved',
-        resolvedById: req.user!.userId,
-        resolvedAt: new Date(),
-        resolution: sanitizedResolution,
-      },
-    });
+    // Read before the transaction what its writes take away: the reported
+    // message (its rooms are told after the commit) and the keys of its
+    // attachment files (deleted after it), the banned account's pending join
+    // requests (their moderators are told after it)
+    const message = deleteMessage && report.messageId
+      ? await prisma.message.findUnique({ where: { id: report.messageId }, select: { id: true, channelId: true, conversationId: true } })
+      : null;
+    const attachmentKeys = message ? await collectAttachmentKeys({ id: message.id }) : [];
+    const bannedPending = banTarget
+      ? await prisma.serverJoinRequest.findMany({ where: { userId: banTarget.id, status: 'pending' }, select: { serverId: true } })
+      : [];
 
-    // Optional action: delete the reported message
-    if (deleteMessage && report.messageId) {
-      const message = await prisma.message.findUnique({ where: { id: report.messageId }, select: { id: true, channelId: true, conversationId: true } });
-      if (message) {
-        await prisma.message.delete({ where: { id: message.id } });
+    // ONE transaction holds the whole resolution: the report resolved, the
+    // optional message delete, the optional ban (the canonical ban route's
+    // writes: webhook URLs disarmed, account banned, join requests withdrawn)
+    // and both audit rows. Before, each was its own write and the audit rows
+    // came last, after awaits that could throw: a failing step answered 500
+    // with the ban committed and neither `user.ban` nor `report.resolve`
+    // recorded.
+    const { messageDeleted, disarmedServerIds } = await prisma.$transaction(async (tx) => {
+      // The account rows FIRST (lockAccountRows), as on the ban route: the
+      // reported account's (the one banned, and the author whose deletion
+      // cascades to the message and the report) and the reporter's (whose
+      // deletion cascades to the report and, for a DM, to the message). An
+      // account deletion takes its row first, then reaches these rows through
+      // its foreign keys; taking them before the account row formed a cycle.
+      // Only the account being banned is written ('update'); the reporter,
+      // and a reported account this resolution does not ban, only have to
+      // outlive it ('keep'), so their own writes (presence) never wait here.
+      const locked = await lockAccountRows(tx, [
+        { id: report.reportedUserId, mode: banTarget ? 'update' : 'keep' },
+        { id: report.reporterId, mode: 'keep' },
+      ]);
+      // Either account deleted since the read above took this report with it
+      // (both foreign keys cascade): the route's not-found, never a 500 from
+      // the writes below
+      if ([report.reportedUserId, report.reporterId].some((uid) => uid && !locked.has(uid))) throw new NotFoundError('Report');
+      const disarmed = banTarget ? await disarmWebhookRowsHeldBy(tx, banTarget.id) : [];
+      // The reported message's row BEFORE the report's, in the order its
+      // author's own delete takes them (the message row, then the report
+      // through the foreign key's SET NULL): taking the report first and the
+      // message second closed a cycle with that delete. Only locked here, the
+      // same lock its DELETE takes: the pending check below still decides
+      // before anything is deleted.
+      if (message) await tx.$queryRaw`SELECT id FROM messages WHERE id = ${message.id} FOR UPDATE`;
+      // Only from pending, re-checked by the write itself: a second resolve or
+      // a dismiss that committed since the read above leaves nothing to
+      // transition, and this whole resolution rolls back (ban included) with
+      // the answer the read gives
+      const transitioned = await tx.report.updateMany({
+        where: { id, status: 'pending' },
+        data: {
+          status: 'resolved',
+          resolvedById: req.user!.userId,
+          resolvedAt: new Date(),
+          resolution: sanitizedResolution,
+        },
+      });
+      if (transitioned.count === 0) throw new BadRequestError('Report is already processed');
+      // deleteMany: a message its author deleted meanwhile is not an error
+      const deleted = message ? (await tx.message.deleteMany({ where: { id: message.id } })).count > 0 : false;
+      if (banTarget) {
+        await tx.user.update({
+          where: { id: banTarget.id },
+          data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
+        });
+        await tx.serverJoinRequest.deleteMany({ where: { userId: banTarget.id } });
+        await tx.auditLog.create({
+          data: auditLogData({
+            actorId: req.user!.userId,
+            action: 'user.ban',
+            targetType: 'user',
+            targetId: banTarget.id,
+            metadata: { reason: `Report resolved: ${sanitizedResolution}`, webhooksDisarmed: disarmed.length },
+          }),
+        });
+      }
+      await tx.auditLog.create({
+        data: auditLogData({
+          actorId: req.user!.userId,
+          action: 'report.resolve',
+          targetType: 'report',
+          targetId: id,
+          // What this resolution deleted, not what it asked for: a message its
+          // author deleted meanwhile was not deleted here
+          metadata: { resolution: sanitizedResolution, action: action ?? null, messageDeleted: deleted },
+        }),
+      });
+      return { messageDeleted: deleted, disarmedServerIds: disarmed };
+    }, BAN_TRANSACTION_OPTIONS);
+
+    // Committed. A ban signs the account out everywhere FIRST, right after
+    // the commit (never throws). Everything after is best effort, each step
+    // on its own: one that throws is logged and never answers 500 for a
+    // resolution that holds.
+    if (banTarget) forceLogoutUser(banTarget.id, 'Your account has been banned');
+
+    if (message && messageDeleted) {
+      // The files after the row, as on the author's own delete
+      deleteAttachmentBlobs(attachmentKeys, '[Admin]', `reported message ${message.id}`);
+      try {
         const io = getIO();
         if (message.channelId) {
           io.to(`channel:${message.channelId}`).emit(WS_EVENTS.MESSAGE_DELETE, { messageId: message.id, channelId: message.channelId });
         } else if (message.conversationId) {
           io.to(`dm:${message.conversationId}`).emit(WS_EVENTS.DM_MESSAGE_DELETE, { messageId: message.id, conversationId: message.conversationId });
         }
+      } catch (err) {
+        console.error(`[Admin] Report ${id} resolved, but the message delete notice failed:`, err instanceof Error ? err.message : err);
       }
     }
 
-    // Optional action: ban the reported user (validated above)
-    if (banTarget) {
-      await prisma.user.update({
-        where: { id: banTarget.id },
-        data: { bannedAt: new Date(), banReason: `Report resolved: ${sanitizedResolution}`, tokenVersion: { increment: 1 } },
-      });
+    // The same fan-out as the canonical ban route
+    if (banTarget) await announceCommittedBan(banTarget.id, disarmedServerIds, bannedPending);
 
-      // Committed: sign the account out everywhere before the fan-out below,
-      // whose awaits may throw into next(err).
-      forceLogoutUser(banTarget.id, 'Your account has been banned');
-
-      // Same as the canonical ban route: a banned owner's servers leave the
-      // directory, their pending join requests are withdrawn, and the webhook
-      // URLs they hold stop posting.
-      await recomputeListedForOwner(banTarget.id);
-      const webhooksDisarmed = (await disarmWebhooksHeldBy(banTarget.id)).length;
-      const bannedPending = await prisma.serverJoinRequest.findMany({
-        where: { userId: banTarget.id, status: 'pending' },
-        select: { serverId: true },
-      });
-      await prisma.serverJoinRequest.deleteMany({ where: { userId: banTarget.id } });
-      for (const { serverId } of bannedPending) {
-        await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId: banTarget.id, outcome: 'cancelled' });
-      }
-
-      // Remove the banned user from all server member lists/rooms — same as the
-      // canonical ban route. Without this the banned user lingers in member lists.
-      const memberships = await prisma.serverMember.findMany({
-        where: { userId: banTarget.id },
-        select: { serverId: true },
-      });
-      for (const { serverId } of memberships) {
-        await broadcastMemberLeft(banTarget.id, serverId);
-      }
-
-      logAuditEvent({
-        actorId: req.user!.userId,
-        action: 'user.ban',
-        targetType: 'user',
-        targetId: banTarget.id,
-        metadata: { reason: `Report resolved: ${sanitizedResolution}`, webhooksDisarmed },
-      });
+    try {
+      const pendingCount = await prisma.report.count({ where: { status: 'pending' } });
+      getIO().to('admin:reports').emit('report:new', { total: pendingCount });
+    } catch (err) {
+      console.error(`[Admin] Report ${id} resolved, but the pending-report count update failed:`, err instanceof Error ? err.message : err);
     }
-
-    logAuditEvent({
-      actorId: req.user!.userId,
-      action: 'report.resolve',
-      targetType: 'report',
-      targetId: id,
-      metadata: { resolution: sanitizedResolution, action: action ?? null, messageDeleted: !!(deleteMessage && report.messageId) },
-    });
-
-    const pendingCount = await prisma.report.count({ where: { status: 'pending' } });
-    getIO().to('admin:reports').emit('report:new', { total: pendingCount });
 
     res.json({ success: true, message: 'Report resolved' });
   } catch (err) {
@@ -2802,14 +2922,17 @@ adminRouter.post('/reports/:id/dismiss', async (req: Request<{ id: string }>, re
     if (!report) throw new NotFoundError('Report');
     if (report.status !== 'pending') throw new BadRequestError('Report is already processed');
 
-    await prisma.report.update({
-      where: { id },
+    // Only from pending, as a resolve: a resolve or another dismiss that
+    // committed since the read above must not be overwritten
+    const transitioned = await prisma.report.updateMany({
+      where: { id, status: 'pending' },
       data: {
         status: 'dismissed',
         resolvedById: req.user!.userId,
         resolvedAt: new Date(),
       },
     });
+    if (transitioned.count === 0) throw new BadRequestError('Report is already processed');
 
     logAuditEvent({
       actorId: req.user!.userId,

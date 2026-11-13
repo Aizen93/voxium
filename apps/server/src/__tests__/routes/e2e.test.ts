@@ -30,7 +30,9 @@ vi.mock('../../middleware/rateLimiter', () => {
     rateLimitE2EKeys: passthrough,
     rateLimitE2EBundle: passthrough,
     rateLimitE2EStatus: passthrough,
-    rateLimitE2EShares: passthrough,
+    // spied on: the key-share acknowledgement must not spend the share budget
+    rateLimitE2EShares: vi.fn(passthrough),
+    rateLimitE2EShareAck: vi.fn(passthrough),
     rateLimitE2EApprove: passthrough,
   };
 });
@@ -97,6 +99,7 @@ vi.mock('../../utils/prisma', () => ({
 import { prisma } from '../../utils/prisma';
 import { e2eRouter } from '../../routes/e2e';
 import { errorHandler } from '../../middleware/errorHandler';
+import { rateLimitE2EShareAck, rateLimitE2EShares } from '../../middleware/rateLimiter';
 
 // ─── Real Ed25519 signing (exercises the actual verification path) ──────────
 
@@ -965,8 +968,32 @@ describe('E2E routes — POST /keyshares', () => {
 
 // ─── GET /keyshares ─────────────────────────────────────────────────────────
 
+/** The statement a $queryRaw call ran, its parameters as `?`, and those parameters. */
+function rawCall(n = 0): { sql: string; params: unknown[] } {
+  const call = vi.mocked(prisma.$queryRaw).mock.calls[n];
+  return { sql: (call[0] as unknown as string[]).join('?'), params: call.slice(1) };
+}
+
+/** A key-share row as the claim statements return it. */
+function claimedRow(id: string, at = '2026-07-25T10:00:00Z') {
+  return {
+    id,
+    sender_user_id: 'user-2',
+    sender_device_id: DEVICE_B,
+    conversation_id: 'conv-1',
+    session_id: 'c2Vzc2lvbklk',
+    body: shareBody,
+    created_at: new Date(at),
+  };
+}
+
+/** Either claim takes only shares no live lease holds, on the database's UTC clock. */
+const LEASE_FREE = "(leased_until IS NULL OR leased_until <= (now() AT TIME ZONE 'UTC'))";
+/** Either claim reads the inbox of the device it was asked for: the recipient's columns, bound in this order. */
+const INBOX_OF = 'WHERE recipient_user_id = ? AND recipient_device_id = ?';
+
 describe('E2E routes — GET /keyshares', () => {
-  it('claims pending shares atomically and deletes them', async () => {
+  it('claims pending shares atomically and deletes them (the legacy claim, no lease=1)', async () => {
     vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
     vi.mocked(prisma.$queryRaw).mockResolvedValue([
       {
@@ -1001,8 +1028,25 @@ describe('E2E routes — GET /keyshares', () => {
     expect(sql).toContain('DELETE FROM e2e_key_shares');
     expect(sql).toContain('RETURNING');
     expect(sql).toContain('FOR UPDATE SKIP LOCKED');
-    // scoped to the caller's own inbox and bounded
+    // scoped to the caller's own inbox (the recipient columns, never the
+    // sender's) and bounded
+    expect(sql).toContain(INBOX_OF);
     expect(call.slice(1)).toEqual(['user-1', DEVICE_A, E2E_LIMITS.KEYSHARE_CLAIM_MAX]);
+    // oldest first, as the leasing claim scans it: the page limit takes the oldest
+    expect(sql).toContain('ORDER BY created_at, id');
+    // a claim that deletes on read leaves nothing to acknowledge: no lease is announced
+    expect(res.body.data).not.toHaveProperty('leaseMs');
+  });
+
+  it('skips, in the legacy claim, the shares a leasing claim holds', async () => {
+    // Two clients of one device (a stale tab beside an updated one): the one
+    // that deletes on read must not take what the other is importing.
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([]);
+    await request(createApp()).get(`/api/v1/e2e/keyshares?deviceId=${DEVICE_A}`);
+    const { sql } = rawCall();
+    expect(sql).toContain('DELETE FROM e2e_key_shares');
+    expect(sql).toContain(LEASE_FREE);
   });
 
   it('returns an empty list when the inbox is empty', async () => {
@@ -1011,6 +1055,32 @@ describe('E2E routes — GET /keyshares', () => {
     const res = await request(createApp()).get(`/api/v1/e2e/keyshares?deviceId=${DEVICE_A}`);
     expect(res.status).toBe(200);
     expect(res.body.data.shares).toEqual([]);
+  });
+
+  it('answers the page oldest first, whatever order the statement returned it in', async () => {
+    // RETURNING guarantees no order, and the client imports a page in the
+    // order it is given: a sender's later share must not come before the
+    // earlier one whose Olm message sets up the session it rides.
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    const row = (id: string, at: string) => ({
+      id,
+      sender_user_id: 'user-2',
+      sender_device_id: DEVICE_B,
+      conversation_id: 'conv-1',
+      session_id: 'c2Vzc2lvbklk',
+      body: shareBody,
+      created_at: new Date(at),
+    });
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([
+      row('ks-3', '2026-07-25T10:00:02Z'),
+      row('ks-1b', '2026-07-25T10:00:00Z'),
+      row('ks-2', '2026-07-25T10:00:01Z'),
+      row('ks-1a', '2026-07-25T10:00:00Z'),
+    ]);
+    const res = await request(createApp()).get(`/api/v1/e2e/keyshares?deviceId=${DEVICE_A}`);
+    expect(res.status).toBe(200);
+    // ties on the creation time broken by id, as the inbox is scanned
+    expect(res.body.data.shares.map((s: { id: string }) => s.id)).toEqual(['ks-1a', 'ks-1b', 'ks-2', 'ks-3']);
   });
 
   it('refuses to drain an inbox for a device the caller does not own', async () => {
@@ -1024,6 +1094,216 @@ describe('E2E routes — GET /keyshares', () => {
     const res = await request(createApp()).get('/api/v1/e2e/keyshares?deviceId=nope');
     expect(res.status).toBe(400);
     expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe('E2E routes — GET /keyshares?lease=1 (the leasing claim)', () => {
+  const leaseUrl = (deviceId = DEVICE_A) => `/api/v1/e2e/keyshares?deviceId=${deviceId}&lease=1`;
+
+  beforeEach(() => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+  });
+
+  it('hands the page out under a lease instead of deleting it, and says so', async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([claimedRow('ks-1')]);
+    const res = await request(createApp()).get(leaseUrl());
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({
+      shares: [
+        {
+          id: 'ks-1',
+          senderUserId: 'user-2',
+          senderDeviceId: DEVICE_B,
+          conversationId: 'conv-1',
+          sessionId: 'c2Vzc2lvbklk',
+          body: shareBody,
+          createdAt: '2026-07-25T10:00:00.000Z',
+        },
+      ],
+      // the client acknowledges only what a leasing answer handed out
+      leaseMs: E2E_LIMITS.KEYSHARE_LEASE_MS,
+    });
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    const { sql, params } = rawCall();
+    expect(sql).toContain('UPDATE e2e_key_shares');
+    expect(sql).not.toContain('DELETE');
+    // set and compared on the database clock, in UTC
+    expect(sql).toContain("SET leased_until = (now() AT TIME ZONE 'UTC') + make_interval(secs => ?)");
+    expect(sql).toContain(LEASE_FREE);
+    expect(sql).toContain('ORDER BY created_at, id');
+    expect(sql).toContain('FOR UPDATE SKIP LOCKED');
+    expect(sql).toContain('RETURNING');
+    // the lease, then the caller's own inbox (the recipient columns, never the sender's), bounded
+    expect(sql).toContain(INBOX_OF);
+    expect(params).toEqual([E2E_LIMITS.KEYSHARE_LEASE_MS / 1000, 'user-1', DEVICE_A, E2E_LIMITS.KEYSHARE_CLAIM_MAX]);
+  });
+
+  it('answers the leased page oldest first too', async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([
+      claimedRow('ks-2', '2026-07-25T10:00:01Z'),
+      claimedRow('ks-1', '2026-07-25T10:00:00Z'),
+    ]);
+    const res = await request(createApp()).get(leaseUrl());
+    expect(rawCall().sql).toContain('UPDATE e2e_key_shares');
+    expect(res.body.data.shares.map((s: { id: string }) => s.id)).toEqual(['ks-1', 'ks-2']);
+  });
+
+  it('spends the share budget like the legacy claim, never the acknowledgement one', async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([]);
+    await request(createApp()).get(leaseUrl());
+    expect(rawCall().sql).toContain('UPDATE e2e_key_shares');
+    expect(rateLimitE2EShares).toHaveBeenCalledTimes(1);
+    expect(rateLimitE2EShareAck).not.toHaveBeenCalled();
+  });
+
+  it('refuses a device the caller does not own before any statement runs, after checking the request', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    const leasing = await request(createApp()).get(leaseUrl(DEVICE_B));
+    const legacy = await request(createApp()).get(`/api/v1/e2e/keyshares?deviceId=${DEVICE_B}`);
+    expect(leasing.status).toBe(403);
+    // one answer for a device of someone else's and for no device at all
+    expect(leasing.body).toEqual(legacy.body);
+    expect(prisma.e2EDevice.findUnique).toHaveBeenCalledWith({
+      where: { userId_deviceId: { userId: 'user-1', deviceId: DEVICE_B } },
+      select: { id: true },
+    });
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    // a malformed request is refused as such, before the device is looked up
+    vi.mocked(prisma.e2EDevice.findUnique).mockClear();
+    const malformed = await request(createApp()).get(`/api/v1/e2e/keyshares?deviceId=${DEVICE_B}&lease=on`);
+    expect(malformed.status).toBe(400);
+    expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
+  });
+
+  it.each(['0', 'true', 'yes', ''])('rejects lease=%j: only lease=1 asks for a lease', async (value) => {
+    const res = await request(createApp()).get(`/api/v1/e2e/keyshares?deviceId=${DEVICE_A}&lease=${value}`);
+    expect(res.status).toBe(400);
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('rejects a repeated lease parameter', async () => {
+    const res = await request(createApp()).get(`${leaseUrl()}&lease=1`);
+    expect(res.status).toBe(400);
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('two claims in flight each run one statement of their own, never a read then a write', async () => {
+    // The guarantee that two claims never hold one share rests on the
+    // statement (FOR UPDATE SKIP LOCKED, the lease re-checked on a row a
+    // concurrent claim committed): the route must not split it into a read
+    // and a later write, which would hand both claims the same rows.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    vi.mocked(prisma.$queryRaw).mockImplementation((async () => {
+      const call = ++calls;
+      if (call === 1) await held; // the first statement is still running…
+      return call === 1 ? [claimedRow('ks-1')] : [];
+    }) as any);
+    const app = createApp();
+    const first = request(app).get(leaseUrl()).then((r) => r);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    const second = await request(app).get(leaseUrl()); // …when the second one runs
+    release();
+    const firstRes = await first;
+
+    expect(firstRes.body.data.shares.map((s: { id: string }) => s.id)).toEqual(['ks-1']);
+    expect(second.body.data.shares).toEqual([]);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+    for (const n of [0, 1]) {
+      const { sql } = rawCall(n);
+      expect(sql).toContain('FOR UPDATE SKIP LOCKED');
+      expect(sql).toContain(LEASE_FREE);
+    }
+    expect(prisma.e2EKeyShare.findMany).not.toHaveBeenCalled();
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /keyshares/ack ─────────────────────────────────────────────────────
+
+describe('E2E routes — POST /keyshares/ack', () => {
+  const ID_1 = 'cmkeyshare0000000001';
+  const ID_2 = 'cmkeyshare0000000002';
+
+  beforeEach(() => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'dev-1' } as any);
+    vi.mocked(prisma.e2EKeyShare.deleteMany).mockResolvedValue({ count: 2 } as any);
+  });
+
+  it('deletes exactly the named shares of the calling device, and counts them', async () => {
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares/ack')
+      .send({ deviceId: DEVICE_A, ids: [ID_1, ID_2] });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { cleared: 2 } });
+    // one statement, scoped to this account AND this device; whatever the
+    // lease says (an acknowledgement after it passed still deletes)
+    expect(prisma.e2EKeyShare.deleteMany).toHaveBeenCalledTimes(1);
+    expect(prisma.e2EKeyShare.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [ID_1, ID_2] }, recipientUserId: 'user-1', recipientDeviceId: DEVICE_A },
+    });
+    expect(prisma.e2EKeyShare.findMany).not.toHaveBeenCalled();
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('answers ids of another device or account exactly like ids that name nothing', async () => {
+    vi.mocked(prisma.e2EKeyShare.deleteMany).mockResolvedValue({ count: 0 } as any);
+    const foreign = await request(createApp())
+      .post('/api/v1/e2e/keyshares/ack')
+      .send({ deviceId: DEVICE_A, ids: [ID_1] }); // someone else's share
+    const missing = await request(createApp())
+      .post('/api/v1/e2e/keyshares/ack')
+      .send({ deviceId: DEVICE_A, ids: [ID_2] }); // no share at all
+    expect(foreign.status).toBe(200);
+    expect(foreign.body).toEqual({ success: true, data: { cleared: 0 } });
+    expect(missing.body).toEqual(foreign.body);
+  });
+
+  it('refuses a device the caller does not own, before deleting anything', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares/ack')
+      .send({ deviceId: DEVICE_B, ids: [ID_1] });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Unknown device');
+    expect(prisma.e2EDevice.findUnique).toHaveBeenCalledWith({
+      where: { userId_deviceId: { userId: 'user-1', deviceId: DEVICE_B } },
+      select: { id: true },
+    });
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['no ids', { deviceId: DEVICE_A }],
+    ['an empty list', { deviceId: DEVICE_A, ids: [] }],
+    ['ids that are not a list', { deviceId: DEVICE_A, ids: ID_1 }],
+    ['more ids than a page', { deviceId: DEVICE_A, ids: Array.from({ length: E2E_LIMITS.KEYSHARE_ACK_MAX + 1 }, (_, i) => `cmkeyshare${String(i).padStart(10, '0')}`) }],
+    ['a non-string id', { deviceId: DEVICE_A, ids: [ID_1, 42] }],
+    ['a malformed id', { deviceId: DEVICE_A, ids: [ID_1, 'short'] }],
+    ['an id with a forbidden character', { deviceId: DEVICE_A, ids: ['cmkeyshare00000000/1'] }],
+    ['no deviceId', { ids: [ID_1] }],
+    ['a malformed deviceId', { deviceId: 'x', ids: [ID_1] }],
+  ])('rejects %s before any lookup', async (_label, body) => {
+    const res = await request(createApp()).post('/api/v1/e2e/keyshares/ack').send(body);
+    expect(res.status).toBe(400);
+    expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('accepts a full page of ids', async () => {
+    const ids = Array.from({ length: E2E_LIMITS.KEYSHARE_ACK_MAX }, (_, i) => `cmkeyshare${String(i).padStart(10, '0')}`);
+    const res = await request(createApp()).post('/api/v1/e2e/keyshares/ack').send({ deviceId: DEVICE_A, ids });
+    expect(res.status).toBe(200);
+    expect(vi.mocked(prisma.e2EKeyShare.deleteMany).mock.calls[0][0]).toMatchObject({ where: { id: { in: ids } } });
+  });
+
+  it('has a budget of its own: a claim run’s acknowledgements never spend the share-upload budget', async () => {
+    await request(createApp()).post('/api/v1/e2e/keyshares/ack').send({ deviceId: DEVICE_A, ids: [ID_1] });
+    expect(rateLimitE2EShareAck).toHaveBeenCalledTimes(1);
+    expect(rateLimitE2EShares).not.toHaveBeenCalled();
   });
 });
 
