@@ -316,8 +316,9 @@ const MAX_CLAIM_PAGES = 20;
  * after each lease, and MAX_CLAIM_PAGES pages of them would keep a run from
  * ever reaching a share stored after them. Each claim leases its page, so the
  * next one gets the page after it. 25 of the 30 claims a minute the server
- * allows (e2eShares, shared with the share uploads), so a run leaves the
- * uploads of that minute some room; more held shares than a run reaches wait
+ * allows (e2eShares, which the claims share with the share uploads, the
+ * master-secret transfers and the message-key backup writes), so a run leaves
+ * those of that minute some room; more held shares than a run reaches wait
  * for a run within those leases (the next one starts past them) or for the
  * held ones to be settled.
  */
@@ -328,7 +329,8 @@ const MAX_CLAIM_REQUESTS = 25;
  * KEYSHARE_ACK_MAX), the run in progress and one before it whose
  * acknowledgements all failed. Dropping one costs a delivery, never a key:
  * its share, if the server still has it, is handed out again after its
- * lease, recognised by its session, and acknowledged then. The cap bounds
+ * lease, recognised by its session if it was imported (one discarded as
+ * unusable has no session and is processed again), and acknowledged then. The cap bounds
  * the vault (an id and a time each) and what one pass of the sender sends
  * (40 requests, inside the server's 60 a minute for acknowledgements).
  */

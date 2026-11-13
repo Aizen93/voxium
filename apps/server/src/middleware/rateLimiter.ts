@@ -247,13 +247,13 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // Group-session key fan-out: one batched POST per rotation plus periodic
   // claims, so a modest budget covers normal multi-device use.
   e2eShares:      { keyPrefix: 'rl:e2eshare',  points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Key Shares' },
-  // Acknowledgements of claimed key shares (POST /e2e/keyshares/ack): one per
-  // claimed page and one before a claim run's first page, so at most about
-  // twice the claims, which e2eShares already bounds. A bucket of their own:
-  // sharing e2eShares would let a drain's acknowledgements (up to 21 for its
-  // 20 pages) starve the share uploads of a rotation on the same budget, and a
-  // refused acknowledgement only means the shares are handed out again. Each
-  // request deletes at most a page of the caller's own rows.
+  // Acknowledgements of claimed key shares (POST /e2e/keyshares/ack): one request
+  // per 100 ids the device owes, at most 40 a pass (MAX_OWED_SHARE_ACKS, 4000).
+  // A bucket of their own: sharing e2eShares would let a drain's
+  // acknowledgements (up to 40 requests for the 4000 ids it may owe) starve the
+  // share uploads of a rotation on the same budget, and a refused
+  // acknowledgement only means the shares are handed out again. Each request
+  // deletes at most a page of the caller's own rows.
   e2eShareAck:    { keyPrefix: 'rl:e2eack',    points: 60,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'E2E Key Share Acknowledgements' },
   // Cross-signing writes must NOT share the 5/hour device-registration
   // bucket: setting up several devices costs a publish plus one approval

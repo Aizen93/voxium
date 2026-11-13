@@ -5666,7 +5666,8 @@ describe('E2EService — lifecycle', () => {
         const second = over(alice, rec.api);
         await second.initialize();
         await second.claimMasterTransfers(); // queued behind the start-up claim
-        // sent first, so the server does not hand the share out again
+        // issued first (the order the requests leave in; which one the server
+        // handles first is not pinned: a share handed out again is recognised by its owed id)
         expect(inboxCalls(rec.calls)).toEqual(['ack', 'claim']);
         expect(server.shareAcks.map((a) => a.ids)).toEqual([[row.id]]);
         expect(sharesFor(server, alice.userId)).toHaveLength(0);
@@ -5744,6 +5745,7 @@ describe('E2EService — lifecycle', () => {
         const again = over(alice, rec.api);
         await again.initialize();
         await again.claimMasterTransfers(); // queued behind the start-up claim
+        // the acknowledgement is ISSUED first; the server may handle either request first
         expect(inboxCalls(rec.calls)).toEqual(['ack', 'claim']);
         expect(server.shareAcks.map((a) => a.ids)).toEqual([[row.id]]);
         expect(sharesFor(server, alice.userId)).toHaveLength(0);
