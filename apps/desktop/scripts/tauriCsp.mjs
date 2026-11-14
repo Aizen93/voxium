@@ -18,6 +18,17 @@ const HOST_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?$/i;
 const ORIGIN_RE = /^https?:\/\/([^/:?#]+)(?::(\d{1,5}))?$/i;
 const DIRECTIVES = ['img-src', 'connect-src'];
 
+/**
+ * Tauri's own channel between the page and the Rust side. An installed app
+ * reaches it with a request of its own: the `ipc:` scheme on macOS and Linux,
+ * `http://ipc.localhost` on Windows and Android. It is the app talking to
+ * itself, not a host of any deployment, so `connect-src` names both in every
+ * build. Without them the webview refuses the first call, reports a policy
+ * violation, and Tauri carries every later call over its slower message
+ * channel.
+ */
+export const TAURI_IPC_SOURCES = ['ipc:', 'http://ipc.localhost'];
+
 /** Whether `host` is a hostname a CSP host-source can name. */
 export function isCspHost(host) {
   return typeof host === 'string' && HOST_RE.test(host);

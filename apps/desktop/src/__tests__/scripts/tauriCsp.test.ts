@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { parseAssetOrigins, withAssetOrigins, releaseConfig } from '../../../scripts/tauriCsp.mjs';
+import { parseAssetOrigins, withAssetOrigins, releaseConfig, TAURI_IPC_SOURCES } from '../../../scripts/tauriCsp.mjs';
 
 // The desktop CSP names only the app's own hosts; avatars and space icons
 // redirect to the deployment's object store and their upload is a direct PUT
@@ -16,8 +16,10 @@ import { parseAssetOrigins, withAssetOrigins, releaseConfig } from '../../../scr
 // the page's http URL, not a file URL
 const CONF_PATH = resolve(__dirname, '../../../src-tauri/tauri.conf.json');
 const CLI_PATH = resolve(__dirname, '../../../scripts/tauri-release-config.mjs');
-const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as { identifier: string; build: { devUrl: string }; app: { security: { csp: string; devCsp?: string } } };
+const conf = JSON.parse(readFileSync(CONF_PATH, 'utf8')) as { identifier: string; build: { devUrl: string }; app: { security: { csp: string; devCsp?: string; dangerousDisableAssetCspModification?: unknown } } };
 const BASE = conf.app.security.csp;
+/** `text` without Tauri's own channel, whose Windows form is a `localhost` name that is no dev server's. */
+const withoutOwnChannel = (text: string) => text.split('http://ipc.localhost').join('');
 const ORIGIN = 'https://assets.example.com';
 
 function directive(csp: string, name: string): string[] {
@@ -47,18 +49,20 @@ describe('the official release policy (tauri.conf.json + the release overlay)', 
       .map((d) => {
         const [name, ...sources] = d.split(/\s+/);
         const kept = sources.filter((s) => !LOCALHOST_SOURCES.includes(s));
+        // 2.2.0: connect-src names Tauri's own channel right after 'self'
+        const own = name === 'connect-src' ? [kept[0], ...TAURI_IPC_SOURCES, ...kept.slice(1)] : kept;
         const added = name === 'img-src' || name === 'connect-src' ? assetOrigins : [];
-        return [name, ...kept, ...added].join(' ');
+        return [name, ...own, ...added].join(' ');
       })
       .join('; ');
 
   it('the base policy is 2.1.1 minus the localhost sources, byte for byte', () => {
     expect(BASE).toBe(expectedRelease([]));
     expect(BASE).toBe(
-      "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://voxium.app https://*.voxium.app wss://voxium.app wss://*.voxium.app; img-src 'self' blob: data: https://voxium.app https://*.voxium.app; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:",
+      "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://voxium.app https://*.voxium.app wss://voxium.app wss://*.voxium.app; img-src 'self' blob: data: https://voxium.app https://*.voxium.app; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:",
     );
     for (const s of LOCALHOST_SOURCES) expect(BASE).not.toContain(s);
-    expect(BASE).not.toMatch(/localhost|127\.0\.0\.1/);
+    expect(withoutOwnChannel(BASE)).not.toMatch(/localhost|127\.0\.0\.1/);
   });
 
   it('the release overlay for a storage origin is 2.1.1 minus the localhost sources, every directive in order', () => {
@@ -67,7 +71,7 @@ describe('the official release policy (tauri.conf.json + the release overlay)', 
     const expected = expectedRelease([storage]);
     expect(directives(overlay.app.security.csp)).toEqual(directives(expected));
     expect(overlay.app.security.csp).toBe(expected);
-    expect(overlay.app.security.csp).not.toMatch(/localhost/);
+    expect(withoutOwnChannel(overlay.app.security.csp)).not.toMatch(/localhost/);
   });
 
   // `tauri dev` on the desktop loads the dev URL straight from the Vite dev
@@ -78,8 +82,58 @@ describe('the official release policy (tauri.conf.json + the release overlay)', 
   // nothing here, so there is none.
   it('no policy names localhost, and the desktop dev build is loaded from the dev server, which no policy covers', () => {
     expect(conf.app.security.devCsp).toBeUndefined();
-    expect(JSON.stringify(conf.app.security)).not.toMatch(/localhost|127\.0\.0\.1/);
+    expect(withoutOwnChannel(JSON.stringify(conf.app.security))).not.toMatch(/localhost|127\.0\.0\.1/);
     expect(new URL(conf.build.devUrl).hostname).toBe('localhost');
+  });
+});
+
+// An installed app calls its Rust side with a request of its own: the `ipc:`
+// scheme on macOS and Linux, http://ipc.localhost on Windows and Android.
+// A policy that names neither refuses the first call (a violation at every
+// launch) and Tauri carries every later call over its slower message channel.
+describe("Tauri's own channel", () => {
+  it('is named by connect-src, in both forms, and by no other directive', () => {
+    expect(TAURI_IPC_SOURCES).toEqual(['ipc:', 'http://ipc.localhost']);
+    for (const source of TAURI_IPC_SOURCES) expect(directive(BASE, 'connect-src')).toContain(source);
+    for (const d of directives(BASE).filter((d) => !d.startsWith('connect-src '))) {
+      for (const source of TAURI_IPC_SOURCES) expect(d.split(/\s+/), d).not.toContain(source);
+    }
+  });
+
+  it('stays in the release overlay, which only appends the storage origin', () => {
+    const csp = releaseConfig(conf, ORIGIN)!.app.security.csp;
+    expect(directive(csp, 'connect-src')).toEqual([...directive(BASE, 'connect-src'), ORIGIN]);
+    for (const source of TAURI_IPC_SOURCES) expect(directive(csp, 'connect-src')).toContain(source);
+  });
+});
+
+// At build time Tauri adds a nonce to the directives of the pages it serves,
+// and a nonce makes the webview ignore 'unsafe-inline'. The app renders style
+// blocks of its own at run time (the sign-in page's animations, the live
+// voice bars, a theme's pattern rules), which carry no nonce: with one in
+// style-src every such block is refused. So Tauri is told to leave style-src
+// as written, and only style-src: script-src keeps what Tauri adds to it.
+// The stricter way is tracked in #279: no style block added at run time (the
+// keyframes in the stylesheet, the theme's rules without an inline block),
+// and then neither this setting nor 'unsafe-inline'. When that lands, these
+// tests state the new rule instead.
+describe('the style-src the installed app runs under', () => {
+  it("is the one written here: 'unsafe-inline' with no nonce or hash", () => {
+    expect(directive(BASE, 'style-src')).toEqual(["'self'", "'unsafe-inline'"]);
+  });
+
+  it('is left alone by Tauri, and no other directive is', () => {
+    expect(conf.app.security.dangerousDisableAssetCspModification).toEqual(['style-src']);
+  });
+
+  it('is still needed: the app adds style blocks at run time', () => {
+    const src = resolve(__dirname, '../..');
+    expect(readFileSync(resolve(src, 'services/themeEngine.ts'), 'utf8')).toContain("document.createElement('style')");
+    expect(readFileSync(resolve(src, 'pages/LoginPage.tsx'), 'utf8')).toMatch(/<style>\{`/);
+  });
+
+  it('is not touched by either overlay (a merge keeps what an overlay does not name)', () => {
+    expect(Object.keys(releaseConfig(conf, ORIGIN)!.app.security)).toEqual(['csp']);
   });
 });
 
@@ -244,7 +298,7 @@ describe('tauri-release-config.mjs (the CLI the release workflow runs)', () => {
     const printed = JSON.parse(run({ TAURI_ASSET_ORIGIN: 'https://storage.example.org' })) as Record<string, unknown>;
     expect(Object.keys(printed)).toEqual(['app']);
     expect(printed.app).toEqual({ security: { csp: expect.any(String) } });
-    expect(JSON.stringify(printed)).not.toMatch(/localhost/);
+    expect(withoutOwnChannel(JSON.stringify(printed))).not.toMatch(/localhost/);
     expect(JSON.stringify(printed)).not.toContain('identifier');
   });
 

@@ -1,3 +1,4 @@
+export const TAURI_IPC_SOURCES: readonly string[];
 export function isCspHost(host: unknown): boolean;
 export function isTcpPort(port: string | number): boolean;
 export function parseAssetOrigins(value: string | undefined | null): string[];
