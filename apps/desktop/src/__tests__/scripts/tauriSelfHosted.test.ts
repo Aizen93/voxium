@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   isHostSource,
+  isDeploymentHost,
   parseServerUrl,
   serverSources,
   selfHostedCsp,
@@ -54,7 +55,9 @@ function directive(csp: string, name: string): string[] {
 }
 const otherDirectives = (csp: string) => csp.split(';').map((d) => d.trim()).filter((d) => d && !/^(img|connect)-src /.test(d));
 /** Every host source the project's own policy names (voxium.app and its subdomains). */
-const projectHosts = [...directive(BASE, 'connect-src'), ...directive(BASE, 'img-src')].filter(isHostSource);
+const projectHosts = [...directive(BASE, 'connect-src'), ...directive(BASE, 'img-src')].filter(isDeploymentHost);
+/** Tauri's own channel, which every build's connect-src keeps right after 'self'. */
+const OWN = ['ipc:', 'http://ipc.localhost'];
 
 describe('the project policy the overlay replaces', () => {
   it('names the project hosts in connect-src and img-src only (so they are what a self-hosted build drops)', () => {
@@ -67,6 +70,19 @@ describe('isHostSource', () => {
   it('keywords, hashes and scheme sources name no host; origins and wildcards do', () => {
     for (const s of ["'self'", "'wasm-unsafe-eval'", "'sha256-abc='", 'blob:', 'data:', 'mediastream:']) expect(isHostSource(s), s).toBe(false);
     for (const s of ['https://voxium.app', 'https://*.voxium.app', 'wss://voxium.app', '*', 'example.org']) expect(isHostSource(s), s).toBe(true);
+  });
+});
+
+describe('isDeploymentHost', () => {
+  it("is every host source but Tauri's own channel, which is the app talking to itself", () => {
+    for (const s of ['https://voxium.app', 'https://*.voxium.app', 'wss://voxium.app', '*', 'example.org', 'http://localhost:3001']) expect(isDeploymentHost(s), s).toBe(true);
+    for (const s of [...OWN, "'self'", 'blob:', 'data:']) expect(isDeploymentHost(s), s).toBe(false);
+    // only the exact origin: another port, scheme or name under it is a host like any other
+    for (const s of ['https://ipc.localhost', 'http://ipc.localhost:8080', 'http://x.ipc.localhost', 'http://ipc.localhost.example.org']) expect(isDeploymentHost(s), s).toBe(true);
+  });
+
+  it('the base policy names the channel in connect-src', () => {
+    for (const s of OWN) expect(directive(BASE, 'connect-src')).toContain(s);
   });
 });
 
@@ -184,7 +200,7 @@ describe('serverSources', () => {
 describe('selfHostedCsp', () => {
   it('replaces every host of img-src and connect-src, keeps their keywords and schemes, and leaves the other directives byte-identical', () => {
     const csp = selfHostedCsp(BASE, { 'connect-src': ['https://chat.example.org'], 'img-src': ['https://chat.example.org'] });
-    expect(directive(csp, 'connect-src')).toEqual(["'self'", 'https://chat.example.org']);
+    expect(directive(csp, 'connect-src')).toEqual(["'self'", ...OWN, 'https://chat.example.org']);
     expect(directive(csp, 'img-src')).toEqual(["'self'", 'blob:', 'data:', 'https://chat.example.org']);
     expect(otherDirectives(csp)).toEqual(otherDirectives(BASE));
     for (const host of projectHosts) expect(csp.split(/[\s;]+/)).not.toContain(host);
@@ -192,7 +208,7 @@ describe('selfHostedCsp', () => {
 
   it('never duplicates a source', () => {
     const csp = selfHostedCsp(BASE, { 'connect-src': ['https://a.example.org', 'https://a.example.org', "'self'"], 'img-src': [] });
-    expect(directive(csp, 'connect-src')).toEqual(["'self'", 'https://a.example.org']);
+    expect(directive(csp, 'connect-src')).toEqual(["'self'", ...OWN, 'https://a.example.org']);
   });
 
   it('refuses an empty base, a missing directive, and a host in any other directive (the build would keep a host not its own)', () => {
@@ -374,7 +390,7 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
       identifier: selfHostedIdentifier(API),
       app: {
         security: {
-          csp: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://chat.example.org wss://chat.example.org; img-src 'self' blob: data: https://chat.example.org; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:",
+          csp: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://chat.example.org wss://chat.example.org; img-src 'self' blob: data: https://chat.example.org; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self' data:",
         },
       },
       bundle: { createUpdaterArtifacts: false },
@@ -391,7 +407,7 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
       updaterPubkey: KEY,
     });
     const csp = overlay.app.security.csp;
-    expect(directive(csp, 'connect-src')).toEqual(["'self'", 'https://api.example.org', 'https://ws.example.org', 'wss://ws.example.org', STORAGE, 'https://cdn.example.org:9000']);
+    expect(directive(csp, 'connect-src')).toEqual(["'self'", ...OWN, 'https://api.example.org', 'https://ws.example.org', 'wss://ws.example.org', STORAGE, 'https://cdn.example.org:9000']);
     expect(directive(csp, 'img-src')).toEqual(["'self'", 'blob:', 'data:', 'https://api.example.org', STORAGE, 'https://cdn.example.org:9000']);
     expect(otherDirectives(csp)).toEqual(otherDirectives(BASE));
     expect(overlay.bundle).toEqual({ createUpdaterArtifacts: true });
@@ -400,7 +416,7 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
 
   it('a build pointed at a local backend on purpose names localhost (the URLs it is compiled with), nothing else', () => {
     const csp = build({ apiUrl: 'http://localhost:3001/api/v1', wsUrl: 'http://localhost:3001' }).app.security.csp;
-    expect(directive(csp, 'connect-src')).toEqual(["'self'", 'http://localhost:3001', 'ws://localhost:3001']);
+    expect(directive(csp, 'connect-src')).toEqual(["'self'", ...OWN, 'http://localhost:3001', 'ws://localhost:3001']);
     expect(directive(csp, 'img-src')).toEqual(["'self'", 'blob:', 'data:', 'http://localhost:3001']);
   });
 
@@ -548,7 +564,7 @@ describe('tauri-build-config.mjs (the CLI `pnpm tauri:build` runs)', () => {
     const result = run([], { VITE_WS_URL: 'https://ws.example.org' });
     expect(result.status, result.stderr).toBe(0);
     const csp = (JSON.parse(result.stdout) as Conf).app.security.csp;
-    expect(directive(csp, 'connect-src')).toEqual(["'self'", 'https://api.example.org', 'https://ws.example.org', 'wss://ws.example.org']);
+    expect(directive(csp, 'connect-src')).toEqual(["'self'", ...OWN, 'https://api.example.org', 'https://ws.example.org', 'wss://ws.example.org']);
     expect(csp).not.toContain('wrong');
   });
 

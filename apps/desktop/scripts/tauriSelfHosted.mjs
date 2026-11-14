@@ -8,7 +8,8 @@
 //
 // `pnpm tauri:build` therefore merges this overlay over tauri.conf.json
 // (`tauri build --config`, scripts/tauri-build-config.mjs):
-// - `img-src` / `connect-src` lose every host the base policy names and get
+// - `img-src` / `connect-src` lose every host the base policy names (Tauri's
+//   own channel, which is no deployment's host, stays) and get
 //   the origins of the very URLs the frontend is compiled with, plus the
 //   object store's (TAURI_ASSET_ORIGIN); every other directive is kept as is
 //   and must name no host;
@@ -26,7 +27,7 @@
 // Pure functions, so the desktop test suite can pin them.
 
 import { createHash } from 'node:crypto';
-import { isCspHost, isTcpPort, parseAssetOrigins } from './tauriCsp.mjs';
+import { isCspHost, isTcpPort, parseAssetOrigins, TAURI_IPC_SOURCES } from './tauriCsp.mjs';
 
 const SERVER_DIRECTIVES = ['connect-src', 'img-src'];
 const SCHEME_SOURCE_RE = /^[a-z][a-z0-9+.-]*:$/i;
@@ -35,6 +36,11 @@ const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 /** A keyword ('self'), a nonce or hash ('…') or a scheme source (blob:, data:) names no host; every other source does. */
 export function isHostSource(source) {
   return !source.startsWith("'") && !SCHEME_SOURCE_RE.test(source);
+}
+
+/** A host of a deployment: any host source but Tauri's own channel, which every build keeps. */
+export function isDeploymentHost(source) {
+  return isHostSource(source) && !TAURI_IPC_SOURCES.includes(source);
 }
 
 /**
@@ -86,8 +92,9 @@ export function serverSources(apiUrl, wsUrl) {
 }
 
 /**
- * `csp` with every host source of `img-src` and `connect-src` replaced by
- * `sources[directive]`, keywords and scheme sources kept. Throws when either
+ * `csp` with every deployment host of `img-src` and `connect-src` replaced by
+ * `sources[directive]`; keywords, scheme sources and Tauri's own channel
+ * (TAURI_IPC_SOURCES) are kept. Throws when either
  * directive is missing, or when another directive names a host (the build
  * would keep a host that is not its own).
  */
@@ -101,12 +108,12 @@ export function selfHostedCsp(csp, sources) {
     .map((directive) => {
       const [name, ...list] = directive.split(/\s+/);
       if (!SERVER_DIRECTIVES.includes(name)) {
-        const host = list.find(isHostSource);
+        const host = list.find(isDeploymentHost);
         if (host) throw new Error(`The base CSP's ${name} names the host ${host}: a self-hosted build would keep it`);
         return directive;
       }
       seen.add(name);
-      return [name, ...unique([...list.filter((s) => !isHostSource(s)), ...(sources[name] ?? [])])].join(' ');
+      return [name, ...unique([...list.filter((s) => !isDeploymentHost(s)), ...(sources[name] ?? [])])].join(' ');
     });
   for (const name of SERVER_DIRECTIVES) {
     if (!seen.has(name)) throw new Error(`The base CSP has no ${name} directive to fill`);
