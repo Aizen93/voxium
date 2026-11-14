@@ -53,3 +53,67 @@ describe('workflow time limits', () => {
     expect(Number(/timeout-minutes: (\d+)/.exec(minio)?.[1])).toBeLessThan(30);
   });
 });
+
+// The end-to-end job's object store. The image's entrypoint starts the server
+// twice unless told otherwise (once in the background to configure its bundled
+// client, then for good), the readiness probe answers during the first start,
+// and a bucket call that meets the stop between the two is reset: the step
+// then fails before any test runs. The store starts once, and the bucket is
+// there when head-bucket says so, asked again in a bounded loop.
+describe('the end-to-end job\'s object store', () => {
+  const ci = readFileSync(WORKFLOWS + 'ci.yml', 'utf8').replace(/\r\n/g, '\n');
+  const start = ci.indexOf('      - name: Start MinIO and create the assets bucket\n');
+  const step = ci.slice(start, ci.indexOf('\n      - name: ', start + 1));
+  /** The step's script lines, comments dropped, continued lines joined. */
+  const script = step.replace(/\\\n\s*/g, ' ').split('\n').map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('#'));
+  const awsCalls = script.filter((l) => /(?:^|\s)aws\s/.test(l));
+
+  it('starts the server once', () => {
+    const run = script.filter((l) => l.startsWith('docker run '));
+    expect(run).toHaveLength(1);
+    expect(run[0]).toContain(' -e MINIO_SKIP_CLIENT=yes ');
+    // still the image pinned by digest
+    expect(run[0]).toMatch(/ bitnamilegacy\/minio:[\w.-]+@sha256:[0-9a-f]{64}$/);
+  });
+
+  it('waits for the readiness probe and fails with the container log when it never answers', () => {
+    expect(script.some((l) => l.includes('/minio/health/ready'))).toBe(true);
+    const notReady = script.indexOf('if [ -z "$ready" ]; then');
+    expect(notReady).toBeGreaterThan(-1);
+    expect(script.slice(notReady, notReady + 5)).toEqual(expect.arrayContaining(['docker logs minio', 'exit 1']));
+  });
+
+  it('takes head-bucket as the only proof of the bucket, in a bounded loop', () => {
+    const loop = script.findIndex((l) => /^for i in \$\(seq 1 \d+\); do$/.test(l) && script[script.indexOf(l) + 1]?.includes('head-bucket'));
+    expect(loop, 'a counted loop whose first statement asks head-bucket').toBeGreaterThan(-1);
+    const rounds = Number(/seq 1 (\d+)/.exec(script[loop])?.[1]);
+    expect(rounds).toBeGreaterThan(1);
+    expect(rounds).toBeLessThanOrEqual(20);
+    const end = script.indexOf('done', loop);
+    const body = script.slice(loop + 1, end);
+    // success is head-bucket answering, and nothing else sets it
+    expect(body[0]).toMatch(/^if aws .*s3api head-bucket .*; then created=1; break; fi$/);
+    expect(script.filter((l) => l.includes('created=1'))).toHaveLength(1);
+    // a create call never decides: its success only skips the pause before the next question
+    const create = body.filter((l) => l.includes(' s3 mb '));
+    expect(create).toHaveLength(1);
+    expect(create[0]).toMatch(/ && continue$/);
+    expect(body).toContain('sleep 2');
+    // A loop that ends without that answer (its last round may have created
+    // the bucket) asks once more, and the step fails with the container log
+    // only when that answer is no too.
+    const missing = script.findIndex((l, i) => i > end && /^if \[ -z "\$created" \] && ! aws .*s3api head-bucket .*; then$/.test(l));
+    expect(missing, 'one more head-bucket decides after the loop').toBeGreaterThan(-1);
+    expect(script.slice(missing + 1, missing + 4)).toEqual(['echo "The assets bucket was not there after 10 rounds"', 'docker logs minio', 'exit 1']);
+    expect(script[missing + 4]).toBe('fi');
+  });
+
+  it('gives every CLI call a time limit and a single attempt, so the loop is the only retry', () => {
+    expect(awsCalls.length).toBeGreaterThanOrEqual(3);
+    expect(script).toContainEqual(expect.stringMatching(/^limits="--cli-connect-timeout \d+ --cli-read-timeout \d+"$/));
+    for (const call of awsCalls) expect(call, call).toMatch(/(?:^|\s)aws \$limits /);
+    expect(step).toMatch(/\n {10}AWS_MAX_ATTEMPTS: 1\n/);
+    // no chain that reads a create call's exit code as the outcome
+    expect(step).not.toMatch(/\|\|\s*\\?\n?\s*aws /);
+  });
+});
