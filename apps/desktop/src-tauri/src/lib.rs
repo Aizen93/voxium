@@ -373,8 +373,45 @@ async fn session_secret_delete(app: tauri::AppHandle, name: String) -> Result<()
         .map_err(|e| e.to_string())?
 }
 
+/// Bring the running app to the front: the main window shown, restored and
+/// focused. While the app is still starting, the splash window is on screen
+/// and the main one not ready, so the splash is focused instead. The tray
+/// uses it, and so does a second launch of the app.
+fn show_main_window(app: &tauri::AppHandle) {
+    use tauri::Manager;
+
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = splash.set_focus();
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // One running app per build. Closing the window hides the app in the tray,
+    // so opening it again from its shortcut must bring that app back, not
+    // start a second one beside it (two processes on one vault and one
+    // session store). The plugin hands a second launch over to the running
+    // app and must be the first one registered. Builds are told apart by their
+    // identifier, so a build for another server runs beside the official app.
+    // Not in debug builds: `tauri dev` has the official identifier, and would
+    // hand over to an installed app instead of starting. `cfg!`, not an
+    // attribute, so that a debug build still compiles the registration.
+    let builder = if cfg!(debug_assertions) {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
+    };
+
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -413,13 +450,7 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.unminimize();
-                                let _ = window.set_focus();
-                            }
-                        }
+                        "show" => show_main_window(app),
                         "quit" => {
                             app.exit(0);
                         }
@@ -434,12 +465,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
+                        show_main_window(tray.app_handle());
                     }
                 })
                 .build(app)
@@ -814,5 +840,73 @@ mod updater_config_tests {
         assert!(!official.endpoints.is_empty());
         assert!(official.endpoints.iter().all(|url| url.scheme() == "https"));
         assert!(!official.pubkey.is_empty());
+    }
+}
+
+/// One running app per build. The single-instance plugin is registered first
+/// (plugins run in the order they are added), in release builds only (a debug
+/// build has the official identifier and would hand over to an installed
+/// app) but compiled in every build, and a second launch brings the running
+/// app to the front.
+#[cfg(test)]
+mod single_instance_tests {
+    #[test]
+    fn a_second_launch_hands_over_to_the_running_app() {
+        let source = include_str!("lib.rs");
+        let code = &source[..source
+            .find("\n#[cfg(test)]")
+            .expect("the tests follow the code")];
+        let run = &code[code.find("pub fn run() {").expect("run")..];
+
+        let single = run
+            .find("tauri_plugin_single_instance::init(")
+            .expect("the plugin is registered");
+        let others = run
+            .find(".plugin(tauri_plugin_shell::init())")
+            .expect("the other plugins");
+        assert!(single < others, "registered before every other plugin");
+        assert_eq!(run.matches(".plugin(").count(), 5, "one more than before");
+
+        // release builds only, by a condition every build compiles
+        let gate = run[..single]
+            .rfind("if cfg!(debug_assertions) {")
+            .expect("release builds only");
+        let between: Vec<&str> = run[gate..single].lines().map(str::trim).collect();
+        assert_eq!(
+            between,
+            [
+                "if cfg!(debug_assertions) {",
+                "builder",
+                "} else {",
+                "builder.plugin("
+            ],
+            "a debug build registers nothing, a release build the plugin"
+        );
+        assert!(!run.contains("#[cfg(not(debug_assertions))]"));
+
+        let callback = &run[single..others];
+        assert!(callback.contains("show_main_window(app)"));
+    }
+
+    #[test]
+    fn the_running_app_comes_back_through_one_function() {
+        let source = include_str!("lib.rs");
+        let code = &source[..source
+            .find("\n#[cfg(test)]")
+            .expect("the tests follow the code")];
+
+        // the tray's menu entry, a click on its icon and a second launch
+        assert_eq!(code.matches("show_main_window(").count(), 4);
+        // nothing else shows the main window by hand
+        assert_eq!(code.matches("window.show()").count(), 1);
+        let start = code.find("fn show_main_window(").expect("show_main_window");
+        let end = start + code[start..].find("\n}\n").expect("its end");
+        let body = &code[start..end];
+        let splash = body.find("get_webview_window(\"splash\")").expect("splash");
+        let main = body.find("get_webview_window(\"main\")").expect("main");
+        assert!(splash < main, "the splash window while the app starts");
+        for step in ["window.show()", "window.unminimize()", "window.set_focus()"] {
+            assert!(body.contains(step), "{step}");
+        }
     }
 }
