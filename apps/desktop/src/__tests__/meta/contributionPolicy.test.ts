@@ -32,6 +32,32 @@ describe('contribution terms', () => {
   });
 });
 
+// The Contributors page shows a person's GitHub username, profile link and
+// avatar to everyone. Nobody is put there by default: the author asks for it.
+describe('public credit', () => {
+  const CONTRIBUTORS_PAGE = 'https://voxium.app/contributors';
+
+  it('the pull request template asks before a contributor is listed on the public page, in an optional unticked checkbox', () => {
+    const lines = read('.github/pull_request_template.md').split(/\r?\n/);
+    const boxes = lines.filter((l) => l.includes(CONTRIBUTORS_PAGE));
+    expect(boxes).toHaveLength(1);
+    const box = boxes[0];
+    expect(box.startsWith('- [ ] Optional: ')).toBe(true);
+    // what is shown, so the tick is an informed one
+    for (const shown of ['GitHub username', 'profile link', 'avatar', 'name']) expect(box).toContain(shown);
+    // opt-in, and not for ever
+    expect(box).toContain('Left unticked, you are not listed');
+    expect(box).toContain('added or removed at any time');
+  });
+
+  it('is the only optional box, after the confirmations every pull request makes', () => {
+    const boxes = read('.github/pull_request_template.md').split(/\r?\n/).filter((l) => l.startsWith('- [ ] '));
+    expect(boxes.filter((l) => l.startsWith('- [ ] Optional: '))).toHaveLength(1);
+    expect(boxes[boxes.length - 1]).toContain(CONTRIBUTORS_PAGE);
+    expect(boxes[0]).toContain(TERMS_ANCHOR);
+  });
+});
+
 describe('security disclosure', () => {
   it('SECURITY.md sends reports to the private form, never to a public issue', () => {
     const policy = flat(read('SECURITY.md'));
