@@ -330,8 +330,8 @@ individually revertible; step 7 is the point of no return.
       drops it again on success, so the authorisation is spent by the run it
       authorised. This is not ceremony: `prisma migrate deploy` runs on **every
       container start** (`docker-entrypoint.sh`) and on every routine update
-      (DEPLOYMENT.md, "Application Updates" — `git pull` → `migrate deploy` →
-      build → restart). Without the gate, the first restart or routine update
+      of a server run from a checkout (`git pull` → `migrate deploy` → build →
+      restart). Without the gate, the first restart or routine update
       after this branch lands would perform the cutover unattended — no window,
       no snapshot, no captured attachment keys, and no warning to users whose
       recovery keys stop working. A database with nothing to destroy (fresh dev
