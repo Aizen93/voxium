@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo, memo, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { toast } from '../../stores/toastStore';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
@@ -32,7 +33,7 @@ interface Props {
   conversationId?: string;
 }
 
-function formatMessageTime(dateStr: string, t: (key: string, opts?: Record<string, string>) => string) {
+function formatMessageTime(dateStr: string, t: TFunction) {
   const date = new Date(dateStr);
   if (isToday(date)) return t('messageItem.todayAt', { time: format(date, 'h:mm a') });
   if (isYesterday(date)) return t('messageItem.yesterdayAt', { time: format(date, 'h:mm a') });
