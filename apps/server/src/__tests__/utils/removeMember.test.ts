@@ -11,6 +11,8 @@ const order: string[] = [];
 
 /** The interactive transaction's client: every statement records itself. */
 const tx = vi.hoisted(() => ({
+  // the membership row lock, the transaction's first statement
+  $queryRaw: vi.fn(),
   webhook: { updateMany: vi.fn() },
   serverBan: { upsert: vi.fn() },
   serverJoinRequest: { deleteMany: vi.fn() },
@@ -24,6 +26,9 @@ const prismaMock = vi.hoisted(() => ({
   channelRead: { deleteMany: vi.fn() },
   // Read only when the transaction found the member gone or lost a deadlock
   server: { findUnique: vi.fn() },
+  // A kick's webhook rows, read and waited for before its transaction opens
+  webhook: { findMany: vi.fn() },
+  $queryRaw: vi.fn(),
   $transaction: vi.fn(),
 }));
 vi.mock('../../utils/prisma', () => ({ prisma: prismaMock }));
@@ -58,6 +63,8 @@ const webhookChanged = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/webhookLifecycle', () => ({ emitWebhookChanged: (...a: unknown[]) => webhookChanged(...a) }));
 
 import { removeMemberFromServer } from '../../utils/removeMember';
+import { ForbiddenError } from '../../utils/errors';
+import { lazyStatement } from '../helpers/lazyStatement';
 
 const NO_SECURE = { userId: 'u-1', deleted: [], left: [] };
 
@@ -72,6 +79,9 @@ beforeEach(() => {
   evict.mockImplementation(async () => { order.push('voice'); });
   prismaMock.messageAttachment.findMany.mockImplementation(async () => { order.push('attachment-keys'); return []; });
   webhooksDisabled(0);
+  // The lock recorded when it RUNS (awaited), as a PrismaPromise runs: a
+  // statement built and never awaited is never sent, and takes no lock
+  tx.$queryRaw.mockImplementation(() => lazyStatement(order, 'lock:member', [{ user_id: 'u-1' }]));
   tx.serverBan.upsert.mockImplementation(async () => { order.push('ban'); return {}; });
   tx.serverJoinRequest.deleteMany.mockImplementation(async () => { order.push('request'); return { count: 0 }; });
   tx.serverMember.deleteMany.mockImplementation(async () => { order.push('member'); return { count: 1 }; });
@@ -79,6 +89,9 @@ beforeEach(() => {
   removeSecure.mockImplementation(async () => { order.push('secure'); return NO_SECURE; });
   prismaMock.channelRead.deleteMany.mockImplementation(async () => { order.push('reads'); return { count: 2 }; });
   prismaMock.server.findUnique.mockResolvedValue({ id: 's-1' });
+  prismaMock.webhook.findMany.mockResolvedValue([]);
+  prismaMock.$queryRaw.mockImplementation((_strings: TemplateStringsArray, ...values: unknown[]) =>
+    lazyStatement(order, `wait:webhook ${String(values[0])}`, [{ id: values[0] }]));
   tx.server.updateMany.mockImplementation(async () => { order.push('count'); return { count: 1 }; });
   prismaMock.$transaction.mockImplementation(async (fn: (client: typeof tx) => Promise<unknown>) => {
     order.push('txn:start');
@@ -100,11 +113,29 @@ describe('removeMemberFromServer', () => {
 
     expect(order).toEqual([
       'voice', 'attachment-keys',
-      'txn:start', 'request', 'member', 'secure', 'count', 'txn:end',
+      'txn:start', 'lock:member', 'request', 'member', 'secure', 'count', 'txn:end',
       'reads', 'secure:notices', 'left',
     ]);
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(memberLeft).toHaveBeenCalledWith('u-1', 's-1');
+  });
+
+  it('locks the membership row FIRST, FOR UPDATE, on the transaction\'s client: before the webhooks, the check, the request and the delete', async () => {
+    const authorize = vi.fn(async (db: unknown) => { order.push(db === tx ? 'authorize:tx' : 'authorize:shared'); });
+    await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize });
+
+    const inTx = order.slice(order.indexOf('txn:start') + 1, order.indexOf('txn:end'));
+    expect(inTx[0]).toBe('lock:member');
+    expect(inTx.slice(0, 4)).toEqual(['lock:member', 'webhooks.disable', 'authorize:tx', 'request']);
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+    const [strings, ...values] = tx.$queryRaw.mock.calls[0] as unknown as [string[], ...unknown[]];
+    expect(strings.join('?')).toBe('SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR UPDATE');
+    expect(values).toEqual(['u-1', 's-1']);
+  });
+
+  it('a voluntary leave locks the membership row first too', async () => {
+    await removeMemberFromServer('u-1', 's-1');
+    expect(order[order.indexOf('txn:start') + 1]).toBe('lock:member');
   });
 
   it('removes the member\'s secure-channel state INSIDE the transaction, on its client, after the membership row', async () => {
@@ -258,7 +289,7 @@ describe('removeMemberFromServer', () => {
     // before the count (which locks it anyway), after the member row and the
     // secure-channel cascade, it is held for the shortest time
     expect(order.slice(0, order.indexOf('txn:end') + 1)).toEqual([
-      'attachment-keys', 'txn:start', 'webhooks.disable', 'request', 'member', 'secure', 'ban', 'count', 'txn:end',
+      'attachment-keys', 'txn:start', 'lock:member', 'webhooks.disable', 'request', 'member', 'secure', 'ban', 'count', 'txn:end',
     ]);
     expect(tx.serverBan.upsert).toHaveBeenCalledWith({
       where: { serverId_userId: { serverId: 's-1', userId: 'u-1' } },
@@ -388,7 +419,7 @@ describe('removeMemberFromServer', () => {
           { open: 0, client: 'shared' }, { open: 1, client: 'tx' },
         ]);
         const lastAttempt = order.slice(order.lastIndexOf('authorize:shared'));
-        expect(lastAttempt.slice(0, 5)).toEqual(['authorize:shared', 'txn:start', 'webhooks.disable', 'authorize:tx', 'request']);
+        expect(lastAttempt.slice(0, 6)).toEqual(['authorize:shared', 'txn:start', 'lock:member', 'webhooks.disable', 'authorize:tx', 'request']);
         expect(lastAttempt.indexOf('member')).toBeGreaterThan(lastAttempt.indexOf('authorize:tx'));
       } finally {
         warn.mockRestore();
@@ -415,6 +446,14 @@ describe('removeMemberFromServer', () => {
       expect(announceSecure).not.toHaveBeenCalled();
       expect(memberLeft).not.toHaveBeenCalled();
       expect(prismaMock.channelRead.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('a refusal while the space still exists stays the refusal (403)', async () => {
+      const refusal = new ForbiddenError('You do not have permission to kick members');
+      const authorize = vi.fn(async (db: unknown) => { if (db === tx) throw refusal; });
+
+      await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize })).rejects.toBe(refusal);
+      expect(prismaMock.server.findUnique).toHaveBeenCalledWith({ where: { id: 's-1' }, select: { id: true } });
     });
 
     it('a check that refuses on a retried attempt is the answer: no transaction is opened for it, nothing is removed', async () => {
@@ -459,6 +498,28 @@ describe('removeMemberFromServer', () => {
       } finally {
         warn.mockRestore();
       }
+    });
+
+    it('a refusal from the check on a retried attempt (it ran against the space that is gone) answers 404 Server', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const authorize = vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new ForbiddenError('You do not have permission to kick members'));
+      prismaMock.$transaction.mockImplementationOnce(async () => { throw Object.assign(new Error('deadlock'), { code: 'P2034' }); });
+      try {
+        await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize }))
+          .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
+        expect(memberLeft).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a refusal from the check inside the first attempt\'s transaction, the space gone by the answer, answers 404 Server', async () => {
+      const authorize = vi.fn(async (db: unknown) => { if (db === tx) throw new ForbiddenError('You do not have permission to kick members'); });
+
+      await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null }, authorize }))
+        .rejects.toMatchObject({ statusCode: 404, message: 'Server not found' });
     });
 
     it('a space lookup that fails keeps the answer the error had (it is not read as "gone")', async () => {
@@ -510,11 +571,11 @@ describe('removeMemberFromServer: a kick disables the removed creator\'s webhook
     expect(args.data.creatorRemovedAt.getTime()).toBeGreaterThanOrEqual(before);
   });
 
-  it('rides FIRST in the SAME transaction as the membership delete (a removal never commits without it; the row lock of a purge is waited for before any other row is taken)', async () => {
+  it('rides in the SAME transaction as the membership delete, right after the membership row lock (a removal never commits without it)', async () => {
     webhooksDisabled(1);
     await removeMemberFromServer('u-1', 's-1', KICK);
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-    expect(order[order.indexOf('txn:start') + 1]).toBe('webhooks.disable');
+    expect(order.slice(order.indexOf('txn:start') + 1, order.indexOf('txn:start') + 3)).toEqual(['lock:member', 'webhooks.disable']);
   });
 
   it('when it disabled any: one webhook:changed with the server id alone, AFTER member:left (the removed member is out of the room)', async () => {
@@ -534,6 +595,51 @@ describe('removeMemberFromServer: a kick disables the removed creator\'s webhook
     // The decrement answers { count: 1 }: the count must be the webhook
     // statement's, never another one's
     expect(webhookChanged).not.toHaveBeenCalled();
+  });
+
+  describe('the webhook rows it disables are waited for, holding nothing, before its transaction opens', () => {
+    it('each row the member holds, in its own statement FOR NO KEY UPDATE on the shared client, before the transaction takes the membership row', async () => {
+      prismaMock.webhook.findMany.mockResolvedValue([{ id: 'wh-1' }, { id: 'wh-2' }]);
+      webhooksDisabled(2);
+
+      await removeMemberFromServer('u-1', 's-1', KICK);
+
+      expect(order.slice(0, order.indexOf('txn:start') + 2)).toEqual([
+        'attachment-keys', 'wait:webhook wh-1', 'wait:webhook wh-2', 'txn:start', 'lock:member',
+      ]);
+      // the rows the transaction's webhook statement updates
+      expect(prismaMock.webhook.findMany).toHaveBeenCalledWith({
+        where: tx.webhook.updateMany.mock.calls[0][0].where,
+        select: { id: true },
+      });
+      const [strings, ...values] = prismaMock.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+      expect(strings.join('?')).toBe('SELECT id FROM webhooks WHERE id = ? FOR NO KEY UPDATE');
+      expect(values).toEqual(['wh-1']);
+    });
+
+    it('waits again before every attempt', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.webhook.findMany.mockResolvedValue([{ id: 'wh-1' }]);
+      const real = prismaMock.$transaction.getMockImplementation()!;
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { order.push('txn:aborted'); throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })
+        .mockImplementation(real);
+      try {
+        await removeMemberFromServer('u-1', 's-1', KICK);
+      } finally {
+        warn.mockRestore();
+      }
+      expect(order.slice(0, order.indexOf('txn:start') + 1)).toEqual([
+        'attachment-keys', 'wait:webhook wh-1', 'txn:aborted', 'wait:webhook wh-1', 'txn:start',
+      ]);
+    });
+
+    it('a voluntary leave waits for none', async () => {
+      prismaMock.webhook.findMany.mockResolvedValue([{ id: 'wh-1' }]);
+      await removeMemberFromServer('u-1', 's-1');
+      expect(prismaMock.webhook.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+    });
   });
 
   it('a voluntary leave (no ban) keeps the member\'s webhooks: no statement, no event', async () => {

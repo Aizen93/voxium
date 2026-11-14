@@ -29,6 +29,7 @@ const emitToModerators = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: unknown[]) => emitToModerators(...a) }));
 
 import { joinServerMember } from '../../utils/serverJoin';
+import { lazyStatement } from '../helpers/lazyStatement';
 
 const order: string[] = [];
 const REQ = { op: 'request.deleteMany' };
@@ -113,6 +114,92 @@ describe('joinServerMember', () => {
     prismaMock.channel.findMany.mockResolvedValue([]);
     await joinServerMember('u-2', 's-1', { via: 'invite' });
     expect(prismaMock.serverMember.count).not.toHaveBeenCalled();
+  });
+
+  describe('the rows the transaction takes after the space row are waited for before it opens', () => {
+    /**
+     * The transaction's own client: the root's models, but an identity and a
+     * raw statement of its own, so a statement run on the wrong client, or a
+     * client handed to the wrong caller, is told apart.
+     */
+    const tx = { ...prismaMock, $queryRaw: vi.fn() };
+    /**
+     * Every raw statement, named when it RUNS (a shared-client statement when
+     * it is awaited, as a PrismaPromise runs; built and never awaited, it
+     * never runs), with `txn` marking where the transaction opens and `tx:`
+     * the statements on the transaction's client.
+     */
+    function recordWaits(): string[] {
+      const seen: string[] = [];
+      const name = (sql: string) => {
+        if (sql.includes('FROM servers') && sql.includes('FOR UPDATE')) return 'lock:space';
+        if (sql.includes('FROM server_join_requests') && sql.includes('FOR UPDATE')) return 'wait:requests';
+        if (sql.includes('FROM channel_members') && sql.includes('FOR UPDATE')) return 'wait:secure-rows';
+        if (sql.includes('FROM users') && sql.includes('FOR KEY SHARE')) return 'wait:account';
+        return `raw:${sql}`;
+      };
+      prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray) =>
+        lazyStatement(seen, name(strings.join('?')), [{ id: 's-1' }]));
+      tx.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => { seen.push(`tx:${name(strings.join('?'))}`); return [{ id: 's-1' }]; });
+      prismaMock.$transaction.mockImplementation(async (fn: (client: unknown) => Promise<unknown>) => { seen.push('txn'); return fn(tx); });
+      return seen;
+    }
+    /** The invite route's statement: lazy, run on the client it is handed. */
+    const inviteWait = (seen: string[]) => vi.fn((_db: unknown) => lazyStatement(seen, 'wait:invite', []));
+    const sqlOf = (i: number) => {
+      const [strings, ...values] = prismaMock.$queryRaw.mock.calls[i] as [TemplateStringsArray, ...unknown[]];
+      return { sql: strings.join('?').replace(/\s+/g, ' '), values };
+    };
+
+    it('the joiner\'s join requests and secure-channel rows in the space, the joiner\'s account row, then the caller\'s rows: each its own statement, before the transaction', async () => {
+      const seen = recordWaits();
+      const awaitRows = inviteWait(seen);
+
+      await joinServerMember('u-1', 's-1', { via: 'invite', extraWrites: () => [], awaitRows });
+
+      expect(seen.slice(0, seen.indexOf('tx:lock:space') + 1)).toEqual(['wait:requests', 'wait:secure-rows', 'wait:account', 'wait:invite', 'txn', 'tx:lock:space']);
+      // the caller's statement runs on the shared client, outside the transaction
+      expect(awaitRows).toHaveBeenCalledTimes(1);
+      expect(awaitRows.mock.calls[0][0]).toBe(prismaMock);
+      expect(sqlOf(0)).toEqual({ sql: 'SELECT id FROM server_join_requests WHERE server_id = ? AND user_id = ? FOR UPDATE', values: ['s-1', 'u-1'] });
+      expect(sqlOf(1).sql).toMatch(/FROM channel_members cm JOIN channels c ON c\.id = cm\.channel_id WHERE cm\.user_id = \? AND c\.server_id = \? FOR UPDATE OF cm/);
+      expect(sqlOf(1).values).toEqual(['u-1', 's-1']);
+      expect(sqlOf(2)).toEqual({ sql: 'SELECT id FROM users WHERE id = ? FOR KEY SHARE', values: ['u-1'] });
+    });
+
+    it('waits again before each attempt: a retried transaction meets the rows as they are then', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const seen = recordWaits();
+      const awaitRows = inviteWait(seen);
+      let attempt = 0;
+      prismaMock.$transaction.mockImplementation(async (fn: (client: unknown) => Promise<unknown>) => {
+        seen.push('txn');
+        if (attempt++ === 0) throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' });
+        return fn(tx);
+      });
+      try {
+        await joinServerMember('u-1', 's-1', { via: 'invite', extraWrites: () => [], awaitRows });
+
+        const waits = ['wait:requests', 'wait:secure-rows', 'wait:account', 'wait:invite'];
+        expect(seen.slice(0, 11)).toEqual([...waits, 'txn', ...waits, 'txn', 'tx:lock:space']);
+        expect(awaitRows).toHaveBeenCalledTimes(2);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a direct join waits for its own rows only', async () => {
+      const seen = recordWaits();
+      await joinServerMember('u-1', 's-1', { via: 'discovery' });
+      expect(seen.slice(0, seen.indexOf('tx:lock:space') + 1)).toEqual(['wait:requests', 'wait:secure-rows', 'wait:account', 'txn', 'tx:lock:space']);
+    });
+
+    it('a refusal before the transaction waits for nothing', async () => {
+      const seen = recordWaits();
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'u-1' });
+      await expect(joinServerMember('u-1', 's-1', { via: 'discovery' })).rejects.toMatchObject({ statusCode: 400 });
+      expect(seen).toEqual([]);
+    });
   });
 
   describe('the join transaction holds its checks on every attempt', () => {

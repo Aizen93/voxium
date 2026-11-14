@@ -1,7 +1,8 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, memberGoneAsNotFound, violatesForeignKey } from '../utils/errors';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import {
   validateRoleName,
   validateRoleColor,
@@ -16,7 +17,13 @@ import type { Role, MemberRole } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 import { rateLimitRoleManage } from '../middleware/rateLimiter';
-import { hasServerPermission, hasChannelPermission, getHighestRolePosition, getEffectivePermissions } from '../utils/permissionCalculator';
+import {
+  hasServerPermission,
+  hasChannelPermission,
+  getHighestRolePosition,
+  getEffectivePermissions,
+  type PermissionReadClient,
+} from '../utils/permissionCalculator';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 
 export const roleRouter = Router({ mergeParams: true });
@@ -323,6 +330,65 @@ roleRouter.delete('/:roleId', rateLimitRoleManage, async (req: Request<{ serverI
   }
 });
 
+/**
+ * The role assignment's checks, reading through `db` (the shared client for
+ * the early answer, the transaction's client inside it): the actor may
+ * manage roles, the target is a member, the owner's roles are the owner's
+ * alone, every role is one of this server's and not @everyone, and the
+ * actor outranks both the roles and the target. Returns the space's owner.
+ */
+async function assertMayAssignRoles(
+  db: PermissionReadClient,
+  actorId: string,
+  serverId: string,
+  memberId: string,
+  roleIds: string[],
+): Promise<{ ownerId: string } | null> {
+  const canManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, db);
+  if (!canManage) throw new ForbiddenError('You do not have permission to manage roles');
+
+  // Verify target is a member
+  const targetMember = await db.serverMember.findUnique({
+    where: { userId_serverId: { userId: memberId, serverId } },
+  });
+  if (!targetMember) throw new NotFoundError('Member');
+
+  // Cannot modify owner's roles (unless you're the owner)
+  const server = await db.server.findUnique({ where: { id: serverId }, select: { ownerId: true } });
+  if (server?.ownerId === memberId && actorId !== memberId) {
+    throw new ForbiddenError('Cannot modify the server owner\'s roles');
+  }
+
+  // Validate all role IDs belong to this server and are not @everyone
+  const roles = await db.role.findMany({
+    where: { id: { in: roleIds }, serverId },
+    select: { id: true, position: true, isDefault: true },
+  });
+  if (roles.length !== roleIds.length) {
+    throw new BadRequestError('One or more role IDs are invalid');
+  }
+  if (roles.some((r) => r.isDefault)) {
+    throw new BadRequestError('Cannot explicitly assign the @everyone role');
+  }
+
+  // Hierarchy check: actor can only assign roles below their own highest position
+  const actorHighest = await getHighestRolePosition(actorId, serverId, db);
+  if (actorHighest !== Infinity) {
+    // Cannot assign roles at or above actor's position
+    for (const r of roles) {
+      if (r.position >= actorHighest) {
+        throw new ForbiddenError('Cannot assign roles at or above your own position');
+      }
+    }
+    // Cannot modify roles of users with equal or higher position
+    const targetHighest = await getHighestRolePosition(memberId, serverId, db);
+    if (targetHighest >= actorHighest) {
+      throw new ForbiddenError('Cannot modify roles of a member with an equal or higher role');
+    }
+  }
+  return server;
+}
+
 // Assign roles to a member
 roleRouter.patch(
   '/members/:memberId',
@@ -334,58 +400,36 @@ roleRouter.patch(
 
       if (!Array.isArray(roleIds)) throw new BadRequestError('roleIds must be an array');
 
-      const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_ROLES);
-      if (!canManage) throw new ForbiddenError('You do not have permission to manage roles');
+      const actorId = req.user!.userId;
+      // The early answer, on the shared client; the transaction asks it again
+      await assertMayAssignRoles(prisma, actorId, serverId, memberId, roleIds);
 
-      // Verify target is a member
-      const targetMember = await prisma.serverMember.findUnique({
-        where: { userId_serverId: { userId: memberId, serverId } },
-      });
-      if (!targetMember) throw new NotFoundError('Member');
-
-      // Cannot modify owner's roles (unless you're the owner)
-      const server = await prisma.server.findUnique({ where: { id: serverId }, select: { ownerId: true } });
-      if (server?.ownerId === memberId && req.user!.userId !== memberId) {
-        throw new ForbiddenError('Cannot modify the server owner\'s roles');
-      }
-
-      // Validate all role IDs belong to this server and are not @everyone
-      const roles = await prisma.role.findMany({
-        where: { id: { in: roleIds }, serverId },
-        select: { id: true, position: true, isDefault: true },
-      });
-      if (roles.length !== roleIds.length) {
-        throw new BadRequestError('One or more role IDs are invalid');
-      }
-      if (roles.some((r) => r.isDefault)) {
-        throw new BadRequestError('Cannot explicitly assign the @everyone role');
-      }
-
-      // Hierarchy check: actor can only assign roles below their own highest position
-      const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
-      if (actorHighest !== Infinity) {
-        // Cannot assign roles at or above actor's position
-        for (const r of roles) {
-          if (r.position >= actorHighest) {
-            throw new ForbiddenError('Cannot assign roles at or above your own position');
+      // Replace all member roles atomically. The member row first, in the
+      // mode the new rows' key takes it (FOR KEY SHARE): a removal of the
+      // member locks that row as its first statement, and this transaction
+      // then waits for it before it holds any role row the removal's cascade
+      // deletes. Then every check made above, made again on the
+      // transaction's client (assertMayAssignRoles), so the one that holds is
+      // the one made after the wait; then the writes. The long budget
+      // (LOCK_WAIT_TRANSACTION_OPTIONS): the transaction waits for the
+      // removal inside it. Run again whole when PostgreSQL aborts it to break
+      // a deadlock, the checks included. A refused key answers what is
+      // missing: the member (404 Member) or a role deleted meanwhile (404 Role).
+      let server: { ownerId: string } | null;
+      try {
+        server = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${memberId} AND server_id = ${serverId} FOR KEY SHARE`;
+          const checked = await assertMayAssignRoles(tx, actorId, serverId, memberId, roleIds);
+          await tx.memberRole.deleteMany({ where: { userId: memberId, serverId } });
+          for (const roleId of roleIds) {
+            await tx.memberRole.create({ data: { userId: memberId, serverId, roleId } });
           }
-        }
-        // Cannot modify roles of users with equal or higher position
-        const targetHighest = await getHighestRolePosition(memberId, serverId);
-        if (targetHighest >= actorHighest) {
-          throw new ForbiddenError('Cannot modify roles of a member with an equal or higher role');
-        }
+          return checked;
+        }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The role assignment of ${memberId} in ${serverId}`);
+      } catch (err) {
+        if (violatesForeignKey(err, 'member_roles_role_id_fkey')) throw new NotFoundError('Role');
+        memberGoneAsNotFound(err);
       }
-
-      // Replace all member roles atomically
-      await prisma.$transaction([
-        prisma.memberRole.deleteMany({ where: { userId: memberId, serverId } }),
-        ...roleIds.map((roleId) =>
-          prisma.memberRole.create({
-            data: { userId: memberId, serverId, roleId },
-          })
-        ),
-      ]);
 
       // Also update the legacy `role` field for backward compat
       // If any assigned role has ADMINISTRATOR or MANAGE_* permissions, set to 'admin'
@@ -405,10 +449,16 @@ roleRouter.patch(
       let legacyRole: MemberRole = 'member';
       if (server?.ownerId !== memberId) {
         legacyRole = isAdminLevel ? 'admin' : 'member';
-        await prisma.serverMember.update({
-          where: { userId_serverId: { userId: memberId, serverId } },
-          data: { role: legacyRole },
-        });
+        // A member gone since the batch (removed with no role to replace)
+        // finds no row (P2025): 404 Member
+        try {
+          await prisma.serverMember.update({
+            where: { userId_serverId: { userId: memberId, serverId } },
+            data: { role: legacyRole },
+          });
+        } catch (err) {
+          memberGoneAsNotFound(err);
+        }
       } else {
         legacyRole = 'owner';
       }

@@ -48,6 +48,9 @@ export const SECURE_VOICE_MEMBER_PERMISSIONS =
  */
 export type PermissionReadClient = Pick<typeof prisma, 'server' | 'serverMember' | 'role' | 'memberRole'>;
 
+/** The models the channel-level reads use, on the same terms as PermissionReadClient. */
+export type ChannelPermissionReadClient = PermissionReadClient & Pick<typeof prisma, 'channel' | 'channelMember' | 'channelPermissionOverride'>;
+
 /**
  * Compute effective base permissions for a user in a server (no channel overrides).
  * Owner always gets ALL_PERMISSIONS. Reads through `db` (see PermissionReadClient).
@@ -97,16 +100,21 @@ export async function computeServerPermissions(
  *
  * Optimized: fetches @everyone role (with id + permissions), user's member roles,
  * and channel overrides in a single parallel batch to avoid redundant queries
- * with computeServerPermissions.
+ * with computeServerPermissions. Given a transaction's client (`db`), it
+ * reads through it, one read after the other (a transaction's statements
+ * share its one connection); without one, on the shared client, in parallel.
  */
 export async function computeUserChannelPermissions(
   userId: string,
   channelId: string,
   serverId: string,
+  db?: ChannelPermissionReadClient,
 ): Promise<bigint> {
+  const client: ChannelPermissionReadClient = db ?? prisma;
+  const sequential = db !== undefined;
   // One fetch covers the secure flag, the channel↔server binding, and the
   // owner bypass (replaces the old bare server fetch — no extra query).
-  const channel = await prisma.channel.findUnique({
+  const channel = await client.channel.findUnique({
     where: { id: channelId },
     select: { secure: true, type: true, serverId: true, server: { select: { ownerId: true } } },
   });
@@ -117,16 +125,17 @@ export async function computeUserChannelPermissions(
   // ServerMember check is defense in depth: leave/kick flows delete
   // ChannelMember rows, but a stale row must never outrank that.
   if (channel.secure) {
-    const [member, serverMember] = await Promise.all([
-      prisma.channelMember.findUnique({
-        where: { channelId_userId: { channelId, userId } },
-        select: { isCreator: true },
-      }),
-      prisma.serverMember.findUnique({
-        where: { userId_serverId: { userId, serverId } },
-        select: { userId: true },
-      }),
-    ]);
+    const readMember = () => client.channelMember.findUnique({
+      where: { channelId_userId: { channelId, userId } },
+      select: { isCreator: true },
+    });
+    const readServerMember = () => client.serverMember.findUnique({
+      where: { userId_serverId: { userId, serverId } },
+      select: { userId: true },
+    });
+    const [member, serverMember] = sequential
+      ? [await readMember(), await readServerMember()]
+      : await Promise.all([readMember(), readServerMember()]);
     if (!member || !serverMember) return 0n;
     if (channel.type === 'voice') return SECURE_VOICE_MEMBER_PERMISSIONS;
     return member.isCreator ? SECURE_CREATOR_PERMISSIONS : SECURE_MEMBER_PERMISSIONS;
@@ -135,26 +144,27 @@ export async function computeUserChannelPermissions(
   if (channel.server.ownerId === userId) return ALL_PERMISSIONS;
 
   // Verify membership
-  const membership = await prisma.serverMember.findUnique({
+  const membership = await client.serverMember.findUnique({
     where: { userId_serverId: { userId, serverId } },
     select: { userId: true },
   });
   if (!membership) return 0n;
 
-  // Fetch all needed data in parallel
-  const [everyoneRole, memberRoles, overrides] = await Promise.all([
-    prisma.role.findFirst({
-      where: { serverId, isDefault: true },
-      select: { id: true, permissions: true },
-    }),
-    prisma.memberRole.findMany({
-      where: { userId, serverId },
-      include: { role: { select: { permissions: true } } },
-    }),
-    prisma.channelPermissionOverride.findMany({
-      where: { channelId },
-    }),
-  ]);
+  // Fetch all needed data in parallel (one after the other on a transaction's client)
+  const readEveryone = () => client.role.findFirst({
+    where: { serverId, isDefault: true },
+    select: { id: true, permissions: true },
+  });
+  const readMemberRoles = () => client.memberRole.findMany({
+    where: { userId, serverId },
+    include: { role: { select: { permissions: true } } },
+  });
+  const readOverrides = () => client.channelPermissionOverride.findMany({
+    where: { channelId },
+  });
+  const [everyoneRole, memberRoles, overrides] = sequential
+    ? [await readEveryone(), await readMemberRoles(), await readOverrides()]
+    : await Promise.all([readEveryone(), readMemberRoles(), readOverrides()]);
 
   // Compute base permissions
   const everyonePerms = everyoneRole
@@ -199,15 +209,17 @@ export async function hasServerPermission(
 }
 
 /**
- * Check if a user has a specific permission in a channel.
+ * Check if a user has a specific permission in a channel. Reads through `db`
+ * when one is given (see computeUserChannelPermissions).
  */
 export async function hasChannelPermission(
   userId: string,
   channelId: string,
   serverId: string,
   permission: bigint,
+  db?: ChannelPermissionReadClient,
 ): Promise<boolean> {
-  const perms = await computeUserChannelPermissions(userId, channelId, serverId);
+  const perms = await computeUserChannelPermissions(userId, channelId, serverId, db);
   return hasFlag(perms, permission);
 }
 

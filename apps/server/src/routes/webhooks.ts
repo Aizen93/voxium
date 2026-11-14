@@ -4,13 +4,20 @@ import { authenticate, requireVerifiedEmail, requireConsent } from '../middlewar
 import { requireFeature } from '../middleware/requireFeature';
 import { rateLimitWebhookManage, rateLimitWebhookRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError, ServiceUnavailableError, prismaErrorCode } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, ServiceUnavailableError, prismaErrorCode, violatesForeignKey } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
 import { newWebhookToken, hashWebhookTokenHex } from '../utils/webhookToken';
 import { isSecretBoxConfigured, sealSecret } from '../utils/secretBox';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { LOCK_WAIT_TRANSACTION_OPTIONS } from '../utils/transactionRetry';
-import { hasServerPermission, hasChannelPermission, filterVisibleChannels, filterChannelsWithPermissions } from '../utils/permissionCalculator';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import {
+  hasServerPermission,
+  hasChannelPermission,
+  filterVisibleChannels,
+  filterChannelsWithPermissions,
+  type ChannelPermissionReadClient,
+  type PermissionReadClient,
+} from '../utils/permissionCalculator';
 import {
   webhookSelect,
   toWebhook,
@@ -54,7 +61,10 @@ import {
  * kick or ban disables the webhooks whose live URL the member holds (created
  * by them and never rotated by another, or last rotated by them) and marks
  * them (`creatorRemovedAt`, utils/removeMember.ts): any enable, the owner's
- * or an admin's, or a rotate clears the mark, as having reviewed it.
+ * or an admin's, or a rotate clears the mark, as having reviewed it. A
+ * create, a rotate and an enable run under the caller's member row
+ * (lockCallerMemberRow): only a current member who may manage webhooks makes,
+ * re-mints or re-arms a URL.
  *
  * The token is the credential: 256 random bits, only its SHA-256 is stored,
  * and the plaintext leaves the server exactly twice: in the create and in the
@@ -78,7 +88,7 @@ webhookRouter.use(requireFeature('webhooks', WEBHOOKS_DISABLED_MESSAGE));
 webhookRouter.use(async (req: Request<{ serverId: string }>, _res: Response, next: NextFunction) => {
   try {
     const allowed = await hasServerPermission(req.user!.userId, req.params.serverId, Permissions.MANAGE_WEBHOOKS);
-    if (!allowed) throw new ForbiddenError('You do not have permission to manage webhooks');
+    if (!allowed) throw new ForbiddenError(NO_MANAGE);
     next();
   } catch (err) {
     next(err);
@@ -97,6 +107,47 @@ const GITHUB_UNCONFIGURED = 'GitHub webhooks are not configured on this server';
 // routes/messages.ts answers the same sentence for a refused SEND_MESSAGES
 const NO_SEND = 'You do not have permission to send messages in this channel';
 const ADMIN_DISABLED = 'This webhook was disabled by an administrator';
+const NO_MANAGE = 'You do not have permission to manage webhooks';
+
+/**
+ * A webhook is created, rotated or enabled only by a current member who may
+ * manage webhooks, checked under the member row. The transaction's first
+ * statement locks the caller's member row FOR KEY SHARE; a removal of the
+ * caller locks that row FOR UPDATE as its first statement, so the two queue
+ * on it. A removal that commits first leaves no row, and the check that
+ * follows (refuseUnlessManager) refuses; a removal that waits reads the
+ * webhook this transaction commits, and its webhook statement disables it
+ * with the others the member holds.
+ *
+ * A rotate and an enable then write the webhook row (an enable that moves
+ * the webhook also key-shares the target channel). A removal and an account
+ * deletion take the member row first too; a channel delete, a purge-delete
+ * and a platform ban's disarm take no member row. A space delete reaches its
+ * rows in the order PostgreSQL fires the cascade triggers of `servers` in,
+ * which is the text order of the trigger names (each ends in the trigger's
+ * oid), not an order the schema fixes: on a restored database, or one whose
+ * oid counter was further along when a table was added, the delete can hold
+ * the webhook row or the target channel while it waits for the member row.
+ * So both run inside retryOnTransactionConflict, with their checks made
+ * again on every attempt (assertMayArm); an attempt after the delete has
+ * committed answers 404 Server.
+ */
+async function lockCallerMemberRow(tx: { $queryRaw: typeof prisma.$queryRaw }, userId: string, serverId: string): Promise<void> {
+  await tx.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${userId} AND server_id = ${serverId} FOR KEY SHARE`;
+}
+
+/**
+ * The webhook-management permission read again on `db` (a transaction's
+ * client, after lockCallerMemberRow): 404 Server when the space is gone,
+ * otherwise the router's own 403 for a caller who is not a member or lacks
+ * the permission.
+ */
+async function refuseUnlessManager(db: PermissionReadClient, userId: string, serverId: string): Promise<void> {
+  if (await hasServerPermission(userId, serverId, Permissions.MANAGE_WEBHOOKS, db)) return;
+  const space = await db.server.findUnique({ where: { id: serverId }, select: { id: true } });
+  if (!space) throw new NotFoundError('Server');
+  throw new ForbiddenError(NO_MANAGE);
+}
 
 /** 503 unless a GitHub secret can be sealed: checked BEFORE anything is written. */
 function assertSecretBox(): void {
@@ -136,18 +187,21 @@ function bodyOf(body: unknown): Record<string, unknown> {
  *   through the calculator.
  * - All three are decided BEFORE the type check, so a hidden voice channel
  *   cannot leak "exists, but is voice".
+ *
+ * Reads through `db` when one is given (a transaction's client: the
+ * creation asks it again inside its transaction, on every attempt).
  */
-async function assertChannel(userId: string, serverId: string, channelId: string): Promise<void> {
-  const channel = await prisma.channel.findUnique({
+async function assertChannel(userId: string, serverId: string, channelId: string, db?: ChannelPermissionReadClient): Promise<void> {
+  const channel = await (db ?? prisma).channel.findUnique({
     where: { id: channelId },
     select: { id: true, serverId: true, type: true, secure: true },
   });
   if (!channel || channel.serverId !== serverId) throw new NotFoundError('Channel');
   if (channel.secure === true) throw new NotFoundError('Channel');
-  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL, db)) {
     throw new NotFoundError('Channel');
   }
-  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.SEND_MESSAGES)) {
+  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.SEND_MESSAGES, db)) {
     throw new ForbiddenError(NO_SEND);
   }
   if (channel.type !== 'text') throw new BadRequestError('Webhooks can only post to text channels');
@@ -178,12 +232,48 @@ async function loadOwnWebhook(
 }
 
 /**
- * P2003 on a write that sets a channel id: the target channel was deleted
- * between assertChannel and the write (the webhook FK). Answer the missing
- * channel it now is, never a 500 with a logged stack.
+ * The channel checks a rotate or an enable made before its transaction, made
+ * again on the transaction's client (`db`), on every attempt: the caller
+ * still sees the webhook's channel (otherwise the webhook answers as a
+ * missing one, as loadOwnWebhook does) and may still send where the URL will
+ * post: in that channel, or, for an enable that also moves the webhook, in
+ * `target` (assertChannel, every check of a move). The write itself is
+ * conditional on the webhook still posting to `channelId`.
  */
-function channelGoneAsNotFound(err: unknown): never {
-  if (prismaErrorCode(err) === 'P2003') throw new NotFoundError('Channel');
+async function assertMayArm(
+  db: ChannelPermissionReadClient,
+  userId: string,
+  serverId: string,
+  channelId: string,
+  target?: string,
+): Promise<void> {
+  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.VIEW_CHANNEL, db)) {
+    throw new NotFoundError('Webhook');
+  }
+  if (target !== undefined) {
+    await assertChannel(userId, serverId, target, db);
+    return;
+  }
+  if (!await hasChannelPermission(userId, channelId, serverId, Permissions.SEND_MESSAGES, db)) {
+    throw new ForbiddenError(NO_SEND);
+  }
+}
+
+/**
+ * A webhook write's foreign-key refusal (P2003), answered by the key the
+ * driver names. The space's key (the space deleted meanwhile) answers the
+ * missing space it now is. The channel's key (the channel deleted between
+ * assertChannel and the write) answers the missing channel. The caller's own
+ * key, the creator's on a create and the rotator's on a rotate (the caller's
+ * account deleted meanwhile), answers the missing user. Anything else is
+ * thrown as it is.
+ */
+function foreignKeyRefusedAsNotFound(err: unknown): never {
+  if (violatesForeignKey(err, 'webhooks_server_id_fkey')) throw new NotFoundError('Server');
+  if (violatesForeignKey(err, 'webhooks_channel_id_fkey')) throw new NotFoundError('Channel');
+  if (violatesForeignKey(err, 'webhooks_created_by_id_fkey') || violatesForeignKey(err, 'webhooks_last_rotated_by_id_fkey')) {
+    throw new NotFoundError('User');
+  }
   throw err;
 }
 
@@ -198,14 +288,15 @@ function channelGoneAsNotFound(err: unknown): never {
  * - another moderator MOVED it meanwhile, maybe into a channel this caller
  *   cannot see: the write matches nothing, so a rotate never hands out a
  *   working token for a hidden channel, and a PATCH never edits one.
- * A P2003 is a PATCH's target channel deleted meanwhile (channelGoneAsNotFound).
+ * A P2003 is answered by the key it names (foreignKeyRefusedAsNotFound): a
+ * PATCH's target channel deleted meanwhile, a rotate's caller deleted meanwhile.
  */
 async function updateOrMissing<T>(write: Promise<T>): Promise<T> {
   try {
     return await write;
   } catch (err) {
     if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Webhook');
-    return channelGoneAsNotFound(err);
+    return foreignKeyRefusedAsNotFound(err);
   }
 }
 
@@ -312,26 +403,53 @@ webhookRouter.post('/', rateLimitWebhookManage, async (req: Request<{ serverId: 
     // secure-channel and category creations take the same lock for theirs.
     // The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space delete holds
     // the space row through its cascade (every channel and message of the
-    // space), and a creation merely waiting for it must not expire.
-    const row = await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
-      const count = await tx.webhook.count({ where: { serverId } });
-      if (count >= limits.maxWebhooksPerServer) {
-        throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);
-      }
-      return tx.webhook.create({
-        data: {
-          serverId,
-          channelId,
-          name,
-          type,
-          tokenHash: hashWebhookTokenHex(token),
-          secretEnc: signing ? signing.secretEnc : null,
-          createdById: userId,
-        },
-        select: webhookSelect,
-      });
-    }, LOCK_WAIT_TRANSACTION_OPTIONS).catch(channelGoneAsNotFound);
+    // space), and a creation merely waiting for it must not expire. Run again
+    // whole when PostgreSQL aborts it to break a deadlock, as every creation
+    // under the space row lock is: an aborted attempt leaves nothing, and the
+    // count is read again under the lock. Each attempt first waits, holding
+    // nothing, for the existing rows the insert key-shares after the space
+    // row (the channel, the creator's account), one statement each on the
+    // shared client and outside any transaction, so a transaction holding
+    // one of them (a channel delete, an account deletion of the creator) is
+    // waited for before the space row is taken.
+    const row = await retryOnTransactionConflict(async () => {
+      await prisma.$queryRaw`SELECT id FROM channels WHERE id = ${channelId} FOR KEY SHARE`;
+      await prisma.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR KEY SHARE`;
+      return prisma.$transaction(async (tx) => {
+        // The caller's member row first (lockCallerMemberRow), then the space
+        // row: the order a secure-channel creation takes them in. A space
+        // delete takes the space row and then, through its cascade, the
+        // member rows: when it reaches the caller's row after this
+        // transaction locked it, PostgreSQL aborts one side; both are retried,
+        // and the creation's retry answers 404 Server.
+        await lockCallerMemberRow(tx, userId, serverId);
+        // Every check made before the transaction, made again on its client:
+        // the permission, then the channel (assertChannel). Before the space
+        // row is taken: they need nothing that row gives, and every join,
+        // removal and creation of the space queues on it.
+        await refuseUnlessManager(tx, userId, serverId);
+        await assertChannel(userId, serverId, channelId, tx);
+        // A space deleted since the checks answers as one
+        const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+        if (space.length === 0) throw new NotFoundError('Server');
+        const count = await tx.webhook.count({ where: { serverId } });
+        if (count >= limits.maxWebhooksPerServer) {
+          throw new BadRequestError(`Server can have at most ${limits.maxWebhooksPerServer} webhooks`);
+        }
+        return tx.webhook.create({
+          data: {
+            serverId,
+            channelId,
+            name,
+            type,
+            tokenHash: hashWebhookTokenHex(token),
+            secretEnc: signing ? signing.secretEnc : null,
+            createdById: userId,
+          },
+          select: webhookSelect,
+        });
+      }, LOCK_WAIT_TRANSACTION_OPTIONS);
+    }, `[Webhooks] The creation of a webhook in ${serverId}`).catch(foreignKeyRefusedAsNotFound);
 
     emitWebhookChanged(serverId);
 
@@ -399,13 +517,26 @@ webhookRouter.patch('/:webhookId', rateLimitWebhookManage, async (req: Request<{
     // admin disable landing after the check above makes the write match
     // nothing (the 404 of any row that changed under the caller), so the lock
     // never ends up set on an enabled webhook.
-    const row = await updateOrMissing(prisma.webhook.update({
+    const write = (db: Pick<typeof prisma, 'webhook'>) => updateOrMissing(db.webhook.update({
       where: enabling
         ? { id: webhookId, channelId: webhook.channelId, adminDisabledAt: null }
         : { id: webhookId, channelId: webhook.channelId },
       data: enabling ? { ...data, creatorRemovedAt: null } : data,
       select: webhookSelect,
     }));
+    // An enable re-arms the webhook's URL: under the caller's member row,
+    // after the permission and the channel checks read again there
+    // (lockCallerMemberRow, assertMayArm), and run again whole when
+    // PostgreSQL aborts it to break a deadlock. A rename, a move or a disable
+    // is the one statement.
+    const row = enabling
+      ? await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+        await lockCallerMemberRow(tx, userId, serverId);
+        await refuseUnlessManager(tx, userId, serverId);
+        await assertMayArm(tx, userId, serverId, webhook.channelId, data.channelId);
+        return write(tx);
+      }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Webhooks] The enabling of ${webhookId}`)
+      : await write(prisma);
 
     emitWebhookChanged(serverId);
 
@@ -445,13 +576,22 @@ webhookRouter.post('/:webhookId/rotate', rateLimitWebhookManage, async (req: Req
     // Only if it still posts to the channel loadOwnWebhook checked VIEW on:
     // a webhook moved meanwhile into a channel this caller cannot see must
     // not hand them a working token for it
-    const row = await updateOrMissing(prisma.webhook.update({
-      where: { id: webhookId, channelId: webhook.channelId },
-      data: signing
-        ? { tokenHash: hashWebhookTokenHex(token), secretEnc: signing.secretEnc, ...trace }
-        : { tokenHash: hashWebhookTokenHex(token), ...trace },
-      select: webhookSelect,
-    }));
+    // Under the caller's member row, after the permission and the channel
+    // checks read again there (lockCallerMemberRow, assertMayArm), and run
+    // again whole when PostgreSQL aborts it to break a deadlock: the same
+    // token on every attempt, so the one that commits is the one answered
+    const row = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      await lockCallerMemberRow(tx, req.user!.userId, serverId);
+      await refuseUnlessManager(tx, req.user!.userId, serverId);
+      await assertMayArm(tx, req.user!.userId, serverId, webhook.channelId);
+      return updateOrMissing(tx.webhook.update({
+        where: { id: webhookId, channelId: webhook.channelId },
+        data: signing
+          ? { tokenHash: hashWebhookTokenHex(token), secretEnc: signing.secretEnc, ...trace }
+          : { tokenHash: hashWebhookTokenHex(token), ...trace },
+        select: webhookSelect,
+      }));
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Webhooks] The rotation of ${webhookId}`);
 
     emitWebhookChanged(serverId);
 

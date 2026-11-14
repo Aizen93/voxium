@@ -90,7 +90,7 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
     ...await readKeys({ channel: { createdById: userId, secure: true } }, 'the secure channels the account created'),
   ])];
 
-  const secure = await deleteAccountRows(userId);
+  const { secure, removedFrom } = await deleteAccountRows(userId);
 
   // Again, now that the row is gone: a socket whose handshake landed while
   // the row still existed joined user:{id} after the first pass and passed
@@ -98,6 +98,20 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   revokeUserSessions(userId, { forceLogoutReason: opts.reason });
 
   deleteAttachmentBlobs(attachmentKeys, opts.logPrefix, 'a deleted account');
+
+  // Every space the committed deletion removed a membership from that the
+  // notices above did not name (a membership that committed after the read
+  // above): its members hear the departure too. Each its own step, logged,
+  // never failing a deletion that has committed.
+  const announced = new Set(memberships.map((m) => m.serverId));
+  for (const serverId of new Set(removedFrom)) {
+    if (announced.has(serverId)) continue;
+    try {
+      await broadcastMemberLeft(userId, serverId);
+    } catch (err) {
+      console.warn(`${opts.logPrefix} The departure notice of deleted account ${userId} in space ${serverId} failed:`, err instanceof Error ? err.message : err);
+    }
+  }
 
   // The members of its secure channels hear it (created channels vanish
   // from their sidebars, member lists refresh, live voice ends). Never throws.
@@ -127,11 +141,17 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  *  1. the member rows (the explicit DELETE);
  *  2. the secure channels, FOR UPDATE, in id order;
  *  3. the key shares and the rest of the account's E2E material;
- *  4. the account row and every row its delete cascades to or sets null
- *     (messages, reactions, reads, invites it created, join requests it
- *     decided, bans it issued, webhooks it created or rotated, …): the long
- *     part, tens of seconds on a heavy account.
+ *  4. the account row (FOR UPDATE), then the member rows committed since
+ *     step 1 (a second DELETE), then the user delete and every row it
+ *     cascades to or sets null (messages, reactions, reads, invites it
+ *     created, join requests it decided, bans it issued, webhooks it created
+ *     or rotated, …): the long part.
  * It takes NO space row. Why each comes where it does:
+ *  - in 4, the account row before the second member-row delete: a
+ *    membership's key to the account waits for that lock, so every
+ *    membership within reach of the user delete's cascade has been deleted
+ *    here first, and is counted (lowerMemberCounts) and announced
+ *    (deleteUserAccount) with the others.
  *  - 2 before 3: a member's removal from one secure channel
  *    (removeSecureMember) locks the channel, then deletes the key shares
  *    addressed to that member there. With the purge first (as this
@@ -150,26 +170,36 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  *    from `servers` to `users` is the owner's (Restrict, and an account
  *    deleted here owns no space), and nothing it sets null lives in
  *    `servers`.
- * Two deadlocks stay possible, both with a transaction that starts between
- * step 1 and step 4 (a short window, longer when the account created secure
- * channels with a long history): a transfer to this account (it key-shares
- * the account row through the new owner's key, then waits for the member row
- * deleted here, while step 4 waits for that key share) and a kick of this
- * account (it holds the webhooks the account created or rotated, then waits
- * for the member row, while the cascade waits for those webhooks). PostgreSQL
- * aborts one side, usually this transaction (the side that began waiting
- * last, when the other had waited longer than the deadlock check's delay),
- * and the aborted side runs again whole: the transfer and the kick are
- * retried as this transaction is. After a transfer that committed meanwhile
- * this transaction's retry answers OwnedServersError (below). A space delete
- * was not seen to close a cycle with it: its cascade reaches this account's
- * member row before any other row this transaction holds, and waits there.
- * That rests on the order PostgreSQL fires the cascade triggers of `servers`
- * in (by constraint id: `server_members` ahead of `channels` on a database
- * built from these migrations). A migration that drops and re-creates one of
- * those keys changes the order, and the retry is then what settles it.
+ * The transactions that need the account's member row and a row this one
+ * takes after it lock that member row first and queue with this one there: a
+ * transfer to the account (the owner's route in routes/servers.ts, the admin
+ * heir path) locks the heir's member row before its owner update key-shares
+ * the account row; a removal of the account (removeMemberFromServer) locks
+ * the member row before the webhooks and the ban key that this transaction's
+ * cascade and account-row lock reach. A space delete's cascade reaches this
+ * account's member row before any other row this transaction holds and waits
+ * there; that rests on the order PostgreSQL fires the cascade triggers of
+ * `servers` in, which is the text order of the trigger names, each ending in
+ * the trigger's oid: `server_members` ahead of `channels` on a database built
+ * from these migrations in one go, not necessarily on a restored one, where
+ * the delete may hold another of these rows first (PostgreSQL then aborts
+ * one side, and both are retried). Two cycles stay possible on any database,
+ * both on a membership the account gained after step 1. A kick of the account from
+ * that space, when the kick locks the new member row after step 4 has locked
+ * the account row and before the second member-row delete reaches the row
+ * (the kick's ban then key-shares the account row). A transfer to the
+ * account in that space, when its batch has locked the space row and the new
+ * member row before step 4 locks the account row: its owner update then
+ * waits to key-share the account row while the second member-row delete
+ * waits for the member row. No single order serves a transfer against both
+ * member-row deletes: this transaction deletes the account's earlier member
+ * rows before it locks its account row, and its later ones after. PostgreSQL
+ * aborts one side and the aborted
+ * side runs again whole: every transaction named here is retried
+ * (retryOnTransactionConflict), and a retry of this one after a transfer to
+ * the account committed answers OwnedServersError (below).
  */
-export async function deleteAccountRows(userId: string): Promise<SecureMembershipRemoval> {
+export async function deleteAccountRows(userId: string): Promise<AccountRowsDeleted> {
   let committed: { removal: SecureMembershipRemoval; serverIds: string[] };
   try {
     committed = await runAccountDeletionTransaction(userId);
@@ -197,7 +227,19 @@ export async function deleteAccountRows(userId: string): Promise<SecureMembershi
   // what follows the commit (the second session revocation first of all)
   // must not wait with it. It never rejects.
   void lowerMemberCounts(committed.serverIds, userId);
-  return committed.removal;
+  return { secure: committed.removal, removedFrom: committed.serverIds };
+}
+
+/** What a committed `deleteAccountRows` leaves its caller to announce. */
+export interface AccountRowsDeleted {
+  /** The secure-channel state removed (the notices follow the commit). */
+  secure: SecureMembershipRemoval;
+  /**
+   * Every space the committed attempt removed a membership from, by either
+   * member-row delete: the caller announces the departure in each one it has
+   * not announced it in yet.
+   */
+  removedFrom: string[];
 }
 
 function ownsASpaceNow(err: unknown): boolean {
@@ -272,10 +314,18 @@ function runAccountDeletionTransaction(userId: string): Promise<{ removal: Secur
     // other deletes: the secure-channel step reads channels and their member
     // rows, the purge deletes by user id alone.
     await purgeE2EMaterial(userId, tx);
+    // The account row, then the memberships committed since the first delete
+    // (a join of this account meanwhile). With the account row held, a new
+    // membership's key to the account waits for this transaction, so the
+    // user delete below removes no membership that this transaction does not
+    // count and announce.
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+    const joinedSince = (await tx.$queryRaw<Array<{ server_id: string }>>`
+      DELETE FROM server_members WHERE user_id = ${userId} RETURNING server_id`).map((r) => r.server_id);
     // The row, and with it the long cascade. The last statement: nothing in
     // this transaction touches a space row (see the lock order above).
     await tx.user.delete({ where: { id: userId } });
-    return { removal, serverIds };
+    return { removal, serverIds: [...serverIds, ...joinedSince] };
   }, {
     // Deleting a user cascades across ~36 relations (messages, reactions,
     // reads, conversations, reports, tickets, themes…) plus six E2E deletes.

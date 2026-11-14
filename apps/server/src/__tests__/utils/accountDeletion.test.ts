@@ -61,6 +61,9 @@ const SECURE_REMOVAL = {
   left: [{ channelId: 'sec-other', serverId: 's-2' }],
 };
 
+let memberDeletes = 0;
+let lateJoins: Array<{ server_id: string }> = [];
+
 beforeEach(() => {
   vi.clearAllMocks();
   order.length = 0;
@@ -71,7 +74,17 @@ beforeEach(() => {
   io.localDisconnectSockets.mockImplementation(() => { order.push('disconnect:local'); });
   io.disconnectSockets.mockImplementation(() => { order.push('disconnect'); });
   io.emit.mockImplementation(() => { order.push('force:logout'); });
-  prismaMock.$queryRaw.mockImplementation(async () => { order.push('memberships'); return [{ server_id: 's-1' }, { server_id: 's-2' }]; });
+  // the transaction's raw statements: the first member-row delete, the
+  // account row lock, the second member-row delete (each attempt from the start)
+  memberDeletes = 0;
+  prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+    const sql = strings.join('?');
+    if (/FROM users/.test(sql)) { order.push('lock:account'); return [{ id: 'u-1' }]; }
+    if (memberDeletes++ % 2 === 0) { order.push('memberships'); return [{ server_id: 's-1' }, { server_id: 's-2' }]; }
+    order.push('memberships:since');
+    return lateJoins;
+  });
+  lateJoins = [];
   removeSecure.mockImplementation(async () => { order.push('secure'); return SECURE_REMOVAL; });
   announceSecure.mockImplementation(async () => { order.push('secure:notices'); });
   purgeE2E.mockImplementation(async () => { order.push('e2e'); });
@@ -100,7 +113,7 @@ describe('deleteUserAccount', () => {
     expect(order.filter((step) => !step.startsWith('count:'))).toEqual([
       'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect',
       'attachment-keys', 'attachment-keys', 'attachment-keys', 'attachment-keys',
-      'txn:start', 'memberships', 'secure', 'e2e', 'delete', 'txn:end',
+      'txn:start', 'memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'delete', 'txn:end',
       'force:logout', 'disconnect:local', 'disconnect', 'secure:notices', 's3',
     ]);
     // the member counts move once the transaction has committed, a space at a
@@ -141,6 +154,75 @@ describe('deleteUserAccount', () => {
     expect(order.indexOf('e2e')).toBeLessThan(order.indexOf('txn:end'));
   });
 
+  describe('a membership committed after the first member-row delete (the account joining a space meanwhile)', () => {
+    it('is deleted under the account row lock right before the user delete, then counted and announced after the commit', async () => {
+      lateJoins = [{ server_id: 's-3' }];
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+      await vi.waitFor(() => expect(order).toContain('count:s-3'));
+
+      // the account row first, then the second delete, then the user delete
+      expect(order.indexOf('e2e')).toBeLessThan(order.indexOf('lock:account'));
+      expect(order.indexOf('lock:account')).toBeLessThan(order.indexOf('memberships:since'));
+      expect(order.indexOf('memberships:since')).toBeLessThan(order.indexOf('delete'));
+      const sqls = (prismaMock.$queryRaw.mock.calls as unknown as Array<[string[], ...unknown[]]>).map(([s, ...v]) => [s.join('?').replace(/\s+/g, ' ').trim(), v]);
+      expect(sqls[1]).toEqual(['SELECT id FROM users WHERE id = ? FOR UPDATE', ['u-1']]);
+      expect(sqls[2]).toEqual(['DELETE FROM server_members WHERE user_id = ? RETURNING server_id', ['u-1']]);
+      // its members hear the departure once the delete has committed, and its count moves
+      expect(order.indexOf('left:s-3')).toBeGreaterThan(order.indexOf('txn:end'));
+      expect(order.filter((s) => s === 'left:s-3')).toHaveLength(1);
+      expect(prismaMock.server.updateMany).toHaveBeenCalledWith({ where: { id: 's-3', memberCount: { gt: 0 } }, data: { memberCount: { decrement: 1 } } });
+      // the spaces of the first delete are counted once and were announced before the transaction
+      expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(3);
+      expect(order.indexOf('left:s-1')).toBeLessThan(order.indexOf('txn:start'));
+    });
+
+    it('a membership the earlier read missed and the first delete removed is announced after the commit, once', async () => {
+      // read before the transaction: s-1 and s-2; a join to s-4 committed
+      // before the first member-row delete, which removes it with the others
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+        const sql = strings.join('?');
+        if (/FROM users/.test(sql)) { order.push('lock:account'); return [{ id: 'u-1' }]; }
+        if (memberDeletes++ % 2 === 0) { order.push('memberships'); return [{ server_id: 's-1' }, { server_id: 's-2' }, { server_id: 's-4' }]; }
+        order.push('memberships:since');
+        return [];
+      });
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+      await vi.waitFor(() => expect(order).toContain('count:s-4'));
+
+      expect(order.filter((s) => s === 'left:s-4')).toHaveLength(1);
+      expect(order.indexOf('left:s-4')).toBeGreaterThan(order.indexOf('txn:end'));
+      // the spaces announced before the transaction are not announced again
+      expect(order.filter((s) => s === 'left:s-1')).toHaveLength(1);
+      expect(order.filter((s) => s === 'left:s-2')).toHaveLength(1);
+      expect(memberLeft).toHaveBeenCalledTimes(3);
+    });
+
+    it('nothing joined meanwhile: no second announcement, no extra count', async () => {
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+      await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
+      expect(memberLeft).toHaveBeenCalledTimes(2);
+    });
+
+    it('a departure notice that fails after the commit is logged; the deletion still completes', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      lateJoins = [{ server_id: 's-3' }];
+      memberLeft.mockImplementation(async (_u: string, s: string) => {
+        order.push(`left:${s}`);
+        if (s === 's-3') throw new Error('socket layer down');
+      });
+      try {
+        await expect(deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' })).resolves.toBeUndefined();
+        expect(warn).toHaveBeenCalledWith('[T] The departure notice of deleted account u-1 in space s-3 failed:', 'socket layer down');
+        expect(deleteFromS3).toHaveBeenCalledWith('avatars/u-1.webp');
+        expect(announceSecure).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
   describe('the member counts of the spaces the account was in', () => {
     const countUpdate = (serverId: string) => ({
       where: { id: serverId, memberCount: { gt: 0 } },
@@ -153,8 +235,14 @@ describe('deleteUserAccount', () => {
       // the transaction it was held through the user delete's cascade (ahead
       // of it) or closed a cycle with those transactions (behind it).
       const txOrder: string[] = [];
+      let deletes = 0;
       const tx = {
-        $queryRaw: vi.fn(async () => { txOrder.push('memberships'); return [{ server_id: 's-1' }, { server_id: 's-2' }]; }),
+        $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+          if (/FROM users/.test(strings.join('?'))) { txOrder.push('lock:account'); return [{ id: 'u-1' }]; }
+          if (deletes++ === 0) { txOrder.push('memberships'); return [{ server_id: 's-1' }, { server_id: 's-2' }]; }
+          txOrder.push('memberships:since');
+          return [];
+        }),
         user: { delete: vi.fn(async () => { txOrder.push('delete'); return {}; }) },
         server: { updateMany: vi.fn(), update: vi.fn() },
         $executeRaw: vi.fn(),
@@ -173,14 +261,16 @@ describe('deleteUserAccount', () => {
       await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
       await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
 
-      expect(txOrder).toEqual(['memberships', 'secure', 'e2e', 'delete']);
+      expect(txOrder).toEqual(['memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'delete']);
       expect(tx.user.delete).toHaveBeenCalledWith({ where: { id: 'u-1' } });
       expect(tx.server.updateMany).not.toHaveBeenCalled();
       expect(tx.server.update).not.toHaveBeenCalled();
       expect(tx.$executeRaw).not.toHaveBeenCalled();
-      // the one statement of the transaction's client that is raw SQL names no space
-      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
-      expect(((tx.$queryRaw.mock.calls[0] as unknown[])[0] as string[]).join('?')).not.toMatch(/\bservers\b/);
+      // the statements of the transaction's client that are raw SQL name no space
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(3);
+      for (const [strings] of tx.$queryRaw.mock.calls as unknown as Array<[string[]]>) {
+        expect(strings.join('?')).not.toMatch(/\bservers\b/);
+      }
       expect(prismaMock.server.updateMany).toHaveBeenNthCalledWith(1, countUpdate('s-1'));
       expect(prismaMock.server.updateMany).toHaveBeenNthCalledWith(2, countUpdate('s-2'));
       expect(committedAtCountUpdate).toEqual([true, true]);
@@ -451,7 +541,9 @@ describe('deleteUserAccount', () => {
     // read before the transaction: s-1 and s-2. Between the attempts a join
     // to s-3 committed and a removal from s-2 did
     prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 's-1' }, { serverId: 's-2' }]);
-    prismaMock.$queryRaw.mockResolvedValue([{ server_id: 's-1' }, { server_id: 's-3' }]);
+    // the committed attempt's first member-row delete; its account lock and
+    // second delete find nothing more
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ server_id: 's-1' }, { server_id: 's-3' }]).mockResolvedValue([]);
     const real = prismaMock.$transaction.getMockImplementation()!;
     prismaMock.$transaction
       .mockImplementationOnce(async () => { throw Object.assign(new Error('deadlock'), { code: 'P2034' }); })
@@ -463,6 +555,12 @@ describe('deleteUserAccount', () => {
       const lowered = (prismaMock.server.updateMany.mock.calls as Array<[{ where: { id: string } }]>).map(([args]) => args.where.id);
       // each of the committed attempt's spaces once; s-2 (left between the attempts) never
       expect(lowered).toEqual(['s-1', 's-3']);
+      // s-3, joined between the attempts, is announced after the commit, once;
+      // s-1 and s-2 were announced before the transaction and are not again
+      expect(order.filter((s) => s === 'left:s-3')).toHaveLength(1);
+      expect(order.lastIndexOf('left:s-3')).toBeGreaterThan(order.lastIndexOf('txn:end'));
+      expect(order.filter((s) => s === 'left:s-1')).toHaveLength(1);
+      expect(order.filter((s) => s === 'left:s-2')).toHaveLength(1);
     } finally {
       warn.mockRestore();
     }

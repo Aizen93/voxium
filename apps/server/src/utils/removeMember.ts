@@ -13,6 +13,7 @@ import { isTransactionConflict, retryOnTransactionConflict } from './transaction
 import { broadcastMemberLeft } from './memberBroadcast';
 import { emitWebhookChanged } from './webhookLifecycle';
 import type { PermissionReadClient } from './permissionCalculator';
+import type { Prisma } from '../generated/prisma/client';
 
 /** False only when the space row is certainly gone (a failed read is not "gone"). */
 async function spaceExists(serverId: string): Promise<boolean> {
@@ -43,16 +44,40 @@ export interface RemoveMemberOptions {
    * reading through the client it is given. Run twice on EVERY attempt:
    * before the attempt's transaction opens, on the shared client, a cheap
    * early refusal that opens no transaction and waits on no lock; then inside
-   * the transaction, on ITS client, right after the webhook statement, so the
-   * check that holds is the one made right before the membership delete, not
-   * one made before that statement's wait (up to a minute behind a webhook
-   * purge). Every read must go through the client given: one through the
-   * shared client from inside the transaction would hold its pool connection
-   * while waiting for a second, and enough concurrent kicks doing that stall
-   * the node. Throws the route's own refusal; inside, that rolls the
-   * transaction back. The owner rule is held by the delete itself.
+   * the transaction, on ITS client, after the statements that wait for other
+   * transactions (the membership row lock, then the webhook statement) and
+   * before the membership delete, so the check that holds is the one made
+   * after every wait. Every read must go through the client given: one
+   * through the shared client from inside the transaction would hold its
+   * pool connection while waiting for a second, and enough concurrent kicks
+   * doing that stall the node. Throws the route's own refusal; inside, that
+   * rolls the transaction back. The owner rule is held by the delete itself.
    */
   authorize?: (db: PermissionReadClient) => Promise<void>;
+}
+
+/**
+ * The webhooks of `serverId` whose LIVE URL `userId` holds: created by them
+ * and never rotated since, or rotated last by them (a rotate hands its caller
+ * the only working URL).
+ */
+function webhooksHeldBy(userId: string, serverId: string): Prisma.WebhookWhereInput {
+  return { serverId, OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }] };
+}
+
+/**
+ * Before a kick's transaction: wait, holding nothing, for the webhook rows its
+ * webhook statement (step 2b) updates, so a transaction holding one of them
+ * (a purge-delete) is waited for before the membership row is taken. The rows
+ * are read without a lock, then each is waited for in its own statement, in
+ * the mode the update takes it (FOR NO KEY UPDATE), on the shared client and
+ * outside any transaction: no row is held while another is waited for.
+ */
+async function waitForHeldWebhookRows(userId: string, serverId: string): Promise<void> {
+  const rows = await prisma.webhook.findMany({ where: webhooksHeldBy(userId, serverId), select: { id: true } });
+  for (const { id } of rows) {
+    await prisma.$queryRaw`SELECT id FROM webhooks WHERE id = ${id} FOR NO KEY UPDATE`;
+  }
 }
 
 /**
@@ -73,40 +98,52 @@ export interface RemoveMemberOptions {
  *    Cross-node via the Redis reverse lookup + the cluster eviction fan-out
  *    (the channel's mediasoup Router lives on exactly one node).
  * 2. One transaction, which commits whole or not at all:
- *    a. with a ban (a kick), FIRST, the webhooks whose LIVE URL the member
- *       holds (created by them and never rotated by another, or last rotated
- *       by them: a rotate hands its caller the only working URL), enabled or
+ *    a. FIRST, the membership row, locked FOR UPDATE (the strength its
+ *       delete in d takes). Every transaction that needs this row and a row
+ *       this one takes later queues with it on this row: an account deletion
+ *       of the member deletes its member rows before its cascade reaches the
+ *       member's webhooks (b) and account row (f, the ban's key); a transfer
+ *       to the member locks this row before it key-shares the member's
+ *       account row. A secure-channel writer's key share on this row, and a
+ *       role assignment to the member (whose row in member_roles key-shares
+ *       it), are waited for here, so `authorize` below sees them committed;
+ *    b. with a ban (a kick), the webhooks whose LIVE URL the member holds
+ *       (created by them and never rotated by another, or last rotated by
+ *       them: a rotate hands its caller the only working URL), enabled or
  *       not, disabled and marked `creatorRemovedAt`. The URL is a bearer
  *       credential that may have left with the kicked member, so it stops
  *       posting the moment they are out, and a row already disabled carries
  *       the mark too, so whoever enables it later is warned; any enable or a
- *       rotate clears the mark. A voluntary leave keeps them. First because a
- *       60 s purge-delete may hold one of these rows, and that wait must come
- *       before this transaction takes any row a create or a join needs.
- *       Right after it (or first, without a ban), `authorize` again, on this
- *       transaction's client, taking no lock: a check made before that wait
- *       is not the one in force when the membership row goes;
- *    b. the pending/declined join request gone;
- *    c. the membership row gone. Every writer of a secure-channel row locks
- *       that row first (FOR KEY SHARE), so this delete waits for one in progress.
- *       Before any statement that locks the space row: a secure-channel
- *       creation locks the member rows and then the space row, and taking
- *       them in the other order here could deadlock with it;
- *    d. THEN the member's secure-channel state (removeSecureMembershipsInTx):
+ *       rotate clears the mark. A voluntary leave keeps them. Each attempt
+ *       first waits for these rows, holding nothing, before the transaction
+ *       opens (waitForHeldWebhookRows), so a purge-delete holding one is
+ *       waited for before the membership row is taken.
+ *       Right after it (or right after a, without a ban), `authorize` again,
+ *       on this transaction's client: the check in force when the membership
+ *       row goes is the one made after every wait;
+ *    c. the pending/declined join request gone;
+ *    d. the membership row gone. Before any statement that locks the space
+ *       row: a secure-channel creation locks the member rows and then the
+ *       space row, in that order;
+ *    e. THEN the member's secure-channel state (removeSecureMembershipsInTx):
  *       every secure channel they created or belong to locked FOR UPDATE in
  *       id order before anything is deleted, then the ones they created
  *       deleted (a creator never stays the manager of a channel in a space
  *       they left; if the delete fails, the departure fails), their rows in
  *       the others and the key shares addressed to them there removed. After
- *       (c), so it also removes a row an invite wrote while (c) waited for it;
- *    e. with a ban, the ServerBan upsert, and memberCount − 1 (never below
+ *       (d), so it also removes a row an invite wrote before (a) had the row;
+ *    f. with a ban, the ServerBan upsert, and memberCount − 1 (never below
  *       zero), LAST: both lock the space row (the ban's foreign key takes a
  *       key-share lock on it), which every join, secure-channel creation and
  *       webhook creation also takes, so it is held for the shortest time,
  *       never across the cascade of a departing creator's channels.
- *    The whole transaction is run again (twice at most) when PostgreSQL
- *    aborts it to break a deadlock (retryOnTransactionConflict): a net for a
- *    lock order nobody foresaw, never for any other error.
+ *    The whole transaction is run again when PostgreSQL aborts it to break a
+ *    deadlock (retryOnTransactionConflict), never for any other error. Two
+ *    writers take this transaction's first and last rows in the other order:
+ *    a space delete (the space row, then the member rows) and a transfer to
+ *    the member (the space row, then this member row; it waits for the member
+ *    row first, holding nothing, so the cycle needs this transaction to lock
+ *    the row between that wait and the transfer's batch).
  * 3. After the commit, best effort: their ChannelRead rows in the space (they
  *    grant nothing, and outside the transaction they are not one more lock a
  *    channel delete's cascade takes in another order), the attachment files
@@ -115,7 +152,7 @@ export interface RemoveMemberOptions {
  *    rooms emptied).
  * 4. The room invariant's other half: sockets leave `server:{id}` and every
  *    `channel:{id}` room, remaining members get member:left.
- * 5. When step 2a disabled any webhook: the `webhook:changed` refetch hint to
+ * 5. When step 2b disabled any webhook: the `webhook:changed` refetch hint to
  *    `server:{id}` (the server id alone), after step 4 so the removed
  *    member's sockets are no longer in the room.
  *
@@ -148,6 +185,9 @@ export async function removeMemberFromServer(
   let outcome: { disabledWebhooks: number; secure: SecureMembershipRemoval };
   try {
     outcome = await retryOnTransactionConflict(async () => {
+      // With a ban, the webhook rows step 2b updates, waited for holding
+      // nothing before the transaction takes the membership row
+      if (opts.ban) await waitForHeldWebhookRows(userId, serverId);
       // The caller's precondition for this attempt, BEFORE its transaction
       // opens: the early refusal (see `authorize`)
       if (opts.authorize) await opts.authorize(prisma);
@@ -155,22 +195,21 @@ export async function removeMemberFromServer(
         // One statement after the other: they share the transaction's one
         // connection, and the order is the one documented above. Nothing in
         // here reads through the shared client.
+        // The membership row first (2a). No row: the delete below answers.
+        await tx.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${userId} AND server_id = ${serverId} FOR UPDATE`;
         let disabled = 0;
         if (opts.ban) {
           ({ count: disabled } = await tx.webhook.updateMany({
-            where: {
-              serverId,
-              // The webhooks whose LIVE URL the member holds: created by them
-              // and never rotated since, or rotated last by them. Disabled or
-              // not: a disabled row gets the mark too, so a later enable is warned.
-              OR: [{ lastRotatedById: userId }, { lastRotatedAt: null, createdById: userId }],
-            },
+            // Disabled or not: a disabled row gets the mark too, so a later
+            // enable is warned.
+            where: webhooksHeldBy(userId, serverId),
             data: { enabled: false, creatorRemovedAt: new Date() },
           }));
         }
         // The caller's precondition again, on this transaction's client, after
-        // the one statement that can wait long: a refusal rolls back the
-        // webhook statement with the rest
+        // every statement that waits for another transaction (the membership
+        // row, the webhooks): a refusal rolls back the webhook statement with
+        // the rest
         if (opts.authorize) await opts.authorize(tx);
         await tx.serverJoinRequest.deleteMany({ where: { serverId, userId } });
         // The owner is never removed, whatever the caller checked before the
@@ -220,8 +259,11 @@ export async function removeMemberFromServer(
     const missing = err instanceof MembershipGone;
     // A space deleted meanwhile (its delete takes the space row, then the
     // member rows, and wins a deadlock or simply commits first): the removal
-    // has nothing left to remove, and answers that the space is gone.
-    if ((missing || isTransactionConflict(err)) && !(await spaceExists(serverId))) {
+    // has nothing left to remove, and answers that the space is gone. So
+    // does a refusal from `authorize` on any attempt: a check run against a
+    // space that is gone refuses because nobody is a member of it.
+    const refused = err instanceof ForbiddenError;
+    if ((missing || refused || isTransactionConflict(err)) && !(await spaceExists(serverId))) {
       throw new NotFoundError('Server');
     }
     // The member left (or was removed) between the caller's membership check

@@ -148,6 +148,68 @@ describe('permissionCalculator', () => {
 
   // ── computeUserChannelPermissions ──────────────────────────────────────
 
+  describe('computeUserChannelPermissions on a transaction\'s client', () => {
+    /**
+     * A transaction's client whose reads each take a turn: a read starts only
+     * once the one before it has finished, as on a transaction's one pg
+     * connection. `overlapped` turns true if a read starts while another runs.
+     */
+    function sequentialClient() {
+      let running = 0;
+      const state = { overlapped: false, reads: [] as string[] };
+      const read = <T>(name: string, value: T) => vi.fn(async () => {
+        if (running > 0) state.overlapped = true;
+        running++;
+        state.reads.push(name);
+        await new Promise((r) => setTimeout(r, 1));
+        running--;
+        return value;
+      });
+      const client = {
+        server: { findUnique: read('server', { ownerId: 'someone-else' }) },
+        serverMember: { findUnique: read('serverMember', { userId: 'user1' }) },
+        role: { findFirst: read('role', { id: 'everyone', permissions: permissionsToString(Permissions.VIEW_CHANNEL) }) },
+        memberRole: { findMany: read('memberRole', []) },
+        channel: { findUnique: read('channel', { secure: false, type: 'text', serverId: 'srv1', server: { ownerId: 'someone-else' } }) },
+        channelMember: { findUnique: read('channelMember', null) },
+        channelPermissionOverride: { findMany: read('overrides', []) },
+      };
+      return { client, state };
+    }
+
+    it('reads through the client it is given, one read after the other, and never through the shared client', async () => {
+      const { client, state } = sequentialClient();
+
+      const result = await computeUserChannelPermissions('user1', 'ch1', 'srv1', client as never);
+
+      expect(result & Permissions.VIEW_CHANNEL).toBe(Permissions.VIEW_CHANNEL);
+      expect(state.reads).toEqual(['channel', 'serverMember', 'role', 'memberRole', 'overrides']);
+      expect(state.overlapped).toBe(false);
+      expect(prismaMock.channel.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.role.findFirst).not.toHaveBeenCalled();
+      expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+    });
+
+    it('a secure channel\'s two membership reads too, one after the other', async () => {
+      const { client, state } = sequentialClient();
+      client.channel.findUnique.mockResolvedValueOnce({ secure: true, type: 'text', serverId: 'srv1', server: { ownerId: 'someone-else' } });
+
+      await computeUserChannelPermissions('user1', 'ch1', 'srv1', client as never);
+
+      expect(state.reads).toEqual(['channelMember', 'serverMember']);
+      expect(state.overlapped).toBe(false);
+      expect(prismaMock.channelMember.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('hasChannelPermission passes the client through', async () => {
+      const { client } = sequentialClient();
+
+      expect(await hasChannelPermission('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, client as never)).toBe(true);
+      expect(client.channelPermissionOverride.findMany).toHaveBeenCalledTimes(1);
+      expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('computeUserChannelPermissions', () => {
     it('returns ALL_PERMISSIONS for the owner (bypasses channel overrides)', async () => {
       // computeServerPermissions returns ALL_PERMISSIONS for owner

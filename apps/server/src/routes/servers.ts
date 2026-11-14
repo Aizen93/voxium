@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, memberGoneAsNotFound } from '../utils/errors';
 import {
   validateServerName, validateNickname, validateBanReason, validateServerDescription, validateDiscoveryTags, dedupeDiscoveryTags,
   LIMITS, MEMBER_LIST, MEMBER_DIRECTORY_ROLE_FILTERS, WS_EVENTS, DEFAULT_EVERYONE_PERMISSIONS, SERVER_JOIN_MODES, permissionsToString,
@@ -24,6 +24,7 @@ import { getEffectiveLimits } from '../utils/serverLimits';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { removeMemberFromServer, OWNER_CANNOT_LEAVE_MESSAGE, KICK_OUTRANKED_MESSAGE } from '../utils/removeMember';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import { waitForHeirRows } from '../utils/heirRows';
 import { recomputeListed } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
 import { getTierThresholds, tierOf, nextTierFor } from '../utils/discoveryTiers';
@@ -756,10 +757,16 @@ serverRouter.patch(
       if (!targetMembership) throw new NotFoundError('Member');
       if (targetMembership.role === 'owner') throw new ForbiddenError('Cannot change the owner\'s role');
 
-      await prisma.serverMember.update({
-        where: { userId_serverId: { userId: memberId, serverId } },
-        data: { role: newRole },
-      });
+      // One statement: it waits for a removal holding the member row, and a
+      // member gone by then finds no row (P2025): 404 Member
+      try {
+        await prisma.serverMember.update({
+          where: { userId_serverId: { userId: memberId, serverId } },
+          data: { role: newRole },
+        });
+      } catch (err) {
+        memberGoneAsNotFound(err);
+      }
 
       getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_ROLE_UPDATED, {
         serverId,
@@ -826,10 +833,10 @@ serverRouter.post(
       // membership delete and the member count — lives in
       // removeMemberFromServer, nowhere else. It runs the permission and the
       // hierarchy check again on every attempt (`authorize`): before the
-      // attempt's transaction opens, and inside it on its own client right
-      // after the webhook statement, the one that can wait long, so a role
-      // change, a removal of the actor or a promotion of the target that
-      // commits meanwhile is seen before the membership row goes.
+      // attempt's transaction opens, and inside it on its own client after
+      // the membership row lock and the webhook statement, so a role change,
+      // a removal of the actor or a promotion of the target that commits
+      // meanwhile is seen before the membership row goes.
       await removeMemberFromServer(memberId, serverId, { ban: { by: actorId, reason }, authorize: assertMayKick });
 
       // Emit member:kicked directly to the kicked user's per-user room
@@ -1162,10 +1169,16 @@ serverRouter.patch(
         const err = validateNickname(sanitized);
         if (err) throw new BadRequestError(err);
 
-        await prisma.serverMember.update({
-          where: { userId_serverId: { userId: req.user!.userId, serverId } },
-          data: { nickname: sanitized },
-        });
+        // A caller removed since the membership read finds no row (P2025):
+        // the route's answer for a caller who is not a member
+        try {
+          await prisma.serverMember.update({
+            where: { userId_serverId: { userId: req.user!.userId, serverId } },
+            data: { nickname: sanitized },
+          });
+        } catch (err) {
+          memberGoneAsNotFound(err, 'Server');
+        }
 
         getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
           serverId,
@@ -1175,10 +1188,14 @@ serverRouter.patch(
 
         res.json({ success: true, data: { nickname: sanitized } });
       } else {
-        await prisma.serverMember.update({
-          where: { userId_serverId: { userId: req.user!.userId, serverId } },
-          data: { nickname: null },
-        });
+        try {
+          await prisma.serverMember.update({
+            where: { userId_serverId: { userId: req.user!.userId, serverId } },
+            data: { nickname: null },
+          });
+        } catch (err) {
+          memberGoneAsNotFound(err, 'Server');
+        }
 
         getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
           serverId,
@@ -1226,10 +1243,16 @@ serverRouter.patch(
         if (err) throw new BadRequestError(err);
       }
 
-      await prisma.serverMember.update({
-        where: { userId_serverId: { userId: memberId, serverId } },
-        data: { nickname: sanitized },
-      });
+      // One statement: it waits for a removal holding the member row, and a
+      // member gone by then finds no row (P2025): 404 Member
+      try {
+        await prisma.serverMember.update({
+          where: { userId_serverId: { userId: memberId, serverId } },
+          data: { nickname: sanitized },
+        });
+      } catch (err) {
+        memberGoneAsNotFound(err);
+      }
 
       getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
         serverId,
@@ -1275,30 +1298,52 @@ serverRouter.post(
       const targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { bannedAt: true } });
       if (targetUser?.bannedAt) throw new BadRequestError('Cannot transfer ownership to a banned user');
 
-      // The space row, then the two member rows: the reverse of a removal or
-      // an account deletion of the heir, so PostgreSQL may abort the batch to
-      // break a deadlock; it then runs again. The checks above are carried by
-      // the statements themselves, so they hold on every attempt: the space
-      // row only while the actor still owns it, the actor's row only while it
-      // is the owner's, the heir's row only while they are a member (P2025
-      // otherwise, or P2003 when the heir's account is gone). The long
-      // budget: an account deletion of the heir holds their member row
-      // through its cascade, and a space delete the space row through its
-      // own; a batch waiting for either expires under Prisma's 5 s default
-      // like an interactive transaction.
+      // Each attempt first waits, holding nothing, for the heir's member row
+      // and account row (waitForHeirRows), so a transaction holding either
+      // (an account deletion or a removal of the heir) is waited for before
+      // the space row is taken. Then the batch: the space row, then the
+      // heir's member row, both locked FOR NO KEY UPDATE (the strength the
+      // updates below take, so a secure-channel writer's key share on the
+      // member row and a ban's key share on the space row are not waited
+      // for), then the owner update, which key-shares the heir's account row
+      // through its key, then the two member rows. The heir's member row is
+      // locked before the heir's account row is key-shared: an account
+      // deletion of the heir deletes its member rows before it locks its
+      // account row, so the two queue on the member row. Two cycles remain,
+      // and PostgreSQL aborts one side of either; an aborted batch runs again,
+      // its wait included. One is a removal of the heir that locks the heir's
+      // member row after the wait and before the batch does, then waits for
+      // the space row the batch holds: a space delete takes the space row
+      // before the member rows and a removal the member row before the space
+      // row, so no order of this batch serves both. The other is an account
+      // deletion of the heir, for a membership the heir gained after the
+      // deletion's first member-row delete (deleteAccountRows). The
+      // checks above are carried by the statements themselves, so they hold
+      // on every attempt: the space row only while the actor still owns it,
+      // the actor's row only while it is the owner's, the heir's row only
+      // while they are a member (P2025 otherwise, or P2003 when the heir's
+      // account is gone). The long budget (LOCK_WAIT_TRANSACTION_OPTIONS): a
+      // space delete holds the space row through its cascade; the batch form
+      // is bound by Prisma's default budget as an interactive transaction is,
+      // so it carries the long one too.
       const actorId = req.user!.userId;
       try {
-        await retryOnTransactionConflict(() => prisma.$transaction([
-          prisma.server.update({ where: { id: serverId, ownerId: actorId }, data: { ownerId: targetUserId } }),
-          prisma.serverMember.update({
-            where: { userId_serverId: { userId: targetUserId, serverId } },
-            data: { role: 'owner' },
-          }),
-          prisma.serverMember.update({
-            where: { userId_serverId: { userId: actorId, serverId }, role: 'owner' },
-            data: { role: 'admin' },
-          }),
-        ], LOCK_WAIT_TRANSACTION_OPTIONS), `[Servers] The transfer of space ${serverId}`);
+        await retryOnTransactionConflict(async () => {
+          await waitForHeirRows(targetUserId, serverId);
+          return prisma.$transaction([
+            prisma.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR NO KEY UPDATE`,
+            prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${targetUserId} AND server_id = ${serverId} FOR NO KEY UPDATE`,
+            prisma.server.update({ where: { id: serverId, ownerId: actorId }, data: { ownerId: targetUserId } }),
+            prisma.serverMember.update({
+              where: { userId_serverId: { userId: targetUserId, serverId } },
+              data: { role: 'owner' },
+            }),
+            prisma.serverMember.update({
+              where: { userId_serverId: { userId: actorId, serverId }, role: 'owner' },
+              data: { role: 'admin' },
+            }),
+          ], LOCK_WAIT_TRANSACTION_OPTIONS);
+        }, `[Servers] The transfer of space ${serverId}`);
       } catch (err) {
         const code = (err as { code?: unknown })?.code;
         if (code !== 'P2025' && code !== 'P2003') throw err;

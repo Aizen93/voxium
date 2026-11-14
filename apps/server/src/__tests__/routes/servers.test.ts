@@ -265,6 +265,7 @@ vi.mock('../../utils/serverLimits', () => ({
 
 import { serverRouter } from '../../routes/servers';
 import { errorHandler } from '../../middleware/errorHandler';
+import { lazySentinel, runBatch } from '../helpers/lazyStatement';
 
 function createApp() {
   const app = express();
@@ -2304,6 +2305,60 @@ describe('Server Routes', () => {
 
   // ── PATCH /api/v1/servers/:serverId/members/:memberId/role ──────────────
 
+  describe('a write on a member removed before it runs answers the route\'s 404, never a 500', () => {
+    const noRow = () => Object.assign(new Error('Record to update not found.'), { code: 'P2025' });
+    afterEach(() => { prismaMock.serverMember.findUnique.mockReset(); });
+
+    it('the owner\'s role change of a member: 404 Member, nothing announced', async () => {
+      prismaMock.serverMember.findUnique
+        .mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'owner' })
+        .mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.update.mockRejectedValueOnce(noRow());
+
+      const res = await request(app).patch('/api/v1/servers/srv-1/members/user-2/role').set('Authorization', `Bearer ${makeToken()}`).send({ role: 'admin' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Member not found');
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('another member\'s nickname: 404 Member, nothing announced', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.update.mockRejectedValueOnce(noRow());
+
+      const res = await request(app).patch('/api/v1/servers/srv-1/members/user-2/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: 'pp' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Member not found');
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    for (const nickname of ['pp', null]) {
+      it(`the caller's own nickname (${nickname === null ? 'cleared' : 'set'}): the route's answer for a caller who is not a member, 404 Server`, async () => {
+        prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+        prismaMock.serverMember.update.mockRejectedValueOnce(noRow());
+
+        const res = await request(app).patch('/api/v1/servers/srv-1/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname });
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Server not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+    }
+
+    it('any other failure of the write is still a 500', async () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.update.mockRejectedValueOnce(new Error('db gone'));
+      try {
+        const res = await request(app).patch('/api/v1/servers/srv-1/members/user-2/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: 'pp' });
+        expect(res.status).toBe(500);
+      } finally {
+        err.mockRestore();
+      }
+    });
+  });
+
   describe('PATCH /api/v1/servers/:serverId/members/:memberId/role', () => {
     it('allows owner to change member role', async () => {
       const token = makeToken();
@@ -2451,6 +2506,59 @@ describe('Server Routes', () => {
           where: { userId_serverId: { userId: 'user-1', serverId: 'srv-1' }, role: 'owner' },
           data: { role: 'admin' },
         });
+      });
+
+      /**
+       * Every statement in the order it RUNS: a raw statement or a model write
+       * when it is awaited or run in a batch (a statement built and never
+       * awaited never runs, as a PrismaPromise), and `txn` where the batch is
+       * handed to the client. Each keeps its sentinel shape for the batch
+       * assertion.
+       */
+      function recordRuns(): string[] {
+        const ran: string[] = [];
+        prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) =>
+          lazySentinel(ran, `${strings.join('?')} [${values.join(',')}]`, { op: 'lock' }));
+        prismaMock.server.update.mockImplementation(() => lazySentinel(ran, 'server.update', { op: 'owner' }));
+        prismaMock.serverMember.update.mockImplementation(({ where }: any) =>
+          lazySentinel(ran, `member.update ${where.userId_serverId.userId}`, { op: 'member' }));
+        prismaMock.$transaction.mockImplementation(async (batch: unknown[]) => { ran.push('txn'); return runBatch(batch); });
+        return ran;
+      }
+      const ATTEMPT = [
+        'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE [user-2,srv-1]',
+        'SELECT id FROM users WHERE id = ? FOR KEY SHARE [user-2]',
+      ];
+      const BATCH = [
+        'SELECT id FROM servers WHERE id = ? FOR NO KEY UPDATE [srv-1]',
+        'SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR NO KEY UPDATE [user-2,srv-1]',
+        'server.update', 'member.update user-2', 'member.update user-1',
+      ];
+
+      it('waits for the heir\'s member row and account row, each run before the batch, then the batch locks the space row and the heir\'s member row, both FOR NO KEY UPDATE, before the owner update key-shares the heir\'s account row', async () => {
+        const ran = recordRuns();
+
+        expect((await transfer()).status).toBe(200);
+
+        expect(ran).toEqual([...ATTEMPT, 'txn', ...BATCH]);
+        const [batch] = prismaMock.$transaction.mock.calls[0] as [unknown[]];
+        expect(batch).toEqual([{ op: 'lock' }, { op: 'lock' }, { op: 'owner' }, { op: 'member' }, { op: 'member' }]);
+      });
+
+      it('waits for the heir\'s rows again before each attempt, never inside the batch', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ran = recordRuns();
+        const real = prismaMock.$transaction.getMockImplementation()!;
+        prismaMock.$transaction
+          .mockImplementationOnce(async () => { ran.push('txn aborted'); throw deadlock(); })
+          .mockImplementation(real);
+        try {
+          expect((await transfer()).status).toBe(200);
+        } finally {
+          warn.mockRestore();
+        }
+
+        expect(ran).toEqual([...ATTEMPT, 'txn aborted', ...ATTEMPT, 'txn', ...BATCH]);
       });
 
       it('runs with the long budget: an account deletion of any member holds the space row through its cascade', async () => {

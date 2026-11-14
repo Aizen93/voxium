@@ -20,6 +20,7 @@ import { broadcastMemberJoined, broadcastMemberLeft } from '../utils/memberBroad
 import { emitToModerators } from '../utils/moderatorAudience';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import { waitForHeirRows } from '../utils/heirRows';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
@@ -68,8 +69,8 @@ const BAN_TRANSACTION_OPTIONS = { timeout: 60_000, maxWait: 10_000 };
  *    KEY UPDATE, not FOR UPDATE. It conflicts with the deletion and with any
  *    other UPDATE of the row, but not with FOR KEY SHARE, which every insert
  *    of a row referencing the account takes, so a join, a message or a kick
- *    of that account (its webhook statement, then its ban row) never waits
- *    on a ban.
+ *    of that account (its membership row, its webhook statement, then its
+ *    ban row) never waits on a ban.
  *  - 'keep', an account this transaction only needs to still exist (a
  *    report's reporter, a reported account not being banned): FOR KEY SHARE.
  *    A DELETE still waits for it; an ordinary column update (the presence
@@ -739,8 +740,14 @@ function demotedRow(result: unknown): boolean {
  * Hand a space the account being deleted owns to its heir: the heir becomes a
  * member first when they are not one, or their row turns owner. Its batch
  * takes the space row and member rows in the order a space delete and the
- * owner's transfer do, so PostgreSQL may abort it to break a deadlock with a
- * removal or an account deletion; the WHOLE attempt then runs again
+ * owner's transfer do (for an heir who is a member: the space row, then the
+ * heir's member row, then the owner update that key-shares the heir's
+ * account row), after a wait, holding nothing, for the heir's rows it takes
+ * after the space row (waitForHeirRows). The two cycles the owner's transfer
+ * keeps are this batch's too (routes/servers.ts: a removal of the heir that
+ * locks the heir's member row between the wait and the batch, an account
+ * deletion of the heir for a membership gained during it). PostgreSQL aborts
+ * one side; the WHOLE attempt then runs again
  * (retryOnTransactionConflict), the heir's membership read included, so each
  * attempt picks its branch from what is true now. The statements carry the
  * checks, so a retry cannot outlive them: the space row is updated only while
@@ -750,8 +757,8 @@ function demotedRow(result: unknown): boolean {
  * the heir joining meanwhile). Both batches carry the long budget
  * (LOCK_WAIT_TRANSACTION_OPTIONS): the heir's member and account rows are
  * held by an account deletion of the heir through its cascade, and the space
- * row by a space delete through its own; a batch, like an interactive
- * transaction, expires after Prisma's 5 s default while it waits.
+ * row by a space delete through its own; the batch form is bound by Prisma's
+ * default budget as an interactive transaction is.
  *
  * Both batches also demote the departing account's own member row from
  * owner to admin: the account deletion that follows can still fail (the
@@ -768,14 +775,27 @@ export async function transferOwnedSpaceToHeir(
 ): Promise<{ joined: boolean; heirRequestPending: boolean; fromDemoted: boolean }> {
   try {
     return await retryOnTransactionConflict(async () => {
+      // The heir's rows the batch takes after the space row, waited for
+      // holding nothing (waitForHeirRows), then the heir's membership read:
+      // the branch is picked once a transaction holding the heir's member row
+      // (a removal or an account deletion of the heir) has ended
+      await waitForHeirRows(heirId, serverId);
       const existingMembership = await prisma.serverMember.findUnique({
         where: { userId_serverId: { userId: heirId, serverId } },
         select: { userId: true },
       });
 
       if (existingMembership) {
-        // Already a member: their row turns owner with the space row
-        const [, , demotion] = await prisma.$transaction([
+        // Already a member: their row turns owner with the space row. The
+        // space row, then the heir's member row, both FOR NO KEY UPDATE,
+        // before the owner update key-shares the heir's account row: the
+        // order of the owner's transfer route (routes/servers.ts), so an
+        // account deletion of the heir queues with this batch on the member
+        // row, except for a membership the heir gained during that deletion
+        // (the cycle deleteAccountRows names, retried on both sides)
+        const [, , , , demotion] = await prisma.$transaction([
+          prisma.$queryRaw`SELECT id FROM servers WHERE id = ${serverId} FOR NO KEY UPDATE`,
+          prisma.$queryRaw`SELECT user_id FROM server_members WHERE user_id = ${heirId} AND server_id = ${serverId} FOR NO KEY UPDATE`,
           prisma.server.update({ where: { id: serverId, ownerId: fromId }, data: { ownerId: heirId } }),
           prisma.serverMember.update({
             where: { userId_serverId: { userId: heirId, serverId } },

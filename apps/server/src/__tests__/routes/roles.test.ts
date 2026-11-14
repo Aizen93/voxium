@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import { Permissions, permissionsToString, permissionsFromString, ALL_PERMISSIONS, WS_EVENTS } from '@voxium/shared';
+import { lazyStatement } from '../helpers/lazyStatement';
 
 // ─── Mocks (must be before any imports that use them) ───────────────────────
 
@@ -758,6 +759,209 @@ describe('Role Routes', () => {
       );
       // The member's role set changed — their sockets' channel rooms re-sync
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1', { userId: 'member1' });
+    });
+
+    describe('one transaction under the member row, every check made again inside it', () => {
+      /**
+       * The transaction's own client: models of its own as well as an identity
+       * of its own, so a check that reads the shared client inside the
+       * transaction shows in `order`.
+       */
+      const tx = {
+        $queryRaw: vi.fn(),
+        serverMember: { findUnique: vi.fn() },
+        server: { findUnique: vi.fn() },
+        role: { findMany: vi.fn() },
+        memberRole: { findMany: vi.fn(), deleteMany: vi.fn(), create: vi.fn() },
+      };
+      let order: string[] = [];
+      /** An actor who outranks the member, assigning r2; every statement named in `order`, with the client it ran on. */
+      function assignable() {
+        order = [];
+        const member = { userId: 'member1', serverId: 'srv1' };
+        const roles = [{ id: 'r2', position: 2, isDefault: false }];
+        mockHasServerPermission.mockImplementation(async (...args: unknown[]) => { order.push(args[3] === tx ? 'tx:may-manage' : 'may-manage'); return true; });
+        mockGetHighestRolePosition.mockResolvedValue(Infinity);
+        prismaMock.serverMember.findUnique.mockImplementation(async () => { order.push('member'); return member; });
+        prismaMock.server.findUnique.mockImplementation(async () => { order.push('owner'); return { ownerId: 'user1' }; });
+        // the checks' read of the roles (named), and the legacy field's (after the transaction)
+        prismaMock.role.findMany.mockImplementation(async ({ select }: any) => {
+          if (select.permissions) return [{ permissions: permissionsToString(Permissions.VIEW_CHANNEL) }];
+          order.push('roles');
+          return roles;
+        });
+        tx.serverMember.findUnique.mockImplementation(async () => { order.push('tx:member'); return member; });
+        tx.server.findUnique.mockImplementation(async () => { order.push('tx:owner'); return { ownerId: 'user1' }; });
+        tx.role.findMany.mockImplementation(async () => { order.push('tx:roles'); return roles; });
+        // The lock recorded when it RUNS (awaited), as a PrismaPromise runs: a
+        // statement built and never awaited is never sent, and takes no lock
+        tx.$queryRaw.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) =>
+          lazyStatement(order, `tx:${strings.join('?')} [${values.join(',')}]`, [{ user_id: 'member1' }]));
+        tx.memberRole.deleteMany.mockImplementation(async () => { order.push('tx:roles.deleteMany'); return { count: 0 }; });
+        tx.memberRole.create.mockImplementation(async ({ data }: any) => { order.push(`tx:roles.create ${data.roleId}`); return {}; });
+        prismaMock.serverMember.update.mockResolvedValue({});
+        prismaMock.$transaction.mockImplementation(async (fn: (client: typeof tx) => unknown, opts?: unknown) => {
+          order.push(`txn ${JSON.stringify(opts)}`);
+          return fn(tx);
+        });
+      }
+      afterEach(() => {
+        prismaMock.role.findMany.mockReset();
+        prismaMock.serverMember.findUnique.mockReset();
+        prismaMock.server.findUnique.mockReset();
+        mockGetHighestRolePosition.mockReset();
+        mockHasServerPermission.mockReset();
+      });
+      const assign = () => request(app).patch('/api/v1/servers/srv1/roles/members/member1').send({ roleIds: ['r2'] });
+      /** Whose rank was read, on which client, in order. */
+      const rankReads = () => (mockGetHighestRolePosition.mock.calls as unknown[][])
+        .map(([userId, , db]) => `${userId} on ${db === tx ? 'tx' : 'the shared client'}`);
+      const keyRefused = (constraint: string) => Object.assign(new Error(`Foreign key constraint violated on the constraint: \`${constraint}\``), {
+        code: 'P2003',
+        meta: { modelName: 'MemberRole', driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23503', kind: 'ForeignKeyConstraintViolation', constraint: { index: constraint } } } },
+      });
+
+      it('the member row FIRST, FOR KEY SHARE, then the checks on the transaction\'s client, then the roles replaced, with the long budget', async () => {
+        assignable();
+
+        expect((await assign()).status).toBe(200);
+
+        expect(order).toEqual([
+          // the early answer, on the shared client
+          'may-manage',
+          'member',
+          'owner',
+          'roles',
+          `txn ${JSON.stringify({ timeout: 60_000, maxWait: 10_000 })}`,
+          'tx:SELECT user_id FROM server_members WHERE user_id = ? AND server_id = ? FOR KEY SHARE [member1,srv1]',
+          // every read of the checks again, on the transaction's client
+          'tx:may-manage',
+          'tx:member',
+          'tx:owner',
+          'tx:roles',
+          'tx:roles.deleteMany',
+          'tx:roles.create r2',
+        ]);
+        // the actor's rank too: once on the shared client, once on the transaction's
+        expect(rankReads()).toEqual(['user1 on the shared client', 'user1 on tx']);
+      });
+
+      it('an actor below the owner: both ranks are read on the transaction\'s client, the actor\'s and the member\'s', async () => {
+        assignable();
+        // the actor at 5, the member at 1, on either client
+        mockGetHighestRolePosition.mockImplementation(async (userId: string) => (userId === 'user1' ? 5 : 1));
+
+        expect((await assign()).status).toBe(200);
+
+        expect(rankReads()).toEqual([
+          'user1 on the shared client',
+          'member1 on the shared client',
+          'user1 on tx',
+          'member1 on tx',
+        ]);
+      });
+
+      it('a member who outranks the actor by the time the member row is theirs: 403, nothing written, nothing announced', async () => {
+        assignable();
+        // below the actor at the early answer, level with them inside the transaction
+        mockGetHighestRolePosition.mockImplementation(async (userId: string, _serverId: string, db: unknown) =>
+          (userId === 'user1' ? 5 : db === tx ? 5 : 1));
+
+        const res = await assign();
+
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe('Cannot modify roles of a member with an equal or higher role');
+        expect(tx.memberRole.deleteMany).not.toHaveBeenCalled();
+        expect(tx.memberRole.create).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('an actor who may no longer manage roles by the time the member row is theirs: 403, nothing written, nothing announced', async () => {
+        assignable();
+        mockHasServerPermission.mockImplementation(async (...args: unknown[]) => args[3] !== tx);
+
+        const res = await assign();
+
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe('You do not have permission to manage roles');
+        expect(tx.memberRole.deleteMany).not.toHaveBeenCalled();
+        expect(tx.memberRole.create).not.toHaveBeenCalled();
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a role no longer in the space by then: the check inside refuses it, nothing written', async () => {
+        assignable();
+        // there at the early answer (the shared client), gone on the transaction's
+        tx.role.findMany.mockResolvedValue([]);
+
+        const res = await assign();
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('One or more role IDs are invalid');
+        expect(tx.memberRole.create).not.toHaveBeenCalled();
+      });
+
+      it('a role deleted while the transaction runs: its key refused, 404 Role, nothing announced', async () => {
+        assignable();
+        tx.memberRole.create.mockRejectedValueOnce(keyRefused('member_roles_role_id_fkey'));
+
+        const res = await assign();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Role not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a member removed before the transaction ran: the new row\'s key is refused, 404 Member, nothing announced', async () => {
+        assignable();
+        tx.memberRole.create.mockRejectedValueOnce(keyRefused('member_roles_user_id_server_id_fkey'));
+
+        const res = await assign();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Member not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      });
+
+      it('a member removed before the legacy role update: no row (P2025), 404 Member, nothing announced', async () => {
+        assignable();
+        prismaMock.serverMember.update.mockRejectedValueOnce(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
+
+        const res = await assign();
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Member not found');
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a transaction PostgreSQL aborted to break a deadlock runs again whole, the member row and the checks included', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        assignable();
+        const real = prismaMock.$transaction.getMockImplementation()!;
+        prismaMock.$transaction
+          .mockImplementationOnce(async () => { order.push('txn aborted'); throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); })
+          .mockImplementation(real);
+        try {
+          expect((await assign()).status).toBe(200);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+          expect(order.filter((o) => o === 'tx:may-manage')).toHaveLength(1);
+          expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('any other failure of the transaction is still a 500', async () => {
+        const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+        assignable();
+        tx.memberRole.create.mockRejectedValueOnce(keyRefused('member_roles_another_fkey'));
+        try {
+          expect((await assign()).status).toBe(500);
+        } finally {
+          err.mockRestore();
+        }
+      });
     });
 
     it('returns 403 without MANAGE_ROLES permission', async () => {

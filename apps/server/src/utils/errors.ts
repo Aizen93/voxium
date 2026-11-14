@@ -83,6 +83,35 @@ export function prismaErrorCode(err: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined;
 }
 
+/**
+ * A write on a space member that is gone by the time it runs: no member row
+ * to update (P2025), or a new member_roles row's key to the membership
+ * refused (P2003 on member_roles_user_id_server_id_fkey). Thrown as the 404
+ * of the missing `entity` (the route's own answer for a missing membership,
+ * 'Member' unless the route names another); anything else is thrown as it is.
+ */
+export function memberGoneAsNotFound(err: unknown, entity = 'Member'): never {
+  if (prismaErrorCode(err) === 'P2025' || violatesForeignKey(err, 'member_roles_user_id_server_id_fkey')) {
+    throw new NotFoundError(entity);
+  }
+  throw err;
+}
+
+/**
+ * A foreign-key violation (P2003) on `constraint`, as the driver names it
+ * (the adapter's constraint index, or the message that quotes it).
+ */
+export function violatesForeignKey(err: unknown, constraint: string): boolean {
+  const e = err as {
+    code?: unknown;
+    message?: unknown;
+    meta?: { constraint?: unknown; field_name?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
+  } | null;
+  if (e?.code !== 'P2003') return false;
+  const named = [e.message, e.meta?.constraint, e.meta?.field_name, e.meta?.driverAdapterError?.cause?.constraint?.index];
+  return named.some((v) => typeof v === 'string' && v.includes(constraint));
+}
+
 /** Parse a date string query parameter, throwing BadRequestError if invalid. */
 export function parseDateParam(value: string, name = 'date'): Date {
   const date = new Date(value);
