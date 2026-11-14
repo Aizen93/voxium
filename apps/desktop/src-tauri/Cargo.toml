@@ -33,6 +33,6 @@ tauri-winrt-notification = "0.7"
 # Hiding WebView2's screen-share bar (src/share_bar.rs): the same webview2-com
 # and windows-core versions wry links, so the controller types are one type.
 webview2-com = "0.39"
-windows-core = "0.62"
+windows-core = "0.100"
 # Win32_System_Console: the debug build's Ctrl-C handler (src/dev_console.rs)
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
