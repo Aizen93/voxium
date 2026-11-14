@@ -72,7 +72,7 @@ Solid lines are the topology the repository documents and production runs (one n
 | Layer | Technology | Version |
 |-------|-----------|---------|
 | Runtime | Node.js | 20+ |
-| Language | TypeScript | 5.6+ |
+| Language | TypeScript | 6.0+ |
 | HTTP Framework | Express.js | 5.x |
 | WebSocket | Socket.IO | 4.8 |
 | ORM | Prisma | 7.x (driver adapter pattern) |
@@ -91,7 +91,7 @@ Solid lines are the topology the repository documents and production runs (one n
 | Layer | Technology | Version |
 |-------|-----------|---------|
 | Framework | React | 19 |
-| Language | TypeScript | 5.6+ |
+| Language | TypeScript | 6.0+ |
 | Build Tool | Vite | 8.x |
 | Desktop Shell | Tauri | 2.x |
 | Styling | Tailwind CSS | 4.x (CSS-first `@theme` config) |
