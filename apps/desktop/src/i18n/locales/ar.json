@@ -1055,6 +1055,117 @@
     "join": "الانضمام إلى {{name}}"
   },
   "landing": {
+    "publicPages": {
+      "architecture": "البنية التقنية",
+      "contributors": "المساهمون",
+      "supporters": "الداعمون",
+      "contributorsAndSupporters": "المساهمون والداعمون",
+      "architecturePage": {
+        "title": "كيف يعمل",
+        "highlight": "Voxium؟",
+        "intro": "تتبّع رسالة أو انضم إلى قناة صوتية أو ابدأ مكالمة خاصة. تعرّف على ما يبقى على جهازك وما يمر عبر البنية التحتية لـ Voxium.",
+        "mapTitle": "تتبّع الاتصال",
+        "mapIntro": "اختر إجراءً لتتبّع مساره داخل Voxium.",
+        "mapLabel": "مخطط النظام",
+        "controlLabel": "تمييز اتصال",
+        "docs": "قراءة وثائق البنية التقنية",
+        "device": "تطبيق Voxium على جهازك",
+        "deviceDetail": "عبر الويب أو سطح المكتب. يجري التشفير على جهازك.",
+        "columns": {
+          "client": "العميل",
+          "connection": "الاتصال",
+          "destination": "الوجهة",
+          "storage": "التخزين والحالة"
+        },
+        "routes": {
+          "api": {
+            "connection": "HTTPS",
+            "transport": "مشفّر باستخدام TLS",
+            "destination": "واجهة Express API",
+            "detail": "تسجيل الدخول والأذونات وحفظ الرسائل"
+          },
+          "events": {
+            "connection": "الأحداث الفورية",
+            "transport": "WebSocket عبر TLS",
+            "destination": "Socket.IO",
+            "detail": "التحديثات الفورية وإشارات المكالمات"
+          },
+          "media": {
+            "connection": "وسائط المجموعة",
+            "transport": "WebRTC",
+            "destination": "mediasoup",
+            "detail": "يعيد توجيه صوت المجموعة ومشاركات الشاشة"
+          },
+          "peer": {
+            "connection": "الصوت الخاص",
+            "transport": "اتصال WebRTC من نظير إلى نظير",
+            "destination": "تطبيق الطرف الآخر",
+            "detail": "يتلقى صوت المكالمة الخاصة مباشرة"
+          }
+        },
+        "storage": {
+          "postgres": {
+            "title": "PostgreSQL",
+            "detail": "الحسابات والرسائل"
+          },
+          "redis": {
+            "title": "Redis",
+            "detail": "حالة التواجد والاتصال الصوتي"
+          },
+          "objects": {
+            "title": "تخزين الكائنات",
+            "detail": "المرفقات والصور"
+          }
+        },
+        "flows": {
+          "overview": {
+            "label": "نظرة عامة",
+            "detail": "ينقل HTTPS الطلبات، ويوصل Socket.IO التحديثات الفورية، وينقل WebRTC الصوت ومشاركات الشاشة."
+          },
+          "message": {
+            "label": "إرسال رسالة",
+            "detail": "تتحقق الواجهة من أذونات الوصول وتحفظ الرسالة في PostgreSQL، ثم يوصلها Socket.IO إلى المستلمين المصرّح لهم."
+          },
+          "voice": {
+            "label": "الانضمام إلى قناة صوتية",
+            "detail": "ينسّق Socket.IO الانضمام ويتابع Redis حالة الاتصال الصوتي. يرسل تطبيقك الصوت مباشرة إلى mediasoup الذي يمرّره إلى القناة."
+          },
+          "private": {
+            "label": "بدء مكالمة خاصة",
+            "detail": "ينقل Socket.IO إشارات المكالمة. بعد الاتصال، يتبادل التطبيقان الصوت الخاص مباشرة عبر WebRTC."
+          }
+        },
+        "notes": {
+          "encryption": {
+            "title": "أين يبدأ التشفير",
+            "detail": "الرسائل المباشرة والقنوات الآمنة مشفّرة من طرف إلى طرف. يشفّر جهازك محتوى الرسالة قبل إرسالها."
+          },
+          "stun": {
+            "title": "كيف تتصل المكالمات الخاصة",
+            "detail": "تساعد خدمة STUN ذاتية الاستضافة لدى Voxium التطبيقين على إنشاء اتصال صوتي مباشر."
+          }
+        }
+      },
+      "contributorsPage": {
+        "eyebrow": "المجتمع",
+        "title": "الأشخاص الذين",
+        "highlight": "يقفون وراء Voxium",
+        "intro": "شكرًا لكل من يطوّر Voxium ويساعد على استمرار تشغيله.",
+        "githubContributors": "عرض المساهمين على GitHub",
+        "founderRole": "المؤسس والمشرف على الصيانة",
+        "profile": "الملف الشخصي على GitHub",
+        "profileLabel": "الملف الشخصي على GitHub لـ ⁦@{{username}}⁩",
+        "credits": {
+          "founder": "أسس Voxium وطوّر أساس وظائف الصوت الفوري والمراسلة وتطبيق سطح المكتب.",
+          "pins": "عزّز أمان مسار التكامل المستمر بتثبيت إجراءاته على إيداعات محددة وتقييد صلاحيات رمز الوصول.",
+          "nickname": "أظهر حالات فشل حفظ الأسماء المستعارة ومنع طلبات الحفظ المكررة."
+        },
+        "anonymous": "داعم مجهول",
+        "supporterPrivacy": "ننشر أسماء الداعمين الذين يختارون ذكرها. شكرًا لكل من يتبرّع بخصوصية.",
+        "thanks": "شكرًا لدعمك Voxium",
+        "supporterImpact": "تساعد التبرعات في تغطية تكاليف البنية التحتية اللازمة لاستمرار تشغيل Voxium."
+      }
+    },
     "nav": {
       "signIn": "تسجيل الدخول",
       "getStarted": "ابدأ الآن",

@@ -14,6 +14,13 @@ const ROOT = resolve(__dirname, '../../..');
 const html = readFileSync(resolve(ROOT, 'index.html'), 'utf8');
 
 describe('index.html SEO contract', () => {
+  it('lists both public landing pages in the sitemap', () => {
+    const sitemap = readFileSync(resolve(ROOT, 'public/sitemap.xml'), 'utf8');
+    for (const path of ['/architecture', '/contributors']) {
+      expect(sitemap).toContain(`<loc>https://voxium.app${path}</loc>`);
+    }
+  });
+
   it('carries the title and description', () => {
     expect(html).toContain('<title>Voxium — Privacy-First Real-Time Communication Platform</title>');
     expect(html).toMatch(/<meta name="description" content="Privacy-first voice, chat and screen sharing\./);

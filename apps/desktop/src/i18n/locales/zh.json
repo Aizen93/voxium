@@ -1045,6 +1045,117 @@
     "join": "加入 {{name}}"
   },
   "landing": {
+    "publicPages": {
+      "architecture": "架构",
+      "contributors": "贡献者",
+      "supporters": "赞助者",
+      "contributorsAndSupporters": "贡献者和赞助者",
+      "architecturePage": {
+        "title": "Voxium 如何",
+        "highlight": "运作？",
+        "intro": "追踪一条消息、加入语音频道，或发起私密通话。看看哪些内容留在设备上，哪些经过 Voxium 的基础设施。",
+        "mapTitle": "追踪连接",
+        "mapIntro": "选择一个操作，查看它在 Voxium 中的路径。",
+        "mapLabel": "系统架构图",
+        "controlLabel": "突出显示连接",
+        "docs": "阅读架构文档",
+        "device": "你的 Voxium 应用",
+        "deviceDetail": "网页或桌面客户端。加密在你的设备上完成。",
+        "columns": {
+          "client": "客户端",
+          "connection": "连接",
+          "destination": "目的地",
+          "storage": "存储和状态"
+        },
+        "routes": {
+          "api": {
+            "connection": "HTTPS",
+            "transport": "通过 TLS 加密",
+            "destination": "Express API",
+            "detail": "登录、权限检查和保存消息"
+          },
+          "events": {
+            "connection": "实时事件",
+            "transport": "基于 TLS 的 WebSocket",
+            "destination": "Socket.IO",
+            "detail": "实时更新和通话信令"
+          },
+          "media": {
+            "connection": "群组媒体",
+            "transport": "WebRTC",
+            "destination": "mediasoup",
+            "detail": "转发群组音频和屏幕共享"
+          },
+          "peer": {
+            "connection": "私密音频",
+            "transport": "点对点 WebRTC",
+            "destination": "对方的应用",
+            "detail": "直接接收私密通话音频"
+          }
+        },
+        "storage": {
+          "postgres": {
+            "title": "PostgreSQL",
+            "detail": "账户和消息"
+          },
+          "redis": {
+            "title": "Redis",
+            "detail": "在线状态和语音状态"
+          },
+          "objects": {
+            "title": "对象存储",
+            "detail": "附件和图片"
+          }
+        },
+        "flows": {
+          "overview": {
+            "label": "概览",
+            "detail": "HTTPS 传输请求，Socket.IO 传递实时更新，WebRTC 传输音频和屏幕共享。"
+          },
+          "message": {
+            "label": "发送消息",
+            "detail": "API 检查访问权限并将消息存入 PostgreSQL。Socket.IO 将消息发给有权限的接收者。"
+          },
+          "voice": {
+            "label": "加入语音频道",
+            "detail": "Socket.IO 协调加入流程，Redis 跟踪语音状态。应用将音频直接发给 mediasoup，由它转发到频道。"
+          },
+          "private": {
+            "label": "发起私密通话",
+            "detail": "Socket.IO 传递通话信令。连接建立后，两个应用通过 WebRTC 直接交换私密音频。"
+          }
+        },
+        "notes": {
+          "encryption": {
+            "title": "加密从哪里开始",
+            "detail": "私信和安全频道采用端到端加密。你的设备会在发送前加密消息内容。"
+          },
+          "stun": {
+            "title": "私密通话如何建立连接",
+            "detail": "Voxium 自托管的 STUN 服务帮助两个应用建立直接的音频连接。"
+          }
+        }
+      },
+      "contributorsPage": {
+        "eyebrow": "社区",
+        "title": "Voxium 背后的",
+        "highlight": "每一位参与者",
+        "intro": "感谢所有参与开发 Voxium 并帮助它持续运行的人。",
+        "githubContributors": "在 GitHub 上查看贡献者",
+        "founderRole": "创始人和维护者",
+        "profile": "GitHub 个人资料",
+        "profileLabel": "@{{username}} 的 GitHub 个人资料",
+        "credits": {
+          "founder": "创立了 Voxium，并开发了实时语音、消息和桌面应用的核心功能。",
+          "pins": "将 Actions 固定到确切的提交并限制令牌权限，加固了 CI 流水线。",
+          "nickname": "让昵称保存失败时有明确提示，并防止重复提交。"
+        },
+        "anonymous": "匿名赞助者",
+        "supporterPrivacy": "我们只列出愿意公开姓名的赞助者。感谢每一位选择私下捐助的人。",
+        "thanks": "感谢你支持 Voxium",
+        "supporterImpact": "捐款有助于支付 Voxium 持续运行所需的基础设施费用。"
+      }
+    },
     "nav": {
       "signIn": "登录",
       "getStarted": "开始使用",

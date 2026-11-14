@@ -1045,6 +1045,117 @@
     "join": "{{name}} に参加"
   },
   "landing": {
+    "publicPages": {
+      "architecture": "アーキテクチャ",
+      "contributors": "貢献者",
+      "supporters": "支援者",
+      "contributorsAndSupporters": "貢献者と支援者",
+      "architecturePage": {
+        "title": "Voxium の",
+        "highlight": "仕組み",
+        "intro": "メッセージの送信、音声チャンネルへの参加、プライベート通話の流れをたどれます。端末に残るものと Voxium のインフラを経由するものを確認できます。",
+        "mapTitle": "接続の流れを見る",
+        "mapIntro": "操作を選んで、Voxium 内での流れをたどります。",
+        "mapLabel": "システム構成図",
+        "controlLabel": "強調する接続を選択",
+        "docs": "アーキテクチャのドキュメントを読む",
+        "device": "Voxium アプリ",
+        "deviceDetail": "ウェブまたはデスクトップ。暗号化は端末で行われます。",
+        "columns": {
+          "client": "クライアント",
+          "connection": "接続",
+          "destination": "接続先",
+          "storage": "ストレージと状態"
+        },
+        "routes": {
+          "api": {
+            "connection": "HTTPS",
+            "transport": "TLS で暗号化",
+            "destination": "Express API",
+            "detail": "サインイン、権限確認、メッセージの保存"
+          },
+          "events": {
+            "connection": "リアルタイムイベント",
+            "transport": "TLS 上の WebSocket",
+            "destination": "Socket.IO",
+            "detail": "リアルタイム更新と通話シグナリング"
+          },
+          "media": {
+            "connection": "グループメディア",
+            "transport": "WebRTC",
+            "destination": "mediasoup",
+            "detail": "グループ音声と画面共有を転送します"
+          },
+          "peer": {
+            "connection": "プライベート音声",
+            "transport": "ピアツーピア WebRTC",
+            "destination": "相手のアプリ",
+            "detail": "プライベート通話の音声を直接受信します"
+          }
+        },
+        "storage": {
+          "postgres": {
+            "title": "PostgreSQL",
+            "detail": "アカウントとメッセージ"
+          },
+          "redis": {
+            "title": "Redis",
+            "detail": "オンライン状態と音声接続の状態"
+          },
+          "objects": {
+            "title": "オブジェクトストレージ",
+            "detail": "添付ファイルと画像"
+          }
+        },
+        "flows": {
+          "overview": {
+            "label": "概要",
+            "detail": "HTTPS がリクエストを、Socket.IO がリアルタイム更新を、WebRTC が音声と画面共有を伝送します。"
+          },
+          "message": {
+            "label": "メッセージを送る",
+            "detail": "API が権限を確認し、メッセージを PostgreSQL に保存します。Socket.IO が閲覧権限のある相手に届けます。"
+          },
+          "voice": {
+            "label": "音声チャンネルに参加",
+            "detail": "Socket.IO が参加を調整し、Redis が音声接続の状態を管理します。アプリから mediasoup に直接送られた音声は、チャンネルに転送されます。"
+          },
+          "private": {
+            "label": "プライベート通話を始める",
+            "detail": "Socket.IO が通話シグナリングを伝えます。接続後は、2 つのアプリが WebRTC でプライベート通話の音声を直接やり取りします。"
+          }
+        },
+        "notes": {
+          "encryption": {
+            "title": "暗号化が行われる場所",
+            "detail": "ダイレクトメッセージとセキュアチャンネルはエンドツーエンドで暗号化されます。端末は送信前にメッセージの内容を暗号化します。"
+          },
+          "stun": {
+            "title": "プライベート通話の接続方法",
+            "detail": "Voxium がセルフホストする STUN サービスが、2 つのアプリ間の直接音声接続をサポートします。"
+          }
+        }
+      },
+      "contributorsPage": {
+        "eyebrow": "コミュニティ",
+        "title": "Voxium を",
+        "highlight": "支える人たち",
+        "intro": "Voxium の開発と運営を支えてくださる皆さまに感謝します。",
+        "githubContributors": "GitHub で貢献者を見る",
+        "founderRole": "創設者・メンテナー",
+        "profile": "GitHub プロフィール",
+        "profileLabel": "@{{username}} の GitHub プロフィール",
+        "credits": {
+          "founder": "Voxium を立ち上げ、リアルタイム音声、メッセージ、デスクトップアプリの基盤を開発しました。",
+          "pins": "アクションを特定のコミットに固定し、トークンの権限を制限して CI パイプラインを強化しました。",
+          "nickname": "ニックネームの保存失敗を表示し、重複した保存リクエストを防ぎました。"
+        },
+        "anonymous": "匿名の支援者",
+        "supporterPrivacy": "希望された支援者のみ、お名前を掲載します。非公開で寄付してくださる皆さまにも感謝します。",
+        "thanks": "Voxium へのご支援ありがとうございます",
+        "supporterImpact": "寄付金は Voxium の運営に必要なインフラ費用に充てられます。"
+      }
+    },
     "nav": {
       "signIn": "ログイン",
       "getStarted": "始める",
