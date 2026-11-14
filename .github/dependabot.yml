@@ -32,6 +32,12 @@ updates:
     ignore:
       - dependency-name: "@tauri-apps/*"
         update-types: ["version-update:semver-minor"]
+      # A TypeScript major moves by hand. 7.0 removes `moduleResolution: node10`
+      # (the server's tsconfig) and no longer includes every @types package by
+      # default, and typescript-eslint 8 accepts TypeScript below 6.1 only: the
+      # bot's bump fails the typecheck, the lint and the server image build.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: cargo
     directory: /apps/desktop/src-tauri
@@ -47,6 +53,12 @@ updates:
     ignore:
       - dependency-name: "tauri*"
         update-types: ["version-update:semver-minor"]
+      # windows-core and webview2-com are the versions wry links: share_bar.rs
+      # hands WebView2's controller to them, so they must be the same types,
+      # and a second copy of either in the graph does not compile. They move
+      # with wry, by hand.
+      - dependency-name: "windows-core"
+      - dependency-name: "webview2-com"
 
   - package-ecosystem: github-actions
     directory: /
