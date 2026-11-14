@@ -1,6 +1,10 @@
-# Voxium E2E DM Protocol Specification (v1 — "olm1")
+# Voxium E2E DM Protocol Specification (envelope v1 — "olm1" and "megolm1")
 
-Status: **shipped (Phase B MVP)** · Engine: vodozemac `=0.11.1` · Envelope: `v1` / engine `olm1`
+Status: **shipped** (multi-device, cross-signing, key and message-key backup,
+device linking, secure channels, sealed call signaling and secure voice are
+all in; §12–§21) · Engine: vodozemac `=0.11.2` · Envelope: `v1` / engines
+`olm1` (pairwise Olm: key shares, call signaling, legacy history) and `megolm1`
+(message bodies, §12.2)
 
 This document is normative for the client, the server, and the WASM binding
 layer. Anything ambiguous here is a spec bug — fix the doc, not just the code.
@@ -20,11 +24,11 @@ In scope:
   comparison (§8); TOFU pinning limits the window (§4.4).
 - Network attackers (TLS already covers transport; E2E covers TLS termination).
 
-Out of scope (MVP):
+Out of scope:
 - Endpoint compromise (malware on a participant's device).
 - Metadata (who talks to whom, when, message sizes — the server necessarily sees this).
-- Server-channel messages (server-side encrypted only; many-member E2E is a
-  separate effort).
+- Ordinary (non-secure) channel messages: they are readable by the server.
+  Group E2E exists only for secure channels (§19) and their voice (§21).
 - A malicious *web-served* client build. The Tauri desktop app ships signed
   code via installers, so the server cannot inject code into it; browser dev
   builds trust the serving host by construction.
@@ -36,20 +40,22 @@ Double Ratchet messaging), as implemented by
 [vodozemac](https://github.com/matrix-org/vodozemac) — audited by Least
 Authority (2022), Apache-2.0.
 
-- **Version pin:** `vodozemac = "=0.11.1"` (Cargo.toml, `packages/crypto-engine`).
+- **Version pin:** `vodozemac = "=0.11.2"` (Cargo.toml, `packages/crypto-engine`).
   Since 0.10.0 vodozemac carries the defense-in-depth responses to the February
   2026 report: fallible `diffie_hellman()` (all-zero shared-secret check) and
-  strict Ed25519 signature verification by default; 0.11.1 keeps both. The
-  0.10.0 → 0.11.1 bump (2.1.0) changed neither the Olm/Megolm wire format nor
-  the pickle or backup formats — checked cross-version in both directions, so
-  2.0 and 2.1 clients interoperate and existing vaults open. Bumps are gated by
+  strict Ed25519 signature verification by default; 0.11 keeps both. The
+  0.10.0 → 0.11.1 bump (followed by the 0.11.2 patch) changed neither the
+  Olm/Megolm wire format nor the pickle or backup formats — checked
+  cross-version in both directions for 0.11.1, so clients on either side of the
+  bump interoperate and existing vaults open. Bumps are gated by
   the watch workflow (§10).
 - **Session config:** `SessionConfig::version_1()` — the upstream default,
   set explicitly in the binding so an upstream default change cannot silently
   alter the wire format.
 - Properties: forward secrecy per message key; break-in recovery via the DH
   ratchet within a session. **No post-quantum protection** — a PQ engine
-  (envelope `e` field ≠ `olm1`) is the planned Phase C evaluation.
+  (envelope `e` field ≠ `olm1`/`megolm1`) was evaluated and deliberately
+  deferred (§11 item 2, `docs/e2e-pq-evaluation.md`).
 
 ## 3. Architecture: the engine boundary
 
@@ -68,9 +74,10 @@ JS. The only computation it performs beyond encoding is the safety-number
 digest (§8), which operates exclusively on public keys. The one secret JS
 handles is the 32-byte pickle key (§7.3).
 
-The engine is versioned: envelopes carry `e: "olm1"`, and
-`engine_version()` reports `olm1/vodozemac-0.11.1` (diagnostics only;
-envelopes carry the scheme `olm1`, never this string). A future engine (e.g.
+The engine is versioned: envelopes carry `e: "olm1"` (pairwise) or
+`e: "megolm1"` (message bodies, §12.2), and
+`engine_version()` reports `olm1/vodozemac-0.11.2` (diagnostics only;
+envelopes carry the scheme id, never this string). A future engine (e.g.
 post-quantum) is introduced as `e: "<new-id>"` — clients negotiate by
 re-establishing sessions; old envelopes remain decodable from the cache.
 
@@ -117,13 +124,17 @@ fallbackKey}` where every key entry is `{keyId, key, signature}`. The server:
 3. Upserts the device; replacing a device **deletes all previous one-time
    keys** (they belong to the dead account) in the same transaction.
 
-Re-registering with a different identity invalidates the previous install —
-one active E2E device per user (MVP). Peers see a safety-number change.
+An account holds up to `E2E_LIMITS.MAX_DEVICES` (5) devices (§12). Re-registering
+a `deviceId` with a different identity replaces that device and invalidates its
+previous install; the account's other devices are untouched. Peers see the
+change (§12.5).
 
 ### 4.3 Bundle claim (`POST /api/v1/e2e/bundles/:userId/:deviceId`)
 
 Guards: requester must share a conversation with the target (limits pre-key
-harvesting); per-user rate limit (`e2eBundle`, 15/min) further slows draining;
+harvesting); per-user rate limit (`e2eBundle`, 150/min) further slows draining (sized for
+the worst legitimate burst: a secure channel's first rotation claims one bundle
+per member device without a session, about 25 members × 5 devices, §19.4);
 fallback key guarantees exhaustion is never a hard DoS.
 
 The server pops the oldest OTK **atomically**
@@ -194,10 +205,10 @@ send messages"), never a silent downgrade. It is now the only path.
   client searches its decrypted history), and the server's channel search
   excludes secure channels outright (§19.5).
 - Server-side enforcement in an encrypted conversation: `encrypted: true`
-  required, valid envelope required, **attachments rejected**, **edits
-  rejected** (an edit is a fresh ratchet ciphertext an offline peer could
-  never decrypt after refetch). Deletes and reactions work normally
-  (metadata).
+  required, valid envelope required. **Attachments** are accepted only as
+  opaque encrypted blobs (§13); **edits** are accepted only as a fresh
+  encrypted envelope under the same message id (§7.1, §9.1). Deletes and
+  reactions work normally (metadata).
 - Client plaintext limit stays `MESSAGE_MAX` (4000 chars) pre-encryption.
 
 ## 7. Client persistence (vault)
@@ -209,7 +220,10 @@ the always-on cutover and is dropped when the new one opens):
 | Key | Value |
 |---|---|
 | `account` | Olm account pickle (encrypted **inside vodozemac**, ChaCha20-Poly1305, pickle key) |
-| `session:{peerUserId}` | Olm session pickle (same encryption) |
+| `master_secret` | our account master key, sealed (§14.5) |
+| `master:{userId}` | pinned account master key of a user (public material, §14) |
+| `session:{userId}:{deviceId}` | pairwise Olm session pickle, per device (same encryption); a `:fb` suffix holds the glare-fallback session |
+| `session:{userId}` | legacy pairwise session pickle from before multi-device (history only) |
 | `identity:{peerUserId}:{deviceId}` | pinned `{curve25519Key, ed25519Key, verified}`, per device |
 | `dlv:{userId}` | last seen / acknowledged device list (drives the injection warning, §12.5); first written by the first list that names a device or an account key |
 | `gs:{conversationId}` | our outbound Megolm session (pickle + rotation bookkeeping) |
@@ -237,7 +251,9 @@ decrypts each message once (socket event or history fetch) and serves every
 later render from the cache, keyed by server message id. Own sent messages are
 cached at send time (Olm does not encrypt-to-self). An encrypted message whose
 plaintext is not in the vault (new install, cleared storage) renders an honest
-"Unable to decrypt" placeholder — by design, history does not follow devices.
+"Unable to decrypt" placeholder until the message keys are restored: history
+follows the account through the message-key backup (§16) and device linking
+(§17), not through the local cache.
 
 ### 7.2 Ordering
 
@@ -402,7 +418,7 @@ did not vouch for:
 
 ## 10. Supply-chain policy
 
-- **Version pinning:** vodozemac pinned exactly (`=0.11.1`); the built WASM
+- **Version pinning:** vodozemac pinned exactly (`=0.11.2`); the built WASM
   artifact is vendored in-repo (`packages/crypto-engine/pkg`) so builds don't
   need a Rust toolchain. Rebuild: `pnpm --filter @voxium/crypto-engine build:wasm`
   (requires rustup target `wasm32-unknown-unknown` + wasm-pack).
@@ -422,13 +438,13 @@ did not vouch for:
 
 ## 11. Known limitations
 
-1. ~~Single device per account~~ — shipped in Phase C (§12): up to 5 devices, Megolm group sessions with pairwise key shares. History still does not follow a new device (no key backup). (Design: §12.)
+1. ~~Single device per account~~ — shipped in Phase C (§12): up to 5 devices, Megolm group sessions with pairwise key shares. History follows a new device through the message-key backup (§16). (Design: §12.)
 2. No post-quantum protection — evaluated and deliberately deferred; designed path + revisit triggers in `docs/e2e-pq-evaluation.md`.
 3. ~~Pickle key in localStorage pending OS-keychain wrapping~~ — shipped in Phase C (§7.3); localStorage remains only as the browser-dev / keychain-failure fallback.
 4. ~~No edits~~ — shipped in Phase C: edits are fresh ratchet ciphertexts under the same id; the plaintext cache is versioned by `editedAt` (§6, §7.1).
 5. ~~No client-side search~~ — shipped in Phase C: encrypted conversations search this device's plaintext cache (coverage = what this device decrypted; §9).
 6. ~~No encrypted attachments~~ — shipped in Phase C (§13); the server can still see ciphertext sizes and upload timing (metadata, limitation 8).
-7. Group (server-channel) E2E out of scope.
+7. ~~Group (server-channel) E2E out of scope~~ — shipped as secure channels (§19) and secure voice channels (§21); ordinary channels stay readable by the server.
 8. Metadata (participants, timing, sizes) visible to the server, as in Signal-style designs generally.
 
 ## 12. Multi-device (Phase C, shipped)
@@ -819,7 +835,8 @@ read.
   DB-level constraint; two concurrent registrations could both observe 4. Bounded
   by `rateLimitE2EDevice` (5/hour) and harmless (a 6th device is still fully
   authenticated).
-- History does not follow a new device (no key backup) — by design, §11.
+- History reaches a new device only as far as the message-key backup (§16.4)
+  covers: a session nobody backed up before every device was lost is gone.
 - A key share kept unacknowledged (its sender could not be checked yet, its
   session could not be stored) is handed out again by the first claim after
   each lease until it is imported or dropped, and counts against its sender's
@@ -847,9 +864,10 @@ rows rather than carrying a compatibility path. Clients re-register their
   the server stores an opaque blob. GCM's auth tag makes a swapped or
   corrupted blob fail decryption, so no separate content hash is needed.
 - **Structured plaintext**: messages with attachments encrypt
-  `"" + JSON {v:1, t:text, a:[metas]}`; text-only messages remain raw
-  strings (wire-compatible with Phase B). The control-character prefix cannot
-  be typed, so raw text and payloads never collide. Each meta carries the real
+  `"\u0001" + JSON {v:1, t:text, a:[metas]}`; text-only messages remain raw
+  strings (wire-compatible with Phase B). The prefix is the single control character U+0001
+  (`E2E_PAYLOAD_PREFIX`, written above as an escape, never as the raw byte);
+  it cannot be typed, so raw text and payloads never collide. Each meta carries the real
   `fileName`/`mimeType`/`fileSize` plus `key`/`iv` — peer-authored metas are
   validated like any untrusted input and invalid ones dropped
   (`parseE2EPlaintext`, shared).
@@ -1063,8 +1081,8 @@ that was about to help. Unlike the mint path it publishes BEFORE sealing: a
 reset can be replacing a working key, so a failed publish has to leave the
 device exactly as it was. Minting is safe there
 precisely because the *user* asked; the danger §14.2 guards against is a
-*server* provoking it. Encrypted key backup (Matrix's SSSS) is deliberately out
-of scope.
+*server* provoking it. The encrypted account-key backup that avoids the reset
+is §15.
 
 ### 14.5 At rest
 
@@ -1096,8 +1114,8 @@ approval.
   approve it.
 - Trust on first use remains for a peer's very first master key, as in any
   system without a prior channel. The safety number is what closes it.
-- No encrypted key backup, so an account with no approved device online starts
-  a new identity rather than recovering the old one (§14.4 makes that an
+- An account with no approved device online and no recovery key (§15) starts a
+  new identity rather than recovering the old one (§14.4 makes that an
   explicit action instead of a dead end).
 - The engine ships as a committed WASM binary, so CI enforces that
   `pkg/.source-hash` matches the Rust source
@@ -1121,7 +1139,8 @@ prompted.
 Message history is **not** backed up. That is a separate mechanism (Megolm
 session keys, one per conversation per rotation) with a different retention
 question, and conflating the two would put megabytes of key material behind the
-same single recovery key. History still does not follow a new device (§11).
+same single recovery key. History is covered by the separate message-key backup
+(§16).
 
 ### 15.2 The recovery key
 
@@ -1211,7 +1230,7 @@ orphan-cleanup migration on a live database and is left as a follow-up.
 
 ### 15.7 Known gaps
 
-- No history backup, as above.
+- Message history is not part of this backup; see §16 and its gaps (§16.4).
 - A user who loses the recovery key AND every device is back to §14.4's reset.
   This is a deliberate floor: any mechanism that could rescue them could also
   rescue an attacker who compromises the account.
@@ -1340,10 +1359,11 @@ It is not new cryptography. It is a safer trigger for the approval flow of
 
 ### 17.1 The code
 
-`base32(SHA-512("voxium-link-v1" || userId ⁠|| deviceId || curve25519 || ed25519))`,
-first 16 characters, grouped `XXXX-XXXX-XXXX-XXXX`. Public material only, like
-a safety number. Fields are separated by a NUL byte so no two different tuples
-can concatenate to the same input.
+`base32(SHA-512("voxium-link-v1" || userId || 0x00 || deviceId || 0x00 || curve25519 || 0x00 || ed25519))`,
+first 16 characters (the first 10 bytes of the digest), grouped
+`XXXX-XXXX-XXXX-XXXX`. Public material only, like a safety number. The four
+fields are separated by a NUL byte (`0x00`) so no two different tuples can
+concatenate to the same input.
 
 ### 17.2 Why it is safe
 
@@ -1414,7 +1434,7 @@ matters.
 ## 19. Secure channels (group E2E)
 
 Invite-only, end-to-end encrypted text channels inside a server. This is the
-"many-member E2E" that §1 and §11.7 deferred — built as a generalization of the
+"many-member E2E" that the first version of this spec (§1, §11.7) deferred — built as a generalization of the
 machinery above, not a second protocol. The crypto engine is unchanged.
 
 ### 19.1 Model

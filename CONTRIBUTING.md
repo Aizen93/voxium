@@ -8,7 +8,7 @@ Thanks for your interest in contributing! This guide covers everything you need 
 
 - **Node.js** >= 24.x (26 LTS recommended)
 - **pnpm** >= 10.16 (earlier versions skip settings in `pnpm-workspace.yaml`, `minimumReleaseAge` among them)
-- **PostgreSQL** >= 15.x (running locally)
+- **PostgreSQL** >= 16.x (running locally)
 - **Docker** (for Redis)
 - **Rust** stable (only needed for Tauri desktop builds)
 
