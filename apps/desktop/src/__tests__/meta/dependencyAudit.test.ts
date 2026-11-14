@@ -79,6 +79,27 @@ describe('dependency audit policy', () => {
     expect(ecosystem(bot, 'npm')).not.toContain('"tauri*"');
   });
 
+  // Bumps the bot cannot get right on its own are left to a human, each with
+  // its reason beside it in dependabot.yml.
+  it('dependabot never proposes the crates wry links, nor a TypeScript major', () => {
+    const bot = read('.github/dependabot.yml');
+    // share_bar.rs hands WebView2's controller to these two crates: a second
+    // copy of either in the graph does not compile, so no version is proposed
+    for (const crate of ['windows-core', 'webview2-com']) {
+      const entry = new RegExp(`^      - dependency-name: "${crate}"\\n(?!        update-types)`, 'm');
+      expect(ecosystem(bot, 'cargo'), crate).toMatch(entry);
+    }
+    const cargo = read('apps/desktop/src-tauri/Cargo.toml');
+    expect(cargo).toMatch(/^webview2-com = "/m);
+    expect(cargo).toMatch(/^windows-core = "/m);
+    // a TypeScript major moves the tsconfig options and typescript-eslint's range with it
+    expect(ecosystem(bot, 'npm')).toContain(
+      '      - dependency-name: "typescript"\n        update-types: ["version-update:semver-major"]\n',
+    );
+    expect(ecosystem(bot, 'cargo')).not.toContain('"typescript"');
+    expect(ecosystem(bot, 'npm')).not.toContain('"windows-core"');
+  });
+
   it('the Tauri CLI and @tauri-apps/api are both held to one minor, the same one', () => {
     const desktop = JSON.parse(read('apps/desktop/package.json')) as {
       dependencies: Record<string, string>;
