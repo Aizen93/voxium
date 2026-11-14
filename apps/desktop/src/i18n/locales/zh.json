@@ -1147,7 +1147,7 @@
         "profileLabel": "@{{username}} 的 GitHub 个人资料",
         "credits": {
           "founder": "创立了 Voxium，并开发了实时语音、消息和桌面应用的核心功能。",
-          "pins": "收紧了置顶和取消置顶消息的权限。",
+          "pins": "将 Actions 固定到确切的提交并限制令牌权限，加固了 CI 流水线。",
           "nickname": "让昵称保存失败时有明确提示，并防止重复提交。"
         },
         "anonymous": "匿名赞助者",

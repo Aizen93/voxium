@@ -225,6 +225,22 @@ describe('public landing pages', () => {
     expect(source).toMatch(/\/\/ The shared Avatar resolves upload keys through the API\. Contributor avatars use local static files\.\s*function ContributorAvatar/);
   });
 
+  // A credit says what that person's pull request did. #237 pinned the CI
+  // workflows' actions to exact commits and restricted the CI token's
+  // permissions (it has nothing to do with pinned messages); #208 made a
+  // refused nickname save visible and kept one save request in flight.
+  it('credits each contributor with what their pull request did, in every language', () => {
+    const english = i18n.getResource('en', 'translation', 'landing.publicPages.contributorsPage.credits');
+    for (const word of ['CI', 'commits', 'token']) expect(english.pins).toContain(word);
+    expect(english.pins).not.toMatch(/message/i);
+    expect(english.nickname).toMatch(/nickname/i);
+    for (const { code } of SUPPORTED_LANGUAGES) {
+      const credits = i18n.getResource(code, 'translation', 'landing.publicPages.contributorsPage.credits');
+      // the pipeline is named in every language, as "CI" or written out
+      expect(credits.pins, code).toMatch(/CI|intégration continue|التكامل المستمر/);
+    }
+  });
+
   it('recognizes named and anonymous supporters and respects the funding switch', () => {
     const supporters = [
       { id: 'public', name: 'Public supporter', github: 'supporter' },

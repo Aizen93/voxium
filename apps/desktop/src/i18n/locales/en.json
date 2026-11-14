@@ -1102,7 +1102,7 @@
         "profileLabel": "GitHub profile of @{{username}}",
         "credits": {
           "founder": "Started Voxium and built its core real-time voice, messaging, and desktop experience.",
-          "pins": "Tightened permissions for pinning and unpinning messages.",
+          "pins": "Hardened the CI pipeline by pinning its actions to exact commits and limiting its token permissions.",
           "nickname": "Made failed nickname saves visible and prevented duplicate save requests."
         },
         "anonymous": "Anonymous supporter",

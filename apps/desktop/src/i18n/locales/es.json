@@ -1149,7 +1149,7 @@
         "profileLabel": "Perfil de GitHub de @{{username}}",
         "credits": {
           "founder": "Creó Voxium y desarrolló la base de la voz en tiempo real, la mensajería y la aplicación de escritorio.",
-          "pins": "Reforzó los permisos para fijar y desfijar mensajes.",
+          "pins": "Reforzó la canalización de CI fijando sus acciones a commits exactos y limitando los permisos de su token.",
           "nickname": "Hizo visibles los errores al guardar apodos y evitó solicitudes duplicadas."
         },
         "anonymous": "Patrocinador anónimo",
