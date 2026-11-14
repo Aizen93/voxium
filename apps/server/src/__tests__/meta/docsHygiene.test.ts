@@ -3,10 +3,11 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-// Guards on the tracked Markdown documents: no hidden characters, and no
-// pointer in CONTEXT.md to a file the repository does not hold. A control
-// byte made tools treat docs/e2e-dm-spec.md as binary, and an invisible
-// word joiner sat inside a formula nobody could see.
+// Guards on the tracked Markdown documents: no hidden characters, no pointer
+// in CONTEXT.md to a file the repository does not hold, and no Markdown
+// document named that a reader of the repository cannot open. A control byte
+// made tools treat docs/e2e-dm-spec.md as binary, and an invisible word
+// joiner sat inside a formula nobody could see.
 
 const ROOT = path.resolve(__dirname, '../../../../..');
 
@@ -33,6 +34,21 @@ function codePoint(ch: string): string {
   return `U+${ch.charCodeAt(0).toString(16).padStart(4, '0')}`;
 }
 
+// A Markdown file name with the path written before it.
+const NAMED_DOCUMENT = /[A-Za-z0-9_.\-/]*[A-Za-z0-9_-]\.md\b/g;
+
+/** The Markdown documents a text names that the repository does not track. */
+function untrackedDocuments(text: string): { name: string; index: number }[] {
+  const found: { name: string; index: number }[] = [];
+  for (const match of text.matchAll(NAMED_DOCUMENT)) {
+    const name = match[0];
+    // The tail of a web address ("//host/…/README.md") is not ours to hold.
+    if (name.startsWith('//')) continue;
+    if (!trackedSet.has(name)) found.push({ name, index: match.index });
+  }
+  return found;
+}
+
 describe('tracked Markdown documents', () => {
   it('finds the documents to scan', () => {
     expect(markdownFiles).toContain('README.md');
@@ -49,6 +65,31 @@ describe('tracked Markdown documents', () => {
       if (invisible) problems.push(`${file}:${lineOf(text, invisible.index)} invisible character ${codePoint(invisible[0])}`);
     }
     expect(problems).toEqual([]);
+  });
+
+  // Every Markdown document one of them names is one the repository tracks:
+  // a document kept out of it (.gitignore) is a pointer its reader cannot
+  // follow. A name is taken as written, with the path it carries; the tail of
+  // a web address is somebody else's document and is left alone.
+  it('name no Markdown document the repository does not track', () => {
+    const problems: string[] = [];
+    for (const file of markdownFiles) {
+      const text = readFileSync(path.join(ROOT, file), 'utf8');
+      for (const { name, index } of untrackedDocuments(text)) {
+        problems.push(`${file}:${lineOf(text, index)} ${name}`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it('tells a tracked document from one that is not, and leaves web addresses alone', () => {
+    const sample = [
+      'See CONTRIBUTING.md and `docs/e2e-dm-spec.md`.',
+      'Read NOT-IN-THE-REPOSITORY.md (the "Updates" part) and docs/missing/plan.md.',
+      'Upstream: https://example.com/project/blob/main/README.md',
+      'A tracked `.md` file, or any *.md file.',
+    ].join('\n');
+    expect(untrackedDocuments(sample).map((d) => d.name)).toEqual(['NOT-IN-THE-REPOSITORY.md', 'docs/missing/plan.md']);
   });
 });
 
