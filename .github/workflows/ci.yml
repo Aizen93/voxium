@@ -80,7 +80,7 @@ jobs:
       - name: Crypto engine WASM matches its Rust source
         run: pnpm --filter @voxium/crypto-engine check:wasm-fresh
 
-      - name: Typecheck (shared -> server -> desktop -> admin)
+      - name: Typecheck (shared -> server -> desktop -> admin, then browser code without Node types)
         run: pnpm typecheck
 
       - name: Lint
