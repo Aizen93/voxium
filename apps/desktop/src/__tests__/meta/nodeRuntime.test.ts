@@ -1,8 +1,11 @@
 // @vitest-environment node
 // Pure filesystem check — pins the supported Node.js runtime so the places that
 // name it cannot drift apart again (the server image ran an end-of-life Node 20
-// while CI tested 24), and keeps the two Node 25+ traps closed: Corepack is no
-// longer bundled, and Node's own Web Storage globals hide jsdom's under vitest 4.
+// while CI tested 24), and keeps the Node 25+ Corepack trap closed: Corepack is
+// no longer bundled. The other Node 25+ trap, Node's own Web Storage globals,
+// is checked by behaviour, not by config, in two files beside this one:
+// jsdomStorage.test.ts (jsdom suites get jsdom's; a copy runs in apps/admin)
+// and nodeEnvironmentStorage.test.ts (node suites get none).
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -79,12 +82,6 @@ describe('supported Node.js runtime', () => {
         expect(s, file).toContain('[[ $PNPM_VERSION =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || {');
         expect(s, file).toContain('npm install -g "pnpm@$PNPM_VERSION"');
       }
-    }
-  });
-
-  it('the jsdom suites run with Node Web Storage off (vitest 4 keeps Node\'s storage globals otherwise)', () => {
-    for (const file of ['apps/desktop/vitest.config.ts', 'apps/admin/vitest.config.ts']) {
-      expect(read(file), file).toContain("execArgv: ['--no-experimental-webstorage']");
     }
   });
 });
