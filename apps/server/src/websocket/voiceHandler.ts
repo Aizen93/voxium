@@ -1,6 +1,6 @@
 import type { Server as SocketServer, Socket } from 'socket.io';
 import { type ServerToClientEvents, type ClientToServerEvents } from '@voxium/shared';
-import type { WebRtcTransport, Producer, Consumer, DtlsParameters, RtpParameters, RtpCapabilities } from 'mediasoup/node/lib/types';
+import type { WebRtcTransport, Producer, Consumer, DtlsParameters, RtpParameters, RtpCapabilities } from 'mediasoup/types';
 import { prisma } from '../utils/prisma';
 import { leaveCurrentDMVoiceChannel } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';

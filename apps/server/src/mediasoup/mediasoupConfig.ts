@@ -1,4 +1,4 @@
-import type { RouterRtpCodecCapability, WorkerLogLevel, TransportListenInfo, WebRtcServer } from 'mediasoup/node/lib/types';
+import type { RouterRtpCodecCapability, WorkerLogLevel, TransportListenInfo, WebRtcServer } from 'mediasoup/types';
 
 // Audio + video codecs for the mediasoup Router
 export const mediaCodecs: RouterRtpCodecCapability[] = [

@@ -1,5 +1,5 @@
 import * as mediasoup from 'mediasoup';
-import type { Worker, Router, WebRtcTransport, WebRtcServer } from 'mediasoup/node/lib/types';
+import type { Worker, Router, WebRtcTransport, WebRtcServer } from 'mediasoup/types';
 import type { SfuStats, SfuWorkerStats } from '@voxium/shared';
 import os from 'os';
 import {
