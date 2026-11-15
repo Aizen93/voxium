@@ -313,6 +313,158 @@ describe('totpService — verifyTOTP', () => {
   });
 });
 
+describe('totpService — verifyTOTP replay protection (#103)', () => {
+  // Fresh module state per test: the node-local record and the warning
+  // throttle live in totpService's module scope
+  async function freshService(set: (...args: unknown[]) => Promise<unknown>) {
+    vi.resetModules();
+    const { prisma: db } = await import('../../utils/prisma');
+    const { getRedis } = await import('../../utils/redis');
+    vi.mocked(getRedis).mockReturnValue({ set: vi.fn(set) } as never);
+    const service = await import('../../services/totpService');
+    const secret = new OTPAuth.Secret({ size: 20 });
+    const totp = new OTPAuth.TOTP({ issuer: 'Voxium', label: 'testuser', algorithm: 'SHA1', digits: 6, period: 30, secret });
+    vi.mocked(db.user.findUnique).mockResolvedValue({ username: 'testuser', totpSecret: secret.base32, totpBackupCodes: null } as never);
+    delete process.env.TOTP_ENCRYPTION_KEY;
+    return { verify: service.verifyTOTP, code: () => totp.generate(), secret: secret.base32, getRedis };
+  }
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('with Redis up, a second use of the same code is refused (SET NX finds the first)', async () => {
+    const used = new Set<string>();
+    const { verify, code } = await freshService(async (key) => {
+      if (used.has(String(key))) return null;
+      used.add(String(key));
+      return 'OK';
+    });
+    const c = code();
+    expect(await verify('user-r1', c)).toBe(true);
+    expect(await verify('user-r1', c)).toBe(false);
+  });
+
+  it('with Redis failing, a code is accepted once and refused the second time on this node', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { verify, code } = await freshService(async () => { throw new Error('The client is closed'); });
+      const c = code();
+      expect(await verify('user-r2', c)).toBe(true);
+      expect(await verify('user-r2', c)).toBe(false);
+      // another account's use of the same digits is its own
+      expect(await verify('user-r3', c)).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('logs the outage once a minute at most, with the error\'s name and message and never the code, the secret or the account', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-16T10:00:00Z'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { verify, code, secret } = await freshService(async () => { throw Object.assign(new Error('Socket closed unexpectedly'), { name: 'SocketClosedUnexpectedlyError' }); });
+      const c = code();
+      await verify('user-r4', c);
+      await verify('user-r4', c);
+      await verify('user-r5', c);
+      const said = () => warn.mock.calls.filter((call) => String(call[0]).startsWith('[TOTP]'));
+      expect(said()).toHaveLength(1);
+      const line = said()[0].map(String).join(' ');
+      expect(line).toContain('SocketClosedUnexpectedlyError');
+      expect(line).toContain('Socket closed unexpectedly');
+      expect(line).not.toContain(c);
+      expect(line).not.toContain(secret);
+      expect(line).not.toContain('user-r4');
+      expect(line).not.toContain('totp:used');
+
+      vi.setSystemTime(new Date('2026-11-16T10:01:01Z'));
+      await verify('user-r6', code());
+      expect(said()).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a code accepted during the outage stays refused on this node once Redis answers again', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let redisUp = false;
+      const { verify, code } = await freshService(async () => {
+        if (!redisUp) throw new Error('Connection timeout');
+        return 'OK'; // Redis never saw the first use
+      });
+      const c = code();
+      expect(await verify('user-r7', c)).toBe(true);
+      redisUp = true;
+      expect(await verify('user-r7', c)).toBe(false);
+      // a fresh code goes through Redis as usual
+      expect(await verify('user-r8', c)).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a wrong code is refused without asking Redis', async () => {
+    const set = vi.fn(async () => 'OK');
+    const { verify } = await freshService(set);
+    expect(await verify('user-r9', '000000')).toBe(false);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  describe('the node-local record: 90 seconds, at most 10,000 codes', () => {
+    // Any code starting with "ok" is a valid TOTP code here, whatever the
+    // clock says, so the record's own lifetime is what the tests observe
+    async function serviceWithRedisDown() {
+      vi.resetModules();
+      vi.doMock('otpauth', () => ({
+        Secret: { fromBase32: () => ({}) },
+        TOTP: class { validate({ token }: { token: string }) { return token.startsWith('ok') ? 0 : null; } },
+      }));
+      const { prisma: db } = await import('../../utils/prisma');
+      const { getRedis } = await import('../../utils/redis');
+      vi.mocked(getRedis).mockReturnValue({ set: vi.fn(async () => { throw new Error('The client is closed'); }) } as never);
+      vi.mocked(db.user.findUnique).mockResolvedValue({ username: 'testuser', totpSecret: 'JBSWY3DPEHPK3PXP', totpBackupCodes: null } as never);
+      delete process.env.TOTP_ENCRYPTION_KEY;
+      return (await import('../../services/totpService')).verifyTOTP;
+    }
+
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => { warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+    afterEach(() => {
+      warn.mockRestore();
+      vi.doUnmock('otpauth');
+      vi.useRealTimers();
+    });
+
+    it('a code is refused for 90 seconds after its use, and is a new use after that', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-11-16T10:00:00Z'));
+      const verify = await serviceWithRedisDown();
+
+      expect(await verify('user-e1', 'ok-111111')).toBe(true);
+      vi.setSystemTime(new Date('2026-11-16T10:01:29.999Z'));
+      expect(await verify('user-e1', 'ok-111111')).toBe(false);
+      vi.setSystemTime(new Date('2026-11-16T10:01:30.001Z'));
+      expect(await verify('user-e1', 'ok-111111')).toBe(true);
+    });
+
+    it('past 10,000 recorded codes the oldest is dropped first, and only it', async () => {
+      const verify = await serviceWithRedisDown();
+      for (let n = 0; n < 10_000; n++) {
+        expect(await verify(`user-c${n}`, 'ok-222222')).toBe(true);
+      }
+      // the record is full: the oldest is still refused
+      expect(await verify('user-c0', 'ok-222222')).toBe(false);
+      // one more use pushes the oldest out
+      expect(await verify('user-c10000', 'ok-222222')).toBe(true);
+      expect(await verify('user-c0', 'ok-222222')).toBe(true);
+      // ...and that re-recording pushed out the next oldest, not a newer one
+      expect(await verify('user-c9999', 'ok-222222')).toBe(false);
+      expect(await verify('user-c1', 'ok-222222')).toBe(true);
+    });
+  });
+});
+
 describe('totpService — disableTOTP', () => {
   it('disables TOTP with valid code', async () => {
     const secret = new OTPAuth.Secret({ size: 20 });
