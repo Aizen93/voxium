@@ -33,12 +33,69 @@ export class SecretBoxUnavailableError extends Error {
   }
 }
 
-/** Decoded exactly as totpService decodes it, so one key opens both. */
+const CANONICAL_KEY_RE = /^[0-9a-fA-F]{64}$/;
+
+/** What every consumer of TOTP_ENCRYPTION_KEY says of a key that is set but cannot be used. */
+export const ENCRYPTION_KEY_UNUSABLE_MESSAGE = 'TOTP_ENCRYPTION_KEY is set but cannot be used: it must be 64 hexadecimal characters (32 bytes)';
+
+export type EncryptionKeyState =
+  | { state: 'unset' }
+  | { state: 'unusable' }
+  /** `canonical`: exactly 64 hexadecimal characters, nothing after them */
+  | { state: 'usable'; key: Buffer; canonical: boolean };
+
+/**
+ * TOTP_ENCRYPTION_KEY as every consumer reads it: this box, totpService and
+ * the boot check (checkEncryptionKeyAtBoot), so the three never disagree on a
+ * key. Unset when missing or empty. Decoded as hex, which stops at the first
+ * character that is not part of a hex pair: usable when that gives exactly 32
+ * bytes. A value that carries characters after its 64 hex ones (a trailing
+ * CR or space from an env file) gives the same 32 bytes as without them, so
+ * it stays usable, and is reported as not canonical.
+ */
+export function readEncryptionKey(value: string | undefined = process.env.TOTP_ENCRYPTION_KEY): EncryptionKeyState {
+  if (!value) return { state: 'unset' };
+  const key = Buffer.from(value, 'hex');
+  if (key.length !== KEY_LENGTH) return { state: 'unusable' };
+  return { state: 'usable', key, canonical: CANONICAL_KEY_RE.test(value) };
+}
+
+/** What index.ts says of the key before it starts anything: stop on `fatal`, print `warning`. */
+export interface EncryptionKeyBootCheck {
+  fatal: string | null;
+  warning: string | null;
+}
+
+/**
+ * The start-up check of TOTP_ENCRYPTION_KEY. Unset: production refuses to
+ * start (TOTP secrets would be stored in plaintext), elsewhere a warning, as
+ * before. Set but unusable: no environment starts, since every TOTP
+ * enrolment and every GitHub webhook would fail on it. Usable with
+ * characters after the key: starts, with a warning. No message repeats the
+ * value or anything derived from it.
+ */
+export function checkEncryptionKeyAtBoot(env: NodeJS.ProcessEnv): EncryptionKeyBootCheck {
+  const generate = 'Generate one with: openssl rand -hex 32';
+  const read = readEncryptionKey(env.TOTP_ENCRYPTION_KEY);
+  if (read.state === 'unset') {
+    if (env.NODE_ENV === 'production') {
+      return { fatal: `TOTP_ENCRYPTION_KEY is not set — refusing to start in production (TOTP secrets would be stored UNENCRYPTED). ${generate}`, warning: null };
+    }
+    return { fatal: null, warning: 'TOTP_ENCRYPTION_KEY is not set. TOTP secrets will be stored UNENCRYPTED in the database. Set this to a 32-byte hex string (64 characters) for production use.' };
+  }
+  if (read.state === 'unusable') {
+    return { fatal: `${ENCRYPTION_KEY_UNUSABLE_MESSAGE} — refusing to start. ${generate}`, warning: null };
+  }
+  if (!read.canonical) {
+    return { fatal: null, warning: 'TOTP_ENCRYPTION_KEY has characters after its first 64 hexadecimal characters; they are ignored. Set it to exactly 64 hexadecimal characters.' };
+  }
+  return { fatal: null, warning: null };
+}
+
+/** The usable key, or null (unset or unusable: the box is not configured). */
 function getKey(): Buffer | null {
-  const hex = process.env.TOTP_ENCRYPTION_KEY;
-  if (!hex) return null;
-  const key = Buffer.from(hex, 'hex');
-  return key.length === KEY_LENGTH ? key : null;
+  const read = readEncryptionKey();
+  return read.state === 'usable' ? read.key : null;
 }
 
 /** Whether a key is present and decodes to 32 bytes. */

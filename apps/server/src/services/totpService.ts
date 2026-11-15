@@ -6,16 +6,19 @@ import { prisma } from '../utils/prisma';
 import { BadRequestError, UnauthorizedError } from '../utils/errors';
 import { LIMITS } from '@voxium/shared';
 import { getRedis } from '../utils/redis';
+import { readEncryptionKey, ENCRYPTION_KEY_UNUSABLE_MESSAGE } from '../utils/secretBox';
 
 const APP_NAME = 'Voxium';
 const ENCRYPTION_ALGO = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
+/** The key as the secret box reads it; null when unset; a set key that cannot be used throws, by name, never falls back to plaintext. */
 function getEncryptionKey(): Buffer | null {
-  const key = process.env.TOTP_ENCRYPTION_KEY;
-  if (!key) return null;
-  return Buffer.from(key, 'hex');
+  const read = readEncryptionKey();
+  if (read.state === 'unset') return null;
+  if (read.state === 'unusable') throw new Error(ENCRYPTION_KEY_UNUSABLE_MESSAGE);
+  return read.key;
 }
 
 function encryptSecret(plaintext: string): string {

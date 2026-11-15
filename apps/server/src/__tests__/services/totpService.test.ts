@@ -122,6 +122,19 @@ describe('totpService — setupTOTP', () => {
     expect(updateCall.data.totpSecret).toBe(result.secret);
   });
 
+  it('a key that is set but does not give 32 bytes is refused by name, in every environment, never as plaintext (#51)', async () => {
+    const savedNodeEnv = process.env.NODE_ENV;
+    savedEnv.NODE_ENV = savedNodeEnv;
+    for (const NODE_ENV of ['development', 'production']) {
+      process.env.NODE_ENV = NODE_ENV;
+      process.env.TOTP_ENCRYPTION_KEY = 'ab'.repeat(31); // 31 bytes
+      vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ username: 'testuser', totpEnabled: false } as any);
+
+      await expect(setupTOTP('user-1')).rejects.toThrow('TOTP_ENCRYPTION_KEY is set but cannot be used: it must be 64 hexadecimal characters (32 bytes)');
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    }
+  });
+
   it('FAILS CLOSED in production when TOTP_ENCRYPTION_KEY is not set', async () => {
     delete process.env.TOTP_ENCRYPTION_KEY;
     const savedNodeEnv = process.env.NODE_ENV;
