@@ -7,6 +7,7 @@ import { validateMessageContent, validateEmoji, LIMITS, ALLOWED_ATTACHMENT_TYPES
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { sanitizeText } from '../utils/sanitize';
+import { storedAttachmentName } from '../utils/attachmentName';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 import { verifyAttachmentUploads } from '../utils/uploadVerification';
 import { extractMentionIds, resolveMentionsForServer, batchResolveMentions, attachMentions } from '../utils/mentions';
@@ -239,6 +240,14 @@ messageRouter.post('/', rateLimitMessageSend, async (req: Request<{ channelId: s
           if (!Number.isSafeInteger(a.fileSize) || a.fileSize <= 0 || a.fileSize > getMaxAttachmentSize(a.mimeType)) throw new BadRequestError('Invalid attachment size');
           if (!ALLOWED_ATTACHMENT_TYPES.includes(a.mimeType as typeof ALLOWED_ATTACHMENT_TYPES[number])) throw new BadRequestError('Invalid file type');
         }
+        // The four stored fields only, the name as it is stored (one line, no
+        // invisible characters, at most ATTACHMENT_NAME_MAX, extension kept)
+        attachments = attachments.map((a) => ({
+          s3Key: a.s3Key,
+          fileName: storedAttachmentName(a.fileName),
+          fileSize: a.fileSize,
+          mimeType: a.mimeType,
+        }));
       }
 
       // Allow empty content if attachments are present
