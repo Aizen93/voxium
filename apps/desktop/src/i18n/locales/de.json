@@ -1008,7 +1008,9 @@
       "deafenedByModerator": "Du wurdest von einem Moderator lautlos geschaltet",
       "screenShareFailed": "Bildschirmfreigabe fehlgeschlagen — bitte versuche es erneut",
       "micIssue": "Mikrofonproblem erkannt — versuche, dem Sprachkanal erneut beizutreten",
-      "noiseSuppressionUnavailable": "Die Rauschunterdrückung ist gerade nicht verfügbar — dein Mikrofon funktioniert ohne sie weiter."
+      "noiseSuppressionUnavailable": "Die Rauschunterdrückung ist gerade nicht verfügbar — dein Mikrofon funktioniert ohne sie weiter.",
+      "micSwitchFailed": "Wechsel zum ausgewählten Mikrofon nicht möglich — du nutzt weiterhin das bisherige",
+      "micDefaultInUse": "Das ausgewählte Mikrofon konnte nicht geöffnet werden — das Standardmikrofon des Systems wird verwendet"
     }
   },
   "attachment": {

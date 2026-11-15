@@ -1008,7 +1008,9 @@
       "deafenedByModerator": "You have been deafened by a moderator",
       "screenShareFailed": "Screen share failed — please try again",
       "micIssue": "Microphone issue detected — try rejoining voice",
-      "noiseSuppressionUnavailable": "Noise suppression is unavailable for now — your microphone keeps working without it."
+      "noiseSuppressionUnavailable": "Noise suppression is unavailable for now — your microphone keeps working without it.",
+      "micSwitchFailed": "Could not switch to the selected microphone — you are still on the previous one",
+      "micDefaultInUse": "Could not open the selected microphone — the system default microphone is in use"
     }
   },
   "attachment": {

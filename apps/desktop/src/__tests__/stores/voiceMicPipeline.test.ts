@@ -709,6 +709,8 @@ describe('a pipeline rebuild that lands while produce() is in flight', () => {
     await flush();
     expect(sendTransport.produce).toHaveBeenCalledWith(expect.objectContaining({ track: gatedBefore.track }));
     return async () => {
+      // One mic producer, however many rebuilds landed meanwhile
+      expect(sendTransport.produce).toHaveBeenCalledTimes(1);
       const producer = { ...fakeProducer('audio'), track: gatedBefore.track };
       made.resolve(producer);
       await run;
@@ -799,5 +801,594 @@ describe('a socket reconnect re-opening the microphone', () => {
     expect(reopened.track.stop).toHaveBeenCalled();
     expect(useVoiceStore.getState().localStream).toBe(switched);
     expect(switched.track.stop).not.toHaveBeenCalled();
+  });
+});
+
+// ─── #190: quick microphone changes during a call ────────────────────────────
+
+describe('switching the input device during a call (#190)', () => {
+  /** getUserMedia answers in the order the test settles these. */
+  let pendingMics: Array<{ deviceId: string; resolve: (s: MediaStream) => void; reject: (e: unknown) => void }>;
+  /** The oldest unanswered getUserMedia call for `deviceId` ('' = no device asked for). */
+  const answer = (deviceId: string) => {
+    const at = pendingMics.findIndex((p) => p.deviceId === deviceId);
+    expect(at, `a pending getUserMedia for "${deviceId}"`).toBeGreaterThanOrEqual(0);
+    return pendingMics.splice(at, 1)[0];
+  };
+
+  beforeEach(() => {
+    pendingMics = [];
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn((constraints: { audio: { deviceId?: { exact: string } } }) => new Promise<MediaStream>((resolve, reject) => {
+          pendingMics.push({ deviceId: constraints.audio.deviceId?.exact ?? '', resolve, reject });
+        })),
+      },
+    });
+  });
+
+  /** In a voice channel on mic A, with a live mic producer whose track the pipeline swaps. */
+  function inVoiceOn(a: FakeStream) {
+    const mic = fakeProducer('audio');
+    useVoiceStore.setState({
+      activeChannelId: 'ch-1',
+      localStream: a,
+      msProducers: new Map<string, Producer>([[mic.id, mic as unknown as Producer]]),
+    });
+    // The gated stream follows whatever stream the detector was started on
+    aa.startSpeakingDetection.mockImplementation((stream: MediaStream, mode = 'server') => { aa.state.mode = mode; aa.state.gated = stream; });
+    return mic;
+  }
+  const pick = (deviceId: string) => useSettingsStore.getState().setAudioInputDeviceId(deviceId);
+
+  it('A → B → C with C answering first: the call ends on C, and B and A are stopped', async () => {
+    const [a, b, c] = [fakeStream('a'), fakeStream('b'), fakeStream('c')];
+    const mic = inVoiceOn(a);
+    pick('mic-b');
+    pick('mic-c');
+    answer('mic-c').resolve(c);
+    await flush();
+    answer('mic-b').resolve(b);
+    await flush();
+
+    expect(useVoiceStore.getState().localStream).toBe(c);
+    expect(mic.replaceTrack).toHaveBeenLastCalledWith({ track: c.track });
+    expect(b.track.stop).toHaveBeenCalled();
+    expect(a.track.stop).toHaveBeenCalled();
+    expect(c.track.stop).not.toHaveBeenCalled();
+    expect(aa.applyNoiseSuppression).toHaveBeenLastCalledWith(c);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('A → B → C answering in order: the call ends on C, every stream it left is stopped', async () => {
+    const [a, b, c] = [fakeStream('a'), fakeStream('b'), fakeStream('c')];
+    const mic = inVoiceOn(a);
+    pick('mic-b');
+    pick('mic-c');
+    answer('mic-b').resolve(b);
+    await flush();
+    answer('mic-c').resolve(c);
+    await flush();
+
+    expect(useVoiceStore.getState().localStream).toBe(c);
+    expect(mic.replaceTrack).toHaveBeenLastCalledWith({ track: c.track });
+    expect(a.track.stop).toHaveBeenCalled();
+    expect(b.track.stop).toHaveBeenCalled();
+    expect(c.track.stop).not.toHaveBeenCalled();
+  });
+
+  it('a device that cannot be opened: the previous one stays in place, untouched, and the user is told', async () => {
+    const a = fakeStream('a');
+    const mic = inVoiceOn(a);
+    pick('mic-b');
+    answer('mic-b').reject(Object.assign(new Error('Could not start audio source'), { name: 'NotReadableError' }));
+    await flush();
+
+    expect(useVoiceStore.getState().localStream).toBe(a);
+    expect(a.track.stop).not.toHaveBeenCalled();
+    expect(mic.replaceTrack).not.toHaveBeenCalled();
+    expect(aa.applyNoiseSuppression).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenCalledWith('voice.toasts.micSwitchFailed');
+    // Not the join's "listen-only" wording: the call still has its microphone
+    expect(toast.warning).not.toHaveBeenCalledWith('voice.toasts.micDenied');
+  });
+
+  it('a superseded choice that fails says nothing: only the latest choice reports', async () => {
+    const [a, c] = [fakeStream('a'), fakeStream('c')];
+    inVoiceOn(a);
+    pick('mic-b');
+    pick('mic-c');
+    answer('mic-c').resolve(c);
+    await flush();
+    answer('mic-b').reject(new Error('gone'));
+    await flush();
+
+    expect(useVoiceStore.getState().localStream).toBe(c);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('the call ends while the new device opens: the new stream is stopped, nothing is installed', async () => {
+    const [a, b] = [fakeStream('a'), fakeStream('b')];
+    inVoiceOn(a);
+    pick('mic-b');
+    useVoiceStore.getState().leaveChannel();
+    aa.applyNoiseSuppression.mockClear();
+    answer('mic-b').resolve(b);
+    await flush();
+
+    expect(b.track.stop).toHaveBeenCalled();
+    expect(useVoiceStore.getState().localStream).toBeNull();
+    expect(aa.applyNoiseSuppression).not.toHaveBeenCalled();
+  });
+
+  it('the new track follows the mute and push-to-talk state of the moment it goes live', async () => {
+    const [a, b, c] = [fakeStream('a'), fakeStream('b'), fakeStream('c')];
+    inVoiceOn(a);
+    // Muted while B opens: B goes live muted
+    pick('mic-b');
+    useVoiceStore.setState({ selfMute: true });
+    answer('mic-b').resolve(b);
+    await flush();
+    expect(b.track.enabled).toBe(false);
+
+    // Push-to-talk held while C opens: C goes live open (push-to-talk overrides mute)
+    useSettingsStore.setState({ voiceMode: 'push_to_talk' });
+    useVoiceStore.setState({ pttActive: true });
+    pick('mic-c');
+    answer('mic-c').resolve(c);
+    await flush();
+    expect(c.track.enabled).toBe(true);
+  });
+
+  it('a track swap the producer refuses: back on the previous device, the new one stopped, the user told', async () => {
+    const [a, b] = [fakeStream('a'), fakeStream('b')];
+    const mic = inVoiceOn(a);
+    mic.replaceTrack.mockRejectedValueOnce(new Error('InvalidStateError'));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    pick('mic-b');
+    answer('mic-b').resolve(b);
+    await flush();
+
+    expect(useVoiceStore.getState().localStream).toBe(a);
+    expect(b.track.stop).toHaveBeenCalled();
+    expect(a.track.stop).not.toHaveBeenCalled();
+    expect(aa.applyNoiseSuppression).toHaveBeenLastCalledWith(a);
+    expect(mic.replaceTrack).toHaveBeenLastCalledWith({ track: a.track });
+    expect(toast.error).toHaveBeenCalledWith('voice.toasts.micSwitchFailed');
+    errors.mockRestore();
+  });
+
+  it('in a DM call the peer\'s audio sender gets the new device', async () => {
+    const [a, b] = [fakeStream('a'), fakeStream('b')];
+    const { sender, peer } = fakePeer();
+    useVoiceStore.setState({ dmCallConversationId: 'conv-1', localStream: a, peers: new Map([['peer-1', peer as never]]) });
+    pick('mic-b');
+    answer('mic-b').resolve(b);
+    await flush();
+
+    expect(useVoiceStore.getState().localStream).toBe(b);
+    expect(sender.replaceTrack).toHaveBeenLastCalledWith(b.track);
+    expect(aa.startSpeakingDetection).toHaveBeenLastCalledWith(b, 'dm');
+    expect(a.track.stop).toHaveBeenCalled();
+  });
+
+  // ── After a review in real engines ──────────────────────────────────────
+
+  /** Joined a voice channel through the real join, on mic A. */
+  async function joinedOn(a: FakeStream) {
+    const join = useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: false });
+    await flush();
+    answer('mic-a').resolve(a);
+    await join;
+    await flush();
+  }
+  const notAllowed = () => Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' });
+  const overconstrained = () => Object.assign(new Error('Requested device not found'), { name: 'OverconstrainedError' });
+
+  it('a refused swap with a mute during the switch: the previous microphone goes back MUTED (DM call)', async () => {
+    const [a, b] = [fakeStream('a'), fakeStream('b')];
+    const { sender, peer } = fakePeer();
+    sender.replaceTrack.mockRejectedValueOnce(new Error('InvalidStateError'));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    useVoiceStore.setState({ dmCallConversationId: 'conv-1', localStream: a, peers: new Map([['peer-1', peer as never]]) });
+    const pipeline = deferred<MediaStream>();
+    aa.applyNoiseSuppression.mockImplementationOnce(() => pipeline.promise);
+
+    pick('mic-b');
+    answer('mic-b').resolve(b);
+    await flush();
+    useVoiceStore.getState().toggleMute(); // muted while the new device's pipeline starts
+    pipeline.resolve(b);
+    await flush();
+
+    expect(useVoiceStore.getState().localStream).toBe(a);
+    expect(useVoiceStore.getState().selfMute).toBe(true);
+    expect(a.track.enabled).toBe(false);
+    expect(b.track.stop).toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  it('a device that cannot be opened: the picker goes back to the device the call uses, and no new switch starts', async () => {
+    const a = fakeStream('a');
+    await joinedOn(a);
+    pick('mic-b');
+    answer('mic-b').reject(overconstrained());
+    await flush();
+
+    expect(useSettingsStore.getState().audioInputDeviceId).toBe('mic-a');
+    expect(useVoiceStore.getState().localStream).toBe(a);
+    expect(pendingMics).toEqual([]); // the revert opened nothing
+    expect(toast.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused track swap: the picker goes back to the device the call uses', async () => {
+    const [a, b] = [fakeStream('a'), fakeStream('b')];
+    await joinedOn(a);
+    const mic = fakeProducer('audio');
+    mic.replaceTrack.mockRejectedValueOnce(new Error('InvalidStateError'));
+    useVoiceStore.setState({ msProducers: new Map<string, Producer>([[mic.id, mic as unknown as Producer]]) });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    pick('mic-b');
+    answer('mic-b').resolve(b);
+    await flush();
+
+    expect(useSettingsStore.getState().audioInputDeviceId).toBe('mic-a');
+    expect(useVoiceStore.getState().localStream).toBe(a);
+    expect(pendingMics).toEqual([]);
+    errors.mockRestore();
+  });
+
+  it('a join whose saved device cannot be opened tries the system default once, with no listen-only notice', async () => {
+    const dflt = fakeStream('default');
+    const join = useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: false });
+    await flush();
+    answer('mic-a').reject(overconstrained());
+    await flush();
+    answer('').resolve(dflt);
+    await join;
+
+    expect(useVoiceStore.getState().localStream).toBe(dflt);
+    expect(toast.warning).not.toHaveBeenCalledWith('voice.toasts.micDenied');
+    expect(socket.emit).toHaveBeenCalledWith('voice:join', 'ch-1', expect.objectContaining({ selfMute: false }));
+    // The saved choice is kept (the device may come back), and no switch chases it
+    expect(useSettingsStore.getState().audioInputDeviceId).toBe('mic-a');
+    expect(pendingMics).toEqual([]);
+  });
+
+  describe('a join that fell back to the system default', () => {
+    /** The system default's stream, reporting the device actually opened. */
+    const defaultMic = (deviceId: string | undefined) => {
+      const s = fakeStream('default');
+      Object.assign(s.track, { getSettings: () => (deviceId === undefined ? {} : { deviceId }) });
+      return s;
+    };
+    async function joinFallingBack(dflt: FakeStream, join: () => Promise<void> = () => useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: false })) {
+      const joining = join();
+      await flush();
+      answer('mic-a').reject(overconstrained());
+      await flush();
+      answer('').resolve(dflt);
+      await joining;
+      await flush();
+    }
+
+    it('tells the user once that the system default is in use, and keeps the saved choice', async () => {
+      await joinFallingBack(defaultMic('dev-default'));
+
+      expect(toast.warning).toHaveBeenCalledTimes(1);
+      expect(toast.warning).toHaveBeenCalledWith('voice.toasts.micDefaultInUse');
+      expect(useSettingsStore.getState().audioInputDeviceId).toBe('mic-a');
+      expect(useSettingsStore.getState().setAudioInputDeviceId).not.toHaveBeenCalled();
+    });
+
+    it('a failed switch afterwards puts the picker back on the device actually opened, not the saved one', async () => {
+      await joinFallingBack(defaultMic('dev-default'));
+      pick('mic-c');
+      answer('mic-c').reject(overconstrained());
+      await flush();
+
+      expect(useSettingsStore.getState().audioInputDeviceId).toBe('dev-default');
+      expect(pendingMics).toEqual([]);
+    });
+
+    it('a browser that does not say which device it opened: the picker goes back to the system default', async () => {
+      await joinFallingBack(defaultMic(undefined));
+      pick('mic-c');
+      answer('mic-c').reject(overconstrained());
+      await flush();
+
+      expect(useSettingsStore.getState().audioInputDeviceId).toBe('');
+    });
+
+    it('a DM call says it too', async () => {
+      await joinFallingBack(defaultMic('dev-default'), () => useVoiceStore.getState().joinDMCall('conv-1'));
+      expect(toast.warning).toHaveBeenCalledWith('voice.toasts.micDefaultInUse');
+      expect(toast.warning).toHaveBeenCalledTimes(1);
+      useVoiceStore.getState().leaveDMCall();
+    });
+
+    it('a join that opened the saved device says nothing of the kind; a saved "system default" stays the system default', async () => {
+      const a = fakeStream('a');
+      Object.assign(a.track, { getSettings: () => ({ deviceId: 'mic-a' }) });
+      await joinedOn(a);
+      expect(toast.warning).not.toHaveBeenCalled();
+      useVoiceStore.getState().leaveChannel();
+
+      useSettingsStore.setState({ audioInputDeviceId: '' });
+      const join = useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: false });
+      await flush();
+      answer('').resolve(defaultMic('dev-default'));
+      await join;
+      pick('mic-c');
+      answer('mic-c').reject(overconstrained());
+      await flush();
+      expect(toast.warning).not.toHaveBeenCalled();
+      expect(useSettingsStore.getState().audioInputDeviceId).toBe('');
+    });
+
+    it('and RNNoise failing at that start: the device actually opened is opened again, with one notice of each kind', async () => {
+      aa.applyNoiseSuppression.mockImplementationOnce(async (stream: MediaStream) => {
+        failure('start', stream);
+        return stream;
+      });
+      const reopened = fakeStream('reopened');
+      const joining = useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: false });
+      await flush();
+      answer('mic-a').reject(overconstrained());
+      await flush();
+      answer('').resolve(defaultMic('dev-default'));
+      await flush();
+      answer('dev-default').resolve(reopened);
+      await joining;
+
+      expect(pendingMics).toEqual([]);
+      expect(useVoiceStore.getState().localStream).toBe(reopened);
+      expect(toast.warning).toHaveBeenCalledTimes(2);
+      expect(toast.warning).toHaveBeenCalledWith('voice.toasts.noiseSuppressionUnavailable');
+      expect(toast.warning).toHaveBeenCalledWith('voice.toasts.micDefaultInUse');
+    });
+
+    it('a socket reconnect that re-opens the microphone on the system default says so too', async () => {
+      const dead = fakeStream('dead');
+      dead.track.readyState = 'ended';
+      useVoiceStore.setState({ activeChannelId: 'ch-1', activeVoiceServerId: 'srv-1', localStream: dead });
+      const done = reconnectHandler();
+      await flush();
+      answer('mic-a').reject(overconstrained());
+      await flush();
+      answer('').resolve(defaultMic('dev-default'));
+      await done;
+      await flush();
+
+      expect(toast.warning).toHaveBeenCalledWith('voice.toasts.micDefaultInUse');
+      pick('mic-c');
+      answer('mic-c').reject(overconstrained());
+      await flush();
+      expect(useSettingsStore.getState().audioInputDeviceId).toBe('dev-default');
+    });
+  });
+
+  it('a join refused the microphone does not retry: listen-only, with its notice', async () => {
+    const join = useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: false });
+    await flush();
+    answer('mic-a').reject(notAllowed());
+    await join;
+
+    expect(pendingMics).toEqual([]);
+    expect(useVoiceStore.getState().localStream).toBeNull();
+    expect(toast.warning).toHaveBeenCalledWith('voice.toasts.micDenied');
+  });
+
+  it('a device chosen while a join opens the microphone is switched to once the join is through', async () => {
+    const [a, b] = [fakeStream('a'), fakeStream('b')];
+    const join = useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: false });
+    await flush();
+    pick('mic-b'); // not in a call yet: the subscription cannot act on it
+    answer('mic-a').resolve(a);
+    await join;
+    await flush();
+    answer('mic-b').resolve(b);
+    await flush();
+
+    expect(useVoiceStore.getState().localStream).toBe(b);
+    expect(a.track.stop).toHaveBeenCalled();
+  });
+
+  it('a device picked during a DM join\'s last steps (already counted as in a call) is opened once, not twice', async () => {
+    const [a, b] = [fakeStream('a'), fakeStream('b')];
+    const join = useVoiceStore.getState().joinDMCall('conv-1');
+    await flush();
+    answer('mic-a').resolve(a);
+    for (let i = 0; i < 500 && !useVoiceStore.getState().dmCallConversationId; i++) await Promise.resolve();
+    expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+    expect(socket.emit).not.toHaveBeenCalledWith('dm:voice:join', expect.anything(), expect.anything());
+    pick('mic-b'); // the subscription starts this switch
+    await join;
+    await flush();
+
+    expect(pendingMics.filter((p) => p.deviceId === 'mic-b')).toHaveLength(1);
+    answer('mic-b').resolve(b);
+    await flush();
+    expect(useVoiceStore.getState().localStream).toBe(b);
+    useVoiceStore.getState().leaveDMCall();
+  });
+
+  describe('a call joined listen-only gets a working microphone', () => {
+    /** A send transport whose produce() hands the encrypt hook a sender first, like mediasoup-client. */
+    function sendTransportFor(producer: ReturnType<typeof fakeProducer>) {
+      const sender = { kind: 'rtp-sender' };
+      return {
+        sender,
+        transport: {
+          id: 'send',
+          closed: false,
+          close: vi.fn(),
+          produce: vi.fn(async (opts: { track: unknown; onRtpSender?: (s: unknown) => void }) => {
+            opts.onRtpSender?.(sender);
+            return { ...producer, track: opts.track };
+          }),
+        },
+      };
+    }
+
+    it('server voice: the mic producer is made on the existing send transport', async () => {
+      const b = fakeStream('b');
+      const mic = fakeProducer('audio');
+      const { transport } = sendTransportFor(mic);
+      useVoiceStore.setState({
+        activeChannelId: 'ch-1', localStream: null, selfMute: true, // a listen-only join is muted
+        msSendTransport: transport as never, msDevice: { canProduce: () => true } as never,
+      });
+      aa.startSpeakingDetection.mockImplementation((stream: MediaStream, mode = 'server') => { aa.state.mode = mode; aa.state.gated = fakeStream(`gated-${stream.id}`); });
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+
+      expect(transport.produce).toHaveBeenCalledWith(expect.objectContaining({ track: aa.state.gated!.getAudioTracks()[0], appData: { type: 'audio' } }));
+      expect([...useVoiceStore.getState().msProducers.keys()]).toEqual([mic.id]);
+      // Still muted, as the UI says: unmuting opens it
+      expect(b.track.enabled).toBe(false);
+    });
+
+    it('a secure voice channel: the encrypt transform is attached to the sender before anything is sent', async () => {
+      const b = fakeStream('b');
+      const mic = fakeProducer('audio');
+      const { transport, sender } = sendTransportFor(mic);
+      const frames = { onFatal: vi.fn(), attachSender: vi.fn() };
+      vi.mocked(beginSecureVoiceSession).mockResolvedValueOnce({ frames, deviceId: 'device-me000001', epoch: 'epochME000001' } as never);
+      const join = useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: true });
+      await flush();
+      answer('mic-a').reject(notAllowed()); // listen-only secure join
+      await join;
+      useVoiceStore.setState({ msSendTransport: transport as never, msDevice: { canProduce: () => true } as never });
+
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+
+      expect(frames.attachSender).toHaveBeenCalledWith(sender);
+      expect(useVoiceStore.getState().msProducers.size).toBe(1);
+      expect(useVoiceStore.getState().activeChannelId).toBe('ch-1');
+      useVoiceStore.getState().leaveChannel();
+    });
+
+    it('a secure voice channel whose transform cannot attach: the producer is closed and the channel left (fail closed)', async () => {
+      const b = fakeStream('b');
+      const mic = fakeProducer('audio');
+      const { transport } = sendTransportFor(mic);
+      const frames = { onFatal: vi.fn(), attachSender: vi.fn(() => { throw new Error('no transform in this engine'); }) };
+      vi.mocked(beginSecureVoiceSession).mockResolvedValueOnce({ frames, deviceId: 'device-me000001', epoch: 'epochME000001' } as never);
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const join = useVoiceStore.getState().joinChannel('ch-1', 'srv-1', { secure: true });
+      await flush();
+      answer('mic-a').reject(notAllowed());
+      await join;
+      useVoiceStore.setState({ msSendTransport: transport as never, msDevice: { canProduce: () => true } as never });
+
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+
+      expect(frames.attachSender).toHaveBeenCalled();
+      expect(mic.close).toHaveBeenCalled();
+      expect(useVoiceStore.getState().msProducers.size).toBe(0);
+      expect(useVoiceStore.getState().activeChannelId).toBeNull();
+      expect(toast.error).toHaveBeenCalledWith('secureVoice.sessionFailed');
+      errors.mockRestore();
+    });
+
+    it('a DM call: the new microphone is added to each peer, which renegotiates', async () => {
+      const b = fakeStream('b');
+      const addTrack = vi.fn();
+      const peer = { pc: { getSenders: () => [], addTrack, close: vi.fn() }, makingOffer: false, pendingCandidates: [] };
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', localStream: null, peers: new Map([['peer-1', peer as never]]) });
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+
+      expect(addTrack).toHaveBeenCalledWith(b.track, expect.anything());
+      expect(useVoiceStore.getState().localStream).toBe(b);
+    });
+
+    /** Listen-only in a voice channel with a send transport; the switch to B opens, its pipeline start held. */
+    async function switchHeldInListenOnly(b: FakeStream) {
+      const mic = fakeProducer('audio');
+      const { transport } = sendTransportFor(mic);
+      useVoiceStore.setState({
+        activeChannelId: 'ch-1', localStream: null, selfMute: true,
+        msSendTransport: transport as never, msDevice: { canProduce: () => true } as never,
+      });
+      aa.startSpeakingDetection.mockImplementation((stream: MediaStream, mode = 'server') => { aa.state.mode = mode; aa.state.gated = fakeStream(`gated-${stream.id}`); });
+      const held = deferred<MediaStream>();
+      aa.applyNoiseSuppression.mockImplementationOnce(() => held.promise);
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+      expect(useVoiceStore.getState().localStream).toBe(b);
+      return { mic, transport, held };
+    }
+
+    it('the switch\'s rebuild taken over by the noise-suppression toggle: the rebuild that finishes sends the microphone', async () => {
+      const b = fakeStream('b');
+      const { mic, transport, held } = await switchHeldInListenOnly(b);
+      useSettingsStore.getState().setEnableNoiseSuppression(false); // a rebuild of its own, on B
+      await flush();
+      held.resolve(b);
+      await flush();
+
+      expect(transport.produce).toHaveBeenCalledTimes(1);
+      expect(transport.produce).toHaveBeenCalledWith(expect.objectContaining({ appData: { type: 'audio' } }));
+      expect([...useVoiceStore.getState().msProducers.keys()]).toEqual([mic.id]);
+    });
+
+    it('the switch\'s rebuild taken over by the noise-suppression fallback: the fallback\'s rebuild sends the microphone', async () => {
+      const b = fakeStream('b');
+      const { mic, transport, held } = await switchHeldInListenOnly(b);
+      aa.state.mode = 'server';
+      failure('running', b);
+      await flush();
+      held.resolve(b);
+      await flush();
+
+      expect(transport.produce).toHaveBeenCalledTimes(1);
+      expect([...useVoiceStore.getState().msProducers.keys()]).toEqual([mic.id]);
+    });
+
+    it('a produce the server refuses: the user is told, as at a join, and the switch still completes', async () => {
+      const b = fakeStream('b');
+      const { transport } = sendTransportFor(fakeProducer('audio'));
+      transport.produce.mockRejectedValueOnce(new Error('Producer creation failed'));
+      useVoiceStore.setState({
+        activeChannelId: 'ch-1', localStream: null, selfMute: true,
+        msSendTransport: transport as never, msDevice: { canProduce: () => true } as never,
+      });
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+
+      expect(transport.produce).toHaveBeenCalledTimes(1);
+      expect(toast.error).toHaveBeenCalledWith('voice.toasts.establishFailed');
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('[Voice SFU]'), expect.any(Error));
+      expect(useVoiceStore.getState().localStream).toBe(b);
+      expect(b.track.stop).not.toHaveBeenCalled();
+      errors.mockRestore();
+    });
+
+    it('a peer that already sends audio is left alone (the swap gave it the new track)', async () => {
+      const [a, b] = [fakeStream('a'), fakeStream('b')];
+      const { sender, peer } = fakePeer();
+      const addTrack = vi.fn();
+      (peer.pc as unknown as { addTrack: typeof addTrack }).addTrack = addTrack;
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1', localStream: a, peers: new Map([['peer-1', peer as never]]) });
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+
+      expect(sender.replaceTrack).toHaveBeenLastCalledWith(b.track);
+      expect(addTrack).not.toHaveBeenCalled();
+    });
   });
 });

@@ -1008,7 +1008,9 @@
       "deafenedByModerator": "Un modérateur a coupé votre son",
       "screenShareFailed": "Échec du partage d'écran — veuillez réessayer",
       "micIssue": "Problème de micro détecté — essayez de rejoindre le salon vocal à nouveau",
-      "noiseSuppressionUnavailable": "La suppression du bruit est indisponible pour le moment — votre micro continue de fonctionner sans elle."
+      "noiseSuppressionUnavailable": "La suppression du bruit est indisponible pour le moment — votre micro continue de fonctionner sans elle.",
+      "micSwitchFailed": "Impossible de passer au micro sélectionné — vous utilisez toujours le précédent",
+      "micDefaultInUse": "Impossible d’ouvrir le micro sélectionné — le micro par défaut du système est utilisé"
     }
   },
   "attachment": {

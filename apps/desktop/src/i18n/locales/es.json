@@ -1008,7 +1008,9 @@
       "deafenedByModerator": "Un moderador te ha silenciado el audio",
       "screenShareFailed": "No se pudo compartir la pantalla: inténtalo de nuevo",
       "micIssue": "Se detectó un problema con el micrófono: intenta volver a unirte a la voz",
-      "noiseSuppressionUnavailable": "La supresión de ruido no está disponible por ahora: tu micrófono sigue funcionando sin ella."
+      "noiseSuppressionUnavailable": "La supresión de ruido no está disponible por ahora: tu micrófono sigue funcionando sin ella.",
+      "micSwitchFailed": "No se pudo cambiar al micrófono seleccionado: sigues usando el anterior",
+      "micDefaultInUse": "No se pudo abrir el micrófono seleccionado: se está usando el micrófono predeterminado del sistema"
     }
   },
   "attachment": {

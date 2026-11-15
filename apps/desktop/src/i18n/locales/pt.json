@@ -1008,7 +1008,9 @@
       "deafenedByModerator": "Você foi ensurdecido por um moderador",
       "screenShareFailed": "Falha no compartilhamento de tela — tente novamente",
       "micIssue": "Problema no microfone detectado — tente entrar na voz novamente",
-      "noiseSuppressionUnavailable": "A supressão de ruído está indisponível no momento — seu microfone continua funcionando sem ela."
+      "noiseSuppressionUnavailable": "A supressão de ruído está indisponível no momento — seu microfone continua funcionando sem ela.",
+      "micSwitchFailed": "Não foi possível trocar para o microfone selecionado — você continua usando o anterior",
+      "micDefaultInUse": "Não foi possível abrir o microfone selecionado — o microfone padrão do sistema está em uso"
     }
   },
   "attachment": {
