@@ -1007,7 +1007,8 @@
       "mutedByModerator": "Du wurdest von einem Moderator stummgeschaltet",
       "deafenedByModerator": "Du wurdest von einem Moderator lautlos geschaltet",
       "screenShareFailed": "Bildschirmfreigabe fehlgeschlagen — bitte versuche es erneut",
-      "micIssue": "Mikrofonproblem erkannt — versuche, dem Sprachkanal erneut beizutreten"
+      "micIssue": "Mikrofonproblem erkannt — versuche, dem Sprachkanal erneut beizutreten",
+      "noiseSuppressionUnavailable": "Die Rauschunterdrückung ist gerade nicht verfügbar — dein Mikrofon funktioniert ohne sie weiter."
     }
   },
   "attachment": {

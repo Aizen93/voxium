@@ -1007,7 +1007,8 @@
       "mutedByModerator": "You have been muted by a moderator",
       "deafenedByModerator": "You have been deafened by a moderator",
       "screenShareFailed": "Screen share failed — please try again",
-      "micIssue": "Microphone issue detected — try rejoining voice"
+      "micIssue": "Microphone issue detected — try rejoining voice",
+      "noiseSuppressionUnavailable": "Noise suppression is unavailable for now — your microphone keeps working without it."
     }
   },
   "attachment": {

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { Device } from 'mediasoup-client';
 import type { Transport, Producer, Consumer, RtpCapabilities, IceParameters, IceCandidate, DtlsParameters, RtpParameters } from 'mediasoup-client/types';
 import { getSocket, onSocketReconnect } from '../services/socket';
-import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused } from '../services/audioAnalyser';
+import { startSpeakingDetection, stopSpeakingDetection, setNoiseGateThreshold, getGatedStream, setNoiseSuppression, onSpeakingChange, applyNoiseSuppression, getSuppressedStream, stopNoiseSuppression, setSpeakingDetectionPaused, onNoiseSuppressionFailure, getSpeakingDetectionMode } from '../services/audioAnalyser';
 import { useSettingsStore, VOICE_QUALITY_BITRATE } from './settingsStore';
 import { toast } from './toastStore';
 import { teardownComposite, prepareComposite, attachCompositeProducerHandles } from '../services/screenComposite';
@@ -558,6 +558,17 @@ function pinDMCallPeer(conversationId: string, peer: CallPeerDevice) {
   });
 }
 
+/**
+ * The constraints every microphone is opened with. The browser's own noise
+ * suppression is the inverse of RNNoise: off when RNNoise will run (two noise
+ * gates in series degrade the voice), on when RNNoise is off or unavailable
+ * this session. It takes effect only at getUserMedia: asked for on a live
+ * track, Chromium accepts the change and keeps processing as it was opened.
+ */
+function micConstraints(noiseSuppression: boolean): MediaTrackConstraints {
+  return { echoCancellation: true, noiseSuppression, autoGainControl: true };
+}
+
 /** Acquire a mic audio stream using the user's preferred input device. */
 async function acquireAudioStream(): Promise<MediaStream | null> {
   try {
@@ -566,21 +577,222 @@ async function acquireAudioStream(): Promise<MediaStream | null> {
       return null;
     }
     const settings = useSettingsStore.getState();
-    const audioConstraints: MediaTrackConstraints = {
-      echoCancellation: true,
-      // Invert: when our RNNoise ML suppression is enabled, disable the browser's
-      // built-in noiseSuppression to avoid double-processing (two noise gates in
-      // series degrade voice quality). When RNNoise is off, enable the browser's
-      // built-in as a fallback.
-      noiseSuppression: !settings.enableNoiseSuppression,
-      autoGainControl: true,
-    };
+    const audioConstraints = micConstraints(!rnnoiseWanted());
     if (settings.audioInputDeviceId) {
       audioConstraints.deviceId = { exact: settings.audioInputDeviceId };
     }
     return await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   } catch (err) {
     console.warn('[Voice] Microphone access denied, joining in listen-only mode:', err);
+    toast.warning(i18n.t('voice.toasts.micDenied'));
+    return null;
+  }
+}
+
+// ─── The microphone pipeline ────────────────────────────────────────────────
+// Noise suppression and speaking detection are module-level singletons in
+// audioAnalyser. A join, the noise-suppression toggle, an input-device change,
+// a noise-suppression failure and a socket reconnect all rebuild them: one
+// generation orders those rebuilds, so the latest wins and an older one stops
+// touching the singletons after its next await.
+let micPipelineGeneration = 0;
+
+/** `superseded`: a newer rebuild or another voice session took over. */
+type MicPipelineResult = 'ok' | 'superseded' | 'swap-failed';
+
+/** RNNoise is to run: the user wants it and it has not failed in this app session. */
+function rnnoiseWanted(): boolean {
+  const settings = useSettingsStore.getState();
+  return settings.enableNoiseSuppression && !settings.noiseSuppressionUnavailable;
+}
+
+/**
+ * Ask the browser for its own noise suppression on the raw mic exactly when
+ * RNNoise does not run on it (off, failed this session, or a start that fell
+ * back): two suppressors in series degrade the voice, none lets the noise
+ * through. Best effort, asked only of a track that reports the setting and
+ * can take the value: Chromium accepts the change on a live track but keeps
+ * its processing until the mic is opened again (which asks for it at
+ * getUserMedia); a track with no such processing is left alone.
+ */
+function matchBrowserNoiseSuppression(stream: MediaStream, rnnoiseRuns: boolean) {
+  const want = !rnnoiseRuns;
+  for (const track of stream.getAudioTracks()) {
+    if (typeof track.applyConstraints !== 'function') continue;
+    const current = track.getSettings?.().noiseSuppression;
+    if (typeof current !== 'boolean' || current === want) continue;
+    const possible = track.getCapabilities?.().noiseSuppression;
+    if (Array.isArray(possible) && !possible.includes(want)) continue;
+    track.applyConstraints({ ...track.getConstraints?.(), noiseSuppression: want }).catch((err) => {
+      console.warn('[Voice] The browser refused to change its own noise suppression:', err);
+    });
+  }
+}
+
+/**
+ * Give a just-made mic producer the pipeline's CURRENT outgoing track (the
+ * gated stream, or the raw one) when it carries another: a rebuild that ran
+ * while produce() was in flight swapped only the producers already registered,
+ * and the track it ended sends nothing. replaceTrack keeps the RTCRtpSender,
+ * and with it a secure channel's frame transform.
+ */
+async function adoptCurrentMicTrack(producer: Producer): Promise<void> {
+  if (producer.closed) return;
+  const track = (getGatedStream() || useVoiceStore.getState().localStream)?.getAudioTracks()[0];
+  if (!track || track === producer.track || track.readyState !== 'live') return;
+  try {
+    await producer.replaceTrack({ track });
+    debugLog('[Voice SFU] Gave the new mic producer the current track');
+  } catch (err) {
+    console.error('[Voice SFU] Failed to give the new mic producer the current track:', err);
+  }
+}
+
+/** Server voice: the mic producer follows the noise gate (paused in silence,
+ *  resumed on speech), never while muted. The one speaking callback. */
+function followSpeakingWithMicProducer(speaking: boolean) {
+  const state = useVoiceStore.getState();
+  if (state.selfMute) return; // stay paused if muted
+  for (const producer of state.msProducers.values()) {
+    if (isMicProducer(producer) && !producer.closed) {
+      if (speaking) { producer.resume(); } else { producer.pause(); }
+    }
+  }
+}
+
+/**
+ * (Re)build noise suppression and speaking detection over `stream` for the
+ * current voice session, then give the new audio to whatever already sends:
+ * the mic producer (server voice, the gated stream) and the DM peers' audio
+ * senders (the suppressed stream, or the raw one). It keys on what exists, not
+ * on activeChannelId: a secure join builds its pipeline before it sets that,
+ * and its producer, made later, reads the gated stream itself.
+ *
+ * Tracks are swapped with replaceTrack on the existing producer and sender,
+ * never by producing again: the secure-voice frame transform lives on the
+ * RTCRtpSender, which replaceTrack keeps.
+ */
+async function rebuildMicPipeline(stream: MediaStream, mode: 'server' | 'dm'): Promise<MicPipelineResult> {
+  const generation = ++micPipelineGeneration;
+  const session = voiceSessionGeneration;
+  const current = () => generation === micPipelineGeneration && session === voiceSessionGeneration;
+
+  setNoiseGateThreshold(useSettingsStore.getState().noiseGateThreshold);
+  setNoiseSuppression(rnnoiseWanted());
+  const suppressed = await applyNoiseSuppression(stream);
+  if (!current()) return 'superseded';
+  matchBrowserNoiseSuppression(stream, suppressed !== stream);
+
+  onSpeakingChange(null);
+  stopSpeakingDetection();
+  // Speaking detection taps the suppressed stream (the raw one without suppression)
+  startSpeakingDetection(suppressed, mode);
+  if (mode === 'server') onSpeakingChange(followSpeakingWithMicProducer);
+
+  let swapFailed = false;
+  const { msProducers, peers } = useVoiceStore.getState();
+  const micProducers = [...msProducers.values()].filter((p) => isMicProducer(p) && !p.closed);
+  const producerTrack = (getGatedStream() || suppressed).getAudioTracks()[0];
+  if (micProducers.length > 0 && producerTrack?.readyState === 'live') {
+    for (const producer of micProducers) {
+      try {
+        await producer.replaceTrack({ track: producerTrack });
+        debugLog('[Voice SFU] Replaced the mic producer track after a pipeline rebuild');
+      } catch (err) {
+        console.error('[Voice SFU] Failed to replace track on producer:', err);
+        swapFailed = true;
+      }
+      if (!current()) return 'superseded';
+    }
+  }
+  const peerTrack = (getSuppressedStream() || stream).getAudioTracks()[0];
+  if (peers.size > 0 && peerTrack?.readyState === 'live') {
+    for (const [peerId, peerConn] of peers.entries()) {
+      const audioSender = peerConn.pc.getSenders().find((s) => s.track?.kind === 'audio');
+      if (!audioSender) continue;
+      try {
+        await audioSender.replaceTrack(peerTrack);
+        debugLog(`[DMVoice] Replaced audio track for peer ${peerId} after a pipeline rebuild`);
+      } catch (err) {
+        console.error(`[DMVoice] Failed to replace track for peer ${peerId}:`, err);
+        swapFailed = true;
+      }
+      if (!current()) return 'superseded';
+    }
+  }
+  return swapFailed ? 'swap-failed' : 'ok';
+}
+
+/**
+ * A join's microphone pipeline, built over the stream the join opened. When
+ * RNNoise fails at this very start, before the join sends anything, that
+ * stream was opened without the browser's own noise suppression (it is off
+ * while RNNoise is to run), and asking for it on the live track changes
+ * nothing in Chromium: the call would go out with no noise suppression at
+ * all. The microphone is then opened again with the browser's on and the
+ * pipeline rebuilt over it. A failure later in the call keeps the raw
+ * microphone until the next one is opened.
+ *
+ * Resolves the stream the join goes on with (null: listen-only, the user
+ * told), or `superseded` when a leave, another join or a newer rebuild took
+ * over during the re-open, which has then stopped what it opened.
+ */
+async function buildJoinMicPipeline(stream: MediaStream, mode: 'server' | 'dm'): Promise<MediaStream | null | 'superseded'> {
+  const rnnoiseTried = rnnoiseWanted();
+  const result = await rebuildMicPipeline(stream, mode);
+  // Failed at this start: it was to run, the failure listener has marked it
+  // unavailable meanwhile, and nothing runs (a context that did not render in
+  // time is not reported, and is left as it is)
+  const failedAtStart = rnnoiseTried && useSettingsStore.getState().noiseSuppressionUnavailable && getSuppressedStream() === null;
+  if (result === 'superseded' || !failedAtStart) return stream;
+
+  const generation = micPipelineGeneration;
+  const session = voiceSessionGeneration;
+  const overtaken = () => generation !== micPipelineGeneration || session !== voiceSessionGeneration;
+  const reopened = await reopenMicWithBrowserSuppression(stream, overtaken);
+  if (overtaken()) {
+    reopened?.getTracks().forEach((track) => track.stop());
+    return 'superseded';
+  }
+  if (!reopened) {
+    // Listen-only: the detector built on the stopped track goes with it
+    onSpeakingChange(null);
+    stopSpeakingDetection();
+    return null;
+  }
+  if (await rebuildMicPipeline(reopened, mode) === 'superseded') {
+    reopened.getTracks().forEach((track) => track.stop());
+    return 'superseded';
+  }
+  return reopened;
+}
+
+/**
+ * Open the microphone of `old` again, with the browser's own noise
+ * suppression on. The old track is stopped FIRST: while a source is live,
+ * Chromium hands a new getUserMedia that same source, processed as it was
+ * opened, so opening before stopping gives the same unsuppressed audio. The
+ * device is the one `old` was actually on. If that open fails, the microphone
+ * is opened again as before, without the browser's suppression (the old one
+ * is gone); if that fails too, null: the join goes on listen-only and the user
+ * is told, as when a join cannot open one. Nothing more is opened once
+ * `overtaken` says the join no longer owns the pipeline.
+ */
+async function reopenMicWithBrowserSuppression(old: MediaStream, overtaken: () => boolean): Promise<MediaStream | null> {
+  const deviceId = old.getAudioTracks()[0]?.getSettings?.().deviceId || useSettingsStore.getState().audioInputDeviceId;
+  const device: MediaTrackConstraints = deviceId ? { deviceId: { exact: deviceId } } : {};
+  old.getTracks().forEach((track) => track.stop());
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: { ...micConstraints(true), ...device } });
+  } catch (err) {
+    console.warn('[Voice] Could not open the microphone again with the browser\'s noise suppression, opening it as before:', err);
+  }
+  if (overtaken()) return null;
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: { ...micConstraints(false), ...device } });
+  } catch (err) {
+    if (overtaken()) return null;
+    console.warn('[Voice] Could not open the microphone again, joining in listen-only mode:', err);
     toast.warning(i18n.t('voice.toasts.micDenied'));
     return null;
   }
@@ -1039,9 +1251,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
-    setNoiseSuppression(settings.enableNoiseSuppression);
 
-    const stream = await acquireAudioStream();
+    let stream = await acquireAudioStream();
 
     // Superseded while acquiring the mic (rapid channel switch / leave) —
     // release the just-acquired stream or the OS records forever
@@ -1054,22 +1265,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // Apply RNNoise noise suppression (clean isolated pipeline)
-      await applyNoiseSuppression(stream);
-      // Speaking detection uses the suppressed stream (falls back to raw if suppression unavailable)
-      startSpeakingDetection(getSuppressedStream() || stream);
+      // RNNoise noise suppression, then speaking detection on its output (the
+      // raw stream when suppression is off or failed; failing at this start,
+      // the mic is opened again with the browser's own); the mic producer
+      // follows the noise gate
+      const built = await buildJoinMicPipeline(stream, 'server');
+      // Superseded while the pipeline started (a leave, another join): only
+      // this join's own streams are safe to touch, the winner owns the pipelines
+      if (built === 'superseded' || generation !== voiceSessionGeneration) {
+        stream.getTracks().forEach((track) => track.stop());
+        if (built !== 'superseded') built?.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      stream = built;
+    }
 
-      // Pause/resume audio producer based on noise gate speaking detection
-      onSpeakingChange((speaking) => {
-        const state = get();
-        if (state.selfMute) return; // stay paused if muted
-        for (const producer of state.msProducers.values()) {
-          if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
-            if (speaking) { producer.resume(); } else { producer.pause(); }
-          }
-        }
-      });
-
+    if (stream) {
       if (isPTT) {
         stream.getAudioTracks().forEach((track) => { track.enabled = false; });
       } else {
@@ -1451,6 +1662,11 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         if (selfMute) {
           producer.pause();
         }
+
+        // A pipeline rebuild that landed while produce() was in flight swapped
+        // only the producers it could see: this one may still carry a track
+        // that rebuild ended
+        await adoptCurrentMicTrack(producer);
 
         debugLog('[Voice SFU] Audio producer created:', producer.id);
       }
@@ -2461,9 +2677,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
     const settings = useSettingsStore.getState();
     setNoiseGateThreshold(settings.noiseGateThreshold);
-    setNoiseSuppression(settings.enableNoiseSuppression);
 
-    const stream = await acquireAudioStream();
+    let stream = await acquireAudioStream();
 
     // Superseded while acquiring the mic — release it (see joinChannel)
     if (generation !== voiceSessionGeneration) {
@@ -2475,11 +2690,20 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     const isPTT = settings.voiceMode === 'push_to_talk';
 
     if (stream) {
-      // Apply RNNoise noise suppression (clean isolated pipeline)
-      const suppressedStream = await applyNoiseSuppression(stream);
-      // Speaking detection taps into the suppressed stream (read-only side-chain)
-      startSpeakingDetection(suppressedStream, 'dm');
+      // RNNoise noise suppression, then speaking detection on its output
+      // (read-only side-chain; DM calls never gate). Failing at this start,
+      // the mic is opened again with the browser's own
+      const built = await buildJoinMicPipeline(stream, 'dm');
+      // Superseded while the pipeline started — release only this join's streams
+      if (built === 'superseded' || generation !== voiceSessionGeneration) {
+        stream.getTracks().forEach((track) => track.stop());
+        if (built !== 'superseded') built?.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      stream = built;
+    }
 
+    if (stream) {
       if (isPTT) {
         stream.getAudioTracks().forEach((track) => { track.enabled = false; });
       } else {
@@ -2762,153 +2986,68 @@ useSettingsStore.subscribe((state, prevState) => {
     const shouldDisable = isPTT || currentState.selfMute;
     newStream.getAudioTracks().forEach((track) => { track.enabled = !shouldDisable; });
 
-    // Rebuild audio pipeline with new stream
-    const mode = currentState.dmCallConversationId ? 'dm' : 'server';
-    onSpeakingChange(null);
-    stopSpeakingDetection();
-    stopNoiseSuppression();
-    setNoiseGateThreshold(useSettingsStore.getState().noiseGateThreshold);
-    setNoiseSuppression(useSettingsStore.getState().enableNoiseSuppression);
-
-    // Apply RNNoise noise suppression (clean isolated pipeline)
-    const suppressedStream = await applyNoiseSuppression(newStream);
-    // Speaking detection uses the suppressed stream
-    startSpeakingDetection(suppressedStream, mode);
-
     useVoiceStore.setState({ localStream: newStream });
 
-    // Re-check again after pipeline setup
-    const postState = useVoiceStore.getState();
-
-    // Replace track on mediasoup producer (SFU server voice)
-    if (postState.activeChannelId) {
-      const newTrack = (getGatedStream() || newStream)?.getAudioTracks()[0];
-      if (newTrack && newTrack.readyState === 'live') {
-        for (const producer of postState.msProducers.values()) {
-          if (producer.kind === 'audio' && !producer.closed && (producer.appData as Record<string, unknown>)?.type === 'audio') {
-            try {
-              await producer.replaceTrack({ track: newTrack });
-              debugLog('[Voice SFU] Replaced audio track on producer after input device change');
-            } catch (err) {
-              console.error('[Voice SFU] Failed to replace track on producer:', err);
-              toast.error(i18n.t('voice.toasts.micIssue'));
-            }
-          }
-        }
-      }
-
-      // Re-register speaking change callback for the new pipeline
-      onSpeakingChange((speaking) => {
-        const s = useVoiceStore.getState();
-        if (s.selfMute) return;
-        for (const p of s.msProducers.values()) {
-          if (p.kind === 'audio' && !p.closed && (p.appData as Record<string, unknown>)?.type === 'audio') {
-            if (speaking) { p.resume(); } else { p.pause(); }
-          }
-        }
-      });
-    }
-
-    // Replace track on DM P2P peers — use RNNoise-suppressed stream
-    if (postState.dmCallConversationId) {
-      const newTrack = (getSuppressedStream() || newStream)?.getAudioTracks()[0];
-      if (newTrack && newTrack.readyState === 'live') {
-        for (const [peerId, peerConn] of postState.peers.entries()) {
-          const senders = peerConn.pc.getSenders();
-          const audioSender = senders.find((s) => s.track?.kind === 'audio');
-          if (audioSender) {
-            try {
-              await audioSender.replaceTrack(newTrack);
-              debugLog(`[DMVoice] Replaced audio track for peer ${peerId} after input device change`);
-            } catch (err) {
-              console.error(`[DMVoice] Failed to replace track for peer ${peerId}:`, err);
-            }
-          }
-        }
-      }
-    }
-  })();
+    // Rebuild the audio pipeline on the new stream and swap the outgoing tracks
+    const mode = currentState.dmCallConversationId ? 'dm' : 'server';
+    const result = await rebuildMicPipeline(newStream, mode);
+    if (result === 'swap-failed') toast.error(i18n.t('voice.toasts.micIssue'));
+  })().catch((err) => {
+    console.error('[Voice] Input device switch failed:', err);
+  });
 });
 
-// Handle live noise suppression toggle while in a call
-/** Generation counter — prevents stale async overlaps on rapid toggles. */
-let nsToggleGeneration = 0;
-
+// Handle live noise suppression toggle while in a call (rebuildMicPipeline
+// orders it against every other rebuild: the latest wins)
 useSettingsStore.subscribe((state, prevState) => {
   if (state.enableNoiseSuppression === prevState.enableNoiseSuppression) return;
+  // A toggle is the user asking again: an earlier failure this session no
+  // longer holds RNNoise off
+  if (state.noiseSuppressionUnavailable) state.setNoiseSuppressionUnavailable(false);
 
   const voiceState = useVoiceStore.getState();
   if (!voiceState.activeChannelId && !voiceState.dmCallConversationId) return;
   if (!voiceState.localStream) return;
 
-  const localStream = voiceState.localStream;
-  const gen = ++nsToggleGeneration;
+  const mode = voiceState.dmCallConversationId ? 'dm' : 'server';
+  rebuildMicPipeline(voiceState.localStream, mode).catch((err) => {
+    console.error('[Voice] Noise suppression toggle failed:', err);
+  });
+});
 
-  (async () => {
-    // Rebuild the suppression pipeline with new setting
-    stopNoiseSuppression();
-    setNoiseSuppression(state.enableNoiseSuppression);
-    const suppressedStream = await applyNoiseSuppression(localStream);
+/** The unavailability notice is shown once per app session. */
+let noiseSuppressionNoticeShown = false;
 
-    // Abort if a newer toggle happened during the await
-    if (gen !== nsToggleGeneration) return;
+/** Test-only: a fresh app session as far as that notice goes. */
+export function _resetNoiseSuppressionNoticeForTests(): void {
+  noiseSuppressionNoticeShown = false;
+}
 
-    // Re-check: user may have left during async work
-    const current = useVoiceStore.getState();
-    if (!current.activeChannelId && !current.dmCallConversationId) return;
-
-    // Rebuild speaking detection on the (now suppressed or raw) stream
-    const mode = current.dmCallConversationId ? 'dm' : 'server';
-    onSpeakingChange(null);
-    stopSpeakingDetection();
-    startSpeakingDetection(suppressedStream, mode);
-
-    // Re-register SFU producer pause/resume callback
-    if (current.activeChannelId) {
-      onSpeakingChange((speaking) => {
-        const s = useVoiceStore.getState();
-        if (s.selfMute) return;
-        for (const p of s.msProducers.values()) {
-          if (p.kind === 'audio' && !p.closed && (p.appData as Record<string, unknown>)?.type === 'audio') {
-            if (speaking) { p.resume(); } else { p.pause(); }
-          }
-        }
-      });
-
-      // Replace SFU producer track with new processed stream
-      const newTrack = (getGatedStream() || suppressedStream)?.getAudioTracks()[0];
-      if (newTrack && newTrack.readyState === 'live') {
-        for (const producer of current.msProducers.values()) {
-          if (producer.kind === 'audio' && !producer.closed && (producer.appData as Record<string, unknown>)?.type === 'audio') {
-            try {
-              await producer.replaceTrack({ track: newTrack });
-            } catch (err) {
-              console.error('[Voice SFU] Failed to replace track after noise suppression toggle:', err);
-            }
-            if (gen !== nsToggleGeneration) return;
-          }
-        }
-      }
-    }
-
-    // Replace DM P2P peer tracks with new processed stream
-    if (current.dmCallConversationId) {
-      const newTrack = (getSuppressedStream() || localStream)?.getAudioTracks()[0];
-      if (newTrack && newTrack.readyState === 'live') {
-        for (const [, peerConn] of current.peers.entries()) {
-          const sender = peerConn.pc.getSenders().find((s) => s.track?.kind === 'audio');
-          if (sender) {
-            try {
-              await sender.replaceTrack(newTrack);
-            } catch (err) {
-              console.error('[DMVoice] Failed to replace track after noise suppression toggle:', err);
-            }
-            if (gen !== nsToggleGeneration) return;
-          }
-        }
-      }
-    }
-  })();
+// Noise suppression failed: its worklet did not load or its processor threw,
+// at the start of a pipeline (that caller already went on with the raw mic)
+// or during the call (the outgoing audio went silent: rebuild on the raw mic
+// and swap the tracks). For the rest of this app session pipelines run on the
+// raw mic, with the browser's own suppression asked for. The saved preference
+// is NEVER changed: it is tried again at the next app start, or when the user
+// toggles it; Settings says it is not active meanwhile. Told once per session.
+onNoiseSuppressionFailure(({ phase, reason, rawStream }) => {
+  console.warn(`[NoiseSuppression] Unavailable for this session (${phase}, ${reason}): the mic goes out without it`);
+  setNoiseSuppression(false);
+  useSettingsStore.getState().setNoiseSuppressionUnavailable(true);
+  if (!noiseSuppressionNoticeShown) {
+    noiseSuppressionNoticeShown = true;
+    toast.warning(i18n.t('voice.toasts.noiseSuppressionUnavailable'));
+  }
+  if (phase !== 'running') return;
+  // The kind of pipeline that was running, read from the detector itself: a
+  // secure join builds its pipeline before activeChannelId is set
+  const mode = getSpeakingDetectionMode();
+  if (!mode) return; // nothing running: the call ended meanwhile
+  rebuildMicPipeline(rawStream, mode).then((result) => {
+    if (result === 'swap-failed') toast.error(i18n.t('voice.toasts.micIssue'));
+  }).catch((err) => {
+    console.error('[NoiseSuppression] Fallback to the raw mic failed:', err);
+  });
 });
 
 // Handle live voice mode switching while in a voice channel or DM call
@@ -2968,6 +3107,8 @@ onSocketReconnect(async () => {
   if (!socket) return;
 
   if (!activeChannelId && !dmCallConversationId) return;
+  // A leave or another join while this handler awaits ends this re-join
+  const session = voiceSessionGeneration;
 
   // Reset transport rejoin counter — socket reconnect is a fresh connection
   transportRejoinAttempts = 0;
@@ -3006,8 +3147,20 @@ onSocketReconnect(async () => {
       localStream.getTracks().forEach((t) => t.stop());
     }
     const newStream = await acquireAudioStream();
-    localStream = newStream;
-    useVoiceStore.setState({ localStream: newStream });
+    if (session !== voiceSessionGeneration) {
+      // The call ended (or another began) while the mic opened: nothing to re-join
+      newStream?.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    const meanwhile = useVoiceStore.getState().localStream;
+    if (meanwhile !== localStream) {
+      // A device switch installed a stream meanwhile: it is the live one
+      newStream?.getTracks().forEach((t) => t.stop());
+      localStream = meanwhile;
+    } else {
+      localStream = newStream;
+      useVoiceStore.setState({ localStream: newStream });
+    }
   }
 
   const { selfMute, selfDeaf } = useVoiceStore.getState();
@@ -3020,31 +3173,21 @@ onSocketReconnect(async () => {
     localStream.getAudioTracks().forEach((track) => { track.enabled = !shouldDisable; });
   }
 
-  // Restart audio pipelines BEFORE emitting voice:join
+  // Restart audio pipelines BEFORE emitting voice:join (the producer and the
+  // peers are made again afterwards, from the new pipeline's streams)
   if (localStream) {
+    const mode = dmCallConversationId ? 'dm' : 'server';
     try {
-      setNoiseGateThreshold(settings.noiseGateThreshold);
-      setNoiseSuppression(settings.enableNoiseSuppression);
-      const suppressedStream = await applyNoiseSuppression(localStream);
-      startSpeakingDetection(suppressedStream, dmCallConversationId ? 'dm' : 'server');
+      await rebuildMicPipeline(localStream, mode);
     } catch (err) {
       console.error('[Voice] Audio pipeline rebuild failed on reconnect:', err);
       // Fallback: use raw stream for speaking detection
-      startSpeakingDetection(localStream, dmCallConversationId ? 'dm' : 'server');
+      startSpeakingDetection(localStream, mode);
+      if (mode === 'server') onSpeakingChange(followSpeakingWithMicProducer);
     }
-
-    // Re-register producer pause/resume callback for silence detection (server voice only)
-    if (activeChannelId) {
-      onSpeakingChange((speaking) => {
-        const state = useVoiceStore.getState();
-        if (state.selfMute) return;
-        for (const producer of state.msProducers.values()) {
-          if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
-            if (speaking) { producer.resume(); } else { producer.pause(); }
-          }
-        }
-      });
-    }
+    // The call ended (or another began) while the pipeline started: there is
+    // nothing to re-join, and the new session owns the pipelines
+    if (session !== voiceSessionGeneration) return;
   }
 
   if (activeChannelId) {

@@ -1007,7 +1007,8 @@
       "mutedByModerator": "Un moderador te ha silenciado",
       "deafenedByModerator": "Un moderador te ha silenciado el audio",
       "screenShareFailed": "No se pudo compartir la pantalla: inténtalo de nuevo",
-      "micIssue": "Se detectó un problema con el micrófono: intenta volver a unirte a la voz"
+      "micIssue": "Se detectó un problema con el micrófono: intenta volver a unirte a la voz",
+      "noiseSuppressionUnavailable": "La supresión de ruido no está disponible por ahora: tu micrófono sigue funcionando sin ella."
     }
   },
   "attachment": {
