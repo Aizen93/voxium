@@ -1,0 +1,19 @@
+{
+  // This package is bundled into the desktop and admin apps as well as loaded by the
+  // server, so its code may use only names that the DOM library AND Node's types both
+  // declare. tsconfig.json builds it against Node's types and no DOM, which refuses
+  // `window`; this second pass (`pnpm typecheck` runs it; alone:
+  // `pnpm exec tsc -p tsconfig.browser.json`) checks the same code against the DOM and
+  // without Node's types, which refuses `process`, `Buffer` or a `node:` import. An
+  // error reported only by this pass means the code uses something a browser does not
+  // have: do not add "node" to `types`. typecheck/noNodeTypes.ts fails this pass the
+  // day Node's types come back by themselves, through a dependency's declarations.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "lib": ["ES2022", "DOM"],
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src/**/*", "typecheck/noNodeTypes.ts"]
+}

@@ -42,7 +42,7 @@ pnpm dev:admin    # Terminal 3 — admin dashboard on :8082 (optional)
 ### Useful Commands
 
 ```bash
-pnpm typecheck          # Type-check all packages (runs as pre-commit hook)
+pnpm typecheck          # Type-check all packages (CI runs it on every pull request)
 pnpm lint               # ESLint across all packages
 pnpm test:e2e           # Playwright E2E tests (requires backend + frontend running)
 pnpm test:e2e:headed    # E2E tests with visible browser
@@ -69,7 +69,7 @@ Voxium/
 
 1. Fork the repo and create a branch from `develop`
 2. Make your changes
-3. Run `pnpm typecheck` — this also runs as a pre-commit hook and must pass
+3. Run `pnpm typecheck` — CI runs it on every pull request and it must pass
 4. Run `pnpm test:e2e` if your changes affect user-facing behavior
 5. Open a PR against `develop` — PRs to `main` are only accepted from `develop`
 6. Fill in the pull request template, including the box that confirms the [contribution terms](#license-and-contributions)
@@ -84,6 +84,7 @@ Voxium/
 - **Sanitize user input** — all text stored in DB must pass through `sanitizeText()` before validation
 - **Rate limit new endpoints** — add a named limiter in `middleware/rateLimiter.ts`
 - **Type route params** — use `Request<{ serverId: string }>` not bare `Request`
+- **No Node API in browser code** — the code of the desktop and admin apps (`src/`, outside `src/__tests__`) and of `packages/shared` is type-checked a second time without Node's types (`tsconfig.browser.json`), so `process`, `Buffer` or a `node:` import there fails `pnpm typecheck`; a timer handle is `ReturnType<typeof setTimeout>`
 
 ### After Modifying...
 
@@ -92,7 +93,7 @@ Voxium/
 | `packages/shared/` | `pnpm build:shared` before consuming apps see changes |
 | `prisma/schema.prisma` | `cd apps/server && npx prisma migrate dev --name <name>` |
 | `apps/desktop/src-tauri/` (Rust or Cargo files) | `cd apps/desktop/src-tauri && cargo check --locked && cargo test --lib` — CI runs the same on Windows for every change there |
-| Any TypeScript | `pnpm typecheck` (automatic via pre-commit hook) |
+| Any TypeScript | `pnpm typecheck` (CI runs it on every pull request) |
 
 ### Commit Messages
 

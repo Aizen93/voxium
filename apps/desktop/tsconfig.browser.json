@@ -1,0 +1,17 @@
+{
+  // The code that runs in a browser, checked a second time without Node's types
+  // (`pnpm typecheck` runs it; alone, once `pnpm build:shared` has run:
+  // `pnpm exec tsc --noEmit -p tsconfig.browser.json`).
+  // tsconfig.json covers src/ together with the tests, which need those types, so by
+  // itself it accepts `process`, `Buffer` or a `node:` import in a component. An error
+  // reported only by this pass means the code uses something a browser does not
+  // have: do not add "node" to `types`. A timer handle is `ReturnType<typeof setTimeout>`.
+  // typecheck/noNodeTypes.ts fails this pass the day Node's types come back by
+  // themselves, through a dependency's declarations.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": []
+  },
+  "include": ["src", "typecheck/noNodeTypes.ts"],
+  "exclude": ["src/**/__tests__/**"]
+}
