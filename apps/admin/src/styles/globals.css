@@ -1,4 +1,15 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
+
+/* Where Tailwind looks for class names, relative to this file. Automatic
+ * detection is off (source(none) above): it read every file of the app folder
+ * that git does not ignore, other than CSS, binary and lock files, so a
+ * class-like word in a test, a config or a public file added CSS to the
+ * stylesheet that ships. The app's code is src without its tests (a class only
+ * a test names is never on screen), and index.html, the Vite root, carries the
+ * body's classes. Pinned by __tests__/meta/tailwindSources.test.ts. */
+@source "../";
+@source not "../__tests__";
+@source "../../index.html";
 
 @theme {
   /* Dark theme colors */
@@ -37,18 +48,12 @@
 
   /* Animations */
   --animate-pulse-ring: pulse-ring 1.5s ease-out infinite;
-  --animate-fade-in: fade-in 0.2s ease-out;
   --animate-slide-up: slide-up 0.2s ease-out;
   --animate-slide-in-right: slide-in-right 0.3s ease-out;
 
   @keyframes pulse-ring {
     0% { transform: scale(0.95); opacity: 1; }
     100% { transform: scale(1.3); opacity: 0; }
-  }
-
-  @keyframes fade-in {
-    0% { opacity: 0; }
-    100% { opacity: 1; }
   }
 
   @keyframes slide-up {
@@ -139,9 +144,4 @@
          text-vox-text-primary placeholder:text-vox-text-muted
          focus:border-vox-accent-primary focus:outline-none focus:ring-1 focus:ring-vox-accent-primary
          transition-colors duration-150;
-}
-
-@utility tooltip {
-  @apply absolute z-50 rounded-md bg-vox-bg-floating px-2 py-1 text-xs text-vox-text-primary
-         shadow-lg border border-vox-border animate-fade-in pointer-events-none;
 }
