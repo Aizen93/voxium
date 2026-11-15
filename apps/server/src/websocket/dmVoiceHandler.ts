@@ -4,6 +4,7 @@ import type { ServerToClientEvents, ClientToServerEvents, Message, DMSystemNotic
 import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
+import { applyLatestState, SPEAKING_INDICATOR_EVENTS_PER_MINUTE } from './latestStateLimit';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup, type SweepOptions } from '../utils/redis';
 import { shapeConversationMessageAuthor } from '../utils/messageAuthor';
@@ -462,6 +463,12 @@ export function handleDMVoiceEvents(
   socket: Socket<ClientToServerEvents, ServerToClientEvents>
 ) {
   const userId = socket.data.userId as string;
+  /** Counts this socket's entries into a DM call room (a fresh join or a
+   *  rebind): a held speaking state carries the count it was sent under. The
+   *  room check alone cannot tell a new call of the same conversation from the
+   *  one that ended, and an ending decided on another node reaches this one
+   *  only as that room leave. */
+  let callEntries = 0;
 
   socket.on('dm:voice:join', async (conversationId: string, state?: { selfMute: boolean; selfDeaf: boolean; deviceId?: string }) => {
     if (!socketRateLimit(socket, 'dm:voice:join', 10)) return;
@@ -502,6 +509,7 @@ export function handleDMVoiceEvents(
       // call or re-ringing the peer, then rehydrate this socket's participant view.
       const rebound = await updateDMVoiceUserSocket(conversationId, userId, socket.id, initialMute, initialDeaf, deviceId);
       if (rebound) {
+        callEntries++;
         socket.join(`dm:voice:${conversationId}`);
         socket.data.dmCallConversationId = conversationId;
         const rejoinUsers = await getDMVoiceUsers(conversationId);
@@ -544,6 +552,7 @@ export function handleDMVoiceEvents(
     }
 
     // Join the DM voice room
+    callEntries++;
     socket.join(`dm:voice:${conversationId}`);
     socket.data.dmCallConversationId = conversationId;
 
@@ -691,25 +700,33 @@ export function handleDMVoiceEvents(
   });
 
   socket.on('dm:voice:speaking', (speaking: boolean) => {
-    if (!socketRateLimit(socket, 'dm:voice:speaking', 120)) return;
     if (typeof speaking !== 'boolean') return;
     // Hot path — use socket.data for zero-latency local lookup
     const conversationId = socket.data.dmCallConversationId as string;
     if (!conversationId) return;
-    // socket.data outlives a call ended from elsewhere (endDMCall: a decline,
-    // a deleted conversation; the other side hanging up): it cannot reach a
-    // socket on another node. The call ROOM can, every ending makes the
-    // sockets leave it adapter-wide, and socket.rooms is this socket's own
-    // node's view of that: still local, still free, and right on every node.
-    if (!socket.rooms.has(`dm:voice:${conversationId}`)) {
-      socket.data.dmCallConversationId = undefined;
-      return;
-    }
+    const call = callEntries;
+    // Latest-wins: over the budget the state is held and sent when the window
+    // ends, so a choppy speaker's ring never freezes on a stale state
+    applyLatestState(socket, 'dm:voice:speaking', SPEAKING_INDICATOR_EVENTS_PER_MINUTE, () => {
+      // Read when sent: a held state can go out up to a minute later, and it
+      // belongs to the call it was sent in. Any later entry of this socket
+      // into a call drops it, a new call of the same conversation included
+      if (callEntries !== call || socket.data.dmCallConversationId !== conversationId) return;
+      // socket.data outlives a call ended from elsewhere (endDMCall: a decline,
+      // a deleted conversation; the other side hanging up): it cannot reach a
+      // socket on another node. The call ROOM can, every ending makes the
+      // sockets leave it adapter-wide, and socket.rooms is this socket's own
+      // node's view of that: still local, still free, and right on every node.
+      if (!socket.rooms.has(`dm:voice:${conversationId}`)) {
+        socket.data.dmCallConversationId = undefined;
+        return;
+      }
 
-    io.to(`dm:${conversationId}`).emit('dm:voice:speaking', {
-      conversationId,
-      userId,
-      speaking,
+      io.to(`dm:${conversationId}`).emit('dm:voice:speaking', {
+        conversationId,
+        userId,
+        speaking,
+      });
     });
   });
 

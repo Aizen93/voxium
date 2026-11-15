@@ -4,6 +4,7 @@ import type { WebRtcTransport, Producer, Consumer, DtlsParameters, RtpParameters
 import { prisma } from '../utils/prisma';
 import { leaveCurrentDMVoiceChannel } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
+import { applyLatestState, SPEAKING_EVENTS_PER_MINUTE, SPEAKING_INDICATOR_EVENTS_PER_MINUTE } from './latestStateLimit';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerRouters, getRouter } from '../mediasoup/mediasoupManager';
 import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
@@ -31,6 +32,17 @@ export const VOICE_SESSION_TAKEN_OVER = 'Your voice session moved to another dev
 /** Runtime type guard — returns false if value is not a non-empty string */
 function isString(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0;
+}
+
+/** Run a mediasoup producer pause/resume, logging a refusal (a producer closed
+ *  under the call) instead of leaving an unhandled rejection. */
+function runProducerOp(op: () => Promise<void> | void, what: string): void {
+  const reason = (err: unknown) => (err instanceof Error ? err.message : err);
+  try {
+    Promise.resolve(op()).catch((err) => console.warn(`[Voice] Mic producer ${what} failed:`, reason(err)));
+  } catch (err) {
+    console.warn(`[Voice] Mic producer ${what} failed:`, reason(err));
+  }
 }
 
 // ─── In-memory voice state ──────────────────────────────────────────────────
@@ -935,27 +947,42 @@ export function createVoiceHandlers(
   });
 
   // ── voice:speaking ────────────────────────────────────────────────────
+  // Two budgets, each latest-wins (applyLatestState) and counted apart: the
+  // producer state may never be lost to the indicator's limit, and an event
+  // over either budget is applied when its window ends instead of being
+  // dropped. The producer's sits well above what an honest client sends; the
+  // indicator's, which reaches every viewer of the channel, at that figure, so
+  // a choppy speaker's ring still follows them live.
   on('voice:speaking', (speaking: boolean) => {
-    if (!socketRateLimit(socket, 'voice:speaking', 120)) return;
     if (typeof speaking !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
-    // Only control producers if not self-muted AND not server-muted
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
-    if (userMedia && !userMedia.selfMute && !userMedia.serverMuted) {
+    // A held state belongs to the session it was sent in: a leave, or a
+    // rejoin (a new UserMediaState), drops it
+    const sameSession = () =>
+      socket.data.voiceChannelId === channelId && voiceChannelUsers.get(channelId)?.get(userId) === userMedia;
+
+    applyLatestState(socket, 'voice:speaking:producer', SPEAKING_EVENTS_PER_MINUTE, () => {
+      // Only control producers if not self-muted AND not server-muted (read
+      // when applied: a held state can run after a mute)
+      if (!userMedia || !sameSession() || userMedia.selfMute || userMedia.serverMuted) return;
       for (const producer of userMedia.producers.values()) {
         if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
-          if (speaking) { producer.resume(); } else { producer.pause(); }
+          if (speaking) runProducerOp(() => producer.resume(), 'resume');
+          else runProducerOp(() => producer.pause(), 'pause');
         }
       }
-    }
+    });
 
-    // Don't broadcast speaking indicator if server-muted (prevents UI deception by modified clients)
-    if (userMedia?.serverMuted) return;
-
-    // Channel visibility room — private voice channels must not leak activity server-wide
-    io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId, speaking });
+    applyLatestState(socket, 'voice:speaking', SPEAKING_INDICATOR_EVENTS_PER_MINUTE, () => {
+      if (!sameSession()) return;
+      // Don't broadcast speaking indicator if server-muted (prevents UI deception by modified clients)
+      if (userMedia?.serverMuted) return;
+      // Channel visibility room — private voice channels must not leak activity server-wide
+      io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId, speaking });
+    });
   });
 
   // ── voice:server_mute (force-mute another user) ────────────────────────
@@ -1388,6 +1415,17 @@ export function handleVoiceEvents(
 
       const session = getRemoteSession(socket.id);
       if (session) {
+        if (event === 'voice:speaking') {
+          // Its own latest-wins budget instead of the shared one below: a
+          // speaking state dropped here never reaches the owner, which then
+          // keeps the mic producer paused (#90), and a choppy speaker must not
+          // spend the budget the other voice events share
+          applyLatestState(socket, 'voice:relay:speaking', SPEAKING_EVENTS_PER_MINUTE, () => {
+            if (getRemoteSession(socket.id) !== session) return; // that session ended
+            void relayVoiceEvent(session.ownerNodeId, event, socket, args);
+          });
+          return;
+        }
         if (!socketRateLimit(socket, 'voice:relay', 600)) return;
         let ack: ((response: unknown) => void) | undefined;
         if (ACK_VOICE_EVENTS.has(event) && typeof args[args.length - 1] === 'function') {

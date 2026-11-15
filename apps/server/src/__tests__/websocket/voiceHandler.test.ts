@@ -2658,3 +2658,201 @@ describe('voiceHandler — session takeover notice', () => {
     expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-L', userId: 'user-L' });
   });
 });
+
+// ─── voice:speaking over the rate limit (#90) ───────────────────────────────
+// The mic producer pauses on "not speaking" and resumes on "speaking". The
+// events used to pass a fixed 120-a-minute limit FIRST: once a socket had spent
+// it, the event that would resume the producer was dropped with the rest, and a
+// producer left paused by the last accepted "false" stayed paused on the SFU
+// while the person talked. These run the REAL fixed-window limiter.
+describe('voiceHandler — voice:speaking keeps the latest state over the rate limit (#90)', () => {
+  let realSocketRateLimit: typeof socketRateLimit;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockJoinablePrisma();
+    vi.mocked(hasChannelPermission).mockResolvedValue(true);
+    mockRelay.getRemoteSession.mockReturnValue(undefined);
+    mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('test-node-1');
+    ({ socketRateLimit: realSocketRateLimit } = await vi.importActual<typeof import('../../middleware/rateLimiter')>('../../middleware/rateLimiter'));
+    vi.mocked(socketRateLimit).mockImplementation(realSocketRateLimit);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(socketRateLimit).mockReset();
+    vi.mocked(socketRateLimit).mockReturnValue(true);
+  });
+
+  /** A joined local participant with a live mic producer. */
+  async function joinedSpeaker(id: string) {
+    const io = createMockIO();
+    const { socket, handlers } = createMockSocket(id, `sock-${id}`);
+    handleVoiceEvents(io as any, socket as any);
+    await handlers.get('voice:join')!(`ch-${id}`);
+    await handlers.get('voice:produce')!({ kind: 'audio', rtpParameters: {} }, vi.fn());
+    const transports = await getCreatedTransports();
+    const sendTransport = transports[transports.length - 2];
+    const mic = await sendTransport.produce.mock.results[0].value;
+    io._emit.mockClear();
+    return { io, socket, handlers, mic };
+  }
+
+  /** `count` alternating speaking events starting with `true`. */
+  function toggles(speak: (s: boolean) => unknown, count: number) {
+    for (let i = 0; i < count; i++) speak(i % 2 === 0);
+  }
+
+  const speakingBroadcasts = (io: ReturnType<typeof createMockIO>) =>
+    io._emit.mock.calls.filter(([event]) => event === 'voice:speaking').map(([, payload]) => payload.speaking);
+
+  it('121 toggles in a minute, the last one "speaking": the mic producer ends RESUMED', async () => {
+    const { handlers, mic } = await joinedSpeaker('sp-1');
+    toggles((s) => handlers.get('voice:speaking')!(s), 121);
+    expect(mic.paused).toBe(false);
+    expect(mic.resume).toHaveBeenCalledTimes(61);
+    expect(mic.pause).toHaveBeenCalledTimes(60);
+  });
+
+  it('an honest choppy speaker (~360 toggles a minute) has every one broadcast: the ring follows them live', async () => {
+    const { io, handlers } = await joinedSpeaker('sp-2a');
+    toggles((s) => handlers.get('voice:speaking')!(s), 360);
+    expect(speakingBroadcasts(io)).toHaveLength(360);
+  });
+
+  it('the broadcast stays limited (360 a minute: it reaches every viewer of the channel), and the last state goes out when the window ends', async () => {
+    const { io, handlers } = await joinedSpeaker('sp-2');
+    toggles((s) => handlers.get('voice:speaking')!(s), 365); // ends on true
+    expect(speakingBroadcasts(io)).toHaveLength(360);
+    expect(speakingBroadcasts(io).at(-1)).toBe(false); // the 360th accepted one
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(speakingBroadcasts(io)).toHaveLength(361);
+    expect(io._emit).toHaveBeenLastCalledWith('voice:speaking', { channelId: 'ch-sp-2', userId: 'sp-2', speaking: true });
+  });
+
+  it('past the indicator budget the producer still follows every state (its own budget is 600)', async () => {
+    const { io, handlers, mic } = await joinedSpeaker('sp-2b');
+    toggles((s) => handlers.get('voice:speaking')!(s), 401); // ends on true
+    expect(speakingBroadcasts(io)).toHaveLength(360);
+    expect(mic.pause.mock.calls.length + mic.resume.mock.calls.length).toBe(401);
+    expect(mic.paused).toBe(false);
+  });
+
+  it('the producer work is bounded too, and the held state is applied when that window ends', async () => {
+    const { handlers, mic } = await joinedSpeaker('sp-3');
+    toggles((s) => handlers.get('voice:speaking')!(s), 700); // ends on false
+    expect(mic.pause.mock.calls.length + mic.resume.mock.calls.length).toBe(600);
+    expect(mic.paused).toBe(true); // the 600th accepted one was false
+
+    handlers.get('voice:speaking')!(true); // over the budget: held
+    expect(mic.paused).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mic.paused).toBe(false);
+    expect(mic.pause.mock.calls.length + mic.resume.mock.calls.length).toBe(601);
+  });
+
+  it('a held "speaking" never resumes a producer the person muted meanwhile', async () => {
+    const { handlers, mic } = await joinedSpeaker('sp-4');
+    toggles((s) => handlers.get('voice:speaking')!(s), 600); // the producer budget is spent, ends on false
+    handlers.get('voice:speaking')!(true); // held
+    handlers.get('voice:mute')!(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mic.paused).toBe(true);
+  });
+
+  it('a held state is dropped once the participant left (no broadcast, no producer call)', async () => {
+    const { io, handlers, mic } = await joinedSpeaker('sp-5');
+    toggles((s) => handlers.get('voice:speaking')!(s), 601); // the 601st (true) is held for the producer
+    handlers.get('voice:leave')!();
+    const calls = mic.pause.mock.calls.length + mic.resume.mock.calls.length;
+    io._emit.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mic.pause.mock.calls.length + mic.resume.mock.calls.length).toBe(calls);
+    expect(speakingBroadcasts(io)).toEqual([]);
+  });
+
+  it('a held state never overwrites a newer one accepted in the next window', async () => {
+    const { handlers, mic } = await joinedSpeaker('sp-6');
+    toggles((s) => handlers.get('voice:speaking')!(s), 600); // spent, ends on false
+    handlers.get('voice:speaking')!(false); // held
+    // The window ends but its timer has not run yet (a busy event loop):
+    // the next event opens a new window and is applied at once
+    vi.setSystemTime(Date.now() + 60_001);
+    handlers.get('voice:speaking')!(true);
+    expect(mic.paused).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mic.paused).toBe(false); // the stale "false" was dropped
+  });
+
+  it('a server-muted participant never has a held state broadcast', async () => {
+    const { io, handlers } = await joinedSpeaker('sp-7');
+    toggles((s) => handlers.get('voice:speaking')!(s), 601); // the 601st is held
+    // A moderator in the same channel mutes them meanwhile
+    const moderator = createMockSocket('mod-7', 'sock-mod-7');
+    handleVoiceEvents(io as any, moderator.socket as any);
+    await moderator.handlers.get('voice:join')!('ch-sp-7');
+    await moderator.handlers.get('voice:server_mute')!({ userId: 'sp-7', muted: true });
+    io._emit.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(speakingBroadcasts(io)).toEqual([]);
+  });
+
+  it('a producer that refuses the pause or the resume is logged, never thrown', async () => {
+    const { handlers, mic } = await joinedSpeaker('sp-8');
+    mic.resume.mockReturnValueOnce(Promise.reject(new Error('Producer closed')));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => handlers.get('voice:speaking')!(true)).not.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[Voice]'), 'Producer closed');
+    warn.mockRestore();
+  });
+
+  it('on the owner node (a relayed participant behind a shim) the latest state wins the same way', async () => {
+    const io = createMockIO();
+    const shim = { id: 'shim-sp-9', data: { userId: 'sp-9' }, emit: vi.fn(), join: vi.fn(), leave: vi.fn() };
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:join', ['ch-sp-9', null], vi.fn());
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:produce', [{ kind: 'audio', rtpParameters: {} }], vi.fn());
+    const transports = await getCreatedTransports();
+    const mic = await transports[transports.length - 2].produce.mock.results[0].value;
+
+    for (let i = 0; i < 121; i++) await dispatchVoiceEvent(io as any, shim as any, 'voice:speaking', [i % 2 === 0]);
+    expect(mic.paused).toBe(false);
+    await dispatchVoiceEvent(io as any, shim as any, 'voice:leave', []);
+  });
+
+  describe('on the home node of a participant whose channel lives on another node', () => {
+    const session = { userId: 'sp-10', channelId: 'ch-remote', ownerNodeId: 'peer-node' };
+    const relayed = (event: string) => mockRelay.relayVoiceEvent.mock.calls.filter(([, e]) => e === event);
+
+    it('speaking has a relay budget of its own: other voice events still go through, and the last state is relayed when it ends', async () => {
+      mockRelay.getRemoteSession.mockReturnValue(session);
+      const { socket, handlers } = createMockSocket('sp-10', 'sock-sp-10');
+      handleVoiceEvents(createMockIO() as any, socket as any);
+
+      toggles((s) => handlers.get('voice:speaking')!(s), 700); // ends on false
+      handlers.get('voice:speaking')!(true); // over its budget: held
+      expect(relayed('voice:speaking')).toHaveLength(600);
+      expect(relayed('voice:speaking').at(-1)![3]).toEqual([false]);
+
+      // The shared budget the other routed events use is untouched
+      handlers.get('voice:mute')!(true);
+      expect(relayed('voice:mute')).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(relayed('voice:speaking')).toHaveLength(601);
+      expect(relayed('voice:speaking').at(-1)).toEqual(['peer-node', 'voice:speaking', socket, [true]]);
+    });
+
+    it('a held state is not relayed once that remote session ended', async () => {
+      mockRelay.getRemoteSession.mockReturnValue(session);
+      const { socket, handlers } = createMockSocket('sp-11', 'sock-sp-11');
+      handleVoiceEvents(createMockIO() as any, socket as any);
+      toggles((s) => handlers.get('voice:speaking')!(s), 601); // the 601st is held
+      mockRelay.getRemoteSession.mockReturnValue(undefined); // left meanwhile
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(relayed('voice:speaking')).toHaveLength(600);
+    });
+  });
+});
