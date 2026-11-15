@@ -1319,13 +1319,18 @@ describe('verifiedBearerUserId — who a request is from, before authenticate ru
     expect(verifiedBearerUserId(authedReq('203.0.113.1', expired) as never)).toBeNull();
   });
 
-  it('reads the `token` query parameter for the tags that cannot set a header (an attachment <img>), the header first when both are there', () => {
+  it('reads the Authorization header only: a valid token in the `token` query parameter names nobody (#167)', () => {
     const byQuery = { ...fakeReq('203.0.113.1'), query: { token: accessToken('clxalice') } };
-    expect(verifiedBearerUserId(byQuery as never)).toBe('clxalice');
+    expect(verifiedBearerUserId(byQuery as never)).toBeNull();
+    // with both, the header's user, whatever the query carries
     const both = { ...authedReq('203.0.113.1', accessToken('clxbob')), query: { token: accessToken('clxalice') } };
     expect(verifiedBearerUserId(both as never)).toBe('clxbob');
-    expect(verifiedBearerUserId({ ...fakeReq('203.0.113.1'), query: { token: ['a', 'b'] } } as never)).toBeNull();
-    expect(verifiedBearerUserId({ ...fakeReq('203.0.113.1'), query: { token: '' } } as never)).toBeNull();
+  });
+
+  it('never reads the query at all', () => {
+    const req = { ...fakeReq('203.0.113.1'), get query(): never { throw new Error('the query was read'); } };
+    expect(() => verifiedBearerUserId(req as never)).not.toThrow();
+    expect(verifiedBearerUserId(req as never)).toBeNull();
   });
 
   it('names nobody for a forged, malformed or missing bearer, or a token with a purpose (TOTP challenge, trusted device)', () => {
@@ -1408,6 +1413,18 @@ describe('rateLimitGeneral — per user once signed in, per address otherwise', 
 
     expect((await hit(mod.rateLimitGeneral as Middleware, authedReq(egress, accessToken('clxcolleague')))).passed).toBe(true);
     expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq(egress))).passed).toBe(true);
+  });
+
+  it('a token in the query string buys no budget of its own: it is charged on the address like any anonymous request (#167)', async () => {
+    const ip = '203.0.113.103';
+    const byQuery = { ...fakeReq(ip), query: { token: accessToken('clxalice') } };
+    for (let r = 0; r < 1000; r++) {
+      expect((await hit(mod.rateLimitGeneral as Middleware, byQuery)).passed).toBe(true);
+    }
+    expect((await hit(mod.rateLimitGeneral as Middleware, byQuery)).passed).toBe(false);
+    expect((await hit(mod.rateLimitGeneral as Middleware, fakeReq(ip))).passed).toBe(false); // the same address bucket
+    // the user's own bucket was never touched
+    expect((await hit(mod.rateLimitGeneral as Middleware, authedReq(ip, accessToken('clxalice')))).passed).toBe(true);
   });
 
   it('a forged bearer buys no budget of its own: it is charged on the address like any anonymous request', async () => {
