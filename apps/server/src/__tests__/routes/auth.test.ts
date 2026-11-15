@@ -423,6 +423,8 @@ describe('POST /api/v1/auth/register — proof-of-work gate', () => {
     ['a missing password', { password: undefined }, 'Password is required'],
     ['a non-string username', { username: ['testuser'] }, 'Username is required'],
     ['a non-string display name', { displayName: { html: '<b>x</b>' } }, 'Display name must be a string'],
+    // #148: the display name has no other check, and one after the PoW would burn the challenge
+    ['a display name over the length limit', { displayName: 'x'.repeat(65) }, 'Display name must be at most 64 characters'],
   ])('refuses %s with a 400 before the PoW is verified', async (_label, patch, message) => {
     const res = await request(app).post('/api/v1/auth/register').send({ ...START_BODY, ...patch });
 
@@ -430,6 +432,29 @@ describe('POST /api/v1/auth/register — proof-of-work gate', () => {
     expect(res.body).toEqual({ success: false, error: message });
     expect(mockVerifyPow).not.toHaveBeenCalled();
     expect(startRegistrationMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/v1/auth/register — the display name is judged after its unsupported characters are stripped (#148)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('a name at the limit plus zero-width characters passes the check (the service stores it stripped)', async () => {
+    const res = await request(app).post('/api/v1/auth/register')
+      .send({ ...START_BODY, displayName: `${'x'.repeat(64)}${String.fromCharCode(0x200b, 0x202e)}` });
+
+    expect(res.status).toBe(202);
+    expect(mockVerifyPow).toHaveBeenCalled();
+    expect(startRegistrationMock).toHaveBeenCalled();
+  });
+
+  it('a name made only of them is not refused: an empty display name falls back to the username', async () => {
+    const res = await request(app).post('/api/v1/auth/register')
+      .send({ ...START_BODY, displayName: String.fromCharCode(0x200b, 0x202e) });
+
+    expect(res.status).toBe(202);
+    expect(startRegistrationMock).toHaveBeenCalled();
   });
 });
 

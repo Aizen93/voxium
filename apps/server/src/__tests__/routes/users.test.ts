@@ -301,6 +301,166 @@ describe('User Routes', () => {
       expect(res.body.data.displayName).toBe('New Name');
     });
 
+    describe('a display name sent unchanged is left as stored (#148: a bio save re-sends it)', () => {
+      const authUser = () => prismaMock.user.findUnique.mockResolvedValueOnce({
+        id: 'user-1', bannedAt: null, tokenVersion: 0, role: 'user',
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+      });
+      const row = (displayName: string, bio: string | null) => ({
+        id: 'user-1', username: 'testuser', displayName, email: 't@e.com', avatarUrl: null, bio, status: 'online', createdAt: new Date('2024-01-01'),
+      });
+
+      for (const [label, stored] of [
+        ['made only of characters the rule removes', String.fromCodePoint(0x3164, 0x3164)],
+        ['holding a zero-width space', `Bob${String.fromCodePoint(0x200b)}by`],
+      ] as const) {
+        it(`a bio-only save with the stored name ${label}: 200, the name untouched byte for byte`, async () => {
+          authUser();
+          prismaMock.user.findUnique.mockResolvedValueOnce({ displayName: stored, avatarUrl: null });
+          prismaMock.user.update.mockResolvedValue(row(stored, 'new bio'));
+          prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-1' }]);
+
+          const res = await request(app)
+            .patch('/api/v1/users/me/profile')
+            .set('Authorization', `Bearer ${makeToken()}`)
+            .send({ displayName: stored, bio: 'new bio' });
+
+          expect(res.status).toBe(200);
+          const data = prismaMock.user.update.mock.calls[0][0].data;
+          expect(data).not.toHaveProperty('displayName');
+          expect(data.bio).toBe('new bio');
+          // the answer and the event carry the stored name, as before
+          expect(res.body.data.displayName).toBe(stored);
+          expect(mockEmit).toHaveBeenCalledWith('user:updated', expect.objectContaining({ displayName: stored }));
+        });
+      }
+
+      it('a changed name is stripped and validated', async () => {
+        authUser();
+        prismaMock.user.findUnique.mockResolvedValueOnce({ displayName: 'Bob', avatarUrl: null });
+        prismaMock.user.update.mockResolvedValue(row('Alice', null));
+        prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+        const res = await request(app)
+          .patch('/api/v1/users/me/profile')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ displayName: `Ali${String.fromCodePoint(0x202e)}ce` });
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.user.update.mock.calls[0][0].data.displayName).toBe('Alice');
+      });
+
+      it('a changed name made only of removed characters is refused, nothing written', async () => {
+        authUser();
+        prismaMock.user.findUnique.mockResolvedValueOnce({ displayName: 'Bob', avatarUrl: null });
+
+        const res = await request(app)
+          .patch('/api/v1/users/me/profile')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ displayName: String.fromCodePoint(0x3164, 0x3164, 0x3164) });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Display name cannot be empty');
+        expect(prismaMock.user.update).not.toHaveBeenCalled();
+      });
+
+      it('a name differing from the stored one only by what the rule removes counts as changed, and is stored stripped', async () => {
+        authUser();
+        prismaMock.user.findUnique.mockResolvedValueOnce({ displayName: 'Bob', avatarUrl: null });
+        prismaMock.user.update.mockResolvedValue(row('Bob', null));
+        prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+        const res = await request(app)
+          .patch('/api/v1/users/me/profile')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ displayName: `Bob${String.fromCodePoint(0x200b)}` });
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.user.update.mock.calls[0][0].data.displayName).toBe('Bob');
+      });
+
+      it('reads the stored name and the stored avatar in one query', async () => {
+        authUser();
+        prismaMock.user.findUnique.mockResolvedValueOnce({ displayName: 'Bob', avatarUrl: null });
+        prismaMock.user.update.mockResolvedValue(row('Bob', 'b'));
+        prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+        await request(app)
+          .patch('/api/v1/users/me/profile')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ displayName: 'Bob', bio: 'b' });
+
+        // the auth lookup, then ONE read of the profile row
+        expect(prismaMock.user.findUnique).toHaveBeenCalledTimes(2);
+        expect(prismaMock.user.findUnique.mock.calls[1][0]).toEqual({ where: { id: 'user-1' }, select: { displayName: true, avatarUrl: true } });
+      });
+    });
+
+    describe('a display name is one line without bidi or zero-width characters (#148)', () => {
+      const RLO = String.fromCharCode(0x202e);
+      const ZWSP = String.fromCharCode(0x200b);
+      const authUser = () => prismaMock.user.findUnique.mockResolvedValueOnce({
+        id: 'user-1', bannedAt: null, tokenVersion: 0, role: 'user',
+        emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+      });
+
+      it('stores the name with them stripped, line breaks as one space (the client gets a 200, never an untranslated refusal)', async () => {
+        authUser();
+        prismaMock.user.update.mockResolvedValue({ id: 'user-1', username: 'testuser', displayName: 'Ali ce', email: 't@e.com', avatarUrl: null, bio: null, status: 'online', createdAt: new Date('2024-01-01') });
+        prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+        const res = await request(app)
+          .patch('/api/v1/users/me/profile')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ displayName: `${ZWSP}Ali${RLO}\nce${ZWSP}` });
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.user.update.mock.calls[0][0].data.displayName).toBe('Ali ce');
+      });
+
+      it('keeps a joined emoji and a Persian zero-width non-joiner whole (the exceptions of the rule)', async () => {
+        authUser();
+        const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467);
+        const persian = String.fromCodePoint(0x0645, 0x06cc, 0x200c, 0x062e, 0x0648, 0x0627, 0x0647, 0x0645);
+        prismaMock.user.update.mockResolvedValue({ id: 'user-1', username: 'testuser', displayName: `${persian} ${family}`, email: 't@e.com', avatarUrl: null, bio: null, status: 'online', createdAt: new Date('2024-01-01') });
+        prismaMock.serverMember.findMany.mockResolvedValue([]);
+
+        const res = await request(app)
+          .patch('/api/v1/users/me/profile')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ displayName: `${persian} ${family}` });
+
+        expect(res.status).toBe(200);
+        expect(prismaMock.user.update.mock.calls[0][0].data.displayName).toBe(`${persian} ${family}`);
+      });
+
+      it('a name made only of characters that render as nothing is empty once stripped: "cannot be empty"', async () => {
+        authUser();
+
+        const res = await request(app)
+          .patch('/api/v1/users/me/profile')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ displayName: String.fromCodePoint(0x3164, 0x3164, 0x2800, 0x115f) });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Display name cannot be empty');
+        expect(prismaMock.user.update).not.toHaveBeenCalled();
+      });
+
+      it('a name made only of them is empty once stripped: the existing "cannot be empty" answer, nothing written', async () => {
+        authUser();
+
+        const res = await request(app)
+          .patch('/api/v1/users/me/profile')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ displayName: `${ZWSP}${RLO}${ZWSP}` });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Display name cannot be empty');
+        expect(prismaMock.user.update).not.toHaveBeenCalled();
+      });
+    });
+
     it('updates bio', async () => {
       const token = makeToken();
 

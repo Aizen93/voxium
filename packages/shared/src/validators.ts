@@ -4,6 +4,7 @@ import {
 } from './constants.js';
 import type { DiscoveryTag } from './constants.js';
 import { ROLE_COLOR_REGEX } from './permissions.js';
+import { hasUnsupportedLabelText } from './labelText.js';
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 const RGBA_COLOR_RE = /^rgba\(\s*([01]?\d{1,2}|2[0-4]\d|25[0-5])\s*,\s*([01]?\d{1,2}|2[0-4]\d|25[0-5])\s*,\s*([01]?\d{1,2}|2[0-4]\d|25[0-5])\s*,\s*(?:0|1|0?\.\d+)\s*\)$/;
@@ -55,10 +56,11 @@ export function validateServerName(name: string): string | null {
   if (name.length < LIMITS.SERVER_NAME_MIN) return `Server name must be at least ${LIMITS.SERVER_NAME_MIN} characters`;
   if (name.length > LIMITS.SERVER_NAME_MAX) return `Server name must be at most ${LIMITS.SERVER_NAME_MAX} characters`;
   // The name is the most visible stranger-facing field of a directory card
-  // and the key of the name sort, the search and the cursor: the same bidi /
-  // zero-width rejection as the description (which may span lines; a name
-  // may not).
-  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(name) || /[\r\n]/.test(name)) return 'Server name contains unsupported characters';
+  // and the key of the name sort, the search and the cursor: one line and the
+  // label rule (labelText.ts), whose only exceptions are joined emoji, three
+  // subdivision flags, joiners within one joiner script and variation
+  // selectors inside emoji and keycap sequences.
+  if (hasUnsupportedLabelText(name)) return 'Server name contains unsupported characters';
   return null;
 }
 
@@ -82,9 +84,12 @@ export function validateEmoji(emoji: string): string | null {
   return null;
 }
 
+/** Shown next to every message the user posts. The server strips what
+ *  hasUnsupportedLabelText refuses before it validates (stripUnsupportedLabelText). */
 export function validateDisplayName(displayName: string): string | null {
   if (displayName.trim().length === 0) return 'Display name cannot be empty';
   if (displayName.length > LIMITS.DISPLAY_NAME_MAX) return `Display name must be at most ${LIMITS.DISPLAY_NAME_MAX} characters`;
+  if (hasUnsupportedLabelText(displayName)) return 'Display name contains unsupported characters';
   return null;
 }
 
@@ -95,10 +100,9 @@ export function validateWebhookName(name: string): string | null {
   if (trimmed.length === 0) return 'Webhook name cannot be empty';
   if (trimmed.length > LIMITS.WEBHOOK_NAME_MAX) return `Webhook name must be at most ${LIMITS.WEBHOOK_NAME_MAX} characters`;
   // The author label of every message it posts, shown next to members' names:
-  // one line, and none of the bidi / zero-width characters that could make it
-  // read as another member's name (the same rule as a server name; the
-  // per-message username override collapses line breaks on its own path).
-  if (DISCOVERY_TEXT_FORBIDDEN_RE.test(trimmed) || /[\r\n]/.test(trimmed)) return 'Webhook name contains unsupported characters';
+  // one line and the label rule (labelText.ts), as a server name; the
+  // per-message username override is stripped by the same rule instead.
+  if (hasUnsupportedLabelText(trimmed)) return 'Webhook name contains unsupported characters';
   return null;
 }
 
@@ -110,6 +114,7 @@ export function validateBio(bio: string): string | null {
 export function validateCategoryName(name: string): string | null {
   if (name.length < LIMITS.CATEGORY_NAME_MIN) return `Category name must be at least ${LIMITS.CATEGORY_NAME_MIN} character`;
   if (name.length > LIMITS.CATEGORY_NAME_MAX) return `Category name must be at most ${LIMITS.CATEGORY_NAME_MAX} characters`;
+  if (hasUnsupportedLabelText(name)) return 'Category name contains unsupported characters';
   return null;
 }
 
@@ -122,12 +127,14 @@ export function validateSearchQuery(query: string): string | null {
 export function validateRoleName(name: string): string | null {
   if (name.length < LIMITS.ROLE_NAME_MIN) return `Role name must be at least ${LIMITS.ROLE_NAME_MIN} character`;
   if (name.length > LIMITS.ROLE_NAME_MAX) return `Role name must be at most ${LIMITS.ROLE_NAME_MAX} characters`;
+  if (hasUnsupportedLabelText(name)) return 'Role name contains unsupported characters';
   return null;
 }
 
 export function validateNickname(nickname: string): string | null {
   if (nickname.trim().length === 0) return 'Nickname cannot be empty';
   if (nickname.length > LIMITS.NICKNAME_MAX) return `Nickname must be at most ${LIMITS.NICKNAME_MAX} characters`;
+  if (hasUnsupportedLabelText(nickname)) return 'Nickname contains unsupported characters';
   return null;
 }
 

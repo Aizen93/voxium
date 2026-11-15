@@ -293,6 +293,62 @@ describe('Role Routes', () => {
 
   // ── PATCH /api/v1/servers/:serverId/roles/:roleId ──────────────────────
 
+  describe('a role name is one line without bidi or zero-width characters (#148)', () => {
+    const RLO = String.fromCharCode(0x202e);
+    const ZWSP = String.fromCharCode(0x200b);
+    const created = { id: 'role-new', name: 'Moderator', position: 2, isDefault: false, permissions: '0', color: null, serverId: 'srv1' };
+
+    it('a creation stores the stripped name, and the duplicate check looks for the stripped name', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      prismaMock.role.findFirst.mockResolvedValueOnce(null);
+      prismaMock.role.count.mockResolvedValue(2);
+      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
+      prismaMock.role.create.mockResolvedValue(created);
+
+      const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: `Mod${ZWSP}era${RLO}tor` });
+
+      expect(res.status).toBe(201);
+      expect(prismaMock.role.findFirst.mock.calls[0][0].where.name).toBe('Moderator');
+      expect(prismaMock.role.create.mock.calls[0][0].data.name).toBe('Moderator');
+    });
+
+    it('a creation whose stripped name is taken answers the existing conflict (no look-alike second role)', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+      prismaMock.role.findFirst.mockResolvedValueOnce({ ...created });
+
+      const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: `Moderator${ZWSP}` });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('A role with this name already exists');
+      expect(prismaMock.role.create).not.toHaveBeenCalled();
+    });
+
+    it('the reserved name is judged after stripping', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+
+      const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: `every${ZWSP}one` });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Cannot use reserved role name "everyone"');
+    });
+
+    it('a rename stores the stripped name, and the duplicate check looks for it', async () => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(10);
+      prismaMock.role.findFirst
+        .mockResolvedValueOnce({ id: 'role1', name: 'OldName', position: 5, isDefault: false, permissions: '0', color: null, serverId: 'srv1' })
+        .mockResolvedValueOnce(null);
+      prismaMock.role.update.mockResolvedValue({ id: 'role1', name: 'New Name', position: 5, isDefault: false, permissions: '0', color: null, serverId: 'srv1' });
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1').send({ name: `${RLO}New\nName${ZWSP}` });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.role.findFirst.mock.calls[1][0].where.name).toBe('New Name');
+      expect(prismaMock.role.update.mock.calls[0][0].data.name).toBe('New Name');
+    });
+  });
+
   describe('PATCH /roles/:roleId', () => {
     it('updates role name and color', async () => {
       mockHasServerPermission.mockResolvedValue(true);

@@ -15,7 +15,7 @@ import {
 } from '@voxium/shared';
 import type { Role, MemberRole } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
-import { sanitizeText } from '../utils/sanitize';
+import { sanitizeLabel } from '../utils/sanitize';
 import { rateLimitRoleManage } from '../middleware/rateLimiter';
 import {
   hasServerPermission,
@@ -133,7 +133,7 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
     const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_ROLES);
     if (!canManage) throw new ForbiddenError('You do not have permission to manage roles');
 
-    const name = sanitizeText(req.body.name ?? '');
+    const name = sanitizeLabel(req.body.name);
     const nameErr = validateRoleName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
@@ -232,7 +232,7 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
     if (req.body.name !== undefined) {
       if (role.isDefault) throw new BadRequestError('Cannot rename the @everyone role');
       if (typeof req.body.name !== 'string') throw new BadRequestError('name must be a string');
-      const name = sanitizeText(req.body.name);
+      const name = sanitizeLabel(req.body.name);
       const nameErr = validateRoleName(name);
       if (nameErr) throw new BadRequestError(nameErr);
       if (name.toLowerCase() === 'everyone') throw new BadRequestError('Cannot use reserved role name "everyone"');

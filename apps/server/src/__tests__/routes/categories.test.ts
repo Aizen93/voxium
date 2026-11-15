@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { LIMITS } from '@voxium/shared';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -334,6 +335,30 @@ describe('Category Routes', () => {
       expect(createCall?.data?.name).toBe('Clean Name');
     });
 
+    it('stores the name without bidi or zero-width characters, line breaks as one space (#148)', async () => {
+      categoryStats(0);
+      prismaMock.category.create.mockResolvedValue({ id: 'cat-1', name: 'Text Channels', serverId: 'srv-1', position: 0 });
+
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: `${String.fromCharCode(0x200b)}Text${String.fromCharCode(0x202e)}\nChannels` });
+
+      expect(res.status).toBe(201);
+      expect(prismaMock.category.create.mock.calls[0]?.[0]?.data?.name).toBe('Text Channels');
+    });
+
+    it('a name made only of them is empty once stripped: the existing length answer, nothing created (#148)', async () => {
+      const res = await request(app)
+        .post('/api/v1/servers/srv-1/categories')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: String.fromCharCode(0x200b, 0x202e) });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(`Category name must be at least ${LIMITS.CATEGORY_NAME_MIN} character`);
+      expect(prismaMock.category.create).not.toHaveBeenCalled();
+    });
+
     // ── The limit and the position, under the space row lock ─────────────
 
     it('locks the space row, then counts and places, then inserts, all inside ONE transaction', async () => {
@@ -497,6 +522,19 @@ describe('Category Routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.name).toBe('New Name');
+    });
+
+    it('a rename stores the name without bidi or zero-width characters (#148)', async () => {
+      prismaMock.category.findFirst.mockResolvedValue({ id: 'cat-1', name: 'Old Name', serverId: 'srv-1', position: 0 });
+      prismaMock.category.update.mockResolvedValue({ id: 'cat-1', name: 'Voice', serverId: 'srv-1', position: 0 });
+
+      const res = await request(app)
+        .patch('/api/v1/servers/srv-1/categories/cat-1')
+        .set('Authorization', `Bearer ${makeToken()}`)
+        .send({ name: `Vo${String.fromCharCode(0xfeff)}ice${String.fromCharCode(0x200e)}` });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.category.update.mock.calls[0][0].data.name).toBe('Voice');
     });
 
     it('emits category:updated socket event', async () => {

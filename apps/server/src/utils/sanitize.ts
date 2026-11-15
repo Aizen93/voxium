@@ -1,3 +1,5 @@
+import { stripUnsupportedLabelText } from '@voxium/shared';
+
 /**
  * Strip HTML tags from a string (defense-in-depth).
  *
@@ -35,4 +37,23 @@ const NUL_RE = new RegExp(String.fromCharCode(0), 'g');
 export function sanitizeText(str: unknown): string {
   if (typeof str !== 'string') return '';
   return stripHtml(str).replace(NUL_RE, '').trim();
+}
+
+/**
+ * A single-line label shown next to other people's (a display name, a
+ * nickname, a role or category name, an attachment's file name): sanitizeText,
+ * after the shared stripUnsupportedLabelText (the rule a space or webhook name
+ * is validated against) turned every run of line breaks and tabs into one
+ * space and removed the direction-override, zero-width, control,
+ * default-ignorable and blank-rendering characters, keeping only joined
+ * emoji, the flags of England, Scotland and Wales, joiners between letters of
+ * one joiner script, and variation selectors inside emoji and keycap
+ * sequences. Stripped rather than refused: no
+ * client in use translates a refusal of these fields, and a name made only of
+ * such characters comes out empty, which each field's own validator already
+ * answers. Coerces non-strings to empty string.
+ */
+export function sanitizeLabel(str: unknown): string {
+  if (typeof str !== 'string') return '';
+  return sanitizeText(stripUnsupportedLabelText(str));
 }

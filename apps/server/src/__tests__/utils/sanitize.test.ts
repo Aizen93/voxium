@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeText, stripHtml } from '../../utils/sanitize';
+import { sanitizeText, sanitizeLabel, stripHtml } from '../../utils/sanitize';
 
 describe('stripHtml', () => {
   it('removes simple HTML tags', () => {
@@ -158,5 +158,32 @@ describe('sanitizeText — U+0000', () => {
 
   it('stripHtml itself leaves NUL alone (it strips tags only)', () => {
     expect(stripHtml(`a${NUL}b`)).toBe(`a${NUL}b`);
+  });
+});
+
+describe('sanitizeLabel — a single-line label shown next to other people\'s (#148)', () => {
+  const RLO = String.fromCharCode(0x202e);
+  const ZWSP = String.fromCharCode(0x200b);
+
+  it('removes bidi and zero-width characters, turns line breaks into one space, then sanitizes and trims', () => {
+    expect(sanitizeLabel(`  ${ZWSP}<b>Ali${RLO}ce</b>\r\n\nAdmin${ZWSP}  `)).toBe('Alice Admin');
+  });
+
+  it('trims what only became an edge once the invisible characters were gone', () => {
+    expect(sanitizeLabel(`${ZWSP} Bob ${ZWSP}`)).toBe('Bob');
+  });
+
+  it('drops NUL like sanitizeText', () => {
+    expect(sanitizeLabel(`a${String.fromCharCode(0)}b`)).toBe('ab');
+  });
+
+  it('leaves an ordinary name as it is', () => {
+    expect(sanitizeLabel('Élodie 🎉 (mod)')).toBe('Élodie 🎉 (mod)');
+  });
+
+  it('coerces a non-string to the empty string', () => {
+    expect(sanitizeLabel(undefined)).toBe('');
+    expect(sanitizeLabel(42)).toBe('');
+    expect(sanitizeLabel({ name: 'x' })).toBe('');
   });
 });
