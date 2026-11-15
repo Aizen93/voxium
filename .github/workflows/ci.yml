@@ -163,8 +163,9 @@ jobs:
       TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       S3_ASSETS_ENDPOINT: http://127.0.0.1:9000
       S3_ASSETS_REGION: us-east-1
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
+      # The object store is started with these credentials (.github/ci/compose.yml)
+      S3_ACCESS_KEY: voxium-ci
+      S3_SECRET_KEY: voxium-ci-object-store
       S3_ASSETS_BUCKET: voxium-e2e
       PORT: 3001
       NODE_ENV: development
@@ -230,48 +231,37 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Object storage: one spec performs a REAL presigned upload of an
-      # encrypted attachment, so a stub endpoint is not enough. Kept as a plain
-      # container (not a service) so the health wait and the bucket creation
-      # live in the same step as the container they depend on.
+      # encrypted attachment from the browser, so a stub endpoint is not
+      # enough. Kept as a plain container (not a service) so the health wait,
+      # the bucket and its CORS rule live in the same step as the container
+      # they depend on.
       #
-      # Image: MinIO's own registries (quay.io/minio/minio AND docker.io/minio/minio)
-      # stopped serving anonymous pulls in autumn 2026 — every tag now answers
-      # "unauthorized", which killed every E2E run before a single test started.
-      # bitnamilegacy/minio is Bitnami's frozen, still-public build of MinIO
-      # RELEASE.2025-07-23, pinned by digest so a tag move cannot change what
-      # runs. Its entrypoint starts the server itself (no `server /data`
-      # argument) and honours MINIO_ROOT_USER / MINIO_ROOT_PASSWORD.
+      # Image: RustFS (Apache-2.0), published by the project that develops it,
+      # pinned by tag and digest in .github/ci/compose.yml, where Dependabot's
+      # docker-compose entry moves it (#110). It replaced bitnamilegacy/minio,
+      # a frozen build of MinIO RELEASE.2025-07-23: MinIO stopped publishing
+      # images in 2025 and archived its server, and that build will never be
+      # patched or moved. RustFS was checked against the server's own
+      # utils/s3.ts calls (path-style, a presigned PUT signed for its exact
+      # size and type, head, range read, copy, presigned GET, list, single and
+      # multi-object delete, bucket default encryption) and a browser's
+      # cross-origin presigned PUT. Its entrypoint starts the server once.
       # The image pull has no limit of its own: a registry that stops
-      # answering would hold the step until the job's 30 minutes
-      - name: Start MinIO and create the assets bucket
+      # answering would hold the step until the step's 5 minutes
+      - name: Start the object store and create the assets bucket
         timeout-minutes: 5
         run: |
-          # MINIO_SKIP_CLIENT: without it the image's entrypoint starts the
-          # server in the background to configure its bundled client, stops
-          # it, and starts it again. The readiness probe answers during that
-          # first start, and a bucket call that meets the stop is reset: the
-          # failure of 2026-11-13 on a PR branch (create reset, then no
-          # bucket), and what the earlier ones are consistent with (develop
-          # 2026-10-09, twice; a PR branch on 2026-11-09). The job uses the
-          # root credentials and creates its bucket itself, so it needs none
-          # of that setup, and with the variable the server starts once.
-          docker run -d --name minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            -e MINIO_SKIP_CLIENT=yes \
-            bitnamilegacy/minio:2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
+          docker compose -f .github/ci/compose.yml up -d --quiet-pull object-store
           # The step fails here, with the container's log, when the readiness
-          # probe never answers: the loop used to fall through to the bucket
-          # call, which hid the cause.
+          # probe never answers.
           ready=
           for i in $(seq 1 30); do
-            if curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:9000/minio/health/ready; then ready=1; break; fi
+            if curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:9000/health/ready; then ready=1; break; fi
             sleep 2
           done
           if [ -z "$ready" ]; then
-            echo "MinIO did not become ready within 60 s"
-            docker logs minio
+            echo "The object store did not become ready within 60 s"
+            docker logs object-store
             exit 1
           fi
           # The bucket is there when head-bucket says so, and only then. Each
@@ -296,12 +286,32 @@ jobs:
           # its answer is printed when it is no.
           if [ -z "$created" ] && ! aws $limits --endpoint-url "$endpoint" s3api head-bucket --bucket "$S3_ASSETS_BUCKET"; then
             echo "The assets bucket was not there after 10 rounds"
-            docker logs minio
+            docker logs object-store
+            exit 1
+          fi
+          # The browser PUTs to the store from the desktop app's origin, so the
+          # request is preflighted, and this server sends no CORS header for a
+          # bucket without a rule (MinIO allowed every origin by default; a
+          # deployed bucket needs its own rule too, README and
+          # scripts/setup-dev-bucket.ts). The rule is that script's, for the
+          # one origin the e2e pages run on. As for the bucket, the rule is
+          # there when get-bucket-cors says so, asked again in a bounded loop.
+          cors='{"CORSRules":[{"AllowedOrigins":["http://localhost:8080"],"AllowedMethods":["PUT","GET","HEAD"],"AllowedHeaders":["*"],"ExposeHeaders":["ETag"],"MaxAgeSeconds":3600}]}'
+          applied=
+          for i in $(seq 1 5); do
+            if aws $limits --endpoint-url "$endpoint" s3api get-bucket-cors --bucket "$S3_ASSETS_BUCKET" 2>/dev/null | grep -q 'http://localhost:8080'; then applied=1; break; fi
+            aws $limits --endpoint-url "$endpoint" s3api put-bucket-cors --bucket "$S3_ASSETS_BUCKET" --cors-configuration "$cors" && continue
+            sleep 2
+          done
+          if [ -z "$applied" ] && ! aws $limits --endpoint-url "$endpoint" s3api get-bucket-cors --bucket "$S3_ASSETS_BUCKET" | grep -q 'http://localhost:8080'; then
+            echo "The assets bucket had no CORS rule for http://localhost:8080 after 5 rounds"
+            docker logs object-store
             exit 1
           fi
         env:
-          AWS_ACCESS_KEY_ID: minioadmin
-          AWS_SECRET_ACCESS_KEY: minioadmin
+          # The credentials the job starts the store with (S3_* above)
+          AWS_ACCESS_KEY_ID: ${{ env.S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.S3_SECRET_KEY }}
           AWS_DEFAULT_REGION: us-east-1
           AWS_MAX_ATTEMPTS: 1
 
@@ -479,9 +489,13 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: MinIO logs (on failure)
+      # The container's own output is its start-up; the server writes the
+      # rest to a file inside it (RUSTFS_OBS_LOG_DIRECTORY, /logs)
+      - name: Object store logs (on failure)
         if: failure()
-        run: docker logs minio || true
+        run: |
+          docker logs object-store || true
+          timeout 30 docker exec object-store sh -c 'tail -n 200 /logs/*.log' || true
 
   security:
     name: Security Scan

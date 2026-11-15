@@ -697,7 +697,8 @@ npx playwright test --grep-invert @quarantine
 ```
 
 E2E runs on every pull request and blocks merging. The job provisions
-PostgreSQL, Redis, Mailpit and MinIO, applies migrations, and runs the suite on
+PostgreSQL, Redis, Mailpit and an S3-compatible object store (RustFS, with the
+bucket CORS rule a browser upload needs), applies migrations, and runs the suite on
 Chromium plus the encrypted-voice spec on Firefox. A spec tagged `@quarantine`
 still runs, but in a non-blocking step, with a note in the spec saying why it is
 tagged; no spec is tagged at the moment.
