@@ -1168,11 +1168,10 @@ export function createVoiceHandlers(
     // the target client receives voice:force_moved, calls leaveChannel() then joinChannel(targetChannelId)
   });
 
-  // ── voice:signal (kept as no-op for backward compat) ──────────────────
-  // No-op: kept for backward compat (SFU replaced P2P). Rate-limited to prevent spam.
-  on('voice:signal', () => {
-    if (!socketRateLimit(socket, 'voice:signal', 10)) return;
-  });
+  // (The P2P `voice:signal` of voice channels went with the SFU and has no
+  // handler: no client release sends it, Socket.IO drops an event nothing
+  // listens for, and dispatchVoiceEvent drops one an older node relays.
+  // DM calls signal over dm:voice:signal, in dmVoiceHandler.)
 
   // ── voice:e2e:key / voice:e2e:key_request (spec §21) ──────────────────
   // Sealed media sender keys for secure voice channels, relayed between two
@@ -1301,7 +1300,7 @@ export function createVoiceHandlers(
 const ROUTED_VOICE_EVENTS = [
   'voice:leave', 'voice:transport:connect', 'voice:produce', 'voice:producer:close',
   'voice:rtp_capabilities', 'voice:consumer:resume', 'voice:mute', 'voice:deaf',
-  'voice:speaking', 'voice:server_mute', 'voice:server_deafen', 'voice:signal',
+  'voice:speaking', 'voice:server_mute', 'voice:server_deafen',
   'voice:screen_share:start', 'voice:screen_share:stop',
   'voice:e2e:key', 'voice:e2e:key_request',
 ] as const;

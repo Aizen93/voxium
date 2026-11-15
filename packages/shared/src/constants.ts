@@ -442,7 +442,6 @@ export const WS_EVENTS = {
   VOICE_USER_LEFT: 'voice:user_left',
   VOICE_STATE_UPDATE: 'voice:state_update',
   VOICE_SPEAKING: 'voice:speaking',
-  VOICE_SIGNAL: 'voice:signal',
   VOICE_E2E_KEY: 'voice:e2e:key',
   VOICE_E2E_KEY_REQUEST: 'voice:e2e:key_request',
   VOICE_ERROR: 'voice:error',

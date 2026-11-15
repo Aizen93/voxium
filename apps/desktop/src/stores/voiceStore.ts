@@ -282,8 +282,6 @@ interface VoiceState {
   serverDeafenUser: (targetUserId: string, deafened: boolean) => void;
   forceMoveUser: (targetUserId: string, targetChannelId: string) => void;
   setUserSpeaking: (channelId: string, userId: string, speaking: boolean) => void;
-  handleSignal: (from: string, signal: unknown) => void;
-  createPeer: (targetUserId: string, initiator: boolean) => void;
 
   // mediasoup SFU actions
   handleTransportCreated: (data: {
@@ -404,24 +402,19 @@ function applyOutputDevice(audio: HTMLAudioElement, deviceId: string) {
   }
 }
 
-type SignalEvent = 'voice:signal' | 'dm:voice:signal';
+/** The one peer-to-peer signaling event left: DM calls (voice channels use the SFU). */
+type SignalEvent = 'dm:voice:signal';
 
 export type DMCallAbortReason = 'identity-changed' | 'peer-must-update' | 'peer-not-e2e' | 'signaling-failed';
 
-/** Emit a signaling event on the socket with proper typing per event name. */
+/** Send one WebRTC signal of a DM call. */
 function emitSignal(
-  socket: ReturnType<typeof getSocket>,
-  event: SignalEvent,
+  _event: SignalEvent,
   data: { to: string; signal: unknown },
 ) {
-  if (event === 'dm:voice:signal') {
-    // E2E cutover (spec §20): DM signals NEVER leave in plaintext. Sealed on
-    // the send chain to the pinned peer device; socket resolved at emit time.
-    sendDMSignalEncrypted(data.to, data.signal as E2ECallSignal);
-    return;
-  }
-  if (!socket) return;
-  socket.emit('voice:signal', data);
+  // E2E cutover (spec §20): DM signals NEVER leave in plaintext. Sealed on
+  // the send chain to the pinned peer device; socket resolved at emit time.
+  sendDMSignalEncrypted(data.to, data.signal as E2ECallSignal);
 }
 
 // ─── E2E-authenticated DM call signaling (docs/e2e-dm-spec.md §20) ──────────
@@ -996,7 +989,7 @@ function createPeerInternal(
       if (pc.localDescription) {
         const s = getSocket();
         if (s) {
-          emitSignal(s, signalEvent, {
+          emitSignal(signalEvent, {
             to: targetUserId,
             signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
           });
@@ -1011,7 +1004,7 @@ function createPeerInternal(
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      emitSignal(socket, signalEvent, {
+      emitSignal(signalEvent, {
         to: targetUserId,
         signal: { type: 'ice-candidate', candidate: event.candidate.toJSON() },
       });
@@ -1038,7 +1031,7 @@ function createPeerInternal(
           .then(() => {
             const s = getSocket();
             if (s && pc.localDescription) {
-              emitSignal(s, signalEvent, {
+              emitSignal(signalEvent, {
                 to: targetUserId,
                 signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
               });
@@ -1150,7 +1143,7 @@ function createPeerInternal(
       .then(() => {
         if (pc.localDescription) {
           debugLog(`${logPrefix} Sending offer to ${targetUserId}`);
-          emitSignal(socket, signalEvent, {
+          emitSignal(signalEvent, {
             to: targetUserId,
             signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
           });
@@ -1236,7 +1229,7 @@ function handleSignalInternal(
         const socket = getSocket();
         if (socket && pc.localDescription) {
           debugLog(`${logPrefix} Sending answer to ${from}`);
-          emitSignal(socket, signalEvent, {
+          emitSignal(signalEvent, {
             to: from,
             signal: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
           });
@@ -2170,10 +2163,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       return { channelUsers: newMap };
     });
   },
-
-  // These are kept for backward compat but are no-ops for server voice now
-  handleSignal: () => {},
-  createPeer: () => {},
 
   toggleMute: () => {
     const socket = getSocket();

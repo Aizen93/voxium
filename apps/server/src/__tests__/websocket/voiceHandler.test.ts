@@ -702,7 +702,7 @@ describe('voiceHandler — clearVoiceState (boot cleanup, multi-node aware)', ()
 });
 
 describe('voiceHandler — handler registration', () => {
-  it('registers all 19 expected event handlers', () => {
+  it('registers all 18 expected event handlers', () => {
     const { socket, handlers } = createMockSocket();
     const io = createMockIO();
     handleVoiceEvents(io as any, socket as any);
@@ -721,7 +721,6 @@ describe('voiceHandler — handler registration', () => {
       'voice:server_mute',
       'voice:server_deafen',
       'voice:force_move',
-      'voice:signal',
       'voice:e2e:key',
       'voice:e2e:key_request',
       'voice:screen_share:start',
@@ -729,12 +728,40 @@ describe('voiceHandler — handler registration', () => {
       'disconnecting',
     ];
 
-    expect(expectedEvents.length).toBe(19);
-    expect(handlers.size).toBe(19);
+    expect(expectedEvents.length).toBe(18);
+    expect(handlers.size).toBe(18);
 
     for (const event of expectedEvents) {
       expect(handlers.has(event)).toBe(true);
     }
+  });
+
+  // The P2P voice:signal of voice channels ended with the SFU; no tagged
+  // client (2.0.0, 2.1.x) sends it. Nothing listens for it any more: Socket.IO
+  // drops an event without a listener, and it is no longer relayed
+  it('no longer listens for the P2P voice:signal (the DM call path, dm:voice:signal, is another handler)', () => {
+    const { socket, handlers } = createMockSocket();
+    handleVoiceEvents(createMockIO() as any, socket as any);
+    expect(handlers.has('voice:signal')).toBe(false);
+    expect(socket.on).not.toHaveBeenCalledWith('voice:signal', expect.anything());
+  });
+
+  it('a voice:signal an older node still relays during a rolling deploy is dropped quietly on the owner', async () => {
+    const io = createMockIO();
+    const shim = { id: 'shim-old-node', data: { userId: 'old-1' }, emit: vi.fn(), join: vi.fn(), leave: vi.fn() };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const ack = vi.fn();
+
+    await expect(dispatchVoiceEvent(io as any, shim as any, 'voice:signal', [{ to: 'old-2', signal: { type: 'offer' } }], ack)).resolves.toBeUndefined();
+
+    expect(shim.emit).not.toHaveBeenCalled();
+    expect(io.to).not.toHaveBeenCalled();
+    expect(ack).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    error.mockRestore();
+    warn.mockRestore();
   });
 });
 
