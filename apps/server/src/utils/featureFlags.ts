@@ -1,4 +1,5 @@
 import { getRedis, getRedisPubSub, getRedisConfigSub } from './redis';
+import { NotFoundError } from './errors';
 
 // ─── Feature Flag Registry ──────────────────────────────────────────────────
 
@@ -9,7 +10,10 @@ export interface FeatureFlagDef {
   enabled: boolean;
 }
 
-const DEFAULTS: Record<string, FeatureFlagDef> = {
+// THE list of flags and what each answers while no override is stored, which
+// is every flag on a fresh install: nothing seeds the feature:flags hash and
+// no migration holds a flag. A name not in it reads as disabled.
+const DEFAULTS = {
   registration:    { name: 'registration',    label: 'User Registration',   description: 'Allow new users to create accounts',              enabled: true },
   invites:         { name: 'invites',         label: 'Server Invites',      description: 'Allow users to create and use server invites',     enabled: true },
   server_creation: { name: 'server_creation', label: 'Server Creation',     description: 'Allow users to create new servers',                enabled: true },
@@ -30,12 +34,25 @@ const DEFAULTS: Record<string, FeatureFlagDef> = {
   // webhook execute route answer 403 for every webhook at once (and hides the
   // Integrations tab). Webhook rows and their posted messages are kept.
   webhooks:        { name: 'webhooks',        label: 'Incoming Webhooks',   description: 'Let servers receive messages from incoming webhooks (the public execute endpoint and the Integrations tab)', enabled: true },
-};
+} satisfies Record<string, FeatureFlagDef>;
+
+/** A registered flag name: a misspelled one in isFeatureEnabled or requireFeature is a type error. */
+export type FeatureFlagName = keyof typeof DEFAULTS;
+
+/** An OWN key of the registry: `'constructor' in DEFAULTS` is true, and must not make a flag. */
+function isKnownFlag(name: string): name is FeatureFlagName {
+  return Object.hasOwn(DEFAULTS, name);
+}
 
 const REDIS_KEY = 'feature:flags';
 
-// In-memory cache
-const overrides: Record<string, boolean> = {};
+// In-memory cache of the stored overrides, registered names only
+const overrides = new Map<FeatureFlagName, boolean>();
+
+// Unknown names already reported (a name comes from code, not from a
+// request; bounded anyway)
+const UNKNOWN_WARNED_MAX = 100;
+const unknownWarned = new Set<string>();
 
 const CONFIG_CHANNEL = 'config:feature_flags';
 
@@ -45,8 +62,8 @@ export async function loadFeatureFlags(): Promise<void> {
     const redis = getRedis();
     const data = await redis.hGetAll(REDIS_KEY);
     for (const [name, value] of Object.entries(data)) {
-      if (name in DEFAULTS) {
-        overrides[name] = value === 'true';
+      if (isKnownFlag(name)) {
+        overrides.set(name, value === 'true');
       }
     }
   } catch (err) {
@@ -59,52 +76,65 @@ export async function loadFeatureFlags(): Promise<void> {
     await configSub.subscribe(CONFIG_CHANNEL, (message) => {
       try {
         const { name, enabled, action } = JSON.parse(message);
+        if (typeof name !== 'string' || !isKnownFlag(name)) return;
         if (action === 'reset') {
-          delete overrides[name];
-        } else if (name in DEFAULTS) {
-          overrides[name] = enabled;
+          overrides.delete(name);
+        } else if (typeof enabled === 'boolean') {
+          overrides.set(name, enabled);
         }
-      } catch { /* ignore malformed messages */ }
+      } catch (err) {
+        // Ignored, and said once per message: the channel and the error's
+        // name, never the payload
+        console.warn(`[FeatureFlags] Ignored a malformed message on ${CONFIG_CHANNEL} (${err instanceof Error ? err.name : typeof err})`);
+      }
     });
   } catch (err) {
     console.error('[FeatureFlags] Failed to subscribe to config channel:', err);
   }
 }
 
-/** Check if a feature is enabled */
-export function isFeatureEnabled(name: string): boolean {
-  const def = DEFAULTS[name];
-  if (!def) return true; // Unknown flags default to enabled
-  if (name in overrides) return overrides[name];
-  return def.enabled;
+/**
+ * Whether a feature is enabled: its stored override, else its default. A name
+ * the registry does not hold reads as DISABLED, with one warning per name: a
+ * kill switch spelled wrong must fail visibly, never stay on for good (the
+ * type rules such a call out at compile time; this is the net under it).
+ */
+export function isFeatureEnabled(name: FeatureFlagName): boolean {
+  if (!isKnownFlag(name)) {
+    if (!unknownWarned.has(name) && unknownWarned.size < UNKNOWN_WARNED_MAX) {
+      unknownWarned.add(name);
+      console.warn(`[FeatureFlags] Unknown feature flag "${String(name)}" read as disabled`);
+    }
+    return false;
+  }
+  return overrides.get(name) ?? DEFAULTS[name].enabled;
 }
 
 /** Get all feature flags with current state */
 export function getAllFeatureFlags(): Array<FeatureFlagDef & { isCustom: boolean }> {
-  return Object.values(DEFAULTS).map((def) => ({
-    ...def,
-    enabled: def.name in overrides ? overrides[def.name] : def.enabled,
-    isCustom: def.name in overrides,
-  }));
+  return Object.values(DEFAULTS).map((def: FeatureFlagDef) => {
+    const override = isKnownFlag(def.name) ? overrides.get(def.name) : undefined;
+    return { ...def, enabled: override ?? def.enabled, isCustom: override !== undefined };
+  });
 }
 
-/** Update a feature flag and notify all nodes. */
+/** Update a feature flag and notify all nodes. A name the registry does not hold is a 404. */
 export async function updateFeatureFlag(name: string, enabled: boolean): Promise<void> {
-  if (!(name in DEFAULTS)) throw new Error(`Unknown feature flag: ${name}`);
+  if (!isKnownFlag(name)) throw new NotFoundError('Feature flag');
   const redis = getRedis();
   await redis.hSet(REDIS_KEY, name, String(enabled));
-  overrides[name] = enabled;
+  overrides.set(name, enabled);
   // Notify other nodes
   const { pub } = getRedisPubSub();
   await pub.publish(CONFIG_CHANNEL, JSON.stringify({ name, enabled, action: 'set' }));
 }
 
-/** Reset a feature flag to default and notify all nodes. */
+/** Reset a feature flag to default and notify all nodes. A name the registry does not hold is a 404. */
 export async function resetFeatureFlag(name: string): Promise<void> {
-  if (!(name in DEFAULTS)) throw new Error(`Unknown feature flag: ${name}`);
+  if (!isKnownFlag(name)) throw new NotFoundError('Feature flag');
   const redis = getRedis();
   await redis.hDel(REDIS_KEY, name);
-  delete overrides[name];
+  overrides.delete(name);
   // Notify other nodes
   const { pub } = getRedisPubSub();
   await pub.publish(CONFIG_CHANNEL, JSON.stringify({ name, action: 'reset' }));
