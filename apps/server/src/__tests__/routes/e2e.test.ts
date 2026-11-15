@@ -845,6 +845,34 @@ describe('E2E routes — POST /keyshares', () => {
     expect(res.status).toBe(201);
   });
 
+  it('a conversation whose other side was deleted (NULL side): no share to anyone but your own devices', async () => {
+    // Nothing writes a NULL side yet; the row is constructed. `other` is then
+    // null, and a recipient is a string: only the sender's own devices pass.
+    for (const sides of [{ user1Id: 'user-1', user2Id: null }, { user1Id: null, user2Id: 'user-1' }]) {
+      vi.mocked(prisma.conversation.findMany).mockResolvedValue([{ id: 'conv-1', ...sides }] as any);
+      const toPeer = await request(createApp())
+        .post('/api/v1/e2e/keyshares')
+        .send({ deviceId: DEVICE_A, shares: [share()] });
+      expect(toPeer.status, JSON.stringify(sides)).toBe(403);
+      expect(toPeer.body.error).toBe('Recipient is not a participant of this conversation');
+
+      const toSelf = await request(createApp())
+        .post('/api/v1/e2e/keyshares')
+        .send({ deviceId: DEVICE_A, shares: [share({ recipientUserId: 'user-1' })] });
+      expect(toSelf.status, JSON.stringify(sides)).toBe(201);
+    }
+  });
+
+  it('a conversation with both sides gone (NULL, NULL) admits no sender', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValue([{ id: 'conv-1', user1Id: null, user2Id: null }] as any);
+    const res = await request(createApp())
+      .post('/api/v1/e2e/keyshares')
+      .send({ deviceId: DEVICE_A, shares: [share({ recipientUserId: 'user-1' })] });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Not a participant of this conversation');
+    expect(prisma.e2EKeyShare.createMany).not.toHaveBeenCalled();
+  });
+
   it('rejects a share for a conversation the sender is not part of', async () => {
     // The gate is per-conversation: a DM peer must not be able to plant a
     // session record labelled with someone else's conversation.

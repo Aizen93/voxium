@@ -427,9 +427,13 @@ model Message {
   type           String    @default("user")
   channelId      String?   @map("channel_id")
   conversationId String?   @map("conversation_id")
-  // Null ONLY for a webhook-authored row (then webhookId/webhookName are set at
-  // write time). Every reader shapes the author through shapeMessageAuthor()
-  // (utils/messageAuthor.ts), so the wire type keeps a non-null author.
+  // Null for a webhook-authored row (then webhookId/webhookName are set at
+  // write time; webhooks post in channels only). Inside a conversation a NULL
+  // author is reserved for a deleted account's message: nothing writes one
+  // yet, a later change of #131 will. Every reader shapes the author through
+  // utils/messageAuthor.ts (a DM reader with the conversation it reads), so
+  // the wire type keeps a non-null author: the webhook's, or the
+  // deleted-account placeholder.
   authorId       String?   @map("author_id")
   // Incoming webhooks: the webhook that posted the row, and its name frozen at
   // post time (the label survives a rename or a deleted webhook — SetNull).
@@ -565,8 +569,16 @@ model ChannelRead {
 
 model Conversation {
   id        String   @id @default(cuid())
-  user1Id   String   @map("user1_id")
-  user2Id   String   @map("user2_id")
+  // Nullable since migration 20261116120000_conversation_lifecycle_expand, so
+  // that a conversation can later outlive one participant's account (#131);
+  // nothing writes NULL yet and both foreign keys still CASCADE. A reader
+  // treats a NULL side as a deleted account: never a participant, shown as
+  // the placeholder utils/deletedParticipant.ts builds. The unique pair below
+  // still refuses a second (A, B): PostgreSQL treats NULLs as DISTINCT in a
+  // unique index, so (NULL, B) rows may coexist and never block B from
+  // opening a new conversation. Keep it that way, never NULLS NOT DISTINCT.
+  user1Id   String?  @map("user1_id")
+  user2Id   String?  @map("user2_id")
   // E2E DMs: conversations are BORN encrypted (docs/e2e-always-on-plan.md
   // §4.2) — there is no toggle and no plaintext path. Non-nullable since the
   // always-on cutover (migration 20260801140000_e2e_always_on); the server
@@ -575,8 +587,8 @@ model Conversation {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  user1    User      @relation("ConversationUser1", fields: [user1Id], references: [id], onDelete: Cascade)
-  user2    User      @relation("ConversationUser2", fields: [user2Id], references: [id], onDelete: Cascade)
+  user1    User?     @relation("ConversationUser1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2    User?     @relation("ConversationUser2", fields: [user2Id], references: [id], onDelete: Cascade)
   messages Message[]
   reads    ConversationRead[]
 
@@ -589,6 +601,14 @@ model ConversationRead {
   userId         String   @map("user_id")
   conversationId String   @map("conversation_id")
   lastReadAt     DateTime @map("last_read_at")
+  // One person's side of removing a conversation (#47), on their own row so
+  // the other person is told nothing (a write to `conversations` bumps its
+  // updatedAt, which orders their list). Added by migration
+  // 20261116120000_conversation_lifecycle_expand; nothing reads or writes them
+  // yet. hiddenAt: off this person's list. clearedAt: the floor below which
+  // this person no longer sees messages.
+  hiddenAt       DateTime? @map("hidden_at")
+  clearedAt      DateTime? @map("cleared_at")
 
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)

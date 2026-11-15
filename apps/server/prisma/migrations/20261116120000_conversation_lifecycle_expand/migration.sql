@@ -1,0 +1,75 @@
+-- Direct conversations: the schema half of removal for one side (#47) and of
+-- conversations that outlive an account (#131). Expand only: no row changes
+-- and no behaviour changes.
+--
+-- WHAT.
+--   conversations.user1_id, user2_id   NOT NULL dropped. A NULL side will mean
+--                                      "that account was deleted"; nothing
+--                                      writes one yet, and both foreign keys
+--                                      keep ON DELETE CASCADE, so an account
+--                                      deletion still deletes its
+--                                      conversations as before.
+--   conversation_reads.hidden_at       new, nullable, no default: this person
+--                                      took the conversation off their list.
+--   conversation_reads.cleared_at      new, nullable, no default: the floor
+--                                      below which this person no longer sees
+--                                      messages.
+-- The two read-row columns live on each person's own row, never on
+-- `conversations`: a write there bumps its updated_at, which orders the
+-- other person's list. Nothing reads or writes them yet.
+--
+-- The unique pair (conversations_user1_id_user2_id_key) is kept as it is.
+-- PostgreSQL treats NULLs as DISTINCT in a unique index, so rows (NULL, B)
+-- may coexist, never block B from opening a new conversation with someone,
+-- and a second (A, B) is still refused. Never rebuild it NULLS NOT DISTINCT.
+-- No backfill, no new index.
+--
+-- LOCKS. Each ALTER TABLE takes an ACCESS EXCLUSIVE lock on its table, and
+-- holds it only for a catalog update: dropping NOT NULL checks no row, and a
+-- nullable column without a default writes none (no scan, no rewrite). What
+-- can take time on a busy database is the WAIT for the lock: the ALTER
+-- queues behind every open transaction that touched the table, and every
+-- later query on that table queues behind the ALTER. Under `prisma migrate
+-- deploy` the two statements commit one after the other, so the first
+-- table's lock is gone while the second waits. Harmless under maintenance
+-- mode.
+--
+-- NOTE: for an online or rolling deploy, apply the two statements one at a
+-- time instead, each in an execution of its own after its own short lock
+-- timeout. Never both in one execution: `prisma db execute --file` runs a
+-- whole file as ONE transaction, so the first table's lock would be held
+-- while the second statement waits, and a timeout there would undo both.
+--   1. Run, with `prisma db execute --file <file>` or in psql, a file holding
+--        SET lock_timeout = '2s';
+--        ALTER TABLE "conversations" ALTER COLUMN "user1_id" DROP NOT NULL,
+--        ALTER COLUMN "user2_id" DROP NOT NULL;
+--      and run it again until it succeeds.
+--   2. The same with a file holding
+--        SET lock_timeout = '2s';
+--        ALTER TABLE "conversation_reads" ADD COLUMN IF NOT EXISTS "hidden_at" TIMESTAMP(3),
+--        ADD COLUMN IF NOT EXISTS "cleared_at" TIMESTAMP(3);
+--   3. `prisma migrate resolve --applied 20261116120000_conversation_lifecycle_expand`.
+-- A step that times out changes nothing. A run stopped part way is finished
+-- by repeating the procedure from step 1 (both statements are safe to repeat,
+-- and each repeat waits under its own timeout), never by `prisma migrate
+-- deploy`, which takes the locks with no timeout. The timeout is not set in
+-- this file: under `prisma migrate deploy` a timeout would leave the
+-- migration failed (P3009), which stops every later deploy until it is
+-- resolved.
+--
+-- DEPLOYMENT ORDER. This migration first, then the code shipped with it (the
+-- server image's entrypoint applies it before the server starts). That
+-- code's Prisma client names hidden_at and cleared_at whenever it reads or
+-- returns a whole conversation_reads row, as the mark-read upsert does,
+-- which answers P2022 on a database without them. Code older than this
+-- migration runs on the schema after it: it names neither new column, and
+-- no side is NULL yet. The later changes of the series write NULL sides and
+-- use the new columns: this migration must have run on the database every
+-- node uses before any of them ships, and once one writes a NULL side no
+-- node may run code older than this migration's (it would serve
+-- `participant: null`).
+ALTER TABLE "conversations" ALTER COLUMN "user1_id" DROP NOT NULL,
+ALTER COLUMN "user2_id" DROP NOT NULL;
+
+ALTER TABLE "conversation_reads" ADD COLUMN IF NOT EXISTS "hidden_at" TIMESTAMP(3),
+ADD COLUMN IF NOT EXISTS "cleared_at" TIMESTAMP(3);

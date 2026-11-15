@@ -1315,3 +1315,232 @@ describe('DM routes — POST /:conversationId/read', () => {
     );
   });
 });
+
+// ─── A conversation that outlived one side (expand step of #47/#131) ─────────
+// Nothing writes a NULL side or a NULL DM author yet: the rows below are
+// constructed to pin what every reader does once one exists, and that a live
+// conversation still serialises exactly as before (what a 2.1.x client reads).
+
+describe('DM routes — the wire for live conversations is unchanged', () => {
+  const alice = { id: 'user-1', username: 'alice', displayName: 'Alice', avatarUrl: null, status: 'online', role: 'user', isSupporter: false, supporterTier: null };
+  const bob = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: 'avatars/user-2-1.webp', status: 'idle', role: 'admin', isSupporter: true, supporterTier: 'first' };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
+  });
+
+  it('GET /dm: exactly the fields and order it had, and no participantDeleted key', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([
+      {
+        ...mockConversation,
+        user1: alice,
+        user2: bob,
+        messages: [{ id: 'm-1', content: validEnvelope, encrypted: true, type: 'user', createdAt: new Date('2026-11-01T10:00:00Z'), authorId: 'user-2' }],
+      },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toStrictEqual({
+      success: true,
+      data: [{
+        id: 'conv-1',
+        user1Id: 'user-1',
+        user2Id: 'user-2',
+        participant: bob,
+        lastMessage: { id: 'm-1', content: validEnvelope, encrypted: true, type: 'user', createdAt: '2026-11-01T10:00:00.000Z', authorId: 'user-2' },
+        encryptedAt: '2026-08-01T14:00:00.000Z',
+        createdAt: '2024-01-01T00:00:00.000Z',
+      }],
+    });
+    expect(Object.keys(res.body.data[0])).toEqual(['id', 'user1Id', 'user2Id', 'participant', 'lastMessage', 'encryptedAt', 'createdAt']);
+  });
+
+  it('POST /dm: exactly the body it had', async () => {
+    const target = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null };
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(target as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+
+    const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toStrictEqual({
+      success: true,
+      data: {
+        id: 'conv-1',
+        user1Id: 'user-1',
+        user2Id: 'user-2',
+        participant: target,
+        lastMessage: null,
+        encryptedAt: '2026-08-01T14:00:00.000Z',
+        createdAt: '2024-01-01T00:00:00.000Z',
+      },
+    });
+    // the pair lookup is by both live ids, sorted (Prisma's compound input takes no null)
+    expect(prisma.conversation.findUnique).toHaveBeenCalledWith({ where: { user1Id_user2Id: { user1Id: 'user-1', user2Id: 'user-2' } } });
+  });
+
+  it('GET /:id/messages: a live row and its live quote pass through as they are', async () => {
+    const quoted = { id: 'msg-0', content: validEnvelope, encrypted: true, webhookId: null, webhookName: null, author: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null } };
+    const row = { ...mockMessage, encrypted: true, content: validEnvelope, webhookId: null, webhookName: null, mentionsEveryone: false, replyToId: 'msg-0', replyTo: quoted };
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([row] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm/conv-1/messages');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toStrictEqual([JSON.parse(JSON.stringify({ ...row, reactions: [] }))]);
+  });
+});
+
+describe('DM routes — a conversation whose other side was deleted (NULL side)', () => {
+  const alice = { id: 'user-1', username: 'alice', displayName: 'Alice', avatarUrl: null, status: 'online', role: 'user', isSupporter: false, supporterTier: null };
+  const placeholder = (conversationId: string) => ({
+    id: `deleted:${conversationId}`,
+    username: 'deleted',
+    displayName: 'Deleted user',
+    avatarUrl: null,
+    status: 'offline',
+    role: 'user',
+    isSupporter: false,
+    supporterTier: null,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
+  });
+
+  it('GET /dm: the viewer as the first side, the second gone → the placeholder, participantDeleted: true, the side sent as null', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([
+      { ...mockConversation, id: 'conv-7', user1Id: 'user-1', user2Id: null, user1: alice, user2: null, messages: [] },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0]).toStrictEqual({
+      id: 'conv-7',
+      user1Id: 'user-1',
+      user2Id: null,
+      participant: placeholder('conv-7'),
+      participantDeleted: true,
+      lastMessage: null,
+      encryptedAt: '2026-08-01T14:00:00.000Z',
+      createdAt: '2024-01-01T00:00:00.000Z',
+    });
+  });
+
+  it('GET /dm: the viewer as the second side, the first gone → the placeholder', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([
+      { ...mockConversation, id: 'conv-8', user1Id: null, user2Id: 'user-1', user1: null, user2: alice, messages: [] },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.body.data[0].user1Id).toBeNull();
+    expect(res.body.data[0].user2Id).toBe('user-1');
+    expect(res.body.data[0].participant).toStrictEqual(placeholder('conv-8'));
+    expect(res.body.data[0].participantDeleted).toBe(true);
+  });
+
+  it('GET /dm: a live and an outlived conversation side by side keep their own shapes, and the placeholders differ per conversation', async () => {
+    const bob = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, status: 'offline', role: 'user', isSupporter: false, supporterTier: null };
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([
+      { ...mockConversation, user1: alice, user2: bob, messages: [] },
+      { ...mockConversation, id: 'conv-a', user1Id: 'user-1', user2Id: null, user1: alice, user2: null, messages: [] },
+      { ...mockConversation, id: 'conv-b', user1Id: null, user2Id: 'user-1', user1: null, user2: alice, messages: [] },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.body.data[0].participant).toStrictEqual(bob);
+    expect(res.body.data[0]).not.toHaveProperty('participantDeleted');
+    expect(res.body.data[1].participant.id).toBe('deleted:conv-a');
+    expect(res.body.data[2].participant.id).toBe('deleted:conv-b');
+  });
+
+  it('GET /dm: a newest row without an author names the placeholder as its author, never null', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([
+      {
+        ...mockConversation, id: 'conv-7', user1Id: 'user-1', user2Id: null, user1: alice, user2: null,
+        messages: [{ id: 'm-9', content: '', encrypted: false, type: 'deleted', createdAt: new Date('2026-11-01T10:00:00Z'), authorId: null }],
+      },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.body.data[0].lastMessage).toStrictEqual({
+      id: 'm-9', content: '', encrypted: false, type: 'deleted', createdAt: '2026-11-01T10:00:00.000Z', authorId: 'deleted:conv-7',
+    });
+  });
+
+  it('the participant check: the remaining person passes, as before (read-only refusals are not part of this change)', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...mockConversation, user1Id: null, user2Id: 'user-1' } as any);
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm/conv-1/messages');
+
+    expect(res.status).toBe(200);
+  });
+
+  it('the participant check: nobody passes as the deleted side, and a row with both sides gone admits nobody', async () => {
+    for (const sides of [{ user1Id: null, user2Id: 'user-2' }, { user1Id: 'user-2', user2Id: null }, { user1Id: null, user2Id: null }]) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...mockConversation, ...sides } as any);
+      const res = await request(createApp()).get('/api/v1/dm/conv-1/messages');
+      expect(res.status, JSON.stringify(sides)).toBe(403);
+      expect(res.body.error).toBe('Not a participant of this conversation');
+    }
+    expect(prisma.message.findMany).not.toHaveBeenCalled();
+  });
+
+  it('GET /:id/messages: an authorless row is shaped with the placeholder author, and so is a quote of one', async () => {
+    const placeholderRow = {
+      id: 'msg-a', content: '', encrypted: false, type: 'deleted', mentionsEveryone: false,
+      conversationId: 'conv-1', channelId: null, authorId: null, author: null, webhookId: null, webhookName: null,
+      replyToId: null, replyTo: null, editedAt: null, createdAt: new Date('2026-11-01T10:00:00Z'), reactions: [], attachments: [],
+    };
+    const reply = {
+      ...mockMessage, id: 'msg-b', encrypted: true, content: validEnvelope, webhookId: null, webhookName: null,
+      replyToId: 'msg-a', replyTo: { id: 'msg-a', content: '', encrypted: false, author: null, webhookId: null, webhookName: null },
+    };
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...mockConversation, user2Id: null } as any);
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([reply, placeholderRow] as any);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const res = await request(createApp()).get('/api/v1/dm/conv-1/messages');
+
+    expect(res.status).toBe(200);
+    const [first, second] = res.body.data;
+    expect(first.id).toBe('msg-a');
+    expect(first.author).toStrictEqual(placeholder('conv-1'));
+    expect(first.author).not.toHaveProperty('isWebhook');
+    expect(second.author.id).toBe('user-1');
+    // a quote's placeholder carries exactly the keys this route selects for a
+    // live quote author (no presence), the row's those of a live row author
+    const { status: _status, ...quotePlaceholder } = placeholder('conv-1');
+    expect(second.replyTo.author).toStrictEqual(quotePlaceholder);
+    const include = vi.mocked(prisma.message.findMany).mock.calls[0][0]!.include as any;
+    expect(Object.keys(second.replyTo.author).sort()).toEqual(Object.keys(include.replyTo.select.author.select).sort());
+    expect(Object.keys(first.author).sort()).toEqual(Object.keys(include.author.select).sort());
+    // never the webhook fallback label, so never its warning
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('[messageAuthor]'), expect.anything());
+    warn.mockRestore();
+  });
+
+  it('GET /:id/messages: the conversation comes from the route, so a row read without conversationId still gets the placeholder', async () => {
+    const { conversationId: _omitted, ...withoutConversation } = {
+      id: 'msg-a', content: '', encrypted: false, type: 'deleted', mentionsEveryone: false,
+      conversationId: 'conv-1', channelId: null, authorId: null, author: null, webhookId: null, webhookName: null,
+      replyToId: null, replyTo: null, editedAt: null, createdAt: new Date('2026-11-01T10:00:00Z'), reactions: [], attachments: [],
+    };
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...mockConversation, user2Id: null } as any);
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([withoutConversation] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm/conv-1/messages');
+
+    expect(res.body.data[0].author).toStrictEqual(placeholder('conv-1'));
+  });
+});

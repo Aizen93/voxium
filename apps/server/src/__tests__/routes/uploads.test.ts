@@ -618,3 +618,70 @@ describe('uploads — POST /presign/attachment', () => {
     expect(res.body.error).toMatch(/mimeType required/);
   });
 });
+
+// ─── A conversation whose other side was deleted (NULL side) ────────────────
+// Nothing writes a NULL side yet; the rows are constructed. Both DM checks
+// compare each side with the caller: the remaining person passes as before
+// (a read-only refusal of the presign is a later change), nobody passes as
+// the deleted side.
+
+describe('uploads — a conversation with a NULL side', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const refused = [{ user1Id: null, user2Id: 'other-2' }, { user1Id: 'other-1', user2Id: null }, { user1Id: null, user2Id: null }];
+
+  it('GET /attachments/*: the remaining person still downloads a file of the conversation', async () => {
+    vi.mocked(prisma.messageAttachment.findFirst).mockResolvedValueOnce({
+      expired: false,
+      message: { channelId: null, conversationId: 'conv-1', channel: null },
+    } as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', user1Id: null, user2Id: 'user-1' } as any);
+    const dmData = Buffer.alloc(16, 0);
+    vi.mocked(getS3Object).mockResolvedValueOnce({
+      Body: { pipe: vi.fn((dest: any) => { dest.end(dmData); return dest; }) },
+      ContentType: 'application/octet-stream',
+      ContentLength: dmData.length,
+    } as any);
+
+    const res = await request(createApp()).get('/api/v1/uploads/attachments/dm-conv1/abc-encrypted.bin');
+
+    expect(res.status).toBe(200);
+  });
+
+  it('GET /attachments/*: nobody downloads as the deleted side, nor from a row with both sides gone', async () => {
+    for (const sides of refused) {
+      vi.mocked(prisma.messageAttachment.findFirst).mockResolvedValueOnce({
+        expired: false,
+        message: { channelId: null, conversationId: 'conv-1', channel: null },
+      } as any);
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', ...sides } as any);
+      const res = await request(createApp()).get('/api/v1/uploads/attachments/dm-conv1/abc-encrypted.bin');
+      expect(res.status, JSON.stringify(sides)).toBe(403);
+    }
+    expect(getS3Object).not.toHaveBeenCalled();
+  });
+
+  it('POST /presign/attachment: the remaining person passes the participant check as before', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', user1Id: 'user-1', user2Id: null } as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/uploads/presign/attachment')
+      .send({ fileName: 'encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream', conversationId: 'conv-1', encrypted: true });
+
+    expect(res.status).toBe(200);
+  });
+
+  it('POST /presign/attachment: nobody presigns as the deleted side, nor into a row with both sides gone', async () => {
+    for (const sides of refused) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', ...sides } as any);
+      const res = await request(createApp())
+        .post('/api/v1/uploads/presign/attachment')
+        .send({ fileName: 'encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream', conversationId: 'conv-1', encrypted: true });
+      expect(res.status, JSON.stringify(sides)).toBe(403);
+      expect(res.body.error).toBe('Not a participant of this conversation');
+    }
+    expect(generatePresignedPutUrl).not.toHaveBeenCalled();
+  });
+});

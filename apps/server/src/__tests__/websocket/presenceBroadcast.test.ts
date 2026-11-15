@@ -1347,3 +1347,63 @@ describe('getSocketIp', () => {
     warn.mockRestore();
   });
 });
+
+// ─── dm:join on a conversation whose other side was deleted (NULL side) ─────
+// Nothing writes a NULL side yet; the rows are constructed. The check compares
+// each side with the caller: the remaining person joins the room as before,
+// nobody joins as the deleted side.
+
+describe('socketServer — dm:join with a NULL side', () => {
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.JWT_SECRET = 'test-secret';
+    mockPrisma.user.findUnique.mockResolvedValue({
+      bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+    });
+    mockPrisma.serverMember.findMany.mockResolvedValue([]);
+    mockPrisma.channel.findMany.mockResolvedValue([]);
+    mockPrisma.conversation.findMany.mockResolvedValue([]);
+    mockPrisma.ipBan.findUnique.mockResolvedValue(null);
+    mockPrisma.ipRecord.upsert.mockResolvedValue({});
+    mockPrisma.supportTicket.findUnique.mockResolvedValue(null);
+    mockPrisma.announcement.findMany.mockResolvedValue([]);
+    mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    if (savedJwtSecret !== undefined) process.env.JWT_SECRET = savedJwtSecret;
+    else delete process.env.JWT_SECRET;
+  });
+
+  async function connectedSocket() {
+    const created = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+    await getConnectionHandler()(created.socket);
+    httpServer.close();
+    return created;
+  }
+
+  it('joins the remaining person to dm:{id}, whichever side they are', async () => {
+    const { socket, handlers } = await connectedSocket();
+    for (const sides of [{ user1Id: 'user-1', user2Id: null }, { user1Id: null, user2Id: 'user-1' }]) {
+      socket.join.mockClear();
+      mockPrisma.conversation.findUnique.mockResolvedValueOnce(sides);
+      await handlers.get('dm:join')!('conv-1');
+      expect(socket.join, JSON.stringify(sides)).toHaveBeenCalledWith('dm:conv-1');
+    }
+  });
+
+  it('joins nobody as the deleted side, and nobody to a row with both sides gone', async () => {
+    const { socket, handlers } = await connectedSocket();
+    socket.join.mockClear();
+    for (const sides of [{ user1Id: null, user2Id: 'user-2' }, { user1Id: 'user-2', user2Id: null }, { user1Id: null, user2Id: null }]) {
+      mockPrisma.conversation.findUnique.mockResolvedValueOnce(sides);
+      await handlers.get('dm:join')!('conv-1');
+    }
+    expect(socket.join).not.toHaveBeenCalledWith('dm:conv-1');
+  });
+});

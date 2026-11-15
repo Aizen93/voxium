@@ -2030,3 +2030,63 @@ describe('dmVoiceHandler — endDMCall', () => {
     }));
   });
 });
+
+// ─── A conversation whose other side was deleted (NULL side) ────────────────
+// Nothing writes a NULL side yet; the rows are constructed. The participant
+// checks compare a side with the caller (`null !== userId`): the remaining
+// person passes as before (refusing a call there is a later change), nobody
+// passes as the deleted side.
+
+describe('dmVoiceHandler — a conversation whose other side was deleted (NULL side)', () => {
+  let socket: ReturnType<typeof createMockSocket>['socket'];
+  let handlers: ReturnType<typeof createMockSocket>['handlers'];
+  let io: ReturnType<typeof createMockIO>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetRedis();
+    const created = createMockSocket();
+    socket = created.socket;
+    handlers = created.handlers;
+    io = createMockIO();
+    handleDMVoiceEvents(io as any, socket as any);
+  });
+
+  it('dm:voice:join: nobody passes as the deleted side, and a row with both sides gone admits nobody', async () => {
+    for (const sides of [{ user1Id: null, user2Id: 'user-2' }, { user1Id: 'user-2', user2Id: null }, { user1Id: null, user2Id: null }]) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(sides as any);
+      await handlers.get('dm:voice:join')!('conv-1');
+    }
+    expect(leaveCurrentVoiceChannel).not.toHaveBeenCalled();
+    expect(socket.join).not.toHaveBeenCalled();
+    expect(mockRedis.hGetAll).not.toHaveBeenCalled();
+  });
+
+  it('dm:voice:join: the remaining person passes the participant check as before', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ user1Id: 'user-1', user2Id: null } as any);
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({});
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+    });
+
+    await handlers.get('dm:voice:join')!('conv-1');
+
+    expect(leaveCurrentVoiceChannel).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'user-1', { force: true });
+    expect(socket.join).toHaveBeenCalledWith('dm:voice:conv-1');
+  });
+
+  it('dm:voice:decline: the deleted side never ends a call; the remaining person still can', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ user1Id: null, user2Id: 'user-2' } as any);
+    await handlers.get('dm:voice:decline')!('conv-1');
+    expect(mockRedis.hGetAll).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalled();
+
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ user1Id: null, user2Id: 'user-1' } as any);
+    mockRedis.hGetAll.mockResolvedValueOnce({
+      'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+    });
+    await handlers.get('dm:voice:decline')!('conv-1');
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:ended', { conversationId: 'conv-1' });
+  });
+});

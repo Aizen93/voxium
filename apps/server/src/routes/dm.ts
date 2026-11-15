@@ -8,9 +8,10 @@ import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
 import { verifyAttachmentUploads } from '../utils/uploadVerification';
-import { shapeMessageRow } from '../utils/messageAuthor';
+import { shapeConversationMessageRow } from '../utils/messageAuthor';
 import { endDMCall } from '../websocket/dmVoiceHandler';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
+import { otherParticipant, deletedParticipantId } from '../utils/deletedParticipant';
 
 /** A step after the conversation delete committed failed: logged, never thrown. */
 function logDeleteFanOutFailure(conversationId: string, step: string, err: unknown): void {
@@ -29,9 +30,12 @@ const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, status: true, role: true, isSupporter: true, supporterTier: true },
 };
 
-// webhookId/webhookName: a DM row always has a user author, but every message
-// reader goes through shapeMessageRow() (utils/messageAuthor.ts), which needs
-// both to keep the author non-null if it ever does not
+// webhookId/webhookName: a DM row has a user author, or none once a later
+// change lets a conversation outlive a deleted account, and every reader here
+// shapes through shapeConversationMessageRow() (utils/messageAuthor.ts), which
+// needs both to keep the author non-null. It takes the conversation from the
+// route, never from a select, so an authorless row or quote here becomes the
+// deleted-account placeholder, never a webhook.
 const replyToSelect = {
   select: {
     id: true,
@@ -48,7 +52,11 @@ function sortUserIds(a: string, b: string): [string, string] {
   return a < b ? [a, b] : [b, a];
 }
 
-/** Verify the requesting user is a participant of the conversation */
+/**
+ * Verify the requesting user is a participant of the conversation. A side is
+ * NULL once its account is deleted: `null !== userId`, so the remaining
+ * person still passes and nobody can pass as the deleted side.
+ */
 async function getConversationOrThrow(conversationId: string, userId: string) {
   const conversation = await prisma.conversation.findUnique({
     where: { id: conversationId },
@@ -87,7 +95,9 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
       id: c.id,
       user1Id: c.user1Id,
       user2Id: c.user2Id,
-      participant: c.user1Id === userId ? c.user2 : c.user1,
+      // the other side, or the deleted-account placeholder with
+      // participantDeleted: true (absent for a live side, utils/deletedParticipant.ts)
+      ...otherParticipant(c, userId),
       lastMessage: c.messages[0]
         ? {
             id: c.messages[0].id,
@@ -96,7 +106,9 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
             // the client shows an unencrypted preview ONLY for a system notice
             type: c.messages[0].type,
             createdAt: c.messages[0].createdAt.toISOString(),
-            authorId: c.messages[0].authorId,
+            // a row whose author's account is gone names the placeholder the
+            // message itself carries as author, never null
+            authorId: c.messages[0].authorId ?? deletedParticipantId(c.id),
           }
         : null,
       // always set — conversations are born encrypted (plan §4.2)
@@ -247,7 +259,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
       });
 
       const data = unique.map((m) => ({
-        ...shapeMessageRow(m),
+        ...shapeConversationMessageRow(m, conversationId),
         reactions: aggregateReactions(m.reactions),
       }));
 
@@ -272,7 +284,7 @@ dmRouter.get('/:conversationId/messages', async (req: Request<{ conversationId: 
     if (hasMore) messages.pop();
 
     const data = messages.reverse().map((m) => ({
-      ...shapeMessageRow(m),
+      ...shapeConversationMessageRow(m, conversationId),
       reactions: aggregateReactions(m.reactions),
     }));
 
@@ -390,7 +402,7 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
       data: { updatedAt: new Date() },
     });
 
-    const payload = { ...shapeMessageRow(message), reactions: [] };
+    const payload = { ...shapeConversationMessageRow(message, conversationId), reactions: [] };
     getIO().to(`dm:${conversationId}`).emit('dm:message:new', payload as unknown as Message);
 
     res.status(201).json({ success: true, data: payload });
@@ -447,7 +459,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
       },
     });
 
-    const payload = { ...shapeMessageRow(updated), reactions: aggregateReactions(updated.reactions) };
+    const payload = { ...shapeConversationMessageRow(updated, conversationId), reactions: aggregateReactions(updated.reactions) };
     getIO().to(`dm:${conversationId}`).emit('dm:message:update', payload as unknown as Message);
 
     res.json({ success: true, data: payload });
