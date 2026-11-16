@@ -9,23 +9,58 @@ import {
   ListObjectsV2Command,
   GetBucketEncryptionCommand,
   PutBucketEncryptionCommand,
+  type S3ClientConfig,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+/**
+ * The settings of every S3 client this code base builds: the server's own
+ * (below) and the bucket scripts', so none of them can drift from the others.
+ * Reads the environment when called, never at import.
+ *
+ * Checksums go only where the operation REQUIRES one. The SDK's default
+ * (`WHEN_SUPPORTED`, since 3.729) puts a CRC32 on every request that can carry
+ * one, and the presigner hoists it into the URL: every presigned PUT then
+ * carried `x-amz-checksum-crc32` of an EMPTY body (the presigner has no body)
+ * plus `x-amz-sdk-checksum-algorithm`, and the client uploads the real file
+ * under that URL. A store that ignores the parameter accepts the upload; one
+ * that enforces it refuses every avatar, icon and attachment (`BadDigest`).
+ * The presigned PUT stays bound to the exact size and type the server signed
+ * (`content-length` and `content-type`, see generatePresignedPutUrl). The
+ * operations S3 models as requiring a checksum keep theirs under this setting:
+ * the multi-object delete and the bucket configuration writes (encryption,
+ * CORS) still send a CRC32 of their real body.
+ *
+ * Response checksums are validated only when a call asks for them. The default
+ * sets `ChecksumMode: ENABLED` on every GetObject, which puts
+ * `x-amz-checksum-mode=ENABLED` into each presigned GET URL the avatar and
+ * icon redirects hand out, and validates proxied bodies against whatever
+ * checksum header the store chooses to send, ranged reads included.
+ *
+ * Set here, in the constructor, these win over the AWS_REQUEST_CHECKSUM_CALCULATION
+ * and AWS_RESPONSE_CHECKSUM_VALIDATION environment variables and the shared
+ * AWS config file, so no deployment setting can turn the URL parameter back on.
+ */
+export function s3ClientConfig(): S3ClientConfig {
+  return {
+    endpoint: process.env.S3_ASSETS_ENDPOINT!,
+    region: process.env.S3_ASSETS_REGION!,
+    credentials: {
+      accessKeyId: process.env.S3_ACCESS_KEY!,
+      secretAccessKey: process.env.S3_SECRET_KEY!,
+    },
+    forcePathStyle: true,
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
+  };
+}
 
 // Lazy-initialized to avoid reading env vars at module load time
 // (ES import hoisting means this file executes before dotenv.config())
 let _s3: S3Client | null = null;
 function getS3Client(): S3Client {
   if (!_s3) {
-    _s3 = new S3Client({
-      endpoint: process.env.S3_ASSETS_ENDPOINT!,
-      region: process.env.S3_ASSETS_REGION!,
-      credentials: {
-        accessKeyId: process.env.S3_ACCESS_KEY!,
-        secretAccessKey: process.env.S3_SECRET_KEY!,
-      },
-      forcePathStyle: true,
-    });
+    _s3 = new S3Client(s3ClientConfig());
   }
   return _s3;
 }
@@ -110,7 +145,9 @@ export const VALID_ATTACHMENT_KEY_RE = /^attachments\/(ch|dm)-[\w-]+\/[\w]+-[\w]
  * set Content-Length themselves from the Blob they PUT, so the client sends
  * nothing extra — only Content-Type and Content-Length are signed, never a
  * header the client does not send on its own (an unsent signed header 403s
- * every upload; that is why SSE is bucket-default, see above).
+ * every upload; that is why SSE is bucket-default, see above). Nor does the
+ * URL carry a checksum of a body it never saw (s3ClientConfig): what it holds
+ * besides the signature is the `x-id` operation name, and nothing else.
  */
 export async function generatePresignedPutUrl(
   key: string,
