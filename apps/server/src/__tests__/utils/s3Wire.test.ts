@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { crc32 } from 'node:zlib';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * The real SDK and the real presigner, with the network replaced by a handler
@@ -46,6 +49,9 @@ vi.mock('@aws-sdk/client-s3', async (importOriginal) => {
       if (request.method === 'HEAD') return answer(200, { 'content-length': '10', 'content-type': 'image/webp' });
       if (request.method === 'GET' && 'list-type' in q) {
         return { response: { statusCode: 200, headers: {}, body: xml('<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><IsTruncated>false</IsTruncated></ListBucketResult>') } };
+      }
+      if (request.method === 'GET' && 'cors' in q) {
+        return answer(404, { 'content-type': 'application/xml' }, '<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchCORSConfiguration</Code><Message>The CORS configuration does not exist</Message></Error>');
       }
       if ('encryption' in q || 'cors' in q) return answer(200, {});
       if (request.method === 'GET') return answer(206, { 'content-length': '4', 'content-type': 'image/webp' }, Buffer.from([1, 2, 3, 4]));
@@ -168,6 +174,38 @@ describe('utils/s3 on the wire — presigned PUT', () => {
   });
 });
 
+describe('utils/s3 on the wire — the client settings win over a shared AWS config file', () => {
+  let dir: string | null = null;
+
+  afterEach(async () => {
+    if (dir) await rm(dir, { recursive: true, force: true });
+    dir = null;
+  });
+
+  it('a config file asking for checksums leaves the presigned PUT without one', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'voxium-aws-config-'));
+    const file = join(dir, 'config');
+    await writeFile(file, ['[default]', 'request_checksum_calculation = when_supported', 'response_checksum_validation = when_supported', ''].join('\n'));
+    process.env.AWS_CONFIG_FILE = file;
+    process.env.AWS_SDK_LOAD_CONFIG = '1';
+    const sdk = await import('@aws-sdk/client-s3');
+    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+    const { s3ClientConfig } = await import('../../utils/s3');
+    const input = { Bucket: 'test-bucket', Key: 'avatars/u1-1.webp', ContentType: 'image/webp', ContentLength: 2048 };
+    const presign = async (config: ConstructorParameters<typeof sdk.S3Client>[0]) =>
+      new URL(await getSignedUrl(new sdk.S3Client(config), new sdk.PutObjectCommand(input), { expiresIn: 300, signableHeaders: new Set(['content-type', 'content-length']) }));
+
+    // Control: without the server's settings the file takes effect, so the
+    // assertion below is not a vacuous one
+    const control = await presign({ ...s3ClientConfig(), requestChecksumCalculation: undefined, responseChecksumValidation: undefined });
+    expect(control.search).toMatch(/checksum/i);
+
+    const url = await presign(s3ClientConfig());
+    expect(url.search).not.toMatch(/checksum/i);
+    expect([...url.searchParams.keys()].sort()).toEqual([...SIGV4_QUERY, 'x-id'].sort());
+  });
+});
+
 describe('utils/s3 on the wire — presigned GET', () => {
   it('carries the signature, the cache directive it was signed for and the operation name, and no checksum mode', async () => {
     const { generatePresignedGetUrl } = await import('../../utils/s3');
@@ -210,6 +248,37 @@ describe('utils/s3 on the wire — the calls the server makes', () => {
     // The read before it carries none
     const get = captured.find((r) => r.method === 'GET' && 'encryption' in r.query);
     expect(get && checksumHeaders(get)).toEqual([]);
+  });
+
+  it('the bucket CORS write still sends a CRC32 of its real body, which holds the upload rule', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { reconcileBucketCors } = await import('../../utils/s3');
+    // The store refuses the first preflight of each origin and accepts the second
+    let calls = 0;
+    const fetchImpl = async (_input: string, init: RequestInit) => {
+      calls += 1;
+      const origin = (init.headers as Record<string, string>).Origin;
+      return calls <= 2
+        ? new Response(null, { status: 403 })
+        : new Response(null, { status: 200, headers: { 'access-control-allow-origin': origin, 'access-control-allow-methods': 'PUT', 'access-control-allow-headers': 'content-type' } });
+    };
+
+    const outcome = await reconcileBucketCors({ origins: ['https://chat.example.org', 'http://tauri.localhost'], apply: true, fetchImpl });
+
+    expect(outcome.status).toBe('written');
+    const put = captured.find((r) => r.method === 'PUT' && 'cors' in r.query);
+    expect(put).toBeDefined();
+    const body = bodyBytes(put!.body);
+    expect(put!.headers['x-amz-checksum-crc32']).toBe(crc32Base64(body));
+    const xml = body.toString();
+    expect(xml).toContain('<ID>voxium-uploads</ID>');
+    expect(xml).toContain('<AllowedOrigin>http://tauri.localhost</AllowedOrigin>');
+    expect(xml).toContain('<AllowedMethod>PUT</AllowedMethod>');
+    expect(xml).toContain('<AllowedHeader>content-type</AllowedHeader>');
+    expect(xml).not.toContain('ExposeHeader');
+    // The read carries no checksum
+    for (const get of captured.filter((r) => r.method === 'GET' && 'cors' in r.query)) expect(checksumHeaders(get)).toEqual([]);
   });
 
   it('a ranged read asks for no response checksum and sends none', async () => {

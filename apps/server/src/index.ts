@@ -52,7 +52,8 @@ import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { checkRedisEvictionPolicy } from './utils/redisPolicy';
 import { logSmtpSecurity, verifySmtpRelayAtStart } from './utils/email';
-import { ensureBucketEncryption } from './utils/s3';
+import { ensureBucketEncryption, ensureBucketCors } from './utils/s3';
+import { parseCorsOrigins } from './utils/corsOrigins';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { repairIpBanSpellings } from './utils/ipBans';
 import { loadFeatureFlags } from './utils/featureFlags';
@@ -105,6 +106,12 @@ async function main() {
   // Apply bucket-default encryption when S3_SSE is set (never throws;
   // logs loudly if the provider/key can't do it — uploads keep working)
   await ensureBucketEncryption();
+
+  // Ask the store whether it accepts the browser's upload preflight from every
+  // CORS_ORIGIN origin (and with S3_CORS_APPLY=true, add the CORS rule after a
+  // refusal). Not awaited: a slow or unreachable store must not hold the boot;
+  // it logs one line and never throws.
+  void ensureBucketCors(parseCorsOrigins(process.env.CORS_ORIGIN));
 
   // Which security the mail transport uses (one line; no host, user or address)
   logSmtpSecurity();
