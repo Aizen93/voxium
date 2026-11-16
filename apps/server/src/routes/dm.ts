@@ -3,7 +3,7 @@ import { authenticate, requireVerifiedEmail, requireConsent } from '../middlewar
 import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead, rateLimitDmOpen } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import type { Prisma } from '../generated/prisma/client';
-import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam, prismaErrorCode, violatesForeignKey } from '../utils/errors';
 import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
@@ -412,17 +412,25 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
     // after the commit, to the audience read then (the writer's `announce`).
     const { message, context } = await writeConversationMessage(conversationId, userId, async (tx, ctx) => {
       await assertReplyParent(tx, ctx.authorFloor);
-      const msg = await tx.message.create({
-        data: {
-          content,
-          encrypted: true,
-          conversationId,
-          authorId: userId,
-          // after every floor and the newest message (newMessageTime), so everyone sees it
-          createdAt: ctx.createdAt,
-          ...(replyToId && { replyToId }),
-        },
-      });
+      let msg: { id: string };
+      try {
+        msg = await tx.message.create({
+          data: {
+            content,
+            encrypted: true,
+            conversationId,
+            authorId: userId,
+            // after every floor and the newest message (newMessageTime), so everyone sees it
+            createdAt: ctx.createdAt,
+            ...(replyToId && { replyToId }),
+          },
+        });
+      } catch (err) {
+        // The parent was deleted after the check (its key refused): the
+        // answer a missing parent always gets. Anything else is itself.
+        if (replyToId && violatesForeignKey(err, 'messages_reply_to_id_fkey')) throw new BadRequestError('Invalid replyToId');
+        throw err;
+      }
       if (attachments?.length) {
         await tx.messageAttachment.createMany({
           data: attachments.map((a) => ({
@@ -492,7 +500,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
     }
     const content = req.body.content as string; // verbatim — never sanitized
 
-    const updated = await prisma.message.update({
+    const editMessage = () => prisma.message.update({
       where: { id: messageId },
       data: { content, editedAt: new Date() },
       include: {
@@ -502,6 +510,14 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
         attachments: attachmentSelect,
       },
     });
+    let updated: Awaited<ReturnType<typeof editMessage>>;
+    try {
+      updated = await editMessage();
+    } catch (err) {
+      // deleted after the read above (no row to update): a missing message
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Message');
+      throw err;
+    }
 
     const row = { ...shapeConversationMessageRow(updated, conversationId), reactions: aggregateReactions(updated.reactions) };
     // to the audience as it stands after the write
@@ -529,7 +545,14 @@ dmRouter.delete('/:conversationId/messages/:messageId', rateLimitInteract, async
     if (!isVisibleMessage(message, conversationId, view.floor)) throw new NotFoundError('Message');
     if (message.authorId !== userId) throw new ForbiddenError('You can only delete your own messages');
 
-    await prisma.message.delete({ where: { id: messageId } });
+    try {
+      await prisma.message.delete({ where: { id: messageId } });
+    } catch (err) {
+      // deleted after the read above (a second delete of the same row): a
+      // missing message, whose files the first delete took care of
+      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Message');
+      throw err;
+    }
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {
@@ -586,8 +609,11 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitI
       try {
         await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
       } catch (err) {
-        // P2002: the concurrent duplicate add won the race — same outcome
-        if (!(err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === 'P2002')) throw err;
+        // P2002: the concurrent duplicate add won the race — same outcome.
+        // The message deleted after the read above (its key refused): a
+        // missing message. Anything else is itself.
+        if (violatesForeignKey(err, 'message_reactions_message_id_fkey')) throw new NotFoundError('Message');
+        if (prismaErrorCode(err) !== 'P2002') throw err;
       }
       action = 'add';
     }
@@ -709,11 +735,18 @@ dmRouter.post('/:conversationId/read', rateLimitMarkRead, async (req: Request<{ 
 
     // The last read only: never the caller's removal state (hiddenAt,
     // clearedAt), which a read does not change
-    await prisma.conversationRead.upsert({
-      where: { userId_conversationId: { userId, conversationId } },
-      update: { lastReadAt: new Date() },
-      create: { userId, conversationId, lastReadAt: new Date() },
-    });
+    try {
+      await prisma.conversationRead.upsert({
+        where: { userId_conversationId: { userId, conversationId } },
+        update: { lastReadAt: new Date() },
+        create: { userId, conversationId, lastReadAt: new Date() },
+      });
+    } catch (err) {
+      // the conversation was really deleted after the view (the new read
+      // row's key refused): a missing conversation. Anything else is itself.
+      if (violatesForeignKey(err, 'conversation_reads_conversation_id_fkey')) throw new NotFoundError('Conversation');
+      throw err;
+    }
 
     res.json({ success: true });
   } catch (err) {

@@ -1345,3 +1345,150 @@ describe('DM routes — a conversation whose other side was deleted (NULL side)'
     expect(res.body.data[0].author).toStrictEqual(placeholder('conv-1'));
   });
 });
+
+// ─── A row deleted while the request ran ────────────────────────────────────
+// Each of these windows answered 500. The errors are shaped as Prisma 7 and
+// its pg adapter raise them (checked against PostgreSQL 16): a refused
+// foreign key is P2003 naming its constraint, a row gone before an update or
+// a delete is P2025.
+
+/** A refused foreign key, as the adapter reports it. */
+const foreignKeyRefused = (modelName: string, constraint: string) => Object.assign(new Error(`Foreign key constraint violated on the constraint: \`${constraint}\``), {
+  code: 'P2003',
+  meta: {
+    modelName,
+    driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23503', kind: 'ForeignKeyConstraintViolation', constraint: { index: constraint } } },
+  },
+});
+/** No row to update or delete. */
+const rowGone = (operation: string) => Object.assign(new Error('An operation failed because it depends on one or more records that were required but not found.'), {
+  code: 'P2025',
+  meta: { modelName: 'Message', operation },
+});
+
+describe('DM routes — a row deleted while the request ran is answered as missing', () => {
+  const EMOJI = '👍';
+  const reactionUrl = `/api/v1/dm/conv-1/messages/msg-1/reactions/${encodeURIComponent(EMOJI)}`;
+  const editEnvelope = JSON.stringify({ v: 1, e: 'olm1', t: 1, b: 'ZWRpdGVkY2lwaGVydGV4dA' });
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(mockConversation as any);
+    errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => errorLog.mockRestore());
+
+  const stageReaction = () => {
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1', createdAt: new Date('2024-01-01') } as any);
+    vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
+  };
+
+  it('a reaction on a message deleted after the read: 404 Message, nothing announced', async () => {
+    stageReaction();
+    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce(foreignKeyRefused('MessageReaction', 'message_reactions_message_id_fkey'));
+
+    const res = await request(createApp()).put(reactionUrl);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Message not found');
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('a reaction refused by another key (the account) is not taken for a missing message: it surfaces as itself', async () => {
+    stageReaction();
+    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce(foreignKeyRefused('MessageReaction', 'message_reactions_user_id_fkey'));
+
+    expect((await request(createApp()).put(reactionUrl)).status).toBe(500);
+  });
+
+  it('a reply whose parent was deleted after the check: the answer a missing parent always gets (400 Invalid replyToId), and nothing is sent', async () => {
+    const parent = { conversationId: 'conv-1', createdAt: new Date('2024-01-01') };
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce(parent as any);
+    const tx = {
+      message: {
+        findUnique: vi.fn().mockResolvedValue(parent),
+        create: vi.fn().mockRejectedValue(foreignKeyRefused('Message', 'messages_reply_to_id_fkey')),
+        findUniqueOrThrow: vi.fn(),
+      },
+      messageAttachment: { createMany: vi.fn() },
+    };
+    vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: (client: unknown) => unknown) => fn(tx)) as any);
+
+    const res = await request(createApp()).post('/api/v1/dm/conv-1/messages').send({ content: validEnvelope, encrypted: true, replyToId: 'msg-0' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid replyToId');
+    expect(tx.message.findUniqueOrThrow).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('a send refused by another key surfaces as itself, a reply\'s included', async () => {
+    for (const replyToId of [undefined, 'msg-0']) {
+      if (replyToId) vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ conversationId: 'conv-1', createdAt: new Date('2024-01-01') } as any);
+      const tx = {
+        message: {
+          findUnique: vi.fn().mockResolvedValue({ conversationId: 'conv-1', createdAt: new Date('2024-01-01') }),
+          create: vi.fn().mockRejectedValue(foreignKeyRefused('Message', 'messages_author_id_fkey')),
+          findUniqueOrThrow: vi.fn(),
+        },
+        messageAttachment: { createMany: vi.fn() },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: (client: unknown) => unknown) => fn(tx)) as any);
+      const res = await request(createApp()).post('/api/v1/dm/conv-1/messages').send({ content: validEnvelope, encrypted: true, ...(replyToId && { replyToId }) });
+      expect(res.status, String(replyToId)).toBe(500);
+    }
+  });
+
+  it('an edit that lost the race with a delete: 404 Message, nothing announced', async () => {
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, encrypted: true, content: validEnvelope } as any);
+    vi.mocked(prisma.message.update).mockRejectedValueOnce(rowGone('an update'));
+
+    const res = await request(createApp()).patch('/api/v1/dm/conv-1/messages/msg-1').send({ content: editEnvelope, encrypted: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Message not found');
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('a delete that lost the race with another delete: 404 Message, no file deleted, nothing announced', async () => {
+    const { deleteMultipleFromS3 } = await import('../../utils/s3');
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, attachments: [{ s3Key: 'attachments/dm-conv-1/abc123-encrypted.bin' }] } as any);
+    vi.mocked(prisma.message.delete).mockRejectedValueOnce(rowGone('a delete'));
+
+    const res = await request(createApp()).delete('/api/v1/dm/conv-1/messages/msg-1');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Message not found');
+    expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('an edit or a delete failing otherwise surfaces as itself', async () => {
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, encrypted: true, content: validEnvelope } as any);
+    vi.mocked(prisma.message.update).mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: 'P2034' }));
+    expect((await request(createApp()).patch('/api/v1/dm/conv-1/messages/msg-1').send({ content: editEnvelope, encrypted: true })).status).toBe(500);
+
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, attachments: [] } as any);
+    vi.mocked(prisma.message.delete).mockRejectedValueOnce(new Error('connection lost'));
+    expect((await request(createApp()).delete('/api/v1/dm/conv-1/messages/msg-1')).status).toBe(500);
+  });
+
+  it('a mark-read whose insert meets a conversation really deleted after the view: 404 Conversation', async () => {
+    vi.mocked(prisma.conversationRead.upsert).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_conversation_id_fkey'));
+
+    const res = await request(createApp()).post('/api/v1/dm/conv-1/read');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Conversation not found');
+  });
+
+  it('a mark-read refused by the account\'s key is not taken for a missing conversation: it surfaces as itself', async () => {
+    vi.mocked(prisma.conversationRead.upsert).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_user_id_fkey'));
+
+    expect((await request(createApp()).post('/api/v1/dm/conv-1/read')).status).toBe(500);
+  });
+});
