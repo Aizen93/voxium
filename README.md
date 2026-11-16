@@ -489,6 +489,14 @@ The desktop installers are then built with `pnpm tauri:build`, which also takes 
 
 > **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
 
+### Redis Memory and Eviction
+
+Redis holds the server's state, not a cache: rate-limit and abuse budgets, the single-use marks of solved sign-up challenges and of used two-factor codes, the feature-flag and rate-limit overrides set from the admin dashboard, scheduled-job locks, node heartbeats, presence and voice state. The compose file runs it with `--maxmemory 256mb --maxmemory-policy noeviction` and the append-only file written to disk every second, and gives the container a 512 MB limit. If you run Redis yourself (another host, a managed service), set `maxmemory-policy noeviction` there too: any other policy drops those keys without an error once memory runs short (`volatile-*` as well, since the marks, budgets and locks all carry a TTL). The server logs a warning at startup when the policy evicts, or when it cannot read it (some managed services refuse `CONFIG GET`).
+
+- **When Redis is full** it refuses new writes and keeps everything it holds; reads, deletes and expiry keep working, so memory comes back as keys expire. Meanwhile the server log shows each refused write (`OOM command not allowed when used memory > 'maxmemory'`): rate limits fall back to a count kept in each server process's memory, scheduled jobs skip their run and try again later, the single-use marks are not recorded (the request goes through, as when Redis is down), voice joins can fail, and users who connect are not shown online.
+- **Sizing.** Most of what Redis holds is small and expires on its own: one small key per caller and rate limit (gone when its window ends), the Explore page cache (60 seconds). The largest items are screen-share annotation scenes, up to 800 KB per voice channel with an active share, kept up to four hours. 256 MB is ample for a community on one server; for more, raise `--maxmemory` and keep the container's memory limit at about twice it (rewriting the append-only file forks Redis, and the copy can double the memory in use while it runs).
+- **Monitoring.** `docker compose -f docker-compose.production.yml exec redis redis-cli INFO memory` prints `used_memory` and `maxmemory`; alert well before the first reaches the second.
+
 ### Managing the Docker Stack
 
 ```bash
