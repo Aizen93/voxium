@@ -21,6 +21,7 @@ export interface SelfHostedOverlay {
 export function isHostSource(source: string): boolean;
 export function isDeploymentHost(source: string): boolean;
 export function parseServerUrl(name: string, value: string | undefined | null, protocols: readonly string[]): URL;
+export function selfHostedClientOrigin(value: string | undefined | null): string | null;
 export function serverSources(
   apiUrl: string | undefined | null,
   wsUrl: string | undefined | null,

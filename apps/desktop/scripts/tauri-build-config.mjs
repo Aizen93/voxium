@@ -12,6 +12,9 @@
 //                              (mode production): the environment first,
 //                              then apps/desktop/.env.production.local,
 //                              .env.production, .env.local, .env
+//   VITE_CLIENT_URL            the same way; optional, the web client's
+//                              origin for invite links (checked, not in
+//                              the overlay)
 //   TAURI_ASSET_ORIGIN         the object store's origin(s), comma-separated
 //   TAURI_UPDATER_ENDPOINTS    your update feed URL(s), comma-separated, https
 //   TAURI_UPDATER_PUBKEY       your updater public key (`tauri signer generate`)
@@ -27,7 +30,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from 'vite';
-import { selfHostedConfig } from './tauriSelfHosted.mjs';
+import { selfHostedClientOrigin, selfHostedConfig } from './tauriSelfHosted.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopDir = join(here, '..');
@@ -61,6 +64,10 @@ function main() {
     updaterPubkey: env.TAURI_UPDATER_PUBKEY,
   });
 
+  // Checked here so a malformed value stops the build; the app reads it itself
+  if (selfHostedClientOrigin(viteEnv.VITE_CLIENT_URL) === null) {
+    console.warn('[tauri-build-config] VITE_CLIENT_URL is unset: invite links start with VITE_WS_URL, and open the web client only if it is served on that origin');
+  }
   if (!env.TAURI_ASSET_ORIGIN?.trim()) {
     console.warn('[tauri-build-config] TAURI_ASSET_ORIGIN is unset: avatars, space icons and uploads work only if your object storage answers on the API origin');
   }

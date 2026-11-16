@@ -330,6 +330,7 @@ NODE_ENV=production node dist/index.js
 cd apps/desktop
 VITE_API_URL=https://chat.example.org/api/v1 \
 VITE_WS_URL=https://chat.example.org \
+VITE_CLIENT_URL=https://chat.example.org \
 TAURI_ASSET_ORIGIN=https://storage.example.org \
 pnpm tauri:build
 ```
@@ -338,6 +339,7 @@ pnpm tauri:build
 |---------|---------|---------------|
 | `VITE_API_URL` | `https://chat.example.org/api/v1` | **Required.** The API the app is compiled for. Its origin goes into the Content Security Policy's `connect-src` (requests) and `img-src` (avatars and icons are `<img>` loads from `/uploads/`). |
 | `VITE_WS_URL` | `https://chat.example.org` | **Required.** The socket server. `connect-src` gets its origin in both forms the client uses: `https://` (polling) and `wss://` (WebSocket); `http://` gives `http://` + `ws://`. |
+| `VITE_CLIENT_URL` | `https://chat.example.org` | Your web client's origin (`scheme://host[:port]`, no path): the invite links the app hands out open `/invite/<code>` there. Not part of the policy (a link is opened by someone's browser, not fetched by the app). Without it the build warns, and the links start with `VITE_WS_URL`, which opens the invite page only if the web client is served on that origin too. |
 | `TAURI_ASSET_ORIGIN` | `https://storage.example.org` | Your object storage's origin (`https://host[:port]`, comma-separated for several). The server answers avatar and icon requests with a redirect there and uploads are sent straight to it, so it goes into `img-src` and `connect-src`. Without it, images and uploads work only if the storage answers on the API origin. |
 | `TAURI_UPDATER_ENDPOINTS` | `https://updates.example.org/voxium/latest.json` | Optional, with `TAURI_UPDATER_PUBKEY`: your own update feed (`https` only, comma-separated for several; Tauri's `{{target}}` / `{{arch}}` / `{{current_version}}` placeholders work). |
 | `TAURI_UPDATER_PUBKEY` | the `.pub` content `pnpm tauri signer generate` prints | Optional, with `TAURI_UPDATER_ENDPOINTS`: the public key your updates are signed with. |
@@ -490,9 +492,11 @@ Point the Voxium desktop app (or web client) to your server by setting these in 
 ```env
 VITE_API_URL=http://YOUR_SERVER_IP:3001/api/v1
 VITE_WS_URL=http://YOUR_SERVER_IP:3001
+# For the desktop app: where your web client is served, for its invite links
+VITE_CLIENT_URL=https://chat.example.com
 ```
 
-The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
+`apps/desktop/.env.example` lists every client setting. The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
 
 > **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
 
@@ -654,6 +658,7 @@ Read by the Docker deployment around the server, not by the server itself:
 | `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
 | `VITE_STUN_URL` | `stun:<VITE_WS_URL host>:3478` | Optional STUN server for DM calls (`stun:`/`stuns:` only). Compiled into the build. |
+| `VITE_CLIENT_URL` | — (desktop app: `VITE_WS_URL`) | The public web client's origin, for the invite links the **desktop app** hands out. In a browser, links always use the page's own origin and this is not read; `tauri dev` uses the dev server's. A desktop build without it starts its links with `VITE_WS_URL`, as before. Compiled into the build. |
 
 `VOXIUM_DEV_LAN=1`, from the environment only, makes the Vite dev server listen on every interface. The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VITE_WS_URL`, and also reads `TAURI_ASSET_ORIGIN`, `TAURI_UPDATER_ENDPOINTS`, `TAURI_UPDATER_PUBKEY` and `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) from the environment: see [Build the Desktop App](#build-the-desktop-app).
 
