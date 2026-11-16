@@ -7,6 +7,8 @@
 # Shell scripts must be LF — CRLF causes /bin/sh parse errors.
 *.sh text eol=lf
 docker-entrypoint.sh text eol=lf
+# The git hooks (.githooks/) are sh scripts without an extension.
+.githooks/* text eol=lf
 Dockerfile text eol=lf
 .dockerignore text eol=lf
 

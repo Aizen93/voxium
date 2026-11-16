@@ -5,6 +5,9 @@ module.exports = tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    // Named, not inferred: typescript-eslint refuses to guess once two packages' configs
+    // are loaded in one process (an editor opened at the repository root, the lint test).
+    languageOptions: { parserOptions: { tsconfigRootDir: __dirname } },
     rules: {
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', destructuredArrayIgnorePattern: '^_', ignoreRestSiblings: true }],

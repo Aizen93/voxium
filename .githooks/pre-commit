@@ -1,0 +1,22 @@
+#!/bin/sh
+# The pre-commit hook the repository keeps. `pnpm install` puts a shim in the
+# clone's .git/hooks (scripts/install-git-hooks.mjs) that runs this file with sh
+# in whichever worktree commits.
+#
+# It runs `pnpm typecheck`, the typecheck CI runs: the shared package's build,
+# the server, desktop and admin compilers, then the code that runs in a browser
+# once more without Node's types. It checks the files as they are in the working
+# tree, staged or not. A failure stops the commit: fix the errors, and never
+# commit with --no-verify.
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "[pre-commit] FAILED: pnpm is not on this shell's PATH, so the typecheck cannot run" >&2
+  exit 1
+fi
+
+echo "[pre-commit] Running pnpm typecheck..."
+if ! pnpm typecheck; then
+  echo "[pre-commit] FAILED: pnpm typecheck reported errors; fix them, then commit again" >&2
+  exit 1
+fi
+echo "[pre-commit] pnpm typecheck passed"

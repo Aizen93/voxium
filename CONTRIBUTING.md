@@ -15,7 +15,7 @@ Thanks for your interest in contributing! This guide covers everything you need 
 ### Getting Started
 
 ```bash
-# Clone and install
+# Clone and install (this also turns on the pre-commit hook, see below)
 git clone https://github.com/your-username/Voxium.git
 cd Voxium
 pnpm install
@@ -42,12 +42,23 @@ pnpm dev:admin    # Terminal 3 — admin dashboard on :8082 (optional)
 ### Useful Commands
 
 ```bash
-pnpm typecheck          # Type-check all packages (CI runs it on every pull request)
+pnpm typecheck          # Type-check all packages (the pre-commit hook and CI run it)
 pnpm lint               # ESLint across all packages
 pnpm test:e2e           # Playwright E2E tests (requires backend + frontend running)
 pnpm test:e2e:headed    # E2E tests with visible browser
 pnpm db:studio          # Visual database browser
 ```
+
+### The pre-commit hook
+
+The repository keeps its pre-commit hook in `.githooks/pre-commit`. It runs `pnpm typecheck`, the same command CI runs on every pull request, and stops the commit when it fails: fix the errors, and never commit with `--no-verify`. It checks the files as they are in your working tree, staged or not, and needs what `pnpm typecheck` needs: the install and the Prisma client (`pnpm --filter @voxium/server db:generate`, in Getting Started above).
+
+`pnpm install` installs it: `scripts/install-git-hooks.mjs` writes a small shim to `.git/hooks/pre-commit`, which every worktree of your clone shares, and sets no git setting. At each commit the shim runs the committed branch's own `.githooks/pre-commit` when the branch tracks it; on a branch made before the hook was kept in the repository it runs `pnpm typecheck` itself; anywhere else, nothing.
+
+- **A `pre-commit` of your own is never replaced.** The installer replaces the file only when its text, line endings aside, is exactly a shim this project shipped. Anything else is left byte for byte as it is: a hook of your own, a shim you edited, a hook into which you pasted the shim's text. For such a file every install prints one line saying that the repository's hook does not run, except when the file begins the way a shim of a newer version does (its first line a shebang, its second the shim's marker with a higher version, as a newer branch writes it): that one is kept without a line. To switch to the repository's hook, remove or rename your file, then run `node scripts/install-git-hooks.mjs`. To keep your own hook instead, leave it in place, or put one there: that is the way to opt out.
+- **With `core.hooksPath` set** (husky, a global policy), git does not read `.git/hooks`: the installer writes nothing and says so. Call `.githooks/pre-commit` from the `pre-commit` hook in that folder. When `.git/hooks` is a link to a folder outside the repository's git directory (`.git`, or `.git/modules/<name>` for a submodule), such as one several repositories share or one in your work tree, the installer writes nothing either, and says so.
+- The installer does nothing when `CI` is set or outside a git work tree. After an install that skipped scripts (`--ignore-scripts`), run it yourself: `node scripts/install-git-hooks.mjs`.
+- A merge or a cherry-pick that completes without a conflict runs no pre-commit hook (that is git's behaviour): run `pnpm typecheck` after one.
 
 ## Project Structure
 
@@ -69,7 +80,7 @@ Voxium/
 
 1. Fork the repo and create a branch from `develop`
 2. Make your changes
-3. Run `pnpm typecheck` — CI runs it on every pull request and it must pass
+3. Run `pnpm typecheck` — the pre-commit hook runs it before each commit and CI on every pull request, and it must pass
 4. Run `pnpm test:e2e` if your changes affect user-facing behavior
 5. Open a PR against `develop` — PRs to `main` are only accepted from `develop`
 6. Fill in the pull request template, including the box that confirms the [contribution terms](#license-and-contributions)
@@ -84,7 +95,7 @@ Voxium/
 - **Sanitize user input** — all text stored in DB must pass through `sanitizeText()` before validation
 - **Rate limit new endpoints** — add a named limiter in `middleware/rateLimiter.ts`
 - **Type route params** — use `Request<{ serverId: string }>` not bare `Request`
-- **No Node API in browser code** — the code of the desktop and admin apps (`src/`, outside `src/__tests__`) and of `packages/shared` is type-checked a second time without Node's types (`tsconfig.browser.json`), so `process`, `Buffer` or a `node:` import there fails `pnpm typecheck`; a timer handle is `ReturnType<typeof setTimeout>`
+- **No Node API in browser code** — the code of the desktop and admin apps (`src/`, outside `src/__tests__`) and of `packages/shared` is type-checked a second time without Node's types (`tsconfig.browser.json`), so `process`, `Buffer` or a `node:` import there fails `pnpm typecheck`; a timer handle is `ReturnType<typeof setTimeout>`. In the two apps, ESLint flags Node's globals and the imports of its built-in modules there too, so your editor shows them as you type (`pnpm lint`)
 
 ### After Modifying...
 
@@ -93,7 +104,7 @@ Voxium/
 | `packages/shared/` | `pnpm build:shared` before consuming apps see changes |
 | `prisma/schema.prisma` | `cd apps/server && npx prisma migrate dev --name <name>` |
 | `apps/desktop/src-tauri/` (Rust or Cargo files) | `cd apps/desktop/src-tauri && cargo check --locked && cargo test --lib` — CI runs the same on Windows for every change there |
-| Any TypeScript | `pnpm typecheck` (CI runs it on every pull request) |
+| Any TypeScript | `pnpm typecheck` (the pre-commit hook runs it before each commit, CI on every pull request) |
 
 ### Commit Messages
 
