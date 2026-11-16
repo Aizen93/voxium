@@ -32,6 +32,7 @@ import { rateLimitGeneral } from './middleware/rateLimiter';
 import { requireSingleValueQuery } from './middleware/singleValueQuery';
 import { trustsProxy, trustedProxyHops } from './utils/trustProxy';
 import { redactUrl } from './utils/redactUrl';
+import { parseCorsOrigins } from './utils/corsOrigins';
 
 export const app = express();
 
@@ -69,9 +70,7 @@ app.use((req, _res, next) => {
 let _allowedOrigins: string[] | null = null;
 function getAllowedOrigins(): string[] {
   if (!_allowedOrigins) {
-    _allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8080')
-      .split(',')
-      .map((o) => o.trim());
+    _allowedOrigins = parseCorsOrigins(process.env.CORS_ORIGIN);
   }
   return _allowedOrigins;
 }

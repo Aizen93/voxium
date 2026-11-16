@@ -15,6 +15,8 @@ vi.mock('@aws-sdk/client-s3', () => ({
   ListObjectsV2Command: vi.fn(),
   GetBucketEncryptionCommand: vi.fn(),
   PutBucketEncryptionCommand: vi.fn(),
+  GetBucketCorsCommand: vi.fn(),
+  PutBucketCorsCommand: vi.fn(),
 }));
 
 vi.mock('@aws-sdk/s3-request-presigner', () => ({
@@ -512,5 +514,22 @@ describe('utils/s3 — deleteMultipleFromS3', () => {
     } finally {
       error.mockRestore();
     }
+  });
+});
+
+describe('utils/s3 — describeStoreError', () => {
+  it('keeps identifiers and the status, never a message', async () => {
+    const { describeStoreError } = await import('../../utils/s3');
+
+    expect(describeStoreError(Object.assign(new Error('getaddrinfo ENOTFOUND store.private.example'), { code: 'ENOTFOUND' }))).toBe('Error, ENOTFOUND');
+    expect(describeStoreError({ name: 'AccessDenied', Code: 'AccessDenied', $metadata: { httpStatusCode: 403 } })).toBe('AccessDenied, HTTP 403');
+    expect(describeStoreError({ name: 'a sentence with spaces', code: 'store.private.example:9000 refused' })).toBe('unknown error');
+    // fetch hides the system error's code in `cause`
+    expect(describeStoreError(Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED host:1'), { code: 'ECONNREFUSED' }) }))).toBe('TypeError, ECONNREFUSED');
+    // The SDK's HTTP handler wraps an abort as an AbortError whose cause is the signal's reason
+    expect(describeStoreError(Object.assign(new Error('The operation was aborted'), { name: 'AbortError', cause: new DOMException('signal timed out 15000', 'TimeoutError') }))).toBe('AbortError, cause TimeoutError');
+    expect(describeStoreError({ name: 'AbortError', cause: { name: 'a sentence with spaces' } })).toBe('AbortError');
+    expect(describeStoreError(null)).toBe('unknown error');
+    expect(describeStoreError('a string')).toBe('unknown error');
   });
 });

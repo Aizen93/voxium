@@ -1,4 +1,5 @@
 import type { Server as HttpServer } from 'http';
+import { parseCorsOrigins } from '../utils/corsOrigins';
 import { Server as SocketServer } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import jwt from 'jsonwebtoken';
@@ -62,9 +63,7 @@ export function getIO(): SocketServer<ClientToServerEvents, ServerToClientEvents
 export function initSocketServer(httpServer: HttpServer) {
   io = new SocketServer<ClientToServerEvents, ServerToClientEvents>(httpServer, {
     cors: {
-      origin: (process.env.CORS_ORIGIN || 'http://localhost:8080')
-        .split(',')
-        .map((o) => o.trim()),
+      origin: parseCorsOrigins(process.env.CORS_ORIGIN),
       credentials: true,
     },
     pingInterval: 25000,
