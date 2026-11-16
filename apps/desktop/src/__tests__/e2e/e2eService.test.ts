@@ -6,7 +6,7 @@
 // signature verification → Olm key-share fanout → Megolm group session →
 // pickle persistence → plaintext cache.
 import 'fake-indexeddb/auto';
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { activateSecurePins, deactivateSecurePins, forgetSecurePins, isPinnedSecure } from '../../utils/securePins';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -792,6 +792,9 @@ type Server = ReturnType<typeof createFakeServer>;
 
 let uniq = 0;
 let vaultSeq = 0;
+/** Every service `makeDevice` built in the running test: `flushQueue` waits for their queues. */
+const liveServices = new Set<E2EService>();
+beforeEach(() => liveServices.clear());
 
 /** One installed device: its own vault, its own pickle key, its own account. */
 function makeDevice(
@@ -811,6 +814,7 @@ function makeDevice(
     vaultNamespace,
     deviceListCacheMs: 0, // tests observe device-list changes immediately
   });
+  liveServices.add(service);
   return { userId, service, keyProvider, vaultNamespace };
 }
 
@@ -818,9 +822,29 @@ function makeParty(server: Server, name: string, keyProvider = memoryKeyProvider
   return makeDevice(server, `${name}-${uniq}`, { keyProvider });
 }
 
+/** The serial queue of a service: private there, read here only to wait for it. */
+const queueOf = (service: E2EService): Promise<unknown> => {
+  const queue = (service as unknown as { queue?: unknown }).queue;
+  // A renamed field must fail here, not turn the wait below into a no-op
+  if (!(queue instanceof Promise)) throw new Error('e2eService.test: E2EService has no queue promise to wait for');
+  return queue;
+};
+
 async function flushQueue() {
-  // replenishment / initial share claim run fire-and-forget; let them settle
+  // Replenishment, the initial share claim and the master-transfer claim run
+  // fire-and-forget on each service's serial queue. A fixed sleep alone lost
+  // that race on a slow machine (the claim had not run when the assertion
+  // did). So: the 20 ms this helper always waited, which also covers work
+  // that runs off the queue, then every queue at rest twice in a row (a
+  // finished task may queue another, like the history pull after a claim).
   await new Promise((r) => setTimeout(r, 20));
+  const services = [...liveServices];
+  for (let calm = 0; calm < 2; ) {
+    const before = services.map(queueOf);
+    await Promise.all(before);
+    await new Promise((r) => setTimeout(r, 0));
+    calm = services.every((service, i) => queueOf(service) === before[i]) ? calm + 1 : 0;
+  }
 }
 
 const sidOf = (envelope: string) => JSON.parse(envelope).sid as string;
@@ -7233,6 +7257,7 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
       vaultNamespace: `v${++vaultSeq}`,
       deviceListCacheMs: 0,
     });
+    liveServices.add(bob);
     await alice.service.initialize();
     await bob.initialize();
     await flushQueue();
@@ -7319,6 +7344,7 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
       vaultNamespace: `v${++vaultSeq}`,
       deviceListCacheMs: 0,
     });
+    liveServices.add(bob);
     await alice.service.initialize();
     await bob.initialize();
     await flushQueue();
@@ -7398,6 +7424,7 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
       vaultNamespace: `v${++vaultSeq}`,
       deviceListCacheMs: 0,
     });
+    liveServices.add(bob);
     await alice.service.initialize();
     await bob.initialize();
     await flushQueue();
