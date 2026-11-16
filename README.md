@@ -402,7 +402,7 @@ JWT_REFRESH_SECRET=another_random_64_char_secret
 TOTP_ENCRYPTION_KEY=
 
 # ── S3 / Object Storage (required for file uploads) ──────────────────────────
-S3_ASSETS_ENDPOINT=https://s3.us-east-1.amazonaws.com
+S3_ASSETS_ENDPOINT=https://s3.example.com
 S3_ASSETS_REGION=us-east-1
 S3_ACCESS_KEY=your_access_key
 S3_SECRET_KEY=your_secret_key
@@ -427,12 +427,12 @@ PORT=3001
 # For local testing with the dev frontend, use: http://localhost:8080
 # Add the Tauri desktop origins so the native apps can connect too:
 # https://tauri.localhost (Windows), tauri://localhost (macOS), http://tauri.localhost (Linux)
-CORS_ORIGIN=https://yourdomain.com,https://tauri.localhost,tauri://localhost,http://tauri.localhost
+CORS_ORIGIN=https://chat.example.com,https://tauri.localhost,tauri://localhost,http://tauri.localhost
 # The object-storage BUCKET needs the same origins in its own CORS rules (methods GET, PUT, HEAD;
 # headers *): avatars, space icons and attachments are uploaded straight from the client to a
 # presigned URL, and a bucket that allows only the web origin fails the desktop app's uploads
 # with "Failed to fetch" while the images still display. scripts/setup-dev-bucket.ts shows the rule.
-CLIENT_URL=https://yourdomain.com
+CLIENT_URL=https://chat.example.com
 # Set to true when running behind a reverse proxy (nginx etc.)
 TRUST_PROXY=true
 
@@ -446,7 +446,7 @@ MEDIASOUP_MIN_PORT=10000
 MEDIASOUP_MAX_PORT=10007
 ```
 
-See `.env.production.example` for the full list of options (S3 encryption, proxy hops, logging).
+See `.env.production.example` for the full list of options (token lifetimes, S3 encryption, SMTP connection security, the node name, proxy hops, mediasoup workers, logging) and the [Configuration Reference](#configuration-reference) for what each one does.
 
 > **Important:** `MEDIASOUP_ANNOUNCED_IP` must be your server's public IP address. Voice channels will not work without this.
 
@@ -597,41 +597,55 @@ curl http://localhost:3001/api/v1/servers \
 
 ## Configuration Reference
 
+Every setting below is in the matching template: `apps/server/.env.example` (development), `.env.production.example` (the Docker deployment), `apps/desktop/.env.example` and `apps/admin/.env.example`. A test keeps the templates, this table and the code in step.
+
 ### Server Environment Variables (`apps/server/.env`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | — | **Required.** PostgreSQL connection string |
-| `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
+| `DATABASE_URL` | — | **Required.** PostgreSQL connection string (set by `docker-compose.production.yml` in the Docker deployment) |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection string (set by the compose file in the Docker deployment) |
 | `JWT_SECRET` | — | **Required.** Secret for signing access tokens |
 | `JWT_REFRESH_SECRET` | — | **Required.** Secret for signing refresh tokens |
 | `JWT_EXPIRES_IN` | `15m` | Access token expiry |
-| `JWT_REFRESH_EXPIRES_IN` | `30d` | Refresh token expiry for "remember me" sessions (otherwise 24h); `.env.example` sets `7d` |
+| `JWT_REFRESH_EXPIRES_IN` | `30d` | Refresh token expiry for "remember me" sessions (otherwise 24h); the Cookie Policy states up to 30 days |
+| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest (and the signing secrets of GitHub-type webhooks). Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. When set, it must be 64 hexadecimal characters: a value that does not give 32 bytes stops the start in every environment, and characters after the 64th are ignored with a warning. |
 | `PORT` | `3001` | HTTP server port |
-| `NODE_ENV` | `development` | Environment mode |
-| `CORS_ORIGIN` | `http://localhost:8080` | Allowed CORS origin(s) |
-| `S3_ASSETS_ENDPOINT` | — | S3-compatible storage endpoint |
-| `S3_ASSETS_REGION` | — | S3 bucket region |
-| `S3_ACCESS_KEY` | — | S3 access key |
-| `S3_SECRET_KEY` | — | S3 secret key |
-| `S3_ASSETS_BUCKET` | — | S3 bucket name |
+| `NODE_ENV` | `development` | `production` (set by the compose file) makes `TOTP_ENCRYPTION_KEY` mandatory and turns on HSTS, the trusted proxy, JSON access logs and the STARTTLS requirement for mail; the demo seed refuses it |
+| `NODE_ID` | a random id per start | This process's name in a cluster: one stable value per node, never shared by two processes running at once. Unset, a process killed without a clean stop looks like a live peer to its own replacement for up to 30 s (its heartbeat), which delays the stale-presence cleanup at start |
+| `CORS_ORIGIN` | `http://localhost:8080` | Allowed browser origins, comma-separated (the web client, the admin dashboard, the desktop app's origins) |
+| `CLIENT_URL` | `http://localhost:8080` | The web client's address, used for the links in e-mails |
+| `LOG_FORMAT` | `json` in production, `dev` otherwise | Access log format: `json` (one JSON line per request) or `dev` |
+| `S3_ASSETS_ENDPOINT` | — | **Required.** S3-compatible storage endpoint |
+| `S3_ASSETS_REGION` | — | **Required.** S3 bucket region |
+| `S3_ACCESS_KEY` | — | **Required.** S3 access key |
+| `S3_SECRET_KEY` | — | **Required.** S3 secret key |
+| `S3_ASSETS_BUCKET` | — | **Required.** S3 bucket name |
 | `S3_SSE` | — | Optional bucket-default encryption at rest: `AES256` or `aws:kms` |
 | `SMTP_HOST` | `localhost` | SMTP server host |
 | `SMTP_PORT` | `1025` | SMTP server port |
-| `SMTP_USER` | — | SMTP auth username |
+| `SMTP_USER` | — | SMTP auth username (the server logs in only when both this and `SMTP_PASS` are set) |
 | `SMTP_PASS` | — | SMTP auth password |
-| `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
+| `SMTP_FROM` | `noreply@voxium.app` | Sender email address: set one of your own domain |
 | `SMTP_FROM_NAME` | `Voxium` | Sender display name |
 | `SMTP_SECURE` | `false` | `true`: implicit TLS from the first byte (usually port 465). Only the exact value `true` turns it on |
 | `SMTP_REQUIRE_TLS` | `true` when `NODE_ENV=production`, else `false` | `true`: STARTTLS, and no mail at all to a relay that does not complete it. `false`: STARTTLS when the relay offers it, plain text otherwise (a relay on a network you trust, a local catcher; warned about at start in production). Unset or empty takes the default; any other value reads as `false` and is reported at start. The server logs the mode in effect once at start |
-| `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
-| `CLEANUP_REPORT_EMAIL` | — | Email address for daily attachment cleanup reports. If not set, no report is sent. |
-| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. When set, it must be 64 hexadecimal characters: a value that does not give 32 bytes stops the start in every environment, and characters after the 64th are ignored with a warning. |
+| `CLEANUP_REPORT_EMAIL` | — | Where the nightly attachment-cleanup report and the hourly sign-up spike alert go. If not set, neither is sent. |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers (always on when `NODE_ENV=production`) |
-| `TRUST_PROXY_HOPS` | `1` | Number of reverse proxies in front of the server — must match your setup exactly |
+| `TRUST_PROXY_HOPS` | `1` | Number of reverse proxies in front of the server (1 to 10) — must match your setup exactly |
 | `MEDIASOUP_LISTEN_IP` | `0.0.0.0` | IP the mediasoup workers bind to |
-| `MEDIASOUP_ANNOUNCED_IP` | `127.0.0.1` | IP address announced to WebRTC clients for mediasoup SFU connectivity. Set it to the machine's LAN IP for cross-machine voice in development, and its public IP in production. The Vite dev servers listen on localhost only; start them with `VOXIUM_DEV_LAN=1` to reach them from another machine. |
+| `MEDIASOUP_ANNOUNCED_IP` | `127.0.0.1` | IP address announced to WebRTC clients for mediasoup SFU connectivity. Set it to the machine's LAN IP in development (Firefox does not complete ICE/DTLS against a loopback address, so its voice fails on `127.0.0.1` even on one machine), and its public IP in production. The Vite dev servers listen on localhost only; start them with `VOXIUM_DEV_LAN=1` to reach them from another machine. |
 | `MEDIASOUP_MIN_PORT` / `MEDIASOUP_MAX_PORT` | `10000` / `59999` | mediasoup port range. Each worker (one per CPU core, max 8) binds one UDP + TCP port at `MIN_PORT + slot`, so only the first few ports are used |
+| `MEDIASOUP_NUM_WORKERS` | one per CPU core | Fewer mediasoup workers than CPU cores (at most 8 either way); the port range must hold one port per worker |
+| `MEDIASOUP_WEBRTC_SERVER` | `true` | `false`: the legacy mode where each WebRTC transport binds its own port out of the range (two per user), so the whole range must be open and published |
+
+Read by the Docker deployment around the server, not by the server itself:
+
+| Variable | Read by | Description |
+|----------|---------|-------------|
+| `POSTGRES_PASSWORD` | `docker-compose.production.yml` | The database password, used by both the PostgreSQL container and the server's `DATABASE_URL` |
+| `VOXIUM_ALLOW_CUTOVER` | `docker-entrypoint.sh` | `1` lets one start apply the always-on E2E cutover migration (see [Start the Stack](#3-start-the-stack)); remove it afterwards |
+| `VOXIUM_ALLOW_DEMO_SEED` | `prisma/seed.ts` | `1` lets the demo seed run under `NODE_ENV=production`, for that one command (see [Database Management](#database-management)); never in an env file |
 
 ### Frontend Environment Variables (`apps/desktop/.env`)
 
@@ -641,7 +655,7 @@ curl http://localhost:3001/api/v1/servers \
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
 | `VITE_STUN_URL` | `stun:<VITE_WS_URL host>:3478` | Optional STUN server for DM calls (`stun:`/`stuns:` only). Compiled into the build. |
 
-The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VITE_WS_URL`, and also reads `TAURI_ASSET_ORIGIN`, `TAURI_UPDATER_ENDPOINTS` and `TAURI_UPDATER_PUBKEY` from the environment: see [Build the Desktop App](#build-the-desktop-app).
+`VOXIUM_DEV_LAN=1`, from the environment only, makes the Vite dev server listen on every interface. The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VITE_WS_URL`, and also reads `TAURI_ASSET_ORIGIN`, `TAURI_UPDATER_ENDPOINTS`, `TAURI_UPDATER_PUBKEY` and `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) from the environment: see [Build the Desktop App](#build-the-desktop-app).
 
 ### Admin Dashboard Environment Variables (`apps/admin/.env`)
 
@@ -649,6 +663,8 @@ The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VI
 |----------|---------|-------------|
 | `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
+
+`VOXIUM_DEV_LAN=1` works for the admin dev server the same way.
 
 ---
 

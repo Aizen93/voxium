@@ -28,6 +28,10 @@ services:
       # defaults below are what gets published, whatever the container believes.
       - "${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}:${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}/udp"
       - "${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}:${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}/tcp"
+    # Every other setting comes from .env.production (.env.production.example
+    # lists them all). NODE_ID, when set, names this node: a second server
+    # container needs one of its own, set per container and not in a file
+    # both read (two running processes must never share one).
     env_file:
       - .env.production
     environment:
