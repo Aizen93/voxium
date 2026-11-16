@@ -1,9 +1,26 @@
-# Gitleaks configuration — allowlist for false positives
+# Gitleaks configuration: gitleaks' default rules, and an allowlist for false
+# positives on top.
+#
+# Without [extend] this file defined no rule at all, and gitleaks then loads
+# none: the Security Scan could never find anything.
+[extend]
+useDefault = true
 
 [allowlist]
-  description = "Allow dummy test keys"
+  description = "Dummy test keys, and the dummy values CI boots its servers with"
   paths = [
     '''__tests__/''',
     '''\.test\.ts$''',
     '''\.spec\.ts$''',
+  ]
+  # Matched against the value a rule found. The workflows boot their servers
+  # with these placeholders, which the default generic rule takes for keys;
+  # each is anchored, so only that exact shape passes.
+  regexes = [
+    # TOTP_ENCRYPTION_KEY in ci.yml, server-image.yml, integration-scripts.yml
+    '''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''',
+    # Their JWT_SECRET / JWT_REFRESH_SECRET: the six values themselves
+    # (ci-e2e-secret-at-least-32-characters-long and its five siblings),
+    # never a shape a generated secret could take
+    '''^ci-(?:e2e|image|scripts)-(?:secret-at-least-32-characters-long|refresh-secret-at-least-32-chars)$''',
   ]
