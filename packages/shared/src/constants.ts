@@ -114,6 +114,38 @@ export const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const WEBHOOK_AUTHOR_ID_PREFIX = 'webhook:';
 
 /**
+ * The prefix of the id the server gives the placeholder that stands for a
+ * deleted account in a direct conversation: `deleted:{conversationId}`, as a
+ * conversation's `participant` (with `participantDeleted: true`) and as the
+ * author of a message row that has none. Derived from the conversation, never
+ * from the account, so it differs per conversation and names nobody. Like
+ * the webhook prefix, the colon means it can never EQUAL a user id (a cuid
+ * holds no colon) and fails OPAQUE_ID_RE, which the member lookups apply.
+ */
+export const DELETED_PARTICIPANT_ID_PREFIX = 'deleted:';
+
+/** Whether an id is the server's deleted-account placeholder (DELETED_PARTICIPANT_ID_PREFIX). */
+export function isDeletedParticipantId(id: unknown): boolean {
+  return typeof id === 'string' && id.startsWith(DELETED_PARTICIPANT_ID_PREFIX);
+}
+
+/**
+ * The `type` of the row that stands for a deleted account's message in a
+ * conversation that outlived it: only its id, conversation and time remain,
+ * with empty content, not encrypted, no author, quote, attachment or reaction.
+ */
+export const DELETED_MESSAGE_TYPE = 'deleted';
+
+/**
+ * Whether a message row is that placeholder: the type AND the shape it
+ * always has (not encrypted, empty content), so a row that names the type
+ * but carries text or ciphertext is never taken for one.
+ */
+export function isDeletedMessagePlaceholder(row: { type?: unknown; encrypted?: unknown; content?: unknown }): boolean {
+  return row.type === DELETED_MESSAGE_TYPE && row.encrypted !== true && row.content === '';
+}
+
+/**
  * Max serialized dm:voice:signal payload the server will relay (UTF-16 chars,
  * matching the JSON.stringify length check). Signals are opaque olm1 envelopes
  * after the E2E cutover — the cap must fit a base64-inflated audio SDP with
@@ -455,6 +487,7 @@ export const WS_EVENTS = {
   FRIEND_REQUEST_ACCEPTED: 'friend:request_accepted',
   FRIEND_REMOVED: 'friend:removed',
   DM_CONVERSATION_DELETED: 'dm:conversation:deleted',
+  DM_CONVERSATION_READ_ONLY: 'dm:conversation:read_only',
   MEMBER_ROLE_UPDATED: 'member:role_updated',
   MEMBER_KICKED: 'member:kicked',
   SERVER_DELETED: 'server:deleted',

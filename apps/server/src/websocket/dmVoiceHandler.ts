@@ -6,7 +6,7 @@ import { leaveCurrentVoiceChannel } from './voiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup, type SweepOptions } from '../utils/redis';
-import { shapeMessageAuthor } from '../utils/messageAuthor';
+import { shapeConversationMessageAuthor } from '../utils/messageAuthor';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -42,7 +42,7 @@ async function createSystemMessage(
       channelId: message.channelId,
       conversationId: message.conversationId,
       // always the participant here; shaped for the nullable column's type
-      author: shapeMessageAuthor(message),
+      author: shapeConversationMessageAuthor(message, conversationId),
       createdAt: message.createdAt.toISOString(),
       editedAt: message.editedAt?.toISOString() ?? null,
       reactions: [],

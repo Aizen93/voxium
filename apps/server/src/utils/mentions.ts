@@ -39,8 +39,11 @@ export async function resolveMentionsForServer(
  * The row fields mention resolution looks at. A row is never mention-parsed
  * when it is ciphertext (`encrypted`) or webhook-posted (isWebhookRow: a
  * webhookId, a frozen webhookName — which outlives the webhook — or a NULL
- * authorId): an unauthenticated webhook URL must never ping anyone, and a
- * refetch must agree with the live event, which carries no mentions for it.
+ * authorId outside a conversation): an unauthenticated webhook URL must never
+ * ping anyone, and a refetch must agree with the live event, which carries no
+ * mentions for it. Inside a conversation a NULL author is reserved for a
+ * deleted account's message (nothing writes one yet); mentions are resolved
+ * for channel rows only.
  */
 export interface MentionSourceRow extends WebhookRowMarkers {
   content: string;

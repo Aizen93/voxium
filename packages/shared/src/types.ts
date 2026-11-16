@@ -421,9 +421,14 @@ export interface UnreadCount {
 
 export interface Conversation {
   id: string;
-  user1Id: string;
-  user2Id: string;
+  /** null: that side's account was deleted (the conversation outlived it). */
+  user1Id: string | null;
+  user2Id: string | null;
   participant: MessageAuthor; // the OTHER user (populated at query time)
+  /** Present (and true) only when the other side's account was deleted:
+   *  `participant` is then the server's placeholder ("Deleted user", id
+   *  `deleted:{conversationId}`, DELETED_PARTICIPANT_ID_PREFIX), never a user. */
+  participantDeleted?: boolean;
   /** With the notice text, `type` decides whether an unencrypted preview may
    *  be shown at all: only a listed system notice can be plaintext since the
    *  2.0 cutover (a 2.0 server sends no `type`; the text still decides). */
@@ -547,7 +552,11 @@ export interface ServerToClientEvents {
   'dm:voice:speaking': (data: { conversationId: string; userId: string; speaking: boolean }) => void;
   'dm:voice:signal': (data: { from: string; signal: unknown }) => void;
   'dm:voice:ended': (data: { conversationId: string }) => void;
-  'dm:conversation:deleted': (data: { conversationId: string }) => void;
+  // clearedUntil: the floor the remover's own history was cleared to
+  // (ISO time), sent only to the remover's user room
+  'dm:conversation:deleted': (data: { conversationId: string; clearedUntil?: string }) => void;
+  // the other side's account was deleted: the conversation stays, read-only
+  'dm:conversation:read_only': (data: { conversationId: string }) => void;
   'friend:request_received': (data: { friendship: Friendship }) => void;
   'friend:request_accepted': (data: { friendship: Friendship }) => void;
   'friend:removed': (data: { userId: string }) => void;
