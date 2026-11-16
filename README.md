@@ -413,7 +413,13 @@ SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_USER=your_smtp_user
 SMTP_PASS=your_smtp_password
-SMTP_FROM=noreply@yourdomain.com
+SMTP_FROM=noreply@example.com
+# With neither of the next two set, NODE_ENV=production requires STARTTLS:
+# no mail goes to a relay that does not complete it. SMTP_SECURE=true for
+# implicit TLS (port 465); SMTP_REQUIRE_TLS=false only for a relay you trust
+# on its network (plain text when it offers no STARTTLS).
+# SMTP_SECURE=false
+# SMTP_REQUIRE_TLS=true
 
 # ── App ───────────────────────────────────────────────────────────────────────
 PORT=3001
@@ -615,6 +621,9 @@ curl http://localhost:3001/api/v1/servers \
 | `SMTP_USER` | — | SMTP auth username |
 | `SMTP_PASS` | — | SMTP auth password |
 | `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
+| `SMTP_FROM_NAME` | `Voxium` | Sender display name |
+| `SMTP_SECURE` | `false` | `true`: implicit TLS from the first byte (usually port 465). Only the exact value `true` turns it on |
+| `SMTP_REQUIRE_TLS` | `true` when `NODE_ENV=production`, else `false` | `true`: STARTTLS, and no mail at all to a relay that does not complete it. `false`: STARTTLS when the relay offers it, plain text otherwise (a relay on a network you trust, a local catcher; warned about at start in production). Unset or empty takes the default; any other value reads as `false` and is reported at start. The server logs the mode in effect once at start |
 | `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
 | `CLEANUP_REPORT_EMAIL` | — | Email address for daily attachment cleanup reports. If not set, no report is sent. |
 | `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. When set, it must be 64 hexadecimal characters: a value that does not give 32 bytes stops the start in every environment, and characters after the 64th are ignored with a warning. |

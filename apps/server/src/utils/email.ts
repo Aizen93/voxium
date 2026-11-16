@@ -1,22 +1,104 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
+import type { SMTPTransportOptions } from 'nodemailer/lib/smtp-transport';
 import { isMailSuppressed, mailBlockUrl } from './mailSuppression';
+
+/**
+ * How the connection to the SMTP relay is secured. The mail carries
+ * single-use account links (verification, password reset, sign-up codes)
+ * and the session carries the SMTP credentials, so under a production
+ * configuration nothing goes out in clear text because a relay did not
+ * offer STARTTLS:
+ *
+ * - `SMTP_SECURE=true`: implicit TLS from the first byte (port 465 usually).
+ * - `SMTP_REQUIRE_TLS=true`: STARTTLS, and no mail at all to a relay that
+ *   does not complete it.
+ * - `SMTP_REQUIRE_TLS=false`: STARTTLS when the relay offers it, plain text
+ *   otherwise (a relay on a network the operator trusts, a local catcher).
+ * - neither (unset or empty): required under `NODE_ENV=production`,
+ *   opportunistic otherwise, so development against a plain local catcher
+ *   (port 1025) keeps working with no setting.
+ *
+ * Only the exact `true` turns either on, as before; any other value of
+ * SMTP_REQUIRE_TLS reads as `false` (what it always did) and is reported at
+ * start. So a deployment that sets these values explicitly behaves as it did.
+ */
+export type SmtpSecurity =
+  | { mode: 'implicit-tls'; source: 'explicit' }
+  | { mode: 'starttls-required'; source: 'explicit' | 'production-default' }
+  | { mode: 'starttls-opportunistic'; source: 'explicit' | 'unrecognised' | 'development-default' };
+
+type SmtpEnv = Partial<Record<'NODE_ENV' | 'SMTP_SECURE' | 'SMTP_REQUIRE_TLS', string>>;
+
+export function smtpSecurity(env: SmtpEnv): SmtpSecurity {
+  if (env.SMTP_SECURE === 'true') return { mode: 'implicit-tls', source: 'explicit' };
+  const requireTls = env.SMTP_REQUIRE_TLS;
+  if (requireTls === 'true') return { mode: 'starttls-required', source: 'explicit' };
+  if (requireTls !== undefined && requireTls.trim() !== '') {
+    return { mode: 'starttls-opportunistic', source: requireTls === 'false' ? 'explicit' : 'unrecognised' };
+  }
+  return env.NODE_ENV === 'production'
+    ? { mode: 'starttls-required', source: 'production-default' }
+    : { mode: 'starttls-opportunistic', source: 'development-default' };
+}
+
+/** The nodemailer transport options the SMTP_* settings describe. */
+export function smtpTransportOptions(env: NodeJS.ProcessEnv): SMTPTransportOptions {
+  const security = smtpSecurity(env);
+  return {
+    host: env.SMTP_HOST || 'localhost',
+    port: parseInt(env.SMTP_PORT || '1025', 10),
+    secure: security.mode === 'implicit-tls',
+    // nodemailer sends STARTTLS even when the relay does not advertise it,
+    // and fails the send (ETLS) when the upgrade does not happen
+    ...(security.mode === 'starttls-required' ? { requireTLS: true } : {}),
+    ...(env.SMTP_USER && env.SMTP_PASS
+      ? { auth: { user: env.SMTP_USER, pass: env.SMTP_PASS } }
+      : {}),
+  };
+}
+
+/**
+ * One line at start saying which security the mail transport uses, a
+ * warning when mail may cross the network in clear text under a production
+ * configuration or a setting is not understood. Names no host, user or
+ * address: the line goes to the process log.
+ */
+export function logSmtpSecurity(env: NodeJS.ProcessEnv = process.env): SmtpSecurity {
+  const security = smtpSecurity(env);
+  const plain = 'STARTTLS when the relay offers it, plain text otherwise';
+  if (env.SMTP_SECURE !== undefined && env.SMTP_SECURE.trim() !== '' && env.SMTP_SECURE !== 'true' && env.SMTP_SECURE !== 'false') {
+    console.warn('[Email] SMTP_SECURE is neither true nor false and reads as false (no implicit TLS)');
+  }
+  switch (security.mode) {
+    case 'implicit-tls':
+      console.log('[Email] SMTP connection security: implicit TLS (SMTP_SECURE=true)');
+      break;
+    case 'starttls-required':
+      console.log(security.source === 'explicit'
+        ? '[Email] SMTP connection security: STARTTLS required (SMTP_REQUIRE_TLS=true); no mail goes to a relay that does not complete it'
+        : '[Email] SMTP connection security: STARTTLS required (the default under NODE_ENV=production; SMTP_REQUIRE_TLS=false allows a relay without TLS)');
+      break;
+    case 'starttls-opportunistic':
+      if (security.source === 'unrecognised') {
+        console.warn(`[Email] SMTP_REQUIRE_TLS is neither true nor false and reads as false: ${plain}. Set true or false.`);
+      } else if (security.source === 'development-default') {
+        console.log(`[Email] SMTP connection security: ${plain} (the default outside production)`);
+      } else if (env.NODE_ENV === 'production') {
+        console.warn(`[Email] SMTP connection security: ${plain} (SMTP_REQUIRE_TLS=false): account links and the SMTP credentials can cross the network unencrypted`);
+      } else {
+        console.log(`[Email] SMTP connection security: ${plain} (SMTP_REQUIRE_TLS=false)`);
+      }
+      break;
+  }
+  return security;
+}
 
 // Lazy-initialized to avoid reading env vars at module scope (ES import hoisting)
 let _transporter: Transporter | null = null;
 function getTransporter(): Transporter {
   if (!_transporter) {
-    _transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'localhost',
-      port: parseInt(process.env.SMTP_PORT || '1025', 10),
-      secure: process.env.SMTP_SECURE === 'true',
-      ...(process.env.SMTP_SECURE !== 'true' && process.env.SMTP_REQUIRE_TLS === 'true'
-        ? { requireTLS: true }
-        : {}),
-      ...(process.env.SMTP_USER && process.env.SMTP_PASS
-        ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }
-        : {}),
-    });
+    _transporter = nodemailer.createTransport(smtpTransportOptions(process.env));
   }
   return _transporter;
 }
