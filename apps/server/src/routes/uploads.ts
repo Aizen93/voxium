@@ -8,6 +8,7 @@ import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, LIMITS, E2
 import crypto from 'crypto';
 import { Readable } from 'stream';
 import { hasServerPermission, hasChannelPermission } from '../utils/permissionCalculator';
+import { isAboveFloor, readConversationView } from '../utils/conversationVisibility';
 
 export const uploadRouter = Router();
 
@@ -189,6 +190,7 @@ uploadRouter.get(
             select: {
               channelId: true,
               conversationId: true,
+              createdAt: true,
               channel: { select: { serverId: true, secure: true } },
             },
           },
@@ -219,12 +221,12 @@ uploadRouter.get(
         );
         if (!canView) throw secure ? new NotFoundError('Attachment') : new ForbiddenError('Not authorized');
       } else if (attachment.message.conversationId) {
-        const conv = await prisma.conversation.findUnique({
-          where: { id: attachment.message.conversationId },
-        });
-        if (!conv || (conv.user1Id !== req.user!.userId && conv.user2Id !== req.user!.userId)) {
-          throw new ForbiddenError('Not a participant');
-        }
+        // A participant only (a NULL side, a deleted account, is nobody), and
+        // only for a message above their floor: one they cleared answers like
+        // a missing attachment (utils/conversationVisibility.ts)
+        const view = await readConversationView(attachment.message.conversationId, req.user!.userId);
+        if (!view) throw new ForbiddenError('Not a participant');
+        if (!isAboveFloor(attachment.message.createdAt, view.floor)) throw new NotFoundError('Attachment');
       }
 
       // Proxy from S3 — S3 URL never reaches the client

@@ -34,7 +34,8 @@ vi.mock('../../utils/prisma', () => ({
     serverMember: { findUnique: vi.fn() },
     channelMember: { findUnique: vi.fn() },
     message: { findUnique: vi.fn() },
-    conversation: { findFirst: vi.fn() },
+    // the DM check reads the conversation view (utils/conversationVisibility.ts)
+    conversation: { findUnique: vi.fn() },
   },
 }));
 
@@ -111,16 +112,65 @@ describe('Report Routes — E2E message reports', () => {
     channelId: null,
     conversationId: 'conv-1',
     authorId: 'user-2',
+    createdAt: new Date('2026-11-11T10:00:00.000Z'),
     channel: null,
   };
+  const conversationView = (reads: unknown[] = [], sides = { user1Id: 'user-1', user2Id: 'user-2' }) => ({ id: 'conv-1', ...sides, reads });
 
   function mockHappyPath(message: Record<string, unknown>) {
     vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-2' } as any);
     vi.mocked(prisma.report.findFirst).mockResolvedValue(null);
     vi.mocked(prisma.message.findUnique).mockResolvedValue(message as any);
-    vi.mocked(prisma.conversation.findFirst).mockResolvedValue({ id: 'conv-1' } as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(conversationView() as any);
     vi.mocked(prisma.report.create).mockResolvedValue({ id: 'report-1' } as any);
   }
+
+  // ── A DM message the reporter cleared from their own history (#47) ─────
+
+  describe('the reporter\'s floor', () => {
+    const floor = new Date('2026-11-10T10:00:00.000Z');
+
+    it('a message at or below it answers like a missing message, and no report is filed', async () => {
+      for (const createdAt of [new Date('2026-11-09T10:00:00.000Z'), floor]) {
+        mockHappyPath({ ...baseDMMessage, createdAt });
+        vi.mocked(prisma.conversation.findUnique).mockResolvedValue(conversationView([{ userId: 'user-1', hiddenAt: null, clearedAt: floor }]) as any);
+        const res = await request(createApp())
+          .post('/api/v1/reports')
+          .send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-1', reason: 'Harassment in this DM' });
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Message not found');
+      }
+      expect(prisma.report.create).not.toHaveBeenCalled();
+      expect((vi.mocked(prisma.message.findUnique).mock.calls[0][0] as any).select.createdAt).toBe(true);
+    });
+
+    it('a message above it is reported as before; the other person\'s floor changes nothing for the reporter', async () => {
+      mockHappyPath(baseDMMessage);
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValue(conversationView([
+        { userId: 'user-1', hiddenAt: null, clearedAt: floor },
+        { userId: 'user-2', hiddenAt: null, clearedAt: new Date('2026-11-12T00:00:00.000Z') },
+      ]) as any);
+
+      const res = await request(createApp())
+        .post('/api/v1/reports')
+        .send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-1', reason: 'Harassment in this DM' });
+
+      expect(res.status).toBe(201);
+    });
+
+    it('a reporter who is not a participant (a NULL side admits nobody) keeps the 403 it always got', async () => {
+      for (const sides of [{ user1Id: 'user-3', user2Id: 'user-2' }, { user1Id: null as any, user2Id: 'user-2' }]) {
+        mockHappyPath(baseDMMessage);
+        vi.mocked(prisma.conversation.findUnique).mockResolvedValue(conversationView([], sides) as any);
+        const res = await request(createApp())
+          .post('/api/v1/reports')
+          .send({ type: 'message', reportedUserId: 'user-2', messageId: 'msg-1', reason: 'Harassment in this DM' });
+        expect(res.status).toBe(403);
+        expect(res.body.error).toBe('You do not have access to this message');
+      }
+      expect(prisma.report.create).not.toHaveBeenCalled();
+    });
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();

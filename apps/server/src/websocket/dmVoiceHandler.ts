@@ -7,11 +7,23 @@ import { socketRateLimit } from '../middleware/rateLimiter';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, type ClusterSocketLookup, type SweepOptions } from '../utils/redis';
 import { shapeConversationMessageAuthor } from '../utils/messageAuthor';
+import { writeConversationMessage } from '../utils/conversationLifecycle';
+import { viewersRoom } from '../utils/conversationAudience';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
 } as const;
 
+/**
+ * A call notice ("Voice call started" / "Call ended") is a message like any
+ * other: written through writeConversationMessage (utils/conversationLifecycle.ts),
+ * so it takes the conversation row lock, carries a time after every floor and
+ * brings the conversation back for a side that had removed it. It is sent
+ * right after the commit, to the audience read then, through the same helper
+ * as every DM message event (utils/conversationAudience.ts): a side whose
+ * floor a removal raised past it meanwhile is not told. A conversation
+ * deleted meanwhile refuses it (logged, no notice).
+ */
 async function createSystemMessage(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   conversationId: string,
@@ -20,34 +32,30 @@ async function createSystemMessage(
   content: DMSystemNotice
 ) {
   try {
-    const message = await prisma.message.create({
+    await writeConversationMessage(conversationId, authorId, (tx, ctx) => tx.message.create({
       data: {
         content,
         type: 'system',
         conversationId,
         authorId,
+        createdAt: ctx.createdAt,
       },
       include: { author: { select: authorSelect.select } },
+    }), (message, audience) => {
+      const payload: Message = {
+        id: message.id,
+        content: message.content,
+        type: message.type,
+        channelId: message.channelId,
+        conversationId: message.conversationId,
+        // always the participant here; shaped for the nullable column's type
+        author: shapeConversationMessageAuthor(message, conversationId),
+        createdAt: message.createdAt.toISOString(),
+        editedAt: message.editedAt?.toISOString() ?? null,
+        reactions: [],
+      };
+      viewersRoom(io, conversationId, audience, message.createdAt).emit('dm:message:new', payload);
     });
-
-    await prisma.conversation.update({
-      where: { id: conversationId },
-      data: { updatedAt: new Date() },
-    });
-
-    const payload: Message = {
-      id: message.id,
-      content: message.content,
-      type: message.type,
-      channelId: message.channelId,
-      conversationId: message.conversationId,
-      // always the participant here; shaped for the nullable column's type
-      author: shapeConversationMessageAuthor(message, conversationId),
-      createdAt: message.createdAt.toISOString(),
-      editedAt: message.editedAt?.toISOString() ?? null,
-      reactions: [],
-    };
-    io.to(`dm:${conversationId}`).emit('dm:message:new', payload);
   } catch (err) {
     console.error('[DMVoice] Failed to create system message:', err);
   }
@@ -404,7 +412,9 @@ export async function leaveCurrentDMVoiceChannel(
  * fires later, finds no participant and does nothing), and `dm:voice:left` +
  * `dm:voice:ended` go to `dm:{id}`, which every client already handles as
  * the end of the call (and of an incoming ring). The "call ended" notice is
- * written only with `notice: true`: a deleted conversation cannot hold it.
+ * written only with `notice: true`: a deleted conversation cannot hold it,
+ * and a conversation removed for one side must not get a message newer than
+ * the removal, which would bring it back for that side (routes/dm.ts).
  * Without a participant there is no call and nothing is touched (a late
  * decline must not reach a call that starts in the same conversation).
  *
@@ -433,6 +443,25 @@ export async function endDMCall(
   io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
   if (opts.notice) createSystemMessage(io, conversationId, first, DM_NOTICE_CALL_ENDED);
   return participants;
+}
+
+/**
+ * endDMCall() only when `userId` is one of the call's participants (in the
+ * call, or ringing from it), whichever of their sockets registered it: the
+ * call hash is keyed by user. A ring that someone else started and `userId`
+ * has not answered is not theirs to end (a removal for one side tells the
+ * other person nothing, routes/dm.ts). Resolves the ids it removed (none:
+ * no call of theirs).
+ */
+export async function endDMCallIfParticipant(
+  io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
+  conversationId: string,
+  userId: string,
+  opts: { notice: boolean },
+): Promise<string[]> {
+  const callUsers = await getDMVoiceUsers(conversationId);
+  if (!callUsers.has(userId)) return [];
+  return endDMCall(io, conversationId, opts);
 }
 
 /** Returns count of active DM calls (cross-node via Redis) */

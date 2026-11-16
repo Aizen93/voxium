@@ -12,6 +12,7 @@ import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
 import { deleteServerAndAnnounce } from '../utils/serverDeletion';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from '../utils/attachmentBlobs';
+import { readConversationAudience, viewersRoom } from '../utils/conversationAudience';
 import { getActiveDMCallCount, getTotalDMVoiceUsers } from '../websocket/dmVoiceHandler';
 import { getSfuStats } from '../mediasoup/mediasoupManager';
 import { getGlobalLimits } from '../utils/serverLimits';
@@ -2933,7 +2934,7 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
     // attachment files (deleted after it), the banned account's pending join
     // requests (their moderators are told after it)
     const message = deleteMessage && report.messageId
-      ? await prisma.message.findUnique({ where: { id: report.messageId }, select: { id: true, channelId: true, conversationId: true } })
+      ? await prisma.message.findUnique({ where: { id: report.messageId }, select: { id: true, channelId: true, conversationId: true, createdAt: true } })
       : null;
     const attachmentKeys = message ? await collectAttachmentKeys({ id: message.id }) : [];
     const bannedPending = banTarget
@@ -3033,7 +3034,11 @@ adminRouter.post('/reports/:id/resolve', async (req: Request<{ id: string }>, re
         if (message.channelId) {
           io.to(`channel:${message.channelId}`).emit(WS_EVENTS.MESSAGE_DELETE, { messageId: message.id, channelId: message.channelId });
         } else if (message.conversationId) {
-          io.to(`dm:${message.conversationId}`).emit(WS_EVENTS.DM_MESSAGE_DELETE, { messageId: message.id, conversationId: message.conversationId });
+          // not to a side that cleared the row from their history (#47): the
+          // audience as it stands now (utils/conversationAudience.ts)
+          const audience = await readConversationAudience(message.conversationId);
+          viewersRoom(io, message.conversationId, audience, message.createdAt)
+            .emit(WS_EVENTS.DM_MESSAGE_DELETE, { messageId: message.id, conversationId: message.conversationId });
         }
       } catch (err) {
         console.error(`[Admin] Report ${id} resolved, but the message delete notice failed:`, err instanceof Error ? err.message : err);

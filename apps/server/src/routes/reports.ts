@@ -4,6 +4,7 @@ import { rateLimitReport } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
+import { isAboveFloor, readConversationView } from '../utils/conversationVisibility';
 import { getIO } from '../websocket/socketServer';
 import { LIMITS } from '@voxium/shared';
 
@@ -138,6 +139,7 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
           channelId: true,
           conversationId: true,
           authorId: true,
+          createdAt: true,
           channel: { select: { serverId: true, secure: true } },
         },
       });
@@ -167,14 +169,12 @@ reportsRouter.post('/', rateLimitReport, async (req: Request, res: Response, nex
         });
         if (!membership) throw new ForbiddenError('You do not have access to this message');
       } else if (message.conversationId) {
-        const conversation = await prisma.conversation.findFirst({
-          where: {
-            id: message.conversationId,
-            OR: [{ user1Id: userId }, { user2Id: userId }],
-          },
-          select: { id: true },
-        });
-        if (!conversation) throw new ForbiddenError('You do not have access to this message');
+        // A participant only, and only for a message above their floor: one
+        // they cleared from their history answers like a missing message
+        // (utils/conversationVisibility.ts)
+        const view = await readConversationView(message.conversationId, userId);
+        if (!view) throw new ForbiddenError('You do not have access to this message');
+        if (!isAboveFloor(message.createdAt, view.floor)) throw new NotFoundError('Message');
       }
 
       if (message.encrypted) {

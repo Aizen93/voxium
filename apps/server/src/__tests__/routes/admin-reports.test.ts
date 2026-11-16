@@ -40,6 +40,10 @@ const prismaMock: Record<string, any> = {
   messageAttachment: {
     findMany: vi.fn().mockResolvedValue([]),
   },
+  // the audience of a DM message event, read when it goes out (utils/conversationAudience.ts)
+  conversationRead: {
+    findMany: vi.fn().mockResolvedValue([]),
+  },
   serverMember: {
     findMany: vi.fn().mockResolvedValue([]),
   },
@@ -63,7 +67,8 @@ vi.mock('../../utils/prisma', () => ({
 
 // Socket.IO
 const mockEmit = vi.fn();
-const mockTo = vi.fn(() => ({ emit: mockEmit }));
+const mockExcept = vi.fn(() => ({ emit: mockEmit }));
+const mockTo = vi.fn(() => ({ emit: mockEmit, except: mockExcept }));
 const mockFetchSockets = vi.fn().mockResolvedValue([]);
 const mockDisconnectSockets = vi.fn();
 const mockLocalDisconnectSockets = vi.fn();
@@ -655,6 +660,35 @@ describe('POST /admin/reports/:id/resolve — deleting the reported message', ()
     } finally {
       errorLog.mockRestore();
     }
+  });
+
+  it('a DM message: the delete reaches the DM room without a side that had cleared the row, its audience read after the commit', async () => {
+    const createdAt = new Date('2026-11-09T10:00:00.000Z');
+    prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: null, conversationId: 'conv-1', createdAt });
+    prismaMock.conversationRead.findMany.mockResolvedValueOnce([
+      { userId: 'reporter-9', hiddenAt: null, clearedAt: null },
+      { userId: 'target-1', hiddenAt: null, clearedAt: new Date('2026-11-10T10:00:00.000Z') },
+    ]);
+
+    const res = await resolve();
+
+    expect(res.status).toBe(200);
+    expect((prismaMock.message.findUnique.mock.calls[0][0] as any).select.createdAt).toBe(true);
+    expect(prismaMock.conversationRead.findMany).toHaveBeenCalledWith({ where: { conversationId: 'conv-1' }, select: { userId: true, hiddenAt: true, clearedAt: true } });
+    expect(prismaMock.conversationRead.findMany.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.message.deleteMany.mock.invocationCallOrder[0]);
+    expect(mockTo).toHaveBeenCalledWith('dm:conv-1');
+    expect(mockExcept).toHaveBeenCalledWith(['user:target-1']);
+    expect(mockEmit).toHaveBeenCalledWith('dm:message:delete', { messageId: 'msg-1', conversationId: 'conv-1' });
+  });
+
+  it('a DM message nobody cleared: the delete reaches the whole DM room', async () => {
+    prismaMock.message.findUnique.mockResolvedValue({ id: 'msg-1', channelId: null, conversationId: 'conv-1', createdAt: new Date('2026-11-09T10:00:00.000Z') });
+
+    await resolve();
+
+    expect(mockTo).toHaveBeenCalledWith('dm:conv-1');
+    expect(mockExcept).not.toHaveBeenCalled();
+    expect(mockEmit).toHaveBeenCalledWith('dm:message:delete', { messageId: 'msg-1', conversationId: 'conv-1' });
   });
 
   it('a message its author deleted meanwhile still resolves the report, with nothing to announce', async () => {

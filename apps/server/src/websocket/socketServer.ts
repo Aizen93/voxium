@@ -16,6 +16,7 @@ import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared'
 import { Permissions } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 import { visibilityRequestMark, resyncAfterJoins } from '../utils/channelVisibilityRooms';
+import { dmListedSql, dmUnreadSinceSql } from '../utils/conversationVisibility';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -585,7 +586,11 @@ export function initSocketServer(httpServer: HttpServer) {
       console.error(`[WS] Error computing channel unread counts for ${userId}:`, err);
     }
 
-    // Compute DM unread counts — same LATERAL + LIMIT 100 optimization as channels
+    // Compute DM unread counts — same LATERAL + LIMIT 100 optimization as channels.
+    // The rows above the later of the last read and the user's floor
+    // (utils/conversationVisibility.ts), and none for a conversation the user
+    // removed (it is off their list; a newer message unhides it first). The
+    // rooms above are joined for those too: a later message must reach them.
     try {
       if (conversations.length > 0) {
         const convIds = conversations.map((c) => c.id);
@@ -599,12 +604,13 @@ export function initSocketServer(httpServer: HttpServer) {
              SELECT COUNT(*)::int AS val FROM (
                SELECT 1 FROM messages m
                WHERE m.conversation_id = conv.id
-                 AND m.created_at > COALESCE(cr.last_read_at, '1970-01-01'::timestamp)
+                 AND m.created_at > ${dmUnreadSinceSql('cr')}
                  AND m.author_id IS DISTINCT FROM $1
                LIMIT 100
              ) sub
            ) cnt
-           WHERE cnt.val > 0`,
+           WHERE cnt.val > 0
+             AND ${dmListedSql('cr')}`,
           userId,
           convIds
         );
