@@ -746,6 +746,8 @@ tagged; no spec is tagged at the moment.
 | `npx tsx scripts/load-test-voice.ts` | Voice channel load test with real WebRTC media |
 | `KEYSHARE_INBOX_CHECK=1 DATABASE_URL=<url> npx tsx scripts/check-keyshare-inbox.ts` | Check the key-share lease and acknowledgement statements on the migrated database `DATABASE_URL` names (the script reads no `.env`; build the shared package first), two-session races included (writes and then deletes rows of its own only); CI runs it in the e2e job |
 
+The permission and multi-node scripts sign in as the seed account `alice@example.com`, which must be a platform admin (the seed creates her as a plain user). CI runs both on every change to the server, the shared package, the scripts or the dependencies, and once a week (`.github/workflows/integration-scripts.yml`).
+
 ---
 
 ## License

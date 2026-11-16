@@ -27,8 +27,12 @@
  * Usage:
  *   npx tsx scripts/test-multi-node.ts
  *
- * Requires: PostgreSQL + Redis running, apps/server/.env configured, and
- * ports 3001/3002 free (the run refuses to start next to a dev backend).
+ * Requires: PostgreSQL + Redis running, apps/server/.env configured (or the
+ * same variables in the environment), ports 3001/3002 free (the run refuses
+ * to start next to a dev backend), and the seed account alice@example.com a
+ * platform admin: the admin-stats and config-propagation checks sign in as
+ * her, and the seed creates her as a plain user. CI runs this script with
+ * its own database, promoted so (.github/workflows/integration-scripts.yml).
  *
  * Repeatable: the run creates its space "MultiNode Test Server" and deletes it
  * at the end; one an interrupted run left behind is deleted at the next start
