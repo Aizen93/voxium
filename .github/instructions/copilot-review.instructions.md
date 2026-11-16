@@ -85,7 +85,7 @@ Voxium is a real-time voice and text communication platform. Monorepo with pnpm 
 
 - After modifying `packages/shared`, run `pnpm build:shared` before consuming apps see changes
 - After modifying `prisma/schema.prisma`, run `npx prisma generate` from `apps/server/`
-- `pnpm typecheck` must pass: CI runs it on every pull request, and its errors are fixed, never silenced
+- `pnpm typecheck` must pass: the pre-commit hook kept in `.githooks/` runs it before each commit (`pnpm install` writes a shim to `.git/hooks/pre-commit` that runs it, and replaces a file there only when it is, line endings aside, a shim the project shipped) and CI runs it on every pull request; its errors are fixed, never silenced or skipped with `--no-verify`
 - Docker: uses `node-linker=hoisted` in `.npmrc` for pnpm compatibility
 - mediasoup v3.19+ ships prebuilt workers — no C++ toolchain in Docker
 

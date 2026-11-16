@@ -24,7 +24,8 @@
     "test:watch": "pnpm --filter @voxium/server test:watch",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "test:e2e:headed": "playwright test --headed"
+    "test:e2e:headed": "playwright test --headed",
+    "prepare": "node -e \"if (require('node:fs').existsSync('scripts/install-git-hooks.mjs')) import('./scripts/install-git-hooks.mjs').catch((e) => console.warn('[git hooks] not installed: ' + e.message))\""
   },
   "pnpm": {
     "onlyBuiltDependencies": [
