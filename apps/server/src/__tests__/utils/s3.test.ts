@@ -62,6 +62,46 @@ describe('utils/s3 — lazy initialization', () => {
   });
 });
 
+describe('utils/s3 — client settings', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+  });
+
+  it('builds the client from s3ClientConfig(): path-style, checksums only where an operation requires one', async () => {
+    const { S3Client } = await import('@aws-sdk/client-s3');
+    vi.mocked(S3Client).mockClear();
+    mockSend.mockResolvedValue({ ContentLength: 1 });
+    const { headS3Object, s3ClientConfig } = await import('../../utils/s3');
+
+    await headS3Object('avatars/u1-1.webp');
+
+    expect(S3Client).toHaveBeenCalledTimes(1);
+    const config = vi.mocked(S3Client).mock.calls[0][0] as Record<string, unknown>;
+    expect(config).toEqual(s3ClientConfig());
+    expect(config).toMatchObject({
+      forcePathStyle: true,
+      // The SDK's default WHEN_SUPPORTED put a CRC32 of an empty body into
+      // every presigned PUT URL, which a store enforcing it refuses
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      // The default put x-amz-checksum-mode=ENABLED into every presigned GET
+      responseChecksumValidation: 'WHEN_REQUIRED',
+    });
+  });
+
+  it('reads the environment when called, so a value set after import is the one used', async () => {
+    const { s3ClientConfig } = await import('../../utils/s3');
+    const saved = process.env.S3_ASSETS_ENDPOINT;
+    process.env.S3_ASSETS_ENDPOINT = 'http://store.example.test:9000';
+    try {
+      expect(s3ClientConfig().endpoint).toBe('http://store.example.test:9000');
+    } finally {
+      if (saved === undefined) delete process.env.S3_ASSETS_ENDPOINT;
+      else process.env.S3_ASSETS_ENDPOINT = saved;
+    }
+  });
+});
+
 describe('utils/s3 — S3_SSE bucket-default encryption', () => {
   const savedSSE = process.env.S3_SSE;
 
