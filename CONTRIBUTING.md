@@ -95,7 +95,7 @@ Voxium/
 - **Sanitize user input** — all text stored in DB must pass through `sanitizeText()` before validation
 - **Rate limit new endpoints** — add a named limiter in `middleware/rateLimiter.ts`
 - **Type route params** — use `Request<{ serverId: string }>` not bare `Request`
-- **No Node API in browser code** — the code of the desktop and admin apps (`src/`, outside `src/__tests__`) and of `packages/shared` is type-checked a second time without Node's types (`tsconfig.browser.json`), so `process`, `Buffer` or a `node:` import there fails `pnpm typecheck`; a timer handle is `ReturnType<typeof setTimeout>`
+- **No Node API in browser code** — the code of the desktop and admin apps (`src/`, outside `src/__tests__`) and of `packages/shared` is type-checked a second time without Node's types (`tsconfig.browser.json`), so `process`, `Buffer` or a `node:` import there fails `pnpm typecheck`; a timer handle is `ReturnType<typeof setTimeout>`. In the two apps, ESLint flags Node's globals and the imports of its built-in modules there too, so your editor shows them as you type (`pnpm lint`)
 
 ### After Modifying...
 
