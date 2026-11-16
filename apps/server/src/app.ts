@@ -100,8 +100,9 @@ app.use((req, res, next) => {
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
     // HSTS pinned to 1 year in production (helmet's default is ~180 days);
     // disabled outside production so plain-HTTP localhost dev never caches
-    // the policy. nginx must set the same header for static-file responses
-    // that never reach Express (DEPLOYMENT.md §12).
+    // the policy. The reverse proxy must set the same header for the
+    // static-file responses that never reach Express (docs/reverse-proxy.md,
+    // "TLS and HSTS").
     strictTransportSecurity: isProd
       ? { maxAge: 31536000, includeSubDomains: true }
       : false,
