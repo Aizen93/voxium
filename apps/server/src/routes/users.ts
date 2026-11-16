@@ -4,7 +4,7 @@ import { prisma } from '../utils/prisma';
 import { BadRequestError, NotFoundError } from '../utils/errors';
 import { validateDisplayName, validateBio, WS_EVENTS, LIMITS } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
-import { sanitizeText } from '../utils/sanitize';
+import { sanitizeText, sanitizeLabel } from '../utils/sanitize';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { adoptImageAssetUpload } from '../utils/uploadVerification';
 import { rateLimitProfileUpdate } from '../middleware/rateLimiter';
@@ -58,11 +58,30 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
       }
     }
 
+    // Whether the request carried a display name at all: the user:updated
+    // fan-out below keys on what was sent, as it always has
+    const displayNameSent = displayName !== undefined;
+    if (displayName !== undefined && typeof displayName !== 'string') throw new BadRequestError('displayName must be a string');
+
+    // The stored name (and the stored avatar, for its cleanup), in one read
+    const current = displayName !== undefined || avatarUrl !== undefined
+      ? await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: { displayName: true, avatarUrl: true },
+      })
+      : null;
+
     if (displayName !== undefined) {
-      if (typeof displayName !== 'string') throw new BadRequestError('displayName must be a string');
-      displayName = sanitizeText(displayName);
-      const err = validateDisplayName(displayName);
-      if (err) throw new BadRequestError(err);
+      if (current != null && displayName === current.displayName) {
+        // Sent unchanged: left as stored, neither judged nor rewritten. Every
+        // desktop re-sends the display name with a bio save, and a name is
+        // judged and stripped only when its owner changes it.
+        displayName = undefined;
+      } else {
+        displayName = sanitizeLabel(displayName);
+        const err = validateDisplayName(displayName);
+        if (err) throw new BadRequestError(err);
+      }
     }
 
     if (bio !== undefined) {
@@ -72,15 +91,8 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
       if (err) throw new BadRequestError(err);
     }
 
-    // Fetch old avatar key before updating (for cleanup)
-    let oldAvatarUrl: string | null = null;
-    if (avatarUrl !== undefined) {
-      const current = await prisma.user.findUnique({
-        where: { id: req.user!.userId },
-        select: { avatarUrl: true },
-      });
-      oldAvatarUrl = current?.avatarUrl ?? null;
-    }
+    // The old avatar key, for its cleanup after the update
+    const oldAvatarUrl: string | null = avatarUrl !== undefined ? current?.avatarUrl ?? null : null;
 
     // First reference of a new avatar object: the profile stores a verified
     // server-side copy (size cap, image header) under a key no upload URL was
@@ -127,7 +139,7 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
     }
 
     // Broadcast profile change to all servers the user is in
-    if (displayName !== undefined || avatarUrl !== undefined) {
+    if (displayNameSent || avatarUrl !== undefined) {
       const memberships = await prisma.serverMember.findMany({
         where: { userId: req.user!.userId },
         select: { serverId: true },

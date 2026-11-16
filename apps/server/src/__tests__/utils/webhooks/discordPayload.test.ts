@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { LIMITS } from '@voxium/shared';
+import { LIMITS, hasUnsupportedLabelText } from '@voxium/shared';
 import { renderDiscordPayload, formatEmbedTimestamp } from '../../../utils/webhooks/discordPayload';
 import { bareLinkRuns, outsideCodeSpans } from './bareLinkRuns';
 
@@ -172,6 +172,16 @@ describe('renderDiscordPayload — username', () => {
     expect(name).toBe('a'.repeat(max - 1));
     const last = name.charCodeAt(name.length - 1);
     expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+  });
+
+  it('keeps a joined emoji, and a cut that ends on its joiner leaves no stray joiner (#148)', () => {
+    const max = LIMITS.WEBHOOK_NAME_MAX;
+    const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467);
+    expect(ok({ content: 'x', username: `Deploy ${family}` }).nameOverride).toBe(`Deploy ${family}`);
+    // 61 + 2 code units of the first emoji + its joiner = the cut at 64
+    const name = ok({ content: 'x', username: `${'a'.repeat(max - 3)}${family}` }).nameOverride as string;
+    expect(name).toBe(`${'a'.repeat(max - 3)}${String.fromCodePoint(0x1f468)}`);
+    expect(hasUnsupportedLabelText(name)).toBe(false);
   });
 
   it('measures the length AFTER sanitising and trimming', () => {

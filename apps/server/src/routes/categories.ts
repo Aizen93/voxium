@@ -5,7 +5,7 @@ import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from 
 import { validateCategoryName, WS_EVENTS, Permissions } from '@voxium/shared';
 import type { Category, Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
-import { sanitizeText } from '../utils/sanitize';
+import { sanitizeLabel } from '../utils/sanitize';
 import { rateLimitCategoryManage } from '../middleware/rateLimiter';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { hasServerPermission } from '../utils/permissionCalculator';
@@ -98,7 +98,7 @@ categoryRouter.post('/', rateLimitCategoryManage, async (req: Request<{ serverId
     const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_CATEGORIES);
     if (!canManage) throw new ForbiddenError('You do not have permission to manage categories');
 
-    const name = sanitizeText(req.body.name ?? '');
+    const name = sanitizeLabel(req.body.name);
     const nameErr = validateCategoryName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 
@@ -151,7 +151,7 @@ categoryRouter.patch('/:categoryId', rateLimitCategoryManage, async (req: Reques
     });
     if (!category) throw new NotFoundError('Category');
 
-    const name = sanitizeText(req.body.name ?? '');
+    const name = sanitizeLabel(req.body.name);
     const nameErr = validateCategoryName(name);
     if (nameErr) throw new BadRequestError(nameErr);
 

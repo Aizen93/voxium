@@ -10,6 +10,8 @@ import { readMailBlockToken, isDigestSuppressed, suppressDigest, unsuppressDiges
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { revokeUserSessions } from '../utils/sessionRevocation';
+import { sanitizeLabel } from '../utils/sanitize';
+import { validateDisplayName } from '@voxium/shared';
 
 export const authRouter = Router();
 
@@ -51,6 +53,15 @@ authRouter.post('/register', rateLimitRegister, rateLimitRegisterAttempt, rateLi
     if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
     if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
     if (displayName !== undefined && typeof displayName !== 'string') { res.status(400).json({ success: false, error: 'Display name must be a string' }); return; }
+    // The display name as it will be stored (sanitizeLabel: one line, no bidi
+    // or zero-width characters), judged with the other cheap checks: refused
+    // after the proof of work, it would burn the challenge. An empty one is
+    // not refused: the account then takes its username as display name.
+    if (typeof displayName === 'string') {
+      const storedName = sanitizeLabel(displayName);
+      const displayNameErr = storedName ? validateDisplayName(storedName) : null;
+      if (displayNameErr) { res.status(400).json({ success: false, error: displayNameErr }); return; }
+    }
     // Consent (CNIL/GDPR): both documents, each as its own explicit `true` —
     // a truthy string or a missing field is not acceptance. Checked with the
     // other cheap validations, BEFORE the proof-of-work is verified: a verify

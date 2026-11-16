@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { Permissions, MEMBER_LIST, LIMITS } from '@voxium/shared';
+import { Permissions, MEMBER_LIST, LIMITS, WS_EVENTS } from '@voxium/shared';
 import { BadRequestError } from '../../utils/errors';
 import { encodeMemberCursor, decodeMemberCursor } from '../../utils/memberCursor';
 
@@ -2356,6 +2356,114 @@ describe('Server Routes', () => {
       } finally {
         err.mockRestore();
       }
+    });
+  });
+
+  describe('a nickname is one line without bidi or zero-width characters (#148)', () => {
+    const RLO = String.fromCharCode(0x202e);
+    const ZWSP = String.fromCharCode(0x200b);
+    afterEach(() => { prismaMock.serverMember.findUnique.mockReset(); });
+
+    it('the caller\'s own nickname is stored, announced and answered stripped', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.update.mockResolvedValueOnce({});
+
+      const res = await request(app).patch('/api/v1/servers/srv-1/nickname').set('Authorization', `Bearer ${makeToken()}`)
+        .send({ nickname: `Mo${RLO}d${ZWSP}\nTwo` });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.nickname).toBe('Mod Two');
+      expect(prismaMock.serverMember.update.mock.calls[0][0].data.nickname).toBe('Mod Two');
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.MEMBER_NICKNAME_UPDATED, expect.objectContaining({ nickname: 'Mod Two' }));
+    });
+
+    it('another member\'s nickname is stored and announced stripped', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member' });
+      prismaMock.serverMember.update.mockResolvedValueOnce({});
+
+      const res = await request(app).patch('/api/v1/servers/srv-1/members/user-2/nickname').set('Authorization', `Bearer ${makeToken()}`)
+        .send({ nickname: `${ZWSP}Admin${RLO}` });
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.serverMember.update.mock.calls[0][0].data.nickname).toBe('Admin');
+      expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.MEMBER_NICKNAME_UPDATED, expect.objectContaining({ userId: 'user-2', nickname: 'Admin' }));
+    });
+
+    describe('a nickname sent unchanged is left as stored (the dialog is filled with the stored one)', () => {
+      const removedOnly = String.fromCodePoint(0x3164, 0x3164);
+      const withZwsp = `Mo${String.fromCodePoint(0x200b)}d`;
+
+      for (const [label, stored] of [['made only of characters the rule removes', removedOnly], ['holding a zero-width space', withZwsp]] as const) {
+        it(`the caller's own nickname ${label}: 200, not judged, not rewritten, still answered and announced`, async () => {
+          prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'member', nickname: stored });
+
+          const res = await request(app).patch('/api/v1/servers/srv-1/nickname').set('Authorization', `Bearer ${makeToken()}`)
+            .send({ nickname: stored });
+
+          expect(res.status).toBe(200);
+          expect(res.body.data.nickname).toBe(stored);
+          expect(prismaMock.serverMember.update).not.toHaveBeenCalled();
+          expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.MEMBER_NICKNAME_UPDATED, expect.objectContaining({ userId: 'user-1', nickname: stored }));
+        });
+
+        it(`a moderator re-saving another member's nickname ${label}: 200, not judged, not rewritten`, async () => {
+          prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member', nickname: stored });
+
+          const res = await request(app).patch('/api/v1/servers/srv-1/members/user-2/nickname').set('Authorization', `Bearer ${makeToken()}`)
+            .send({ nickname: stored });
+
+          expect(res.status).toBe(200);
+          expect(res.body.data.nickname).toBe(stored);
+          expect(prismaMock.serverMember.update).not.toHaveBeenCalled();
+          expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.MEMBER_NICKNAME_UPDATED, expect.objectContaining({ userId: 'user-2', nickname: stored }));
+        });
+      }
+
+      it('reads nothing more than the row the route already loads', async () => {
+        prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'member', nickname: withZwsp });
+
+        await request(app).patch('/api/v1/servers/srv-1/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: withZwsp });
+
+        expect(prismaMock.serverMember.findUnique).toHaveBeenCalledTimes(1);
+      });
+
+      it('the permission and hierarchy checks still come first', async () => {
+        mockHasServerPermission.mockResolvedValue(false);
+        prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'member', nickname: withZwsp });
+        const own = await request(app).patch('/api/v1/servers/srv-1/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: withZwsp });
+        expect(own.status).toBe(403);
+
+        mockHasServerPermission.mockResolvedValue(true);
+        mockGetHighestRolePosition.mockResolvedValueOnce(1).mockResolvedValueOnce(5);
+        prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'admin', nickname: withZwsp });
+        const other = await request(app).patch('/api/v1/servers/srv-1/members/user-2/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: withZwsp });
+        expect(other.status).toBe(403);
+        expect(prismaMock.serverMember.update).not.toHaveBeenCalled();
+      });
+
+      it('a changed nickname is still stripped and judged, on both routes', async () => {
+        prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'member', nickname: 'Mod' });
+        prismaMock.serverMember.update.mockResolvedValueOnce({});
+        const own = await request(app).patch('/api/v1/servers/srv-1/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: withZwsp });
+        expect(own.status).toBe(200);
+        expect(prismaMock.serverMember.update.mock.calls[0][0].data.nickname).toBe('Mod');
+
+        prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-2', serverId: 'srv-1', role: 'member', nickname: 'Mod' });
+        const other = await request(app).patch('/api/v1/servers/srv-1/members/user-2/nickname').set('Authorization', `Bearer ${makeToken()}`).send({ nickname: removedOnly });
+        expect(other.status).toBe(400);
+        expect(other.body.error).toBe('Nickname cannot be empty');
+      });
+    });
+
+    it('a nickname made only of them is empty once stripped: "Nickname cannot be empty", nothing written', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1', role: 'member' });
+
+      const res = await request(app).patch('/api/v1/servers/srv-1/nickname').set('Authorization', `Bearer ${makeToken()}`)
+        .send({ nickname: `${ZWSP}${RLO}` });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Nickname cannot be empty');
+      expect(prismaMock.serverMember.update).not.toHaveBeenCalled();
     });
   });
 

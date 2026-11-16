@@ -7,6 +7,7 @@ import { INVITE_CODE_LENGTH, Permissions } from '@voxium/shared';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { hasServerPermission } from '../utils/permissionCalculator';
 import { joinServerMember } from '../utils/serverJoin';
+import { serverSelect } from '../utils/serverSelect';
 import { rateLimitInviteUse } from '../middleware/rateLimiter';
 
 export const inviteRouter = Router();
@@ -46,9 +47,12 @@ inviteRouter.post('/:code/join', rateLimitInviteUse, async (req: Request<{ code:
     if (!isFeatureEnabled('invites')) throw new ForbiddenError('Server invites are currently disabled');
     const { code } = req.params;
 
+    // The server in the shape the server list, the server updates and the
+    // discovery join answer (serverSelect): the client adds it to its list
+    // as it is. It carries invitesLocked, the one field the checks below read.
     const invite = await prisma.invite.findUnique({
       where: { code },
-      include: { server: true },
+      include: { server: { select: serverSelect } },
     });
 
     if (!invite) throw new NotFoundError('Invite');

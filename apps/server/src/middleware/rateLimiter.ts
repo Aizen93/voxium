@@ -605,16 +605,16 @@ const verifiedBearers = new WeakMap<Request, string | null>();
 /** The userId a request's bearer carries, if the signature verifies, the
  *  token is not expired and it is an ACCESS token (one with a `purpose` —
  *  TOTP challenge, trusted device — is not a session); null otherwise. The
- *  bearer is the Authorization header or, for the tags that cannot set one
- *  (an attachment `<img>`), the `token` query parameter. Memoised per request. */
+ *  bearer is the Authorization header, the only place `authenticate` reads
+ *  one: a token anywhere else in the request names nobody. Memoised per
+ *  request. */
 export function verifiedBearerUserId(req: Request): string | null {
   if (verifiedBearers.has(req)) return verifiedBearers.get(req) ?? null;
   let userId: string | null = null;
   const header = req.headers.authorization;
-  const queryToken = (req.query as { token?: unknown } | undefined)?.token;
   const token = typeof header === 'string' && header.startsWith('Bearer ')
     ? header.slice('Bearer '.length)
-    : typeof queryToken === 'string' ? queryToken : null;
+    : null;
   if (token !== null && token.length > 0 && token.length <= 4096) {
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown; purpose?: unknown };

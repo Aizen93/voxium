@@ -439,6 +439,47 @@ describe('Message Routes', () => {
         expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
       });
 
+      it('stores each file name on one line, without control, bidi or zero-width characters (#158)', async () => {
+        const { createMany } = mockPlainChannel();
+        const named = `in${String.fromCharCode(0x202e)}voice${String.fromCharCode(0x200b)}\n${String.fromCharCode(7)}fdp.pdf`;
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: '', attachments: [{ ...pdf, fileName: named }, clip] });
+
+        expect(res.status).toBe(201);
+        expect(createMany.mock.calls[0][0].data.map((a: { fileName: string }) => a.fileName)).toEqual(['invoice fdp.pdf', 'clip.mp4']);
+      });
+
+      it('cuts an over-long file name to ATTACHMENT_NAME_MAX, keeping its extension, instead of refusing the message (#158)', async () => {
+        const { createMany } = mockPlainChannel();
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [{ ...pdf, fileName: `${'r'.repeat(5000)}.pdf` }] });
+
+        expect(res.status).toBe(201);
+        const stored: string = createMany.mock.calls[0][0].data[0].fileName;
+        expect(stored).toHaveLength(LIMITS.ATTACHMENT_NAME_MAX);
+        expect(stored.endsWith('.pdf')).toBe(true);
+      });
+
+      it('stores a fixed name for a file name that comes out empty, and only the four attachment fields (#158)', async () => {
+        const { createMany } = mockPlainChannel();
+
+        const res = await request(app)
+          .post('/api/v1/channels/ch-1/messages')
+          .set('Authorization', `Bearer ${makeToken()}`)
+          .send({ content: 'look', attachments: [{ ...pdf, fileName: String.fromCharCode(0x200b, 0x202e), extra: 'x' }] });
+
+        expect(res.status).toBe(201);
+        expect(createMany.mock.calls[0][0].data[0]).toEqual({
+          messageId: 'msg-1', s3Key: pdf.s3Key, fileName: 'attachment', fileSize: 2048, mimeType: 'application/pdf',
+        });
+      });
+
       it('does not call the verifier for a message without attachments', async () => {
         mockPlainChannel();
 

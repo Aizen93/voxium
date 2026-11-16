@@ -69,6 +69,51 @@ describe('redactUrl', () => {
   });
 });
 
+describe('redactUrl — a `token` query value never reaches a log line (#167)', () => {
+  it('redacts the value on any path, keeping the other parameters', () => {
+    expect(redactUrl('/api/v1/uploads/attachments/a.png?token=eyJhbGciOi.payload.sig')).toBe('/api/v1/uploads/attachments/a.png?token=[redacted]');
+    expect(redactUrl('/api/v1/channels/c1/messages?before=2026-01-01&token=JWT&limit=50')).toBe('/api/v1/channels/c1/messages?before=2026-01-01&token=[redacted]&limit=50');
+    expect(redactUrl('/health?token=JWT')).toBe('/health?token=[redacted]');
+  });
+
+  it('redacts every occurrence, whatever the case of the key', () => {
+    expect(redactUrl('/x?token=A&Token=B&TOKEN=C')).toBe('/x?token=[redacted]&Token=[redacted]&TOKEN=[redacted]');
+  });
+
+  it('redacts an empty value, and a value up to the next parameter', () => {
+    expect(redactUrl('/x?token=&a=1')).toBe('/x?token=[redacted]&a=1');
+  });
+
+  it('reads everything after the first ? as the query: a # never ends it (a client sends no fragment, so a # in the line is text)', () => {
+    expect(redactUrl('/x?a=1#&token=JWT')).toBe('/x?a=1#&token=[redacted]');
+    expect(redactUrl('/x?a=1#token=JWT')).toBe('/x?a=1#token=[redacted]');
+    expect(redactUrl('/x?a=1##token=JWT#b=2&c=3')).toBe('/x?a=1##token=[redacted]&c=3');
+    // a credential's value runs to the next &: a # inside it hides the rest too
+    expect(redactUrl('/x?token=JWT#frag')).toBe('/x?token=[redacted]');
+    expect(redactUrl('/x?token=abc#def&x=1')).toBe('/x?token=[redacted]&x=1');
+    expect(redactUrl('/x?a=1#b&TOKEN=JWT&c=2')).toBe('/x?a=1#b&TOKEN=[redacted]&c=2');
+  });
+
+  it('is idempotent (the JSON access log applies it twice)', () => {
+    const once = redactUrl('/api/v1/invites/CODE?token=JWT&x=1');
+    expect(redactUrl(once)).toBe(once);
+    expect(once).toBe('/api/v1/invites/[redacted]?token=[redacted]&x=1');
+  });
+
+  it('leaves parameters that merely contain "token" in their name alone, and a "token" in the path', () => {
+    expect(redactUrl('/x?mytoken=1&token_type=2&tokens=3')).toBe('/x?mytoken=1&token_type=2&tokens=3');
+    expect(redactUrl('/api/v1/auth/mail-block/token?a=1')).toBe('/api/v1/auth/mail-block/token?a=1');
+  });
+
+  it('redacts the value in an absolute-form request target too', () => {
+    expect(redactUrl('http://voxium.test/api/v1/x?token=JWT')).toBe('http://voxium.test/api/v1/x?token=[redacted]');
+  });
+
+  it('redacts a percent-encoded key spelling as well', () => {
+    expect(redactUrl('/x?%74oken=JWT')).toBe('/x?%74oken=[redacted]');
+  });
+});
+
 describe('redactedPath', () => {
   it('drops the query string (it may carry ?token=) and redacts the path', () => {
     expect(redactedPath('/api/v1/uploads/attachments/a.png?token=JWT')).toBe('/api/v1/uploads/attachments/a.png');

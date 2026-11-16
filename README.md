@@ -396,8 +396,10 @@ JWT_SECRET=your_random_64_char_secret
 JWT_REFRESH_SECRET=another_random_64_char_secret
 
 # ── TOTP (generate with: openssl rand -hex 32) ───────────────────────────────
-# Required: the server refuses to start in production without it
-TOTP_ENCRYPTION_KEY=your_32_byte_hex_key
+# Required in production: the server refuses to start without it, and in every
+# environment when it is set but is not 64 hexadecimal characters. Paste the
+# output of `openssl rand -hex 32` after the = sign.
+TOTP_ENCRYPTION_KEY=
 
 # ── S3 / Object Storage (required for file uploads) ──────────────────────────
 S3_ASSETS_ENDPOINT=https://s3.us-east-1.amazonaws.com
@@ -595,7 +597,7 @@ curl http://localhost:3001/api/v1/servers \
 | `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
 | `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
 | `CLEANUP_REPORT_EMAIL` | — | Email address for daily attachment cleanup reports. If not set, no report is sent. |
-| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. |
+| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. When set, it must be 64 hexadecimal characters: a value that does not give 32 bytes stops the start in every environment, and characters after the 64th are ignored with a warning. |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers (always on when `NODE_ENV=production`) |
 | `TRUST_PROXY_HOPS` | `1` | Number of reverse proxies in front of the server — must match your setup exactly |
 | `MEDIASOUP_LISTEN_IP` | `0.0.0.0` | IP the mediasoup workers bind to |

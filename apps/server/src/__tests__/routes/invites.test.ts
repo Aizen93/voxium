@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
+import { serverSelect } from '../../utils/serverSelect';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 
@@ -306,6 +307,42 @@ describe('Invite Routes', () => {
 
       // Verify transaction was called (creates member + deletes invite)
       expect(prismaMock.$transaction).toHaveBeenCalled();
+    });
+
+    it('answers with the serverSelect shape, as the server list and the discovery join do, never the whole row (#128)', async () => {
+      const token = makeToken({ userId: 'user-2' });
+      mockAuthUser({ id: 'user-2' });
+      // The whole row, curation and ranking columns included; the mock hands
+      // back only what the call selects, as Prisma does
+      const fullRow: Record<string, unknown> = {
+        ...mockServer, description: null, tags: [], discoverable: true, joinMode: 'open',
+        discoveryListed: true, discoveryBlockedAt: null, featuredAt: new Date('2026-01-01'),
+        activityScore: 12.5, weeklyMessages: 40, onlineCount: 3, statsRefreshedAt: new Date('2026-01-02'),
+        memberCount: 6, updatedAt: new Date('2026-01-03'),
+      };
+      prismaMock.invite.findUnique.mockImplementationOnce(async (args: { include?: { server?: true | { select: Record<string, true> } } }) => {
+        const include = args.include?.server;
+        const server = include === true || include === undefined
+          ? fullRow
+          : Object.fromEntries(Object.keys(include.select).map((k) => [k, fullRow[k]]));
+        return { id: 'inv-1', code: 'ABC12345', serverId: 'srv-1', expiresAt: null, server };
+      });
+      prismaMock.serverMember.findUnique.mockResolvedValue(null);
+      prismaMock.serverMember.count.mockResolvedValue(5);
+      prismaMock.$transaction.mockResolvedValue([{}, {}]);
+      prismaMock.channel.findMany.mockResolvedValue([{ id: 'ch-1' }]);
+      prismaMock.channelRead.createMany.mockResolvedValue({ count: 1 });
+
+      const res = await request(app)
+        .post('/api/v1/invites/ABC12345/join')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.invite.findUnique).toHaveBeenCalledWith({ where: { code: 'ABC12345' }, include: { server: { select: serverSelect } } });
+      expect(Object.keys(res.body.data).sort()).toEqual(Object.keys(serverSelect).sort());
+      for (const hidden of ['discoveryListed', 'discoveryBlockedAt', 'featuredAt', 'activityScore', 'weeklyMessages', 'onlineCount', 'statsRefreshedAt', 'memberCount', 'updatedAt']) {
+        expect(res.body.data).not.toHaveProperty(hidden);
+      }
     });
 
     it('returns 404 with invalid invite code', async () => {

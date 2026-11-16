@@ -12,7 +12,7 @@ import { Prisma } from '../generated/prisma/client';
 import { encodeMemberCursor, decodeMemberCursor, hashMemberQuery } from '../utils/memberCursor';
 import { joinServerRoom } from '../utils/memberBroadcast';
 import { getIO } from '../websocket/socketServer';
-import { sanitizeText } from '../utils/sanitize';
+import { sanitizeText, sanitizeLabel } from '../utils/sanitize';
 import { rateLimitMemberManage, rateLimitMemberRead, rateLimitMemberLookup, rateLimitSearch } from '../middleware/rateLimiter';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { adoptImageAssetUpload } from '../utils/uploadVerification';
@@ -1165,19 +1165,25 @@ serverRouter.patch(
         if (!canChange) throw new ForbiddenError('You do not have permission to change your nickname');
 
         if (typeof nickname !== 'string') throw new BadRequestError('nickname must be a string');
-        const sanitized = sanitizeText(nickname);
-        const err = validateNickname(sanitized);
-        if (err) throw new BadRequestError(err);
+        // Sent unchanged (the nickname dialog is filled with the stored one):
+        // left as stored, neither judged nor rewritten, still answered and
+        // announced. A nickname is judged and stripped only when it changes.
+        const unchanged = nickname === membership.nickname;
+        const sanitized = unchanged ? nickname : sanitizeLabel(nickname);
+        if (!unchanged) {
+          const err = validateNickname(sanitized);
+          if (err) throw new BadRequestError(err);
 
-        // A caller removed since the membership read finds no row (P2025):
-        // the route's answer for a caller who is not a member
-        try {
-          await prisma.serverMember.update({
-            where: { userId_serverId: { userId: req.user!.userId, serverId } },
-            data: { nickname: sanitized },
-          });
-        } catch (err) {
-          memberGoneAsNotFound(err, 'Server');
+          // A caller removed since the membership read finds no row (P2025):
+          // the route's answer for a caller who is not a member
+          try {
+            await prisma.serverMember.update({
+              where: { userId_serverId: { userId: req.user!.userId, serverId } },
+              data: { nickname: sanitized },
+            });
+          } catch (err) {
+            memberGoneAsNotFound(err, 'Server');
+          }
         }
 
         getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {
@@ -1236,22 +1242,31 @@ serverRouter.patch(
       }
 
       let sanitized: string | null = null;
-      if (nickname !== null) {
+      // Sent unchanged (a moderator re-saving the nickname the dialog was
+      // filled with): left as stored, neither judged nor rewritten, still
+      // answered and announced. A nickname is judged and stripped only when
+      // it changes.
+      const unchanged = typeof nickname === 'string' && nickname === targetMember.nickname;
+      if (unchanged) {
+        sanitized = nickname;
+      } else if (nickname !== null) {
         if (typeof nickname !== 'string') throw new BadRequestError('nickname must be a string');
-        sanitized = sanitizeText(nickname);
+        sanitized = sanitizeLabel(nickname);
         const err = validateNickname(sanitized);
         if (err) throw new BadRequestError(err);
       }
 
       // One statement: it waits for a removal holding the member row, and a
       // member gone by then finds no row (P2025): 404 Member
-      try {
-        await prisma.serverMember.update({
-          where: { userId_serverId: { userId: memberId, serverId } },
-          data: { nickname: sanitized },
-        });
-      } catch (err) {
-        memberGoneAsNotFound(err);
+      if (!unchanged) {
+        try {
+          await prisma.serverMember.update({
+            where: { userId_serverId: { userId: memberId, serverId } },
+            data: { nickname: sanitized },
+          });
+        } catch (err) {
+          memberGoneAsNotFound(err);
+        }
       }
 
       getIO().to(`server:${serverId}`).emit(WS_EVENTS.MEMBER_NICKNAME_UPDATED, {

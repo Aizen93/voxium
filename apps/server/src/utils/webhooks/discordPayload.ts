@@ -1,5 +1,5 @@
-import { DISCOVERY_TEXT_FORBIDDEN_RE, LIMITS, validateMessageContent } from '@voxium/shared';
-import { sanitizeText } from '../sanitize';
+import { LIMITS, validateMessageContent } from '@voxium/shared';
+import { sanitizeText, sanitizeLabel } from '../sanitize';
 import {
   collapseLineBreaks,
   escapeLinkDestination,
@@ -208,9 +208,6 @@ function inputTooLong(body: Record<string, unknown>, embeds: unknown[]): boolean
 }
 
 /** The first WEBHOOK_NAME_MAX characters, never splitting a surrogate pair, trimmed. */
-// DISCOVERY_TEXT_FORBIDDEN_RE (the server-name rule) as a global matcher
-const INVISIBLE_RE = new RegExp(DISCOVERY_TEXT_FORBIDDEN_RE.source, 'gu');
-
 function truncateName(name: string): string {
   let cut = LIMITS.WEBHOOK_NAME_MAX;
   const last = name.charCodeAt(cut - 1);
@@ -256,11 +253,12 @@ export function renderDiscordPayload(body: unknown): RenderedWebhookMessage | We
   let nameOverride: string | undefined;
   if (typeof body.username === 'string') {
     // The same character rule as the stored name (validateWebhookName): no
-    // bidi or zero-width characters that could make the label read as another
-    // member's name. Stripped rather than refused: a Discord notifier's name
-    // must not fail the delivery.
-    let name = sanitizeText(collapseLineBreaks(body.username)).replace(INVISIBLE_RE, '').trim();
-    if (name.length > LIMITS.WEBHOOK_NAME_MAX) name = truncateName(name);
+    // direction-override or stray zero-width characters that could make the
+    // label read as another member's name. Stripped rather than refused: a
+    // Discord notifier's name must not fail the delivery. The rule runs again
+    // after a cut, which can end on a joiner or inside a flag's tag run.
+    let name = sanitizeLabel(body.username);
+    if (name.length > LIMITS.WEBHOOK_NAME_MAX) name = sanitizeLabel(truncateName(name));
     if (name) nameOverride = name;
   }
 

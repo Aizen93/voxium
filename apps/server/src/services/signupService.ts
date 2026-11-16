@@ -9,7 +9,7 @@ import {
   emailDomain, isCommonEmailProvider,
 } from '@voxium/shared';
 import { BadRequestError, ConflictError, ForbiddenError } from '../utils/errors';
-import { sanitizeText } from '../utils/sanitize';
+import { sanitizeLabel } from '../utils/sanitize';
 import {
   sendSignupCodeEmail, sendSignupExistingAccountEmail, describeEmailError, MailSuppressedError,
 } from '../utils/email';
@@ -174,7 +174,7 @@ export async function startRegistration(
       username,
       email,
       emailCanonical,
-      displayName: sanitizeText(displayName) || username,
+      displayName: sanitizeLabel(displayName) || username,
       passwordHash,
       // Branches that mail no code store a hash of a code nobody was given
       codeHash: signupCodeHash(pendingId, branch === 'code' ? code : newCode() + crypto.randomBytes(8).toString('hex')),

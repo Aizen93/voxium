@@ -410,6 +410,22 @@ describe('app.ts — lazy morgan middleware', () => {
     });
   });
 
+  it('neither access log format keeps a `token` query value (#167)', async () => {
+    for (const format of ['json', 'dev']) {
+      vi.resetModules();
+      process.env.LOG_FORMAT = format;
+      const { app } = await import('../app');
+
+      await withStdout(async (stdout) => {
+        await request(app, 'GET', `/api/v1/uploads/attachments/ch-1/a.png?token=QUERYSECRET${format}&inline`);
+        const logged = await stdout.waitFor('/api/v1/uploads/attachments/ch-1/a.png');
+
+        expect(logged).toContain('/api/v1/uploads/attachments/ch-1/a.png?token=[redacted]&inline');
+        expect(logged).not.toContain(`QUERYSECRET${format}`);
+      });
+    }
+  });
+
   it('json access log leaves the webhook management URLs untouched', async () => {
     process.env.LOG_FORMAT = 'json';
     const { app } = await import('../app');

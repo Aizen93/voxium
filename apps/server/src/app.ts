@@ -29,10 +29,17 @@ import { webhookExecuteRouter } from './routes/webhookExecute';
 import { webhookRouter } from './routes/webhooks';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimitGeneral } from './middleware/rateLimiter';
+import { requireSingleValueQuery } from './middleware/singleValueQuery';
 import { trustsProxy, trustedProxyHops } from './utils/trustProxy';
 import { redactUrl } from './utils/redactUrl';
 
 export const app = express();
+
+// Express 5's default, set explicitly because requireSingleValueQuery (the api
+// router) relies on it: a query value is a string or, for a repeated
+// parameter, an array of strings — never the nested objects the 'extended'
+// parser builds
+app.set('query parser', 'simple');
 
 // Enable trust proxy lazily (env vars not available at module scope due to import hoisting)
 let _trustProxySet = false;
@@ -241,6 +248,11 @@ app.get('/api/v1/feature-flags/public', rateLimitGeneral, async (_req, res) => {
 
 const api = express.Router();
 api.use(rateLimitGeneral);
+// One value per query parameter on every API route, AFTER the general budget
+// (a refused request is charged like any other). The execute route, the
+// health probes and the public feature flags sit outside this router and are
+// not judged by it.
+api.use(requireSingleValueQuery);
 api.use('/auth', authRouter);
 api.use('/users', userRouter);
 api.use('/servers', serverRouter);

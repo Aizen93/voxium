@@ -6,16 +6,19 @@ import { prisma } from '../utils/prisma';
 import { BadRequestError, UnauthorizedError } from '../utils/errors';
 import { LIMITS } from '@voxium/shared';
 import { getRedis } from '../utils/redis';
+import { readEncryptionKey, ENCRYPTION_KEY_UNUSABLE_MESSAGE } from '../utils/secretBox';
 
 const APP_NAME = 'Voxium';
 const ENCRYPTION_ALGO = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
+/** The key as the secret box reads it; null when unset; a set key that cannot be used throws, by name, never falls back to plaintext. */
 function getEncryptionKey(): Buffer | null {
-  const key = process.env.TOTP_ENCRYPTION_KEY;
-  if (!key) return null;
-  return Buffer.from(key, 'hex');
+  const read = readEncryptionKey();
+  if (read.state === 'unset') return null;
+  if (read.state === 'unusable') throw new Error(ENCRYPTION_KEY_UNUSABLE_MESSAGE);
+  return read.key;
 }
 
 function encryptSecret(plaintext: string): string {
@@ -184,6 +187,59 @@ export async function disableTOTP(userId: string, code: string) {
   });
 }
 
+// ─── Replay protection ──────────────────────────────────────────────────────
+// A code that passed is recorded for the length of its validity window
+// (`SET NX EX` in Redis, one key per account and code). While Redis cannot be
+// asked, each node records the codes it accepts in memory for the same
+// window, and the outage is logged at most once a minute.
+
+const REPLAY_WINDOW_S = 90;
+const LOCAL_REPLAY_MAX = 10_000;
+const REPLAY_WARN_INTERVAL_MS = 60_000;
+
+// replay key → expiry (ms). Insertion order is expiry order: every entry
+// lives the same window, and a key is only inserted when absent.
+const localUses = new Map<string, number>();
+let lastReplayWarnAt = -Infinity;
+
+function dropExpiredLocalUses(now: number): void {
+  for (const [key, expiresAt] of localUses) {
+    if (expiresAt > now) break;
+    localUses.delete(key);
+  }
+}
+
+function usedLocally(replayKey: string): boolean {
+  if (localUses.size === 0) return false;
+  const now = Date.now();
+  dropExpiredLocalUses(now);
+  return localUses.has(replayKey);
+}
+
+/** Record a use on this node: true for the first use within the window, false for a replay. */
+function recordLocalUse(replayKey: string): boolean {
+  const now = Date.now();
+  dropExpiredLocalUses(now);
+  if (localUses.has(replayKey)) return false;
+  // Bounded: past the cap the oldest record goes first
+  if (localUses.size >= LOCAL_REPLAY_MAX) {
+    const oldest = localUses.keys().next().value;
+    if (oldest !== undefined) localUses.delete(oldest);
+  }
+  localUses.set(replayKey, now + REPLAY_WINDOW_S * 1000);
+  return true;
+}
+
+/** The outage, once a minute at most: the error's name and message, never the key (it holds the code) nor the account. */
+function warnReplayCheckUnavailable(err: unknown): void {
+  const now = Date.now();
+  if (now - lastReplayWarnAt < REPLAY_WARN_INTERVAL_MS) return;
+  lastReplayWarnAt = now;
+  const name = err instanceof Error ? err.name : typeof err;
+  const message = err instanceof Error ? err.message : 'non-error value thrown';
+  console.warn(`[TOTP] Replay check could not reach Redis (${name}: ${message}); codes are checked against this node's memory until it answers`);
+}
+
 /** Verify TOTP code during login */
 export async function verifyTOTP(userId: string, code: string): Promise<boolean> {
   const user = await prisma.user.findUnique({
@@ -198,12 +254,19 @@ export async function verifyTOTP(userId: string, code: string): Promise<boolean>
   if (delta !== null) {
     // Replay protection: reject codes already used within the validity window
     const replayKey = `totp:used:${userId}:${code}`;
+    // A use this node recorded while Redis could not be asked: Redis never
+    // saw it, so it is refused here whatever Redis answers now
+    if (usedLocally(replayKey)) return false;
     try {
       const redis = getRedis();
-      const alreadyUsed = await redis.set(replayKey, '1', { NX: true, EX: 90 });
+      const alreadyUsed = await redis.set(replayKey, '1', { NX: true, EX: REPLAY_WINDOW_S });
       if (!alreadyUsed) return false; // Code already used within the window
-    } catch {
-      // Redis unavailable — allow through (fail-open for TOTP, rate limit still applies)
+    } catch (err) {
+      // Fail OPEN, like the rate limiters: a Redis outage must not lock every
+      // 2FA account out of sign-in. The use is recorded on this node instead,
+      // so a second use of the code here is still refused.
+      warnReplayCheckUnavailable(err);
+      return recordLocalUse(replayKey);
     }
     return true;
   }

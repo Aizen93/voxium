@@ -46,6 +46,9 @@ export const LIMITS = {
   MAX_ATTACHMENTS_PER_MESSAGE: 5,
   MAX_ATTACHMENT_SIZE: 8 * 1024 * 1024, // 8 MB (default for non-video files)
   MAX_VIDEO_ATTACHMENT_SIZE: 12 * 1024 * 1024, // 12 MB (for video files)
+  // A plaintext attachment's stored file name (UTF-16 code units): a longer
+  // one is cut, keeping its extension, never refused
+  ATTACHMENT_NAME_MAX: 255,
   // Avatars and space icons are 256x256 images the client encodes before the
   // upload (WebP, or PNG on a webview without a WebP encoder): tens of KB, a
   // PNG of noise stays under 300 KB. The presigned PUT is signed for the exact

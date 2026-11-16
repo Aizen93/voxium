@@ -476,6 +476,18 @@ describe('startRegistration — the same answer after the same work on every bra
     expect(createdRow().displayName).toBe('newuser');
   });
 
+  it('stores the display name on one line, without bidi or zero-width characters (#148)', async () => {
+    const RLO = String.fromCharCode(0x202e);
+    const ZWSP = String.fromCharCode(0x200b);
+    await startRegistration('newuser', 'a@example.com', PASSWORD, `${ZWSP}Ali${RLO}ce
+Admin`, undefined, CONSENT);
+    expect(createdRow().displayName).toBe('Alice Admin');
+
+    vi.clearAllMocks();
+    await startRegistration('newuser', 'a@example.com', PASSWORD, `${ZWSP}${RLO}`, undefined, CONSENT);
+    expect(createdRow().displayName).toBe('newuser');
+  });
+
   it('every start gets a fresh pending id', async () => {
     const a = await startRegistration('newuser', 'a@example.com', PASSWORD, undefined, undefined, CONSENT);
     const b = await startRegistration('newuser', 'a@example.com', PASSWORD, undefined, undefined, CONSENT);

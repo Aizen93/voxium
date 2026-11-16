@@ -2,6 +2,10 @@ import dotenv from 'dotenv';
 // quiet: dotenv prints "injected env (N) from .env" at every boot otherwise
 // (on stderr from dotenv 18, i.e. into the process manager's error log).
 dotenv.config({ quiet: true });
+// Imported HERE, before the checks below call it: the compiled CommonJS
+// requires each module where its import stands (secretBox reads the
+// environment only when called)
+import { checkEncryptionKeyAtBoot } from './utils/secretBox';
 
 // Validate required env vars before any module reads them
 const REQUIRED_ENV_VARS = [
@@ -21,17 +25,18 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// TOTP_ENCRYPTION_KEY: fail closed in production — without it TOTP secrets
-// would be stored in PLAINTEXT. Dev keeps the warning-only fallback so local
-// setups don't need the key.
-if (!process.env.TOTP_ENCRYPTION_KEY) {
-  if (process.env.NODE_ENV === 'production') {
-    console.error('\nFATAL: TOTP_ENCRYPTION_KEY is not set — refusing to start in production (TOTP secrets would be stored UNENCRYPTED).');
-    console.error('Generate one with: openssl rand -hex 32\n');
-    process.exit(1);
-  }
-  console.warn('\nWARNING: TOTP_ENCRYPTION_KEY is not set. TOTP secrets will be stored UNENCRYPTED in the database.');
-  console.warn('Set this to a 32-byte hex string (64 characters) for production use.\n');
+// TOTP_ENCRYPTION_KEY, by the rule totpService and the secret box read it
+// (utils/secretBox.ts): unset fails closed in production, where TOTP secrets
+// would be stored in PLAINTEXT, and only warns elsewhere so local setups
+// don't need the key; set but not decoding to 32 bytes stops every
+// environment, since every TOTP enrolment and GitHub webhook would fail on it.
+const totpKeyCheck = checkEncryptionKeyAtBoot(process.env);
+if (totpKeyCheck.fatal) {
+  console.error(`\nFATAL: ${totpKeyCheck.fatal}\n`);
+  process.exit(1);
+}
+if (totpKeyCheck.warning) {
+  console.warn(`\nWARNING: ${totpKeyCheck.warning}\n`);
 }
 
 import http from 'http';
