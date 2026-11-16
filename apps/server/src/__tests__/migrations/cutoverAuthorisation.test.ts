@@ -8,7 +8,8 @@ import { resolve } from 'node:path';
  *
  * `prisma migrate deploy` is not an operator-only command here: it runs on
  * EVERY container start (docker-entrypoint.sh) and on every routine update
- * (DEPLOYMENT.md, "Application Updates"). So the sequencing in the runbook
+ * of a server run from a checkout (git pull, migrate deploy, build, restart:
+ * docs/e2e-always-on-plan.md §7). So the sequencing in the runbook
  * cannot be what keeps this migration from firing — a restart is not an
  * operator action. Two gates stop it, and this file exists so neither can be
  * deleted quietly: the damage is silent, irreversible, and only visible once
@@ -165,9 +166,9 @@ describe('release script — verify proves what survived instead of asserting it
   });
 
   it('does not treat a hostname as proof of which database it is talking to', () => {
-    // `ssh -L 5433:db:5432` makes production `localhost`, and DEPLOYMENT.md's
-    // own production DATABASE_URL literally contains "localhost" because
-    // Postgres runs on the app box. rehearse rewrites schema and deletes the
+    // `ssh -L 5433:db:5432` makes production `localhost`, and so does a
+    // PostgreSQL running on the same machine as the server. rehearse
+    // rewrites schema and deletes the
     // cutover's _prisma_migrations row, so this guard has to be one no tunnel
     // and no deployment topology can satisfy by accident.
     expect(script).toContain('current_database()');

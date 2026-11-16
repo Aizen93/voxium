@@ -487,16 +487,16 @@ curl http://localhost:3001/health
 
 ### 5. Connect a Client
 
-Point the Voxium desktop app (or web client) to your server by setting these in the client's `.env`:
+Point the Voxium desktop app (or web client) to your server by setting these in the client's `.env`. In production the clients reach the server through the reverse proxy, on its public name:
 
 ```env
-VITE_API_URL=http://YOUR_SERVER_IP:3001/api/v1
-VITE_WS_URL=http://YOUR_SERVER_IP:3001
+VITE_API_URL=https://chat.example.com/api/v1
+VITE_WS_URL=https://chat.example.com
 # For the desktop app: where your web client is served, for its invite links
 VITE_CLIENT_URL=https://chat.example.com
 ```
 
-`apps/desktop/.env.example` lists every client setting. The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
+For a first test on a private network, before the proxy is in place, `http://YOUR_SERVER_IP:3001/api/v1` and `http://YOUR_SERVER_IP:3001` reach the server's port directly; that port is never opened to the internet (see [Production Recommendations](#production-recommendations)). `apps/desktop/.env.example` lists every client setting. The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
 
 > **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
 
@@ -535,7 +535,8 @@ docker compose -f docker-compose.production.yml --env-file .env.production up -d
 
 ### Production Recommendations
 
-- Put **nginx** or another reverse proxy in front for TLS/SSL termination
+- Put **nginx** or another reverse proxy in front for TLS termination
+- Clients reach the server only through the proxy, the one party that may set `X-Forwarded-For` (the server trusts it when `NODE_ENV=production`): with the proxy on the same host, publish the server's port on the loopback address only (`"127.0.0.1:3001:3001"` in `docker-compose.production.yml`), otherwise close it in the firewall to everything but the proxy
 - Open the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall — UDP, plus TCP as a fallback — and 3478/udp for STUN (see [STUN for Direct Calls](#stun-for-direct-calls))
 - For better reliability, use a managed PostgreSQL instance (change `DATABASE_URL` in `docker-compose.production.yml` — its `environment:` entry takes precedence over `.env.production`)
 - Set up regular database backups

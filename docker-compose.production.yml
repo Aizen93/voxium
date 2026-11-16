@@ -6,7 +6,7 @@
 #
 # Database migrations run automatically on server startup.
 # The server image is built from the root Dockerfile (multi-stage, non-root).
-# Put nginx/TLS in front of this (see DEPLOYMENT.md sections 11-12).
+# Put a reverse proxy with TLS in front of this.
 
 services:
   server:

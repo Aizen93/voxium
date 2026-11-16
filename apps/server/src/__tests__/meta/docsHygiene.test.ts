@@ -82,6 +82,24 @@ describe('tracked Markdown documents', () => {
     expect(problems).toEqual([]);
   });
 
+  // A self-hoster reads these before any Markdown: the compose files, the
+  // env templates, the image's files. What they point to must be in the
+  // repository too.
+  it('neither do the files a self-hoster deploys from', () => {
+    const deployFiles = tracked.filter((f) =>
+      /^docker-compose[^/]*\.ya?ml$/.test(f) || /(^|\/)\.env[^/]*\.example$/.test(f) || f === 'Dockerfile' || f === 'docker-entrypoint.sh');
+    expect(deployFiles).toEqual(expect.arrayContaining([
+      'docker-compose.production.yml', 'docker-compose.yml', '.env.production.example', 'apps/server/.env.example',
+      'apps/desktop/.env.example', 'apps/admin/.env.example', 'Dockerfile', 'docker-entrypoint.sh',
+    ]));
+    const problems: string[] = [];
+    for (const file of deployFiles) {
+      const text = readFileSync(path.join(ROOT, file), 'utf8');
+      for (const { name, index } of untrackedDocuments(text)) problems.push(`${file}:${lineOf(text, index)} ${name}`);
+    }
+    expect(problems).toEqual([]);
+  });
+
   it('tells a tracked document from one that is not, and leaves web addresses alone', () => {
     const sample = [
       'See CONTRIBUTING.md and `docs/e2e-dm-spec.md`.',
