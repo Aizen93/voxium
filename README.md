@@ -452,13 +452,14 @@ See `.env.production.example` for the full list of options (S3 encryption, proxy
 docker compose -f docker-compose.production.yml --env-file .env.production up -d
 ```
 
-This starts three services:
+This starts four services:
 
 | Service           | Description              | Port     |
 | ----------------- | ------------------------ | -------- |
 | `voxium-server`   | Backend API + WebSocket  | 3001, plus the mediasoup range (UDP + TCP) |
 | `voxium-postgres` | PostgreSQL 16            | internal |
 | `voxium-redis`    | Redis 7                  | internal |
+| `voxium-stun`     | STUN-only coturn for direct calls | 3478 (UDP, TCP too), on the host's network |
 
 Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed. On a new, empty database the first start applies all of them. Unless `VOXIUM_ALLOW_CUTOVER=1` is set (below), the container first reads `prisma migrate status` until the database answers (10 attempts, 3 s apart, each failed read logged with its error) and does not migrate a database it could not read: if PostgreSQL stays unreachable, the server container exits and its log shows the last error.
 
@@ -489,6 +490,15 @@ The desktop installers are then built with `pnpm tauri:build`, which also takes 
 
 > **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
 
+### STUN for Direct Calls
+
+DM calls are peer to peer, so each client needs to learn the public address its network gives it: that is all STUN does (a request of about 100 bytes, an answer of the same size; no media and no credentials). The compose file's `stun` service is a STUN-only coturn (`--stun-only --no-auth`, TURN requests ignored, the same settings as the development `docker-compose.yml`). Voice channels do not need it: their media goes through the server's SFU on the mediasoup ports.
+
+- **Where the clients look.** A client asks `stun:<host of VITE_WS_URL>:3478`, so with `VITE_WS_URL=https://chat.example.com` the machine `chat.example.com` resolves to must answer on 3478. When that name leads somewhere else (a load balancer or a proxy on another machine) or coturn runs on its own machine, build the clients with `VITE_STUN_URL`, for example `VITE_STUN_URL=stun:stun.example.com:3478` (only `stun:` and `stuns:` are accepted; a malformed value is ignored with a warning and the derived address is used). The value is compiled in: changing it means rebuilding the web client and the desktop installers.
+- **Firewall.** Open 3478/udp (browsers send their STUN requests over UDP; coturn answers on 3478/tcp too).
+- **Host networking.** The service uses the host's network so coturn sees each client's own address and port; behind Docker's port publishing it can see the bridge's address instead, and the answer would be wrong. That needs a Linux host (Docker Desktop only with its host networking feature turned on).
+- **What STUN cannot do.** Without a relay (TURN), two peers whose networks allow no direct path (symmetric NATs, strict firewalls) still cannot connect. Voxium ships no TURN server and the client refuses `turn:` URLs on purpose. It never uses a third-party STUN server.
+
 ### Redis Memory and Eviction
 
 Redis holds the server's state, not a cache: rate-limit and abuse budgets, the single-use marks of solved sign-up challenges and of used two-factor codes, the feature-flag and rate-limit overrides set from the admin dashboard, scheduled-job locks, node heartbeats, presence and voice state. The compose file runs it with `--maxmemory 256mb --maxmemory-policy noeviction` and the append-only file written to disk every second, and gives the container a 512 MB limit. If you run Redis yourself (another host, a managed service), set `maxmemory-policy noeviction` there too: any other policy drops those keys without an error once memory runs short (`volatile-*` as well, since the marks, budgets and locks all carry a TTL). The server logs a warning at startup when the policy evicts, or when it cannot read it (some managed services refuse `CONFIG GET`).
@@ -516,7 +526,7 @@ docker compose -f docker-compose.production.yml --env-file .env.production up -d
 ### Production Recommendations
 
 - Put **nginx** or another reverse proxy in front for TLS/SSL termination
-- Open the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall — UDP, plus TCP as a fallback
+- Open the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall — UDP, plus TCP as a fallback — and 3478/udp for STUN (see [STUN for Direct Calls](#stun-for-direct-calls))
 - For better reliability, use a managed PostgreSQL instance (change `DATABASE_URL` in `docker-compose.production.yml` — its `environment:` entry takes precedence over `.env.production`)
 - Set up regular database backups
 

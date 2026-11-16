@@ -138,6 +138,44 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # STUN for direct calls (DM calls are peer to peer; voice channels go
+  # through the server's SFU and do not need it). STUN only: a client asks
+  # "what is my public address?" in about 100 bytes and gets the answer; no
+  # media, no relay (TURN requests are ignored), no credentials. The same
+  # settings as the development docker-compose.yml.
+  #
+  # The clients ask stun:<host of VITE_WS_URL>:3478 unless they were built
+  # with VITE_STUN_URL (apps/desktop/src/utils/stunUrl.ts), so that host must
+  # reach this machine on 3478/udp (coturn answers on TCP too): open it in the
+  # firewall. Host networking, so coturn sees each client's own address and
+  # port; behind Docker's port publishing it can see the bridge's instead.
+  # Linux hosts (Docker Desktop needs its host networking feature).
+  stun:
+    image: coturn/coturn:4.19-alpine
+    container_name: voxium-stun
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --stun-only
+      - --no-auth
+      - --no-tls
+      - --listening-port=3478
+      - --log-file=stdout
+      - --no-multicast-peers
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 16M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   pgdata:
   redisdata:
