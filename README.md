@@ -245,7 +245,7 @@ pnpm --filter @voxium/server db:generate
 # Run database migrations
 pnpm --filter @voxium/server db:migrate
 
-# (Optional) Seed with demo data
+# (Optional, development only) Seed with demo data
 pnpm --filter @voxium/server db:seed
 ```
 
@@ -545,14 +545,16 @@ npx prisma migrate dev --name your_migration_name
 # Reset database (deletes all data)
 npx prisma migrate reset
 
-# Seed demo data
+# Seed demo data (development databases only)
 pnpm run db:seed
 ```
 
-Demo seed creates:
-- **Users:** `alice`, `bob`, `charlie` (password: `password123`)
-- **Server:** "Voxium Community" with text and voice channels
+The demo seed is for **development**: it fills a local database so you can sign in and try the app at once. It creates:
+- **Users:** `alice`, `bob`, `charlie`, e-mail-verified, with the password `password123`
+- **Space:** "Voxium Community" with text and voice channels
 - **Messages:** Sample messages in #general
+
+Never seed a database other people can reach: anyone who has read this page could sign in to those accounts. The seed refuses to run when `NODE_ENV=production` (what the server image and `docker-compose.production.yml` set, or what `apps/server/.env` says); to seed a production-configured database anyway, for a private test instance, put `VOXIUM_ALLOW_DEMO_SEED=1` in that one command's environment (`VOXIUM_ALLOW_DEMO_SEED=1 pnpm run db:seed`), never in an env file. Only the exact value `1` counts.
 
 > **Note:** usernames are kept case-insensitively unique by a functional index Prisma cannot express, so `prisma migrate dev` reports it as drift and may offer to reset the database or drop it. Do not accept — keep the index.
 
@@ -756,7 +758,7 @@ tagged; no spec is tagged at the moment.
 | `pnpm test:watch` | Run server tests in watch mode |
 | `pnpm test:e2e` | Run Playwright E2E tests (`test:e2e:ui` / `test:e2e:headed` for UI mode / visible browser) |
 | `pnpm db:migrate` | Run Prisma migrations |
-| `pnpm db:seed` | Seed database with demo data |
+| `pnpm db:seed` | Seed a development database with demo data (refuses `NODE_ENV=production`) |
 | `pnpm db:studio` | Open Prisma Studio |
 | `npx tsx scripts/test-permissions.ts` | Run permission system integration test against a running backend (11 phases) |
 | `npx tsx scripts/test-multi-node.ts` | Spawn two server nodes and validate cross-node behavior, including real voice media and owner-crash takeover |
