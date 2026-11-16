@@ -1,5 +1,16 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @import "./themes.css";
+
+/* Where Tailwind looks for class names, relative to this file. Automatic
+ * detection is off (source(none) above): it read every file of the app folder
+ * that git does not ignore, other than CSS, binary and lock files, so a
+ * class-like word in a test, a config, the Rust shell or a public file added
+ * CSS to the stylesheet that ships. The app's code is src without its tests (a
+ * class only a test names is never on screen), and index.html, the Vite root,
+ * carries markup of its own. Pinned by __tests__/meta/tailwindSources.test.ts. */
+@source "../";
+@source not "../__tests__";
+@source "../../index.html";
 
 @theme {
   /* Map Tailwind color classes to CSS custom properties from the active theme.
