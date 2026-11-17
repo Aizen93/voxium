@@ -303,13 +303,15 @@ describe('adminStore — a failed request logs a sentence, never the request', (
   });
 });
 
-describe('adminStore — support actions report their failures', () => {
+describe('adminStore — support and report actions report their failures', () => {
   const refusal = (data: Record<string, unknown>) => new AxiosError('Request failed', 'ERR_BAD_REQUEST', undefined, undefined, {
     status: 409, statusText: '', headers: {}, config: { headers: new AxiosHeaders() }, data,
   });
   const ACTIONS = [
     { name: 'claimTicket', fallback: 'Failed to claim the ticket', url: '/admin/support/tickets/t-1/claim', run: () => useAdminStore.getState().claimTicket('t-1') },
     { name: 'closeTicket', fallback: 'Failed to close the ticket', url: '/admin/support/tickets/t-1/close', run: () => useAdminStore.getState().closeTicket('t-1') },
+    { name: 'resolveReport', fallback: 'Failed to resolve the report', url: '/admin/reports/r-1/resolve', run: () => useAdminStore.getState().resolveReport('r-1', { resolution: 'ok' }) },
+    { name: 'dismissReport', fallback: 'Failed to dismiss the report', url: '/admin/reports/r-1/dismiss', run: () => useAdminStore.getState().dismissReport('r-1') },
     { name: 'sendTicketMessage', fallback: 'Failed to send the reply', url: '/admin/support/tickets/t-1/messages', run: () => useAdminStore.getState().sendTicketMessage('t-1', 'hi') },
   ] as const;
 
@@ -385,5 +387,16 @@ describe('adminStore — support actions report their failures', () => {
     await expect(useAdminStore.getState().sendTicketMessage('t-1', 'hi')).resolves.toBe(true);
     await expect(useAdminStore.getState().sendTicketMessage('t-1', 'hi')).resolves.toBe(true);
     expect(useAdminStore.getState().activeTicketMessages).toHaveLength(1);
+  });
+
+  it('a resolved or dismissed report resolves true, refetches, and a failing refetch only warns', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    api.post.mockResolvedValue({ data: {} });
+    await expect(useAdminStore.getState().resolveReport('r-1', { resolution: 'ok' })).resolves.toBe(true);
+    expect(api.get).toHaveBeenCalledWith('/admin/reports', expect.anything());
+    api.get.mockRejectedValueOnce(new Error('Network Error'));
+    await expect(useAdminStore.getState().dismissReport('r-1')).resolves.toBe(true);
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

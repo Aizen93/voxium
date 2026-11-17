@@ -137,3 +137,37 @@ describe('AdminReports — server reports', () => {
     expect(document.body.textContent).not.toContain('Delete reported message');
   });
 });
+
+describe('AdminReports — resolving and dismissing', () => {
+  const rowButton = (text: string) => qa('tbody tr button').find((b) => b.textContent?.trim() === text && rowWith('Offensive listing').contains(b)) as HTMLButtonElement;
+
+  it('Resolve sends the report and closes the modal once the store reports success', async () => {
+    store.resolveReport.mockResolvedValue(true);
+    await render();
+    await act(async () => { rowButton('Resolve').click(); });
+    await act(async () => { buttonByText('Resolve').click(); });
+    expect(store.resolveReport).toHaveBeenCalledWith('r-server', { resolution: 'Resolved' });
+    expect(buttonByText('Resolve')).toBeUndefined();
+  });
+
+  it('Resolve keeps the modal open for another try when the store reports a failure', async () => {
+    store.resolveReport.mockResolvedValue(false);
+    await render();
+    await act(async () => { rowButton('Resolve').click(); });
+    await act(async () => { buttonByText('Resolve').click(); });
+    expect(store.resolveReport).toHaveBeenCalledTimes(1);
+    expect(buttonByText('Resolve')).toBeDefined();
+    expect((buttonByText('Resolve') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('Dismiss closes the modal on success and keeps it open on failure', async () => {
+    store.dismissReport.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await render();
+    await act(async () => { rowButton('Dismiss').click(); });
+    await act(async () => { buttonByText('Dismiss').click(); });
+    expect(buttonByText('Dismiss')).toBeDefined();
+    await act(async () => { buttonByText('Dismiss').click(); });
+    expect(store.dismissReport).toHaveBeenCalledTimes(2);
+    expect(buttonByText('Dismiss')).toBeUndefined();
+  });
+});

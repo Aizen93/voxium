@@ -56,29 +56,23 @@ export function AdminReports() {
 
   const handleResolve = async () => {
     if (!resolveModal) return;
-    try {
-      await resolveReport(resolveModal.id, {
-        resolution: resolution || 'Resolved',
-        ...(banOnResolve ? { action: 'ban' } : {}),
-        ...(deleteOnResolve ? { deleteMessage: true } : {}),
-      });
-      setResolveModal(null);
-      setResolution('');
-      setBanOnResolve(false);
-      setDeleteOnResolve(false);
-    } catch {
-      // Error handled by store
-    }
+    // The store reports a failure itself and resolves false: the modal stays open for another try.
+    const done = await resolveReport(resolveModal.id, {
+      resolution: resolution || 'Resolved',
+      ...(banOnResolve ? { action: 'ban' } : {}),
+      ...(deleteOnResolve ? { deleteMessage: true } : {}),
+    });
+    if (!done) return;
+    setResolveModal(null);
+    setResolution('');
+    setBanOnResolve(false);
+    setDeleteOnResolve(false);
   };
 
   const handleDismiss = async () => {
     if (!dismissModal) return;
-    try {
-      await dismissReport(dismissModal.id);
-      setDismissModal(null);
-    } catch {
-      // Error handled by store
-    }
+    // The store reports a failure itself and resolves false: the modal stays open for another try.
+    if (await dismissReport(dismissModal.id)) setDismissModal(null);
   };
 
   const columns = [

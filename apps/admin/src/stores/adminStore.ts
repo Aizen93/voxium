@@ -235,8 +235,9 @@ interface AdminState {
 
   fetchReports: (page?: number) => Promise<void>;
   setReportsFilter: (filter: string) => void;
-  resolveReport: (id: string, data: { resolution: string; action?: 'ban'; deleteMessage?: boolean }) => Promise<void>;
-  dismissReport: (id: string) => Promise<void>;
+  /** Resolve / dismiss: toast and log a failure, and resolve false (true on success) instead of throwing. */
+  resolveReport: (id: string, data: { resolution: string; action?: 'ban'; deleteMessage?: boolean }) => Promise<boolean>;
+  dismissReport: (id: string) => Promise<boolean>;
   subscribeReports: () => void;
   unsubscribeReports: () => void;
 
@@ -675,13 +676,37 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   setReportsFilter: (filter) => set({ reportsFilter: filter }),
 
   resolveReport: async (id, body) => {
-    await api.post(`/admin/reports/${id}/resolve`, body);
-    await get().fetchReports();
+    try {
+      await api.post(`/admin/reports/${id}/resolve`, body);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to resolve the report'));
+      console.error('Failed to resolve the report:', logMessage(err));
+      return false;
+    }
+    // The action went through: the refetch only brings the list up to date.
+    try {
+      await get().fetchReports();
+    } catch (err) {
+      console.warn('Failed to refresh the reports:', logMessage(err));
+    }
+    return true;
   },
 
   dismissReport: async (id) => {
-    await api.post(`/admin/reports/${id}/dismiss`);
-    await get().fetchReports();
+    try {
+      await api.post(`/admin/reports/${id}/dismiss`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to dismiss the report'));
+      console.error('Failed to dismiss the report:', logMessage(err));
+      return false;
+    }
+    // The action went through: the refetch only brings the list up to date.
+    try {
+      await get().fetchReports();
+    } catch (err) {
+      console.warn('Failed to refresh the reports:', logMessage(err));
+    }
+    return true;
   },
 
   subscribeReports: () => {
