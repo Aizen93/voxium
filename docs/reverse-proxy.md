@@ -30,7 +30,7 @@ The voice ports carry WebRTC media (DTLS-SRTP over UDP, TCP as a fallback): an H
 
 `CORS_ORIGIN` names the origins browsers may call the API from: the web client's (`https://chat.example.com`) and the desktop app's (`https://tauri.localhost`, `tauri://localhost`, `http://tauri.localhost`).
 
-With `NODE_ENV=production` the server trusts the `X-Forwarded-For` header (next sections), which only the proxy may set, so **clients reach the server process only through the proxy**. When the proxy runs on the same host, listen on (or publish the container's port on) the loopback address only, for example `"127.0.0.1:3001:3001"` in the `ports:` of `docker-compose.production.yml`; otherwise close the port in the firewall to everything but the proxy.
+With `NODE_ENV=production` the server trusts the `X-Forwarded-For` header (next sections), which only the proxy may set, so **clients reach the server process only through the proxy**. When the proxy runs on the same host, listen on (or publish the container's port on) the loopback address only, for example `"127.0.0.1:3001:3001"` in the `ports:` of `docker-compose.production.yml`; otherwise close the port in the firewall to everything but the proxy. With Docker, a firewall rule is not a reliable way to do that: ports Docker publishes bypass `ufw`'s rules, and `firewalld` gives Docker its own zone. Bind the published port to an address instead (`docker-compose.production.yml` publishes it on `127.0.0.1` unless `VOXIUM_HTTP_BIND` says otherwise).
 
 ## TLS and HSTS
 
@@ -106,7 +106,7 @@ location ~* ^/api/v1/(webhooks|invites)/ {
 Two more leaks to close:
 
 - **The `Referer` header.** When the web client's page `/reset-password/<token>` loads its scripts or calls the API, the browser sends the page's address in `Referer`, and the default `combined` log format records it with every one of those requests. Send `Referrer-Policy: no-referrer` with the web client's pages, and log without `$http_referer`.
-- **Query strings.** Log the path without its query (`$uri` rather than `$request` in nginx), so that a credential a client ever puts in a query string does not reach the log either.
+- **Query strings.** Log the path without its query (`$uri` rather than `$request` in nginx), so that a credential a client ever puts in a query string does not reach the access log either. The error log is a different matter: it quotes the request line of a failing request with its query, which is why the credential paths above also get a critical-only error log.
 
 ## The web client's static files
 
@@ -157,13 +157,17 @@ server {
     listen 80;
     listen [::]:80;
     server_name chat.example.com;
+    # No access log here either: a server block with none of its own inherits
+    # nginx's default log, which records the full request line (the path of
+    # a webhook or an invite) of every request redirected to HTTPS
+    access_log off;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    http2 on;
+    http2 on;  # nginx 1.25.1 or later, see the notes below
     server_name chat.example.com;
 
     ssl_certificate     /etc/nginx/tls/chat.example.com.crt;
@@ -240,6 +244,9 @@ server {
 
 Notes on the example:
 
+- `http2 on;` needs nginx 1.25.1 or later; on an earlier release `nginx -t` rejects it (for example Ubuntu 24.04 and Debian 12 ship an older nginx). There, delete that line and write the option on the listen lines instead: `listen 443 ssl http2;` and `listen [::]:443 ssl http2;`.
+- Both `server` blocks say what they log: the port-80 block turns the access log off, the port-443 block writes the `voxium` format and turns it off again for the credential paths.
+- The access log shows `/index.html` as the path of every page the web client serves through its fallback, not the address the client asked for: `try_files` rewrites `$uri` internally.
 - `proxy_pass` names no path, so the request goes to the server exactly as the client sent it, and nginx's own logs are the only place its line could have been written.
 - Regular-expression locations (`~*`) take precedence over the plain prefixes `/` and `/api/`, which is what sends the credential paths to their own blocks.
 - `/health` and `/ready` are not exposed: they are for the container's health check, on the server's own port.

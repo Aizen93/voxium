@@ -158,6 +158,20 @@ describe('docs/reverse-proxy.md', () => {
       }
     });
 
+    it('every server block turns its access log off, or sets its own and turns it off in each credential location (an inherited log is the default one and records the request line)', () => {
+      const servers = [...directives.matchAll(/^server \{\n([\s\S]*?)\n\}$/gm)].map((m) => m[1]);
+      expect(servers.length).toBeGreaterThanOrEqual(2);
+      for (const server of servers) {
+        const serverLevel = [...server.matchAll(/^ {4}access_log (.+);$/gm)].map((m) => m[1]);
+        // a server block with no access_log of its own inherits the http block's, whatever that is
+        expect(serverLevel.length, `a server block with no access_log directive:\n${server}`).toBeGreaterThan(0);
+        if (serverLevel.includes('off')) continue;
+        const credentialLocations = [...server.matchAll(/^ {4}location ~\* \S+ \{\n([\s\S]*?)\n {4}\}$/gm)].map((m) => m[1]);
+        expect(credentialLocations.length).toBeGreaterThan(0);
+        for (const block of credentialLocations) expect(block).toMatch(/^ {8}access_log off;$/m);
+      }
+    });
+
     it('the regex locations stand before nothing that could take their paths (nginx gives a regex precedence over a plain prefix)', () => {
       // no `^~` prefix, which would win over the regex locations
       expect(directives).not.toMatch(/location \^~/);
@@ -169,6 +183,23 @@ describe('docs/reverse-proxy.md', () => {
     expect(location('/')).toMatch(/try_files \$uri \/index\.html;/);
     expect(location('= /index.html')).toContain('expires -1;');
     for (const pass of directives.matchAll(/proxy_pass (\S+);/g)) expect(pass[1]).toBe('http://voxium_server');
+  });
+
+  it('states the nginx release http2 on; needs, and the older spelling', () => {
+    expect(directives).toMatch(/^ {4}http2 on;/m);
+    expect(guide).toContain('needs nginx 1.25.1 or later');
+    expect(guide).toContain('listen 443 ssl http2;');
+    expect(guide).toContain('listen [::]:443 ssl http2;');
+  });
+
+  it('says a firewall rule does not close a port Docker publishes, and what to do instead', () => {
+    expect(guide).toContain("bypass `ufw`'s rules");
+    expect(guide).toContain('`firewalld` gives Docker its own zone');
+    expect(guide).toContain('VOXIUM_HTTP_BIND');
+  });
+
+  it('says a page served through the fallback is logged as /index.html', () => {
+    expect(guide).toContain('shows `/index.html` as the path of every page');
   });
 
   it('says the media and STUN ports go around the proxy', () => {
