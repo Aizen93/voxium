@@ -32,14 +32,191 @@ fn is_valid_avatar_key(key: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+// ─── Where the native avatar download may go ─────────────────────────────────
+// On Windows a notification's avatar is downloaded here, in native code, which
+// the webview's Content Security Policy does not bind. The webview names the
+// API base it was built with (`notify_with_avatar`'s `api_base`); that value is
+// compared, never trusted: it is accepted only when its origin (scheme, host,
+// port) is an http(s) origin the `connect-src` of the policy this app was
+// BUILT with names exactly, read from the compiled configuration. The official
+// release and a build for another server both carry the origins they may
+// contact in that policy (scripts/tauriCsp.mjs, scripts/tauriSelfHosted.mjs),
+// so the native download can reach nothing the webview could not already
+// reach. A wildcard source (`https://*.example.com`) matches nothing here, nor
+// does Tauri's own channel (`http://ipc.localhost`). A debug build also takes
+// `http://localhost` and `http://127.0.0.1` on any port: `tauri dev` runs the
+// official policy against a local server. The request is built from the
+// checked base, asks the server to proxy the image (`?inline`) and follows no
+// redirect, so it never leaves that origin.
+
+/// Tauri's IPC channel on Windows and Android: named in every build's
+/// `connect-src` (`TAURI_IPC_SOURCES`, scripts/tauriCsp.mjs), and no server.
+const TAURI_IPC_HOST: &str = "ipc.localhost";
+
+/// An http(s) origin: scheme, lower-case host and port (the scheme's default
+/// when the URL names none, so `https://h` and `https://h:443` are one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpOrigin {
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+fn http_origin(url: &tauri::Url) -> Option<HttpOrigin> {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return None;
+    }
+    // A domain (lower-cased by the parser) or an IPv4 address; a CSP source
+    // cannot name an IPv6 literal (`[…]`)
+    let host = url.host_str().filter(|host| !host.starts_with('['))?;
+    Some(HttpOrigin {
+        scheme: url.scheme().to_owned(),
+        host: host.to_ascii_lowercase(),
+        port: url.port_or_known_default()?,
+    })
+}
+
+/// The origin a `connect-src` source names exactly, `None` for every other
+/// kind of source: a keyword (`'self'`), a scheme source (`ipc:`, `blob:`), a
+/// ws(s) source, a wildcard host or port, a source with a path (it allows that
+/// path only), credentials, Tauri's IPC host.
+fn exact_source_origin(source: &str) -> Option<HttpOrigin> {
+    let lower = source.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return None;
+    }
+    // The URL parser takes `*` as a host character: refuse it before parsing
+    if source.contains('*') || source.contains('@') {
+        return None;
+    }
+    let url = tauri::Url::parse(source).ok()?;
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    let origin = http_origin(&url)?;
+    (origin.host != TAURI_IPC_HOST).then_some(origin)
+}
+
+/// The `connect-src` sources of a policy written as one string: the first
+/// such directive, as a browser reads it (the name in any case).
+fn connect_src_of_policy(policy: &str) -> Vec<String> {
+    policy
+        .split(';')
+        .find_map(|directive| {
+            let mut tokens = directive.split_ascii_whitespace();
+            let name = tokens.next()?;
+            name.eq_ignore_ascii_case("connect-src")
+                .then(|| tokens.map(str::to_owned).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// The `connect-src` sources of the policy the app was built with, written as
+/// a string or as a map of directives; none without a policy.
+fn connect_src_of(csp: Option<&tauri::utils::config::Csp>) -> Vec<String> {
+    use tauri::utils::config::Csp;
+    match csp {
+        None => Vec::new(),
+        Some(Csp::Policy(policy)) => connect_src_of_policy(policy),
+        Some(Csp::DirectiveMap(directives)) => directives
+            .get("connect-src")
+            .map(|sources| {
+                let sources: Vec<String> = sources.clone().into();
+                sources
+                    .iter()
+                    .flat_map(|source| source.split_ascii_whitespace())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// The parsed `base` when its origin is one `connect_src` names exactly (or,
+/// with `allow_dev_loopback`, http on localhost or 127.0.0.1); refused
+/// otherwise, and refused whenever it carries credentials, a query or a
+/// fragment.
+fn allowed_avatar_base(
+    connect_src: &[String],
+    base: &str,
+    allow_dev_loopback: bool,
+) -> Result<tauri::Url, String> {
+    const REFUSED: &str = "The API base is not an origin this app's content security policy allows";
+    let url = tauri::Url::parse(base).map_err(|_| REFUSED.to_string())?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(REFUSED.to_string());
+    }
+    let origin = http_origin(&url).ok_or_else(|| REFUSED.to_string())?;
+    let named = connect_src
+        .iter()
+        .filter_map(|source| exact_source_origin(source))
+        .any(|allowed| allowed == origin);
+    let dev_loopback = allow_dev_loopback
+        && origin.scheme == "http"
+        && (origin.host == "localhost" || origin.host == "127.0.0.1");
+    if named || dev_loopback {
+        Ok(url)
+    } else {
+        Err(REFUSED.to_string())
+    }
+}
+
+/// `{base}/uploads/{key}?inline`, built on the checked base: the server
+/// proxies the image instead of redirecting to the object store.
+fn avatar_url(base: &tauri::Url, key: &str) -> Result<tauri::Url, String> {
+    let mut url = base.clone();
+    url.path_segments_mut()
+        .map_err(|_| "Invalid API base URL".to_string())?
+        .pop_if_empty()
+        .push("uploads")
+        .extend(key.split('/'));
+    url.set_query(Some("inline"));
+    Ok(url)
+}
+
+/// GET the image at `url`, following no redirect (a redirect answer is a
+/// failure, like any other answer that is not a success), at most 1 MB, and
+/// only an image.
+fn download_avatar(url: &tauri::Url) -> Result<Vec<u8>, String> {
+    // The 10 s budget covers the whole exchange
+    let response = ureq::get(url.as_str())
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .max_redirects(0)
+        .build()
+        .call()
+        .map_err(|_| "Avatar download failed".to_string())?;
+    if !response.status().is_success() {
+        return Err("Avatar download failed".to_string());
+    }
+
+    let mut bytes = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(1_048_577)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Avatar read failed".to_string())?;
+
+    if bytes.len() > 1_048_576 {
+        return Err("Avatar too large".to_string());
+    }
+    if !is_valid_image(&bytes) {
+        return Err("Invalid image data".to_string());
+    }
+    Ok(bytes)
+}
+
 /// Download an avatar image to the temp directory and return the file path.
-/// Validates key against the strict S3 key regex, image magic bytes, and 1 MB size limit.
-fn cache_avatar_to_file(api_base: &str, key: &str) -> Result<std::path::PathBuf, String> {
+/// `api_base` is a base `allowed_avatar_base` returned. Validates the key
+/// against the strict S3 key regex, then the image (`download_avatar`).
+fn cache_avatar_to_file(api_base: &tauri::Url, key: &str) -> Result<std::path::PathBuf, String> {
     if !is_valid_avatar_key(key) {
         return Err("Invalid avatar key".to_string());
-    }
-    if !api_base.starts_with("http://") && !api_base.starts_with("https://") {
-        return Err("Invalid API base URL".to_string());
     }
 
     let temp_dir = std::env::temp_dir().join("voxium_avatars");
@@ -65,30 +242,7 @@ fn cache_avatar_to_file(api_base: &str, key: &str) -> Result<std::path::PathBuf,
         let _ = std::fs::remove_file(&path);
     }
 
-    let url = format!("{}/uploads/{}", api_base.trim_end_matches('/'), key);
-    // The 10 s budget covers the whole exchange, the 302 to the object store
-    // included (ureq follows it; a non-2xx final answer is an Err).
-    let response = ureq::get(&url)
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(10)))
-        .build()
-        .call()
-        .map_err(|_| "Avatar download failed".to_string())?;
-
-    let mut bytes = Vec::new();
-    response
-        .into_body()
-        .into_reader()
-        .take(1_048_577)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Avatar read failed".to_string())?;
-
-    if bytes.len() > 1_048_576 {
-        return Err("Avatar too large".to_string());
-    }
-    if !is_valid_image(&bytes) {
-        return Err("Invalid image data".to_string());
-    }
+    let bytes = download_avatar(&avatar_url(api_base, key)?)?;
 
     std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
     std::fs::write(&path, &bytes).map_err(|_| "Failed to cache avatar".to_string())?;
@@ -130,6 +284,9 @@ fn get_windows_app_id(app: &tauri::AppHandle) -> String {
 
 /// Show a native OS notification with an optional avatar image.
 /// On Windows: uses WinRT toast with a circular avatar in the app logo position.
+/// An API base the build's policy does not allow is refused before anything
+/// is fetched or shown (`allowed_avatar_base`); an avatar that cannot be
+/// downloaded leaves the toast without one.
 /// On other platforms: returns Err so the JS side falls through to the Tauri plugin / Web API.
 #[tauri::command]
 fn notify_with_avatar(
@@ -147,8 +304,11 @@ fn notify_with_avatar(
         let mut toast = Toast::new(&app_id).title(&title).text2(&body);
 
         if let (Some(base), Some(key)) = (&api_base, &avatar_key) {
-            if let Ok(path) = cache_avatar_to_file(base, key) {
-                toast = toast.icon(&path, IconCrop::Circular, "");
+            let connect_src = connect_src_of(app.config().app.security.csp.as_ref());
+            let base = allowed_avatar_base(&connect_src, base, cfg!(debug_assertions))?;
+            match cache_avatar_to_file(&base, key) {
+                Ok(path) => toast = toast.icon(&path, IconCrop::Circular, ""),
+                Err(e) => eprintln!("[Voxium] Notification avatar: {e}"),
             }
         }
 
@@ -1002,5 +1162,448 @@ mod single_instance_tests {
         for step in ["window.show()", "window.unminimize()", "window.set_focus()"] {
             assert!(body.contains(step), "{step}");
         }
+    }
+}
+
+/// The native avatar download contacts only an origin the build's policy lets
+/// the webview contact (`allowed_avatar_base`), asks for the proxied image and
+/// follows no redirect.
+#[cfg(test)]
+mod avatar_origin_tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    /// The shape of the official policy (tauri.conf.json): Tauri's own
+    /// channel, the app's domain exactly and as a wildcard, its sockets.
+    const POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://voxium.app https://*.voxium.app wss://voxium.app wss://*.voxium.app; img-src 'self' blob: data: https://voxium.app https://*.voxium.app";
+
+    fn check(policy: &str, base: &str, dev_loopback: bool) -> Result<String, String> {
+        allowed_avatar_base(&connect_src_of_policy(policy), base, dev_loopback)
+            .map(|url| url.to_string())
+    }
+
+    fn allows(policy: &str, base: &str) -> bool {
+        check(policy, base, false).is_ok()
+    }
+
+    #[test]
+    fn an_origin_the_policy_names_is_accepted_with_its_path() {
+        for base in [
+            "https://voxium.app/api/v1",
+            "https://voxium.app/api/v1/",
+            "https://voxium.app",
+            "https://voxium.app/",
+            "HTTPS://VOXIUM.APP/api/v1",
+        ] {
+            assert!(allows(POLICY, base), "{base}");
+        }
+        assert_eq!(
+            check(POLICY, "https://voxium.app/api/v1", false),
+            Ok("https://voxium.app/api/v1".to_string())
+        );
+    }
+
+    #[test]
+    fn another_host_scheme_or_port_is_refused() {
+        for base in [
+            "https://evil.example/api/v1",
+            "https://evilvoxium.app/api/v1",
+            "https://voxium.app.evil.example/api/v1",
+            "https://voxium.app./api/v1",
+            "http://voxium.app/api/v1",
+            "wss://voxium.app",
+            "ftp://voxium.app/api/v1",
+            "https://voxium.app:8443/api/v1",
+            "https://voxium.app:80/api/v1",
+        ] {
+            assert!(!allows(POLICY, base), "{base}");
+        }
+    }
+
+    #[test]
+    fn a_default_port_written_out_is_the_same_origin() {
+        assert!(allows(POLICY, "https://voxium.app:443/api/v1"));
+        let http = "connect-src http://chat.example.org";
+        assert!(allows(http, "http://chat.example.org:80/api/v1"));
+        assert!(allows(http, "http://chat.example.org/api/v1"));
+        let spelled = "connect-src https://chat.example.org:443 http://lan.example:80";
+        assert!(allows(spelled, "https://chat.example.org/api/v1"));
+        assert!(allows(spelled, "http://lan.example/api/v1"));
+        assert!(!allows(spelled, "https://lan.example/api/v1"));
+    }
+
+    #[test]
+    fn a_self_hosted_policy_allows_its_own_api_origin() {
+        // what scripts/tauriSelfHosted.mjs writes: the API origin as is, a
+        // port when it is not the scheme's default
+        let policy = "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://10.0.0.5:3001 ws://10.0.0.5:3001 https://objects.example.org; img-src 'self' http://10.0.0.5:3001";
+        assert!(allows(policy, "http://10.0.0.5:3001/api/v1"));
+        assert!(!allows(policy, "http://10.0.0.5:3002/api/v1"));
+        assert!(!allows(policy, "https://10.0.0.5:3001/api/v1"));
+        // every origin the webview may contact, the object store included
+        assert!(allows(policy, "https://objects.example.org"));
+    }
+
+    /// Only an exact origin matches: a wildcard source is no origin, so an
+    /// API on a subdomain must be named in the policy by itself.
+    #[test]
+    fn a_wildcard_source_matches_nothing() {
+        for base in [
+            "https://api.voxium.app/api/v1",
+            "https://a.b.voxium.app/api/v1",
+            "https://*.voxium.app/api/v1",
+        ] {
+            assert!(!allows(POLICY, base), "{base}");
+        }
+        assert!(!allows("connect-src *", "https://voxium.app/api/v1"));
+        assert!(!allows("connect-src https:", "https://voxium.app/api/v1"));
+        assert!(!allows(
+            "connect-src https://*",
+            "https://voxium.app/api/v1"
+        ));
+        assert!(!allows(
+            "connect-src https://voxium.app:*",
+            "https://voxium.app/api/v1"
+        ));
+    }
+
+    #[test]
+    fn keywords_scheme_sources_sockets_and_tauris_channel_are_no_origin() {
+        assert!(!allows("connect-src 'self'", "http://tauri.localhost/api"));
+        assert!(!allows("connect-src 'self'", "https://tauri.localhost/api"));
+        assert!(!allows(POLICY, "http://ipc.localhost/api"));
+        assert!(!allows(POLICY, "http://IPC.localhost"));
+        assert!(!allows(
+            "connect-src https://ipc.localhost",
+            "https://ipc.localhost"
+        ));
+        assert!(!allows("connect-src ipc:", "ipc://localhost/api"));
+        assert!(!allows(
+            "connect-src wss://chat.example.org ws://chat.example.org",
+            "https://chat.example.org/api/v1"
+        ));
+        assert!(!allows(
+            "connect-src wss://chat.example.org ws://chat.example.org",
+            "http://chat.example.org/api/v1"
+        ));
+    }
+
+    #[test]
+    fn a_source_with_a_path_or_credentials_is_no_origin() {
+        assert!(!allows(
+            "connect-src https://voxium.app/api/",
+            "https://voxium.app/api/v1"
+        ));
+        assert!(!allows(
+            "connect-src https://user@voxium.app",
+            "https://voxium.app/api/v1"
+        ));
+        assert!(!allows(
+            "connect-src https://voxium.app?x",
+            "https://voxium.app/api/v1"
+        ));
+    }
+
+    #[test]
+    fn a_base_with_credentials_a_query_or_a_fragment_is_refused() {
+        for base in [
+            "https://user@voxium.app/api/v1",
+            "https://user:secret@voxium.app/api/v1",
+            "https://:secret@voxium.app/api/v1",
+            "https://voxium.app@evil.example/api/v1",
+            "https://voxium.app/api/v1?x=1",
+            "https://voxium.app/api/v1?",
+            "https://voxium.app/api/v1#top",
+        ] {
+            assert!(!allows(POLICY, base), "{base}");
+        }
+    }
+
+    #[test]
+    fn what_is_not_an_absolute_http_url_is_refused() {
+        for base in [
+            "",
+            "voxium.app/api/v1",
+            "/api/v1",
+            "//voxium.app/api/v1",
+            "javascript:alert(1)",
+            "file:///C:/Windows",
+            "data:text/plain,x",
+            "http://[::1]:3001/api/v1",
+        ] {
+            assert!(!allows(POLICY, base), "{base:?}");
+            assert!(check(POLICY, base, true).is_err(), "{base:?}");
+        }
+    }
+
+    #[test]
+    fn the_policy_is_read_from_its_connect_src_alone() {
+        // no connect-src: nothing, even when another directive names the host
+        assert!(!allows(
+            "default-src 'self' https://voxium.app; img-src https://voxium.app",
+            "https://voxium.app/api/v1"
+        ));
+        assert!(!allows("", "https://voxium.app/api/v1"));
+        // the directive name in any case, sources split on any blank
+        assert!(allows(
+            "CONNECT-SRC\thttps://voxium.app  ",
+            "https://voxium.app/api/v1"
+        ));
+        // the first connect-src counts, as in a browser
+        let twice = "connect-src https://a.example.org; connect-src https://b.example.org";
+        assert!(allows(twice, "https://a.example.org"));
+        assert!(!allows(twice, "https://b.example.org"));
+    }
+
+    #[test]
+    fn a_debug_build_also_takes_http_on_loopback() {
+        for base in [
+            "http://localhost:3001/api/v1",
+            "http://localhost/api/v1",
+            "http://LOCALHOST:8080",
+            "http://127.0.0.1:3001/api/v1",
+        ] {
+            assert!(check(POLICY, base, true).is_ok(), "{base}");
+            assert!(check(POLICY, base, false).is_err(), "{base}");
+        }
+        for base in [
+            "https://localhost:3001/api/v1",
+            "https://127.0.0.1:3001/api/v1",
+            "http://localhost.evil.example:3001/api/v1",
+            "http://127.0.0.2:3001/api/v1",
+            "http://10.0.0.5:3001/api/v1",
+            "http://localhost:3001@evil.example/api/v1",
+            "http://evil.example/?localhost",
+        ] {
+            assert!(check(POLICY, base, true).is_err(), "{base}");
+        }
+    }
+
+    #[test]
+    fn the_policy_map_form_is_read_too() {
+        use std::collections::HashMap;
+        use tauri::utils::config::{Csp, CspDirectiveSources};
+
+        let inline = Csp::DirectiveMap(HashMap::from([
+            (
+                "connect-src".to_string(),
+                CspDirectiveSources::Inline("'self' https://chat.example.org".to_string()),
+            ),
+            (
+                "img-src".to_string(),
+                CspDirectiveSources::Inline("https://img.example.org".to_string()),
+            ),
+        ]));
+        let list = Csp::DirectiveMap(HashMap::from([(
+            "connect-src".to_string(),
+            CspDirectiveSources::List(vec![
+                "'self'".to_string(),
+                "https://chat.example.org".to_string(),
+            ]),
+        )]));
+        for csp in [&inline, &list] {
+            let sources = connect_src_of(Some(csp));
+            assert!(allowed_avatar_base(&sources, "https://chat.example.org/api", false).is_ok());
+            assert!(allowed_avatar_base(&sources, "https://img.example.org/api", false).is_err());
+        }
+        let string = Csp::Policy("connect-src https://chat.example.org".to_string());
+        assert_eq!(connect_src_of(Some(&string)), ["https://chat.example.org"]);
+        assert!(connect_src_of(None).is_empty());
+    }
+
+    /// The policy the official release is built with, read the way the app
+    /// reads its compiled configuration: it names the app's domain exactly.
+    #[test]
+    fn the_official_policy_allows_the_official_api_and_nothing_else() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json is JSON");
+        let csp: tauri::utils::config::Csp =
+            serde_json::from_value(conf["app"]["security"]["csp"].clone()).expect("a policy");
+        let sources = connect_src_of(Some(&csp));
+        assert!(allowed_avatar_base(&sources, "https://voxium.app/api/v1", false).is_ok());
+        for base in [
+            "http://ipc.localhost/api/v1",
+            "https://api.voxium.app/api/v1",
+            "http://localhost:3001/api/v1",
+        ] {
+            assert!(
+                allowed_avatar_base(&sources, base, false).is_err(),
+                "{base}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_request_asks_for_the_proxied_image_on_the_checked_base() {
+        let key = "avatars/u-1_x.webp";
+        for (base, url) in [
+            (
+                "https://voxium.app/api/v1",
+                "https://voxium.app/api/v1/uploads/avatars/u-1_x.webp?inline",
+            ),
+            (
+                "https://voxium.app/api/v1/",
+                "https://voxium.app/api/v1/uploads/avatars/u-1_x.webp?inline",
+            ),
+            (
+                "https://voxium.app:443",
+                "https://voxium.app/uploads/avatars/u-1_x.webp?inline",
+            ),
+            (
+                "http://10.0.0.5:3001/api/v1",
+                "http://10.0.0.5:3001/api/v1/uploads/avatars/u-1_x.webp?inline",
+            ),
+        ] {
+            let checked = tauri::Url::parse(base).expect("a URL");
+            let built = avatar_url(&checked, key).expect("built");
+            assert_eq!(built.as_str(), url);
+            assert_eq!(http_origin(&built), http_origin(&checked));
+        }
+        let icon = avatar_url(
+            &tauri::Url::parse("https://voxium.app/api/v1").expect("a URL"),
+            "server-icons/s-9.webp",
+        )
+        .expect("built");
+        assert_eq!(
+            icon.as_str(),
+            "https://voxium.app/api/v1/uploads/server-icons/s-9.webp?inline"
+        );
+    }
+
+    // ── The download itself, against a server on this machine ──────────────
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+    /// Answer one request with `response` and hand back the request head.
+    fn serve_once(response: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let base = format!("http://{}", listener.local_addr().expect("its address"));
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("the request");
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if stream.read(&mut byte).expect("the request head") == 0 {
+                    break;
+                }
+                head.push(byte[0]);
+            }
+            stream.write_all(&response).expect("the answer");
+            String::from_utf8_lossy(&head).into_owned()
+        });
+        (base, served)
+    }
+
+    fn answer(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn the_image_is_fetched_with_inline_from_the_base_it_was_given() {
+        let (base, served) = serve_once(answer("200 OK", "Content-Type: image/png\r\n", PNG));
+        let url = avatar_url(
+            &tauri::Url::parse(&format!("{base}/api/v1")).expect("a URL"),
+            "avatars/u-1.webp",
+        )
+        .expect("built");
+        assert_eq!(download_avatar(&url), Ok(PNG.to_vec()));
+        let head = served.join().expect("served");
+        assert!(
+            head.starts_with("GET /api/v1/uploads/avatars/u-1.webp?inline HTTP/1.1\r\n"),
+            "{head}"
+        );
+    }
+
+    #[test]
+    fn a_redirect_is_a_failure_and_is_not_followed() {
+        let elsewhere = TcpListener::bind("127.0.0.1:0").expect("a port");
+        elsewhere.set_nonblocking(true).expect("non-blocking");
+        let location = format!(
+            "Location: http://{}/avatar.png\r\n",
+            elsewhere.local_addr().expect("its address")
+        );
+        for status in [
+            "302 Found",
+            "301 Moved Permanently",
+            "307 Temporary Redirect",
+        ] {
+            let (base, served) = serve_once(answer(status, &location, b""));
+            let url = avatar_url(
+                &tauri::Url::parse(&base).expect("a URL"),
+                "avatars/u-1.webp",
+            )
+            .expect("built");
+            assert_eq!(
+                download_avatar(&url),
+                Err("Avatar download failed".to_string()),
+                "{status}"
+            );
+            served.join().expect("served");
+        }
+        // nothing ever connected to where the redirects pointed
+        assert_eq!(
+            elsewhere.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn an_answer_that_is_not_a_small_image_is_refused() {
+        for (response, error) in [
+            (
+                answer("404 Not Found", "", b"missing"),
+                "Avatar download failed",
+            ),
+            (answer("204 No Content", "", b""), "Invalid image data"),
+            (
+                answer("200 OK", "Content-Type: image/png\r\n", b"<html>"),
+                "Invalid image data",
+            ),
+            (
+                answer("200 OK", "", &[PNG, &vec![0u8; 1_048_577]].concat()),
+                "Avatar too large",
+            ),
+        ] {
+            let (base, served) = serve_once(response);
+            let url = avatar_url(
+                &tauri::Url::parse(&base).expect("a URL"),
+                "avatars/u-1.webp",
+            )
+            .expect("built");
+            assert_eq!(download_avatar(&url), Err(error.to_string()));
+            let _ = served.join();
+        }
+    }
+
+    /// The command checks the base before anything else, the cache included:
+    /// a refused base never reaches `cache_avatar_to_file`.
+    #[test]
+    fn the_command_checks_the_base_before_the_cache_and_the_download() {
+        let source = include_str!("lib.rs");
+        let code = &source[..source
+            .find("\n#[cfg(test)]")
+            .expect("the tests follow the code")];
+        let command = &code[code.find("fn notify_with_avatar(").expect("the command")..];
+        let checked = command
+            .find("allowed_avatar_base(&connect_src, base, cfg!(debug_assertions))?")
+            .expect("the base is checked, and a refusal returns");
+        let cached = command
+            .find("cache_avatar_to_file(&base, key)")
+            .expect("the cache");
+        assert!(checked < cached);
+        assert!(
+            command[..checked].contains("connect_src_of(app.config().app.security.csp.as_ref())")
+        );
+        // the only caller of the cache, the only builder of the request
+        assert_eq!(code.matches("cache_avatar_to_file(").count(), 2);
+        assert_eq!(code.matches("download_avatar(").count(), 2);
+        assert_eq!(code.matches("ureq::").count(), 1);
     }
 }

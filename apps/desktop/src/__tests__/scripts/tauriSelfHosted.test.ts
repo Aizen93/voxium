@@ -420,6 +420,16 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
     expect(directive(csp, 'img-src')).toEqual(["'self'", 'blob:', 'data:', 'http://localhost:3001']);
   });
 
+  // The shell's native avatar download (lib.rs `allowed_avatar_base`) takes
+  // the API base the frontend is compiled with only when connect-src names its
+  // origin EXACTLY (no wildcard): every self-hosted build must give it that.
+  it('names the API origin exactly in connect-src, as the native avatar download requires', () => {
+    for (const apiUrl of [API, 'https://api.example.org:8443/api/v1', 'https://chat.example.org:443/api/v1', 'http://10.0.0.5:3001/api/v1', 'http://localhost:3001/api/v1']) {
+      const csp = build({ apiUrl, wsUrl: 'https://ws.example.org' }).app.security.csp;
+      expect(directive(csp, 'connect-src'), apiUrl).toContain(new URL(apiUrl).origin);
+    }
+  });
+
   it('carries none of the project\'s hosts, feed or key, and replaces both updater fields of the base', () => {
     const overlay = build({ apiUrl: API, wsUrl: WS, assetOrigin: STORAGE, updaterEndpoints: FEED, updaterPubkey: KEY });
     const text = JSON.stringify(overlay);

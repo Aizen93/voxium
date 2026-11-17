@@ -22,6 +22,19 @@ const avatarBlobCache = new Map<string, string>();
 // In-flight fetch deduplication — prevents parallel fetches for the same key.
 const avatarFetchInFlight = new Map<string, Promise<string | null>>();
 
+// Why a tier failed, each distinct reason logged once: the native tier answers
+// every notification on macOS and Linux with the same "not implemented".
+const MAX_LOGGED_FAILURES = 50;
+const loggedFailures = new Set<string>();
+
+function warnOnce(tier: string, err: unknown): void {
+  const reason = err instanceof Error ? err.message : String(err);
+  const key = `${tier}|${reason}`;
+  if (loggedFailures.has(key) || loggedFailures.size >= MAX_LOGGED_FAILURES) return;
+  loggedFailures.add(key);
+  console.warn(`[Notifications] ${tier} failed, falling back:`, reason);
+}
+
 /**
  * Check and request notification permission on app startup.
  * Should be called once from MainLayout on mount.
@@ -113,7 +126,10 @@ export async function notify(
   const safeAvatarKey = avatarKey && VALID_AVATAR_KEY_RE.test(avatarKey) ? avatarKey : null;
 
   if (TAURI_AVAILABLE) {
-    // 1. Try native Tauri command with avatar support (Windows)
+    // 1. Try native Tauri command with avatar support (Windows). The shell
+    //    downloads the avatar only from an origin the build's own content
+    //    security policy allows, and refuses any other base before fetching
+    //    anything; this one is the build's constant.
     try {
       await invoke('notify_with_avatar', {
         title,
@@ -122,8 +138,9 @@ export async function notify(
         avatarKey: safeAvatarKey,
       });
       return;
-    } catch {
-      // Command not available or not implemented on this platform — fall through
+    } catch (err) {
+      // Not implemented on this platform, or the shell refused the base — fall through
+      warnOnce('Native notification', err);
     }
 
     // 2. Tauri notification plugin (no avatar, but native notifications)
