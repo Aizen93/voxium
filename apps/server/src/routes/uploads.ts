@@ -2,8 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitUpload, rateLimitAttachmentRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, describeStoreError, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
+import { AppError, BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, LIMITS, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
 import crypto from 'crypto';
 import { Readable } from 'stream';
@@ -11,6 +11,34 @@ import { hasServerPermission, hasChannelPermission } from '../utils/permissionCa
 import { isAboveFloor, readConversationView } from '../utils/conversationVisibility';
 
 export const uploadRouter = Router();
+
+/**
+ * Stream a store object's body into the response. The body is a stream of the
+ * store's connection and can fail after the route has answered: an `error`
+ * event nobody listens to is an uncaught exception, which stops the node. A
+ * failure before the first byte goes out answers through the route's error
+ * path (502); one in the middle destroys the response, so the client sees a
+ * broken transfer, never a truncated success. The log holds the error's name,
+ * code and status, never the key. A client that goes away stops the read.
+ */
+function streamStoreBody(source: Readable, res: Response, next: NextFunction): void {
+  source.on('error', (err: unknown) => {
+    console.error(`[Uploads] The store failed while a download was being proxied (${describeStoreError(err)})`);
+    source.destroy();
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    for (const header of ['Content-Type', 'Content-Length', 'Cache-Control', 'Content-Disposition']) {
+      res.removeHeader(header);
+    }
+    next(new AppError('Storage is unavailable', 502));
+  });
+  res.on('close', () => {
+    if (!source.destroyed) source.destroy();
+  });
+  source.pipe(res);
+}
 
 /**
  * The declared size of an avatar/icon presign: a positive integer at most
@@ -248,7 +276,7 @@ uploadRouter.get(
       if (s3Response.ContentLength) res.set('Content-Length', String(s3Response.ContentLength));
       res.set('Cache-Control', 'private, max-age=300');
 
-      (s3Response.Body as Readable).pipe(res);
+      streamStoreBody(s3Response.Body as Readable, res, next);
     } catch (err) {
       next(err);
     }
@@ -280,7 +308,7 @@ uploadRouter.get(
         res.set('Cache-Control', 'public, max-age=86400, immutable');
         res.set('Content-Disposition', 'inline');
         res.set('X-Content-Type-Options', 'nosniff');
-        (s3Response.Body as Readable).pipe(res);
+        streamStoreBody(s3Response.Body as Readable, res, next);
         return;
       }
 
