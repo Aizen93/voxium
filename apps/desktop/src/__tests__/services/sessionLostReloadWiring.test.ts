@@ -18,12 +18,12 @@ const SOCKET = fileURLToPath(new URL('../../services/socket.ts', import.meta.url
 const source = readFileSync(SOCKET, 'utf8');
 
 describe('socket force:logout reloads only after the stored session is cleared', () => {
-  it('awaits flushTokenStorage() between logout() and the navigation', () => {
+  it('awaits flushTokenStorage() between logout() and the navigation, and the navigation waits for an account deletion in flight', () => {
     const start = source.indexOf("s.on('force:logout'");
     expect(start).toBeGreaterThan(-1);
     const handler = source.slice(start, source.indexOf("s.on('disconnect'", start));
-    expect(handler).toMatch(/const toLogin = \(\) => \{\s*window\.location\.href = /);
-    expect(handler).toMatch(/useAuthStore\.getState\(\)\.logout\(\);[\s\S]*await flushTokenStorage\(\);[\s\S]*toLogin\(\);/);
+    expect(handler).toMatch(/const toLogin = async \(\) => \{[\s\S]*?await accountDeletionSettled\(\);\s*window\.location\.href = /);
+    expect(handler).toMatch(/useAuthStore\.getState\(\)\.logout\(\);[\s\S]*await flushTokenStorage\(\);[\s\S]*await toLogin\(\);/);
   });
 
   it('still reaches the login page when the local clean-up fails (and logs it)', () => {

@@ -33,6 +33,7 @@ const storage = vi.hoisted(() => ({
   getTrustedDeviceToken: vi.fn(() => null as string | null),
   setTrustedDeviceToken: vi.fn(),
   clearTrustedDeviceToken: vi.fn(),
+  flushTokenStorage: vi.fn(async () => {}),
 }));
 vi.mock('../../services/tokenStorage', () => storage);
 

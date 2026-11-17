@@ -26,6 +26,7 @@ vi.mock('../../services/tokenStorage', () => ({
   getTrustedDeviceToken: vi.fn(() => null),
   setTrustedDeviceToken: vi.fn(),
   clearTrustedDeviceToken: vi.fn(),
+  flushTokenStorage: vi.fn(async () => {}),
 }));
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
 const e2e = vi.hoisted(() => ({ forgetLocalE2EState: vi.fn() }));
