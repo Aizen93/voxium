@@ -831,10 +831,17 @@ read.
 
 ### 12.6 Known gaps
 
-- The `MAX_DEVICES` check is read-then-write inside a transaction with no
-  DB-level constraint; two concurrent registrations could both observe 4. Bounded
-  by `rateLimitE2EDevice` (5/hour) and harmless (a 6th device is still fully
-  authenticated).
+- ~~Concurrent registrations could exceed `MAX_DEVICES`~~ — closed. The cap
+  is still a count followed by an insert, but `PUT /e2e/devices` now locks the
+  caller's account row (`FOR NO KEY UPDATE`) as the first statement of its
+  transaction, before it reads or counts anything: an account's registrations
+  run one after the other, and each count sees every device the ones before it
+  committed, so the cap is a hard bound. It is the account row because an
+  account's first device has no `E2EDeviceRegistry` row yet; only this route
+  adds device rows. Re-registering an existing `deviceId` is never counted, so
+  it still succeeds at the cap. An account deleted meanwhile answers 404, and a
+  deadlock with an account deletion (which takes the E2E rows before the
+  account row) is retried.
 - History reaches a new device only as far as the message-key backup (§16.4)
   covers: a session nobody backed up before every device was lost is gone.
 - A key share kept unacknowledged (its sender could not be checked yet, its

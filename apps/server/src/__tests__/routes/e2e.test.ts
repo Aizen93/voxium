@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { generateKeyPairSync, sign as cryptoSign, randomBytes } from 'node:crypto';
@@ -100,6 +100,8 @@ import { prisma } from '../../utils/prisma';
 import { e2eRouter } from '../../routes/e2e';
 import { errorHandler } from '../../middleware/errorHandler';
 import { rateLimitE2EShareAck, rateLimitE2EShares } from '../../middleware/rateLimiter';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, TRANSACTION_CONFLICT_RETRIES } from '../../utils/transactionRetry';
+import { lazyStatement } from '../helpers/lazyStatement';
 
 // ─── Real Ed25519 signing (exercises the actual verification path) ──────────
 
@@ -191,9 +193,26 @@ function deviceRow(deviceId: string, over: Record<string, unknown> = {}) {
   };
 }
 
+/** The SQL of a raw statement as the tagged template built it, parameters as `?`. */
+function rawSql(call: unknown[]): string {
+  return (call[0] as string[]).join('?').replace(/\s+/g, ' ').trim();
+}
+
+const ACCOUNT_LOCK_SQL = 'SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE';
+
+/**
+ * The raw statements outside the device registration answer what an unset
+ * mock answers (each test that needs one sets it); the registration's lock on
+ * the caller's account row finds the row, as for any account that exists.
+ */
+function defaultQueryRaw(...call: unknown[]): unknown {
+  return rawSql(call) === ACCOUNT_LOCK_SQL ? Promise.resolve([{ id: call[1] }]) : undefined;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(prisma.$transaction).mockImplementation(async (fn: any) => fn(prisma));
+  vi.mocked(prisma.$queryRaw).mockImplementation(defaultQueryRaw as any);
   vi.mocked(prisma.e2EDeviceRegistry.upsert).mockResolvedValue({ userId: 'user-1', version: 3 } as any);
   vi.mocked(prisma.e2EDeviceRegistry.findUnique).mockResolvedValue({ version: 7 } as any);
 });
@@ -270,6 +289,147 @@ describe('E2E routes — PUT /devices', () => {
 
     expect(res.status).toBe(201);
     expect(prisma.e2EDevice.count).not.toHaveBeenCalled();
+  });
+
+  // ── #140: the device cap is counted under the account row's lock ─────────
+
+  it('locks the caller\'s account row FIRST, before the device is read and counted (recorded when each statement runs)', async () => {
+    // Concurrent registrations of new ids then run one after the other, and
+    // each count sees the devices committed before it: the cap is a hard bound
+    const ran: string[] = [];
+    const device = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.$queryRaw).mockImplementationOnce(((...call: unknown[]) =>
+      lazyStatement(ran, rawSql(call) === ACCOUNT_LOCK_SQL ? `lock ${String(call[1])}` : rawSql(call), [{ id: 'user-1' }])) as any);
+    vi.mocked(prisma.e2EDevice.findUnique).mockImplementationOnce((() => lazyStatement(ran, 'read device', null)) as any);
+    vi.mocked(prisma.e2EDevice.count).mockImplementationOnce((() => lazyStatement(ran, 'count', E2E_LIMITS.MAX_DEVICES - 1)) as any);
+    vi.mocked(prisma.e2EDevice.upsert).mockImplementationOnce((() =>
+      lazyStatement(ran, 'upsert', { id: 'dev-2', updatedAt: new Date('2026-07-12') })) as any);
+
+    const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+    expect(res.status).toBe(201);
+    expect(ran.slice(0, 4)).toEqual(['lock user-1', 'read device', 'count', 'upsert']);
+    // the one raw statement of the route, and its strength (lockAccountRows' 'update')
+    expect(vi.mocked(prisma.$queryRaw)).toHaveBeenCalledTimes(1);
+    expect(rawSql(vi.mocked(prisma.$queryRaw).mock.calls[0])).toBe(ACCOUNT_LOCK_SQL);
+    expect(vi.mocked(prisma.$queryRaw).mock.calls[0].slice(1)).toEqual(['user-1']);
+  });
+
+  it('at the cap, a NEW device id is refused after the lock, and an existing id still re-registers', async () => {
+    const fresh = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.e2EDevice.count).mockResolvedValue(E2E_LIMITS.MAX_DEVICES);
+
+    const refused = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(fresh));
+
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toMatch(/device limit/i);
+    expect(vi.mocked(prisma.$queryRaw).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(prisma.e2EDevice.count).mock.invocationCallOrder[0]);
+    expect(prisma.e2EDevice.upsert).not.toHaveBeenCalled();
+    expect(prisma.e2EOneTimeKey.createMany).not.toHaveBeenCalled();
+    expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    const known = makeTestDevice('user-1', DEVICE_A);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'dev-1', curve25519Key: 'an-older-curve-key', ed25519Key: 'an-older-ed-key',
+    } as any);
+    vi.mocked(prisma.e2EDevice.upsert).mockResolvedValue({ id: 'dev-1', updatedAt: new Date() } as any);
+
+    const reRegistered = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(known));
+
+    expect(reRegistered.status).toBe(201);
+    expect(rawSql(vi.mocked(prisma.$queryRaw).mock.calls[0])).toBe(ACCOUNT_LOCK_SQL);
+    expect(prisma.e2EDevice.count).not.toHaveBeenCalled();
+    expect(prisma.e2EDevice.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers 404 User when the account row is gone by the lock (deleted meanwhile), and reads or writes nothing else', async () => {
+    const device = makeTestDevice('user-1', DEVICE_A);
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([] as any);
+
+    const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('User not found');
+    expect(prisma.e2EDevice.findUnique).not.toHaveBeenCalled();
+    expect(prisma.e2EDevice.count).not.toHaveBeenCalled();
+    expect(prisma.e2EDevice.upsert).not.toHaveBeenCalled();
+    expect(prisma.e2EOneTimeKey.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+  });
+
+  it('runs the transaction with the lock-wait budget, not Prisma\'s 5 s default', async () => {
+    const device = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.e2EDevice.count).mockResolvedValue(0);
+    vi.mocked(prisma.e2EDevice.upsert).mockResolvedValue({ id: 'dev-2', updatedAt: new Date() } as any);
+
+    await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(prisma.$transaction).mock.calls[0][1]).toEqual(LOCK_WAIT_TRANSACTION_OPTIONS);
+  });
+
+  describe('a deadlock or serialization failure', () => {
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => { warn.mockRestore(); });
+
+    it('is retried from the account lock, and the registration then succeeds', async () => {
+      // An account deletion takes the E2E rows before the account row, this
+      // transaction the account row before the E2E rows: PostgreSQL may abort it
+      const device = makeTestDevice('user-1', DEVICE_B);
+      vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+      vi.mocked(prisma.e2EDevice.count).mockResolvedValue(1);
+      vi.mocked(prisma.e2EDevice.upsert).mockResolvedValue({ id: 'dev-2', updatedAt: new Date('2026-07-12') } as any);
+      vi.mocked(prisma.e2EDeviceRegistry.upsert)
+        .mockRejectedValueOnce(Object.assign(
+          new Error('Raw query failed. Code: `40P01`. Message: `deadlock detected`'),
+          { code: 'P2010', meta: { driverAdapterError: { cause: { kind: 'postgres', originalCode: '40P01' } } } },
+        ))
+        .mockResolvedValueOnce({ userId: 'user-1', version: 4 } as any);
+
+      const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.listVersion).toBe(4);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      for (const call of vi.mocked(prisma.$transaction).mock.calls) expect(call[1]).toEqual(LOCK_WAIT_TRANSACTION_OPTIONS);
+      // each attempt opens with the lock, and counts again under it
+      const raw = vi.mocked(prisma.$queryRaw).mock.calls.map(rawSql);
+      expect(raw).toEqual([ACCOUNT_LOCK_SQL, ACCOUNT_LOCK_SQL]);
+      expect(prisma.e2EDevice.count).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('was aborted by a deadlock or a serialization failure'));
+    });
+
+    it('a write conflict (P2034) on every attempt surfaces after the retry limit', async () => {
+      const device = makeTestDevice('user-1', DEVICE_B);
+      vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+      vi.mocked(prisma.e2EDevice.count).mockResolvedValue(1);
+      vi.mocked(prisma.e2EDevice.upsert).mockRejectedValue(Object.assign(new Error('write conflict'), { code: 'P2034' }));
+
+      const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+      expect(res.status).toBe(500);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1 + TRANSACTION_CONFLICT_RETRIES);
+    });
+
+    it('anything else is the answer and is not retried', async () => {
+      const device = makeTestDevice('user-1', DEVICE_B);
+      vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+      vi.mocked(prisma.e2EDevice.count).mockResolvedValue(1);
+      vi.mocked(prisma.e2EDevice.upsert).mockRejectedValue(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }));
+
+      const res = await request(createApp()).put('/api/v1/e2e/devices').send(validRegistration(device));
+
+      expect(res.status).toBe(500);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('retrying'));
+    });
   });
 
   // ── F4: an identity-changing re-register must clear the dead inbox ───────

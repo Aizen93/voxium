@@ -10,6 +10,8 @@ import {
   rateLimitE2EApprove,
 } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
+import { lockAccountRows } from '../utils/accountRowLocks';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { acknowledgeKeyShares, claimAndDeleteKeyShares, leaseKeyShares } from '../utils/keyShareInbox';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import {
@@ -268,7 +270,43 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
     // Re-registering a deviceId replaces its identity, which invalidates every
     // previously published one-time key (they belong to the old Olm account)
     // and is a device-list change as far as peers are concerned.
-    const result = await prisma.$transaction(async (tx) => {
+    //
+    // The device cap (E2E_LIMITS.MAX_DEVICES) is a count followed by an
+    // insert, so the transaction first locks the caller's ACCOUNT row, before
+    // it reads anything (FOR NO KEY UPDATE, lockAccountRows): an account's
+    // registrations then run one after the other, and each one's count sees
+    // the devices the ones before it committed (READ COMMITTED: a statement
+    // reads what was committed before it started). The account row and not
+    // the registry row, because an account's first device has no registry row
+    // yet. This route is the only writer that adds a device row, so this one
+    // lock keeps the cap a hard bound: a revoke and an account deletion only
+    // remove device rows, the cross-signing writes and the key upload only
+    // update them.
+    //
+    // Where this stands in an account deletion's lock order (deleteAccountRows,
+    // utils/accountDeletion.ts): the deletion takes the account's E2E material
+    // (its step 3: key shares, master transfers, master key, registry, then
+    // the devices with their one-time keys) and only then the account row (its
+    // step 4). This transaction takes the account row first and then device,
+    // inbox, one-time-key and registry rows: the opposite order, so the two
+    // CAN deadlock, when the deletion is between its steps 3 and 4 holding a
+    // row this transaction waits for (the device row, the registry row, a key
+    // share) while it waits for the account row held here. PostgreSQL then
+    // aborts one of them and both run under retryOnTransactionConflict: a
+    // retried deletion runs again from its first step; a retried registration
+    // waits for the deletion to commit, and its lock then finds no row (404
+    // User). A deletion that already holds the account row is simply waited
+    // for. Rows this transaction INSERTS are invisible to the deletion's
+    // step-3 deletes until this commits: a new device and its one-time keys
+    // still go with the account (e2e_devices cascades from the user delete),
+    // but an account's FIRST registry row has no key to the account, so a
+    // first registration committing while the deletion is between its steps
+    // 3 and 4 leaves that one row behind, as it could before this lock.
+    const result = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      const locked = await lockAccountRows(tx, [{ id: userId, mode: 'update' }]);
+      // Deleted since the request was authenticated
+      if (!locked.has(userId)) throw new NotFoundError('User');
+
       const existing = await tx.e2EDevice.findUnique({
         where: { userId_deviceId: { userId, deviceId } },
         // The identity keys are load-bearing, not decoration: they decide
@@ -339,7 +377,7 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
       });
       const listVersion = await bumpDeviceListVersion(tx, userId);
       return { updatedAt: upserted.updatedAt, listVersion };
-    });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The device registration of ${deviceId} for ${userId}`);
 
     res.status(201).json({
       success: true,
