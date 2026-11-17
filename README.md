@@ -328,20 +328,20 @@ NODE_ENV=production node dist/index.js
 
 ```bash
 cd apps/desktop
-VITE_API_URL=https://chat.example.org/api/v1 \
-VITE_WS_URL=https://chat.example.org \
-VITE_CLIENT_URL=https://chat.example.org \
-TAURI_ASSET_ORIGIN=https://storage.example.org \
+VITE_API_URL=https://chat.example.com/api/v1 \
+VITE_WS_URL=https://chat.example.com \
+VITE_CLIENT_URL=https://chat.example.com \
+TAURI_ASSET_ORIGIN=https://storage.example.com \
 pnpm tauri:build
 ```
 
 | Setting | Example | What it feeds |
 |---------|---------|---------------|
-| `VITE_API_URL` | `https://chat.example.org/api/v1` | **Required.** The API the app is compiled for. Its origin goes into the Content Security Policy's `connect-src` (requests) and `img-src` (avatars and icons are `<img>` loads from `/uploads/`). |
-| `VITE_WS_URL` | `https://chat.example.org` | **Required.** The socket server. `connect-src` gets its origin in both forms the client uses: `https://` (polling) and `wss://` (WebSocket); `http://` gives `http://` + `ws://`. |
-| `VITE_CLIENT_URL` | `https://chat.example.org` | Your web client's origin (`scheme://host[:port]`, no path): the invite links the app hands out open `/invite/<code>` there. Not part of the policy (a link is opened by someone's browser, not fetched by the app). Without it the build warns, and the links start with `VITE_WS_URL`, which opens the invite page only if the web client is served on that origin too. |
-| `TAURI_ASSET_ORIGIN` | `https://storage.example.org` | Your object storage's origin (`https://host[:port]`, comma-separated for several). The server answers avatar and icon requests with a redirect there and uploads are sent straight to it, so it goes into `img-src` and `connect-src`. Without it, images and uploads work only if the storage answers on the API origin. |
-| `TAURI_UPDATER_ENDPOINTS` | `https://updates.example.org/voxium/latest.json` | Optional, with `TAURI_UPDATER_PUBKEY`: your own update feed (`https` only, comma-separated for several; Tauri's `{{target}}` / `{{arch}}` / `{{current_version}}` placeholders work). |
+| `VITE_API_URL` | `https://chat.example.com/api/v1` | **Required.** The API the app is compiled for. Its origin goes into the Content Security Policy's `connect-src` (requests) and `img-src` (avatars and icons are `<img>` loads from `/uploads/`). |
+| `VITE_WS_URL` | `https://chat.example.com` | **Required.** The socket server. `connect-src` gets its origin in both forms the client uses: `https://` (polling) and `wss://` (WebSocket); `http://` gives `http://` + `ws://`. |
+| `VITE_CLIENT_URL` | `https://chat.example.com` | Your web client's origin (`scheme://host[:port]`, no path): the invite links the app hands out open `/invite/<code>` there. Not part of the policy (a link is opened by someone's browser, not fetched by the app). Without it the build warns, and the links start with `VITE_WS_URL`, which opens the invite page only if the web client is served on that origin too. |
+| `TAURI_ASSET_ORIGIN` | `https://storage.example.com` | Your object storage's origin (`https://host[:port]`, comma-separated for several). The server answers avatar and icon requests with a redirect there and uploads are sent straight to it, so it goes into `img-src` and `connect-src`. Without it, images and uploads work only if the storage answers on the API origin. |
+| `TAURI_UPDATER_ENDPOINTS` | `https://updates.example.com/voxium/latest.json` | Optional, with `TAURI_UPDATER_PUBKEY`: your own update feed (`https` only, comma-separated for several; Tauri's `{{target}}` / `{{arch}}` / `{{current_version}}` placeholders work). |
 | `TAURI_UPDATER_PUBKEY` | the `.pub` content `pnpm tauri signer generate` prints | Optional, with `TAURI_UPDATER_ENDPOINTS`: the public key your updates are signed with. |
 | `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) | the private key from `tauri signer generate` | Needed only with your own feed: `tauri build` signs the update artifacts with it. |
 

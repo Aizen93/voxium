@@ -9,6 +9,13 @@ import path from 'node:path';
 // until it is documented. Variables only tests or CI read are not scanned:
 // test files are skipped, and the scripts under scripts/ are development and
 // CI tools with their own headers.
+//
+// What this scan does not see: a `process.env` object passed to a function
+// under another name than `env` (a read through that parameter is missed,
+// and so is any other alias of the object), and a default that is not
+// written as `process.env.X || 'literal'` (a `??` fallback, a constant, a
+// computed value, or a default on an env object such as `env.X || 'literal'`:
+// its stated default is not compared with the template's or the README's).
 
 const ROOT = path.resolve(__dirname, '../../../../..');
 const read = (rel: string) => readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
