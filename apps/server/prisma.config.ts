@@ -19,7 +19,9 @@ export default defineConfig({
   // `prisma db seed` runs this command (the key Prisma 7 reads is
   // migrations.seed, a command line; the earlier migrate.seed() function was
   // never read, and the seed then reported "No seed command configured").
+  // `--no` makes npx refuse to download tsx when it is not installed (only
+  // production dependencies are), instead of fetching it from the registry.
   migrations: {
-    seed: 'npx tsx prisma/seed.ts',
+    seed: 'npx --no tsx prisma/seed.ts',
   },
 });
