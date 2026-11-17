@@ -45,8 +45,13 @@ vi.mock('../../stores/serverStore', () => {
 });
 const { useMemberMock } = vi.hoisted(() => ({ useMemberMock: vi.fn((userId: string | undefined): undefined => { void userId; return undefined; }) }));
 vi.mock('../../hooks/useMember', () => ({ useMember: useMemberMock }));
-vi.mock('../../stores/toastStore', () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
-vi.mock('../../components/common/EmojiPicker', () => ({ EmojiPicker: () => <div data-testid="emoji-picker" /> }));
+const toastError = vi.hoisted(() => vi.fn());
+vi.mock('../../stores/toastStore', () => ({ toast: { success: vi.fn(), error: toastError, warning: vi.fn() } }));
+vi.mock('../../components/common/EmojiPicker', () => ({
+  EmojiPicker: ({ onEmojiSelect }: { onEmojiSelect: (e: string) => void }) => (
+    <button data-testid="emoji-picker" onClick={() => onEmojiSelect('👍')} />
+  ),
+}));
 vi.mock('../../components/common/Avatar', () => ({ Avatar: () => <span data-testid="avatar" /> }));
 vi.mock('../../components/common/UserHoverTarget', () => ({
   UserHoverTarget: ({ children, userId }: { children: React.ReactNode; userId: string }) => (
@@ -63,6 +68,7 @@ vi.mock('../../components/chat/ReportModal', () => ({ ReportModal: () => <div da
 
 import { MessageItem } from '../../components/chat/MessageItem';
 import { ReactionDisplay } from '../../components/chat/ReactionDisplay';
+import { DMConversationReadOnlyError } from '../../utils/dmParticipant';
 
 const CONV = 'c-1';
 const PLACEHOLDER: MessageAuthor = { id: `deleted:${CONV}`, username: 'deleted', displayName: 'Deleted user', avatarUrl: 'x.webp', role: 'admin', isSupporter: true, supporterTier: 'top' };
@@ -213,5 +219,38 @@ describe('a quote of a deleted account\'s message', () => {
     renderItem(row({ replyToId: 'm-call', replyTo: { id: 'm-call', content: 'Voice call started', encrypted: false, author: PLACEHOLDER } }), { isOwn: true, readOnly: true });
     expect(container.textContent).toContain('Voice call started');
     expect(container.textContent).not.toContain('dm.deletedParticipant.messageDeleted');
+  });
+});
+
+describe('a message action the store refuses', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('an edit refused as read-only shows the read-only sentence (the same one as the server answer)', async () => {
+    chat.editDMMessage.mockRejectedValueOnce(new DMConversationReadOnlyError(CONV));
+    renderItem(row(), { isOwn: true, readOnly: false });
+    act(() => (button('messageItem.editMessage') as HTMLButtonElement).click());
+    const textarea = q('textarea') as HTMLTextAreaElement;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'edited words');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => { textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    expect(toastError).toHaveBeenCalledWith('serverErrors.conversationReadOnly');
+  });
+
+  it('a reaction the server refuses shows its sentence; a client error keeps the generic one', async () => {
+    const forbidden = Object.assign(new Error('Request failed with status code 403'), {
+      isAxiosError: true,
+      response: { status: 403, data: { success: false, error: 'This conversation is read-only' } },
+    });
+    chat.toggleDMReaction.mockRejectedValueOnce(forbidden).mockRejectedValueOnce(new Error('engine state corrupt'));
+    renderItem(row(), { isOwn: true, readOnly: false });
+    for (const expected of ['serverErrors.conversationReadOnly', 'messageItem.failedToToggleReaction']) {
+      act(() => (button('messageItem.addReaction') as HTMLButtonElement).click());
+      await act(async () => { (q('[data-testid="emoji-picker"]') as HTMLButtonElement).click(); });
+      expect(toastError).toHaveBeenLastCalledWith(expected);
+    }
   });
 });

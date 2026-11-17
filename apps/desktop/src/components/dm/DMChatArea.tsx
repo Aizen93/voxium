@@ -14,7 +14,7 @@ import { Phone, PhoneOff } from 'lucide-react';
 import { SearchModal } from '../search/SearchModal';
 import { SearchField } from '../search/SearchField';
 import { E2EControls } from './E2EControls';
-import { DeletedUserAvatar, ReadOnlyConversationNotice } from './DeletedParticipant';
+import { DeletedUserAvatar } from './DeletedParticipant';
 import { isParticipantDeleted } from '../../utils/dmParticipant';
 import { clsx } from 'clsx';
 import type { UserStatus } from '@voxium/shared';
@@ -211,15 +211,14 @@ export function DMChatArea() {
       {/* Messages */}
       <DMMessageList conversationId={conversation.id} readOnly={readOnly} />
 
-      {/* Input — a notice in its place when nothing can be written */}
-      {readOnly ? (
-        <ReadOnlyConversationNotice />
-      ) : (
-        <MessageInput
-          conversationId={conversation.id}
-          placeholderName={conversation.participant.displayName}
-        />
-      )}
+      {/* Input — MessageInput renders the read-only notice itself when nothing
+          can be written; it stays mounted across the flip, so a typing signal
+          it had pending is dropped there instead of sent by an unmount */}
+      <MessageInput
+        conversationId={conversation.id}
+        placeholderName={readOnly ? t('dm.deletedParticipant.name') : conversation.participant.displayName}
+      />
+
 
       {showSearch && (
         <SearchModal

@@ -110,6 +110,8 @@ const EXACT: Row[] = [
   { msg: 'User is not a member of this server', key: 'userNotServerMember' },
   { msg: 'Not a member', key: 'notAMember' },
   { msg: 'Not a participant', key: 'notAParticipant' },
+  // written by the client's own refusal today (utils/dmParticipant.ts), the server's sentence once it refuses too
+  { msg: 'This conversation is read-only', key: 'conversationReadOnly' },
   { msg: 'Not authorized', key: 'notAuthorized' },
   { msg: 'Invite not found', key: 'inviteNotFound', src: "NotFoundError('Invite')" },
 

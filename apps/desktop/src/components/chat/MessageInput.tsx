@@ -6,6 +6,7 @@ import { useDMStore } from '../../stores/dmStore';
 import { conversationIsReadOnly } from '../../utils/dmParticipant';
 import { ReadOnlyConversationNotice } from '../dm/DeletedParticipant';
 import { getSocket } from '../../services/socket';
+import { getTranslatedActionError } from '../../utils/serverErrors';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { AppTag } from '../common/AppTag';
@@ -78,6 +79,14 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
+  // Turned read-only while a typing signal was pending: its "stop" never goes
+  // out (nothing is signalled in a read-only conversation)
+  useEffect(() => {
+    if (!readOnly) return;
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = null;
+    isTypingRef.current = false;
+  }, [readOnly]);
   const [cursorPos, setCursorPos] = useState(0);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -339,8 +348,9 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       }
       setPendingFiles([]);
       isTypingRef.current = false;
-    } catch {
-      toast.error(t('chat.failedToSend'));
+    } catch (err) {
+      // the store logged it; a refusal of a read-only conversation reads like the server's 403
+      toast.error(getTranslatedActionError(err, t, 'chat.failedToSend'));
     } finally {
       setIsSending(false);
     }

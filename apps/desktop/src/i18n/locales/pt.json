@@ -1382,6 +1382,7 @@
     "noPermissionViewChannel": "Você não tem permissão para ver este canal",
     "cannotDmSelf": "Não é possível criar uma conversa consigo mesmo",
     "notAParticipant": "Você não é participante desta conversa",
+    "conversationReadOnly": "Esta conversa é somente leitura",
     "voiceDisabled": "Os canais de voz estão desativados no momento",
     "voiceCallsDisabled": "As chamadas de voz estão desativadas no momento",
     "voiceChannelFull": "O canal de voz está cheio",

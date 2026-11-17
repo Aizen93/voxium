@@ -29,7 +29,11 @@ export function conversationIsReadOnly(
   return isParticipantDeleted(conversations.find((c) => c.id === conversationId));
 }
 
-/** The English sentence the server answers with, kept as the message so the shared mapping translates both. */
+/**
+ * The English sentence of a refusal in a read-only conversation, the one the
+ * server answers with too: `serverErrors.conversationReadOnly` translates
+ * both (utils/serverErrors.ts).
+ */
 export const CONVERSATION_READ_ONLY_MESSAGE = 'This conversation is read-only';
 
 /**

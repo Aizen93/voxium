@@ -1386,6 +1386,7 @@
     "noPermissionViewChannel": "У вас немає дозволу на перегляд цього каналу",
     "cannotDmSelf": "Не можна створити розмову із самим собою",
     "notAParticipant": "Ви не є учасником цієї розмови",
+    "conversationReadOnly": "Ця розмова доступна лише для читання",
     "voiceDisabled": "Голосові канали наразі вимкнено",
     "voiceCallsDisabled": "Голосові виклики наразі вимкнено",
     "voiceChannelFull": "Голосовий канал заповнений",

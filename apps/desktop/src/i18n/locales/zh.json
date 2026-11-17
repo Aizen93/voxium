@@ -1380,6 +1380,7 @@
     "noPermissionViewChannel": "你没有查看该频道的权限",
     "cannotDmSelf": "无法与自己创建对话",
     "notAParticipant": "你不是该对话的参与者",
+    "conversationReadOnly": "此对话为只读",
     "voiceDisabled": "语音频道目前已禁用",
     "voiceCallsDisabled": "语音通话目前已禁用",
     "voiceChannelFull": "语音频道已满",

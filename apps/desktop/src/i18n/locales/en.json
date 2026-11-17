@@ -1335,6 +1335,7 @@
     "noPermissionViewChannel": "You do not have permission to view this channel",
     "cannotDmSelf": "Cannot create conversation with yourself",
     "notAParticipant": "Not a participant of this conversation",
+    "conversationReadOnly": "This conversation is read-only",
     "voiceDisabled": "Voice channels are currently disabled",
     "voiceCallsDisabled": "Voice calls are currently disabled",
     "voiceChannelFull": "Voice channel is full",

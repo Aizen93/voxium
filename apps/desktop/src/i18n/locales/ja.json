@@ -1380,6 +1380,7 @@
     "noPermissionViewChannel": "このチャンネルを閲覧する権限がありません",
     "cannotDmSelf": "自分自身とのダイレクトメッセージは作成できません",
     "notAParticipant": "この会話の参加者ではありません",
+    "conversationReadOnly": "この会話は閲覧のみです",
     "voiceDisabled": "現在、ボイスチャンネルは無効になっています",
     "voiceCallsDisabled": "現在、音声通話は無効になっています",
     "voiceChannelFull": "ボイスチャンネルが満員です",

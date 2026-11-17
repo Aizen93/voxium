@@ -2,7 +2,10 @@
 // Encrypted messages are decrypted (or resolved from the local cache) before
 // they reach any store or the DOM. An unencrypted row passes only when it is
 // one of the server's own call notices (DM_SYSTEM_NOTICES); every other one is
-// refused and shown as "unable to decrypt". Whatever the server attaches that
+// refused and shown as "unable to decrypt". The one other unencrypted shape is
+// a deleted account's message (`type: 'deleted'`), which the gate builds itself
+// from the row's id, conversation and time (deletedMessageRow), keeping
+// nothing else the server sent. Whatever the server attaches that
 // the crypto did not vouch for — `e2eAttachments`, plaintext `attachments` on
 // a refused row, an unencrypted reply quote — is dropped here; the shapes
 // (refusedRow, lockedQuote, withoutServerAssertions) live in displayGate.ts,
@@ -211,7 +214,10 @@ async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Mes
   return refused;
 }
 
-/** Decrypt a fetched page of messages (order preserved; only the server's call notices pass unencrypted). */
+/**
+ * Decrypt a fetched page of messages (order preserved). Only the server's call
+ * notices pass unencrypted, beside the deleted-message rows the gate builds.
+ */
 export async function decryptMessagesForDisplay(messages: Message[]): Promise<Message[]> {
   // No `some(m => m.encrypted)` short-circuit: a page of forged plaintext rows
   // would satisfy it and bypass the per-message check entirely, which is

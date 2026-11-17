@@ -65,10 +65,16 @@ function serverReadOnly(id: string): Conversation {
   return conv(id, { user2Id: null, participant: { id: `deleted:${id}`, username: 'deleted', displayName: 'Deleted user', avatarUrl: null }, participantDeleted: true });
 }
 
+/**
+ * Lets the work these handlers start settle: the dynamic imports (the
+ * list fetch loads services/dmReadOnly) and the promise chains after them.
+ * No timer: nothing here waits on time.
+ */
 async function settle() {
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  await new Promise((r) => setTimeout(r, 0));
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  for (let round = 0; round < 5; round++) {
+    await vi.dynamicImportSettled();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
 }
 
 let warn: ReturnType<typeof vi.spyOn>;

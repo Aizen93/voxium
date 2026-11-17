@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import { DMConversationReadOnlyError } from './dmParticipant';
 import axios from 'axios';
 import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE } from '@voxium/shared';
 
@@ -86,6 +87,9 @@ const ERROR_MAP: Record<string, string> = {
   // ─── DM ────────────────────────────────────────────────────────────────
   'Cannot create conversation with yourself': 'cannotDmSelf',
   'Not a participant of this conversation': 'notAParticipant',
+  // the other side's account was deleted (the server's refusal, and the
+  // client's own DMConversationReadOnlyError, utils/dmParticipant.ts)
+  'This conversation is read-only': 'conversationReadOnly',
 
   // ─── Voice ─────────────────────────────────────────────────────────────
   'Voice channels are currently disabled': 'voiceDisabled',
@@ -499,5 +503,17 @@ export function getTranslatedError(
   if (err instanceof Error) {
     return translateServerError(err.message, t, fallbackKey);
   }
+  return t(fallbackKey);
+}
+
+/**
+ * getTranslatedError for the catch around a message action (send, edit,
+ * reaction): the server's answer, and the client's own refusal worded like it
+ * (DMConversationReadOnlyError), are translated; any other error the client
+ * threw (an identity change, a conversation not loaded, the session's end)
+ * shows the action's own key, never its developer-facing English message.
+ */
+export function getTranslatedActionError(err: unknown, t: TFunction, fallbackKey: string): string {
+  if (axios.isAxiosError(err) || err instanceof DMConversationReadOnlyError) return getTranslatedError(err, t, fallbackKey);
   return t(fallbackKey);
 }

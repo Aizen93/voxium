@@ -1380,6 +1380,7 @@
     "noPermissionViewChannel": "이 채널을 볼 권한이 없습니다",
     "cannotDmSelf": "자신과의 대화는 만들 수 없습니다",
     "notAParticipant": "이 대화의 참여자가 아닙니다",
+    "conversationReadOnly": "이 대화는 읽기 전용입니다",
     "voiceDisabled": "현재 음성 채널이 비활성화되어 있습니다",
     "voiceCallsDisabled": "현재 음성 통화가 비활성화되어 있습니다",
     "voiceChannelFull": "음성 채널이 가득 찼습니다",

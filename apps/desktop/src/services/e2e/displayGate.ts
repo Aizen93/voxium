@@ -5,7 +5,9 @@
 // The gate's rule: nothing the crypto did not vouch for reaches a store or the
 // DOM. The server's word on a row (its `encrypted` flag, its `type`, a quote,
 // a file, a mention) is dropped or locked; what remains is either the
-// decrypted message or the "unable to decrypt" marker.
+// decrypted message or the "unable to decrypt" marker, or in a DM the row the
+// gate builds for a deleted account's message (deletedMessageRow), which holds
+// nothing but the server's id, conversation and time.
 import { parseE2EPlaintext, isDMSystemNotice, DELETED_MESSAGE_TYPE, DELETED_PARTICIPANT_ID_PREFIX, isDeletedParticipantId } from '@voxium/shared';
 import type { Message, MessageAuthor, E2EAttachmentMeta } from '@voxium/shared';
 

@@ -62,6 +62,7 @@ import {
 import { decryptChannelMessageForDisplay } from '../../services/e2e/channelCrypto';
 import { deletedMessageRow, deletedParticipantAuthor, isDeletedQuote } from '../../services/e2e/displayGate';
 import { DMConversationReadOnlyError } from '../../utils/dmParticipant';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { useDMStore } from '../../stores/dmStore';
 
 const CONV = 'c-1';
@@ -292,9 +293,18 @@ describe('the send path of a read-only conversation', () => {
     expect(encryptMessage).not.toHaveBeenCalled();
   });
 
-  it('the error carries the server\'s sentence (one translation for both)', async () => {
+  it('the error carries the server\'s sentence, and one translation serves both', async () => {
     useDMStore.setState({ conversations: [readOnlyConversation()] });
-    await expect(prepareOutgoingDM(CONV, 'hello?')).rejects.toThrow('This conversation is read-only');
+    const err = await prepareOutgoingDM(CONV, 'hello?').catch((e: unknown) => e);
+    expect((err as Error).message).toBe('This conversation is read-only');
+    const t = ((key: string) => key) as unknown as Parameters<typeof getTranslatedError>[1];
+    // the client's own refusal and the server's 403 answer read the same
+    expect(getTranslatedError(err, t)).toBe('serverErrors.conversationReadOnly');
+    const axiosErr = Object.assign(new Error('Request failed with status code 403'), {
+      isAxiosError: true,
+      response: { status: 403, data: { success: false, error: 'This conversation is read-only' } },
+    });
+    expect(getTranslatedError(axiosErr, t)).toBe('serverErrors.conversationReadOnly');
   });
 });
 

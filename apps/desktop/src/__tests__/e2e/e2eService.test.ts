@@ -4721,6 +4721,29 @@ describe('E2EService — lifecycle', () => {
       }
     });
 
+    it('discards a share that names the deleted-account placeholder as its sender, without looking it up', async () => {
+      const { server, alice, message } = await bobWroteWhileAliceWasAway('from an account now gone');
+      const asPlaceholder = (res: { data: { data?: { shares?: unknown[] } } }) => {
+        res.data.data!.shares = (res.data.data!.shares ?? []).map((s) => ({ ...(s as object), senderUserId: 'deleted:c1' }));
+        return res;
+      };
+      const base = mangledClaims(server.apiFor(alice.userId), asPlaceholder);
+      const asked: string[] = [];
+      const recording = { ...base, async get(url: string) { asked.push(url); return base.get(url); } } as unknown as typeof base;
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        const again = serviceOver(alice.userId, recording, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+        await again.initialize();
+        await flushQueue();
+        // unusable for good: discarded (so it is acknowledged), never kept for a later run
+        expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/discarding an unusable key share.*deleted account/s);
+        expect(asked.some((url) => url.includes('deleted:'))).toBe(false);
+        expect((await again.decryptMessage(message, { claimMissing: false })).failed).toBe(true);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it.each([
       ['a malformed element', withJunk, 1],
       ['no page at all', () => ({ data: {} }), 0],

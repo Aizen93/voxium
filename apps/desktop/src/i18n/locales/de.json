@@ -1382,6 +1382,7 @@
     "noPermissionViewChannel": "Du hast keine Berechtigung, diesen Kanal anzuzeigen",
     "cannotDmSelf": "Du kannst keine Unterhaltung mit dir selbst erstellen",
     "notAParticipant": "Du bist kein Teilnehmer dieser Unterhaltung",
+    "conversationReadOnly": "Diese Unterhaltung ist schreibgeschützt",
     "voiceDisabled": "Sprachkanäle sind derzeit deaktiviert",
     "voiceCallsDisabled": "Sprachanrufe sind derzeit deaktiviert",
     "voiceChannelFull": "Der Sprachkanal ist voll",

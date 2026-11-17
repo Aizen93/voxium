@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   apiPost: vi.fn(),
   emit: vi.fn(),
   joinDMCall: vi.fn(),
+  toastError: vi.fn(),
   chat: {
     fetchDMMessages: vi.fn(async () => {}),
     clearMessages: vi.fn(),
@@ -36,7 +37,7 @@ vi.mock('../../services/api', () => ({ api: { get: h.apiGet, post: h.apiPost, pa
 // the list fetch's read-only side (purge, view) is services/dmReadOnly's own test
 vi.mock('../../services/dmReadOnly', () => ({ applyReadOnlyConversations: vi.fn() }));
 vi.mock('../../services/socket', () => ({ getSocket: () => ({ emit: h.emit, on: vi.fn(), off: vi.fn(), connected: false }), onConnectionStatusChange: () => () => {} }));
-vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
+vi.mock('../../stores/toastStore', () => ({ toast: { error: h.toastError, success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 vi.mock('../../stores/chatStore', () => {
   const useChatStore = <T,>(sel?: (s: typeof h.chat) => T) => (sel ? sel(h.chat) : h.chat);
   useChatStore.getState = () => h.chat;
@@ -90,6 +91,7 @@ import { DMChatArea } from '../../components/dm/DMChatArea';
 import { DMList } from '../../components/dm/DMList';
 import { MessageInput } from '../../components/chat/MessageInput';
 import { useDMStore } from '../../stores/dmStore';
+import { DMConversationReadOnlyError } from '../../utils/dmParticipant';
 
 const PLACEHOLDER = { id: 'deleted:c-ro', username: 'deleted', displayName: 'Deleted user', avatarUrl: 'avatars/served.webp', role: 'admin', isSupporter: true, supporterTier: 'top', status: 'online' } as Conversation['participant'];
 const ALICE = { id: 'u-alice', username: 'alice', displayName: 'Alice', avatarUrl: null, role: 'admin', isSupporter: true, supporterTier: 'top' } as Conversation['participant'];
@@ -198,6 +200,59 @@ describe('MessageInput rendered for a read-only conversation anyway', () => {
     act(() => { container.firstElementChild!.dispatchEvent(drop); });
     expect(h.apiPost).not.toHaveBeenCalled();
     expect(h.emit).not.toHaveBeenCalled();
+  });
+});
+
+describe('a typing signal pending when the conversation turns read-only', () => {
+  it('in the real DMChatArea, its "stop" never goes out: the composer stays mounted and drops it', async () => {
+    useDMStore.setState({ activeConversationId: 'c-live' });
+    vi.useFakeTimers();
+    try {
+      await render(<DMChatArea />);
+      const textarea = q('textarea') as HTMLTextAreaElement;
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'hel');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(h.emit).toHaveBeenCalledWith('dm:typing:start', 'c-live');
+
+      act(() => { useDMStore.getState().markParticipantDeleted('c-live', 'me'); });
+      act(() => { vi.advanceTimersByTime(3000); });
+
+      expect(q('textarea')).toBeNull();
+      expect(q('[data-testid="dm-read-only-notice"]')).not.toBeNull();
+      expect(h.emit).not.toHaveBeenCalledWith('dm:typing:stop', 'c-live');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('a send the store refuses', () => {
+  it('shows the read-only sentence, as the server 403 will', async () => {
+    useDMStore.setState({ activeConversationId: 'c-live' });
+    h.chat.sendDMMessage.mockRejectedValueOnce(new DMConversationReadOnlyError('c-live'));
+    await render(<DMChatArea />);
+    const textarea = q('textarea') as HTMLTextAreaElement;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'hello?');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => { (q('button[aria-label="messageInput.sendMessage"]') as HTMLButtonElement).click(); });
+    expect(h.toastError).toHaveBeenCalledWith('serverErrors.conversationReadOnly');
+  });
+
+  it('any other client error keeps the generic sentence (never its English message)', async () => {
+    useDMStore.setState({ activeConversationId: 'c-live' });
+    h.chat.sendDMMessage.mockRejectedValueOnce(new Error('Peer identity key changed'));
+    await render(<DMChatArea />);
+    const textarea = q('textarea') as HTMLTextAreaElement;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'hello?');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => { (q('button[aria-label="messageInput.sendMessage"]') as HTMLButtonElement).click(); });
+    expect(h.toastError).toHaveBeenCalledWith('chat.failedToSend');
   });
 });
 

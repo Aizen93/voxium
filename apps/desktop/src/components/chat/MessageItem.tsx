@@ -22,6 +22,7 @@ import { ReportModal } from './ReportModal';
 import { useAuthStore } from '../../stores/authStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useMember } from '../../hooks/useMember';
+import { getTranslatedActionError } from '../../utils/serverErrors';
 import { isDeletedParticipantId } from '@voxium/shared';
 import { isDeletedMessageRow, isDeletedQuote } from '../../services/e2e/displayGate';
 import { DeletedMessageRow, DeletedUserAvatar } from '../dm/DeletedParticipant';
@@ -105,8 +106,9 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
       }
       setIsEditing(false);
       setEditContent('');
-    } catch {
-      toast.error(t('chat.failedToEdit'));
+    } catch (err) {
+      console.warn('[MessageItem] Edit failed:', err instanceof Error ? err.message : err);
+      toast.error(getTranslatedActionError(err, t, 'chat.failedToEdit'));
     } finally {
       setIsSaving(false);
     }
@@ -130,8 +132,9 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
       } else if (channelId) {
         await useChatStore.getState().toggleReaction(channelId, message.id, emoji);
       }
-    } catch {
-      toast.error(t('messageItem.failedToToggleReaction'));
+    } catch (err) {
+      console.warn('[MessageItem] Reaction failed:', err instanceof Error ? err.message : err);
+      toast.error(getTranslatedActionError(err, t, 'messageItem.failedToToggleReaction'));
     }
   };
 

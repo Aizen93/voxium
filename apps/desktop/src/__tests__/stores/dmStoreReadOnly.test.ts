@@ -45,10 +45,16 @@ function conv(over: Partial<Conversation> & Record<string, unknown> = {}): Conve
 const readOnlyConv = (over: Partial<Conversation> & Record<string, unknown> = {}) =>
   conv({ user2Id: null, participant: PLACEHOLDER as Conversation['participant'], participantDeleted: true, ...over });
 
-/** Lets the dynamic import of services/dmReadOnly settle. */
+/**
+ * Lets the work these handlers start settle: the dynamic imports (the
+ * list fetch loads services/dmReadOnly) and the promise chains after them.
+ * No timer: nothing here waits on time.
+ */
 async function settle() {
-  for (let i = 0; i < 5; i++) await Promise.resolve();
-  await new Promise((r) => setTimeout(r, 0));
+  for (let round = 0; round < 5; round++) {
+    await vi.dynamicImportSettled();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
 }
 
 beforeEach(() => {

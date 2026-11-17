@@ -1382,6 +1382,7 @@
     "noPermissionViewChannel": "Vous n'avez pas l'autorisation de voir ce salon",
     "cannotDmSelf": "Impossible de créer une conversation avec vous-même",
     "notAParticipant": "Vous n'êtes pas un participant de cette conversation",
+    "conversationReadOnly": "Cette conversation est en lecture seule",
     "voiceDisabled": "Les salons vocaux sont actuellement désactivés",
     "voiceCallsDisabled": "Les appels vocaux sont actuellement désactivés",
     "voiceChannelFull": "Le salon vocal est plein",
