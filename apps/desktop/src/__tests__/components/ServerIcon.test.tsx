@@ -96,4 +96,31 @@ describe('ServerIcon', () => {
     });
     expect(container.firstElementChild?.textContent).toBe('DG');
   });
+
+  it('shows a new icon after the previous one failed to load', () => {
+    const el = render(<ServerIcon id="a" name="Design Guild" iconUrl="icons/gone.png" />);
+    act(() => {
+      el.dispatchEvent(new Event('error'));
+    });
+    expect(container.firstElementChild?.tagName).toBe('SPAN');
+
+    const next = render(<ServerIcon id="a" name="Design Guild" iconUrl="icons/new.png" />);
+    expect(next.tagName).toBe('IMG');
+    expect(next.getAttribute('src')).toContain('icons/new.png');
+  });
+
+  it('keeps the fallback when the same url is rendered again after an error', () => {
+    const el = render(<ServerIcon id="a" name="Design Guild" iconUrl="icons/gone.png" />);
+    act(() => {
+      el.dispatchEvent(new Event('error'));
+    });
+    const again = render(<ServerIcon id="a" name="Design Guild" iconUrl="icons/gone.png" size={40} />);
+    expect(again.tagName).toBe('SPAN');
+    expect(again.textContent).toBe('DG');
+  });
+
+  it('shows the fallback when there is no icon url', () => {
+    expect(render(<ServerIcon id="a" name="Design Guild" iconUrl={null} />).tagName).toBe('SPAN');
+    expect(render(<ServerIcon id="a" name="Design Guild" />).textContent).toBe('DG');
+  });
 });

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { clsx } from 'clsx';
 
 /**
@@ -40,6 +40,11 @@ export function ServerIcon({
   className?: string;
 }) {
   const [failed, setFailed] = useState(false);
+
+  // Reset error state when iconUrl changes (e.g. after a new upload)
+  useEffect(() => {
+    setFailed(false);
+  }, [iconUrl]);
 
   const initials = name
     .split(/\s+/)
