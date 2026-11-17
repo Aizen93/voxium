@@ -601,7 +601,14 @@ pub fn run() {
     };
 
     builder
-        .plugin(tauri_plugin_shell::init())
+        // External links, opened by the webview's own click handler
+        // (apps/desktop/src/utils/externalLinks.ts): the plugin's injected one stays off,
+        // so one place decides which links leave the app
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -1116,7 +1123,7 @@ mod single_instance_tests {
             .find("tauri_plugin_single_instance::init(")
             .expect("the plugin is registered");
         let others = run
-            .find(".plugin(tauri_plugin_shell::init())")
+            .find("tauri_plugin_opener::Builder::new()")
             .expect("the other plugins");
         assert!(single < others, "registered before every other plugin");
         assert_eq!(run.matches(".plugin(").count(), 5, "one more than before");

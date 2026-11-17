@@ -16,7 +16,10 @@
     "core:window:allow-unminimize",
     "core:window:allow-destroy",
     "core:webview:allow-webview-close",
-    "shell:allow-open",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "http://*" }, { "url": "https://*" }, { "url": "mailto:*" }]
+    },
     "notification:default",
     "notification:allow-is-permission-granted",
     "notification:allow-request-permission",
