@@ -30,7 +30,7 @@ The voice ports carry WebRTC media (DTLS-SRTP over UDP, TCP as a fallback): an H
 
 `CORS_ORIGIN` names the origins browsers may call the API from: the web client's (`https://chat.example.com`) and the desktop app's (`https://tauri.localhost`, `tauri://localhost`, `http://tauri.localhost`).
 
-With `NODE_ENV=production` the server trusts the `X-Forwarded-For` header (next sections), which only the proxy may set, so **clients reach the server process only through the proxy**. When the proxy runs on the same host, listen on (or publish the container's port on) the loopback address only, for example `"127.0.0.1:3001:3001"` in the `ports:` of `docker-compose.production.yml`; otherwise close the port in the firewall to everything but the proxy. With Docker, a firewall rule is not a reliable way to do that: ports Docker publishes bypass `ufw`'s rules, and `firewalld` gives Docker its own zone. Bind the published port to an address instead (`docker-compose.production.yml` publishes it on `127.0.0.1` unless `VOXIUM_HTTP_BIND` says otherwise).
+With `NODE_ENV=production` the server trusts the `X-Forwarded-For` header (next sections), which only the proxy may set, so **clients reach the server process only through the proxy**. When the proxy runs on the same host, the server's port is reachable on the loopback address only: `docker-compose.production.yml` publishes it as `"${VOXIUM_HTTP_BIND:-127.0.0.1}:3001:3001"`. For a proxy on another host, or a proxy container that reaches the server through the host's address, set `VOXIUM_HTTP_BIND` in `.env.production` to the address it connects to; a proxy container joined to the compose network needs nothing. Otherwise close the port in the firewall to everything but the proxy. With Docker, a firewall rule is not a reliable way to do that: ports Docker publishes bypass `ufw`'s rules, and `firewalld` gives Docker its own zone. Bind the published port to an address instead (`docker-compose.production.yml` publishes it on `127.0.0.1` unless `VOXIUM_HTTP_BIND` says otherwise).
 
 ## TLS and HSTS
 
@@ -250,4 +250,4 @@ Notes on the example:
 - `proxy_pass` names no path, so the request goes to the server exactly as the client sent it, and nginx's own logs are the only place its line could have been written.
 - Regular-expression locations (`~*`) take precedence over the plain prefixes `/` and `/api/`, which is what sends the credential paths to their own blocks.
 - `/health` and `/ready` are not exposed: they are for the container's health check, on the server's own port.
-- To reach the server only through nginx, publish its port on the loopback address (`"127.0.0.1:3001:3001"`) when it runs in `docker-compose.production.yml`.
+- To reach the server only through nginx, publish its port on the loopback address; `docker-compose.production.yml` does so unless `VOXIUM_HTTP_BIND` says otherwise.

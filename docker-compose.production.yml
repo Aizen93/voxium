@@ -18,7 +18,14 @@ services:
     container_name: voxium-server
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      # The HTTP port is published on the loopback address only: clients reach
+      # the server through the reverse proxy on this host (docs/reverse-proxy.md),
+      # the one party that may set X-Forwarded-For, and a firewall rule cannot
+      # be relied on to close a port Docker publishes. VOXIUM_HTTP_BIND (set in
+      # the --env-file) is the address to publish it on instead: the host's
+      # private address for a proxy on another machine or a proxy container
+      # that reaches the server through the host, 0.0.0.0 for every address.
+      - "${VOXIUM_HTTP_BIND:-127.0.0.1}:3001:3001"
       # mediasoup WebRtcServer ports (UDP required, TCP fallback): one udp+tcp
       # pair per worker at MIN_PORT + slot, one worker per CPU core (max 8), so
       # MIN..MIN+7 covers any host. Keep MEDIASOUP_MAX_PORT small here — Docker

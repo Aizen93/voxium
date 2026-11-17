@@ -464,7 +464,7 @@ This starts four services:
 
 | Service           | Description              | Port     |
 | ----------------- | ------------------------ | -------- |
-| `voxium-server`   | Backend API + WebSocket  | 3001, plus the mediasoup range (UDP + TCP) |
+| `voxium-server`   | Backend API + WebSocket  | 3001 (on `127.0.0.1` only, see below), plus the mediasoup range (UDP + TCP) |
 | `voxium-postgres` | PostgreSQL 16            | internal |
 | `voxium-redis`    | Redis 7                  | internal |
 | `voxium-stun`     | STUN-only coturn for direct calls | 3478 (UDP, TCP too), on the host's network |
@@ -479,10 +479,10 @@ Database migrations run **automatically** on every container start (`migrate dep
 docker compose -f docker-compose.production.yml ps
 ```
 
-All services should show `healthy`. You can also check the health endpoint:
+All services should show `healthy`. You can also check the health endpoint from the server itself (the port is published on the loopback address only), or from your machine through an SSH tunnel to it:
 
 ```bash
-curl http://localhost:3001/health
+curl http://127.0.0.1:3001/health
 ```
 
 ### 5. Connect a Client
@@ -496,7 +496,7 @@ VITE_WS_URL=https://chat.example.com
 VITE_CLIENT_URL=https://chat.example.com
 ```
 
-For a first test on a private network, before the proxy is in place, `http://YOUR_SERVER_IP:3001/api/v1` and `http://YOUR_SERVER_IP:3001` reach the server's port directly; that port is never opened to the internet (see [Production Recommendations](#production-recommendations)). `apps/desktop/.env.example` lists every client setting. The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
+For a first test before the proxy is in place, test from the server itself (`curl http://127.0.0.1:3001/health`), or forward the port through an SSH tunnel (`ssh -L 3001:127.0.0.1:3001 user@your-server`) and point a client at `http://localhost:3001/api/v1` and `http://localhost:3001`. The compose file publishes the port on the loopback address only; to reach it directly on a private network, set `VOXIUM_HTTP_BIND` to the host's private address in `.env.production`, and never open that port to the internet (see [Production Recommendations](#production-recommendations)). `apps/desktop/.env.example` lists every client setting. The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
 
 > **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
 
@@ -517,6 +517,10 @@ Redis holds the server's state, not a cache: rate-limit and abuse budgets, the s
 - **Sizing.** Most of what Redis holds is small and expires on its own: one small key per caller and rate limit (gone when its window ends), the Explore page cache (60 seconds). The largest items are screen-share annotation scenes, up to 800 KB per voice channel with an active share, kept up to four hours. 256 MB is ample for a community on one server; for more, raise `--maxmemory` and keep the container's memory limit at about twice it (rewriting the append-only file forks Redis, and the copy can double the memory in use while it runs).
 - **Monitoring.** `docker compose -f docker-compose.production.yml exec redis redis-cli INFO memory` prints `used_memory` and `maxmemory`; alert well before the first reaches the second.
 
+### Upgrading an Existing Deployment
+
+- **The server's HTTP port is now published on the loopback address only** (`127.0.0.1:3001`; `VOXIUM_HTTP_BIND` changes the address). A host nginx that proxies to `127.0.0.1:3001`, and a proxy container joined to the compose network, are unaffected. Set `VOXIUM_HTTP_BIND` in `.env.production` if a reverse proxy on another host, a proxy container that reaches the server through the host's or the bridge's address, or a plain-HTTP setup on a private network connects to that port; until you do, those connections are refused.
+
 ### Managing the Docker Stack
 
 ```bash
@@ -536,7 +540,7 @@ docker compose -f docker-compose.production.yml --env-file .env.production up -d
 ### Production Recommendations
 
 - Put **nginx** or another reverse proxy in front for TLS termination: [`docs/reverse-proxy.md`](docs/reverse-proxy.md) lists what it must do (the WebSocket upgrade, `TRUST_PROXY_HOPS`, the paths whose URL is a credential and must stay out of its logs, HSTS for the static files, the web client's fallback to `index.html`, the bucket's CORS rules) and gives a complete nginx example
-- Clients reach the server only through the proxy, the one party that may set `X-Forwarded-For` (the server trusts it when `NODE_ENV=production`): with the proxy on the same host, publish the server's port on the loopback address only (`"127.0.0.1:3001:3001"` in `docker-compose.production.yml`), otherwise close it in the firewall to everything but the proxy
+- Clients reach the server only through the proxy, the one party that may set `X-Forwarded-For` (the server trusts it when `NODE_ENV=production`): `docker-compose.production.yml` publishes the server's port on the loopback address only (`VOXIUM_HTTP_BIND`, default `127.0.0.1`), which is all a proxy on the same host needs. For a proxy on another host set `VOXIUM_HTTP_BIND` to the address it reaches, and close the port to everything but the proxy. Do not count on a firewall rule alone to close a port Docker publishes: published ports bypass `ufw`'s rules, and `firewalld` gives Docker its own zone, so binding the published port to an address is the reliable way
 - Open the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall — UDP, plus TCP as a fallback — and 3478/udp for STUN (see [STUN for Direct Calls](#stun-for-direct-calls))
 - For better reliability, use a managed PostgreSQL instance (change `DATABASE_URL` in `docker-compose.production.yml` — its `environment:` entry takes precedence over `.env.production`)
 - Set up regular database backups
@@ -649,6 +653,7 @@ Read by the Docker deployment around the server, not by the server itself:
 | Variable | Read by | Description |
 |----------|---------|-------------|
 | `POSTGRES_PASSWORD` | `docker-compose.production.yml` | The database password, used by both the PostgreSQL container and the server's `DATABASE_URL` |
+| `VOXIUM_HTTP_BIND` | `docker-compose.production.yml` | The address the server's HTTP port (3001) is published on. Default `127.0.0.1`: only a reverse proxy on the same host reaches it. Set the host's private address (or `0.0.0.0`) for a proxy on another host, a proxy container that reaches the server through the host's address, or a plain-HTTP setup on a private network, and keep the port closed to everything else |
 | `VOXIUM_ALLOW_CUTOVER` | `docker-entrypoint.sh` | `1` lets one start apply the always-on E2E cutover migration (see [Start the Stack](#3-start-the-stack)); remove it afterwards |
 | `VOXIUM_ALLOW_DEMO_SEED` | `prisma/seed.ts` | `1` lets the demo seed run under `NODE_ENV=production`, for that one command (see [Database Management](#database-management)); never in an env file |
 
