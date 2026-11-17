@@ -48,6 +48,7 @@ const io = vi.hoisted(() => {
 vi.mock('../../websocket/socketServer', () => ({ getIO: () => io }));
 
 import { deleteUserAccount } from '../../utils/accountDeletion';
+import { lazyStatement } from '../helpers/lazyStatement';
 import { OwnedServersError } from '../../utils/errors';
 
 const order: string[] = [];
@@ -55,6 +56,9 @@ const order: string[] = [];
 // transaction must never touch a space row (the counts move after the commit,
 // on the shared client)
 const txSpaceUpdate = vi.fn();
+// The second delete of the account's device-registry row, under the account
+// row lock: recorded when it RUNS (a dropped await would remove it silently)
+const txRegistryDelete = vi.fn();
 const SECURE_REMOVAL = {
   userId: 'u-1',
   deleted: [{ channelId: 'sec-own', serverId: 's-1', memberIds: ['u-1', 'u-2'] }],
@@ -88,12 +92,19 @@ beforeEach(() => {
   removeSecure.mockImplementation(async () => { order.push('secure'); return SECURE_REMOVAL; });
   announceSecure.mockImplementation(async () => { order.push('secure:notices'); });
   purgeE2E.mockImplementation(async () => { order.push('e2e'); });
+  txRegistryDelete.mockImplementation(() => lazyStatement(order, 'registry:since', { count: 0 }));
   prismaMock.user.delete.mockImplementation(async () => { order.push('delete'); return {}; });
   // one statement per space, after the commit: named by its space in the order log
   prismaMock.server.updateMany.mockImplementation(async (args: { where: { id: unknown } }) => { order.push(`count:${String(args.where.id)}`); return { count: 1 }; });
   prismaMock.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
     order.push('txn:start');
-    const result = await fn({ user: prismaMock.user, server: { updateMany: txSpaceUpdate }, serverMember: prismaMock.serverMember, $queryRaw: prismaMock.$queryRaw });
+    const result = await fn({
+      user: prismaMock.user,
+      server: { updateMany: txSpaceUpdate },
+      serverMember: prismaMock.serverMember,
+      e2EDeviceRegistry: { deleteMany: txRegistryDelete },
+      $queryRaw: prismaMock.$queryRaw,
+    });
     order.push('txn:end');
     return result;
   });
@@ -113,7 +124,7 @@ describe('deleteUserAccount', () => {
     expect(order.filter((step) => !step.startsWith('count:'))).toEqual([
       'left:s-1', 'left:s-2', 'force:logout', 'disconnect:local', 'disconnect',
       'attachment-keys', 'attachment-keys', 'attachment-keys', 'attachment-keys',
-      'txn:start', 'memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'delete', 'txn:end',
+      'txn:start', 'memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'registry:since', 'delete', 'txn:end',
       'force:logout', 'disconnect:local', 'disconnect', 'secure:notices', 's3',
     ]);
     // the member counts move once the transaction has committed, a space at a
@@ -152,6 +163,45 @@ describe('deleteUserAccount', () => {
     // on the transaction's client, inside it
     expect(purgeE2E).toHaveBeenCalledWith('u-1', expect.objectContaining({ $queryRaw: prismaMock.$queryRaw }));
     expect(order.indexOf('e2e')).toBeLessThan(order.indexOf('txn:end'));
+  });
+
+  describe('a device registry row committed after the E2E purge (the account registering its first device meanwhile)', () => {
+    // A registration takes the account row first and the registry row last;
+    // its device rows have a key to the account and go with the user delete,
+    // its registry row has none. Under the account row lock no registration
+    // can write it again, so the second delete there covers the window.
+    it('is deleted a second time under the account row lock, before the user delete (recorded when each statement runs)', async () => {
+      let deletes = 0;
+      prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray) => {
+        if (/FROM users/.test(strings.join('?'))) return lazyStatement(order, 'lock:account', [{ id: 'u-1' }]);
+        const first = deletes++ === 0;
+        return lazyStatement(order, first ? 'memberships' : 'memberships:since', first ? [{ server_id: 's-1' }, { server_id: 's-2' }] : []);
+      });
+      prismaMock.user.delete.mockImplementation(() => lazyStatement(order, 'delete', {}));
+
+      await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+      const inTx = order.slice(order.indexOf('txn:start') + 1, order.indexOf('txn:end'));
+      expect(inTx).toEqual(['memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'registry:since', 'delete']);
+      expect(txRegistryDelete).toHaveBeenCalledTimes(1);
+      expect(txRegistryDelete).toHaveBeenCalledWith({ where: { userId: 'u-1' } });
+    });
+
+    it('an attempt aborted on the user delete is run again whole, the second registry delete included', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      prismaMock.user.delete.mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: 'P2034' }));
+      try {
+        await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
+
+        expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+        expect(txRegistryDelete).toHaveBeenCalledTimes(2);
+        // the committed attempt: account row, member rows since, registry row, user delete
+        const lastAttempt = order.slice(order.lastIndexOf('txn:start') + 1, order.lastIndexOf('txn:end'));
+        expect(lastAttempt).toEqual(['memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'registry:since', 'delete']);
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   describe('a membership committed after the first member-row delete (the account joining a space meanwhile)', () => {
@@ -245,6 +295,7 @@ describe('deleteUserAccount', () => {
         }),
         user: { delete: vi.fn(async () => { txOrder.push('delete'); return {}; }) },
         server: { updateMany: vi.fn(), update: vi.fn() },
+        e2EDeviceRegistry: { deleteMany: vi.fn(() => lazyStatement(txOrder, 'registry:since', { count: 0 })) },
         $executeRaw: vi.fn(),
       };
       removeSecure.mockImplementation(async () => { txOrder.push('secure'); return SECURE_REMOVAL; });
@@ -261,7 +312,7 @@ describe('deleteUserAccount', () => {
       await deleteUserAccount('u-1', { reason: 'bye', logPrefix: '[T]' });
       await vi.waitFor(() => expect(prismaMock.server.updateMany).toHaveBeenCalledTimes(2));
 
-      expect(txOrder).toEqual(['memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'delete']);
+      expect(txOrder).toEqual(['memberships', 'secure', 'e2e', 'lock:account', 'memberships:since', 'registry:since', 'delete']);
       expect(tx.user.delete).toHaveBeenCalledWith({ where: { id: 'u-1' } });
       expect(tx.server.updateMany).not.toHaveBeenCalled();
       expect(tx.server.update).not.toHaveBeenCalled();

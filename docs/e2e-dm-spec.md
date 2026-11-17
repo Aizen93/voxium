@@ -1252,13 +1252,13 @@ device holds is only backed up if the account actually publishes it.
 
 A backup is the one piece of E2E material designed to outlive every device, so
 no age sweep can ever reclaim it — which makes it the worst row to leave behind.
-It is therefore the only E2E table with a real foreign key to `User`, cascading
-on delete.
+It therefore has a real foreign key to `User`, cascading on delete, as do the
+message-key backups (§16) and the devices (their one-time keys cascade from the
+device).
 
-The others (devices, registry, master key, key shares, transfers) have no FK,
-which predates this and meant a deleted account kept publishing its device
-identities forever. Account deletion now calls `purgeE2EMaterial()` before
-removing the user, covering all of them; adding FKs retroactively needs an
+The others (registry, master key, key shares, transfers) have no FK, which
+predates this. Account deletion calls `purgeE2EMaterial()` before removing the
+user, covering all of them, devices included; adding FKs retroactively needs an
 orphan-cleanup migration on a live database and is left as a follow-up.
 
 ### 15.7 Known gaps

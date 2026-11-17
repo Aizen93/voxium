@@ -318,9 +318,10 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
     // for. Rows this transaction INSERTS are invisible to the deletion's
     // step-3 deletes until this commits: a new device and its one-time keys
     // still go with the account (e2e_devices cascades from the user delete),
-    // but an account's FIRST registry row has no key to the account, so a
-    // first registration committing while the deletion is between its steps
-    // 3 and 4 leaves that one row behind, as it could before this lock.
+    // and an account's FIRST registry row, which has no key to the account,
+    // is deleted a second time once the deletion holds the account row (its
+    // step 4), which a registration committing between steps 3 and 4
+    // precedes.
     const result = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const locked = await lockAccountRows(tx, [{ id: userId, mode: 'update' }]);
       // Deleted since the request was authenticated
@@ -510,7 +511,14 @@ e2eRouter.delete(
       const userId = req.user!.userId;
       const deviceId = validateDeviceId(req.params.deviceId);
 
-      const listVersion = await prisma.$transaction(async (tx) => {
+      // Takes a device row and then the registry row (bumpDeviceListVersion),
+      // while an account deletion takes the registry row (its second delete,
+      // under the account row) before the device rows its user delete reaches
+      // through the cascade (deleteAccountRows, utils/accountDeletion.ts):
+      // PostgreSQL may abort this one, which then runs again whole, every
+      // check made again on the attempt's own reads. The deletion holds those
+      // rows through its cascade, hence the lock-wait budget.
+      const listVersion = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
         const device = await tx.e2EDevice.findUnique({
           where: { userId_deviceId: { userId, deviceId } },
           select: { id: true },
@@ -526,7 +534,7 @@ e2eRouter.delete(
         // the Olm session it was encrypted to is gone with the device.
         await tx.e2EMasterTransfer.deleteMany({ where: { userId, recipientDeviceId: deviceId } });
         return bumpDeviceListVersion(tx, userId);
-      });
+      }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The revoke of device ${deviceId} for ${userId}`);
 
       res.json({ success: true, data: { revoked: true, deviceId, listVersion } });
     } catch (err) {
@@ -706,7 +714,16 @@ e2eRouter.put('/master-key', rateLimitE2EApprove, async (req: Request, res: Resp
       if (unique.size !== pending.length) throw new BadRequestError('Duplicate deviceSignatures entries');
     }
 
-    const result = await prisma.$transaction(async (tx) => {
+    // With device signatures (or a replaced key) this takes device rows and
+    // then the registry row (bumpDeviceListVersion), while an account deletion
+    // takes the registry row (its second delete, under the account row)
+    // before the device rows its user delete reaches through the cascade
+    // (deleteAccountRows, utils/accountDeletion.ts): PostgreSQL may abort this
+    // one, which then runs again whole, every check made again on the
+    // attempt's own reads (the existing key, the devices to sign). The
+    // deletion holds those rows through its cascade, hence the lock-wait
+    // budget.
+    const result = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const existing = await tx.e2EMasterKey.findUnique({ where: { userId }, select: { publicKey: true } });
       const replacing = existing !== null && existing !== undefined && existing.publicKey !== masterKey;
 
@@ -767,7 +784,7 @@ e2eRouter.put('/master-key', rateLimitE2EApprove, async (req: Request, res: Resp
 
       const listVersion = await bumpDeviceListVersion(tx, userId);
       return { listVersion, signed, updatedAt: saved.updatedAt };
-    });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The master-key publication for ${userId}`);
 
     res.json({
       success: true,
@@ -795,7 +812,14 @@ e2eRouter.post(
       const deviceId = validateDeviceId(req.params.deviceId);
       const signature = validateSignatureB64((req.body ?? {}).signature, 'signature');
 
-      const listVersion = await prisma.$transaction(async (tx) => {
+      // Takes a device row and then the registry row (bumpDeviceListVersion),
+      // while an account deletion takes the registry row (its second delete,
+      // under the account row) before the device rows its user delete reaches
+      // through the cascade (deleteAccountRows, utils/accountDeletion.ts):
+      // PostgreSQL may abort this one, which then runs again whole, every
+      // check made again on the attempt's own reads. The deletion holds those
+      // rows through its cascade, hence the lock-wait budget.
+      const listVersion = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
         // Composite lookup: you can only sign your OWN devices.
         const device = await tx.e2EDevice.findUnique({
           where: { userId_deviceId: { userId, deviceId } },
@@ -820,7 +844,7 @@ e2eRouter.post(
         // Peers must re-fetch: a device that just became trusted changes the
         // warning state of the list even though membership did not change.
         return bumpDeviceListVersion(tx, userId);
-      });
+      }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The approval of device ${deviceId} for ${userId}`);
 
       res.json({ success: true, data: { deviceId, signed: true, listVersion } });
     } catch (err) {

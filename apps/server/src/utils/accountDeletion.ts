@@ -142,16 +142,43 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  *  2. the secure channels, FOR UPDATE, in id order;
  *  3. the key shares and the rest of the account's E2E material;
  *  4. the account row (FOR UPDATE), then the member rows committed since
- *     step 1 (a second DELETE), then the user delete and every row it
- *     cascades to or sets null (messages, reactions, reads, invites it
- *     created, join requests it decided, bans it issued, webhooks it created
- *     or rotated, …): the long part.
+ *     step 1 (a second DELETE), then the account's device-registry row a
+ *     second time, then the user delete and every row it cascades to or sets
+ *     null (messages, reactions, reads, invites it created, join requests it
+ *     decided, bans it issued, webhooks it created or rotated, its E2E
+ *     devices with their one-time keys, …): the long part.
  * It takes NO space row. Why each comes where it does:
  *  - in 4, the account row before the second member-row delete: a
  *    membership's key to the account waits for that lock, so every
  *    membership within reach of the user delete's cascade has been deleted
  *    here first, and is counted (lowerMemberCounts) and announced
  *    (deleteUserAccount) with the others.
+ *  - in 4, the registry row after the account row: an E2E device
+ *    registration (PUT /e2e/devices) takes the account row first and the
+ *    registry row last, so one that committed between steps 3 and 4 (an
+ *    account's first device, whose rows step 3 could not see) is covered,
+ *    and none can write the registry once this transaction holds the
+ *    account row. Its device rows have a key to the account and go with the
+ *    user delete, and their one-time keys go with the devices; the registry
+ *    row has none, hence the second delete. The registration takes the
+ *    account row and the registry row in this same order. But this step
+ *    takes the registry row BEFORE the device rows its user delete reaches
+ *    through the cascade, while three E2E writers that never take the
+ *    account row take a device row and then the registry row: a revoke
+ *    (DELETE /e2e/devices/me/:deviceId), the master-key publication with
+ *    device signatures (PUT /e2e/master-key, which the stock client sends
+ *    right after a first registration) and a device approval (POST
+ *    /e2e/devices/:deviceId/signature). On a device registered after step
+ *    3, each can close a cycle with this step: PostgreSQL aborts one side,
+ *    and all four run under retryOnTransactionConflict (this one retried
+ *    whole ends clean; one of those, retried after this commit, finds the
+ *    device gone).
+ * What #114 (foreign keys from the E2E tables to the account) still leaves
+ * open: a master-key publication that waited on step 3's delete inserts a
+ * master-key row and a registry row once this commits; a key share
+ * addressed to a device created after step 3 survives the account; and a
+ * master transfer likewise. None of those writers takes the account row, so
+ * a second delete here cannot cover them.
  *  - 2 before 3: a member's removal from one secure channel
  *    (removeSecureMember) locks the channel, then deletes the key shares
  *    addressed to that member there. With the purge first (as this
@@ -293,9 +320,11 @@ async function lowerMemberCounts(serverIds: string[], userId: string): Promise<v
 }
 
 function runAccountDeletionTransaction(userId: string): Promise<{ removal: SecureMembershipRemoval; serverIds: string[] }> {
-  // E2E key material has no FK to User (except the key backup), so it would
-  // otherwise outlive the account it belongs to. One transaction with the
-  // delete: purging a user who then survives strands every device they own.
+  // Most E2E material has no key to the account (the key shares, master
+  // transfers, master key and device registry; the devices and the two
+  // backups do, and cascade, and the one-time keys cascade from their device),
+  // so it would otherwise outlive the account it belongs to. One transaction with the delete: purging a
+  // user who then survives strands every device they own.
   return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
     // The memberships first, explicitly (the cascade would take them with the
     // row, last): see the lock order above. The spaces whose count moves
@@ -322,6 +351,11 @@ function runAccountDeletionTransaction(userId: string): Promise<{ removal: Secur
     await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
     const joinedSince = (await tx.$queryRaw<Array<{ server_id: string }>>`
       DELETE FROM server_members WHERE user_id = ${userId} RETURNING server_id`).map((r) => r.server_id);
+    // The registry row a device registration committed since step 3 (the
+    // account's first device: invisible to the purge until it committed).
+    // Its device rows go with the user delete; this row has no key to the
+    // account. Under the account row lock, no registration can write it again.
+    await tx.e2EDeviceRegistry.deleteMany({ where: { userId } });
     // The row, and with it the long cascade. The last statement: nothing in
     // this transaction touches a space row (see the lock order above).
     await tx.user.delete({ where: { id: userId } });

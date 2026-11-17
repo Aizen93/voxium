@@ -948,12 +948,14 @@ model E2EKeyBackup {
   id     String @id @default(cuid())
   userId String @unique @map("user_id")
   blob   String // opaque AES-256-GCM ciphertext, base64 — server never decrypts
-  // The one E2E table with a real FK, because it is the one row that is MEANT
-  // to outlive every device: no age sweep can ever reclaim it, so without a
-  // cascade a deleted account leaves its sealed master secret in the database
-  // forever. The other E2E tables are purged explicitly on delete (see
-  // utils/e2ePurge) — they predate this and adding FKs to them needs an
-  // orphan-cleanup migration on a live database.
+  // A real FK, because this is the one row that is MEANT to outlive every
+  // device: no age sweep can ever reclaim it, so without a cascade a deleted
+  // account leaves its sealed master secret in the database forever. The
+  // devices and the message-key backups have one too; the registry, the master
+  // key, the key shares and the master transfers do not. The two backup tables
+  // go with the cascade; the others are purged explicitly on delete (see
+  // utils/e2ePurge). Adding FKs to those four needs an orphan-cleanup
+  // migration on a live database.
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

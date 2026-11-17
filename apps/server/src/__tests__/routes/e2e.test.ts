@@ -797,6 +797,120 @@ describe('E2E routes — PUT /devices', () => {
   });
 });
 
+// ─── The device-row writers that meet an account deletion ──────────────────
+
+describe('E2E routes — a revoke, a master-key publication and a device approval run again after a deadlock', () => {
+  // Each takes a device row and then the registry row; an account deletion
+  // takes the registry row (its second delete) before the device rows its user
+  // delete reaches through the cascade. PostgreSQL may abort either side.
+  const deadlock = () => Object.assign(
+    new Error('Raw query failed. Code: `40P01`. Message: `deadlock detected`'),
+    { code: 'P2010', meta: { driverAdapterError: { cause: { kind: 'postgres', originalCode: '40P01' } } } },
+  );
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    // what these cases set must not reach the suites after them (clearAllMocks keeps implementations)
+    for (const fn of [prisma.e2EMasterKey.findUnique, prisma.e2EMasterKey.upsert, prisma.e2EDevice.findMany, prisma.e2EDevice.findUnique]) {
+      vi.mocked(fn).mockReset();
+    }
+  });
+
+  function approvalSetup() {
+    const device = makeTestDevice('user-1', DEVICE_B);
+    const master = makeTestMasterKey('user-1');
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'row-b', curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key,
+    } as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
+    return { device, master, signature: master.crossSign(DEVICE_B, device.curve25519Key, device.ed25519Key) };
+  }
+
+  const cases = [
+    {
+      name: 'the revoke',
+      arrange: () => {
+        vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'row-a' } as any);
+      },
+      send: () => request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`),
+      // the device read inside the transaction: the check made again on each attempt
+      reads: () => vi.mocked(prisma.e2EDevice.findUnique).mock.calls.length,
+      label: `[E2E] The revoke of device ${DEVICE_A} for user-1`,
+    },
+    {
+      name: 'the master-key publication with a device signature',
+      arrange: () => {
+        const device = makeTestDevice('user-1', DEVICE_A);
+        const master = makeTestMasterKey('user-1');
+        vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+        vi.mocked(prisma.e2EMasterKey.upsert).mockResolvedValue({ updatedAt: new Date('2026-07-31') } as any);
+        vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+          { id: 'row-a', deviceId: DEVICE_A, curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key },
+        ] as any);
+        return {
+          masterKey: master.masterKey,
+          masterSignature: master.masterSignature,
+          deviceSignatures: [{ deviceId: DEVICE_A, signature: master.crossSign(DEVICE_A, device.curve25519Key, device.ed25519Key) }],
+        };
+      },
+      send: (body: unknown) => request(createApp()).put('/api/v1/e2e/master-key').send(body as object),
+      reads: () => vi.mocked(prisma.e2EDevice.findMany).mock.calls.length,
+      label: '[E2E] The master-key publication for user-1',
+    },
+    {
+      name: 'the device approval',
+      arrange: () => ({ signature: approvalSetup().signature }),
+      send: (body: unknown) => request(createApp()).post(`/api/v1/e2e/devices/${DEVICE_B}/signature`).send(body as object),
+      reads: () => vi.mocked(prisma.e2EDevice.findUnique).mock.calls.length,
+      label: `[E2E] The approval of device ${DEVICE_B} for user-1`,
+    },
+  ];
+
+  it.each(cases)('$name: a deadlock on the registry bump is retried whole, with the lock-wait budget, and then succeeds', async ({ arrange, send, reads, label }) => {
+    const body = arrange();
+    vi.mocked(prisma.e2EDeviceRegistry.upsert)
+      .mockRejectedValueOnce(deadlock())
+      .mockResolvedValueOnce({ userId: 'user-1', version: 9 } as any);
+
+    const res = await send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.listVersion).toBe(9);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    for (const call of vi.mocked(prisma.$transaction).mock.calls) expect(call[1]).toEqual(LOCK_WAIT_TRANSACTION_OPTIONS);
+    // the devices are read again inside the second attempt
+    expect(reads()).toBe(2);
+    expect(warn).toHaveBeenCalledWith(`${label} was aborted by a deadlock or a serialization failure; retrying (1 of 2)`);
+  });
+
+  it.each(cases)('$name: a conflict on every attempt surfaces after the retry limit; anything else is not retried', async ({ arrange, send }) => {
+    const body = arrange();
+    for (let i = 0; i <= TRANSACTION_CONFLICT_RETRIES; i++) vi.mocked(prisma.e2EDeviceRegistry.upsert).mockRejectedValueOnce(deadlock());
+
+    expect((await send(body)).status).toBe(500);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1 + TRANSACTION_CONFLICT_RETRIES);
+
+    vi.mocked(prisma.$transaction).mockClear();
+    vi.mocked(prisma.e2EDeviceRegistry.upsert).mockRejectedValueOnce(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }));
+    expect((await send(body)).status).toBe(500);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('a revoke retried after the device went with its account answers 404, and bumps nothing', async () => {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValueOnce({ id: 'row-a' } as any).mockResolvedValueOnce(null);
+    vi.mocked(prisma.e2EDevice.delete).mockRejectedValueOnce(deadlock());
+
+    const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`);
+
+    expect(res.status).toBe(404);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+  });
+});
+
 // ─── GET /devices/me & /devices/:userId ─────────────────────────────────────
 
 describe('E2E routes — device lists', () => {

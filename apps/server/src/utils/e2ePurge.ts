@@ -9,13 +9,15 @@ type PurgeClient = Pick<
 /**
  * Delete every trace of a user's E2E key material.
  *
- * The E2E tables listed here predate this and were written without foreign keys
- * to User, so `prisma.user.delete()` leaves all of it behind: device
- * identities, the account master key, pending key shares and device-approval
- * envelopes. Key shares and transfers are age-swept, but the device rows and
- * the master key never expire — a deleted account would keep publishing its
- * public keys forever, and anyone querying the tables directly could still see
- * who had devices, how many, and when they were added.
+ * Most of the E2E tables listed here have no foreign key to User, so
+ * `prisma.user.delete()` leaves their rows behind: the account master key, the
+ * device registry, pending key shares and device-approval envelopes. Key shares
+ * and transfers are age-swept, but the master key and the registry never
+ * expire, and anyone querying the tables directly could still see the account's
+ * E2E history. The device rows DO have a key to the account (`e2e_devices`,
+ * ON DELETE CASCADE, and their one-time keys cascade from them), so the user
+ * delete would take them; they are deleted here explicitly all the same, in the
+ * order `deleteAccountRows` (utils/accountDeletion.ts) documents for this step.
  *
  * The two backup tables — `E2EKeyBackup` (spec §15) and `E2EMessageKeyBackup`
  * (plan §4.4) — are deliberately ABSENT: both hold rows designed to outlive
