@@ -91,8 +91,9 @@ const initialVoicePrefs = loadPersistedVoicePrefs();
 // Self-hosted STUN server (coturn in STUN-only mode) for NAT traversal.
 // STUN is a stateless UDP request/response (~100 bytes each way) that tells
 // each peer their own public IP:port — no media flows through it. Privacy-first.
-// Derived from VITE_WS_URL (coturn lives on the edge box), or VITE_STUN_URL
-// when coturn has its own machine — see utils/stunUrl.ts.
+// Derived from VITE_WS_URL (by default the STUN server of the deployment is the
+// host the socket connects to), or VITE_STUN_URL when coturn has its own
+// machine — see utils/stunUrl.ts.
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: resolveStunUrl(import.meta.env) },
 ];

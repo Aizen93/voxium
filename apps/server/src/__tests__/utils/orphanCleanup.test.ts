@@ -399,7 +399,7 @@ describe('orphan sweep — cluster leadership', () => {
   });
 
   it('does nothing when a peer already holds the lock', async () => {
-    // Production runs 2+ nodes; two concurrent full-bucket destructive scans
+    // When 2+ nodes run, two concurrent full-bucket destructive scans
     // from two different snapshots is not a thing we want.
     mockRedisSet.mockResolvedValue(null);
 
