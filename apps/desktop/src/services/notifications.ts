@@ -1,9 +1,7 @@
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from '@tauri-apps/plugin-notification';
-import { invoke } from '@tauri-apps/api/core';
+// The same bundle runs in the Tauri app and in a browser: the Tauri modules
+// are loaded with import() on the Tauri path only, so a browser session never
+// fetches them (scripts/browserEntryGuard.mjs fails a build whose startup
+// chunks hold them).
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
 const TAURI_AVAILABLE = '__TAURI_INTERNALS__' in window;
@@ -21,6 +19,26 @@ const avatarBlobCache = new Map<string, string>();
 
 // In-flight fetch deduplication — prevents parallel fetches for the same key.
 const avatarFetchInFlight = new Map<string, Promise<string | null>>();
+
+/**
+ * A module loaded on first use and kept for later calls. A failed load is
+ * not kept: the next call tries again.
+ */
+function loadOnce<T>(load: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | null = null;
+  return async () => {
+    pending ??= load();
+    try {
+      return await pending;
+    } catch (err) {
+      pending = null;
+      throw err;
+    }
+  };
+}
+
+const loadTauriCore = loadOnce(() => import('@tauri-apps/api/core'));
+const loadNotificationPlugin = loadOnce(() => import('@tauri-apps/plugin-notification'));
 
 // Why a tier failed, each distinct reason logged once: the native tier answers
 // every notification on macOS and Linux with the same "not implemented".
@@ -42,14 +60,16 @@ function warnOnce(tier: string, err: unknown): void {
 export async function initNotifications(): Promise<void> {
   if (TAURI_AVAILABLE) {
     try {
-      tauriPermissionGranted = await isPermissionGranted();
+      const plugin = await loadNotificationPlugin();
+      tauriPermissionGranted = await plugin.isPermissionGranted();
       if (!tauriPermissionGranted) {
-        const permission = await requestPermission();
+        const permission = await plugin.requestPermission();
         tauriPermissionGranted = permission === 'granted';
       }
       return;
-    } catch {
+    } catch (err) {
       // Plugin failed even in Tauri context — fall through to Web API
+      warnOnce('Notification permission (plugin)', err);
     }
   }
 
@@ -96,7 +116,9 @@ async function resolveAvatarBlobUrl(avatarKey: string): Promise<string | null> {
 
       avatarBlobCache.set(avatarKey, blobUrl);
       return blobUrl;
-    } catch {
+    } catch (err) {
+      // No icon, the notification still goes out
+      warnOnce('Notification avatar', err);
       return null;
     }
   })();
@@ -131,6 +153,7 @@ export async function notify(
     //    security policy allows, and refuses any other base before fetching
     //    anything; this one is the build's constant.
     try {
+      const { invoke } = await loadTauriCore();
       await invoke('notify_with_avatar', {
         title,
         body,
@@ -146,11 +169,13 @@ export async function notify(
     // 2. Tauri notification plugin (no avatar, but native notifications)
     try {
       if (tauriPermissionGranted) {
-        sendNotification({ title, body });
+        const plugin = await loadNotificationPlugin();
+        plugin.sendNotification({ title, body });
         return;
       }
-    } catch {
+    } catch (err) {
       // Plugin unavailable — fall through to Web API
+      warnOnce('Notification plugin', err);
     }
   }
 
@@ -165,8 +190,9 @@ export async function notify(
         }
       }
       new Notification(title, webOptions);
-    } catch {
-      // Web Notification API failed — non-critical, silently ignore
+    } catch (err) {
+      // Web Notification API failed — non-critical
+      warnOnce('Web notification', err);
     }
   }
 }

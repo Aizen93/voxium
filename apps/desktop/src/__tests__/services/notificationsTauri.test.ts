@@ -5,18 +5,36 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // plugin (text only), the Web Notification API. The build is read once, when
 // the module loads (`__TAURI_INTERNALS__`), so every test loads it afresh.
 
-const tauri = vi.hoisted(() => ({
+const tauri = {
   invoke: vi.fn(),
   isPermissionGranted: vi.fn(),
   requestPermission: vi.fn(),
   sendNotification: vi.fn(),
-}));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
-vi.mock('@tauri-apps/plugin-notification', () => ({
-  isPermissionGranted: tauri.isPermissionGranted,
-  requestPermission: tauri.requestPermission,
-  sendNotification: tauri.sendNotification,
-}));
+  /** Each Tauri module, every time it is loaded. */
+  loads: [] as string[],
+  /** Loads of the notification plugin still to fail (a chunk that does not arrive). */
+  pluginLoadFailures: 0,
+};
+
+/** Mock the Tauri modules anew (after a module reset), recording each load. */
+function mockTauriModules() {
+  vi.doMock('@tauri-apps/api/core', () => {
+    tauri.loads.push('core');
+    return { invoke: tauri.invoke };
+  });
+  vi.doMock('@tauri-apps/plugin-notification', () => {
+    tauri.loads.push('plugin');
+    if (tauri.pluginLoadFailures > 0) {
+      tauri.pluginLoadFailures -= 1;
+      throw new Error('chunk did not load');
+    }
+    return {
+      isPermissionGranted: tauri.isPermissionGranted,
+      requestPermission: tauri.requestPermission,
+      sendNotification: tauri.sendNotification,
+    };
+  });
+}
 
 type TauriWindow = { __TAURI_INTERNALS__?: unknown };
 const API = 'https://chat.example.org/api/v1';
@@ -26,6 +44,7 @@ let warn: ReturnType<typeof vi.spyOn>;
 
 async function load() {
   vi.resetModules();
+  mockTauriModules();
   vi.stubEnv('VITE_API_URL', API);
   (window as TauriWindow).__TAURI_INTERNALS__ = {};
   return import('../../services/notifications');
@@ -33,6 +52,8 @@ async function load() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  tauri.loads.length = 0;
+  tauri.pluginLoadFailures = 0;
   warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   tauri.isPermissionGranted.mockResolvedValue(true);
   tauri.invoke.mockResolvedValue(undefined);
@@ -99,5 +120,94 @@ describe('notifications in the Tauri app — the native tier', () => {
       ['[Notifications] Native notification failed, falling back:', REFUSED],
     ]);
     expect(tauri.sendNotification).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('notifications in the Tauri app — permission, the plugin and the Web fallback', () => {
+  /** A stand-in for the Web Notification API, every notification shown. */
+  function stubWebNotifications(permission: NotificationPermission) {
+    const shown: Array<{ title: string; options?: NotificationOptions }> = [];
+    class FakeNotification {
+      static permission = permission;
+      static requestPermission = vi.fn(async () => permission);
+      constructor(title: string, options?: NotificationOptions) {
+        shown.push({ title, options });
+      }
+    }
+    vi.stubGlobal('Notification', FakeNotification);
+    return { shown, requestPermission: FakeNotification.requestPermission };
+  }
+
+  it('loads nothing until it is used, then each module once', async () => {
+    const { initNotifications, notify } = await load();
+    expect(tauri.loads).toEqual([]);
+
+    await initNotifications();
+    tauri.invoke.mockRejectedValue('Avatar notifications not implemented on this platform');
+    await notify('A', '1');
+    await notify('A', '2');
+
+    expect(tauri.loads.sort()).toEqual(['core', 'plugin']);
+    expect(tauri.sendNotification).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks the plugin for permission when it is not granted yet', async () => {
+    tauri.isPermissionGranted.mockResolvedValue(false);
+    tauri.requestPermission.mockResolvedValue('granted');
+    const { initNotifications, notify } = await load();
+
+    await initNotifications();
+    tauri.invoke.mockRejectedValue('Avatar notifications not implemented on this platform');
+    await notify('A', 'hi');
+
+    expect(tauri.requestPermission).toHaveBeenCalledTimes(1);
+    expect(tauri.sendNotification).toHaveBeenCalledWith({ title: 'A', body: 'hi' });
+  });
+
+  it('without the plugin permission, falls to the Web Notification API', async () => {
+    tauri.isPermissionGranted.mockResolvedValue(false);
+    tauri.requestPermission.mockResolvedValue('denied');
+    const web = stubWebNotifications('granted');
+    const { initNotifications, notify } = await load();
+
+    await initNotifications();
+    tauri.invoke.mockRejectedValue('Avatar notifications not implemented on this platform');
+    await notify('A', 'hi');
+
+    expect(tauri.sendNotification).not.toHaveBeenCalled();
+    expect(web.shown).toEqual([{ title: 'A', options: { body: 'hi', silent: true } }]);
+  });
+
+  it('a plugin that fails to load falls to the Web API, is logged, and is loaded again next time', async () => {
+    tauri.pluginLoadFailures = 1;
+    const web = stubWebNotifications('default');
+    const { initNotifications, notify } = await load();
+
+    await initNotifications();
+    // the permission step fell through to the Web API's
+    expect(web.requestPermission).toHaveBeenCalledTimes(1);
+    // (the test runner words the failed load its own way)
+    expect(warn).toHaveBeenCalledWith('[Notifications] Notification permission (plugin) failed, falling back:', expect.any(String));
+
+    await initNotifications();
+    tauri.invoke.mockRejectedValue('Avatar notifications not implemented on this platform');
+    await notify('A', 'hi');
+    expect(tauri.loads.filter((m) => m === 'plugin')).toHaveLength(2);
+    expect(tauri.sendNotification).toHaveBeenCalledWith({ title: 'A', body: 'hi' });
+  });
+
+  it('a plugin that throws falls to the Web API, and is logged', async () => {
+    const web = stubWebNotifications('granted');
+    const { initNotifications, notify } = await load();
+    await initNotifications();
+    tauri.invoke.mockRejectedValue('Avatar notifications not implemented on this platform');
+    tauri.sendNotification.mockImplementation(() => {
+      throw new Error('plugin gone');
+    });
+
+    await notify('A', 'hi');
+
+    expect(web.shown).toEqual([{ title: 'A', options: { body: 'hi', silent: true } }]);
+    expect(warn).toHaveBeenCalledWith('[Notifications] Notification plugin failed, falling back:', 'plugin gone');
   });
 });
