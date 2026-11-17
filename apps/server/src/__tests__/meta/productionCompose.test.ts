@@ -71,6 +71,19 @@ describe('docker-compose.production.yml: Redis keeps what it holds', () => {
     expect(comment).toMatch(/refuses new writes/);
     expect(comment).toMatch(/INFO memory/);
   });
+
+  it('says what a full Redis does to the single-use marks, the start, the admin overrides, the heartbeats and Explore', () => {
+    const block = serviceBlock(compose, 'redis');
+    const comment = block.slice(0, block.indexOf('    command:')).replace(/\n\s*#/g, ' ').replace(/\s+/g, ' ');
+    expect(comment).toContain("marks of used two-factor codes are kept in each server process's memory");
+    expect(comment).toContain('marks of solved sign-up challenges are not recorded');
+    expect(comment).not.toMatch(/single-use marks are not recorded/);
+    expect(comment).toMatch(/cannot START while Redis is full/);
+    expect(comment).toMatch(/exit code 1/);
+    expect(comment).toMatch(/cannot set a feature flag or a rate-limit override/);
+    expect(comment).toMatch(/heartbeat lapses after 30 seconds/);
+    expect(comment).toMatch(/Explore can serve a page up to 60 seconds stale/);
+  });
 });
 
 describe('docker-compose.production.yml: HTTP port of the server', () => {

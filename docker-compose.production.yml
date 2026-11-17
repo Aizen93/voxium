@@ -117,9 +117,21 @@ services:
     # holds; reads, deletes and expiry keep working, so memory comes back as
     # keys expire. Meanwhile the server logs each refused write: rate limits
     # fall back to a per-process count in memory, scheduled jobs skip the run,
-    # the single-use marks are not recorded (the request goes through, as when
-    # Redis is down), and new voice joins and connections are not recorded
-    # (a voice join can fail, a user who connects is not shown online).
+    # the marks of used two-factor codes are kept in each server process's
+    # memory instead (a code is still refused a second time on that process),
+    # the marks of solved sign-up challenges are not recorded (the request goes
+    # through, as when Redis is down), and new voice joins and connections are
+    # not recorded (a voice join can fail, a user who connects is not shown
+    # online). Four more consequences:
+    #  - a server process cannot START while Redis is full: it writes its node
+    #    heartbeat at boot, a refusal ends the process with exit code 1, and
+    #    the container restarts in a loop until memory frees;
+    #  - an administrator cannot set a feature flag or a rate-limit override
+    #    from the dashboard (the write is refused; a reset works);
+    #  - a running node's heartbeat lapses after 30 seconds without a
+    #    successful write, and where several nodes run its peers then reap its
+    #    voice channels and their visibility resyncs fail closed;
+    #  - Explore can serve a page up to 60 seconds stale.
     # So size maxmemory with room to spare and watch used_memory against it
     # (`docker compose -f docker-compose.production.yml exec redis redis-cli
     # INFO memory`). Keep the container's memory limit (below) at about twice
