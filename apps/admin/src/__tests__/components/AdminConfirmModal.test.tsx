@@ -4,9 +4,9 @@ import { mount, click, keyDown, deferred, getByRole, queryByRole, bodyText, flus
 
 /**
  * The shared confirmation dialog behind every destructive action of the
- * dashboard: two buttons, a close icon, a busy state while the confirm
- * handler runs. It has no Escape handler, no backdrop handler and no focus
- * management; those tests pin what it does today.
+ * dashboard: a modal dialog labelled by its title, two buttons, a close icon,
+ * a busy state while the confirm handler runs. Escape and the backdrop cancel
+ * (not while busy), focus starts on Cancel and returns to the opener.
  */
 
 let view: Mounted;
@@ -49,31 +49,93 @@ describe('AdminConfirmModal', () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
-  it('the close icon in the header cancels (it has no accessible name)', async () => {
+  it('is a modal dialog labelled by its title', async () => {
+    await view.render(<AdminConfirmModal title="Delete thing" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+    const dialog = getByRole('dialog', 'Delete thing');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+  });
+
+  it('the close icon in the header, named "Close", cancels', async () => {
     await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
-    const close = Array.from(document.body.querySelectorAll('button')).find((b) => b.textContent === '' && b.querySelector('svg'))!;
-    expect(close).toBeTruthy();
-    await click(close);
+    await click(getByRole('button', 'Close'));
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
-  it('Escape does not close it today: no handler is registered', async () => {
+  it('Escape cancels once, and never confirms', async () => {
     await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
     await keyDown(document.body, 'Escape');
-    await keyDown(getByRole('button', 'Confirm'), 'Escape');
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('other keys do nothing', async () => {
+    await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+    await keyDown(document.body, 'Enter');
+    await keyDown(document.body, 'a');
     expect(onCancel).not.toHaveBeenCalled();
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
-  it('a click on the backdrop does not close it today, and a click inside the card does not either', async () => {
+  it('a click on the backdrop cancels; a click inside the card does not', async () => {
     await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
-    const card = getByRole('heading', 't').parentElement!.parentElement!;
-    const backdrop = card.parentElement!;
-    await click(backdrop);
-    await click(card);
+    const dialog = getByRole('dialog', 't');
+    await click(dialog);
+    await click(getByRole('heading', 't'));
     expect(onCancel).not.toHaveBeenCalled();
+    await click(dialog.parentElement!);
+    expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('Escape and the backdrop are ignored while the confirm action is in flight, and work again after', async () => {
+    const pending = deferred();
+    onConfirm.mockReturnValue(pending.promise);
+    await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+    await click(getByRole('button', 'Confirm'));
+    await keyDown(document.body, 'Escape');
+    await click(getByRole('dialog', 't').parentElement!);
+    expect(onCancel).not.toHaveBeenCalled();
+
+    pending.resolve();
+    await flush();
+    await keyDown(document.body, 'Escape');
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('puts focus on Cancel when it opens and gives it back to the opener when it closes', async () => {
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+    await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+    expect(document.activeElement).toBe(getByRole('button', 'Cancel'));
+    await view.render(<></>);
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  it('a rejecting confirm handler leaves no unhandled rejection, logs its message once and keeps the dialog usable', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const failure = Object.assign(new Error('boom'), { response: { data: { secret: 'body' } } });
+      onConfirm.mockRejectedValueOnce(failure);
+      await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+      await click(getByRole('button', 'Confirm'));
+      await flush();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]).toEqual(['Confirm action failed:', 'boom']);
+      const again = getByRole('button', 'Confirm') as HTMLButtonElement;
+      expect(again.disabled).toBe(false);
+      await click(again);
+      expect(onConfirm).toHaveBeenCalledTimes(2);
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      log.mockRestore();
+    }
   });
 
   it('shows "Processing..." and disables Confirm while the handler runs, so a second press does nothing', async () => {
@@ -90,11 +152,6 @@ describe('AdminConfirmModal', () => {
     await flush();
     const idle = getByRole('button', 'Confirm') as HTMLButtonElement;
     expect(idle.disabled).toBe(false);
-  });
-
-  it('lands focus nowhere in particular: it does not move focus to either button', async () => {
-    await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
-    expect(document.activeElement).toBe(document.body);
   });
 
   it('draws the danger colour by default and the primary colour for danger={false} or variant="primary"', async () => {
