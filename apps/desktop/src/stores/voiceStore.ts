@@ -44,6 +44,7 @@ import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared'
 import type { CallPeerDevice } from '../services/e2e/callCrypto';
 import { isE2ESessionEnded } from '../services/e2e/session';
 import { resolveStunUrl } from '../utils/stunUrl';
+import { conversationIsReadOnly } from '../utils/dmParticipant';
 
 /** Debug log — stripped in production builds by Vite tree-shaking */
 const debugLog = import.meta.env.DEV
@@ -2445,6 +2446,21 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   joinDMCall: async (conversationId: string) => {
     const socket = getSocket();
     if (!socket) return;
+
+    // A read-only conversation (the other side's account was deleted) has no
+    // calls, by any path: refused before anything is left, acquired or sent.
+    // Dynamic import per the resetStores eval-cycle rule.
+    try {
+      const { useDMStore } = await import('./dmStore');
+      if (conversationIsReadOnly(useDMStore.getState().conversations, conversationId)) {
+        console.warn('[DMVoice] Refusing a call in a read-only conversation');
+        if (get().incomingCall?.conversationId === conversationId) set({ incomingCall: null });
+        return;
+      }
+    } catch (err) {
+      // the conversation state could not be read: the server decides on the join
+      console.warn('[DMVoice] Could not check whether the conversation is read-only:', err);
+    }
 
     // Leave server voice channel if active (cross-cleanup)
     if (get().activeChannelId) {

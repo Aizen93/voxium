@@ -6,7 +6,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useVoiceStore, teardownSecureVoice } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
-import { useDMStore } from '../../stores/dmStore';
+import { useDMStore, isConversationReadOnly } from '../../stores/dmStore';
 import { useE2EStore } from '../../stores/e2eStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { getSocket, getSocketGeneration, onConnectionStatusChange } from '../../services/socket';
@@ -44,6 +44,10 @@ import { discoverySocketHandlers } from '../../services/discoverySocketHandlers'
 import { handleMessageBulkDeleted } from '../../services/webhookSocketHandlers';
 import { handleAppResume } from '../../services/resume';
 import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
+import { handleConversationReadOnly } from '../../services/dmReadOnly';
+import { isDeletedMessageRow } from '../../services/e2e/displayGate';
+import { isParticipantDeleted, participantDisplayName } from '../../utils/dmParticipant';
+import { WS_EVENTS, isDeletedParticipantId } from '@voxium/shared';
 import type {
   Message, Channel, Category, Server, PublicUser, VoiceUser, UserStatus,
   TransportOptions, ConsumerOptions, UnreadCount, DMUnreadCount, Friendship,
@@ -65,6 +69,7 @@ function activeVoiceServerIs(serverId: string): boolean {
 }
 
 export function MainLayout() {
+  const { t } = useTranslation();
   const { fetchServers, activeServerId, channels } = useServerStore();
   const { user } = useAuthStore();
   const activeConversationId = useDMStore((s) => s.activeConversationId);
@@ -410,6 +415,17 @@ export function MainLayout() {
         const dmStore = useDMStore.getState();
         const activeConvId = dmStore.activeConversationId;
 
+        // A deleted account's message (the gate's placeholder row) is never
+        // news: it only stands in for a row already there. No preview, no
+        // unread count, no sound, no notification; on screen it replaces the
+        // row with its id.
+        if (isDeletedMessageRow(message)) {
+          if (message.conversationId === activeConvId && !useServerStore.getState().activeServerId) {
+            useChatStore.getState().updateMessage(message);
+          }
+          return;
+        }
+
         // Update last message in conversation list
         if (message.conversationId) {
           // If conversation isn't in the local store yet (e.g. brand-new DM), fetch it
@@ -439,7 +455,8 @@ export function MainLayout() {
           }, 2000);
         } else if (message.conversationId) {
           const currentUser = useAuthStore.getState().user;
-          if (message.author?.id !== currentUser?.id) {
+          // the deleted account's placeholder notifies nobody (it writes nothing new)
+          if (message.author?.id !== currentUser?.id && !isDeletedParticipantId(message.author?.id)) {
             dmStore.incrementDMUnread(message.conversationId);
             const settings = useSettingsStore.getState();
             if (settings.enableNotificationSounds) playMessageSound();
@@ -475,6 +492,8 @@ export function MainLayout() {
       dmTypingStart: ({ conversationId, userId, username }: { conversationId: string; userId: string; username: string }) => {
         const currentUser = useAuthStore.getState().user;
         const activeConvId = useDMStore.getState().activeConversationId;
+        // nobody types on the other side of a read-only conversation
+        if (isConversationReadOnly(conversationId)) return;
         if (userId !== currentUser?.id && conversationId === activeConvId && !useServerStore.getState().activeServerId) {
           useChatStore.getState().setTypingUser(userId, username);
         }
@@ -503,6 +522,8 @@ export function MainLayout() {
       dmVoiceOffer: ({ conversationId, from }: { conversationId: string; from: VoiceUser }) => {
         const currentUser = useAuthStore.getState().user;
         if (from.id === currentUser?.id) return;
+        // a read-only conversation has no calls (the other side's account is gone)
+        if (isConversationReadOnly(conversationId)) return;
         // Don't show incoming call if already in a voice channel or DM call
         const voiceState = useVoiceStore.getState();
         if (voiceState.activeChannelId || voiceState.dmCallConversationId) return;
@@ -547,6 +568,11 @@ export function MainLayout() {
       },
       dmConversationDeleted: ({ conversationId }: { conversationId: string }) => {
         useDMStore.getState().handleConversationDeleted(conversationId);
+      },
+      // The other side's account was deleted: the conversation stays, read-only
+      // (services/dmReadOnly.ts validates the payload and ignores an unknown id)
+      dmConversationReadOnly: (data: unknown) => {
+        handleConversationReadOnly(data);
       },
       friendRequestReceived: (data: { friendship: Friendship }) => {
         useFriendStore.getState().handleRequestReceived(data);
@@ -801,6 +827,7 @@ export function MainLayout() {
       ['dm:voice:signal', handlers.dmVoiceSignal],
       ['dm:voice:ended', handlers.dmVoiceEnded],
       ['dm:conversation:deleted', handlers.dmConversationDeleted],
+      [WS_EVENTS.DM_CONVERSATION_READ_ONLY, handlers.dmConversationReadOnly],
       ['friend:request_received', handlers.friendRequestReceived],
       ['friend:request_accepted', handlers.friendRequestAccepted],
       ['friend:removed', handlers.friendRemoved],
@@ -998,11 +1025,15 @@ export function MainLayout() {
           }
           if (activeConversationId) {
             const conv = conversations.find((c) => c.id === activeConversationId);
+            const readOnly = isParticipantDeleted(conv);
             return (
               <SearchModal
+                // a conversation turning read-only starts the search over:
+                // results found before the purge are not kept
+                key={readOnly ? 'read-only' : 'open'}
                 onClose={() => setShowGlobalSearch(false)}
                 conversationId={activeConversationId}
-                participantName={conv?.participant.displayName}
+                participantName={conv ? participantDisplayName(conv, t) : undefined}
               />
             );
           }

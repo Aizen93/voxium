@@ -67,8 +67,10 @@ const cc = vi.hoisted(() => {
   };
 });
 vi.mock('../../services/e2e/callCrypto', () => cc);
+// Mutable: the read-only refusal of joinDMCall reads the loaded conversations
+const dmEnv = vi.hoisted(() => ({ conversations: [] as Array<Record<string, unknown>> }));
 vi.mock('../../stores/dmStore', () => ({
-  useDMStore: { getState: () => ({ conversations: [] }) },
+  useDMStore: { getState: () => ({ conversations: dmEnv.conversations }) },
 }));
 
 // The secure-voice keying module, reached by dynamic import from the store:
@@ -1303,6 +1305,68 @@ describe('voiceStore', () => {
 
       expect(socketEmit()).toHaveBeenCalledWith('dm:voice:join', 'conv-1',
         expect.objectContaining({ deviceId: 'device-me000001' }));
+    });
+
+    describe('a read-only conversation (the other side\'s account was deleted)', () => {
+      const readOnly = {
+        id: 'conv-ro',
+        participant: { id: 'deleted:conv-ro', username: 'deleted', displayName: 'Deleted user', avatarUrl: null },
+        participantDeleted: true,
+      };
+      afterEach(() => {
+        dmEnv.conversations = [];
+      });
+
+      it('joinDMCall refuses before anything: no voice channel left, no microphone, no join, no device-list request', async () => {
+        dmEnv.conversations = [readOnly];
+        useVoiceStore.getState().setLocalUserId('me');
+        useVoiceStore.setState({ activeChannelId: 'ch-ok' });
+        const leaveChannel = vi.spyOn(useVoiceStore.getState(), 'leaveChannel');
+        const getUserMedia = vi.fn();
+        vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } });
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        await useVoiceStore.getState().joinDMCall('conv-ro');
+
+        expect(leaveChannel).not.toHaveBeenCalled();
+        expect(getUserMedia).not.toHaveBeenCalled();
+        expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+        expect(useVoiceStore.getState().activeChannelId).toBe('ch-ok');
+        expect(socketEmit().mock.calls.filter((c) => c[0] === 'dm:voice:join')).toHaveLength(0);
+        expect(warn).toHaveBeenCalledWith('[DMVoice] Refusing a call in a read-only conversation');
+        warn.mockRestore();
+        useVoiceStore.setState({ activeChannelId: null });
+      });
+
+      it('recognised by the placeholder id alone, without the flag', async () => {
+        dmEnv.conversations = [{ ...readOnly, participantDeleted: undefined }];
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await useVoiceStore.getState().joinDMCall('conv-ro');
+        expect(socketEmit().mock.calls.filter((c) => c[0] === 'dm:voice:join')).toHaveLength(0);
+        warn.mockRestore();
+      });
+
+      it('accepting a ring of that conversation joins nothing and drops the ring', async () => {
+        dmEnv.conversations = [readOnly];
+        useVoiceStore.setState({ incomingCall: { conversationId: 'conv-ro', from: peerUser } });
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        await useVoiceStore.getState().acceptCall();
+
+        expect(useVoiceStore.getState().incomingCall).toBeNull();
+        expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+        expect(socketEmit().mock.calls.filter((c) => c[0] === 'dm:voice:join')).toHaveLength(0);
+        warn.mockRestore();
+      });
+
+      it('another conversation still calls as before', async () => {
+        dmEnv.conversations = [readOnly, { id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } }];
+        useVoiceStore.getState().setLocalUserId('me');
+
+        await useVoiceStore.getState().joinDMCall('conv-1');
+
+        expect(socketEmit()).toHaveBeenCalledWith('dm:voice:join', 'conv-1', expect.objectContaining({ deviceId: 'device-me000001' }));
+      });
     });
   });
 });

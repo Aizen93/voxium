@@ -1,4 +1,4 @@
-import { parseE2EEnvelope, isDMSystemNotice } from '@voxium/shared';
+import { parseE2EEnvelope, isDMSystemNotice, DELETED_MESSAGE_TYPE } from '@voxium/shared';
 import type { Conversation } from '@voxium/shared';
 
 /**
@@ -17,4 +17,13 @@ export function dmPreviewText(last: NonNullable<Conversation['lastMessage']>): s
   }
   // a 2.0 server sends no `type`; the notice text is what decides either way
   return (last.type === 'system' || last.type === undefined) && isDMSystemNotice(last.content) ? last.content : null;
+}
+
+/**
+ * Whether a last message is a deleted account's message (`type:
+ * DELETED_MESSAGE_TYPE`): the list then prints the localised "Message deleted"
+ * and never the row's text, whatever the server put in it.
+ */
+export function isDeletedPreview(last: NonNullable<Conversation['lastMessage']>): boolean {
+  return last.type === DELETED_MESSAGE_TYPE;
 }

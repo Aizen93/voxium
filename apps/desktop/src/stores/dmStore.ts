@@ -3,7 +3,23 @@ import { api } from '../services/api';
 import { useChatStore } from './chatStore';
 import { toast } from './toastStore';
 import i18n from '../i18n';
+import { DELETED_MESSAGE_TYPE, isDeletedParticipantId, isDMSystemNotice } from '@voxium/shared';
 import type { Conversation, DMUnreadCount, UserStatus } from '@voxium/shared';
+import { deletedParticipantAuthor } from '../services/e2e/displayGate';
+import { isParticipantDeleted, conversationIsReadOnly } from '../utils/dmParticipant';
+
+/** The purge of a read-only conversation's cache, this session (services/dmReadOnly.ts). */
+export type ReadOnlyPurgeState = 'running' | 'done';
+
+/**
+ * A conversation that turned read-only (the other side's account was deleted):
+ * its id, and the participant id it had before, when this client knew a real
+ * one (null when it was never seen otherwise in this session).
+ */
+export interface ReadOnlyTransition {
+  conversationId: string;
+  previousParticipantId: string | null;
+}
 
 interface DMState {
   conversations: Conversation[];
@@ -11,6 +27,12 @@ interface DMState {
   dmUnreadCounts: Record<string, number>;
   participantStatuses: Record<string, UserStatus>;
   isLoading: boolean;
+  /**
+   * Read-only conversations whose local cache of the other person's text was
+   * purged this session ('done') or is being purged ('running'); an attempt
+   * that failed leaves no entry, so the next list fetch tries again.
+   */
+  readOnlyPurges: Record<string, ReadOnlyPurgeState>;
 
   fetchConversations: () => Promise<void>;
   setActiveConversation: (conversationId: string) => void;
@@ -26,6 +48,28 @@ interface DMState {
   handleConversationDeleted: (conversationId: string) => void;
   totalDMUnread: () => number;
   updateParticipantStatus: (userId: string, status: UserStatus) => void;
+  /**
+   * The other side's account of this conversation was deleted
+   * (`dm:conversation:read_only`): flips the loaded conversation to the
+   * read-only state at once — the placeholder participant, the flag, a
+   * preview the other person wrote replaced by "Message deleted" — before the
+   * list is fetched again. Answers the transition (the participant id it had
+   * before), or null for a conversation not loaded or already read-only.
+   */
+  markParticipantDeleted: (conversationId: string, localUserId: string | null) => ReadOnlyTransition | null;
+  /**
+   * The conversation on screen loaded again from the server (its rows replaced,
+   * the composer's reply and the typing indicator cleared): only while it is
+   * the active conversation, and the caller checks that the DM view (not a
+   * server channel) is the one shown. dmStore owns the clear of the shared
+   * chat store for DM transitions.
+   */
+  reloadConversationView: (conversationId: string) => void;
+}
+
+/** Whether the loaded conversation `conversationId` is read-only (utils/dmParticipant.ts); false when it is not loaded. */
+export function isConversationReadOnly(conversationId: string | null | undefined): boolean {
+  return conversationIsReadOnly(useDMStore.getState().conversations, conversationId);
 }
 
 // Dedup: prevent redundant mark-as-read API calls (same pattern as serverStore)
@@ -38,10 +82,67 @@ let _lastMarkedConvAt = 0;
  * hydration below) or from the live decrypt path, never what GET /dm put in
  * `content` — an `encrypted: true` row with readable text is a forgery the
  * chat view's gate would refuse. Blanked here; dmPreviewText locks a blank.
+ *
+ * A deleted account's message (`type: DELETED_MESSAGE_TYPE`) shows the
+ * localised "Message deleted" whatever it carries: its text is dropped here
+ * too, and the row is marked unencrypted so no hydration asks the cache for it.
  */
 function withLockedPreview(conversation: Conversation): Conversation {
   const last = conversation.lastMessage;
+  if (last?.type === DELETED_MESSAGE_TYPE) {
+    return last.content || last.encrypted ? { ...conversation, lastMessage: { ...last, content: '', encrypted: false } } : conversation;
+  }
   return last?.encrypted && last.content ? { ...conversation, lastMessage: { ...last, content: '' } } : conversation;
+}
+
+/**
+ * The conversation as the read-only state shows it: the placeholder participant
+ * built here from the conversation id (never the server's strings), the flag,
+ * and a last message the other person wrote standing as deleted (their call
+ * notices keep their fixed text). `localUserId` null: the preview is kept.
+ */
+function asReadOnly(conversation: Conversation, localUserId: string | null): Conversation {
+  const participant = deletedParticipantAuthor(conversation.id);
+  const last = conversation.lastMessage;
+  const otherWroteLast = !!last && !!localUserId && last.authorId !== localUserId
+    && !(last.type === 'system' && !last.encrypted && isDMSystemNotice(last.content));
+  return {
+    ...conversation,
+    participant,
+    participantDeleted: true,
+    lastMessage: otherWroteLast && last
+      ? { ...last, type: DELETED_MESSAGE_TYPE, content: '', encrypted: false, authorId: participant.id }
+      : last,
+  };
+}
+
+/**
+ * The fetched list against what this session already knew. An account
+ * deletion is final: a conversation seen read-only stays read-only even when a
+ * list answered from before the deletion (a request already on its way when
+ * the event came) still names the old participant. Answers the list to store
+ * and the conversations that turned read-only with this fetch.
+ */
+function reconcileReadOnly(
+  fetched: Conversation[],
+  known: Conversation[],
+): { conversations: Conversation[]; transitions: ReadOnlyTransition[] } {
+  const before = new Map(known.map((c) => [c.id, c]));
+  const transitions: ReadOnlyTransition[] = [];
+  const conversations = fetched.map((conv) => {
+    const prev = before.get(conv.id);
+    const wasReadOnly = isParticipantDeleted(prev);
+    if (isParticipantDeleted(conv)) {
+      // Seen with a real participant earlier this session: the transition
+      // (the event that said so may have been missed). Not loaded before: the
+      // first list of the session, nothing on screen to bring into line.
+      if (prev && !wasReadOnly) transitions.push({ conversationId: conv.id, previousParticipantId: prev.participant?.id ?? null });
+      return conv;
+    }
+    // the local flip (or an earlier list) said read-only: kept, preview included
+    return wasReadOnly && prev ? { ...conv, participant: prev.participant, participantDeleted: true, lastMessage: prev.lastMessage } : conv;
+  });
+  return { conversations, transitions };
 }
 
 export const useDMStore = create<DMState>((set, get) => ({
@@ -50,10 +151,12 @@ export const useDMStore = create<DMState>((set, get) => ({
   dmUnreadCounts: {},
   participantStatuses: {},
   isLoading: false,
+  readOnlyPurges: {},
 
   fetchConversations: async () => {
     set({ isLoading: true });
     let conversations: Conversation[];
+    let transitions: ReadOnlyTransition[];
     // Only the FETCH is allowed to say the fetch failed. Preview hydration used
     // to sit inside this try, so a local cache read that threw — routinely,
     // after the window was hidden and the browser closed the IndexedDB
@@ -61,7 +164,10 @@ export const useDMStore = create<DMState>((set, get) => ({
     // had loaded perfectly well and was already on screen.
     try {
       const { data } = await api.get('/dm');
-      conversations = (data.data as Conversation[]).map(withLockedPreview);
+      ({ conversations, transitions } = reconcileReadOnly(
+        (data.data as Conversation[]).map(withLockedPreview),
+        get().conversations,
+      ));
     } catch (err) {
       console.error('Failed to fetch conversations:', err);
       toast.error(i18n.t('dm.failedToLoadConversations'));
@@ -78,6 +184,8 @@ export const useDMStore = create<DMState>((set, get) => ({
     // behind an untyped value.
     const statuses: Record<string, import('@voxium/shared').UserStatus> = {};
     for (const conv of conversations) {
+      // a deleted account has no presence: its placeholder gets no status
+      if (isParticipantDeleted(conv)) continue;
       const participant = conv.participant as
         | (typeof conv.participant & { status?: import('@voxium/shared').UserStatus })
         | undefined;
@@ -92,13 +200,29 @@ export const useDMStore = create<DMState>((set, get) => ({
       isLoading: false,
     }));
 
+    // Read-only conversations (the other side's account was deleted): the ones
+    // that turned so since the last list are brought into line (the view on
+    // screen, a call, open popups), whether or not `dm:conversation:read_only`
+    // reached this client, and every one has its cached text of the other
+    // person purged once this session (services/dmReadOnly.ts). Never a list
+    // fetch from there: this is the list fetch.
+    const readOnlyIds = conversations.filter(isParticipantDeleted).map((c) => c.id);
+    if (readOnlyIds.length > 0) {
+      void import('../services/dmReadOnly')
+        .then(({ applyReadOnlyConversations }) => applyReadOnlyConversations(transitions, readOnlyIds))
+        .catch((err) => {
+          console.warn('dm: could not bring read-only conversations into line:', err instanceof Error ? err.message : err);
+        });
+    }
+
     // E2E previews arrive blanked (withLockedPreview) — hydrate them from the
     // local plaintext cache (async; the lock renders until this lands).
     //
     // Best-effort by design: a preview that will not resolve costs a lock icon,
     // not a conversation. Failures are logged and the loop continues, so one
-    // unreadable entry cannot stop the rest from hydrating.
-    const encrypted = conversations.filter((c) => c.lastMessage?.encrypted);
+    // unreadable entry cannot stop the rest from hydrating. A row the deleted
+    // account's placeholder stands for is never looked up.
+    const encrypted = conversations.filter((c) => c.lastMessage?.encrypted && !isDeletedParticipantId(c.lastMessage.authorId));
     if (encrypted.length === 0) return;
     try {
       const { resolveEncryptedPreview } = await import('../services/e2e/dmCrypto');
@@ -157,6 +281,8 @@ export const useDMStore = create<DMState>((set, get) => ({
   },
 
   openDM: async (userId: string) => {
+    // the deleted-account placeholder names nobody: no POST /dm for it
+    if (isDeletedParticipantId(userId)) throw new Error('A deleted account cannot be messaged');
     try {
       const { data } = await api.post('/dm', { userId });
       const conversation: Conversation = withLockedPreview(data.data);
@@ -267,5 +393,24 @@ export const useDMStore = create<DMState>((set, get) => ({
     set((state) => ({
       participantStatuses: { ...state.participantStatuses, [userId]: status },
     }));
+  },
+
+  markParticipantDeleted: (conversationId: string, localUserId: string | null) => {
+    const conversation = get().conversations.find((c) => c.id === conversationId);
+    if (!conversation || isParticipantDeleted(conversation)) return null;
+    const previousParticipantId = conversation.participant?.id ?? null;
+    set((state) => ({
+      conversations: state.conversations.map((c) => (c.id === conversationId ? asReadOnly(c, localUserId) : c)),
+    }));
+    return { conversationId, previousParticipantId };
+  },
+
+  reloadConversationView: (conversationId: string) => {
+    // the caller checks the DM view is the one shown (a server channel on
+    // screen keeps activeConversationId behind it, and the chat store is shared)
+    if (get().activeConversationId !== conversationId) return;
+    const chat = useChatStore.getState();
+    chat.clearMessages();
+    void chat.fetchDMMessages(conversationId);
   },
 }));
