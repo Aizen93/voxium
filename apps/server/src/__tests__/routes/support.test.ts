@@ -291,6 +291,15 @@ describe('Support routes (user side)', () => {
       expect(prismaMock.supportMessage.findMany).not.toHaveBeenCalled();
     });
 
+    it('still serves the read when the support flag is off', async () => {
+      flagSpy.mockReturnValue(false);
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow());
+      prismaMock.supportMessage.findMany.mockResolvedValue([messageRow({ id: 'm1' })]);
+      const res = await request(app).get('/api/v1/support/ticket').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.messages.map((m: any) => m.id)).toEqual(['m1']);
+    });
+
     it('looks the ticket up by the caller and reads messages of that ticket only', async () => {
       prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow());
       prismaMock.supportMessage.findMany.mockResolvedValue([
@@ -387,6 +396,18 @@ describe('Support routes (user side)', () => {
 
     const post = (body: unknown) =>
       request(app).post('/api/v1/support/messages').set('Authorization', `Bearer ${makeToken()}`).send(body as object);
+
+    it('answers 403 and writes nothing when the support flag is off', async () => {
+      flagSpy.mockReturnValue(false);
+      const res = await post({ content: 'need help' });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('Support tickets are currently disabled');
+      expect(flagSpy).toHaveBeenCalledWith('support');
+      expect(prismaMock.supportTicket.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.supportMessage.create).not.toHaveBeenCalled();
+      expect(prismaMock.supportTicket.update).not.toHaveBeenCalled();
+      expect(emitted).toEqual([]);
+    });
 
     it('stores the message in the caller\'s own ticket, whatever ids the body names', async () => {
       const res = await post({ content: 'need help', ticketId: 'ticket-9', authorId: 'user-2', type: 'system' });

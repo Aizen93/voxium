@@ -187,6 +187,7 @@ supportRouter.get('/ticket', async (req: Request, res: Response, next: NextFunct
 
 supportRouter.post('/messages', rateLimitSupport, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (!isFeatureEnabled('support')) throw new ForbiddenError('Support tickets are currently disabled');
     const userId = req.user!.userId;
 
     const ticket = await prisma.supportTicket.findUnique({ where: { userId } });
