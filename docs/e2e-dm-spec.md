@@ -233,6 +233,7 @@ the always-on cutover and is dropped when the new one opens):
 | `history_pull` | an unfinished message-key history pull: the account key's public half, the cursor of the next page and the page requests made so far (§16.3) |
 | `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
+| `ptpurge:read-only:{conversationId}` | `{at}`: when the purge of a read-only conversation's `pt:` entries ended, after a conversation list confirmed it read-only; cleared when a list serves the conversation live (§9.1) |
 
 Only the `pickle` fields are encrypted (by vodozemac, under the pickle key).
 Everything else in a record — session ids, device ids, counters, and the
@@ -304,9 +305,10 @@ verification and shows a warning.
 | Surface | Behavior |
 |---|---|
 | Message timeline | decrypted before entering any store (the display gate, §9.1); lock placeholder on failure, opened in place once the row's group session reaches the device |
-| DM list preview | encrypted: decrypted live, cache-hydrated on fetch, the server's `content` blanked on arrival, "🔒 Encrypted message" fallback; unencrypted: only a listed call notice |
-| Reply previews | encrypted quotes resolved from the plaintext cache (same conversation, quoted author); an unencrypted quote shows only when it is a listed call notice; lock placeholder otherwise; a quote without an author is dropped |
-| Notifications | client decrypts first → body shows plaintext locally (never leaves device) |
+| DM list preview | encrypted: decrypted live, cache-hydrated on fetch, the server's `content` blanked on arrival, "🔒 Encrypted message" fallback; unencrypted: only a listed call notice. A `deleted` last message, and in a read-only conversation any last message that is neither the reader's own nor a listed call notice, shows "Message deleted" and is never read from the cache. |
+| Reply previews | encrypted quotes resolved from the plaintext cache (same conversation, quoted author); an unencrypted quote shows only when it is a listed call notice; lock placeholder otherwise; a quote without an author is dropped. A quote under the placeholder `deleted:{conversationId}`, and in a read-only conversation any quote that is neither the reader's own nor a listed call notice, shows "Message deleted" with no text from the server or the cache. |
+| Notifications | client decrypts first → body shows plaintext locally (never leaves device). A deleted row, and any row the read-only rule shows as deleted, raises no sound, unread count or notification. |
+| Read-only conversation | The other side's account was deleted, recognised by `participantDeleted: true` or a `deleted:` participant id, never by a name. No send, edit, reaction, reply, upload, typing or call. Reading, marking read, deleting one's own messages and removing the conversation stay. |
 | Server search | none for DMs (route removed in 2.1); DM history is searched client-side over the local plaintext cache |
 | Plaintext cache | answers only for the scope it was decrypted under and, when recorded, the author who wrote it — the cache must not vouch for a relabelled id or author that the ratchet's bindings refuse |
 | Reports | DMs: reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied. Secure channels: not reportable (§19.1) |
@@ -325,6 +327,67 @@ did not vouch for:
   'system'` AND content exactly one of `DM_SYSTEM_NOTICES` (shared), shown
   with no attachments and no quote. Secure channels have no notices: every
   unencrypted row is refused.
+- **Deleted rows** (`deletedMessageRow`). Beside a listed call notice, the
+  only DM row the gate passes without the crypto vouching for it is the
+  deleted row. A row whose `type` is `deleted` is rebuilt by the gate from the
+  server's id and time and the conversation it is shown in (the page's, for a
+  fetched page). It has content `''`, `encrypted: false`, the locally built
+  placeholder author `deleted:{conversationId}`, and no quote, attachment,
+  reaction, mention, webhook or `@everyone` claim. The type alone decides,
+  before the refusal of unencrypted rows and before any cache read, decrypt,
+  key-share claim or retry note. Secure channels never take this shape.
+- **The read-only rule.** In a conversation the client holds read-only
+  (served so, flipped by `dm:conversation:read_only`, named by that event
+  before the list loaded it, or, while no list of the session has named it,
+  marked as purged by an earlier session), every
+  row, quote and list preview that is neither the reader's own nor a listed
+  call notice gets the deleted shape, whether or not the server has rewritten
+  it. Nothing of it is decrypted, read from or written to the cache, noted for
+  a retry, counted or notified. A decrypt already running when the
+  conversation turned is checked again when it ends: its row takes the deleted
+  shape and the cache entry it wrote is dropped. Rows under the placeholder
+  author are never decrypted.
+
+  Own means the row's author id equals the signed-in account. A server that
+  labels the other person's row as the reader's gains nothing: the session
+  binding (§12.3: the author must be the inbound session's sender) refuses the
+  decrypt, and the own-message cache answers only for entries the reader
+  wrote. An entry that records no author answers for any author; no current
+  build writes one (every entry records the author it was decrypted or sent
+  under).
+- **The purge of a read-only conversation.** Every `pt:` entry of that
+  conversation whose recorded author is another account is removed; own
+  entries and entries that record no author are kept. One bounded walk on
+  the service queue per set of conversations asked together. The mark
+  (`ptpurge:read-only:{conversationId}`, §7) is written when a walk ends, and
+  only for a conversation a conversation list has served read-only by then: a
+  walk the event alone started still runs and records nothing, and runs again
+  once a list confirms the conversation. Later sessions skip the walk for a
+  marked conversation. The mark decides only before any list of the session
+  names the conversation: until then it is held read-only from the session's
+  start. A conversation a list of this session names is gated by what that
+  list says, whatever an earlier session's mark says, and a list that serves
+  it live then clears the mark it contradicts (in the vault and in memory),
+  so that the next session starts right; a conversation the list does not
+  name keeps its mark. A conversation this session has already held
+  read-only stays so until the session ends (a list answered from before the
+  deletion must not bring the other person back); its mark is cleared all the
+  same. A conversation on screen whose mark is cleared is loaded again, since
+  rows shown before the list were gated under the mark. A walk that
+  fails or is cut short records nothing, and a failed removal of a single
+  entry deletes the mark's record, so the next walk of that conversation runs
+  again. The deleted account's inbound group sessions are kept (keys, not
+  text).
+- **What the read-only flag lets a server do.** `participantDeleted` and
+  `dm:conversation:read_only` are the server's word, like a row's `type`. A
+  server that sets them on a live conversation can, for as long as it keeps
+  saying so: hide the other side's messages (each shows "Message deleted"),
+  stop the reader writing there, and make the device purge its cached text of
+  that person. A list that serves the conversation live again restores it,
+  at once, or from the next session when this one already held it read-only,
+  the purged cache entries excepted. It cannot put any text on screen through
+  them: a deleted row carries none, and the rule only removes. A server that
+  withholds rows can already do as much.
 - **The refused shape** (`refusedRow`): content `''`, `type: 'user'`,
   `encrypted: true` (the "unable to decrypt" marker), no attachments, quote
   locked. Every failure path returns it — unencrypted row, no conversation id,
@@ -363,7 +426,8 @@ did not vouch for:
   stays locked. The try never starts a key-share claim (a session no longer
   on the device leaves the row as it is), fetches nothing and acknowledges
   nothing. Rows of a scope not on screen are left alone; opening it fetches
-  and gates them again.
+  and gates them again. The rows of a read-only conversation, own rows
+  included, are never tried again on key arrival.
 - **Decrypted rows** (`decryptedRow`): text and attachments come out of the
   payload only; the type is pinned to `user` (a notice is never encrypted).
 - **Server-asserted fields** are always dropped (`withoutServerAssertions`):
