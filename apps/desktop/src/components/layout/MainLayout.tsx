@@ -44,7 +44,7 @@ import { discoverySocketHandlers } from '../../services/discoverySocketHandlers'
 import { handleMessageBulkDeleted } from '../../services/webhookSocketHandlers';
 import { handleAppResume } from '../../services/resume';
 import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
-import { handleConversationReadOnly } from '../../services/dmReadOnly';
+import { handleConversationReadOnly, standsAsDeletedNow } from '../../services/dmReadOnly';
 import { isDeletedMessageRow } from '../../services/e2e/displayGate';
 import { isParticipantDeleted, participantDisplayName } from '../../utils/dmParticipant';
 import { WS_EVENTS, isDeletedParticipantId } from '@voxium/shared';
@@ -434,6 +434,10 @@ export function MainLayout() {
             await dmStore.fetchConversations();
             // another await: the session may have ended during it too
             if (signedInUser() !== session) return;
+            // the list may hold it read-only (the other side's account was
+            // deleted while the row was on its way): the other person's row
+            // is no news then, no preview, unread count, sound or notification
+            if (standsAsDeletedNow(message)) return;
           } else {
             dmStore.updateLastMessage(message.conversationId, {
               id: message.id,

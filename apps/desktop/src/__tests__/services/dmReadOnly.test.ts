@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { Conversation } from '@voxium/shared';
+import { DM_NOTICE_CALL_STARTED, type Conversation } from '@voxium/shared';
 
 /**
  * `dm:conversation:read_only { conversationId }` as MainLayout registers it,
@@ -25,9 +25,29 @@ const h = vi.hoisted(() => {
     voice,
     auth: { user: { id: 'me' } as { id: string } | null },
     e2e,
-    purgeCachedPlaintexts: vi.fn(async () => 0),
+    purgeCachedPlaintexts: vi.fn<(scopes: string[], remove: (e: PlaintextPurgeEntry) => boolean, opts?: PurgeOpts) => Promise<PurgeAnswer>>(),
+    clearPurgeMarks: vi.fn<(mark: string, scopes: readonly string[]) => Promise<void>>(async () => {}),
+    // the purge marks the service holds (an earlier session's, or this one's), per scope
+    scopeMarkedPurged: vi.fn<(userId: string | null | undefined, scope: string) => boolean | Promise<boolean>>(() => false),
   };
 });
+
+type PurgeOpts = { mark?: string; record?: (scope: string) => boolean };
+type PurgeAnswer = { removed: number; marked: string[] };
+
+/** What the service answers when a walk ends: the mark for the scopes `record` names then (E2EService.purgeCachedPlaintexts). */
+function walkEnded(scopes: string[], opts: PurgeOpts | undefined, removed = 0): PurgeAnswer {
+  return { removed, marked: opts?.mark ? scopes.filter((scope) => opts.record?.(scope) ?? true) : [] };
+}
+
+/** A walk that ends when the test says so, its answer read at that moment. */
+function heldWalk(): { finish: (removed?: number) => void } {
+  const handle = { finish: (_removed?: number) => {} };
+  h.purgeCachedPlaintexts.mockImplementationOnce((scopes, _remove, opts) => new Promise<PurgeAnswer>((resolve) => {
+    handle.finish = (removed = 0) => resolve(walkEnded(scopes, opts, removed));
+  }));
+  return handle;
+}
 
 vi.mock('../../services/api', () => ({ api: { get: h.apiGet, post: vi.fn(), patch: vi.fn(), delete: vi.fn() } }));
 vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
@@ -46,10 +66,18 @@ vi.mock('../../stores/e2eStore', () => ({
   },
 }));
 vi.mock('../../services/e2e/e2eService', () => ({
-  getE2EService: () => ({ purgeCachedPlaintexts: h.purgeCachedPlaintexts }),
+  READ_ONLY_PURGE_MARK: 'read-only',
+  getE2EService: () => ({ purgeCachedPlaintexts: h.purgeCachedPlaintexts, clearPurgeMarks: h.clearPurgeMarks }),
+  scopeMarkedPurged: (userId: string | null | undefined, scope: string) => h.scopeMarkedPurged(userId, scope),
 }));
 
-import { handleConversationReadOnly, applyReadOnlyConversations, purgeReadOnlyConversation } from '../../services/dmReadOnly';
+import {
+  handleConversationReadOnly,
+  applyReadOnlyConversations,
+  purgeReadOnlyConversation,
+  standsAsDeletedNow,
+  clearMarksOfLiveConversations,
+} from '../../services/dmReadOnly';
 import { useDMStore } from '../../stores/dmStore';
 import { onCloseProfilePopups } from '../../utils/profilePopupBus';
 import type { PlaintextPurgeEntry } from '../../services/e2e/vault';
@@ -90,9 +118,16 @@ beforeEach(() => {
   h.e2e.ready = true;
   h.e2e.error = null;
   h.e2e.listeners = [];
-  h.purgeCachedPlaintexts.mockImplementation(async () => 0);
+  h.purgeCachedPlaintexts.mockReset();
+  h.purgeCachedPlaintexts.mockImplementation(async (scopes, _remove, opts) => walkEnded(scopes, opts));
+  h.clearPurgeMarks.mockReset();
+  h.clearPurgeMarks.mockImplementation(async () => {});
+  h.scopeMarkedPurged.mockReset();
+  h.scopeMarkedPurged.mockImplementation(() => false);
   h.apiGet.mockResolvedValue({ data: { data: [serverReadOnly('c1'), conv('c2')] } });
-  useDMStore.setState({ conversations: [conv('c1'), conv('c2')], activeConversationId: 'c1', readOnlyPurges: {}, participantStatuses: {} });
+  useDMStore.setState({
+    conversations: [conv('c1'), conv('c2')], activeConversationId: 'c1', readOnlyPurges: {}, readOnlyConfirmed: {}, readOnlyPending: {}, participantStatuses: {},
+  });
   warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   closed = [];
   stopListening = onCloseProfilePopups((id) => closed.push(id));
@@ -119,18 +154,28 @@ describe('a payload that is not { conversationId: string } is ignored', () => {
   });
 });
 
-describe('an unknown conversation', () => {
-  it('is ignored: no flip, no refetch, no purge (the next list brings it in)', async () => {
+describe('a conversation the list has not loaded', () => {
+  it('is held read-only by its id: no refetch and no purge now; the next list applies it, purge included', async () => {
     handleConversationReadOnly({ conversationId: 'c-unknown' });
     await settle();
+    expect(useDMStore.getState().readOnlyPending).toEqual({ 'c-unknown': true });
     expect(h.apiGet).not.toHaveBeenCalled();
     expect(h.purgeCachedPlaintexts).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
+
+    h.apiGet.mockResolvedValue({ data: { data: [conv('c1'), conv('c2'), conv('c-unknown')] } });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(useDMStore.getState().conversations.find((c) => c.id === 'c-unknown')!.participantDeleted).toBe(true);
+    expect(useDMStore.getState().readOnlyPending).toEqual({});
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
+    expect(h.purgeCachedPlaintexts.mock.calls[0][0]).toEqual(['c-unknown']);
   });
 });
 
 describe('the conversation on screen turns read-only', () => {
   it('flips at once, reloads the view through dmStore, refetches the list once, and purges what the other person wrote', async () => {
+    const walk = heldWalk();
     handleConversationReadOnly({ conversationId: 'c1' });
 
     // at once, before any request settles
@@ -143,13 +188,22 @@ describe('the conversation on screen turns read-only', () => {
     await settle();
     expect(h.apiGet).toHaveBeenCalledTimes(1);
     expect(h.apiGet).toHaveBeenCalledWith('/dm');
+    // the refetched list served it read-only: confirmed, while the walk runs
+    expect(useDMStore.getState().readOnlyConfirmed).toEqual({ c1: true });
+    walk.finish();
+    await settle();
     // one purge, though the refetched list names the conversation read-only again
     expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
-    const [scope, remove] = h.purgeCachedPlaintexts.mock.calls[0] as unknown as [string, (e: PlaintextPurgeEntry) => boolean];
-    expect(scope).toBe('c1');
-    expect(remove({ messageId: 'a', authorId: 'me', editedAt: null })).toBe(false);
-    expect(remove({ messageId: 'b', authorId: 'u-alice', editedAt: null })).toBe(true);
-    expect(remove({ messageId: 'c', editedAt: null })).toBe(true);
+    const [scopes, remove, opts] = h.purgeCachedPlaintexts.mock.calls[0] as unknown as [string[], (e: PlaintextPurgeEntry) => boolean, PurgeOpts];
+    expect(scopes).toEqual(['c1']);
+    // the mark that lets a later session skip the walk, asked of the list's word when the walk ended
+    expect(opts.mark).toBe('read-only');
+    expect(opts.record?.('c1')).toBe(true);
+    expect(opts.record?.('c2')).toBe(false);
+    expect(remove({ scope: 'c1', messageId: 'a', authorId: 'me', editedAt: null })).toBe(false);
+    expect(remove({ scope: 'c1', messageId: 'b', authorId: 'u-alice', editedAt: null })).toBe(true);
+    // an entry that records no author is kept
+    expect(remove({ scope: 'c1', messageId: 'c', editedAt: null })).toBe(false);
     expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'done' });
     // the other conversation is untouched
     expect(useDMStore.getState().conversations.find((c) => c.id === 'c2')!.participantDeleted).toBeUndefined();
@@ -199,7 +253,7 @@ describe('calls', () => {
 
 describe('a conversation already read-only (a list said so first)', () => {
   it('no second transition and no refetch: only the once-per-session purge is left', async () => {
-    useDMStore.setState({ conversations: [serverReadOnly('c1')], readOnlyPurges: {} });
+    useDMStore.setState({ conversations: [serverReadOnly('c1')], readOnlyPurges: {}, readOnlyConfirmed: { c1: true } });
     h.voice.dmCallConversationId = 'c1';
     handleConversationReadOnly({ conversationId: 'c1' });
     await settle();
@@ -245,15 +299,49 @@ describe('the list reconciliation (the event was missed)', () => {
 });
 
 describe('the purge, once per conversation per session', () => {
+  it('the conversations a list names together are purged in ONE pass', async () => {
+    useDMStore.setState({ readOnlyConfirmed: { c1: true, c2: true } });
+    applyReadOnlyConversations([], ['c1', 'c2']);
+    await settle();
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
+    expect(h.purgeCachedPlaintexts.mock.calls[0][0]).toEqual(['c1', 'c2']);
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'done', c2: 'done' });
+  });
+
+  it('one asked while a pass runs joins the next pass', async () => {
+    const walk = heldWalk();
+    purgeReadOnlyConversation('c1');
+    await settle();
+    purgeReadOnlyConversation('c2');
+    await settle();
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
+    walk.finish();
+    await settle();
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(2);
+    expect(h.purgeCachedPlaintexts.mock.calls[1][0]).toEqual(['c2']);
+  });
+
+  it('an E2E start that already failed: no wait, the purge is left for the next list', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    h.e2e.ready = false;
+    h.e2e.error = 'init failed';
+    purgeReadOnlyConversation('c1');
+    await settle();
+    expect(h.e2e.listeners).toHaveLength(0);
+    expect(h.purgeCachedPlaintexts).not.toHaveBeenCalled();
+    expect(useDMStore.getState().readOnlyPurges.c1).toBeUndefined();
+    debug.mockRestore();
+  });
+
   it('running or done: not started again', async () => {
-    let finish: (n: number) => void = () => {};
-    h.purgeCachedPlaintexts.mockImplementation(() => new Promise<number>((r) => { finish = r; }));
+    useDMStore.setState({ readOnlyConfirmed: { c1: true } });
+    const walk = heldWalk();
     purgeReadOnlyConversation('c1');
     await settle();
     purgeReadOnlyConversation('c1');
     expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
     expect(useDMStore.getState().readOnlyPurges.c1).toBe('running');
-    finish(3);
+    walk.finish(3);
     await settle();
     purgeReadOnlyConversation('c1');
     expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
@@ -261,16 +349,17 @@ describe('the purge, once per conversation per session', () => {
   });
 
   it('a failure is logged without any text, leaves no mark, and the next list tries again', async () => {
+    useDMStore.setState({ readOnlyConfirmed: { c1: true } });
     h.purgeCachedPlaintexts.mockRejectedValueOnce(new DOMException('The transaction was aborted', 'AbortError'));
     purgeReadOnlyConversation('c1');
     await settle();
     expect(useDMStore.getState().readOnlyPurges.c1).toBeUndefined();
     expect(warn).toHaveBeenCalledTimes(1);
     const logged = warn.mock.calls[0].join(' ');
-    expect(logged).toContain('Could not purge the cached text of a read-only conversation');
+    expect(logged).toContain('Could not purge the cached text of read-only conversations');
     expect(logged).toContain('AbortError');
 
-    h.purgeCachedPlaintexts.mockResolvedValueOnce(2);
+    h.purgeCachedPlaintexts.mockImplementationOnce(async (scopes, _remove, opts) => walkEnded(scopes, opts, 2));
     purgeReadOnlyConversation('c1');
     await settle();
     expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(2);
@@ -316,14 +405,261 @@ describe('the purge, once per conversation per session', () => {
   });
 
   it('the account changed while it ran: the next session\'s store is not written', async () => {
-    let finish: (n: number) => void = () => {};
-    h.purgeCachedPlaintexts.mockImplementation(() => new Promise<number>((r) => { finish = r; }));
+    const walk = heldWalk();
     purgeReadOnlyConversation('c1');
     await settle();
     useDMStore.setState({ readOnlyPurges: {} }); // the logout reset
     h.auth.user = { id: 'someone-else' };
-    finish(1);
+    walk.finish(1);
     await settle();
     expect(useDMStore.getState().readOnlyPurges).toEqual({});
+  });
+});
+
+describe('the purge mark: only for a conversation a LIST served read-only', () => {
+  it('the event alone writes no mark: the walk runs, records nothing, and is not started again on the event\'s word', async () => {
+    // the list fetched after the event answers from before the deletion: it confirms nothing
+    h.apiGet.mockResolvedValue({ data: { data: [conv('c1'), conv('c2')] } });
+    handleConversationReadOnly({ conversationId: 'c1' });
+    await settle();
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
+    const opts = h.purgeCachedPlaintexts.mock.calls[0][2] as PurgeOpts;
+    expect(opts.record?.('c1')).toBe(false);
+    expect(await h.purgeCachedPlaintexts.mock.results[0].value).toEqual({ removed: 0, marked: [] });
+    expect(useDMStore.getState().readOnlyConfirmed).toEqual({});
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'unmarked' });
+    // still read-only on screen (an account deletion is final)
+    expect(useDMStore.getState().conversations.find((c) => c.id === 'c1')!.participantDeleted).toBe(true);
+    // asked again on the event's word (or by a list that does not serve it so): nothing
+    purgeReadOnlyConversation('c1');
+    await settle();
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
+  });
+
+  it('a list that serves it read-only later: the walk runs again and writes the mark', async () => {
+    h.apiGet.mockResolvedValue({ data: { data: [conv('c1'), conv('c2')] } });
+    handleConversationReadOnly({ conversationId: 'c1' });
+    await settle();
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'unmarked' });
+
+    h.apiGet.mockResolvedValue({ data: { data: [serverReadOnly('c1'), conv('c2')] } });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(useDMStore.getState().readOnlyConfirmed).toEqual({ c1: true });
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(2);
+    expect(await h.purgeCachedPlaintexts.mock.results[1].value).toEqual({ removed: 0, marked: ['c1'] });
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'done' });
+  });
+
+  it('a list-confirmed purge writes it, a pending id included', async () => {
+    handleConversationReadOnly({ conversationId: 'c-unknown' });
+    h.apiGet.mockResolvedValue({ data: { data: [conv('c-unknown', { participantDeleted: true, participant: { id: 'deleted:c-unknown', username: 'deleted', displayName: 'Deleted user', avatarUrl: null } })] } });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
+    expect(await h.purgeCachedPlaintexts.mock.results[0].value).toEqual({ removed: 0, marked: ['c-unknown'] });
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ 'c-unknown': 'done' });
+  });
+
+  it('a pending id the list applies without serving it read-only: purged, not marked', async () => {
+    handleConversationReadOnly({ conversationId: 'c-unknown' });
+    h.apiGet.mockResolvedValue({ data: { data: [conv('c-unknown')] } });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(useDMStore.getState().conversations[0].participantDeleted).toBe(true);
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
+    expect(useDMStore.getState().readOnlyConfirmed).toEqual({});
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ 'c-unknown': 'unmarked' });
+  });
+
+  it('confirmed by a list after the walk ended but before its answer was applied: the mark is still written', async () => {
+    let finish: () => void = () => {};
+    h.purgeCachedPlaintexts.mockImplementationOnce((scopes, _remove, opts) => new Promise<PurgeAnswer>((resolve) => {
+      // the walk ends and asks `record` BEFORE the list confirms
+      const answer = walkEnded(scopes, opts);
+      finish = () => resolve(answer);
+    }));
+    purgeReadOnlyConversation('c1');
+    await settle();
+    useDMStore.setState({ readOnlyConfirmed: { c1: true } });
+    finish();
+    await settle();
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(2);
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'done' });
+  });
+});
+
+describe('standsAsDeletedNow: a row the read-only rule shows as deleted', () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    conversationId: 'c1', type: 'user' as const, encrypted: true, content: 'x', author: { id: 'u-alice' }, ...over,
+  }) as Parameters<typeof standsAsDeletedNow>[0];
+
+  it('the other person\'s row of a conversation held read-only, and only there', () => {
+    expect(standsAsDeletedNow(row())).toBe(false);
+    useDMStore.setState({ conversations: [serverReadOnly('c1'), conv('c2')] });
+    expect(standsAsDeletedNow(row())).toBe(true);
+    expect(standsAsDeletedNow(row({ conversationId: 'c2' }))).toBe(false);
+    expect(standsAsDeletedNow(row({ conversationId: null }))).toBe(false);
+  });
+
+  it('a conversation an event named before the list loaded it counts too', () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: { c1: true } });
+    expect(standsAsDeletedNow(row())).toBe(true);
+  });
+
+  it('our own row and a listed call notice stand; nobody signed in: nothing is ours', () => {
+    useDMStore.setState({ conversations: [serverReadOnly('c1')] });
+    expect(standsAsDeletedNow(row({ author: { id: 'me' } }))).toBe(false);
+    expect(standsAsDeletedNow(row({ type: 'system', encrypted: false, content: DM_NOTICE_CALL_STARTED, author: { id: 'u-alice' } }))).toBe(false);
+    // the type alone is not a notice
+    expect(standsAsDeletedNow(row({ type: 'system', encrypted: false, content: 'hello', author: { id: 'u-alice' } }))).toBe(true);
+    h.auth.user = null;
+    expect(standsAsDeletedNow(row({ author: { id: 'me' } }))).toBe(true);
+  });
+});
+
+describe('a list that serves a conversation live clears its purge mark', () => {
+  it('the marked ones it serves live, and only those, have their mark cleared', async () => {
+    h.scopeMarkedPurged.mockImplementation((_userId, scope) => scope === 'c1' || scope === 'c9');
+    h.apiGet.mockResolvedValue({ data: { data: [conv('c1'), conv('c2')] } });
+    useDMStore.setState({ conversations: [] });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(h.clearPurgeMarks).toHaveBeenCalledTimes(1);
+    // c9 is marked but the list does not name it: it keeps its mark
+    expect(h.clearPurgeMarks).toHaveBeenCalledWith('read-only', ['c1']);
+    expect(h.scopeMarkedPurged).toHaveBeenCalledWith('me', 'c1');
+  });
+
+  it('a list that serves it read-only clears nothing', async () => {
+    h.scopeMarkedPurged.mockImplementation((_userId, scope) => scope === 'c1');
+    h.apiGet.mockResolvedValue({ data: { data: [serverReadOnly('c1'), conv('c2')] } });
+    useDMStore.setState({ conversations: [] });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(h.clearPurgeMarks).not.toHaveBeenCalled();
+  });
+
+  it('nothing marked: no clear at all', async () => {
+    clearMarksOfLiveConversations(['c1', 'c2']);
+    await settle();
+    expect(h.clearPurgeMarks).not.toHaveBeenCalled();
+  });
+
+  it('marks still being read: their answer decides', async () => {
+    h.scopeMarkedPurged.mockImplementation(async (_userId, scope) => scope === 'c2');
+    clearMarksOfLiveConversations(['c1', 'c2']);
+    await settle();
+    expect(h.clearPurgeMarks).toHaveBeenCalledWith('read-only', ['c2']);
+  });
+
+  it('waits for the E2E service to start; a start that fails clears nothing', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    h.scopeMarkedPurged.mockImplementation(() => true);
+    h.e2e.ready = false;
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(h.clearPurgeMarks).not.toHaveBeenCalled();
+    for (const l of [...h.e2e.listeners]) l({ ready: true, error: null });
+    await settle();
+    expect(h.clearPurgeMarks).toHaveBeenCalledWith('read-only', ['c1']);
+
+    h.clearPurgeMarks.mockClear();
+    h.e2e.ready = false;
+    h.e2e.error = 'init failed';
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(h.clearPurgeMarks).not.toHaveBeenCalled();
+    debug.mockRestore();
+  });
+
+  it('nobody signed in, or an account change on the way: nothing', async () => {
+    h.scopeMarkedPurged.mockImplementation(() => true);
+    h.auth.user = null;
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(h.clearPurgeMarks).not.toHaveBeenCalled();
+
+    h.auth.user = { id: 'me' };
+    h.scopeMarkedPurged.mockImplementation(async () => {
+      h.auth.user = { id: 'someone-else' };
+      return true;
+    });
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(h.clearPurgeMarks).not.toHaveBeenCalled();
+  });
+
+  it('a failure is logged; a session that ended is not warned about', async () => {
+    h.scopeMarkedPurged.mockImplementation(() => true);
+    h.clearPurgeMarks.mockRejectedValueOnce(new DOMException('The transaction was aborted', 'AbortError'));
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0].join(' ')).toContain('Could not clear the purge marks of conversations a list served live');
+    expect(warn.mock.calls[0].join(' ')).toContain('AbortError');
+
+    const ended = new Error('E2E service disposed');
+    ended.name = 'E2EServiceDisposedError';
+    h.clearPurgeMarks.mockRejectedValueOnce(ended);
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(warn).toHaveBeenCalledTimes(1);
+    debug.mockRestore();
+  });
+
+  it('the conversation on screen in the DM view whose mark it cleared is loaded again; another one, or a server view, is not', async () => {
+    h.scopeMarkedPurged.mockImplementation((_userId, scope) => scope === 'c1');
+    useDMStore.setState({ conversations: [conv('c1'), conv('c2')], activeConversationId: 'c1' });
+    clearMarksOfLiveConversations(['c1', 'c2']);
+    await settle();
+    expect(h.clearPurgeMarks).toHaveBeenCalledWith('read-only', ['c1']);
+    expect(h.chat.clearMessages).toHaveBeenCalledTimes(1);
+    expect(h.chat.fetchDMMessages).toHaveBeenCalledWith('c1');
+
+    // c2 on screen, c1 cleared: no reload
+    h.chat.fetchDMMessages.mockClear();
+    useDMStore.setState({ activeConversationId: 'c2' });
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(h.chat.fetchDMMessages).not.toHaveBeenCalled();
+
+    // a server channel on screen (activeConversationId kept behind it): the shared chat store is left alone
+    useDMStore.setState({ activeConversationId: 'c1' });
+    h.server.activeServerId = 'srv-1';
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(h.chat.fetchDMMessages).not.toHaveBeenCalled();
+  });
+
+  it('a conversation the store still holds read-only this session is not reloaded when its mark is cleared', async () => {
+    h.scopeMarkedPurged.mockImplementation(() => true);
+    useDMStore.setState({ conversations: [serverReadOnly('c1')], activeConversationId: 'c1' });
+    clearMarksOfLiveConversations(['c1']);
+    await settle();
+    expect(h.clearPurgeMarks).toHaveBeenCalledWith('read-only', ['c1']);
+    expect(h.chat.fetchDMMessages).not.toHaveBeenCalled();
+  });
+
+  it('a conversation unconfirmed by a live list and confirmed again: the walk runs and marks it', async () => {
+    // confirmed and purged, then served live (a restored server), then read-only again
+    h.apiGet.mockResolvedValue({ data: { data: [serverReadOnly('c1')] } });
+    useDMStore.setState({ conversations: [] });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'done' });
+    // the list now serves it live; the store, having seen it read-only this session, still holds it so
+    h.apiGet.mockResolvedValue({ data: { data: [conv('c1')] } });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'unmarked' });
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(1);
+
+    h.apiGet.mockResolvedValue({ data: { data: [serverReadOnly('c1')] } });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(h.purgeCachedPlaintexts).toHaveBeenCalledTimes(2);
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'done' });
   });
 });

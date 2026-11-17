@@ -19,13 +19,16 @@ const encryptMessage = vi.fn();
 const cachePlaintext = vi.fn();
 const searchDecrypted = vi.fn();
 const encryptChannelMessage = vi.fn();
-const forgetCachedPlaintext = vi.fn<(id: string, expected: { scope: string; authorId: string }) => Promise<void>>(async () => {});
+const forgetCachedPlaintext = vi.fn<(id: string, expected: { scope: string; authorId: string }, opts?: { mark?: string }) => Promise<void>>(async () => {});
+// the purge marks of an earlier session (E2EService.scopePurged), per scope
+const marks = vi.hoisted(() => ({ scopeMarkedPurged: vi.fn<(userId: string | null | undefined, scope: string) => boolean | Promise<boolean>>(() => false) }));
 
 vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/e2e/e2eService')>();
   return {
     ...actual,
     getE2EService: () => ({ getCachedPlaintext, decryptMessage, encryptMessage, cachePlaintext, searchDecrypted, encryptChannelMessage, forgetCachedPlaintext }),
+    scopeMarkedPurged: (userId: string | null | undefined, scope: string) => marks.scopeMarkedPurged(userId, scope),
   };
 });
 
@@ -67,6 +70,7 @@ import { deletedMessageRow, deletedParticipantAuthor, isDeletedQuote } from '../
 import { DMConversationReadOnlyError } from '../../utils/dmParticipant';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { useDMStore } from '../../stores/dmStore';
+import { registerE2ESessionUser } from '../../services/e2e/session';
 
 const CONV = 'c-1';
 const PLACEHOLDER = `deleted:${CONV}`;
@@ -125,6 +129,9 @@ beforeEach(() => {
   ledger.noteQuoteAwaiting.mockReset();
   forgetCachedPlaintext.mockReset();
   forgetCachedPlaintext.mockImplementation(async () => {});
+  marks.scopeMarkedPurged.mockReset();
+  marks.scopeMarkedPurged.mockImplementation(() => false);
+  registerE2ESessionUser(() => 'me');
   useDMStore.setState({ conversations: [] });
 });
 
@@ -457,7 +464,8 @@ describe('the read-only rule in the gate: the other person\'s rows the server ha
     answer({ text: 'their words' });
 
     expectPlaceholderShape((await shown)!, 'm-old');
-    expect(forgetCachedPlaintext).toHaveBeenCalledWith('m-old', { scope: CONV, authorId: 'u-real' });
+    // dropped under the read-only mark: a removal that fails clears the conversation's mark
+    expect(forgetCachedPlaintext).toHaveBeenCalledWith('m-old', { scope: CONV, authorId: 'u-real' }, { mark: 'read-only' });
     expect(ledger.noteUndecrypted).not.toHaveBeenCalled();
   });
 
@@ -537,7 +545,7 @@ describe('the read-only rule in the gate: the other person\'s rows the server ha
     cached('my quoted words');
 
     expectPlaceholderShape((await shown)!, 'm-old');
-    expect(forgetCachedPlaintext).toHaveBeenCalledWith('m-old', { scope: CONV, authorId: 'u-real' });
+    expect(forgetCachedPlaintext).toHaveBeenCalledWith('m-old', { scope: CONV, authorId: 'u-real' }, { mark: 'read-only' });
   });
 
   it('a row naming another conversation in a page of this one: the deleted shape across the flip, but no entry of that other conversation is dropped', async () => {
@@ -599,5 +607,87 @@ describe('the read-only rule in the gate: the other person\'s rows the server ha
     expect(out).toMatchObject({ id: 'm-old', content: 'their words', encrypted: true, type: 'user' });
     expect(decryptMessage).toHaveBeenCalledTimes(1);
     expect(forgetCachedPlaintext).not.toHaveBeenCalled();
+  });
+});
+
+describe('a conversation an earlier session marked as purged: read-only from the start, before any list', () => {
+  const PEER = { id: 'u-real', username: 'alice', displayName: 'Alice', avatarUrl: null };
+  const ME = { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null };
+  const live = (over: Partial<Message> = {}): Message => ({
+    id: 'm-push', type: 'user', content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy'), encrypted: true,
+    channelId: null, conversationId: CONV, author: PEER, mentions: [], attachments: [], reactions: [],
+    createdAt: '2026-11-01T10:00:00.000Z', editedAt: null, ...over,
+  });
+
+  beforeEach(() => {
+    // no list yet: the store holds nothing about the conversation
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    decryptMessage.mockResolvedValue({ text: 'their words' });
+  });
+
+  it('a pushed row of the other person gets the deleted shape: nothing decrypted, read, cached or noted', async () => {
+    marks.scopeMarkedPurged.mockImplementation((_userId, scope) => scope === CONV);
+    const out = await decryptMessageForDisplay(live());
+    expectPlaceholderShape(out!, 'm-push');
+    expect(decryptMessage).not.toHaveBeenCalled();
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+    expect(ledger.noteUndecrypted).not.toHaveBeenCalled();
+    // asked for the signed-in account
+    expect(marks.scopeMarkedPurged).toHaveBeenCalledWith('me', CONV);
+  });
+
+  it('while the marks are still being read (a promise), the same', async () => {
+    marks.scopeMarkedPurged.mockImplementation(async (_userId, scope) => scope === CONV);
+    expectPlaceholderShape((await decryptMessageForDisplay(live()))!, 'm-push');
+    expect(decryptMessage).not.toHaveBeenCalled();
+  });
+
+  it('my own row decrypts as before', async () => {
+    marks.scopeMarkedPurged.mockImplementation((_userId, scope) => scope === CONV);
+    decryptMessage.mockResolvedValueOnce({ text: 'my words' });
+    expect(await decryptMessageForDisplay(live({ author: ME }))).toMatchObject({ content: 'my words', encrypted: true });
+  });
+
+  it('the list preview of the other person\'s last message is never read from the cache', async () => {
+    marks.scopeMarkedPurged.mockImplementation((_userId, scope) => scope === CONV);
+    expect(await resolveEncryptedPreview('m-push', CONV, 'u-real')).toBeNull();
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+  });
+
+  it('a conversation a list of this session loaded live: the list decides, whatever the mark says', async () => {
+    marks.scopeMarkedPurged.mockImplementation((_userId, scope) => scope === CONV);
+    useDMStore.setState({
+      conversations: [{
+        id: CONV, user1Id: 'me', user2Id: 'u-real', participant: { ...PEER }, lastMessage: null,
+        encryptedAt: '2026-01-01T00:00:00.000Z', createdAt: '2026-01-01T00:00:00.000Z',
+      } as Conversation],
+    });
+    const out = await decryptMessageForDisplay(live());
+    expect(out).toMatchObject({ id: 'm-push', type: 'user', content: 'their words', encrypted: true });
+    expect(decryptMessage).toHaveBeenCalledTimes(1);
+    // the mark is not even asked for a loaded conversation
+    expect(marks.scopeMarkedPurged).not.toHaveBeenCalled();
+    getCachedPlaintext.mockResolvedValueOnce('their last words');
+    expect(await resolveEncryptedPreview('m-push', CONV, 'u-real')).toBe('their last words');
+  });
+
+  it('a page shown in a loaded conversation, for a row naming one no list loaded: the mark of that one still holds', async () => {
+    marks.scopeMarkedPurged.mockImplementation((_userId, scope) => scope === 'c-unloaded');
+    useDMStore.setState({
+      conversations: [{
+        id: CONV, user1Id: 'me', user2Id: 'u-real', participant: { ...PEER }, lastMessage: null,
+        encryptedAt: '2026-01-01T00:00:00.000Z', createdAt: '2026-01-01T00:00:00.000Z',
+      } as Conversation],
+    });
+    const out = await decryptMessagesForDisplay([live({ conversationId: 'c-unloaded' })], { conversationId: CONV });
+    expectPlaceholderShape(out[0], 'm-push');
+    expect(marks.scopeMarkedPurged).toHaveBeenCalledWith('me', 'c-unloaded');
+    expect(marks.scopeMarkedPurged).not.toHaveBeenCalledWith('me', CONV);
+  });
+
+  it('an unmarked conversation is gated as before', async () => {
+    const out = await decryptMessageForDisplay(live());
+    expect(out).toMatchObject({ content: 'their words' });
+    expect(decryptMessage).toHaveBeenCalledTimes(1);
   });
 });

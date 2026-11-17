@@ -17,7 +17,7 @@
 // eval-order cycle that crashes at boot.
 import { buildE2EPlaintext, parseE2EPlaintext, isDMSystemNotice, isDeletedParticipantId, DELETED_MESSAGE_TYPE } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
-import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
+import { getE2EService, scopeMarkedPurged, E2EIdentityChangedError, READ_ONLY_PURGE_MARK, type E2EMessagePosition } from './e2eService';
 import {
   DECRYPT_FAILED_CONTENT,
   decryptedRow,
@@ -28,7 +28,7 @@ import {
   refusedRow,
   withoutServerAssertions,
 } from './displayGate';
-import { isE2ESessionEnded } from './session';
+import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 import { arrivalMark, noteQuoteAwaiting, noteUndecrypted } from './undecryptedRows';
 import { isParticipantDeleted, isHeldReadOnly, DMConversationReadOnlyError } from '../../utils/dmParticipant';
 
@@ -48,19 +48,22 @@ async function currentUserId(): Promise<string | null> {
  */
 let dmStoreModule: typeof import('../../stores/dmStore') | null = null;
 
-function readOnlyIn(module: typeof import('../../stores/dmStore'), ids: Array<string | null | undefined>): boolean {
-  const state = module.useDMStore.getState();
-  return ids.some((id) => isHeldReadOnly(state, id));
+/** The DM store's word: whether it holds any of these read-only, and which of them no list has loaded. */
+interface StoreWord {
+  held: boolean;
+  notLoaded: Array<string | null | undefined>;
 }
 
-/**
- * Whether the DM store holds any of these conversations read-only (the other
- * side's account was deleted: utils/dmParticipant.ts): a boolean once dmStore
- * is loaded, a promise only for the first lookup. A failed import says
- * nothing about the conversation: logged, and the row is gated as before (the
- * server refuses what a read-only conversation does not allow).
- */
-function heldReadOnly(...conversationIds: Array<string | null | undefined>): boolean | Promise<boolean> {
+function readOnlyIn(module: typeof import('../../stores/dmStore'), ids: Array<string | null | undefined>): StoreWord {
+  const state = module.useDMStore.getState();
+  return {
+    held: ids.some((id) => isHeldReadOnly(state, id)),
+    notLoaded: ids.filter((id) => !!id && !state.conversations.some((c) => c.id === id)),
+  };
+}
+
+/** The DM store's word on these conversations: synchronous once dmStore is loaded, a promise only for the first lookup. */
+function heldByStore(conversationIds: Array<string | null | undefined>): StoreWord | Promise<StoreWord> {
   if (dmStoreModule) return readOnlyIn(dmStoreModule, conversationIds);
   return import('../../stores/dmStore').then(
     (module) => {
@@ -69,9 +72,45 @@ function heldReadOnly(...conversationIds: Array<string | null | undefined>): boo
     },
     (err: unknown) => {
       console.warn('e2e: the read-only state of a conversation could not be read:', err instanceof Error ? err.message : err);
-      return false;
+      return { held: false, notLoaded: conversationIds };
     },
   );
+}
+
+/**
+ * Whether an earlier session recorded the purge of any of these conversations
+ * (scopeMarkedPurged): a list confirmed it read-only then, so the mark holds
+ * from the start of this session for a conversation no list of this session
+ * has loaded yet. A boolean once the service has read its marks.
+ */
+function heldByMark(conversationIds: Array<string | null | undefined>): boolean | Promise<boolean> {
+  const userId = currentE2ESessionUser();
+  const pending: Promise<boolean>[] = [];
+  for (const id of new Set(conversationIds)) {
+    if (!id) continue;
+    const marked = scopeMarkedPurged(userId, id);
+    if (marked === true) return true;
+    if (marked !== false) pending.push(marked);
+  }
+  if (pending.length === 0) return false;
+  return Promise.all(pending).then((answers) => answers.some(Boolean));
+}
+
+/**
+ * Whether any of these conversations is held read-only (the other side's
+ * account was deleted: utils/dmParticipant.ts): by the DM store's word for a
+ * conversation a list of this session loaded (its sticky read-only state and
+ * the ids an event named included), whatever an earlier session's mark says;
+ * by that purge mark only for one no list has loaded yet. A boolean once both
+ * are loaded, a promise only until then. A failed lookup says nothing about
+ * the conversation: logged, and the row is gated as before (the server
+ * refuses what a read-only conversation does not allow).
+ */
+function heldReadOnly(...conversationIds: Array<string | null | undefined>): boolean | Promise<boolean> {
+  const decide = ({ held, notLoaded }: StoreWord): boolean | Promise<boolean> =>
+    held ? true : notLoaded.length > 0 ? heldByMark(notLoaded) : false;
+  const byStore = heldByStore(conversationIds);
+  return byStore instanceof Promise ? byStore.then(decide) : decide(byStore);
 }
 
 /** heldReadOnly, awaited only when it had to load dmStore. */
@@ -196,7 +235,7 @@ async function decryptOneForDisplay(input: Message, retry: boolean, pageConversa
   // shape as a `deleted` row, decided before any decrypt, cache read or retry
   // note, so nothing of it is shown, counted, notified or cached. Every other
   // conversation is gated as it was; the lookup is one read of the store's
-  // state once dmStore is loaded.
+  // state (and of the service's purge marks) once both are loaded.
   const lookup = shownIn ? heldReadOnly(shownIn, message.conversationId) : false;
   // no await on the ordinary path once dmStore is loaded
   const readOnly = typeof lookup === 'boolean' ? lookup : await lookup;
@@ -251,7 +290,11 @@ async function settleReadOnly(
   if (!own) {
     if (decrypted && userId && message.conversationId === shownIn) {
       try {
-        await getE2EService(userId).forgetCachedPlaintext(message.id, { scope: shownIn, authorId: message.author?.id ?? '' });
+        await getE2EService(userId).forgetCachedPlaintext(
+          message.id,
+          { scope: shownIn, authorId: message.author?.id ?? '' },
+          { mark: READ_ONLY_PURGE_MARK },
+        );
       } catch (err) {
         if (isE2ESessionEnded(err)) throw err;
         console.warn(`e2e: the cache entry of message ${message.id} could not be dropped:`, err instanceof Error ? err.message : err);

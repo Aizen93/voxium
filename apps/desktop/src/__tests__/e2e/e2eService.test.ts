@@ -880,6 +880,24 @@ beforeAll(async () => {
 });
 
 describe('E2EService (client crypto core)', () => {
+  it('reads the read-only purge marks once, at its start, so the display gate has them before any list', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    await alice.service.initialize();
+    await alice.service.purgeCachedPlaintexts(['conv-ro'], () => false, { mark: 'read-only' });
+
+    const list = vi.spyOn(E2EVault.prototype, 'listPurgedScopes');
+    const restarted = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await restarted.service.initialize();
+    expect(list).toHaveBeenCalledWith('read-only');
+    // nobody asked yet: the start read them, and the answers are booleans once it ends
+    await vi.waitFor(() => expect(restarted.service.scopePurged('read-only', 'conv-ro')).toBe(true));
+    expect(restarted.service.scopePurged('read-only', 'conv-live')).toBe(false);
+    expect(list).toHaveBeenCalledTimes(1);
+    list.mockRestore();
+  });
+
   it('registers a device with signed keys and a stable device id on first initialize', async () => {
     uniq++;
     const server = createFakeServer();

@@ -10,12 +10,13 @@ import type { Conversation } from '@voxium/shared';
  * cache, exactly like the event (services/dmReadOnly.ts does both).
  */
 
-const { apiGet, apiPost, toastError, resolveEncryptedPreview, applyReadOnlyConversations, chat } = vi.hoisted(() => ({
+const { apiGet, apiPost, toastError, resolveEncryptedPreview, applyReadOnlyConversations, clearMarksOfLiveConversations, chat } = vi.hoisted(() => ({
   apiGet: vi.fn(),
   apiPost: vi.fn(),
   toastError: vi.fn(),
   resolveEncryptedPreview: vi.fn(),
   applyReadOnlyConversations: vi.fn(),
+  clearMarksOfLiveConversations: vi.fn(),
   chat: { clearMessages: vi.fn(), fetchDMMessages: vi.fn(async () => {}) },
 }));
 
@@ -23,7 +24,7 @@ vi.mock('../../services/api', () => ({ api: { get: apiGet, post: apiPost, patch:
 vi.mock('../../stores/toastStore', () => ({ toast: { error: toastError, success: vi.fn(), info: vi.fn() } }));
 vi.mock('../../services/e2e/dmCrypto', () => ({ resolveEncryptedPreview }));
 vi.mock('../../stores/chatStore', () => ({ useChatStore: { getState: () => chat } }));
-vi.mock('../../services/dmReadOnly', () => ({ applyReadOnlyConversations }));
+vi.mock('../../services/dmReadOnly', () => ({ applyReadOnlyConversations, clearMarksOfLiveConversations }));
 
 import { useDMStore, isConversationReadOnly } from '../../stores/dmStore';
 import { registerE2ESessionUser } from '../../services/e2e/session';
@@ -64,9 +65,10 @@ beforeEach(() => {
   toastError.mockReset();
   resolveEncryptedPreview.mockReset();
   applyReadOnlyConversations.mockReset();
+  clearMarksOfLiveConversations.mockReset();
   chat.clearMessages.mockReset();
   chat.fetchDMMessages.mockReset();
-  useDMStore.setState({ conversations: [], isLoading: false, participantStatuses: {}, activeConversationId: null, readOnlyPurges: {}, readOnlyPending: {} });
+  useDMStore.setState({ conversations: [], isLoading: false, participantStatuses: {}, activeConversationId: null, readOnlyPurges: {}, readOnlyPending: {}, readOnlyConfirmed: {} });
   // the signed-in account, as dmStore reads it (the E2E layer's session source)
   registerE2ESessionUser(() => 'me');
 });
@@ -94,13 +96,49 @@ describe('the list reconciles read-only conversations without the event', () => 
     await settle();
 
     expect(applyReadOnlyConversations).toHaveBeenCalledWith([], ['c1']);
+    // the live one, for its purge mark (the list's word both ways)
+    expect(clearMarksOfLiveConversations).toHaveBeenCalledWith(['c2']);
   });
 
-  it('no read-only conversation: the module is not even loaded', async () => {
-    apiGet.mockResolvedValue({ data: { data: [conv()] } });
+  it('no read-only conversation: nothing is purged, the live ones are handed over for their marks', async () => {
+    apiGet.mockResolvedValue({ data: { data: [conv(), conv({ id: 'c2' })] } });
     await useDMStore.getState().fetchConversations();
     await settle();
     expect(applyReadOnlyConversations).not.toHaveBeenCalled();
+    expect(clearMarksOfLiveConversations).toHaveBeenCalledWith(['c1', 'c2']);
+  });
+
+  it('an empty list loads nothing', async () => {
+    apiGet.mockResolvedValue({ data: { data: [] } });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(applyReadOnlyConversations).not.toHaveBeenCalled();
+    expect(clearMarksOfLiveConversations).not.toHaveBeenCalled();
+  });
+
+  it('confirmed only by what a list serves: read-only confirms, live unconfirms and turns a purge done into one owed its mark', async () => {
+    apiGet.mockResolvedValue({ data: { data: [readOnlyConv(), conv({ id: 'c2' })] } });
+    await useDMStore.getState().fetchConversations();
+    expect(useDMStore.getState().readOnlyConfirmed).toEqual({ c1: true });
+
+    // the event alone confirms nothing
+    useDMStore.getState().markParticipantDeleted('c2', 'me');
+    expect(useDMStore.getState().readOnlyConfirmed).toEqual({ c1: true });
+
+    // c1 served live again (a restored server): no longer confirmed, its purge is owed the mark again
+    useDMStore.setState({ readOnlyPurges: { c1: 'done', c2: 'running' } });
+    apiGet.mockResolvedValue({ data: { data: [conv(), conv({ id: 'c2' })] } });
+    await useDMStore.getState().fetchConversations();
+    expect(useDMStore.getState().readOnlyConfirmed).toEqual({});
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c1: 'unmarked', c2: 'running' });
+  });
+
+  it('a conversation the list does not name keeps its confirmation', async () => {
+    useDMStore.setState({ readOnlyConfirmed: { c9: true }, readOnlyPurges: { c9: 'done' } });
+    apiGet.mockResolvedValue({ data: { data: [conv()] } });
+    await useDMStore.getState().fetchConversations();
+    expect(useDMStore.getState().readOnlyConfirmed).toEqual({ c9: true });
+    expect(useDMStore.getState().readOnlyPurges).toEqual({ c9: 'done' });
   });
 
   it('stays read-only: a later list answered from before the deletion (or that lost the flag) changes nothing', async () => {

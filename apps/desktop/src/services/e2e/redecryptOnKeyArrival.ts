@@ -28,7 +28,7 @@ import { useServerStore } from '../../stores/serverStore';
 import { decryptMessageForDisplay, quotedTextFromCache, resolveEncryptedPreview } from './dmCrypto';
 import { decryptChannelMessageForDisplay, quotedChannelTextFromCache } from './channelCrypto';
 import { isRefusedShape } from './displayGate';
-import type { E2ESessionsAvailable } from './e2eService';
+import { scopeMarkedPurged, type E2ESessionsAvailable } from './e2eService';
 import { currentE2ESessionUser } from './session';
 import { isHeldReadOnly } from '../../utils/dmParticipant';
 import {
@@ -71,12 +71,20 @@ function scopeOnScreen(): string | null {
 }
 
 /**
- * A conversation the DM store holds read-only (the other side's account was
- * deleted): nothing of it is tried again or filled in from the cache here.
- * Its rows the gate shows as deleted; a page in flight is reloaded anyway.
+ * A conversation held read-only (the other side's account was deleted), by
+ * the display gate's rule: the DM store's word for a conversation a list of
+ * this session loaded, a purge mark an earlier session wrote only for one no
+ * list has loaded yet. Nothing of it is tried again or filled in from the
+ * cache here, own rows included. Its other rows the gate shows as deleted; a
+ * page in flight is reloaded anyway.
  */
-function heldReadOnly(scope: string): boolean {
-  return isHeldReadOnly(useDMStore.getState(), scope);
+async function heldReadOnly(scope: string): Promise<boolean> {
+  const state = useDMStore.getState();
+  if (isHeldReadOnly(state, scope)) return true;
+  // loaded by a list: its word decides, whatever an earlier session's mark says
+  if (state.conversations.some((c) => c.id === scope)) return false;
+  const marked = scopeMarkedPurged(currentE2ESessionUser(), scope);
+  return typeof marked === 'boolean' ? marked : await marked;
 }
 
 /** The same version by the same author: the row a held one was gated as. */
@@ -141,7 +149,7 @@ async function refreshWhatShowsIt(scope: string, opened: Message, live: () => bo
       return { messages };
     });
   }
-  if (inChannel || heldReadOnly(scope)) return;
+  if (inChannel || (await heldReadOnly(scope))) return;
   const last = useDMStore.getState().conversations.find((c) => c.id === scope)?.lastMessage;
   if (!last || last.id !== opened.id || !last.encrypted || last.content) return;
   let preview: string | null;
@@ -154,7 +162,7 @@ async function refreshWhatShowsIt(scope: string, opened: Message, live: () => bo
   }
   if (preview === null || !live()) return;
   // turned read-only during the read: the preview stands as deleted, no text goes in
-  if (heldReadOnly(scope)) return;
+  if ((await heldReadOnly(scope)) || !live()) return;
   useDMStore.setState((state) => {
     let changed = false;
     const conversations = state.conversations.map((c) => {
@@ -174,7 +182,8 @@ async function retryDueRows(scope: string, live: () => boolean): Promise<void> {
   // a conversation held read-only is never tried again: the gate would only
   // answer the deleted shape for the other person's rows, and the view is
   // reloaded with the server's (its held rows go as the view moves on)
-  if (parseE2EScope(scope).kind !== 'channel' && heldReadOnly(scope)) return;
+  if (parseE2EScope(scope).kind !== 'channel' && (await heldReadOnly(scope))) return;
+  if (!live() || scopeOnScreen() !== scope) return;
   const rows = takeDueRows(scope);
   const inChannel = parseE2EScope(scope).kind === 'channel';
   for (const heldRow of rows) {
@@ -198,7 +207,8 @@ async function retryDueRows(scope: string, live: () => boolean): Promise<void> {
     // still closed: the row stays as it is (its new failure is held at the next view change)
     if (isRefusedShape(opened)) continue;
     // the conversation turned read-only during the try: nothing of it is shown
-    if (parseE2EScope(scope).kind !== 'channel' && heldReadOnly(scope)) return;
+    if (parseE2EScope(scope).kind !== 'channel' && (await heldReadOnly(scope))) return;
+    if (!live() || scopeOnScreen() !== scope) return;
     if (showOpened(heldRow, opened)) await refreshWhatShowsIt(scope, opened, live);
   }
 }

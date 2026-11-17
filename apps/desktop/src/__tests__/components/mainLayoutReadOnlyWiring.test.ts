@@ -36,7 +36,7 @@ function eventTable(): string {
 
 describe('MainLayout and read-only conversations', () => {
   it('imports the handler from services/dmReadOnly and registers ONE entry for the event', () => {
-    expect(source).toMatch(/import \{ handleConversationReadOnly \} from '\.\.\/\.\.\/services\/dmReadOnly';/);
+    expect(source).toMatch(/import \{ handleConversationReadOnly, standsAsDeletedNow \} from '\.\.\/\.\.\/services\/dmReadOnly';/);
     const table = eventTable();
     expect(table.match(/DM_CONVERSATION_READ_ONLY/g) ?? []).toHaveLength(1);
     expect(table).toMatch(/\[WS_EVENTS\.DM_CONVERSATION_READ_ONLY, handlers\.dmConversationReadOnly\]/);
@@ -46,6 +46,18 @@ describe('MainLayout and read-only conversations', () => {
     const body = handlerBody('dmConversationReadOnly');
     expect(body).toMatch(/dmConversationReadOnly: \(data: unknown\) => \{/);
     expect(body).toMatch(/handleConversationReadOnly\(data\);/);
+  });
+
+  it('a pushed row of a conversation the list then holds read-only is dropped before any preview, count, sound or notification', () => {
+    const body = handlerBody('dmMessageNew');
+    const fetch = body.indexOf('await dmStore.fetchConversations();');
+    const drop = body.indexOf('if (standsAsDeletedNow(message)) return;');
+    expect(fetch).toBeGreaterThan(-1);
+    // after the fetch that may say so, and after the session check that follows it
+    expect(drop).toBeGreaterThan(body.indexOf('if (signedInUser() !== session) return;', fetch));
+    for (const later of ['addMessage(', 'incrementDMUnread(', 'playMessageSound(', 'notify(']) {
+      expect(body.indexOf(later), later).toBeGreaterThan(drop);
+    }
   });
 
   it('nobody is shown typing on the other side of a read-only conversation', () => {

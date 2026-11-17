@@ -9,8 +9,13 @@ import { deletedParticipantAuthor } from '../services/e2e/displayGate';
 import { isParticipantDeleted, isHeldReadOnly } from '../utils/dmParticipant';
 import { currentE2ESessionUser } from '../services/e2e/session';
 
-/** The purge of a read-only conversation's cache, this session (services/dmReadOnly.ts). */
-export type ReadOnlyPurgeState = 'running' | 'done';
+/**
+ * The purge of a read-only conversation's cache, this session
+ * (services/dmReadOnly.ts): 'running', 'done' (purged and marked in the
+ * vault), or 'unmarked' (purged on the event's word alone, so not marked: it
+ * runs again once a list confirms the conversation).
+ */
+export type ReadOnlyPurgeState = 'running' | 'done' | 'unmarked';
 
 /**
  * A conversation that turned read-only (the other side's account was deleted):
@@ -30,10 +35,19 @@ interface DMState {
   isLoading: boolean;
   /**
    * Read-only conversations whose local cache of the other person's text was
-   * purged this session ('done') or is being purged ('running'); an attempt
-   * that failed leaves no entry, so the next list fetch tries again.
+   * purged this session ('done', or 'unmarked' before a list confirmed it) or
+   * is being purged ('running'); an attempt that failed leaves no entry, so
+   * the next list fetch tries again.
    */
   readOnlyPurges: Record<string, ReadOnlyPurgeState>;
+  /**
+   * Conversations a LIST of this session served read-only (`participantDeleted:
+   * true`, or the placeholder participant), never one the event alone named:
+   * only those get the vault's purge mark, which holds them read-only from
+   * the start of every later session until a list of that session names
+   * them. A list that serves one live removes it from here. Reset at logout.
+   */
+  readOnlyConfirmed: Record<string, true>;
   /**
    * Conversations `dm:conversation:read_only` named before the list loaded
    * them: read-only from then on (the display gate reads it too), applied by
@@ -182,6 +196,7 @@ export const useDMStore = create<DMState>((set, get) => ({
   participantStatuses: {},
   isLoading: false,
   readOnlyPurges: {},
+  readOnlyConfirmed: {},
   readOnlyPending: {},
 
   fetchConversations: async () => {
@@ -189,6 +204,8 @@ export const useDMStore = create<DMState>((set, get) => ({
     let conversations: Conversation[];
     let transitions: ReadOnlyTransition[];
     let applied: string[];
+    let served: string[];
+    let servedLive: string[];
     // Only the FETCH is allowed to say the fetch failed. Preview hydration used
     // to sit inside this try, so a local cache read that threw — routinely,
     // after the window was hidden and the browser closed the IndexedDB
@@ -196,8 +213,12 @@ export const useDMStore = create<DMState>((set, get) => ({
     // had loaded perfectly well and was already on screen.
     try {
       const { data } = await api.get('/dm');
+      const fetched = (data.data as Conversation[]).map(withLockedPreview);
+      // what the list itself says, before this session's own knowledge joins it
+      served = fetched.filter(isParticipantDeleted).map((c) => c.id);
+      servedLive = fetched.filter((c) => !isParticipantDeleted(c)).map((c) => c.id);
       ({ conversations, transitions, applied } = reconcileReadOnly(
-        (data.data as Conversation[]).map(withLockedPreview),
+        fetched,
         get().conversations,
         get().readOnlyPending,
         // the signed-in account, as the E2E layer reads it (no store import:
@@ -237,11 +258,29 @@ export const useDMStore = create<DMState>((set, get) => ({
         readOnlyPending = { ...state.readOnlyPending };
         for (const id of applied) delete readOnlyPending[id];
       }
+      // The list's word both ways: one served read-only is confirmed, one served
+      // live is not any more (a walk that ends now records no mark for it, and
+      // a purge done this session runs again, marking, once a list confirms it)
+      let readOnlyConfirmed = served.some((id) => !state.readOnlyConfirmed[id])
+        ? { ...state.readOnlyConfirmed, ...Object.fromEntries(served.map((id) => [id, true as const])) }
+        : state.readOnlyConfirmed;
+      let readOnlyPurges = state.readOnlyPurges;
+      const unconfirmed = servedLive.filter((id) => readOnlyConfirmed[id] || readOnlyPurges[id] === 'done');
+      if (unconfirmed.length > 0) {
+        readOnlyConfirmed = { ...readOnlyConfirmed };
+        readOnlyPurges = { ...readOnlyPurges };
+        for (const id of unconfirmed) {
+          delete readOnlyConfirmed[id];
+          if (readOnlyPurges[id] === 'done') readOnlyPurges[id] = 'unmarked';
+        }
+      }
       return {
         conversations,
         participantStatuses: { ...state.participantStatuses, ...statuses },
         isLoading: false,
         readOnlyPending,
+        readOnlyConfirmed,
+        readOnlyPurges,
       };
     });
 
@@ -251,10 +290,17 @@ export const useDMStore = create<DMState>((set, get) => ({
     // reached this client, and every one has its cached text of the other
     // person purged once this session (services/dmReadOnly.ts). Never a list
     // fetch from there: this is the list fetch.
+    // A conversation the list serves live loses the purge mark an earlier
+    // session (or this one) wrote for it: the device follows the list, and the
+    // display gate gates it as live again (what was purged stays purged). One
+    // the list does not name keeps its mark.
     const readOnlyIds = conversations.filter(isParticipantDeleted).map((c) => c.id);
-    if (readOnlyIds.length > 0) {
+    if (readOnlyIds.length > 0 || servedLive.length > 0) {
       void import('../services/dmReadOnly')
-        .then(({ applyReadOnlyConversations }) => applyReadOnlyConversations(transitions, readOnlyIds))
+        .then(({ applyReadOnlyConversations, clearMarksOfLiveConversations }) => {
+          clearMarksOfLiveConversations(servedLive);
+          if (readOnlyIds.length > 0) applyReadOnlyConversations(transitions, readOnlyIds);
+        })
         .catch((err) => {
           console.warn('dm: could not bring read-only conversations into line:', err instanceof Error ? err.message : err);
         });

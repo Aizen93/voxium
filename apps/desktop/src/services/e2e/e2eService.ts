@@ -323,6 +323,19 @@ function refuseDeletedParticipant(userId: unknown): void {
 /** Up to this many `pt:` entries are walked per queue task of a cache purge (purgeCachedPlaintexts). */
 export const PLAINTEXT_PURGE_BATCH = 500;
 
+/**
+ * The purge mark of a conversation whose other side's account was deleted
+ * (`ptpurge:read-only:{conversationId}`): written once a conversation list
+ * confirmed the deletion and the walk ended. A marked scope is read-only from
+ * the start of every later session (scopeMarkedPurged) until a list of that
+ * session names the conversation; one serving it live clears the mark
+ * (clearPurgeMarks), so that the next session starts right.
+ */
+export const READ_ONLY_PURGE_MARK = 'read-only';
+
+/** After a read of the purge marks failed, questions answer "not marked" for this long before the marks are read again. */
+export const PURGE_MARK_RETRY_MS = 30_000;
+
 export interface E2EServiceOptions {
   api?: typeof defaultApi;
   keyProvider?: PickleKeyProvider;
@@ -713,6 +726,19 @@ export class E2EService {
    * scope → session ids: announced once that task is done (enqueue).
    */
   private sessionsStored = new Map<string, Set<string>>();
+  /** Purge marks read from the vault, per mark (scopePurged); absent until the read ended. */
+  private purgeMarks = new Map<string, Set<string>>();
+  /** Marks this service wrote before their read ended: merged into it. */
+  private purgeMarksWritten = new Map<string, Set<string>>();
+  /** The read of a mark's scopes in flight (one range read, shared). */
+  private purgeMarkLoads = new Map<string, Promise<Set<string>>>();
+  /**
+   * How many times each `{mark}:{scope}` was voided (a failed removal, a list serving it live):
+   * a walk that began before one records no mark for that scope.
+   */
+  private purgeMarkVoids = new Map<string, number>();
+  /** When the last read of a mark's scopes failed: no new read before PURGE_MARK_RETRY_MS. */
+  private purgeMarkLoadFailedAt = new Map<string, number>();
 
   constructor(
     private readonly userId: string,
@@ -867,6 +893,12 @@ export class E2EService {
     // connection it was making and throws (E2EVaultClosedError).
     await this.vault.open();
     this.assertLive();
+    // the read-only marks, from the start: the display gate asks for them
+    // before any list (scopePurged); a failed read is logged there
+    void this.loadPurgeMarks(READ_ONLY_PURGE_MARK).catch((err: unknown) => {
+      // logged by loadPurgeMarks; the next question reads them again
+      console.debug('e2e: the read-only purge marks were not read at start:', errText(err));
+    });
 
     let deviceId = await this.vault.getDeviceId();
     this.assertLive();
@@ -4173,11 +4205,123 @@ export class E2EService {
    * turned read-only wrote it after the conversation's purge may have walked
    * past it. On the serial queue, so after the decrypt that wrote it.
    */
-  async forgetCachedPlaintext(messageId: string, expected: { scope: string; authorId: string }): Promise<void> {
+  async forgetCachedPlaintext(
+    messageId: string,
+    expected: { scope: string; authorId: string },
+    opts: { mark?: string } = {},
+  ): Promise<void> {
     return this.enqueue(async () => {
-      const cached = await this.vault.getPlaintext(messageId);
-      if (!cached || cached.conversationId !== expected.scope || cached.authorId !== expected.authorId) return;
-      await this.vault.deletePlaintext(messageId);
+      try {
+        const cached = await this.vault.getPlaintext(messageId);
+        if (!cached || cached.conversationId !== expected.scope || cached.authorId !== expected.authorId) return;
+        await this.vault.deletePlaintext(messageId);
+      } catch (err) {
+        // The entry may still be there: a scope recorded as purged under
+        // `mark` is not any more, so the next walk of it runs again
+        if (opts.mark && !isE2ESessionEnded(err)) await this.voidPurgeRecord(opts.mark, expected.scope);
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Whether a purge under `mark` has ended for `scope` (its mark in the vault):
+   * a boolean once the marks are read (one range read at the start of the
+   * service, or at the first question), a promise only until then. A read that
+   * fails answers false, logged once per attempt; for PURGE_MARK_RETRY_MS after
+   * it, every question answers false at once, with no new read.
+   */
+  scopePurged(mark: string, scope: string): boolean | Promise<boolean> {
+    const loaded = this.purgeMarks.get(mark);
+    if (loaded) return loaded.has(scope);
+    const failedAt = this.purgeMarkLoadFailedAt.get(mark);
+    if (failedAt !== undefined && Date.now() - failedAt < PURGE_MARK_RETRY_MS) return false;
+    return this.loadPurgeMarks(mark).then(
+      (scopes) => scopes.has(scope),
+      () => false,
+    );
+  }
+
+  private loadPurgeMarks(mark: string): Promise<Set<string>> {
+    const inFlight = this.purgeMarkLoads.get(mark);
+    if (inFlight) return inFlight;
+    const load = this.liveVault.listPurgedScopes(mark).then(
+      (scopes) => {
+        const set = new Set(scopes);
+        // marks written meanwhile (this service's own purges) are kept
+        for (const scope of this.purgeMarksWritten.get(mark) ?? []) set.add(scope);
+        this.purgeMarksWritten.delete(mark);
+        this.purgeMarks.set(mark, set);
+        this.purgeMarkLoadFailedAt.delete(mark);
+        return set;
+      },
+      (err: unknown) => {
+        this.purgeMarkLoads.delete(mark);
+        this.purgeMarkLoadFailedAt.set(mark, Date.now());
+        if (!isE2ESessionEnded(err)) console.warn(`e2e: the "${mark}" purge marks could not be read:`, errText(err));
+        throw err;
+      },
+    );
+    this.purgeMarkLoads.set(mark, load);
+    return load;
+  }
+
+  /** A walk of this scope running now must not write the mark when it ends (purgeCachedPlaintexts). */
+  private voidRunningWalks(mark: string, scope: string): void {
+    const key = `${mark}:${scope}`;
+    this.purgeMarkVoids.set(key, (this.purgeMarkVoids.get(key) ?? 0) + 1);
+  }
+
+  /**
+   * A removal under `mark` failed (inside a queue task): the scope's record in
+   * the vault goes, so its next walk runs again, and a walk running now writes
+   * none. The in-memory mark stays: it feeds the display gate alone, and the
+   * scope is still held read-only (the walk decision reads the vault).
+   */
+  private async voidPurgeRecord(mark: string, scope: string): Promise<void> {
+    this.voidRunningWalks(mark, scope);
+    try {
+      await this.vault.deletePurgeMark(mark, scope);
+    } catch (err) {
+      console.warn(`e2e: the "${mark}" purge mark of a scope could not be cleared:`, errText(err));
+    }
+  }
+
+  /**
+   * Clear the mark of these scopes, in the vault and in memory, on the serial
+   * queue: a conversation list served them live, so they are gated as live
+   * again (what was purged stays purged). A walk running for one writes no
+   * mark for it. A scope that holds no mark costs a delete of nothing; one
+   * whose record could not be deleted is logged, and is held again by a later
+   * session until its first list clears it.
+   */
+  async clearPurgeMarks(mark: string, scopes: readonly string[]): Promise<void> {
+    this.assertLive();
+    const wanted = [...new Set(scopes)].filter((scope) => typeof scope === 'string' && scope.length > 0);
+    if (wanted.length === 0) return;
+    // in memory at once: the gate asks before the queue gets here
+    const forget = () => {
+      for (const scope of wanted) {
+        this.voidRunningWalks(mark, scope);
+        this.purgeMarks.get(mark)?.delete(scope);
+        this.purgeMarksWritten.get(mark)?.delete(scope);
+      }
+    };
+    forget();
+    await this.enqueue(async () => {
+      // a read of the marks in flight lands first, so it cannot bring a cleared scope back
+      await this.purgeMarkLoads.get(mark)?.catch((err: unknown) => {
+        console.debug(`e2e: the "${mark}" purge marks were not read before a clear:`, errText(err));
+      });
+      forget();
+      for (const scope of wanted) {
+        try {
+          await this.vault.deletePurgeMark(mark, scope);
+        } catch (err) {
+          if (isE2ESessionEnded(err)) throw err;
+          console.warn(`e2e: the "${mark}" purge mark of a scope could not be cleared:`, errText(err));
+        }
+      }
     });
   }
 
@@ -4422,36 +4566,83 @@ export class E2EService {
   }
 
   /**
-   * Remove decrypted-text cache entries (`pt:`) of ONE scope (a conversation
-   * id, or `ch:{channelId}`) for which `remove` answers true; answers how many
-   * went. `remove` sees each entry's author (absent on entries written before
-   * authors were recorded), message id and creation and edit times, never the
-   * text, and runs synchronously: a conversation whose other side's account
-   * was deleted drops every entry this account did not write; a time floor
+   * Remove decrypted-text cache entries (`pt:`) of a SET of scopes (conversation
+   * ids, or `ch:{channelId}`) for which `remove` answers true, in ONE walk of
+   * the cache; answers how many went (`removed`) and, with a mark, which of
+   * the scopes asked for hold it when the call ends (`marked`). `remove` sees each entry's scope, its
+   * author (as the entry recorded it), message id and creation and edit times,
+   * never the text, and runs synchronously: a conversation whose other side's
+   * account was deleted drops every entry another author wrote; a time floor
    * can drop the entries up to it.
+   *
+   * With a `mark`, a purge that ends is recorded per scope in the vault
+   * (`ptpurge:{mark}:{scope}`), and a scope already recorded under that mark is
+   * left out: a later session walks nothing for it. `record`, asked once per
+   * scope when the walk ends, narrows the scopes recorded (all, without it): a
+   * read-only conversation is recorded only once a conversation list confirmed
+   * it, never on an event alone. Only for a purge whose entries cannot come
+   * back (a read-only conversation's other author writes nothing new, and the
+   * display gate decrypts none of their rows).
    *
    * Bounded: a cursor walks the cache PLAINTEXT_PURGE_BATCH entries at a time,
    * each batch its own task of the serial queue (so it is ordered with the
    * decrypts that write entries, refused once the service is disposed, and
    * holds the queue for one batch at most), resuming after the last key it
    * visited; nothing loads the whole store. Idempotent: a second run over a
-   * purged scope deletes nothing. A batch that fails rejects with what failed
-   * and leaves the entries after it for the next run; the caller logs it.
+   * purged scope deletes nothing. A batch that fails rejects with what failed,
+   * records no mark, and leaves the entries after it for the next run; the
+   * caller logs it.
    */
-  async purgeCachedPlaintexts(scope: string, remove: (entry: PlaintextPurgeEntry) => boolean): Promise<number> {
+  async purgeCachedPlaintexts(
+    scopes: readonly string[],
+    remove: (entry: PlaintextPurgeEntry) => boolean,
+    opts: { mark?: string; record?: (scope: string) => boolean } = {},
+  ): Promise<{ removed: number; marked: string[] }> {
     this.assertLive();
-    if (typeof scope !== 'string' || scope.length === 0) throw new Error('a cache purge needs a scope');
+    const wanted = [...new Set(scopes)];
+    if (wanted.length === 0 || wanted.some((scope) => typeof scope !== 'string' || scope.length === 0)) {
+      throw new Error('a cache purge needs a scope');
+    }
+    const mark = opts.mark;
+    if (mark !== undefined && (typeof mark !== 'string' || !/^[a-z][a-z0-9-]*$/.test(mark))) {
+      throw new Error('a cache purge mark is a lowercase word');
+    }
+    // a removal that fails from here on voids the mark of its scope for this walk
+    const voidsAtStart = new Map(wanted.map((scope) => [scope, this.purgeMarkVoids.get(`${mark}:${scope}`) ?? 0]));
+    const pending = mark ? await this.enqueue(() => this.vault.scopesNotPurged(mark, wanted)) : wanted;
+    const alreadyMarked = mark ? wanted.filter((scope) => !pending.includes(scope)) : [];
+    if (pending.length === 0) return { removed: 0, marked: alreadyMarked };
+    const set = new Set(pending);
     let after: string | null = null;
     let removed = 0;
     do {
       const from: string | null = after;
       const batch: { removed: number; next: string | null } = await this.enqueue(() =>
-        this.vault.purgePlaintextBatch(scope, remove, from, PLAINTEXT_PURGE_BATCH)
+        this.vault.purgePlaintextBatch(set, remove, from, PLAINTEXT_PURGE_BATCH)
       );
       removed += batch.removed;
       after = batch.next;
     } while (after !== null);
-    return removed;
+    // The mark only for the scopes `record` names when the walk ends (all,
+    // without it) and no removal failed for since the walk began: decided and
+    // written in ONE queue task, so a removal (also a queue task) that fails
+    // is either seen here or clears the mark written here
+    const recorded: string[] = !mark ? [] : await this.enqueue(async () => {
+      const chosen = pending.filter((scope) =>
+        (opts.record?.(scope) ?? true) && (this.purgeMarkVoids.get(`${mark}:${scope}`) ?? 0) === voidsAtStart.get(scope));
+      if (chosen.length === 0) return chosen;
+      await this.vault.putScopesPurged(mark, chosen);
+      const known = this.purgeMarks.get(mark);
+      if (known) {
+        for (const scope of chosen) known.add(scope);
+      } else {
+        const written = this.purgeMarksWritten.get(mark) ?? new Set<string>();
+        for (const scope of chosen) written.add(scope);
+        this.purgeMarksWritten.set(mark, written);
+      }
+      return chosen;
+    });
+    return { removed, marked: [...alreadyMarked, ...recorded] };
   }
 
   // ─── Device management for the UI ───────────────────────────────────────────
@@ -4682,6 +4873,18 @@ export function getE2EService(userId: string): E2EService {
   activeService = new E2EService(userId);
   activeUserId = userId;
   return activeService;
+}
+
+/**
+ * Whether the signed-in account's service holds `scope` as purged under the
+ * read-only mark: a conversation an earlier session confirmed as read-only,
+ * read-only from the start of this one (the display gate asks before any
+ * list). False when no service of that account exists yet; a boolean once
+ * the marks are read, a promise only until then.
+ */
+export function scopeMarkedPurged(userId: string | null | undefined, scope: string): boolean | Promise<boolean> {
+  if (!userId || !activeService || activeUserId !== userId) return false;
+  return activeService.scopePurged(READ_ONLY_PURGE_MARK, scope);
 }
 
 export function disposeE2EService(): void {

@@ -35,7 +35,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../../services/api', () => ({ api: { get: h.apiGet, post: h.apiPost, patch: vi.fn(), delete: vi.fn() } }));
 // the list fetch's read-only side (purge, view) is services/dmReadOnly's own test
-vi.mock('../../services/dmReadOnly', () => ({ applyReadOnlyConversations: vi.fn() }));
+vi.mock('../../services/dmReadOnly', () => ({ applyReadOnlyConversations: vi.fn(), clearMarksOfLiveConversations: vi.fn() }));
 vi.mock('../../services/socket', () => ({ getSocket: () => ({ emit: h.emit, on: vi.fn(), off: vi.fn(), connected: false }), onConnectionStatusChange: () => () => {} }));
 vi.mock('../../stores/toastStore', () => ({ toast: { error: h.toastError, success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 vi.mock('../../stores/chatStore', () => {
