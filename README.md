@@ -520,7 +520,7 @@ Redis holds the server's state, not a cache: rate-limit and abuse budgets, the s
 ### Upgrading an Existing Deployment
 
 - **The server's HTTP port is now published on the loopback address only** (`127.0.0.1:3001`; `VOXIUM_HTTP_BIND` changes the address). A host nginx that proxies to `127.0.0.1:3001`, and a proxy container joined to the compose network, are unaffected. Set `VOXIUM_HTTP_BIND` in `.env.production` if a reverse proxy on another host, a proxy container that reaches the server through the host's or the bridge's address, or a plain-HTTP setup on a private network connects to that port; until you do, those connections are refused.
-- **Mail:** with `NODE_ENV=production` STARTTLS is now required unless `SMTP_REQUIRE_TLS=false`. After upgrading, read the start-up log line that states the SMTP mode and send yourself a password reset: a relay that refuses STARTTLS now fails every mail, and each sign-up attempt meanwhile uses one of the two sign-up mails an address may receive in 30 days.
+- **Mail:** with `NODE_ENV=production` STARTTLS is now required unless `SMTP_SECURE=true` (implicit TLS) or `SMTP_REQUIRE_TLS=false` is set. After upgrading, read the start-up log line that states the SMTP mode and send yourself a password reset: a relay that refuses STARTTLS now fails every mail, and each sign-up attempt meanwhile uses one of the two sign-up mails an address may receive in 30 days.
 
 ### Managing the Docker Stack
 
