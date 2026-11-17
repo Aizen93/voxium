@@ -537,13 +537,20 @@ describe('Admin support routes', () => {
       expect(timeline).toEqual([]);
     });
 
-    // Defect: routes/admin.ts POST /support/tickets/:id/messages claims an open ticket (update, system
-    // message, events, audit) BEFORE it validates the content, so a refused reply still claims it.
-    it.fails('does not claim an open ticket when the reply itself is refused', async () => {
+    it.each([
+      ['an empty string', { content: '' }],
+      ['only an HTML tag', { content: '<b></b>' }],
+      ['a number', { content: 7 }],
+      ['no content field', {}],
+      ['one character too many', { content: 'x'.repeat(LIMITS.SUPPORT_MESSAGE_MAX + 1) }],
+    ])('does not claim an open ticket when the reply is refused (%s): nothing written, emitted or audited', async (_label, body) => {
       prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow());
-      const res = await post({ content: '' });
+      const res = await post(body);
       expect(res.status).toBe(400);
       expect(prismaMock.supportTicket.update).not.toHaveBeenCalled();
+      expect(prismaMock.supportMessage.create).not.toHaveBeenCalled();
+      expect(timeline).toEqual([]);
+      expect(auditSpy).not.toHaveBeenCalled();
     });
 
     it('answers 500 when storing the reply fails', async () => {

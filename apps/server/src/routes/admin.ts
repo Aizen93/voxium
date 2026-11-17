@@ -3282,6 +3282,12 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
     if (!ticket) throw new NotFoundError('Ticket');
     if (ticket.status === 'closed') throw new BadRequestError('Ticket is closed');
 
+    // Validate the reply BEFORE anything is written or announced: a refused reply must not claim the ticket
+    const content = sanitizeText(req.body.content ?? '');
+    if (content.length < LIMITS.SUPPORT_MESSAGE_MIN || content.length > LIMITS.SUPPORT_MESSAGE_MAX) {
+      throw new BadRequestError(`Message must be ${LIMITS.SUPPORT_MESSAGE_MIN}-${LIMITS.SUPPORT_MESSAGE_MAX} characters`);
+    }
+
     // Auto-claim if open
     if (ticket.status === 'open') {
       await prisma.supportTicket.update({
@@ -3309,11 +3315,6 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
         targetId: id,
         metadata: { userId: ticket.userId },
       });
-    }
-
-    const content = sanitizeText(req.body.content ?? '');
-    if (content.length < LIMITS.SUPPORT_MESSAGE_MIN || content.length > LIMITS.SUPPORT_MESSAGE_MAX) {
-      throw new BadRequestError(`Message must be ${LIMITS.SUPPORT_MESSAGE_MIN}-${LIMITS.SUPPORT_MESSAGE_MAX} characters`);
     }
 
     const message = await prisma.supportMessage.create({
