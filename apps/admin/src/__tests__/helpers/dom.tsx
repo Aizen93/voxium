@@ -40,7 +40,8 @@ export function accessibleName(el: Element): string {
   }
   const wrapping = el.closest('label');
   if (wrapping) return normalise(wrapping.textContent);
-  const text = normalise(el.textContent);
+  // A textarea's text content is its current value, not a name.
+  const text = el instanceof HTMLTextAreaElement ? '' : normalise(el.textContent);
   if (text) return text;
   const title = el.getAttribute('title');
   if (title) return normalise(title);
