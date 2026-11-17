@@ -24,7 +24,15 @@ services:
       # be relied on to close a port Docker publishes. VOXIUM_HTTP_BIND (set in
       # the --env-file) is the address to publish it on instead: the host's
       # private address for a proxy on another machine or a proxy container
-      # that reaches the server through the host, 0.0.0.0 for every address.
+      # that reaches the server through the host, 0.0.0.0 for every IPv4
+      # address (the mapping this replaced also published on IPv6; an IPv6
+      # address is written in brackets, for example [::1]). A proxy on this
+      # host connects to 127.0.0.1:3001, not localhost:3001: the name also
+      # resolves to the IPv6 loopback, where nothing listens now (nginx logs
+      # a failed attempt before it falls back, and a proxy pointed at
+      # [::1]:3001 gets no answer). Anything on another machine that reads
+      # :3001/health directly, an uptime monitor for one, must go through the
+      # proxy or needs VOXIUM_HTTP_BIND.
       - "${VOXIUM_HTTP_BIND:-127.0.0.1}:3001:3001"
       # mediasoup WebRtcServer ports (UDP required, TCP fallback): one udp+tcp
       # pair per worker at MIN_PORT + slot, one worker per CPU core (max 8), so
