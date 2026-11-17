@@ -32,23 +32,36 @@ vi.mock('../../utils/prisma', () => ({
 }));
 
 // One ordered record of room joins and emits, so "join BEFORE emit" can be asserted
-type Step = ['join', string, string] | ['emit', string, string, any];
+type Step = ['join', string, string] | ['leave' | 'leave-local', string, string] | ['emit', string, string, any];
 const timeline: Step[] = [];
 const joins = () => timeline.filter((s): s is ['join', string, string] => s[0] === 'join').map((s) => [s[1], s[2]]);
 const emits = () => timeline.filter((s): s is ['emit', string, string, any] => s[0] === 'emit');
 const roomsOf = (event: string) => emits().filter((s) => s[2] === event).map((s) => s[1]);
 const payloadOf = (event: string) => emits().find((s) => s[2] === event)?.[3];
-const socketsLeave = vi.fn();
+// Room leaves as [userRoom, targetRoom], this node's form and the cluster form apart; they share the
+// timeline's order
+const leavesLocal: Array<[string, string]> = [];
+const leavesCluster: Array<[string, string]> = [];
+const leaveBehaviour = { throwOnCluster: false };
+const fetchSocketsSpy = vi.fn().mockResolvedValue([]);
 
 vi.mock('../../websocket/socketServer', () => ({
   getIO: vi.fn(() => ({
     to: (room: string) => ({ emit: (event: string, payload: unknown) => { timeline.push(['emit', room, event, payload]); } }),
     in: (room: string) => ({
       socketsJoin: (target: string) => { timeline.push(['join', room, target]); },
-      socketsLeave,
-      fetchSockets: vi.fn().mockResolvedValue([]),
+      socketsLeave: (target: string) => {
+        if (leaveBehaviour.throwOnCluster) throw new Error('adapter down');
+        leavesCluster.push([room, target]);
+        timeline.push(['leave', room, target]);
+      },
+      fetchSockets: fetchSocketsSpy,
     }),
-    local: { in: () => ({ socketsLeave: vi.fn() }) },
+    local: {
+      in: (room: string) => ({
+        socketsLeave: (target: string) => { leavesLocal.push([room, target]); timeline.push(['leave-local', room, target]); },
+      }),
+    },
   })),
 }));
 
@@ -156,6 +169,9 @@ describe('Admin support routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     timeline.length = 0;
+    leavesLocal.length = 0;
+    leavesCluster.length = 0;
+    leaveBehaviour.throwOnCluster = false;
     adminLimiter.mockImplementation((_req, _res, next) => next());
     mockAccounts();
     prismaMock.auditLog.create.mockResolvedValue({});
@@ -347,7 +363,7 @@ describe('Admin support routes', () => {
       });
     });
 
-    it('takes the ticket over when another admin already holds it (current behaviour, not a refusal)', async () => {
+    it('takes the ticket over when another admin already holds it, and takes the previous admin out of the room', async () => {
       prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow({ status: 'claimed', claimedById: 'admin-2' }));
 
       const res = await request(app).post(`${BASE}/ticket-1/claim`).set(as('admin-1'));
@@ -355,9 +371,71 @@ describe('Admin support routes', () => {
       expect(res.status).toBe(200);
       expect(prismaMock.supportTicket.update.mock.calls[0][0].data).toMatchObject({ status: 'claimed', claimedById: 'admin-1' });
       expect(joins()).toEqual([['user:admin-1', 'support:ticket-1']]);
-      // The previous admin's sockets are not taken out of the room
-      expect(socketsLeave).not.toHaveBeenCalled();
+      // The previous admin's sockets leave support:{id}: this node's form first, then the cluster form
+      expect(leavesLocal).toEqual([['user:admin-2', 'support:ticket-1']]);
+      expect(leavesCluster).toEqual([['user:admin-2', 'support:ticket-1']]);
+      expect(timeline.slice(0, 3)).toEqual([
+        ['leave-local', 'user:admin-2', 'support:ticket-1'],
+        ['leave', 'user:admin-2', 'support:ticket-1'],
+        ['join', 'user:admin-1', 'support:ticket-1'],
+      ]);
+      expect(fetchSocketsSpy).not.toHaveBeenCalled();
       expect(payloadOf(WS_EVENTS.SUPPORT_STATUS_CHANGE).claimedById).toBe('admin-1');
+    });
+
+    it('removes nobody from the room when the ticket had no claimer', async () => {
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow());
+      await request(app).post(`${BASE}/ticket-1/claim`).set(as('admin-1'));
+      expect(leavesLocal).toEqual([]);
+      expect(leavesCluster).toEqual([]);
+    });
+
+    it('keeps the previous claimer in the room when they are also the ticket requester', async () => {
+      // An admin opened their own ticket, claimed it, and another admin takes it over
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow({ userId: 'admin-2', status: 'claimed', claimedById: 'admin-2' }));
+
+      const res = await request(app).post(`${BASE}/ticket-1/claim`).set(as('admin-1'));
+
+      expect(res.status).toBe(200);
+      expect(leavesLocal).toEqual([]);
+      expect(leavesCluster).toEqual([]);
+      expect(joins()).toEqual([['user:admin-1', 'support:ticket-1']]);
+      // The requester stays in support:{id}, so the events that follow still reach them
+      expect(roomsOf(WS_EVENTS.SUPPORT_MESSAGE_NEW)).toContain('support:ticket-1');
+      expect(roomsOf(WS_EVENTS.SUPPORT_STATUS_CHANGE)).toContain('support:ticket-1');
+      expect(payloadOf(WS_EVENTS.SUPPORT_STATUS_CHANGE).claimedById).toBe('admin-1');
+    });
+
+    it('removes nobody from the room when the caller already holds the ticket', async () => {
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow({ status: 'claimed', claimedById: 'admin-1' }));
+      const res = await request(app).post(`${BASE}/ticket-1/claim`).set(as('admin-1'));
+      expect(res.status).toBe(200);
+      expect(leavesLocal).toEqual([]);
+      expect(leavesCluster).toEqual([]);
+      expect(joins()).toEqual([['user:admin-1', 'support:ticket-1']]);
+    });
+
+    it('does not take anyone out of the room when the claim itself fails', async () => {
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow({ status: 'claimed', claimedById: 'admin-2' }));
+      prismaMock.supportTicket.update.mockRejectedValue(new Error('db down'));
+      const res = await request(app).post(`${BASE}/ticket-1/claim`).set(as('admin-1'));
+      expect(res.status).toBe(500);
+      expect(leavesLocal).toEqual([]);
+      expect(leavesCluster).toEqual([]);
+    });
+
+    it('still claims, joins and announces when removing the previous admin fails, and logs it', async () => {
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow({ status: 'claimed', claimedById: 'admin-2' }));
+      leaveBehaviour.throwOnCluster = true;
+
+      const res = await request(app).post(`${BASE}/ticket-1/claim`).set(as('admin-1'));
+
+      expect(res.status).toBe(200);
+      expect(joins()).toEqual([['user:admin-1', 'support:ticket-1']]);
+      expect(payloadOf(WS_EVENTS.SUPPORT_STATUS_CHANGE).claimedById).toBe('admin-1');
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[Admin] Failed to remove the previous claimer from the support room:', 'adapter down',
+      );
     });
 
     it('answers 404 for an unknown ticket and changes nothing', async () => {
@@ -485,6 +563,21 @@ describe('Admin support routes', () => {
       });
       expect(roomsOf(WS_EVENTS.SUPPORT_STATUS_CHANGE).sort()).toEqual(['admin:support', 'support:ticket-1']);
       expect(auditSpy).toHaveBeenCalledWith(expect.objectContaining({ action: 'support.claim', targetId: 'ticket-1', actorId: 'admin-1' }));
+    });
+
+    it('joins the replying admin\'s sockets to support:{id} before the claim is announced when it auto-claims', async () => {
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow());
+      await post({ content: 'hello there' });
+      expect(joins()).toEqual([['user:admin-1', 'support:ticket-1']]);
+      expect(timeline[0]).toEqual(['join', 'user:admin-1', 'support:ticket-1']);
+      expect(leavesLocal).toEqual([]);
+      expect(leavesCluster).toEqual([]);
+    });
+
+    it('joins nobody when the ticket is already claimed', async () => {
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow({ status: 'claimed', claimedById: 'admin-2' }));
+      await post({ content: 'on it' });
+      expect(joins()).toEqual([]);
     });
 
     it('emits the reply to the ticket room and to staff, then the count', async () => {
