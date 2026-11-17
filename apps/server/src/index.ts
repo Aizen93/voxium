@@ -78,7 +78,7 @@ async function main() {
   await checkRedisEvictionPolicy(redis);
 
   // Announce this node's liveness IMMEDIATELY so peer reapers stop treating our
-  // state as dead. Production runs multiple horizontally-scaled instances.
+  // state as dead. When several instances run, every one announces itself.
   await startNodeHeartbeat();
   console.log(`[Node ${NODE_ID()}] Heartbeat started`);
 
