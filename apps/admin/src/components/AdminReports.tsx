@@ -276,6 +276,7 @@ export function AdminReports() {
           }
           confirmLabel={banOnResolve ? 'Resolve & Ban' : deleteOnResolve ? 'Resolve & Delete' : 'Resolve'}
           variant={banOnResolve ? 'danger' : 'primary'}
+          dismissible={false}
           onConfirm={handleResolve}
           onCancel={() => { setResolveModal(null); setResolution(''); setBanOnResolve(false); setDeleteOnResolve(false); }}
         />

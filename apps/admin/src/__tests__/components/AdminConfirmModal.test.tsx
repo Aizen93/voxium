@@ -1,3 +1,4 @@
+import { act } from 'react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AdminConfirmModal } from '../../components/AdminConfirmModal';
 import { mount, click, keyDown, deferred, getByRole, queryByRole, bodyText, flush, type Mounted } from '../helpers/dom';
@@ -19,6 +20,17 @@ beforeEach(() => {
   view = mount();
 });
 afterEach(() => view.unmount());
+
+// A pointer press and release: where it went down and where it came up decide whether it was a click
+async function press(down: Element, up: Element = down): Promise<void> {
+  await act(async () => {
+    down.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    up.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+    // the browser fires the click on the nearest common ancestor of both targets
+    const common = down === up ? up : down.contains(up) ? down : up.contains(down) ? up : up.parentElement!;
+    common.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  });
+}
 
 describe('AdminConfirmModal', () => {
   it('shows the title and the message, and "Confirm" as the default confirm label', async () => {
@@ -80,12 +92,75 @@ describe('AdminConfirmModal', () => {
   it('a click on the backdrop cancels; a click inside the card does not', async () => {
     await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
     const dialog = getByRole('dialog', 't');
-    await click(dialog);
-    await click(getByRole('heading', 't'));
+    await press(dialog);
+    await press(getByRole('heading', 't'));
     expect(onCancel).not.toHaveBeenCalled();
-    await click(dialog.parentElement!);
+    await press(dialog.parentElement!);
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('a press that starts inside the card and is released on the backdrop (a text selection) does not cancel', async () => {
+    await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+    const dialog = getByRole('dialog', 't');
+    await press(getByRole('heading', 't'), dialog.parentElement!);
+    expect(onCancel).not.toHaveBeenCalled();
+    // the mark is spent: a click with no press of its own does not cancel either
+    await click(dialog.parentElement!);
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('a press that starts on the backdrop and is released inside the card does not cancel', async () => {
+    await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+    const dialog = getByRole('dialog', 't');
+    await press(dialog.parentElement!, getByRole('heading', 't'));
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('Escape stops at the dialog: a listener above it never sees the key it handled', async () => {
+    const above = vi.fn();
+    window.addEventListener('keydown', above);
+    try {
+      await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+      await keyDown(document.body, 'Escape');
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      expect(above).not.toHaveBeenCalled();
+      await keyDown(document.body, 'a');
+      expect(above).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener('keydown', above);
+    }
+  });
+
+  describe('dismissible={false}', () => {
+    it('ignores Escape and the backdrop, and lets the key through', async () => {
+      const above = vi.fn();
+      window.addEventListener('keydown', above);
+      try {
+        await view.render(<AdminConfirmModal title="t" message="m" dismissible={false} onConfirm={onConfirm} onCancel={onCancel} />);
+        await keyDown(document.body, 'Escape');
+        await press(getByRole('dialog', 't').parentElement!);
+        expect(onCancel).not.toHaveBeenCalled();
+        expect(above).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener('keydown', above);
+      }
+    });
+
+    it('is still cancelled by the Cancel button and the close X', async () => {
+      await view.render(<AdminConfirmModal title="t" message="m" dismissible={false} onConfirm={onConfirm} onCancel={onCancel} />);
+      await click(getByRole('button', 'Cancel'));
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      await click(getByRole('button', 'Close'));
+      expect(onCancel).toHaveBeenCalledTimes(2);
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it('still confirms', async () => {
+      await view.render(<AdminConfirmModal title="t" message="m" dismissible={false} onConfirm={onConfirm} onCancel={onCancel} />);
+      await click(getByRole('button', 'Confirm'));
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('Escape and the backdrop are ignored while the confirm action is in flight, and work again after', async () => {
@@ -94,7 +169,7 @@ describe('AdminConfirmModal', () => {
     await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
     await click(getByRole('button', 'Confirm'));
     await keyDown(document.body, 'Escape');
-    await click(getByRole('dialog', 't').parentElement!);
+    await press(getByRole('dialog', 't').parentElement!);
     expect(onCancel).not.toHaveBeenCalled();
 
     pending.resolve();

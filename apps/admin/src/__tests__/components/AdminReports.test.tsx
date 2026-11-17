@@ -150,6 +150,34 @@ describe('AdminReports — resolving and dismissing', () => {
     expect(buttonByText('Resolve')).toBeUndefined();
   });
 
+  it('the Resolve dialog keeps a typed note and a ticked box through Escape and a click on the backdrop', async () => {
+    await render();
+    await act(async () => { rowButton('Resolve').click(); });
+    const note = qa('.fixed textarea')[0] as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(note, 'Owner warned, listing edited');
+      note.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const ban = qa('.fixed input[type="checkbox"]')[0] as HTMLInputElement;
+    await act(async () => { ban.click(); });
+    expect(ban.checked).toBe(true);
+
+    await act(async () => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    const backdrop = qa('.fixed').find((el) => el.querySelector('[role="dialog"]'))!;
+    await act(async () => {
+      backdrop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect((qa('.fixed textarea')[0] as HTMLTextAreaElement).value).toBe('Owner warned, listing edited');
+    expect((qa('.fixed input[type="checkbox"]')[0] as HTMLInputElement).checked).toBe(true);
+    expect(store.resolveReport).not.toHaveBeenCalled();
+    // Cancel still closes it and discards the draft
+    await act(async () => { buttonByText('Cancel').click(); });
+    expect(qa('.fixed textarea')).toHaveLength(0);
+  });
+
   it('Resolve keeps the modal open for another try when the store reports a failure', async () => {
     store.resolveReport.mockResolvedValue(false);
     await render();

@@ -8,14 +8,21 @@ interface AdminConfirmModalProps {
   confirmLabel?: string;
   danger?: boolean;
   variant?: 'danger' | 'primary';
+  /**
+   * Whether Escape and a click on the backdrop cancel (default true). A dialog that holds something
+   * the user typed or ticked passes false: only the Cancel button and the close X cancel it then.
+   */
+  dismissible?: boolean;
   onConfirm: () => Promise<void> | void;
   onCancel: () => void;
 }
 
-export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', danger = true, variant, onConfirm, onCancel }: AdminConfirmModalProps) {
+export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', danger = true, variant, dismissible = true, onConfirm, onCancel }: AdminConfirmModalProps) {
   const [loading, setLoading] = useState(false);
   const titleId = useId();
   const cancelRef = useRef<HTMLButtonElement>(null);
+  // Where the last press went down and came up: a backdrop click counts only when both were the backdrop
+  const pressOnBackdrop = useRef({ down: false, up: false });
 
   // Focus starts on Cancel (the safe answer to a destructive question) and
   // goes back to whatever had it when the dialog closes.
@@ -25,15 +32,18 @@ export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', da
     return () => opener?.focus();
   }, []);
 
-  // Escape cancels, except while the confirm action is in flight.
+  // Escape cancels, except while the confirm action is in flight or when the dialog is not
+  // dismissible. The event it handles goes no further, so nothing above it acts on the same key.
   useEffect(() => {
-    if (loading) return;
+    if (loading || !dismissible) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel();
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      onCancel();
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [loading, onCancel]);
+  }, [loading, dismissible, onCancel]);
 
   const handleConfirm = async () => {
     setLoading(true);
@@ -50,7 +60,17 @@ export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', da
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-      onClick={(e) => { if (e.target === e.currentTarget && !loading) onCancel(); }}
+      onMouseDown={(e) => {
+        pressOnBackdrop.current = { down: e.target === e.currentTarget, up: false };
+      }}
+      onMouseUp={(e) => { pressOnBackdrop.current.up = e.target === e.currentTarget; }}
+      onClick={(e) => {
+        // A press that starts in the card and ends on the backdrop (a text selection), or the other
+        // way round, is not a click on the backdrop
+        const { down, up } = pressOnBackdrop.current;
+        pressOnBackdrop.current = { down: false, up: false };
+        if (dismissible && down && up && e.target === e.currentTarget && !loading) onCancel();
+      }}
     >
       <div
         role="dialog"
