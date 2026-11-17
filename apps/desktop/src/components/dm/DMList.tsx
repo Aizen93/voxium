@@ -11,6 +11,9 @@ import { DMVoicePanel } from '../voice/DMVoicePanel';
 import { toast } from '../../stores/toastStore';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
+import { DeletedUserAvatar } from './DeletedParticipant';
+import { isParticipantDeleted } from '../../utils/dmParticipant';
+import { isDeletedPreview } from '../../utils/dmPreview';
 
 export function DMList() {
   const { t } = useTranslation();
@@ -122,6 +125,9 @@ export function DMList() {
         {conversations.map((conv) => {
           const unread = dmUnreadCounts[conv.id] || 0;
           const isActive = activeConversationId === conv.id;
+          // the other side's account was deleted: the localised name, a neutral
+          // avatar, no presence and no badge (never the server's strings)
+          const deleted = isParticipantDeleted(conv);
 
           return (
             <div
@@ -139,28 +145,37 @@ export function DMList() {
                     : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
               )}
             >
-              <Avatar
-                avatarUrl={conv.participant.avatarUrl}
-                displayName={conv.participant.displayName}
-                size="sm"
-                status={participantStatuses[conv.participant.id] || 'offline'}
-              />
+              {deleted ? (
+                <DeletedUserAvatar size="sm" />
+              ) : (
+                <Avatar
+                  avatarUrl={conv.participant.avatarUrl}
+                  displayName={conv.participant.displayName}
+                  size="sm"
+                  status={participantStatuses[conv.participant.id] || 'offline'}
+                />
+              )}
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1">
                   <span className={clsx(
                     'truncate text-[13px] leading-tight',
-                    isActive || unread > 0 ? 'font-semibold' : 'font-medium'
+                    isActive || unread > 0 ? 'font-semibold' : 'font-medium',
+                    deleted && 'italic'
                   )}>
-                    {conv.participant.displayName}
+                    {deleted ? t('dm.deletedParticipant.name') : conv.participant.displayName}
                   </span>
-                  {(conv.participant.role === 'admin' || conv.participant.role === 'superadmin') && <StaffBadge />}
+                  {!deleted && (conv.participant.role === 'admin' || conv.participant.role === 'superadmin') && <StaffBadge />}
                 </div>
-                {conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
+                {!deleted && conv.participant.isSupporter && <SupporterBadge tier={conv.participant.supporterTier} />}
                 {conv.lastMessage && (
                   <p className="truncate text-[11.5px] leading-tight text-vox-text-muted">
                     {/* dmPreviewText (utils/dmPreview.ts) decides what may print:
-                        hydrated plaintext or a listed call notice; null is the lock. */}
-                    {dmPreviewText(conv.lastMessage) ?? `🔒 ${t('e2e.encryptedMessage')}`}
+                        hydrated plaintext or a listed call notice; null is the lock.
+                        A deleted account's message is "Message deleted", whatever
+                        the row carries. */}
+                    {isDeletedPreview(conv.lastMessage)
+                      ? t('dm.deletedParticipant.messageDeleted')
+                      : dmPreviewText(conv.lastMessage) ?? `🔒 ${t('e2e.encryptedMessage')}`}
                   </p>
                 )}
               </div>

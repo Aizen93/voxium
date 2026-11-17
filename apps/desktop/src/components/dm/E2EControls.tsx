@@ -13,6 +13,7 @@ import {
   type E2EDeviceSafetyNumber,
 } from '../../services/e2e/e2eService';
 import { shortDeviceId } from '../../utils/deviceId';
+import { isParticipantDeleted } from '../../utils/dmParticipant';
 import type { Conversation } from '@voxium/shared';
 
 /**
@@ -97,12 +98,16 @@ export function E2EControls({ conversation }: Props) {
   //
   // Passively check for peer device-list changes while the conversation is
   // open — the only trigger besides an explicit send/decrypt.
+  // The deleted-account placeholder has no devices and no safety number: no
+  // badge, no device-list request, no dialog (DMChatArea does not render this
+  // for a read-only conversation; this is the second lock)
+  const peerDeleted = isParticipantDeleted(conversation);
   useEffect(() => {
-    if (!e2eReady || !user?.id) return;
+    if (!e2eReady || !user?.id || peerDeleted) return;
     void useE2EStore.getState().refreshDeviceList(user.id, peerId);
-  }, [e2eReady, user?.id, peerId]);
+  }, [e2eReady, user?.id, peerId, peerDeleted]);
 
-  if (!e2eReady) return null;
+  if (!e2eReady || peerDeleted) return null;
 
   const { titleKey, warning } = badgeState({
     identityWarning,

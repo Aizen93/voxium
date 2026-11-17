@@ -18,6 +18,7 @@ import { api } from '../../services/api';
 import { StaffBadge } from './StaffBadge';
 import { SupporterBadge } from './SupporterBadge';
 import { ReportModal } from '../chat/ReportModal';
+import { isDeletedParticipantId } from '@voxium/shared';
 
 const POPUP_WIDTH = 300;
 const GAP = 8;
@@ -62,7 +63,11 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
 
   // The membership row (nickname, roles) — asked for when the client has
   // none, which on a big server is anyone outside the People panel's slice
-  const member = useMember(userId);
+  // The deleted-account placeholder names nobody: no member lookup, no
+  // profile request (UserHoverTarget never opens a popup for it; this is the
+  // second lock)
+  const isPlaceholder = isDeletedParticipantId(userId);
+  const member = useMember(isPlaceholder ? undefined : userId);
   const activeServerId = useServerStore((s) => s.activeServerId);
   const channels = useServerStore((s) => s.channels);
   const channelUsers = useVoiceStore((s) => s.channelUsers);
@@ -76,7 +81,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
   } | null>(null);
 
   useEffect(() => {
-    if (member) return;
+    if (member || isPlaceholder) return;
     let cancelled = false;
     const fetchProfile = () => {
       api.get(`/users/${userId}`).then((res) => {
@@ -89,7 +94,7 @@ export function UserProfilePopup({ userId, anchorRef, popupProps, onClose }: Pro
     if (!activeServerId) { fetchProfile(); return; }
     const timer = setTimeout(fetchProfile, MEMBER_LOOKUP_DEBOUNCE_MS * 2);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [userId, member, activeServerId]);
+  }, [userId, member, activeServerId, isPlaceholder]);
 
   // Find voice channel this user is in
   let voiceChannelName: string | null = null;

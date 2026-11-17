@@ -2,6 +2,9 @@ import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type Chan
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
+import { useDMStore } from '../../stores/dmStore';
+import { conversationIsReadOnly } from '../../utils/dmParticipant';
+import { ReadOnlyConversationNotice } from '../dm/DeletedParticipant';
 import { getSocket } from '../../services/socket';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
@@ -60,6 +63,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     (s) => !!channelId && s.channels.some((c) => c.id === channelId && c.secure === true)
   );
   const isEncrypted = isEncryptedDM || isSecureChannel;
+  // The other side's account was deleted: nothing can be written here, so no
+  // composer at all (no typing signal, no upload, no send) — the notice in
+  // its place (a primitive selector: no allocation per read)
+  const readOnly = useDMStore((s) => !!conversationId && conversationIsReadOnly(s.conversations, conversationId));
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -402,6 +409,8 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   };
 
   const canSend = content.trim() || pendingFiles.some((pf) => pf.status === 'uploaded');
+
+  if (readOnly) return <ReadOnlyConversationNotice />;
 
   return (
     <div

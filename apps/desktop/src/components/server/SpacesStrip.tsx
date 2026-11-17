@@ -16,6 +16,7 @@ import { CreateServerModal } from './CreateServerModal';
 import { ServerSwitcher } from './ServerSwitcher';
 import { ServerIcon } from './ServerIcon';
 import { DiscoveryModal } from '../discovery/DiscoveryModal';
+import { isParticipantDeleted } from '../../utils/dmParticipant';
 
 /**
  * The spaces strip: the navigation along the top of the app, in two captioned
@@ -334,8 +335,13 @@ export function SpacesStrip() {
   const anyUnread = totalDMUnread > 0 || Object.values(serverUnreadCounts).some((c) => c > 0);
   const anyLive = liveServers.size > 0;
 
-  // The conversations the store keeps sorted by most recent activity.
-  const recent = conversations.slice(0, RECENT_PEOPLE);
+  // The conversations the store keeps sorted by most recent activity. A
+  // conversation whose other side's account was deleted is not one of the
+  // people you talk to: never among them (utils/dmParticipant.ts).
+  const recent = useMemo(
+    () => conversations.filter((conv) => !isParticipantDeleted(conv)).slice(0, RECENT_PEOPLE),
+    [conversations]
+  );
   const atHome = !activeServerId;
 
   const goHome = () => {

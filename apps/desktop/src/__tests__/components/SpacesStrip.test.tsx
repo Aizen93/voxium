@@ -380,6 +380,15 @@ describe('SpacesStrip', () => {
     expect(strip().querySelector('button[aria-label="Jonas"]')!.innerHTML).not.toContain('ring-vox-accent-primary');
   });
 
+  it('a conversation whose other side\'s account was deleted is never among the recent people (by the flag or the id)', () => {
+    const gone = { ...conv('c2', 'deleted:c2', 'Deleted user'), participantDeleted: true } as Conversation;
+    const goneNoFlag = conv('c3', 'deleted:c3', 'Deleted user');
+    conversations = [conv('c1', 'u1', 'Mara'), gone, goneNoFlag, conv('c4', 'u4', 'Rui'), conv('c5', 'u5', 'Dana')];
+    render();
+    const people = Array.from(strip().querySelectorAll('[data-testid="recent-person"]'));
+    expect(people.map((p) => p.getAttribute('aria-label'))).toEqual(['Mara', 'Rui', 'Dana']);
+  });
+
   it('an account with no conversations still gets the labelled Messages tab, alone', () => {
     conversations = [];
     render();

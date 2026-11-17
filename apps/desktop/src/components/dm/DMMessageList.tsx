@@ -4,17 +4,21 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { MessageItem } from '../chat/MessageItem';
+import { DeletedMessageRow } from './DeletedParticipant';
+import { isDeletedMessageRow } from '../../services/e2e/displayGate';
 import { Phone, ArrowDown, Lock } from 'lucide-react';
 import { format, isToday, isYesterday } from 'date-fns';
 
 interface Props {
   conversationId: string;
+  /** The other side's account was deleted (DMChatArea): rows offer no edit, reply or reaction. */
+  readOnly?: boolean;
 }
 
 /** Virtual index of the oldest loadable message; leaves room to page upward. */
 const FIRST_INDEX_BASE = 1000000;
 
-export function DMMessageList({ conversationId }: Props) {
+export function DMMessageList({ conversationId, readOnly = false }: Props) {
   const { t } = useTranslation();
   const { messages, hasMore, hasMoreAfter, isLoading, fetchDMMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
   const { user } = useAuthStore();
@@ -159,7 +163,9 @@ export function DMMessageList({ conversationId }: Props) {
     if (index === 0) return true;
     const prev = messages[index - 1];
     const curr = messages[index];
+    // a call notice and a deleted account's line both stand alone: the next row starts a group
     if (curr.type === 'system' || prev.type === 'system') return true;
+    if (isDeletedMessageRow(curr) || isDeletedMessageRow(prev)) return true;
     if (curr.replyToId) return true;
     if (prev.author.id !== curr.author.id) return true;
     const timeDiff = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
@@ -255,6 +261,17 @@ export function DMMessageList({ conversationId }: Props) {
               );
             }
 
+            // A deleted account's message (the gate's placeholder row): a quiet
+            // line with its time, no toolbar, no action. flow-root and padding
+            // like every row (see the message row below).
+            if (isDeletedMessageRow(message)) {
+              return (
+                <div key={message.id} className="flow-root w-full px-4">
+                  <DeletedMessageRow messageId={message.id} createdAt={message.createdAt} />
+                </div>
+              );
+            }
+
             const showHeader = shouldShowHeader(dataIndex);
             const isOwn = message.author.id === user?.id;
 
@@ -275,6 +292,7 @@ export function DMMessageList({ conversationId }: Props) {
                   canDelete={isOwn}
                   channelId={undefined}
                   conversationId={conversationId}
+                  readOnly={readOnly}
                 />
               </div>
             );

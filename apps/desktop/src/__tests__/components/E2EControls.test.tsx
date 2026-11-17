@@ -104,6 +104,18 @@ describe('E2EControls badge state machine', () => {
     expect(badge()).toBeNull();
   });
 
+  it('renders nothing, and asks for no device list, when the other side is the deleted-account placeholder', () => {
+    // no device, no safety number: DMChatArea does not render it then, and
+    // this is the second lock (the flag or the id prefix, never a name)
+    const refresh = vi.fn();
+    useE2EStore.setState({ ready: true, refreshDeviceList: refresh, identityWarnings: { 'deleted:conv-1': true } });
+    render({ ...conversation('deleted:conv-1'), participantDeleted: true });
+    expect(container.innerHTML).toBe('');
+    render(conversation('deleted:conv-1'));
+    expect(container.innerHTML).toBe('');
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
   it('has no "unencrypted" state left to show', () => {
     // Every DM is encrypted since the always-on cutover, so the badge must not
     // branch on encryptedAt at all — even a row that somehow arrives without
