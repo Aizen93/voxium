@@ -250,7 +250,7 @@ export function ThemeEditor({ onClose, editTheme, initialData }: ThemeEditorProp
           </div>
 
           {/* Scrollable content */}
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4" style={{ scrollbarWidth: 'thin' }}>
+          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
             {/* Name & Description */}
             <div className="grid grid-cols-2 gap-3">
               <div>
