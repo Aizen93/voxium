@@ -196,6 +196,80 @@ describe('utils/s3 — S3_SSE bucket-default encryption', () => {
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Could not enable default encryption'));
   });
 
+  describe('what the encryption check logs and how long it takes', () => {
+    const BUCKET = 'acme-private-assets';
+    let saved: Record<string, string | undefined>;
+
+    beforeEach(() => {
+      saved = { S3_ASSETS_BUCKET: process.env.S3_ASSETS_BUCKET };
+      process.env.S3_ASSETS_BUCKET = BUCKET;
+      process.env.S3_SSE = 'AES256';
+    });
+
+    afterEach(() => {
+      if (saved.S3_ASSETS_BUCKET === undefined) delete process.env.S3_ASSETS_BUCKET;
+      else process.env.S3_ASSETS_BUCKET = saved.S3_ASSETS_BUCKET;
+    });
+
+    /** A store call that never answers, ended only by the abort signal it was given. */
+    const hangingSend = (_cmd: unknown, options?: { abortSignal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        // Like the SDK's HTTP handler: an AbortError whose cause is the signal's reason
+        const abortError = () => Object.assign(new Error('Request aborted'), { name: 'AbortError', cause: options?.abortSignal?.reason });
+        // A signal that has already fired rejects at once
+        if (options?.abortSignal?.aborted) reject(abortError());
+        options?.abortSignal?.addEventListener('abort', () => reject(abortError()), { once: true });
+      });
+
+    it('a store that never answers does not hold the caller past the bound; the line holds neither bucket nor host', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockSend.mockImplementation(hangingSend);
+      const { ensureBucketEncryption, BUCKET_ENCRYPTION_TIMEOUT_MS } = await import('../../utils/s3');
+      expect(BUCKET_ENCRYPTION_TIMEOUT_MS).toBe(15_000);
+
+      const started = Date.now();
+      await expect(ensureBucketEncryption(80)).resolves.toBeUndefined();
+
+      // The two calls share ONE bound
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const text = String(errorSpy.mock.calls[0][0]);
+      expect(text).toContain('Could not enable default encryption');
+      expect(text).toContain('AbortError, cause TimeoutError');
+      expect(text).not.toContain(BUCKET);
+      // Both commands were given the same abort signal
+      const signals = mockSend.mock.calls.map((c) => (c[1] as { abortSignal?: AbortSignal }).abortSignal);
+      expect(signals).toHaveLength(2);
+      expect(signals[0]).toBeDefined();
+      expect(signals[0]).toBe(signals[1]);
+    });
+
+    it('a failure logs its name, code and status, never the message (which names host and port) or the bucket', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockSend.mockRejectedValue(Object.assign(new Error(`connect ECONNREFUSED store-7f3a.private-host.example:9443 for ${BUCKET}`), { name: 'Error', code: 'ECONNREFUSED' }));
+      const { ensureBucketEncryption } = await import('../../utils/s3');
+
+      await ensureBucketEncryption();
+
+      const text = String(errorSpy.mock.calls[0][0]);
+      expect(text).toContain('Error, ECONNREFUSED');
+      for (const secret of [BUCKET, 'store-7f3a', 'private-host', '9443']) expect(text).not.toContain(secret);
+    });
+
+    it('the success lines name no bucket either', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      mockSend.mockResolvedValue({ ServerSideEncryptionConfiguration: { Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }] } });
+      const { ensureBucketEncryption } = await import('../../utils/s3');
+      await ensureBucketEncryption();
+      // Nothing there yet: the second line is the "enabled" one
+      mockSend.mockResolvedValue({});
+      await ensureBucketEncryption();
+
+      expect(logSpy).toHaveBeenCalledTimes(2);
+      for (const call of logSpy.mock.calls) expect(String(call[0])).not.toContain(BUCKET);
+    });
+  });
+
   it('warns and no-ops on an unsupported S3_SSE value', async () => {
     process.env.S3_SSE = 'rot13';
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
