@@ -104,25 +104,34 @@ function getSSE(): 'AES256' | 'aws:kms' | undefined {
   return _sse;
 }
 
+/** How long the encryption check at boot may take in all (it must not hold the boot). */
+export const BUCKET_ENCRYPTION_TIMEOUT_MS = 15_000;
+
 /**
  * Ensure the assets bucket has default encryption matching S3_SSE.
  * Called once at startup; no-op when S3_SSE is unset. Never throws — a
  * provider without bucket-encryption support (or a key lacking the
  * permission) must not block boot; uploads keep working and the operator
- * gets a loud log telling them to enable it provider-side.
+ * gets a loud log telling them to enable it provider-side. The whole check is
+ * bounded by `timeoutMs`: a store that does not answer ends it with that log
+ * line instead of holding the start. The log names the error's name, code and
+ * HTTP status, never the bucket or the error's message (which can name the
+ * endpoint's host and port).
  */
-export async function ensureBucketEncryption(): Promise<void> {
+export async function ensureBucketEncryption(timeoutMs = BUCKET_ENCRYPTION_TIMEOUT_MS): Promise<void> {
   const sse = getSSE();
   if (!sse) return;
   const bucket = getBucket();
+  const abortSignal = AbortSignal.timeout(timeoutMs);
   try {
     const current = await getS3Client().send(
       new GetBucketEncryptionCommand({ Bucket: bucket }),
+      { abortSignal },
     ).catch(() => null); // missing config surfaces as an error on most providers
     const currentAlgo = current?.ServerSideEncryptionConfiguration?.Rules?.[0]
       ?.ApplyServerSideEncryptionByDefault?.SSEAlgorithm;
     if (currentAlgo === sse) {
-      console.log(`[S3] Bucket "${bucket}" already has default encryption (${sse})`);
+      console.log(`[S3] The bucket already has default encryption (${sse})`);
       return;
     }
     await getS3Client().send(
@@ -132,13 +141,14 @@ export async function ensureBucketEncryption(): Promise<void> {
           Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: sse } }],
         },
       }),
+      { abortSignal },
     );
-    console.log(`[S3] Enabled default encryption (${sse}) on bucket "${bucket}"`);
+    console.log(`[S3] Enabled default encryption (${sse}) on the bucket`);
   } catch (err) {
     console.error(
-      `[S3] Could not enable default encryption on bucket "${bucket}" — uploads will be stored per the provider's current settings. ` +
+      '[S3] Could not enable default encryption on the bucket — uploads will be stored per the provider\'s current settings. ' +
       'Enable default encryption in the provider console, or unset S3_SSE to silence this. ' +
-      `Cause: ${err instanceof Error ? err.message : String(err)}`,
+      `Cause: ${describeStoreError(err)}`,
     );
   }
 }
