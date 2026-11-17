@@ -322,19 +322,34 @@ describe('Support routes (user side)', () => {
       expect(res.body.data.messages).toHaveLength(2);
     });
 
+    // A whole number of at least 1 is capped at 100 (take 101); anything else reads the default
+    // page (50, so take 51)
     it.each([
+      ['1', 2],
+      ['100', 101],
+      ['101', 101],
       ['5000', 101],
+      ['99999999999', 51],
       ['0', 51],
+      ['-1', 51],
+      ['-4', 51],
+      ['1.5', 51],
+      ['1e3', 51],
       ['abc', 51],
+      ['', 51],
     ])('bounds the page size (limit=%s reads take=%i)', async (limit, take) => {
       prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow());
       await request(app).get(`/api/v1/support/ticket?limit=${limit}`).set('Authorization', `Bearer ${makeToken()}`);
       expect(prismaMock.supportMessage.findMany.mock.calls[0][0].take).toBe(take);
     });
 
-    // Defect: routes/support.ts GET /ticket has no lower bound on limit, so limit=-4 reads take=-3
-    // (Prisma reads a negative take backwards). Kept as it.fails until the route clamps it.
-    it.fails('never reads a negative page size', async () => {
+    it('reads the default page when the limit is repeated (an array, not a number)', async () => {
+      prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow());
+      await request(app).get('/api/v1/support/ticket?limit=5&limit=6').set('Authorization', `Bearer ${makeToken()}`);
+      expect(prismaMock.supportMessage.findMany.mock.calls[0][0].take).toBe(51);
+    });
+
+    it('never reads a negative page size', async () => {
       prismaMock.supportTicket.findUnique.mockResolvedValue(ticketRow());
       await request(app).get('/api/v1/support/ticket?limit=-4').set('Authorization', `Bearer ${makeToken()}`);
       expect(prismaMock.supportMessage.findMany.mock.calls[0][0].take).toBeGreaterThan(0);
