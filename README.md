@@ -520,6 +520,7 @@ Redis holds the server's state, not a cache: rate-limit and abuse budgets, the s
 ### Upgrading an Existing Deployment
 
 - **The server's HTTP port is now published on the loopback address only** (`127.0.0.1:3001`; `VOXIUM_HTTP_BIND` changes the address). A host nginx that proxies to `127.0.0.1:3001`, and a proxy container joined to the compose network, are unaffected. Set `VOXIUM_HTTP_BIND` in `.env.production` if a reverse proxy on another host, a proxy container that reaches the server through the host's or the bridge's address, or a plain-HTTP setup on a private network connects to that port; until you do, those connections are refused.
+- **Mail:** with `NODE_ENV=production` STARTTLS is now required unless `SMTP_REQUIRE_TLS=false`. After upgrading, read the start-up log line that states the SMTP mode and send yourself a password reset: a relay that refuses STARTTLS now fails every mail, and each sign-up attempt meanwhile uses one of the two sign-up mails an address may receive in 30 days.
 
 ### Managing the Docker Stack
 
@@ -638,7 +639,7 @@ Every setting below is in the matching template: `apps/server/.env.example` (dev
 | `SMTP_FROM` | `noreply@voxium.app` | Sender email address: set one of your own domain |
 | `SMTP_FROM_NAME` | `Voxium` | Sender display name |
 | `SMTP_SECURE` | `false` | `true`: implicit TLS from the first byte (usually port 465). Only the exact value `true` turns it on |
-| `SMTP_REQUIRE_TLS` | `true` when `NODE_ENV=production`, else `false` | `true`: STARTTLS, and no mail at all to a relay that does not complete it. `false`: STARTTLS when the relay offers it, plain text otherwise (a relay on a network you trust, a local catcher; warned about at start in production). Unset or empty takes the default; any other value reads as `false` and is reported at start. The server logs the mode in effect once at start |
+| `SMTP_REQUIRE_TLS` | `true` when `NODE_ENV=production`, else `false` | `true`: STARTTLS, and no mail at all to a relay that does not complete it. `false`: STARTTLS when the relay offers it, plain text otherwise (a relay on a network you trust, a local catcher; warned about at start in production). Unset or empty takes the default; any other value (`1`, `yes`, `TRUE`: only the exact `true` and `false` are recognised) is reported at start and reads as `false` outside production but as `true` under `NODE_ENV=production`. The server logs the mode in effect once at start, and in production asks the relay once whether it accepts that setup (a refusal is logged as a warning with its error code; the start does not wait for it) |
 | `CLEANUP_REPORT_EMAIL` | — | Where the nightly attachment-cleanup report and the hourly sign-up spike alert go. If not set, neither is sent. |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers (always on when `NODE_ENV=production`) |
 | `TRUST_PROXY_HOPS` | `1` | Number of reverse proxies in front of the server (1 to 10) — must match your setup exactly |

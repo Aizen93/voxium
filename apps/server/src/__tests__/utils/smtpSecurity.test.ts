@@ -46,12 +46,14 @@ describe('smtpTransportOptions: every combination of NODE_ENV, SMTP_SECURE and S
   it.each(combos().map((env) => [label(env), env] as const))('%s', (_name, env) => {
     const options = smtpTransportOptions(env);
     const unsetRequire = env.SMTP_REQUIRE_TLS === undefined || env.SMTP_REQUIRE_TLS.trim() === '';
+    // neither true, false nor blank: `TRUE`, `yes`, `0`... (the recognised set is the exact `true` and `false`)
+    const unrecognisedRequire = !unsetRequire && env.SMTP_REQUIRE_TLS !== 'true' && env.SMTP_REQUIRE_TLS !== 'false';
 
     if (env.SMTP_SECURE === 'true') {
       // implicit TLS from the first byte; STARTTLS has nothing to add
       expect(options.secure).toBe(true);
       expect(options).not.toHaveProperty('requireTLS');
-    } else if (env.SMTP_REQUIRE_TLS === 'true' || (unsetRequire && env.NODE_ENV === 'production')) {
+    } else if (env.SMTP_REQUIRE_TLS === 'true' || ((unsetRequire || unrecognisedRequire) && env.NODE_ENV === 'production')) {
       expect(options.secure).toBe(false);
       expect(options.requireTLS).toBe(true);
     } else {
@@ -60,8 +62,8 @@ describe('smtpTransportOptions: every combination of NODE_ENV, SMTP_SECURE and S
       expect(options).not.toHaveProperty('requireTLS');
     }
 
-    // The one change: production with SMTP_REQUIRE_TLS unset (or empty) and no implicit TLS
-    const changed = env.NODE_ENV === 'production' && unsetRequire && env.SMTP_SECURE !== 'true';
+    // The changes: production with SMTP_REQUIRE_TLS unset, empty or unrecognised, and no implicit TLS
+    const changed = env.NODE_ENV === 'production' && (unsetRequire || unrecognisedRequire) && env.SMTP_SECURE !== 'true';
     if (changed) {
       expect(options).toEqual({ ...previousOptions(env), requireTLS: true });
     } else {
@@ -92,7 +94,14 @@ describe('smtpSecurity: where each mode comes from', () => {
     [{ NODE_ENV: 'production' }, { mode: 'starttls-required', source: 'production-default' }],
     [{ NODE_ENV: 'production', SMTP_REQUIRE_TLS: '' }, { mode: 'starttls-required', source: 'production-default' }],
     [{ NODE_ENV: 'production', SMTP_REQUIRE_TLS: 'false' }, { mode: 'starttls-opportunistic', source: 'explicit' }],
-    [{ NODE_ENV: 'production', SMTP_REQUIRE_TLS: 'yes' }, { mode: 'starttls-opportunistic', source: 'unrecognised' }],
+    [{ NODE_ENV: 'production', SMTP_REQUIRE_TLS: 'yes' }, { mode: 'starttls-required', source: 'unrecognised' }],
+    [{ NODE_ENV: 'production', SMTP_REQUIRE_TLS: '1' }, { mode: 'starttls-required', source: 'unrecognised' }],
+    [{ NODE_ENV: 'production', SMTP_REQUIRE_TLS: 'TRUE' }, { mode: 'starttls-required', source: 'unrecognised' }],
+    [{ NODE_ENV: 'production', SMTP_REQUIRE_TLS: 'FALSE' }, { mode: 'starttls-required', source: 'unrecognised' }],
+    [{ NODE_ENV: 'production', SMTP_REQUIRE_TLS: 'yes', SMTP_SECURE: 'true' }, { mode: 'implicit-tls', source: 'explicit' }],
+    [{ NODE_ENV: 'development', SMTP_REQUIRE_TLS: 'yes' }, { mode: 'starttls-opportunistic', source: 'unrecognised' }],
+    [{ NODE_ENV: 'test', SMTP_REQUIRE_TLS: '1' }, { mode: 'starttls-opportunistic', source: 'unrecognised' }],
+    [{ SMTP_REQUIRE_TLS: 'TRUE' }, { mode: 'starttls-opportunistic', source: 'unrecognised' }],
     [{}, { mode: 'starttls-opportunistic', source: 'development-default' }],
     [{ NODE_ENV: 'test' }, { mode: 'starttls-opportunistic', source: 'development-default' }],
   ])('%j → %j', (env, expected) => {
@@ -153,10 +162,16 @@ describe('logSmtpSecurity: one line at start, without the host, the user or any 
     expect(run({ SMTP_REQUIRE_TLS: 'false' }).warnings).toEqual([]);
   });
 
-  it('an unrecognised value is reported (and keeps reading as false, as it always did)', () => {
-    const { warnings } = run({ NODE_ENV: 'production', SMTP_REQUIRE_TLS: 'yes' });
+  it('an unrecognised value is reported: read as false outside production (as it always did), as required in production', () => {
+    const outside = run({ NODE_ENV: 'development', SMTP_REQUIRE_TLS: 'yes' });
+    expect(outside.warnings).toHaveLength(1);
+    expect(outside.warnings[0]).toContain('SMTP_REQUIRE_TLS is neither true nor false and reads as false');
+    expect(outside.warnings[0]).not.toContain('yes');
+    vi.restoreAllMocks();
+    const { info, warnings } = run({ NODE_ENV: 'production', SMTP_REQUIRE_TLS: 'yes' });
+    expect(info).toEqual([]);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('SMTP_REQUIRE_TLS is neither true nor false and reads as false');
+    expect(warnings[0]).toContain('SMTP_REQUIRE_TLS is neither true nor false and is treated as required under NODE_ENV=production');
     expect(warnings[0]).not.toContain('yes');
     vi.restoreAllMocks();
     const secure = run({ SMTP_SECURE: 'TRUE' });

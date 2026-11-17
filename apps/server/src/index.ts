@@ -51,7 +51,7 @@ import { startDiscoveryStats, stopDiscoveryStats } from './utils/discoveryStats'
 import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
 import { checkRedisEvictionPolicy } from './utils/redisPolicy';
-import { logSmtpSecurity } from './utils/email';
+import { logSmtpSecurity, verifySmtpRelayAtStart } from './utils/email';
 import { ensureBucketEncryption } from './utils/s3';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { repairIpBanSpellings } from './utils/ipBans';
@@ -108,6 +108,8 @@ async function main() {
 
   // Which security the mail transport uses (one line; no host, user or address)
   logSmtpSecurity();
+  // Production only: ask the relay once whether it accepts that setup (not awaited)
+  verifySmtpRelayAtStart();
 
   // Initialize mediasoup workers
   await initMediasoup();

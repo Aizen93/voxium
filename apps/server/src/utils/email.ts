@@ -18,14 +18,23 @@ import { isMailSuppressed, mailBlockUrl } from './mailSuppression';
  * - neither (unset or empty): required under `NODE_ENV=production`,
  *   opportunistic otherwise, so development against a plain local catcher
  *   (port 1025) keeps working with no setting.
+ * - any other SMTP_REQUIRE_TLS value (`1`, `yes`, `TRUE`: only the exact
+ *   `true` and `false` are recognised): reported at start; read as `false`
+ *   outside production, as it always was, but as REQUIRED under
+ *   `NODE_ENV=production`, where reading a misspelt "yes" as "no" would send
+ *   the login in clear to a relay without STARTTLS, weaker than leaving the
+ *   setting out.
  *
- * Only the exact `true` turns either on, as before; any other value of
- * SMTP_REQUIRE_TLS reads as `false` (what it always did) and is reported at
- * start. So a deployment that sets these values explicitly behaves as it did.
+ * Only the exact `true` turns SMTP_SECURE or SMTP_REQUIRE_TLS on, as before.
+ * What a production deployment gets from a setting that is absent or empty
+ * is what changed: `SMTP_SECURE=false` alone (it only turns implicit TLS
+ * off) and an explicitly empty `SMTP_REQUIRE_TLS=` now require STARTTLS,
+ * and so does an unrecognised SMTP_REQUIRE_TLS value. Every other explicit
+ * combination behaves as it did.
  */
 export type SmtpSecurity =
   | { mode: 'implicit-tls'; source: 'explicit' }
-  | { mode: 'starttls-required'; source: 'explicit' | 'production-default' }
+  | { mode: 'starttls-required'; source: 'explicit' | 'production-default' | 'unrecognised' }
   | { mode: 'starttls-opportunistic'; source: 'explicit' | 'unrecognised' | 'development-default' };
 
 type SmtpEnv = Partial<Record<'NODE_ENV' | 'SMTP_SECURE' | 'SMTP_REQUIRE_TLS', string>>;
@@ -35,7 +44,12 @@ export function smtpSecurity(env: SmtpEnv): SmtpSecurity {
   const requireTls = env.SMTP_REQUIRE_TLS;
   if (requireTls === 'true') return { mode: 'starttls-required', source: 'explicit' };
   if (requireTls !== undefined && requireTls.trim() !== '') {
-    return { mode: 'starttls-opportunistic', source: requireTls === 'false' ? 'explicit' : 'unrecognised' };
+    if (requireTls === 'false') return { mode: 'starttls-opportunistic', source: 'explicit' };
+    // Neither true nor false: required in production, where the safe reading
+    // of a value nobody can interpret is the strict one
+    return env.NODE_ENV === 'production'
+      ? { mode: 'starttls-required', source: 'unrecognised' }
+      : { mode: 'starttls-opportunistic', source: 'unrecognised' };
   }
   return env.NODE_ENV === 'production'
     ? { mode: 'starttls-required', source: 'production-default' }
@@ -75,9 +89,13 @@ export function logSmtpSecurity(env: NodeJS.ProcessEnv = process.env): SmtpSecur
       console.log('[Email] SMTP connection security: implicit TLS (SMTP_SECURE=true)');
       break;
     case 'starttls-required':
-      console.log(security.source === 'explicit'
-        ? '[Email] SMTP connection security: STARTTLS required (SMTP_REQUIRE_TLS=true); no mail goes to a relay that does not complete it'
-        : '[Email] SMTP connection security: STARTTLS required (the default under NODE_ENV=production; SMTP_REQUIRE_TLS=false allows a relay without TLS)');
+      if (security.source === 'unrecognised') {
+        console.warn('[Email] SMTP_REQUIRE_TLS is neither true nor false and is treated as required under NODE_ENV=production: STARTTLS required, no mail goes to a relay that does not complete it. Set true or false.');
+      } else {
+        console.log(security.source === 'explicit'
+          ? '[Email] SMTP connection security: STARTTLS required (SMTP_REQUIRE_TLS=true); no mail goes to a relay that does not complete it'
+          : '[Email] SMTP connection security: STARTTLS required (the default under NODE_ENV=production; SMTP_REQUIRE_TLS=false allows a relay without TLS)');
+      }
       break;
     case 'starttls-opportunistic':
       if (security.source === 'unrecognised') {
@@ -101,6 +119,30 @@ function getTransporter(): Transporter {
     _transporter = nodemailer.createTransport(smtpTransportOptions(process.env));
   }
   return _transporter;
+}
+
+/**
+ * Production only, and only when a relay is configured: ask the relay once at
+ * start whether it accepts the configured connection security and login, so a
+ * relay that refuses STARTTLS shows up in the log at boot instead of at the
+ * first sign-up. Never awaited, never throws, never rejects unhandled: the
+ * start does not wait for the relay and does not fail on it. The failure is
+ * described by `describeEmailError` only (a machine code, never the error
+ * object, the host, the user or an address).
+ */
+export function verifySmtpRelayAtStart(): void {
+  if (process.env.NODE_ENV !== 'production' || !process.env.SMTP_HOST) return;
+  const failed = (err: unknown) => {
+    console.warn(`[Email] SMTP relay check failed (${describeEmailError(err)}): mail will fail until the relay accepts the configured connection security and login`);
+  };
+  try {
+    getTransporter().verify().then(
+      () => console.log('[Email] SMTP relay check passed: the relay accepts the configured connection security and login'),
+      failed,
+    );
+  } catch (err) {
+    failed(err);
+  }
 }
 
 function getSenderFrom() {
