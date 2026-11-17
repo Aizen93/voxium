@@ -98,6 +98,14 @@ export type WebhookType = (typeof WEBHOOK_TYPES)[number];
 export const WEBHOOKS_DISABLED_MESSAGE = 'Webhooks are currently disabled';
 
 /**
+ * The exact message the server answers a microphone producer (`voice:produce`)
+ * from a member who lacks the SPEAK permission in the channel. The desktop
+ * keys on this sentence to keep such a member in the call, listening only,
+ * instead of reporting a failed connection, so both ends share one copy.
+ */
+export const VOICE_SPEAK_REFUSED_MESSAGE = 'You do not have permission to speak in this channel';
+
+/**
  * The charset of every id a client may hand the server (cuids, role ids, user
  * ids): what `/servers/:id/members/lookup` and the directory's role filter
  * accept, and what the webhook execute route requires of a webhook id before

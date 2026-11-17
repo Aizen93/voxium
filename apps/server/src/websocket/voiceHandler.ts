@@ -17,7 +17,7 @@ import {
   relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
 } from './voiceRelay';
 import { hasChannelPermission, hasServerPermission, getHighestRolePosition } from '../utils/permissionCalculator';
-import { Permissions, E2E_DEVICE_ID_RE, E2E_CALL_EPOCH_RE, VOICE_KEY_ENVELOPE_MAX } from '@voxium/shared';
+import { Permissions, E2E_DEVICE_ID_RE, E2E_CALL_EPOCH_RE, VOICE_KEY_ENVELOPE_MAX, VOICE_SPEAK_REFUSED_MESSAGE } from '@voxium/shared';
 
 // Re-exported for existing consumers (voiceCluster, tests)
 export { reapVoiceChannelMirror };
@@ -715,7 +715,7 @@ export function createVoiceHandlers(
       const serverId = channelServerMap.get(channelId);
       if (serverId) {
         const canSpeak = await hasChannelPermission(userId, channelId, serverId, Permissions.SPEAK);
-        if (!canSpeak) { ack({ error: 'You do not have permission to speak in this channel' }); return; }
+        if (!canSpeak) { ack({ error: VOICE_SPEAK_REFUSED_MESSAGE }); return; }
       }
     }
 

@@ -40,6 +40,8 @@ export function registerShareMaskHooks(hooks: ShareMaskHooks): void {
 }
 import { optimizeOpusSDP } from '../services/sdpUtils';
 import i18n from '../i18n';
+import { translateServerError } from '../utils/serverErrors';
+import { VOICE_SPEAK_REFUSED_MESSAGE } from '@voxium/shared';
 import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared';
 import type { CallPeerDevice } from '../services/e2e/callCrypto';
 import { isE2ESessionEnded } from '../services/e2e/session';
@@ -708,6 +710,8 @@ async function adoptCurrentMicTrack(producer: Producer): Promise<void> {
  * fail closed (spec §21).
  */
 async function produceMic(sendTransport: Transport, device: Device): Promise<Producer | null> {
+  // The server already said this member may not speak here: nothing to try again
+  if (micRefusedOn === sendTransport) return null;
   // One at a time per transport: a second one would be a second producer the
   // server replaces while this client keeps sending on it. The one in flight
   // adopts the current track when it lands (adoptCurrentMicTrack)
@@ -715,6 +719,15 @@ async function produceMic(sendTransport: Transport, device: Device): Promise<Pro
   micProduceInFlight = sendTransport;
   try {
     return await produceMicOn(sendTransport, device);
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== VOICE_SPEAK_REFUSED_MESSAGE) throw err;
+    // Listening only, by the space's own rule: not a failure of the
+    // connection. Said once, in the user's language, and remembered for this
+    // transport, so that a later rebuild (a device change, the noise
+    // suppression switch) does not ask the server again and repeat it.
+    micRefusedOn = sendTransport;
+    toast.info(translateServerError(VOICE_SPEAK_REFUSED_MESSAGE, i18n.t.bind(i18n)));
+    return null;
   } finally {
     if (micProduceInFlight === sendTransport) micProduceInFlight = null;
   }
@@ -722,6 +735,12 @@ async function produceMic(sendTransport: Transport, device: Device): Promise<Pro
 
 /** The send transport a mic producer is being made on, or null. */
 let micProduceInFlight: Transport | null = null;
+
+/**
+ * The send transport on which the server refused the microphone because the
+ * member may not speak in the channel (VOICE_SPEAK_REFUSED_MESSAGE), or null. A new join has a new transport, so it asks again.
+ */
+let micRefusedOn: Transport | null = null;
 
 async function produceMicOn(sendTransport: Transport, device: Device): Promise<Producer | null> {
   const state = useVoiceStore.getState;

@@ -757,6 +757,46 @@ describe('a pipeline rebuild that lands while produce() is in flight', () => {
   });
 });
 
+describe('a join by a member who may not speak in the channel', () => {
+  it('is told once, sees no failed connection, and no later rebuild asks the server again', async () => {
+    const raw = fakeStream('raw');
+    const sendTransport = {
+      id: 'send', on: vi.fn(), close: vi.fn(),
+      produce: vi.fn(async () => { throw new Error('You do not have permission to speak in this channel'); }),
+    };
+    const recvTransport = { id: 'recv', on: vi.fn(), close: vi.fn() };
+    vi.mocked(Device).mockImplementation(function fakeDevice() {
+      return { load: vi.fn(async () => {}), rtpCapabilities: {}, canProduce: () => true, createSendTransport: () => sendTransport, createRecvTransport: () => recvTransport };
+    } as never);
+    useVoiceStore.setState({ activeChannelId: 'ch-1', localStream: raw });
+    aa.state.gated = fakeStream('gated');
+    aa.state.mode = 'server';
+    // Each rebuild makes a new gated stream over what it was started on
+    aa.startSpeakingDetection.mockImplementation((stream: MediaStream, mode: 'server' | 'dm' = 'server') => {
+      aa.state.mode = mode;
+      aa.state.gated = fakeStream(`gated-${stream.id}-${Math.random()}`);
+    });
+    const transport = { id: 'x', iceParameters: {}, iceCandidates: [], dtlsParameters: {} };
+
+    await useVoiceStore.getState().handleTransportCreated({ routerRtpCapabilities: {}, sendTransport: { ...transport, id: 'send' }, recvTransport: { ...transport, id: 'recv' } } as never);
+    await flush();
+
+    expect(sendTransport.produce).toHaveBeenCalledTimes(1);
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(toast.info).toHaveBeenCalledWith('serverErrors.noPermissionSpeak');
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(useVoiceStore.getState().activeChannelId).toBe('ch-1');
+
+    // A rebuild of the pipeline on the same connection: nothing sends, and the
+    // server is not asked a second time
+    useSettingsStore.getState().setEnableNoiseSuppression(false);
+    await flush();
+    expect(sendTransport.produce).toHaveBeenCalledTimes(1);
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
 describe('a socket reconnect re-opening the microphone', () => {
   const deadStream = () => {
     const s = fakeStream('dead');
@@ -1374,7 +1414,75 @@ describe('switching the input device during a call (#190)', () => {
       expect(errors).toHaveBeenCalledWith(expect.stringContaining('[Voice SFU]'), expect.any(Error));
       expect(useVoiceStore.getState().localStream).toBe(b);
       expect(b.track.stop).not.toHaveBeenCalled();
+
+      // Only the "may not speak" answer is remembered: after any other refusal
+      // the next rebuild asks the server again
+      const c = fakeStream('c');
+      pick('mic-c');
+      answer('mic-c').resolve(c);
+      await flush();
+      expect(transport.produce).toHaveBeenCalledTimes(2);
       errors.mockRestore();
+    });
+
+    /** Listen-only in ch-1 on a send transport whose server refuses the microphone of a member who may not speak. */
+    function refusedForLackOfSpeak() {
+      const { transport } = sendTransportFor(fakeProducer('audio'));
+      transport.produce.mockRejectedValue(new Error('You do not have permission to speak in this channel'));
+      useVoiceStore.setState({
+        activeChannelId: 'ch-1', localStream: null, selfMute: true,
+        msSendTransport: transport as never, msDevice: { canProduce: () => true } as never,
+      });
+      return transport;
+    }
+
+    it('a member who may not speak: told once in their language, not as a failed connection, and the switch completes', async () => {
+      const b = fakeStream('b');
+      const transport = refusedForLackOfSpeak();
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+
+      expect(transport.produce).toHaveBeenCalledTimes(1);
+      expect(toast.info).toHaveBeenCalledTimes(1);
+      expect(toast.info).toHaveBeenCalledWith('serverErrors.noPermissionSpeak');
+      expect(toast.error).not.toHaveBeenCalled();
+      expect(useVoiceStore.getState().localStream).toBe(b);
+    });
+
+    it('a member who may not speak: no later rebuild asks the server again on that connection', async () => {
+      const [b, c] = [fakeStream('b'), fakeStream('c')];
+      const transport = refusedForLackOfSpeak();
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+      pick('mic-c');
+      answer('mic-c').resolve(c);
+      await flush();
+
+      expect(transport.produce).toHaveBeenCalledTimes(1);
+      expect(toast.info).toHaveBeenCalledTimes(1);
+      expect(toast.error).not.toHaveBeenCalled();
+      expect(useVoiceStore.getState().localStream).toBe(c);
+    });
+
+    it('a member who may not speak: a new connection asks again', async () => {
+      const [b, c] = [fakeStream('b'), fakeStream('c')];
+      refusedForLackOfSpeak();
+      pick('mic-b');
+      answer('mic-b').resolve(b);
+      await flush();
+
+      // A new join: a new send transport, on which the member may speak now
+      const mic = fakeProducer('audio');
+      const { transport: next } = sendTransportFor(mic);
+      useVoiceStore.setState({ msSendTransport: next as never });
+      pick('mic-c');
+      answer('mic-c').resolve(c);
+      await flush();
+
+      expect(next.produce).toHaveBeenCalledTimes(1);
+      expect([...useVoiceStore.getState().msProducers.keys()]).toEqual([mic.id]);
     });
 
     it('a peer that already sends audio is left alone (the swap gave it the new track)', async () => {
