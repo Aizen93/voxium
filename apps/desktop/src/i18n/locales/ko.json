@@ -834,7 +834,12 @@
     "beginningOfConversation": "대화의 시작",
     "conversationStart": "다이렉트 메시지 기록의 시작입니다.",
     "welcomeMessage": "사이드바에서 대화를 선택하거나, 어느 스페이스에서든 멤버를 클릭하여 새 대화를 시작하세요.",
-    "failedToLoadConversations": "대화를 불러오지 못했습니다"
+    "failedToLoadConversations": "대화를 불러오지 못했습니다",
+    "deletedParticipant": {
+      "name": "삭제된 사용자",
+      "readOnlyNotice": "이 대화는 읽기 전용입니다. 상대방의 계정이 삭제되었습니다.",
+      "messageDeleted": "삭제된 메시지"
+    }
   },
   "friends": {
     "title": "친구",

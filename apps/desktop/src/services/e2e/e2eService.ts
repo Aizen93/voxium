@@ -29,6 +29,7 @@ import {
   parseE2EPlaintext,
   e2eChannelScope,
   parseE2EScope,
+  isDeletedParticipantId,
 } from '@voxium/shared';
 import type {
   E2EDeviceEntry,
@@ -65,6 +66,7 @@ import {
   type PendingKeyShare,
   type PickleKeyProvider,
   type PinnedIdentity,
+  type PlaintextPurgeEntry,
   vaultDbName,
 } from './vault';
 import { pinSecure, securePinGeneration } from '../../utils/securePins';
@@ -290,6 +292,36 @@ export class E2EServiceDisposedError extends Error {
     this.name = 'E2EServiceDisposedError';
   }
 }
+
+/**
+ * A peer named by the server's deleted-account placeholder
+ * (`deleted:{conversationId}`, DELETED_PARTICIPANT_ID_PREFIX): a conversation
+ * that outlived the other side's account. There is nobody behind that id: no
+ * device list to fetch, no identity to pin or verify, nothing to encrypt to,
+ * no session to set up, so the service refuses it at its boundary
+ * (refuseDeletedParticipant) and asks the server nothing about it. Not a
+ * session ending (isE2ESessionEnded does not match it) and not a peer that has
+ * no device yet (E2EPeerNotReadyError): the conversation is read-only.
+ */
+export class E2EDeletedParticipantError extends Error {
+  constructor() {
+    super('The other side of this conversation is a deleted account');
+    this.name = 'E2EDeletedParticipantError';
+  }
+}
+
+/** Whether a peer id the service was handed is the deleted-account placeholder. */
+function namesDeletedParticipant(userId: unknown): boolean {
+  return isDeletedParticipantId(userId);
+}
+
+/** The boundary check of every public method that asks or tells the server about a peer: throws for the placeholder. */
+function refuseDeletedParticipant(userId: unknown): void {
+  if (namesDeletedParticipant(userId)) throw new E2EDeletedParticipantError();
+}
+
+/** Up to this many `pt:` entries are walked per queue task of a cache purge (purgeCachedPlaintexts). */
+export const PLAINTEXT_PURGE_BATCH = 500;
 
 export interface E2EServiceOptions {
   api?: typeof defaultApi;
@@ -2130,6 +2162,10 @@ export class E2EService {
     freshness: boolean | number = false
   ): Promise<E2EPinnedDeviceList> {
     this.assertLive();
+    // No `GET /e2e/devices/deleted:…`, no pin, no recorded state, no
+    // onDeviceListChanged: there is no account behind the placeholder. Every
+    // path that reaches the server for a peer's list comes through here.
+    refuseDeletedParticipant(userId);
     // `freshness`: false = normal cache, true = force a round trip, or a
     // max-age in ms. The send path passes a small max-age instead of forcing —
     // two uncached GETs per message would exhaust the per-user rate limit
@@ -2424,8 +2460,11 @@ export class E2EService {
    * acknowledged, so the warning still fires.
    */
   async deviceListStatus(userId: string): Promise<E2EDeviceListStatus> {
+    const nothing: E2EDeviceListStatus = { version: 0, deviceIds: [], newDeviceIds: [], unsignedDeviceIds: [], changed: false };
+    // the deleted-account placeholder has no list: nothing new, nothing to warn about
+    if (namesDeletedParticipant(userId)) return nothing;
     const state = await this.liveVault.getDeviceListState(userId);
-    if (!state) return { version: 0, deviceIds: [], newDeviceIds: [], unsignedDeviceIds: [], changed: false };
+    if (!state) return nothing;
     const crossSigned = new Set(state.crossSignedDeviceIds ?? []);
     // Only meaningful once the account HAS a master key: before cross-signing
     // is bootstrapped every device is unsigned, which is not a signal (D11).
@@ -2527,6 +2566,8 @@ export class E2EService {
    * approved or revoked. Clicking "I've seen it" cannot manufacture trust.
    */
   async acknowledgeDeviceList(userId: string, seenDeviceIds?: string[]): Promise<void> {
+    // no list was ever recorded for the deleted-account placeholder: nothing to acknowledge
+    if (namesDeletedParticipant(userId)) return;
     return this.enqueue(() => this.acknowledgeDeviceListUnqueued(userId, seenDeviceIds));
   }
 
@@ -2571,6 +2612,8 @@ export class E2EService {
    * may have gone to a device we no longer trust).
    */
   async acceptNewIdentity(peerUserId: string): Promise<void> {
+    // its own GET of the list, so its own check: no identity to accept for the placeholder
+    refuseDeletedParticipant(peerUserId);
     return this.enqueue(async () => {
       const res = await this.api.get(`/e2e/devices/${peerUserId}`);
       const data = res.data.data as {
@@ -2644,6 +2687,8 @@ export class E2EService {
 
   /** Drop every pairwise session with a user so the next share re-establishes. */
   async resetSession(peerUserId: string): Promise<void> {
+    // no pairwise session was ever set up with the placeholder
+    if (namesDeletedParticipant(peerUserId)) return;
     return this.enqueue(async () => {
       this.dropOlmSessionsInMemory(peerUserId);
       await this.vault.deleteSessionsForUser(peerUserId);
@@ -3838,6 +3883,10 @@ export class E2EService {
     ) {
       throw new Error('malformed key share');
     }
+    // A share naming the deleted-account placeholder as its sender can never
+    // be imported: unusable for good (discarded and acknowledged), and its
+    // sender is never looked up
+    if (namesDeletedParticipant(senderUserId)) throw new Error('key share names a deleted account as its sender');
     const envelope = parseE2EEnvelope(share.body);
     if (!envelope || envelope.e !== E2E_ENGINE_OLM1) throw new Error('key share body is not an olm1 envelope');
 
@@ -3913,6 +3962,8 @@ export class E2EService {
     peerUserId: string,
     plaintext: string
   ): Promise<{ envelope: string; position: E2EMessagePosition }> {
+    // nothing is encrypted, and no key shared, to the deleted-account placeholder
+    refuseDeletedParticipant(peerUserId);
     return this.enqueue(async () => {
       const { session, record } = await this.ensureGroupSession(conversationId, peerUserId);
       // Read BEFORE encrypt(), which advances the ratchet: this is the index a
@@ -3967,6 +4018,8 @@ export class E2EService {
    * the peer has published nothing — callers abort, never degrade.
    */
   async encryptToDevice(userId: string, deviceId: string, plaintext: string): Promise<string> {
+    // no device, no session, no call signal or voice key for the placeholder
+    refuseDeletedParticipant(userId);
     return this.enqueue(async () => {
       const olm = await this.ensureOlmSession(userId, deviceId);
       const { messageType, body } = olm.encrypt(plaintext) as { messageType: 0 | 1; body: string };
@@ -3987,6 +4040,8 @@ export class E2EService {
    * dropped packet.
    */
   async decryptFromDevice(userId: string, deviceId: string, envelopeStr: string): Promise<string | null> {
+    // its answer to anything that cannot be decrypted: no list fetched, no session set up
+    if (namesDeletedParticipant(userId)) return null;
     const envelope = parseE2EEnvelope(envelopeStr);
     if (!envelope || envelope.e !== E2E_ENGINE_OLM1) return null;
     // First contact with this sender device: verify + TOFU-pin its identity
@@ -4149,6 +4204,9 @@ export class E2EService {
     },
     opts: { claimMissing?: boolean; storageFailureRejects?: boolean } = {},
   ): Promise<DecryptResult> {
+    // A row under the deleted-account placeholder: no session speaks for that
+    // id, so nothing is read, claimed or decrypted for it
+    if (namesDeletedParticipant(message.authorId)) return { text: '', failed: true };
     const claimMissing = opts.claimMissing ?? true;
     const storageFailureRejects = opts.storageFailureRejects ?? false;
     const version = message.editedAt ?? null;
@@ -4349,6 +4407,39 @@ export class E2EService {
       }));
   }
 
+  /**
+   * Remove decrypted-text cache entries (`pt:`) of ONE scope (a conversation
+   * id, or `ch:{channelId}`) for which `remove` answers true; answers how many
+   * went. `remove` sees each entry's author (absent on entries written before
+   * authors were recorded), message id and creation and edit times, never the
+   * text, and runs synchronously: a conversation whose other side's account
+   * was deleted drops every entry this account did not write; a time floor
+   * can drop the entries up to it.
+   *
+   * Bounded: a cursor walks the cache PLAINTEXT_PURGE_BATCH entries at a time,
+   * each batch its own task of the serial queue (so it is ordered with the
+   * decrypts that write entries, refused once the service is disposed, and
+   * holds the queue for one batch at most), resuming after the last key it
+   * visited; nothing loads the whole store. Idempotent: a second run over a
+   * purged scope deletes nothing. A batch that fails rejects with what failed
+   * and leaves the entries after it for the next run; the caller logs it.
+   */
+  async purgeCachedPlaintexts(scope: string, remove: (entry: PlaintextPurgeEntry) => boolean): Promise<number> {
+    this.assertLive();
+    if (typeof scope !== 'string' || scope.length === 0) throw new Error('a cache purge needs a scope');
+    let after: string | null = null;
+    let removed = 0;
+    do {
+      const from: string | null = after;
+      const batch: { removed: number; next: string | null } = await this.enqueue(() =>
+        this.vault.purgePlaintextBatch(scope, remove, from, PLAINTEXT_PURGE_BATCH)
+      );
+      removed += batch.removed;
+      after = batch.next;
+    } while (after !== null);
+    return removed;
+  }
+
   // ─── Device management for the UI ───────────────────────────────────────────
 
   /** This account's registered devices, as the server sees them. */
@@ -4437,6 +4528,8 @@ export class E2EService {
   /** One safety number per device of the peer (D10). */
   async perDeviceSafetyNumbers(peerUserId: string): Promise<E2EDeviceSafetyNumber[]> {
     this.assertLive();
+    // no device, so no number (the "unavailable" answer), and no list fetched for it
+    if (namesDeletedParticipant(peerUserId)) return [];
     let devices: E2EDeviceIdentity[];
     try {
       devices = (await this.fetchDeviceList(peerUserId)).devices;
@@ -4477,6 +4570,8 @@ export class E2EService {
    */
   async accountSafetyNumber(peerUserId: string): Promise<E2EAccountSafetyNumber | null> {
     this.assertLive();
+    // no account key behind the placeholder: the "unavailable" answer, nothing fetched
+    if (namesDeletedParticipant(peerUserId)) return null;
     const own = await this.ownMasterKey();
     if (!own) return null;
     try {
@@ -4496,11 +4591,14 @@ export class E2EService {
 
   /** Has the peer's ACCOUNT key been compared out of band (D9)? */
   async isAccountVerified(peerUserId: string): Promise<boolean> {
+    if (namesDeletedParticipant(peerUserId)) return false;
     return (await this.liveVault.getMasterIdentity(peerUserId))?.verified ?? false;
   }
 
   /** Mark ONE device of a peer as verified out of band. */
   async markDeviceVerified(peerUserId: string, deviceId: string): Promise<void> {
+    // nothing was ever pinned for the placeholder: "verified" would be a claim about nobody
+    refuseDeletedParticipant(peerUserId);
     const identity = await this.liveVault.getIdentity(peerUserId, deviceId);
     if (!identity) return;
     await this.liveVault.putIdentity(peerUserId, deviceId, { ...identity, verified: true });
@@ -4524,6 +4622,8 @@ export class E2EService {
    * individually so accounts without a master key (D11) keep working.
    */
   async markIdentityVerified(peerUserId: string): Promise<void> {
+    // no account key and no device behind the placeholder: "verified" would be a claim about nobody
+    refuseDeletedParticipant(peerUserId);
     const master = await this.liveVault.getMasterIdentity(peerUserId);
     if (master && !master.verified) {
       await this.liveVault.putMasterIdentity(peerUserId, { ...master, verified: true });

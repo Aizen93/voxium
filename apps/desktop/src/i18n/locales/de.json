@@ -835,7 +835,12 @@
     "beginningOfConversation": "Beginn der Unterhaltung",
     "conversationStart": "Dies ist der Beginn deines Direktnachrichtenverlaufs.",
     "welcomeMessage": "Wähle eine Unterhaltung in der Seitenleiste aus oder klicke auf ein Mitglied in einem beliebigen Space, um eine neue zu starten.",
-    "failedToLoadConversations": "Unterhaltungen konnten nicht geladen werden"
+    "failedToLoadConversations": "Unterhaltungen konnten nicht geladen werden",
+    "deletedParticipant": {
+      "name": "Gelöschter Benutzer",
+      "readOnlyNotice": "Diese Unterhaltung ist schreibgeschützt: Das Konto der anderen Person wurde gelöscht.",
+      "messageDeleted": "Nachricht gelöscht"
+    }
   },
   "friends": {
     "title": "Freunde",

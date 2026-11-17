@@ -253,6 +253,18 @@ export interface CachedPlaintext {
   messageIndex?: number;
 }
 
+/**
+ * What a purge of the plaintext cache decides on, per entry: who wrote it
+ * (absent on entries written before authors were recorded), which message it
+ * is, and when it was created and last edited. Never the text.
+ */
+export interface PlaintextPurgeEntry {
+  messageId: string;
+  authorId?: string;
+  createdAt?: string;
+  editedAt: string | null;
+}
+
 /** One Megolm ratchet position: the session and the index within it. */
 export interface MessagePosition {
   sessionId: string;
@@ -780,6 +792,77 @@ export class E2EVault {
           const entry = cursor.value as CachedPlaintext;
           if (entry.conversationId === conversationId && !entry.failed) {
             results.push({ messageId: String(cursor.key).slice(3), entry });
+          }
+          cursor.continue();
+        };
+      })
+    );
+  }
+
+  /**
+   * One batch of a purge of the plaintext cache (E2EService.purgeCachedPlaintexts):
+   * ONE readwrite cursor over the `pt:` range, starting after the key `after`
+   * (from the start when null), that visits at most `limit` entries of any
+   * scope, deletes those of `scope` for which `remove` answers true, and stops.
+   * Answers how many it deleted and the key to resume after, or `next: null`
+   * once the range is done. Settles when the transaction has committed.
+   *
+   * `remove` runs synchronously inside the transaction (nothing may be awaited
+   * there, or IndexedDB commits it); one that throws aborts the batch, so it
+   * deletes nothing.
+   */
+  purgePlaintextBatch(
+    scope: string,
+    remove: (entry: PlaintextPurgeEntry) => boolean,
+    after: string | null,
+    limit: number,
+  ): Promise<{ removed: number; next: string | null }> {
+    return this.withStore('readwrite', (store) =>
+      new Promise((resolve, reject) => {
+        const tx = store.transaction;
+        const upper = `pt:${KEY_MAX}`;
+        const range = after === null ? IDBKeyRange.bound('pt:', upper) : IDBKeyRange.bound(after, upper, true, false);
+        let removed = 0;
+        let visited = 0;
+        let next: string | null = null;
+        let failure: unknown = null;
+        tx.oncomplete = () => resolve({ removed, next });
+        tx.onabort = () => reject(failure ?? tx.error ?? new Error('IndexedDB purge transaction aborted'));
+        const cursorReq = store.openCursor(range);
+        cursorReq.onerror = () => {
+          failure = cursorReq.error ?? new Error('IndexedDB cursor failed');
+        };
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) {
+            next = null;
+            return;
+          }
+          const key = String(cursor.key);
+          const entry = cursor.value as CachedPlaintext | undefined;
+          visited += 1;
+          if (entry && entry.conversationId === scope) {
+            let drop: boolean;
+            try {
+              drop = remove({
+                messageId: key.slice(3),
+                ...(entry.authorId !== undefined && { authorId: entry.authorId }),
+                ...(entry.createdAt !== undefined && { createdAt: entry.createdAt }),
+                editedAt: entry.editedAt ?? null,
+              });
+            } catch (err) {
+              failure = err;
+              tx.abort();
+              return;
+            }
+            if (drop) {
+              cursor.delete();
+              removed += 1;
+            }
+          }
+          if (visited >= limit) {
+            next = key;
+            return;
           }
           cursor.continue();
         };

@@ -6,7 +6,7 @@
 // DOM. The server's word on a row (its `encrypted` flag, its `type`, a quote,
 // a file, a mention) is dropped or locked; what remains is either the
 // decrypted message or the "unable to decrypt" marker.
-import { parseE2EPlaintext } from '@voxium/shared';
+import { parseE2EPlaintext, isDMSystemNotice, DELETED_MESSAGE_TYPE, DELETED_PARTICIPANT_ID_PREFIX, isDeletedParticipantId } from '@voxium/shared';
 import type { Message, MessageAuthor, E2EAttachmentMeta } from '@voxium/shared';
 
 /** Content of a row that could not be shown; with `encrypted: true` the UI renders its "unable to decrypt" marker. */
@@ -96,6 +96,74 @@ export function refusedRow(message: Message): Message {
  */
 export function isRefusedShape(message: Message): boolean {
   return message.encrypted === true && !message.content && !message.e2eAttachments?.length;
+}
+
+/**
+ * The author a direct conversation shows where the other person's account was
+ * deleted: built HERE from the conversation id (`deleted:{conversationId}`,
+ * the id the server uses too), never from what a row carries. Its id is never
+ * a user id (the colon) and names nobody; the UI renders the localised "Deleted
+ * user" for it and never this object's strings.
+ */
+export function deletedParticipantAuthor(conversationId: string): MessageAuthor {
+  return {
+    id: DELETED_PARTICIPANT_ID_PREFIX + conversationId,
+    username: 'deleted',
+    displayName: 'Deleted user',
+    avatarUrl: null,
+    role: 'user',
+    isSupporter: false,
+    supporterTier: null,
+  };
+}
+
+/**
+ * The row that stands for a deleted account's message in a DM
+ * (`type: DELETED_MESSAGE_TYPE`). Every field is set here: the server's id,
+ * conversation and time, and nothing else it sent — no text, no ciphertext,
+ * no file, no reaction, no quote, no mention, no webhook or ping claim, its
+ * author the placeholder above. A server that puts words in such a row shows
+ * the user nothing but "Message deleted". DM scope only: the channel gates
+ * never build it.
+ */
+export function deletedMessageRow(message: Message, conversationId: string): Message {
+  return {
+    id: message.id,
+    type: DELETED_MESSAGE_TYPE,
+    content: '',
+    encrypted: false,
+    channelId: null,
+    conversationId,
+    replyToId: null,
+    replyTo: null,
+    author: deletedParticipantAuthor(conversationId),
+    mentions: [],
+    attachments: [],
+    reactions: [],
+    createdAt: typeof message.createdAt === 'string' ? message.createdAt : '',
+    editedAt: null,
+  };
+}
+
+/** Whether a DM row is the gate's deleted-message row (deletedMessageRow). */
+export function isDeletedMessageRow(message: Pick<Message, 'type'>): boolean {
+  return message.type === DELETED_MESSAGE_TYPE;
+}
+
+/**
+ * Whether a DM quote stands for a deleted account's message: its author is
+ * the placeholder and it is not one of that account's call notices (which
+ * keep their fixed text). A quote carries no `type`, so the author is what
+ * says it; the UI shows "Message deleted" for it, never the quote's text.
+ */
+export function isDeletedQuote(quote: NonNullable<Message['replyTo']>): boolean {
+  if (!isDeletedParticipantId(quote.author?.id)) return false;
+  return quote.encrypted === true || !isDMSystemNotice(quote.content);
+}
+
+/** A deleted account's quote as the gate keeps it: the id and the placeholder author, no text. */
+export function deletedQuote(quote: NonNullable<Message['replyTo']>, conversationId: string): NonNullable<Message['replyTo']> {
+  return { id: quote.id, content: '', encrypted: false, author: deletedParticipantAuthor(conversationId) };
 }
 
 /**

@@ -835,7 +835,12 @@
     "beginningOfConversation": "Início da conversa",
     "conversationStart": "Este é o início do seu histórico de mensagens diretas.",
     "welcomeMessage": "Selecione uma conversa na barra lateral ou clique em um membro de qualquer espaço para iniciar uma nova.",
-    "failedToLoadConversations": "Não foi possível carregar as conversas"
+    "failedToLoadConversations": "Não foi possível carregar as conversas",
+    "deletedParticipant": {
+      "name": "Usuário excluído",
+      "readOnlyNotice": "Esta conversa é somente leitura: a conta da outra pessoa foi excluída.",
+      "messageDeleted": "Mensagem excluída"
+    }
   },
   "friends": {
     "title": "Amigos",

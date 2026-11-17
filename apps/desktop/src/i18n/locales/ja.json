@@ -834,7 +834,12 @@
     "beginningOfConversation": "会話の始まり",
     "conversationStart": "ダイレクトメッセージの履歴の始まりです。",
     "welcomeMessage": "サイドバーから会話を選択するか、いずれかのスペースのメンバーをクリックして新しい会話を始めましょう。",
-    "failedToLoadConversations": "会話を読み込めませんでした"
+    "failedToLoadConversations": "会話を読み込めませんでした",
+    "deletedParticipant": {
+      "name": "削除されたユーザー",
+      "readOnlyNotice": "この会話は閲覧のみです。相手のアカウントは削除されました。",
+      "messageDeleted": "メッセージは削除されました"
+    }
   },
   "friends": {
     "title": "フレンド",

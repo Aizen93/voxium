@@ -834,7 +834,12 @@
     "beginningOfConversation": "对话开始",
     "conversationStart": "这是你们私信记录的开始。",
     "welcomeMessage": "从侧边栏选择一个对话，或点击任意空间中的成员来开始新的对话。",
-    "failedToLoadConversations": "无法加载对话"
+    "failedToLoadConversations": "无法加载对话",
+    "deletedParticipant": {
+      "name": "已删除的用户",
+      "readOnlyNotice": "此对话为只读：对方的账号已被删除。",
+      "messageDeleted": "消息已删除"
+    }
   },
   "friends": {
     "title": "好友",

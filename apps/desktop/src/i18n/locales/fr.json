@@ -835,7 +835,12 @@
     "beginningOfConversation": "Début de la conversation",
     "conversationStart": "Ceci est le début de votre historique de messages privés.",
     "welcomeMessage": "Sélectionnez une conversation dans la barre latérale, ou cliquez sur un membre dans n'importe quel espace pour en démarrer une nouvelle.",
-    "failedToLoadConversations": "Impossible de charger les conversations"
+    "failedToLoadConversations": "Impossible de charger les conversations",
+    "deletedParticipant": {
+      "name": "Utilisateur supprimé",
+      "readOnlyNotice": "Cette conversation est en lecture seule : le compte de l’autre personne a été supprimé.",
+      "messageDeleted": "Message supprimé"
+    }
   },
   "friends": {
     "title": "Amis",

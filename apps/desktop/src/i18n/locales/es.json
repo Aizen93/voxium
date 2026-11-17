@@ -835,7 +835,12 @@
     "beginningOfConversation": "Inicio de la conversación",
     "conversationStart": "Este es el inicio de tu historial de mensajes directos.",
     "welcomeMessage": "Selecciona una conversación de la barra lateral, o haz clic en un miembro de cualquier espacio para iniciar una nueva.",
-    "failedToLoadConversations": "No se pudieron cargar las conversaciones"
+    "failedToLoadConversations": "No se pudieron cargar las conversaciones",
+    "deletedParticipant": {
+      "name": "Usuario eliminado",
+      "readOnlyNotice": "Esta conversación es de solo lectura: la cuenta de la otra persona fue eliminada.",
+      "messageDeleted": "Mensaje eliminado"
+    }
   },
   "friends": {
     "title": "Amigos",

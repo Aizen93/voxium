@@ -12,12 +12,22 @@
 // captures every account store's initial state at module-eval time, so a
 // static store import from a service pulled in by chatStore would create an
 // eval-order cycle that crashes at boot.
-import { buildE2EPlaintext, parseE2EPlaintext, isDMSystemNotice } from '@voxium/shared';
+import { buildE2EPlaintext, parseE2EPlaintext, isDMSystemNotice, isDeletedParticipantId, DELETED_MESSAGE_TYPE } from '@voxium/shared';
 import type { Message, E2EAttachmentMeta } from '@voxium/shared';
 import { getE2EService, E2EIdentityChangedError, type E2EMessagePosition } from './e2eService';
-import { DECRYPT_FAILED_CONTENT, decryptedRow, lockedQuote, refusedRow, withoutServerAssertions } from './displayGate';
+import {
+  DECRYPT_FAILED_CONTENT,
+  decryptedRow,
+  deletedMessageRow,
+  deletedQuote,
+  isDeletedQuote,
+  lockedQuote,
+  refusedRow,
+  withoutServerAssertions,
+} from './displayGate';
 import { isE2ESessionEnded } from './session';
 import { arrivalMark, noteQuoteAwaiting, noteUndecrypted } from './undecryptedRows';
+import { isParticipantDeleted, DMConversationReadOnlyError } from '../../utils/dmParticipant';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
@@ -42,6 +52,11 @@ async function resolveReplyPreview(message: Message, userId: string): Promise<Me
   // a quote names its author; one without is malformed and is dropped whole
   if (!message.replyTo.author) return { ...message, replyTo: null };
   const scope = message.conversationId ?? '';
+  // A deleted account's message, quoted: no text at all, from the server or
+  // the cache, and nothing to wait for (the UI says "Message deleted")
+  if (isDeletedQuote(message.replyTo)) {
+    return scope ? { ...message, replyTo: deletedQuote(message.replyTo, scope) } : { ...message, replyTo: lockedQuote(message.replyTo) };
+  }
   if (!message.replyTo.encrypted) {
     // An unencrypted quote is trusted only when it is one of the server's call
     // notices; anything else renders as the lock placeholder
@@ -99,6 +114,14 @@ export async function decryptMessageForDisplay(
 }
 
 async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Message> {
+  // A deleted account's message (the conversation outlived the account): its
+  // own shape, every field set by the gate, before the refusal of unencrypted
+  // rows and before anything reads the cache or notes the row. The type alone
+  // decides: text or ciphertext a server put in such a row is never shown.
+  if (input.type === DELETED_MESSAGE_TYPE) {
+    if (!input.conversationId) return refusedRow(withoutServerAssertions(input));
+    return deletedMessageRow(input, input.conversationId);
+  }
   const message = withoutServerAssertions(input);
   if (!message.encrypted) {
     // After the always-on cutover there is no plaintext DM path: conversations
@@ -131,6 +154,10 @@ async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Mes
   if (!message.conversationId) return refusedRow(message);
   const userId = await currentUserId();
   if (!userId) return refusedRow(message);
+  // An encrypted row under the deleted account's placeholder: no session
+  // speaks for that id and none ever will, so nothing is decrypted, claimed
+  // or noted for a later try
+  if (isDeletedParticipantId(message.author?.id)) return resolveReplyPreview(refusedRow(message), userId);
 
   const service = getE2EService(userId);
   const own = message.author?.id === userId;
@@ -230,6 +257,8 @@ export async function prepareOutgoingDM(
   // loaded cannot be encrypted to anyone — and must not degrade to a plaintext
   // send the server would reject anyway (plan §4.2).
   if (!conversation) throw new Error(`Conversation ${conversationId} is not loaded`);
+  // the other side's account is gone: nothing is encrypted to its placeholder
+  if (isParticipantDeleted(conversation)) throw new DMConversationReadOnlyError(conversationId);
 
   const userId = await currentUserId();
   if (!userId) throw new Error('Not authenticated');
@@ -291,10 +320,15 @@ export async function searchEncryptedHistory(
   const me = useAuthStore.getState().user;
   const conversation = useDMStore.getState().conversations.find((c) => c.id === conversationId);
 
+  // The other side's account was deleted: only this account's own lines are
+  // found there, whatever the cache still holds before (or after a failed)
+  // purge of that conversation (services/dmReadOnly.ts)
+  const ownOnly = isParticipantDeleted(conversation);
   const hits = (await getE2EService(userId).searchDecrypted(conversationId, query))
     // pre-Phase-C cache entries lack createdAt — they can't be rendered or
     // jumped to reliably, so they're excluded rather than shown broken
-    .filter((hit) => hit.createdAt);
+    .filter((hit) => hit.createdAt)
+    .filter((hit) => !ownOnly || hit.authorId === userId);
   return hits.map((hit) => {
     // Resolve the author from the two possible DM participants; pre-Phase-C
     // cache entries have no authorId and render anonymously rather than wrong
