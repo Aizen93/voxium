@@ -67,6 +67,7 @@ import {
   type PinnedIdentity,
   vaultDbName,
 } from './vault';
+import { defaultPickleKeyProvider } from './pickleKeyProvider';
 import { pinSecure, securePinGeneration } from '../../utils/securePins';
 import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 
@@ -4577,18 +4578,66 @@ export function disposeE2EService(): void {
 }
 
 /**
- * Drop this device's local E2E state for an account that no longer exists.
- * Logout deliberately KEEPS the vault (device keys persist like a trusted
- * device), but after self-service deletion the server has purged every key
- * this vault pairs with, so what remains is pickled key material and a
- * plaintext cache with no owner. Best effort; the vault name is the one
- * E2EVault.open() builds.
+ * The longest an account deletion waits for its vault's delete request to
+ * answer before it removes the vault's key anyway. A request answers success,
+ * error or blocked well before this; the bound is for one that never does.
  */
-export function forgetLocalE2EState(userId: string): void {
+export const VAULT_DELETE_WAIT_MS = 5_000;
+
+/**
+ * Drop this device's local E2E state for an account that no longer exists.
+ * Logout deliberately KEEPS the vault and its pickle key (device keys persist
+ * like a trusted device), but after self-service deletion the server has
+ * purged every key this vault pairs with, so what remains is pickled key
+ * material, a plaintext cache with no owner, and the key that opens them (in
+ * the OS credential store in the desktop app, in localStorage in a browser or
+ * when the keychain could not be written). The vault goes first, then its key.
+ * Best effort, and it never rejects: what could not be removed is logged. The
+ * vault name is the one E2EVault.open() builds; the delete request is made
+ * before this returns.
+ */
+export async function forgetLocalE2EState(
+  userId: string,
+  keys: PickleKeyProvider = defaultPickleKeyProvider()
+): Promise<void> {
   if (activeUserId === userId) disposeE2EService();
+  await deleteVaultDatabase(vaultDbName(userId));
   try {
-    indexedDB.deleteDatabase(vaultDbName(userId));
+    await keys.remove(userId);
   } catch (err) {
-    console.warn('e2e: could not drop the local vault of the deleted account:', errText(err));
+    console.warn('e2e: could not remove the vault key of the deleted account:', errText(err));
   }
+}
+
+/**
+ * Ask IndexedDB to delete a vault; resolves once it is deleted, once the
+ * request failed, or after VAULT_DELETE_WAIT_MS (a connection still open
+ * blocks it: the vault's own close on versionchange, and the database goes
+ * when the last one closes). Never rejects.
+ */
+function deleteVaultDatabase(name: string): Promise<void> {
+  return new Promise((resolve) => {
+    let request: IDBOpenDBRequest;
+    try {
+      request = indexedDB.deleteDatabase(name);
+    } catch (err) {
+      console.warn('e2e: could not drop the local vault of the deleted account:', errText(err));
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      console.warn('e2e: the local vault of the deleted account did not answer its delete request in time');
+      resolve();
+    }, VAULT_DELETE_WAIT_MS);
+    const settle = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    request.onsuccess = settle;
+    // Blocked is not done: the key waits for the vault, within the bound
+    request.onerror = () => {
+      console.warn('e2e: could not drop the local vault of the deleted account:', errText(request.error));
+      settle();
+    };
+  });
 }

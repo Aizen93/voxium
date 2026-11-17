@@ -63,7 +63,7 @@ const ENCRYPTION_ROWS: StorageRow[] = [
     item: 'Vault key',
     purpose: 'Encrypts the keys held in the vault',
     where: 'Desktop app: the credential store. Browser: local storage',
-    duration: 'Kept when you sign out; not removed automatically, even when the account is deleted (it unlocks nothing once its vault is gone)',
+    duration: 'Kept when you sign out, with its vault; deleted from this device with the vault when you delete your account here',
   },
 ];
 
@@ -116,7 +116,7 @@ export function CookiePolicyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Cookie Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 12, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 18, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -167,8 +167,8 @@ export function CookiePolicyContentEn() {
             from the credential store. With &ldquo;Remember me&rdquo; off, your session is never written to
             disk: it stays in memory and ends when you close the app. Signing out keeps your trusted-device
             token, your encryption vault and your preferences, so that your encrypted history is still
-            readable when you sign back in; deleting your account removes the vault and the trusted-device
-            token from the device you delete it on. To remove everything from a computer, delete the
+            readable when you sign back in; deleting your account removes the vault, its key and the
+            trusted-device token from the device you delete it on. To remove everything from a computer, delete the
             app&apos;s data folders (named com.voxium.app) after uninstalling it, and the Voxium entries
             (their names contain app.voxium) from your operating system&apos;s credential manager.
           </p>

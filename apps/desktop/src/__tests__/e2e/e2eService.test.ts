@@ -785,6 +785,7 @@ function memoryKeyProvider(): PickleKeyProvider {
   return {
     load: async (userId) => keys.get(userId) ?? null,
     save: async (userId, key) => void keys.set(userId, key),
+    remove: async (userId) => void keys.delete(userId),
   };
 }
 

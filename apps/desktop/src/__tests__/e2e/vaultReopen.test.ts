@@ -22,6 +22,7 @@ function makeVault() {
   const provider: PickleKeyProvider = {
     load: async () => key,
     save: async () => {},
+    remove: async () => {},
   };
   return new E2EVault(`user-${n}`, provider, `reopen-${n}`);
 }
@@ -151,7 +152,7 @@ describe('a vault closed on purpose stays closed', () => {
       name: 'E2EVaultClosedError',
     });
 
-    const reader = new E2EVault(`user-${n}`, { load: async () => btoa(String.fromCharCode(...new Uint8Array(32).fill(7))), save: async () => {} }, `reopen-${n}`);
+    const reader = new E2EVault(`user-${n}`, { load: async () => btoa(String.fromCharCode(...new Uint8Array(32).fill(7))), save: async () => {}, remove: async () => {} }, `reopen-${n}`);
     await reader.open();
     expect((await reader.listPendingShares()).map((p) => p.key)).toEqual(['pks:2026|s1']);
     reader.close();
@@ -181,6 +182,7 @@ describe('a vault closed on purpose stays closed', () => {
         return answered;
       },
       save,
+      remove: async () => {},
     };
     const vault = new E2EVault(`user-${n}`, provider, `reopen-${n}`);
 

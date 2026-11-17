@@ -695,14 +695,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     await api.delete('/auth/account', { data: { password, ...(totpCode ? { totpCode } : {}) } });
     // The server has purged the account and disconnected its sockets; what is
     // left is this device's copy of it. Same cleanup as logout, plus the E2E
-    // vault logout deliberately keeps — every key it pairs with is gone.
+    // vault and its key, which logout deliberately keeps — every key the vault
+    // pairs with is gone.
     get().logout();
-    if (userId) {
-      forgetLocalE2EState(userId);
-      // The secure-channel pins pair with the same vanished account.
-      forgetSecurePins(userId);
-    }
+    // Never rejects: a part it could not remove is logged, and the account
+    // is deleted either way
+    const localE2EStateForgotten = userId ? forgetLocalE2EState(userId) : Promise.resolve();
+    // The secure-channel pins pair with the same vanished account.
+    if (userId) forgetSecurePins(userId);
     clearTrustedDeviceToken();
+    await localE2EStateForgotten;
   },
 
   acceptConsent: async (consent) => {

@@ -270,7 +270,7 @@ its copy after each use.
 lives in the **OS credential store** (Windows Credential Manager / macOS
 Keychain / Linux Secret Service) under service `app.voxium.e2e-pickle-key`
 (a desktop build for another server: `<its identifier>.e2e-pickle-key`),
-account = userId, via the `e2e_pickle_key_get/set` Tauri commands (`keyring`
+account = userId, via the `e2e_pickle_key_get/set/delete` Tauri commands (`keyring`
 crate v3; the service name is derived on the Rust side of the IPC boundary
 from the identifier the build was compiled with, so webview code can only
 reach its own build's entries, and inputs are shape-validated). Pre-keychain
@@ -280,6 +280,12 @@ from the keychain. Browser dev builds (and keychain failures) fall back to
 localStorage (`voxium_e2e_pk_{userId}`) — fail-soft, because a key that can't
 be persisted at all would orphan every pickle in the vault. Backends implement
 `PickleKeyProvider` (`services/e2e/pickleKeyProvider.ts`).
+
+**Lifecycle:** logout keeps the key with its vault (§9). Self-service account
+deletion removes both from the device it ran on (`forgetLocalE2EState`): the
+vault first, then the key, from the credential store and from localStorage
+alike (`PickleKeyProvider.remove`; a key that is not there counts as removed).
+A key that cannot be removed is logged and does not fail the deletion.
 
 If the pickle key is lost while the vault survives, the client detects
 undecryptable pickles and regenerates a fresh identity (safety number
@@ -313,6 +319,7 @@ verification and shows a warning.
 | Attachments | encrypted client-side (AES-256-GCM in the binding); real metadata inside the message ciphertext; server stores opaque blobs (§13) |
 | Edits | fresh ratchet ciphertext under the same id; plaintext cache versioned by editedAt |
 | Logout | WASM objects freed, vault closed but **kept** (device keys persist like trusted-device tokens) |
+| Account deletion | the vault and its pickle key deleted from this device (§7.3) |
 
 ### 9.1 Display gate
 

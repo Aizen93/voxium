@@ -257,9 +257,38 @@ fn write_pickle_key(service: &str, user_id: &str, key_b64: &str) -> Result<(), S
         .map_err(|e| e.to_string())
 }
 
+/// Removing a key that is not there is the state the caller asked for.
+fn remove_pickle_key_entry(entry: &keyring::Entry) -> Result<(), String> {
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The key of an account deleted on this device, removed with its vault
+/// (`forgetLocalE2EState` on the webview side). A logout never calls it: the
+/// vault outlives a logout, and so does the key that opens it.
+fn delete_pickle_key(service: &str, user_id: &str) -> Result<(), String> {
+    if !valid_e2e_user_id(user_id) {
+        return Err("invalid user id".to_string());
+    }
+    remove_pickle_key_entry(&pickle_key_entry(service, user_id)?)
+}
+
 #[tauri::command]
 fn e2e_pickle_key_get(app: tauri::AppHandle, user_id: String) -> Result<Option<String>, String> {
     read_pickle_key(&build_keychain_services(&app).e2e_pickle_key, &user_id)
+}
+
+// The keyring call blocks (Credential Manager, the Keychain, a D-Bus round
+// trip to the Secret Service): on the blocking pool, off the thread that
+// paints the window, like the session commands below.
+#[tauri::command]
+async fn e2e_pickle_key_delete(app: tauri::AppHandle, user_id: String) -> Result<(), String> {
+    let service = build_keychain_services(&app).e2e_pickle_key;
+    tauri::async_runtime::spawn_blocking(move || delete_pickle_key(&service, &user_id))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -420,6 +449,7 @@ pub fn run() {
             notify_with_avatar,
             e2e_pickle_key_get,
             e2e_pickle_key_set,
+            e2e_pickle_key_delete,
             session_secret_get,
             session_secret_set,
             session_secret_delete
@@ -693,6 +723,70 @@ mod session_secret_tests {
             assert_eq!(write_pickle_key(&service, "user_1", &key), Ok(()));
         }
     }
+
+    /// The delete takes the user id the read and the write take, checked the
+    /// same way, and a key that is not there is already deleted.
+    #[test]
+    fn a_pickle_key_delete_checks_the_id_and_takes_a_missing_key_as_done() {
+        use_mock_store();
+        for identifier in [
+            OFFICIAL_IDENTIFIER,
+            "com.voxium.selfhosted.s0123456789abcdef",
+        ] {
+            let service = keychain_services(identifier).e2e_pickle_key;
+            for bad_user in ["", "a.b", "../x", "a b", "user\0", &"u".repeat(65)] {
+                assert_eq!(
+                    delete_pickle_key(&service, bad_user).unwrap_err(),
+                    "invalid user id",
+                    "{bad_user:?}"
+                );
+            }
+            assert_eq!(delete_pickle_key(&service, "user_1"), Ok(()));
+            assert_eq!(delete_pickle_key(&service, "user_1"), Ok(()));
+            assert_eq!(delete_pickle_key(&service, &"u".repeat(64)), Ok(()));
+        }
+    }
+
+    /// The mock store keeps one credential per `Entry`, so these entries are
+    /// held here and handed to the removal: the one removed is gone, the other
+    /// account's key is still there. Which entry the command opens for a user
+    /// id is `pickle_key_entry`, the same call the read and the write make.
+    #[test]
+    fn a_pickle_key_delete_removes_that_entry_and_no_other() {
+        use_mock_store();
+        let service = keychain_services(OFFICIAL_IDENTIFIER).e2e_pickle_key;
+        let key = "A".repeat(43);
+        let deleted = pickle_key_entry(&service, "user_a").expect("entry");
+        let kept = pickle_key_entry(&service, "user_b").expect("entry");
+        deleted.set_password(&key).expect("stored");
+        kept.set_password(&key).expect("stored");
+
+        assert_eq!(remove_pickle_key_entry(&deleted), Ok(()));
+        assert!(matches!(
+            deleted.get_password(),
+            Err(keyring::Error::NoEntry)
+        ));
+        assert_eq!(kept.get_password().expect("still stored"), key);
+        // removing it again is still the state asked for
+        assert_eq!(remove_pickle_key_entry(&deleted), Ok(()));
+    }
+
+    #[test]
+    fn a_store_that_refuses_the_delete_is_reported() {
+        use_mock_store();
+        let service = keychain_services(OFFICIAL_IDENTIFIER).e2e_pickle_key;
+        let entry = pickle_key_entry(&service, "user_c").expect("entry");
+        entry.set_password(&"A".repeat(43)).expect("stored");
+        let mock: &keyring::mock::MockCredential = entry
+            .get_credential()
+            .downcast_ref()
+            .expect("the mock store");
+        mock.set_error(keyring::Error::NoStorageAccess("locked".into()));
+
+        assert!(remove_pickle_key_entry(&entry).is_err());
+        // the refusal removed nothing
+        assert!(entry.get_password().is_ok());
+    }
 }
 
 /// The credential-store services every keychain command reads its entries
@@ -802,7 +896,7 @@ mod keychain_services_tests {
                 .count(),
             1
         );
-        assert_eq!(code.matches("build_keychain_services(&app)").count(), 5);
+        assert_eq!(code.matches("build_keychain_services(&app)").count(), 6);
         assert!(!code.contains("service: String"));
         assert!(!code.contains("identifier: String"));
     }

@@ -30,6 +30,13 @@ export interface PickleKeyProvider {
   /** The stored key, or null if this account provably has none yet. */
   load(userId: string): Promise<string | null>;
   save(userId: string, keyB64: string): Promise<void>;
+  /**
+   * Remove the account's key from every place this backend keeps it; a key
+   * that is not there counts as removed. Only for an account deleted on this
+   * device (`forgetLocalE2EState`), never on logout: the vault outlives a
+   * logout, and the key is what opens it.
+   */
+  remove(userId: string): Promise<void>;
 }
 
 const legacyKey = (userId: string) => `voxium_e2e_pk_${userId}`;
@@ -40,6 +47,9 @@ export const localStoragePickleKeys: PickleKeyProvider = {
   },
   async save(userId, keyB64) {
     localStorage.setItem(legacyKey(userId), keyB64);
+  },
+  async remove(userId) {
+    localStorage.removeItem(legacyKey(userId));
   },
 };
 
@@ -110,6 +120,14 @@ export function createKeychainPickleKeys(invokeFn?: InvokeFn): PickleKeyProvider
         console.warn('e2e: OS keychain write failed, storing in localStorage:', err instanceof Error ? err.message : err);
         localStorage.setItem(legacyKey(userId), keyB64);
       }
+    },
+
+    async remove(userId) {
+      // The localStorage copy (a pre-keychain install, or a keychain write
+      // that failed) goes whatever the keychain answers; a keychain failure
+      // is the caller's to log
+      localStorage.removeItem(legacyKey(userId));
+      await doInvoke('e2e_pickle_key_delete', { userId });
     },
   };
 }
