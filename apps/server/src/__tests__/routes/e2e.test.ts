@@ -1072,6 +1072,27 @@ describe('E2E routes — device revocation', () => {
 // ─── POST /devices/me/keys ───────────────────────────────────────────────────
 
 describe('E2E routes — key replenishment', () => {
+  const DEVICE_LOCK_SQL = 'SELECT id, curve25519_key, ed25519_key FROM e2e_devices WHERE user_id = ? AND device_id = ? FOR UPDATE';
+
+  /** The device lock finds the row the route's first read found (the device as it stands). */
+  function lockFindsTheDeviceRead() {
+    vi.mocked(prisma.$queryRaw).mockImplementation((async (...call: unknown[]) => {
+      if (rawSql(call) !== DEVICE_LOCK_SQL) return defaultQueryRaw(...call);
+      const read = await vi.mocked(prisma.e2EDevice.findUnique).mock.results.at(-1)?.value;
+      return read ? [{ id: read.id, curve25519_key: read.curve25519Key, ed25519_key: read.ed25519Key }] : [];
+    }) as any);
+  }
+
+  function knownDevice(device: ReturnType<typeof makeTestDevice>) {
+    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+      id: 'dev-1', curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key,
+    } as any);
+  }
+
+  beforeEach(() => {
+    lockFindsTheDeviceRead();
+  });
+
   it('requires a deviceId', async () => {
     const res = await request(createApp()).post('/api/v1/e2e/devices/me/keys').send({ oneTimeKeys: [] });
     expect(res.status).toBe(400);
@@ -1157,6 +1178,207 @@ describe('E2E routes — key replenishment', () => {
     } as any);
     const res = await request(createApp()).post('/api/v1/e2e/devices/me/keys').send({ deviceId: DEVICE_A });
     expect(res.status).toBe(400);
+  });
+
+  // ── the stored-key cap is counted under the device row's lock ────────────
+
+  it('locks the DEVICE row FIRST, then counts, inserts and counts again (recorded when each statement runs)', async () => {
+    const ran: string[] = [];
+    const device = makeTestDevice('user-1', DEVICE_A);
+    knownDevice(device);
+    vi.mocked(prisma.$queryRaw).mockImplementationOnce(((...call: unknown[]) =>
+      lazyStatement(ran, rawSql(call) === DEVICE_LOCK_SQL ? 'lock device' : rawSql(call), [
+        { id: 'dev-1', curve25519_key: device.curve25519Key, ed25519_key: device.ed25519Key },
+      ])) as any);
+    vi.mocked(prisma.e2EOneTimeKey.count)
+      .mockImplementationOnce((() => lazyStatement(ran, 'count', 10)) as any)
+      .mockImplementationOnce((() => lazyStatement(ran, 'count after', 12)) as any);
+    vi.mocked(prisma.e2EOneTimeKey.createMany).mockImplementationOnce((() => lazyStatement(ran, 'insert', { count: 2 })) as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/devices/me/keys')
+      .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N1'), device.oneTimeKey('N2')] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.oneTimeKeyCount).toBe(12);
+    expect(ran).toEqual(['lock device', 'count', 'insert', 'count after']);
+    expect(vi.mocked(prisma.$queryRaw).mock.calls[0].slice(1)).toEqual(['user-1', DEVICE_A]);
+    // the count and the insert are scoped to the row the lock returned
+    expect(prisma.e2EOneTimeKey.count).toHaveBeenNthCalledWith(1, { where: { deviceId: 'dev-1' } });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(prisma.$transaction).mock.calls[0][1]).toEqual(LOCK_WAIT_TRANSACTION_OPTIONS);
+  });
+
+  it('holds the cap under the lock: an upload past MAX_STORED_OTKS is refused, one up to it goes through', async () => {
+    const device = makeTestDevice('user-1', DEVICE_A);
+    knownDevice(device);
+    vi.mocked(prisma.e2EOneTimeKey.count).mockResolvedValueOnce(E2E_LIMITS.MAX_STORED_OTKS - 1);
+
+    const over = await request(createApp())
+      .post('/api/v1/e2e/devices/me/keys')
+      .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N1'), device.oneTimeKey('N2')] });
+
+    expect(over.status).toBe(409);
+    expect(over.body.error).toBe(`Key storage full (${E2E_LIMITS.MAX_STORED_OTKS - 1}/${E2E_LIMITS.MAX_STORED_OTKS})`);
+    expect(prisma.e2EOneTimeKey.createMany).not.toHaveBeenCalled();
+
+    vi.mocked(prisma.e2EOneTimeKey.count)
+      .mockResolvedValueOnce(E2E_LIMITS.MAX_STORED_OTKS - 2)
+      .mockResolvedValueOnce(E2E_LIMITS.MAX_STORED_OTKS);
+    const upTo = await request(createApp())
+      .post('/api/v1/e2e/devices/me/keys')
+      .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N3'), device.oneTimeKey('N4')] });
+
+    expect(upTo.status).toBe(200);
+    expect(upTo.body.data.oneTimeKeyCount).toBe(E2E_LIMITS.MAX_STORED_OTKS);
+    expect(prisma.e2EOneTimeKey.createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('a device gone by the lock (revoked, or its account deleted) answers as an unknown device and writes nothing', async () => {
+    const device = makeTestDevice('user-1', DEVICE_A);
+    knownDevice(device);
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([] as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/devices/me/keys')
+      .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N1')], fallbackKey: device.oneTimeKey('FB2') });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('No E2E device registered');
+    expect(prisma.e2EOneTimeKey.count).not.toHaveBeenCalled();
+    expect(prisma.e2EOneTimeKey.createMany).not.toHaveBeenCalled();
+    expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
+  });
+
+  it('a device re-registered with new identity keys since the read: the upload is checked again against them, and refused', async () => {
+    const device = makeTestDevice('user-1', DEVICE_A);
+    const reRegistered = makeTestDevice('user-1', DEVICE_A);
+    knownDevice(device);
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([
+      { id: 'dev-1', curve25519_key: reRegistered.curve25519Key, ed25519_key: reRegistered.ed25519Key },
+    ] as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/devices/me/keys')
+      .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N1')] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('oneTimeKey: signature verification failed');
+    expect(prisma.e2EOneTimeKey.createMany).not.toHaveBeenCalled();
+  });
+
+  it('an upload over the cap AND with a bad fallback key answers 400 (checked whole, before the count), no longer 409', async () => {
+    const device = makeTestDevice('user-1', DEVICE_A);
+    knownDevice(device);
+    vi.mocked(prisma.e2EOneTimeKey.count).mockResolvedValue(E2E_LIMITS.MAX_STORED_OTKS);
+    const badFallback = { ...device.oneTimeKey('FB2'), key: unpadded(randomBytes(32).toString('base64')) };
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/devices/me/keys')
+      .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N1')], fallbackKey: badFallback });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('fallbackKey: signature verification failed');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.e2EOneTimeKey.count).not.toHaveBeenCalled();
+  });
+
+  describe('a device re-keyed while its new keys are uploaded', () => {
+    it('re-keyed before the first read: an upload signed by the new keys is checked against them and stored', async () => {
+      const reKeyed = makeTestDevice('user-1', DEVICE_A);
+      knownDevice(reKeyed);
+      vi.mocked(prisma.e2EOneTimeKey.count).mockResolvedValueOnce(10).mockResolvedValueOnce(11);
+
+      const res = await request(createApp())
+        .post('/api/v1/e2e/devices/me/keys')
+        .send({ deviceId: DEVICE_A, oneTimeKeys: [reKeyed.oneTimeKey('N1')] });
+
+      expect(res.status).toBe(200);
+      expect(prisma.e2EOneTimeKey.createMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-keyed between the first read and the lock: an upload signed by the new keys fails the first check (400) and locks nothing', async () => {
+      // The first read still returned the old keys, so the upload is refused
+      // before the transaction; the check under the lock can only refuse an
+      // upload that passed against the keys of the first read
+      const old = makeTestDevice('user-1', DEVICE_A);
+      const reKeyed = makeTestDevice('user-1', DEVICE_A);
+      knownDevice(old);
+
+      const res = await request(createApp())
+        .post('/api/v1/e2e/devices/me/keys')
+        .send({ deviceId: DEVICE_A, oneTimeKeys: [reKeyed.oneTimeKey('N1')] });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('oneTimeKey: signature verification failed');
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  it('checks the whole upload before writing: a bad fallback key stores none of the one-time keys', async () => {
+    const device = makeTestDevice('user-1', DEVICE_A);
+    knownDevice(device);
+    const badFallback = { ...device.oneTimeKey('FB2'), key: unpadded(randomBytes(32).toString('base64')) };
+
+    const res = await request(createApp())
+      .post('/api/v1/e2e/devices/me/keys')
+      .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N1')], fallbackKey: badFallback });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('fallbackKey: signature verification failed');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.e2EOneTimeKey.createMany).not.toHaveBeenCalled();
+  });
+
+  describe('a deadlock or serialization failure', () => {
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => { warn.mockRestore(); });
+
+    it('is retried from the device lock, and the upload then succeeds', async () => {
+      const device = makeTestDevice('user-1', DEVICE_A);
+      knownDevice(device);
+      vi.mocked(prisma.e2EOneTimeKey.count).mockResolvedValue(10);
+      vi.mocked(prisma.e2EOneTimeKey.createMany)
+        .mockRejectedValueOnce(Object.assign(new Error('write conflict'), { code: 'P2034' }))
+        .mockResolvedValueOnce({ count: 1 } as any);
+
+      const res = await request(createApp())
+        .post('/api/v1/e2e/devices/me/keys')
+        .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N1')] });
+
+      expect(res.status).toBe(200);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(prisma.$queryRaw).mock.calls.map(rawSql)).toEqual([DEVICE_LOCK_SQL, DEVICE_LOCK_SQL]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('[E2E] The key upload of'));
+    });
+
+    it('a conflict on every attempt surfaces after the retry limit; anything else is not retried', async () => {
+      const device = makeTestDevice('user-1', DEVICE_A);
+      knownDevice(device);
+      vi.mocked(prisma.e2EOneTimeKey.count).mockResolvedValue(10);
+      for (let i = 0; i <= TRANSACTION_CONFLICT_RETRIES; i++) {
+        vi.mocked(prisma.e2EOneTimeKey.createMany).mockRejectedValueOnce(Object.assign(new Error('write conflict'), { code: 'P2034' }));
+      }
+
+      const persistent = await request(createApp())
+        .post('/api/v1/e2e/devices/me/keys')
+        .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N1')] });
+
+      expect(persistent.status).toBe(500);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1 + TRANSACTION_CONFLICT_RETRIES);
+
+      vi.mocked(prisma.$transaction).mockClear();
+      vi.mocked(prisma.e2EOneTimeKey.createMany).mockRejectedValueOnce(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }));
+      const other = await request(createApp())
+        .post('/api/v1/e2e/devices/me/keys')
+        .send({ deviceId: DEVICE_A, oneTimeKeys: [device.oneTimeKey('N2')] });
+
+      expect(other.status).toBe(500);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

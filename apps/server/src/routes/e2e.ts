@@ -871,43 +871,86 @@ e2eRouter.post('/devices/me/keys', rateLimitE2EKeys, async (req: Request, res: R
       throw new BadRequestError('Nothing to upload');
     }
 
-    if (oneTimeKeys !== undefined) {
-      if (!Array.isArray(oneTimeKeys) || oneTimeKeys.length === 0 || oneTimeKeys.length > E2E_LIMITS.OTK_UPLOAD_MAX) {
-        throw new BadRequestError(`oneTimeKeys must contain 1–${E2E_LIMITS.OTK_UPLOAD_MAX} keys`);
+    // The whole upload is checked before anything is written: an invalid
+    // fallback key no longer leaves the one-time keys of the same request
+    // stored behind a 400.
+    const checkUpload = (identity: { curve25519Key: string; ed25519Key: string }) => {
+      if (oneTimeKeys !== undefined) {
+        if (!Array.isArray(oneTimeKeys) || oneTimeKeys.length === 0 || oneTimeKeys.length > E2E_LIMITS.OTK_UPLOAD_MAX) {
+          throw new BadRequestError(`oneTimeKeys must contain 1–${E2E_LIMITS.OTK_UPLOAD_MAX} keys`);
+        }
+        for (const k of oneTimeKeys) {
+          validatePreKeyShape(k, 'oneTimeKey');
+          verifyPreKeySignature(k, userId, deviceId, identity.curve25519Key, identity.ed25519Key, 'oneTimeKey');
+        }
       }
-      for (const k of oneTimeKeys) {
-        validatePreKeyShape(k, 'oneTimeKey');
-        verifyPreKeySignature(k, userId, deviceId, device.curve25519Key, device.ed25519Key, 'oneTimeKey');
+      if (fallbackKey !== undefined) {
+        validatePreKeyShape(fallbackKey, 'fallbackKey');
+        verifyPreKeySignature(fallbackKey, userId, deviceId, identity.curve25519Key, identity.ed25519Key, 'fallbackKey');
       }
-      const existing = await prisma.e2EOneTimeKey.count({ where: { deviceId: device.id } });
-      if (existing + oneTimeKeys.length > E2E_LIMITS.MAX_STORED_OTKS) {
-        throw new ConflictError(`Key storage full (${existing}/${E2E_LIMITS.MAX_STORED_OTKS})`);
-      }
-      await prisma.e2EOneTimeKey.createMany({
-        data: (oneTimeKeys as E2EPreKey[]).map((k) => ({
-          deviceId: device.id,
-          keyId: k.keyId,
-          publicKey: k.key,
-          signature: k.signature,
-        })),
-        skipDuplicates: true,
-      });
-    }
+    };
+    checkUpload(device);
 
-    if (fallbackKey !== undefined) {
-      validatePreKeyShape(fallbackKey, 'fallbackKey');
-      verifyPreKeySignature(fallbackKey, userId, deviceId, device.curve25519Key, device.ed25519Key, 'fallbackKey');
-      await prisma.e2EDevice.update({
-        where: { id: device.id },
-        data: {
-          fallbackKeyId: fallbackKey.keyId,
-          fallbackKey: fallbackKey.key,
-          fallbackKeySignature: fallbackKey.signature,
-        },
-      });
-    }
+    // The stored one-time-key cap (E2E_LIMITS.MAX_STORED_OTKS) is per device
+    // row and is a count followed by an insert, so the transaction first
+    // locks that DEVICE row (FOR UPDATE), before it counts: two uploads for
+    // one device then run one after the other, and each count sees the keys
+    // the one before it committed. The lock also re-asserts what the checks
+    // above rest on: a device revoked since the read answers as an unknown
+    // one (403), and one re-registered with new identity keys meanwhile has
+    // the upload's signatures checked again against the keys it now holds.
+    //
+    // What it can wait on, and why it cannot close a cycle: an account
+    // deletion deletes the device rows in its E2E step and holds them through
+    // its cascade until it commits, a revoke deletes the row first thing, a
+    // re-registration updates it right after the account row, a cross-signing
+    // write updates it; each holds the device row before anything else this
+    // transaction takes, and this transaction takes nothing after the device
+    // row but that device's one-time keys (whose inserts reference the row it
+    // already holds) and the row itself. So it waits, possibly for as long as
+    // an account deletion runs (LOCK_WAIT_TRANSACTION_OPTIONS), and a device
+    // deleted meanwhile is then gone (403). retryOnTransactionConflict stays
+    // the net for an order nobody foresaw.
+    const oneTimeKeyCount = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      const row = await lockDeviceRow(tx, userId, deviceId);
+      if (!row) throw new ForbiddenError('No E2E device registered');
+      // Re-keyed since the first read: the upload passed the check above
+      // against the keys that read returned, so it is refused here unless it
+      // also verifies against the keys the device holds now
+      if (row.curve25519Key !== device.curve25519Key || row.ed25519Key !== device.ed25519Key) {
+        checkUpload(row);
+      }
 
-    const oneTimeKeyCount = await prisma.e2EOneTimeKey.count({ where: { deviceId: device.id } });
+      if (oneTimeKeys !== undefined) {
+        const stored = await tx.e2EOneTimeKey.count({ where: { deviceId: row.id } });
+        if (stored + oneTimeKeys.length > E2E_LIMITS.MAX_STORED_OTKS) {
+          throw new ConflictError(`Key storage full (${stored}/${E2E_LIMITS.MAX_STORED_OTKS})`);
+        }
+        await tx.e2EOneTimeKey.createMany({
+          data: (oneTimeKeys as E2EPreKey[]).map((k) => ({
+            deviceId: row.id,
+            keyId: k.keyId,
+            publicKey: k.key,
+            signature: k.signature,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      if (fallbackKey !== undefined) {
+        await tx.e2EDevice.update({
+          where: { id: row.id },
+          data: {
+            fallbackKeyId: fallbackKey.keyId,
+            fallbackKey: fallbackKey.key,
+            fallbackKeySignature: fallbackKey.signature,
+          },
+        });
+      }
+
+      return tx.e2EOneTimeKey.count({ where: { deviceId: row.id } });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The key upload of ${deviceId} for ${userId}`);
+
     res.json({ success: true, data: { oneTimeKeyCount } });
   } catch (err) {
     next(err);
