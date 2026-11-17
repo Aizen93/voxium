@@ -202,6 +202,14 @@ const ACCOUNT_LOCK_SQL = 'SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE';
 const DEVICE_ROW_LOCK_SQL = 'SELECT id, curve25519_key, ed25519_key FROM e2e_devices WHERE user_id = ? AND device_id = ? FOR UPDATE';
 const SHARE_WAIT_SQL = 'SELECT id FROM e2e_key_shares WHERE recipient_user_id = ? AND recipient_device_id = ? FOR UPDATE';
 const TRANSFER_WAIT_SQL = 'SELECT id FROM e2e_master_transfers WHERE user_id = ? AND recipient_device_id = ? FOR UPDATE';
+const SIGN_LOCK_SQL = 'SELECT id, device_id, curve25519_key, ed25519_key FROM e2e_devices WHERE user_id = ? AND device_id = ANY(?::text[]) ORDER BY id FOR UPDATE';
+
+type SignableDevice = { id: string; deviceId: string; curve25519Key: string; ed25519Key: string };
+/** The caller's devices the master-key publication's locked read finds (filtered to the ids it asks for). */
+let lockedSignDevices: SignableDevice[] = [];
+function signableDevices(rows: SignableDevice[]): void {
+  lockedSignDevices = rows;
+}
 
 type StoredDevice = { id: string; curve25519Key?: string; ed25519Key?: string } | null;
 /** The device row the registration's locked read finds (none unless a test says so). */
@@ -230,12 +238,20 @@ function defaultQueryRaw(...call: unknown[]): unknown {
       ? [{ id: lockedDevice.id, curve25519_key: lockedDevice.curve25519Key, ed25519_key: lockedDevice.ed25519Key }]
       : []);
   }
+  if (sql === SIGN_LOCK_SQL) {
+    const asked = new Set(call[2] as string[]);
+    return Promise.resolve(lockedSignDevices
+      .filter((d) => asked.has(d.deviceId))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((d) => ({ id: d.id, device_id: d.deviceId, curve25519_key: d.curve25519Key, ed25519_key: d.ed25519Key })));
+  }
   return undefined;
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   lockedDevice = null;
+  lockedSignDevices = [];
   vi.mocked(prisma.$transaction).mockImplementation(async (fn: any) => fn(prisma));
   vi.mocked(prisma.$queryRaw).mockImplementation(defaultQueryRaw as any);
   vi.mocked(prisma.e2EDeviceRegistry.upsert).mockResolvedValue({ userId: 'user-1', version: 3 } as any);
@@ -932,7 +948,10 @@ describe('E2E routes — a revoke, a master-key publication and a device approva
   afterEach(() => {
     warn.mockRestore();
     // what these cases set must not reach the suites after them (clearAllMocks keeps implementations)
-    for (const fn of [prisma.e2EMasterKey.findUnique, prisma.e2EMasterKey.upsert, prisma.e2EDevice.findMany, prisma.e2EDevice.findUnique]) {
+    for (const fn of [
+      prisma.e2EMasterKey.findUnique, prisma.e2EMasterKey.upsert, prisma.e2EDevice.findMany, prisma.e2EDevice.findUnique,
+      prisma.e2EDevice.delete, prisma.e2EDevice.update, prisma.e2EDeviceRegistry.upsert,
+    ]) {
       vi.mocked(fn).mockReset();
     }
   });
@@ -940,9 +959,7 @@ describe('E2E routes — a revoke, a master-key publication and a device approva
   function approvalSetup() {
     const device = makeTestDevice('user-1', DEVICE_B);
     const master = makeTestMasterKey('user-1');
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
-      id: 'row-b', curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key,
-    } as any);
+    storedDevice({ id: 'row-b', curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key });
     vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
     return { device, master, signature: master.crossSign(DEVICE_B, device.curve25519Key, device.ed25519Key) };
   }
@@ -951,11 +968,11 @@ describe('E2E routes — a revoke, a master-key publication and a device approva
     {
       name: 'the revoke',
       arrange: () => {
-        vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'row-a' } as any);
+        storedDevice({ id: 'row-a' });
       },
       send: () => request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`),
-      // the device read inside the transaction: the check made again on each attempt
-      reads: () => vi.mocked(prisma.e2EDevice.findUnique).mock.calls.length,
+      // the locked device read inside the transaction: the check made again on each attempt
+      reads: () => vi.mocked(prisma.$queryRaw).mock.calls.filter((c) => rawSql(c) === DEVICE_ROW_LOCK_SQL).length,
       label: `[E2E] The revoke of device ${DEVICE_A} for user-1`,
     },
     {
@@ -965,9 +982,9 @@ describe('E2E routes — a revoke, a master-key publication and a device approva
         const master = makeTestMasterKey('user-1');
         vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
         vi.mocked(prisma.e2EMasterKey.upsert).mockResolvedValue({ updatedAt: new Date('2026-07-31') } as any);
-        vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+        signableDevices([
           { id: 'row-a', deviceId: DEVICE_A, curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key },
-        ] as any);
+        ]);
         return {
           masterKey: master.masterKey,
           masterSignature: master.masterSignature,
@@ -975,14 +992,14 @@ describe('E2E routes — a revoke, a master-key publication and a device approva
         };
       },
       send: (body: unknown) => request(createApp()).put('/api/v1/e2e/master-key').send(body as object),
-      reads: () => vi.mocked(prisma.e2EDevice.findMany).mock.calls.length,
+      reads: () => vi.mocked(prisma.$queryRaw).mock.calls.filter((c) => rawSql(c) === SIGN_LOCK_SQL).length,
       label: '[E2E] The master-key publication for user-1',
     },
     {
       name: 'the device approval',
       arrange: () => ({ signature: approvalSetup().signature }),
       send: (body: unknown) => request(createApp()).post(`/api/v1/e2e/devices/${DEVICE_B}/signature`).send(body as object),
-      reads: () => vi.mocked(prisma.e2EDevice.findUnique).mock.calls.length,
+      reads: () => vi.mocked(prisma.$queryRaw).mock.calls.filter((c) => rawSql(c) === DEVICE_ROW_LOCK_SQL).length,
       label: `[E2E] The approval of device ${DEVICE_B} for user-1`,
     },
   ];
@@ -1017,15 +1034,117 @@ describe('E2E routes — a revoke, a master-key publication and a device approva
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
   });
 
-  it('a revoke retried after the device went with its account answers 404, and bumps nothing', async () => {
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValueOnce({ id: 'row-a' } as any).mockResolvedValueOnce(null);
+  it('a revoke retried after the device went with its account answers 404 through its locked read, and bumps nothing', async () => {
+    let reads = 0;
+    vi.mocked(prisma.$queryRaw).mockImplementation(((...call: unknown[]) => {
+      if (rawSql(call) !== DEVICE_ROW_LOCK_SQL) return defaultQueryRaw(...call);
+      // attempt 1 holds the row; by attempt 2 the deletion has committed
+      return Promise.resolve(reads++ === 0 ? [{ id: 'row-a', curve25519_key: 'c', ed25519_key: 'e' }] : []);
+    }) as any);
     vi.mocked(prisma.e2EDevice.delete).mockRejectedValueOnce(deadlock());
 
     const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`);
 
     expect(res.status).toBe(404);
+    expect(res.body.error).toBe('E2E device not found');
     expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(reads).toBe(2);
+    expect(prisma.e2EDevice.delete).toHaveBeenCalledTimes(1);
     expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('E2E routes — a device an account deletion removes while a revoke, an approval or a master-key publication waits for it', () => {
+  // The deletion holds the device row through its purge or its cascade. An
+  // unlocked read still saw the row, and the delete or update after it found
+  // nothing to change (P2025, a 500). Each route now reads the device under its
+  // lock, as its first statement on that row: the read waits for the deletion
+  // and then finds no row, which is what these tests model.
+  it('the revoke answers 404 and writes nothing; the lock runs before any write (recorded when each statement runs)', async () => {
+    const ran: string[] = [];
+    vi.mocked(prisma.$queryRaw).mockImplementation(((...call: unknown[]) =>
+      lazyStatement(ran, rawSql(call) === DEVICE_ROW_LOCK_SQL ? 'lock device' : rawSql(call), [])) as any);
+    vi.mocked(prisma.e2EDevice.delete).mockImplementation((() => lazyStatement(ran, 'delete device', {})) as any);
+
+    const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('E2E device not found');
+    expect(ran).toEqual(['lock device']);
+    expect(prisma.e2EKeyShare.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+
+    // and with the row there, the lock comes before the delete
+    ran.length = 0;
+    vi.mocked(prisma.$queryRaw).mockImplementation(((...call: unknown[]) =>
+      lazyStatement(ran, 'lock device', [{ id: 'row-a', curve25519_key: 'c', ed25519_key: 'e' }])) as any);
+    vi.mocked(prisma.e2EDeviceRegistry.upsert).mockImplementation((() => lazyStatement(ran, 'bump', { version: 4 })) as any);
+    expect((await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`)).status).toBe(200);
+    expect(ran).toEqual(['lock device', 'delete device', 'bump']);
+  });
+
+  it('the approval answers 404 and writes nothing; the lock runs before the master-key read and any write', async () => {
+    const ran: string[] = [];
+    const master = makeTestMasterKey('user-1');
+    const device = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.$queryRaw).mockImplementation(((...call: unknown[]) =>
+      lazyStatement(ran, rawSql(call) === DEVICE_ROW_LOCK_SQL ? 'lock device' : rawSql(call), [])) as any);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockImplementation((() => lazyStatement(ran, 'read master', { publicKey: master.masterKey })) as any);
+    const signature = master.crossSign(DEVICE_B, device.curve25519Key, device.ed25519Key);
+
+    const gone = await request(createApp()).post(`/api/v1/e2e/devices/${DEVICE_B}/signature`).send({ signature });
+
+    expect(gone.status).toBe(404);
+    expect(gone.body.error).toBe('E2E device not found');
+    expect(ran).toEqual(['lock device']);
+    expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
+    expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+
+    ran.length = 0;
+    vi.mocked(prisma.$queryRaw).mockImplementation(((...call: unknown[]) =>
+      lazyStatement(ran, 'lock device', [{ id: 'row-b', curve25519_key: device.curve25519Key, ed25519_key: device.ed25519Key }])) as any);
+    vi.mocked(prisma.e2EDevice.update).mockImplementation((() => lazyStatement(ran, 'sign device', {})) as any);
+    vi.mocked(prisma.e2EDeviceRegistry.upsert).mockImplementation((() => lazyStatement(ran, 'bump', { version: 4 })) as any);
+    expect((await request(createApp()).post(`/api/v1/e2e/devices/${DEVICE_B}/signature`).send({ signature })).status).toBe(200);
+    expect(ran).toEqual(['lock device', 'read master', 'sign device', 'bump']);
+
+    for (const fn of [prisma.e2EMasterKey.findUnique, prisma.e2EDevice.update, prisma.e2EDeviceRegistry.upsert]) vi.mocked(fn).mockReset();
+  });
+
+  it('the master-key publication answers 400 for the vanished device and writes nothing; the devices are locked in one statement before any device write', async () => {
+    const ran: string[] = [];
+    const master = makeTestMasterKey('user-1');
+    const a = makeTestDevice('user-1', DEVICE_A);
+    const b = makeTestDevice('user-1', DEVICE_B);
+    vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.e2EMasterKey.upsert).mockImplementation((() => lazyStatement(ran, 'publish master key', { updatedAt: new Date() })) as any);
+    // DEVICE_B was deleted with the account while the lock waited
+    vi.mocked(prisma.$queryRaw).mockImplementation(((...call: unknown[]) =>
+      lazyStatement(ran, rawSql(call) === SIGN_LOCK_SQL ? 'lock devices' : rawSql(call), [
+        { id: 'row-a', device_id: DEVICE_A, curve25519_key: a.curve25519Key, ed25519_key: a.ed25519Key },
+      ])) as any);
+    vi.mocked(prisma.e2EDevice.update).mockImplementation((() => lazyStatement(ran, 'sign device', {})) as any);
+    const body = {
+      masterKey: master.masterKey,
+      masterSignature: master.masterSignature,
+      deviceSignatures: [
+        { deviceId: DEVICE_B, signature: master.crossSign(DEVICE_B, b.curve25519Key, b.ed25519Key) },
+        { deviceId: DEVICE_A, signature: master.crossSign(DEVICE_A, a.curve25519Key, a.ed25519Key) },
+      ],
+    };
+
+    const res = await request(createApp()).put('/api/v1/e2e/master-key').send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(`Unknown device in deviceSignatures: ${DEVICE_B}`);
+    // one locked read for every device to sign, before any device write
+    expect(ran).toEqual(['publish master key', 'lock devices']);
+    const lock = vi.mocked(prisma.$queryRaw).mock.calls.find((c) => rawSql(c) === SIGN_LOCK_SQL)!;
+    expect(lock.slice(1)).toEqual(['user-1', [DEVICE_B, DEVICE_A]]);
+    expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
+    expect(prisma.e2EDeviceRegistry.upsert).not.toHaveBeenCalled();
+
+    for (const fn of [prisma.e2EMasterKey.findUnique, prisma.e2EMasterKey.upsert, prisma.e2EDevice.update]) vi.mocked(fn).mockReset();
   });
 });
 
@@ -1149,16 +1268,16 @@ describe('E2E routes — device lists', () => {
 
 describe('E2E routes — device revocation', () => {
   it('revokes a device, drops its pending shares and bumps the list version', async () => {
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'row-a' } as any);
+    storedDevice({ id: 'row-a' });
     vi.mocked(prisma.e2EDeviceRegistry.upsert).mockResolvedValue({ version: 9 } as any);
 
     const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`);
 
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({ revoked: true, deviceId: DEVICE_A, listVersion: 9 });
-    expect(prisma.e2EDevice.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId_deviceId: { userId: 'user-1', deviceId: DEVICE_A } } })
-    );
+    // the device is read under its lock, scoped to the caller's own slot
+    expect(vi.mocked(prisma.$queryRaw).mock.calls.map(rawSql)).toEqual([DEVICE_ROW_LOCK_SQL]);
+    expect(vi.mocked(prisma.$queryRaw).mock.calls[0].slice(1)).toEqual(['user-1', DEVICE_A]);
     // one-time keys cascade with the row; undeliverable shares are cleaned up
     expect(prisma.e2EDevice.delete).toHaveBeenCalledWith({ where: { id: 'row-a' } });
     expect(prisma.e2EKeyShare.deleteMany).toHaveBeenCalledWith({
@@ -1172,7 +1291,7 @@ describe('E2E routes — device revocation', () => {
   });
 
   it('404s for a device the caller does not own, touching nothing', async () => {
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    storedDevice(null);
     const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_B}`);
     expect(res.status).toBe(404);
     expect(prisma.e2EDevice.delete).not.toHaveBeenCalled();
@@ -2248,9 +2367,9 @@ describe('E2E routes — PUT /master-key', () => {
   it('applies device cross-signatures in the same transaction', async () => {
     const master = makeTestMasterKey('user-1');
     const device = makeTestDevice('user-1', DEVICE_A);
-    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+    signableDevices([
       { id: 'row-a', deviceId: DEVICE_A, curve25519Key: device.curve25519Key, ed25519Key: device.ed25519Key },
-    ] as any);
+    ]);
 
     const signature = master.crossSign(DEVICE_A, device.curve25519Key, device.ed25519Key);
     const res = await request(createApp())
@@ -2274,10 +2393,10 @@ describe('E2E routes — PUT /master-key', () => {
     const impostor = makeTestMasterKey('user-1');
     const a = makeTestDevice('user-1', DEVICE_A);
     const b = makeTestDevice('user-1', DEVICE_B);
-    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([
+    signableDevices([
       { id: 'row-a', deviceId: DEVICE_A, curve25519Key: a.curve25519Key, ed25519Key: a.ed25519Key },
       { id: 'row-b', deviceId: DEVICE_B, curve25519Key: b.curve25519Key, ed25519Key: b.ed25519Key },
-    ] as any);
+    ]);
 
     const res = await request(createApp())
       .put('/api/v1/e2e/master-key')
@@ -2299,7 +2418,7 @@ describe('E2E routes — PUT /master-key', () => {
     const master = makeTestMasterKey('user-1');
     const device = makeTestDevice('user-1', DEVICE_B);
     // scoped lookup returns nothing — the device belongs to somebody else
-    vi.mocked(prisma.e2EDevice.findMany).mockResolvedValue([] as any);
+    signableDevices([]);
 
     const res = await request(createApp())
       .put('/api/v1/e2e/master-key')
@@ -2314,10 +2433,9 @@ describe('E2E routes — PUT /master-key', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/unknown device/i);
     expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
-    // the scoped lookup never leaves the caller's own devices
-    expect(prisma.e2EDevice.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId: 'user-1', deviceId: { in: [DEVICE_B] } } })
-    );
+    // the scoped, locked lookup never leaves the caller's own devices
+    const lock = vi.mocked(prisma.$queryRaw).mock.calls.find((c) => rawSql(c) === SIGN_LOCK_SQL)!;
+    expect(lock.slice(1)).toEqual(['user-1', [DEVICE_B]]);
   });
 
   it('validates the deviceSignatures batch shape', async () => {
@@ -2423,11 +2541,11 @@ describe('E2E routes — device cross-signature', () => {
   it('stores a valid cross-signature and bumps the list version', async () => {
     const master = makeTestMasterKey('user-1');
     const device = makeTestDevice('user-1', DEVICE_B);
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+    storedDevice({
       id: 'row-b',
       curve25519Key: device.curve25519Key,
       ed25519Key: device.ed25519Key,
-    } as any);
+    });
     vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
     vi.mocked(prisma.e2EDeviceRegistry.upsert).mockResolvedValue({ version: 11 } as any);
 
@@ -2448,11 +2566,11 @@ describe('E2E routes — device cross-signature', () => {
     const master = makeTestMasterKey('user-1');
     const impostor = makeTestMasterKey('user-1');
     const device = makeTestDevice('user-1', DEVICE_B);
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+    storedDevice({
       id: 'row-b',
       curve25519Key: device.curve25519Key,
       ed25519Key: device.ed25519Key,
-    } as any);
+    });
     vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
 
     const res = await request(createApp())
@@ -2470,11 +2588,11 @@ describe('E2E routes — device cross-signature', () => {
     const master = makeTestMasterKey('user-1');
     const a = makeTestDevice('user-1', DEVICE_A);
     const b = makeTestDevice('user-1', DEVICE_B);
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+    storedDevice({
       id: 'row-b',
       curve25519Key: b.curve25519Key,
       ed25519Key: b.ed25519Key,
-    } as any);
+    });
     vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue({ publicKey: master.masterKey } as any);
 
     const res = await request(createApp())
@@ -2486,7 +2604,7 @@ describe('E2E routes — device cross-signature', () => {
   });
 
   it('404s for a device the caller does not own', async () => {
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue(null);
+    storedDevice(null);
     const master = makeTestMasterKey('user-1');
 
     const res = await request(createApp())
@@ -2494,20 +2612,19 @@ describe('E2E routes — device cross-signature', () => {
       .send({ signature: master.masterSignature });
 
     expect(res.status).toBe(404);
-    expect(prisma.e2EDevice.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId_deviceId: { userId: 'user-1', deviceId: DEVICE_B } } })
-    );
+    // the locked read, scoped to the caller's own slot
+    expect(vi.mocked(prisma.$queryRaw).mock.calls[0].slice(1)).toEqual(['user-1', DEVICE_B]);
     expect(prisma.e2EDevice.update).not.toHaveBeenCalled();
   });
 
   it('409s when the account has no published master key', async () => {
     const device = makeTestDevice('user-1', DEVICE_B);
     const master = makeTestMasterKey('user-1');
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({
+    storedDevice({
       id: 'row-b',
       curve25519Key: device.curve25519Key,
       ed25519Key: device.ed25519Key,
-    } as any);
+    });
     vi.mocked(prisma.e2EMasterKey.findUnique).mockResolvedValue(null);
 
     const res = await request(createApp())
@@ -3334,7 +3451,7 @@ describe('E2E routes — key backup is outside the device lifecycle', () => {
     // dropped it on revocation would destroy the only recovery route at exactly
     // the moment it is needed.
     const store = seedBackups([backupRow('user-1', BACKUP_BLOB)]);
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'row-a' } as any);
+    storedDevice({ id: 'row-a' });
 
     const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`);
 
@@ -4333,7 +4450,7 @@ describe('E2E routes — message-key backup is outside the device lifecycle', ()
     // History follows the ACCOUNT. Dropping the rows when a device goes away
     // would delete exactly the history the next linked device needs.
     const store = seedMessageKeys([mkRow(1, 'user-1')]);
-    vi.mocked(prisma.e2EDevice.findUnique).mockResolvedValue({ id: 'row-a' } as any);
+    storedDevice({ id: 'row-a' });
 
     const res = await request(createApp()).delete(`/api/v1/e2e/devices/me/${DEVICE_A}`);
 

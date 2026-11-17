@@ -202,6 +202,20 @@ async function lockDeviceRow(
   return row ? { id: row.id, curve25519Key: row.curve25519_key, ed25519Key: row.ed25519_key } : null;
 }
 
+/** The caller's devices among `deviceIds`, locked FOR UPDATE in id order on the transaction given. */
+async function lockDeviceRows(
+  tx: Pick<TxClient, '$queryRaw'>,
+  userId: string,
+  deviceIds: string[],
+): Promise<Array<{ id: string; deviceId: string; curve25519Key: string; ed25519Key: string }>> {
+  const rows = await tx.$queryRaw<Array<{ id: string; device_id: string; curve25519_key: string; ed25519_key: string }>>`
+    SELECT id, device_id, curve25519_key, ed25519_key FROM e2e_devices
+    WHERE user_id = ${userId} AND device_id = ANY(${deviceIds}::text[])
+    ORDER BY id
+    FOR UPDATE`;
+  return rows.map((r) => ({ id: r.id, deviceId: r.device_id, curve25519Key: r.curve25519_key, ed25519Key: r.ed25519_key }));
+}
+
 /** The current device-list version, on the client given (a transaction reads through its own). */
 async function readDeviceListVersion(client: Pick<TxClient, 'e2EDeviceRegistry'>, userId: string): Promise<number> {
   const registry = await client.e2EDeviceRegistry.findUnique({
@@ -550,18 +564,19 @@ e2eRouter.delete(
       const userId = req.user!.userId;
       const deviceId = validateDeviceId(req.params.deviceId);
 
-      // Takes a device row and then the registry row (bumpDeviceListVersion),
-      // while an account deletion takes the registry row (its second delete,
-      // under the account row) before the device rows its user delete reaches
-      // through the cascade (deleteAccountRows, utils/accountDeletion.ts):
-      // PostgreSQL may abort this one, which then runs again whole, every
-      // check made again on the attempt's own reads. The deletion holds those
-      // rows through its cascade, hence the lock-wait budget.
+      // Takes the device row first, then the registry row
+      // (bumpDeviceListVersion), while an account deletion takes the registry
+      // row (its second delete, under the account row) before the device rows
+      // its user delete reaches through the cascade (deleteAccountRows,
+      // utils/accountDeletion.ts): PostgreSQL may abort this one, which then
+      // runs again whole, every check made again on the attempt's own reads.
+      // The deletion holds those rows through its cascade, hence the
+      // lock-wait budget. The device is READ under its lock (still the first
+      // row this takes, so no new cycle): a deletion that holds it is waited
+      // for and the row is then gone (404), where an unlocked read saw it and
+      // the delete after it found nothing to delete (P2025, a 500).
       const listVersion = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
-        const device = await tx.e2EDevice.findUnique({
-          where: { userId_deviceId: { userId, deviceId } },
-          select: { id: true },
-        });
+        const device = await lockDeviceRow(tx, userId, deviceId);
         if (!device) throw new NotFoundError('E2E device');
 
         // Cascades the device's one-time keys; pending key shares addressed to
@@ -795,12 +810,16 @@ e2eRouter.put('/master-key', rateLimitE2EApprove, async (req: Request, res: Resp
 
       let signed = 0;
       if (pending.length > 0) {
-        // Read the identities INSIDE the transaction: a device re-registered
-        // concurrently must not end up with a signature over its old keys.
-        const devices = await tx.e2EDevice.findMany({
-          where: { userId, deviceId: { in: pending.map((p) => p.deviceId) } },
-          select: { id: true, deviceId: true, curve25519Key: true, ed25519Key: true },
-        });
+        // Read the identities INSIDE the transaction and under a lock
+        // (lockDeviceRows, in id order): a device re-registered concurrently
+        // must not end up with a signature over its old keys, and one an
+        // account deletion is removing is waited for and then missing (the
+        // 400 below), where an unlocked read saw it and the update after it
+        // found nothing to update (P2025, a 500). The lock takes the rows the
+        // updates below took, at the same point (after the master-key row, and
+        // after every device row when the key is replaced), only earlier and
+        // in id order, so no new cycle arises.
+        const devices = await lockDeviceRows(tx, userId, pending.map((p) => p.deviceId));
         const byDeviceId = new Map(devices.map((d) => [d.deviceId, d]));
         for (const entry of pending) {
           const device = byDeviceId.get(entry.deviceId);
@@ -851,19 +870,20 @@ e2eRouter.post(
       const deviceId = validateDeviceId(req.params.deviceId);
       const signature = validateSignatureB64((req.body ?? {}).signature, 'signature');
 
-      // Takes a device row and then the registry row (bumpDeviceListVersion),
-      // while an account deletion takes the registry row (its second delete,
-      // under the account row) before the device rows its user delete reaches
-      // through the cascade (deleteAccountRows, utils/accountDeletion.ts):
-      // PostgreSQL may abort this one, which then runs again whole, every
-      // check made again on the attempt's own reads. The deletion holds those
-      // rows through its cascade, hence the lock-wait budget.
+      // Takes the device row first, then the registry row
+      // (bumpDeviceListVersion), while an account deletion takes the registry
+      // row (its second delete, under the account row) before the device rows
+      // its user delete reaches through the cascade (deleteAccountRows,
+      // utils/accountDeletion.ts): PostgreSQL may abort this one, which then
+      // runs again whole, every check made again on the attempt's own reads.
+      // The deletion holds those rows through its cascade, hence the
+      // lock-wait budget. The device is READ under its lock (still the first
+      // row this takes, so no new cycle): a deletion that holds it is waited
+      // for and the row is then gone (404), where an unlocked read saw it and
+      // the update after it found nothing to update (P2025, a 500).
       const listVersion = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
         // Composite lookup: you can only sign your OWN devices.
-        const device = await tx.e2EDevice.findUnique({
-          where: { userId_deviceId: { userId, deviceId } },
-          select: { id: true, curve25519Key: true, ed25519Key: true },
-        });
+        const device = await lockDeviceRow(tx, userId, deviceId);
         if (!device) throw new NotFoundError('E2E device');
 
         const master = await tx.e2EMasterKey.findUnique({ where: { userId }, select: { publicKey: true } });

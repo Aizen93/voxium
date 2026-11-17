@@ -171,8 +171,11 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  *    /e2e/devices/:deviceId/signature). On a device registered after step
  *    3, each can close a cycle with this step: PostgreSQL aborts one side,
  *    and all four run under retryOnTransactionConflict (this one retried
- *    whole ends clean; one of those, retried after this commit, finds the
- *    device gone).
+ *    whole ends clean). Each of the three reads the device row under a lock,
+ *    so one that waited for this transaction, or runs again after it
+ *    committed, finds the device gone and answers as for a missing one (404,
+ *    or 400 for a device named in the master-key publication's
+ *    signatures).
  * What #114 (foreign keys from the E2E tables to the account) still leaves
  * open: a master-key publication that waited on step 3's delete inserts a
  * master-key row and a registry row once this commits; a key share
