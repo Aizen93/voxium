@@ -16,10 +16,10 @@ export default defineConfig({
   // Required for `prisma migrate` and `prisma db push`.
   // Uses process.env directly so it doesn't throw when unset (CI generate step).
   ...(process.env.DATABASE_URL ? { datasource: { url: process.env.DATABASE_URL } } : {}),
-  migrate: {
-    async seed() {
-      const { execSync } = await import('child_process');
-      execSync('npx tsx prisma/seed.ts', { stdio: 'inherit' });
-    },
+  // `prisma db seed` runs this command (the key Prisma 7 reads is
+  // migrations.seed, a command line; the earlier migrate.seed() function was
+  // never read, and the seed then reported "No seed command configured").
+  migrations: {
+    seed: 'npx tsx prisma/seed.ts',
   },
 });
