@@ -39,9 +39,10 @@ describe('demoSeedRefusal', () => {
 describe('prisma.config.ts: the command `prisma db seed` runs', () => {
   it('is configured under migrations.seed, the key Prisma 7 reads, and runs prisma/seed.ts', async () => {
     const config = (await import('../../../prisma.config')).default as { migrations?: { seed?: string }; migrate?: unknown };
-    expect(config.migrations?.seed).toBe('npx tsx prisma/seed.ts');
-    // the earlier spelling, which Prisma 7 ignores
-    expect(config).not.toHaveProperty('migrate');
+    expect(config.migrations?.seed).toBe('npx --no tsx prisma/seed.ts');
+    // the earlier spelling, which Prisma 7 ignores. defineConfig drops unknown
+    // keys, so the loaded object cannot show it: the file's text does
+    expect(readFileSync(path.join(SERVER, 'prisma.config.ts'), 'utf8')).not.toMatch(/^\s*migrate\s*:/m);
     const script = /prisma\/seed\.ts$/.exec(config.migrations!.seed!)?.[0];
     expect(script).toBe('prisma/seed.ts');
     expect(readFileSync(path.join(SERVER, script!), 'utf8')).toContain('demoSeedRefusal({');
