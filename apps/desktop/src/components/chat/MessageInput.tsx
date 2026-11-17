@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useDMStore } from '../../stores/dmStore';
-import { conversationIsReadOnly } from '../../utils/dmParticipant';
+import { isHeldReadOnly } from '../../utils/dmParticipant';
 import { ReadOnlyConversationNotice } from '../dm/DeletedParticipant';
 import { getSocket } from '../../services/socket';
 import { getTranslatedActionError } from '../../utils/serverErrors';
@@ -67,7 +67,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   // The other side's account was deleted: nothing can be written here, so no
   // composer at all (no typing signal, no upload, no send) — the notice in
   // its place (a primitive selector: no allocation per read)
-  const readOnly = useDMStore((s) => !!conversationId && conversationIsReadOnly(s.conversations, conversationId));
+  const readOnly = useDMStore((s) => !!conversationId && isHeldReadOnly(s, conversationId));
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);

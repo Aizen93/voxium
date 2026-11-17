@@ -760,6 +760,9 @@ export class E2EVault {
   putPlaintext(messageId: string, entry: CachedPlaintext): Promise<void> {
     return this.put(`pt:${messageId}`, entry);
   }
+  deletePlaintext(messageId: string): Promise<void> {
+    return this.delete(`pt:${messageId}`);
+  }
 
   // ── Ratchet-position bindings (replay / rollback firewall) ──
   getMessagePosition(sessionId: string, messageIndex: number): Promise<MessagePositionBinding | undefined> {

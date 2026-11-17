@@ -19,12 +19,13 @@ const encryptMessage = vi.fn();
 const cachePlaintext = vi.fn();
 const searchDecrypted = vi.fn();
 const encryptChannelMessage = vi.fn();
+const forgetCachedPlaintext = vi.fn<(id: string, expected: { scope: string; authorId: string }) => Promise<void>>(async () => {});
 
 vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/e2e/e2eService')>();
   return {
     ...actual,
-    getE2EService: () => ({ getCachedPlaintext, decryptMessage, encryptMessage, cachePlaintext, searchDecrypted, encryptChannelMessage }),
+    getE2EService: () => ({ getCachedPlaintext, decryptMessage, encryptMessage, cachePlaintext, searchDecrypted, encryptChannelMessage, forgetCachedPlaintext }),
   };
 });
 
@@ -57,6 +58,8 @@ import {
   decryptMessagesForDisplay,
   prepareOutgoingDM,
   searchEncryptedHistory,
+  quotedTextFromCache,
+  resolveEncryptedPreview,
   DECRYPT_FAILED_CONTENT,
 } from '../../services/e2e/dmCrypto';
 import { decryptChannelMessageForDisplay } from '../../services/e2e/channelCrypto';
@@ -120,6 +123,8 @@ beforeEach(() => {
   searchDecrypted.mockReset();
   ledger.noteUndecrypted.mockReset();
   ledger.noteQuoteAwaiting.mockReset();
+  forgetCachedPlaintext.mockReset();
+  forgetCachedPlaintext.mockImplementation(async () => {});
   useDMStore.setState({ conversations: [] });
 });
 
@@ -314,7 +319,7 @@ describe('local search of a read-only conversation', () => {
     searchDecrypted.mockResolvedValue([
       { messageId: 'm-mine', text: 'pizza tonight?', authorId: 'me', createdAt: '2026-11-01T10:00:00.000Z', editedAt: null },
       { messageId: 'm-theirs', text: 'pizza is great', authorId: 'u-real', createdAt: '2026-11-01T10:01:00.000Z', editedAt: null },
-      { messageId: 'm-old', text: 'pizza from an old build', createdAt: '2026-11-01T10:02:00.000Z', editedAt: null },
+      { messageId: 'm-noauthor', text: 'pizza, no author recorded', createdAt: '2026-11-01T10:02:00.000Z', editedAt: null },
     ]);
     const hits = await searchEncryptedHistory(CONV, 'pizza');
     expect(hits.map((h) => h.id)).toEqual(['m-mine']);
@@ -328,5 +333,271 @@ describe('local search of a read-only conversation', () => {
     ]);
     const hits = await searchEncryptedHistory(CONV, 'pizza');
     expect(hits.map((h) => h.id)).toEqual(['m-mine', 'm-theirs']);
+  });
+});
+
+describe('the read-only rule in the gate: the other person\'s rows the server has not rewritten yet', () => {
+  const PEER = { id: 'u-real', username: 'alice', displayName: 'Alice', avatarUrl: null };
+  const ME = { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null };
+  /** An ordinary encrypted row, as a page or an event in flight still carries it. */
+  const live = (over: Partial<Message> = {}): Message => ({
+    id: 'm-old', type: 'user', content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy'), encrypted: true,
+    channelId: null, conversationId: CONV, author: PEER, mentions: [], attachments: [],
+    reactions: [{ emoji: '👍', count: 1, userIds: ['me'] }],
+    createdAt: '2026-11-01T10:00:00.000Z', editedAt: null, ...over,
+  });
+
+  beforeEach(() => {
+    useDMStore.setState({ conversations: [readOnlyConversation()], readOnlyPending: {} });
+    decryptMessage.mockResolvedValue({ text: 'their words' });
+    getCachedPlaintext.mockResolvedValue('their cached words');
+  });
+
+  /** Nothing decrypted, read from or written to the cache, nothing noted for a retry. */
+  function expectUntouched() {
+    expect(decryptMessage).not.toHaveBeenCalled();
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+    expect(cachePlaintext).not.toHaveBeenCalled();
+    expect(ledger.noteUndecrypted).not.toHaveBeenCalled();
+    expect(ledger.noteQuoteAwaiting).not.toHaveBeenCalled();
+  }
+
+  it('a page: the other person\'s row gets the deleted shape; my own and a call notice are gated as before', async () => {
+    decryptMessage.mockResolvedValueOnce({ text: 'my words' });
+    const out = await decryptMessagesForDisplay([
+      live({ id: 'm-theirs' }),
+      live({ id: 'm-mine', author: ME }),
+      live({ id: 'm-call', type: 'system', encrypted: false, content: 'Voice call ended', author: PEER }),
+    ], { conversationId: CONV });
+    expectPlaceholderShape(out[0], 'm-theirs');
+    expect(out[1]).toMatchObject({ id: 'm-mine', content: 'my words', encrypted: true });
+    expect(out[2]).toMatchObject({ id: 'm-call', type: 'system', content: 'Voice call ended' });
+    // only my own row reached the decrypt
+    expect(decryptMessage).toHaveBeenCalledTimes(1);
+    expect(decryptMessage.mock.calls[0][0]).toMatchObject({ id: 'm-mine', authorId: 'me' });
+  });
+
+  it('dm:message:new: the deleted shape, nothing decrypted, cached or noted (so no sound, unread or notification: MainLayout\'s early-out)', async () => {
+    const out = await decryptMessageForDisplay(live());
+    expectPlaceholderShape(out!, 'm-old');
+    expectUntouched();
+  });
+
+  it('dm:message:update (an edit): the same', async () => {
+    const out = await decryptMessageForDisplay(live({ editedAt: '2026-11-01T11:00:00.000Z' }));
+    expectPlaceholderShape(out!, 'm-old');
+    expectUntouched();
+  });
+
+  it('the retry on key arrival: the same, no claim', async () => {
+    const out = await decryptMessageForDisplay(live(), { retry: true });
+    expectPlaceholderShape(out!, 'm-old');
+    expectUntouched();
+  });
+
+  it('an unencrypted user row of the other person: the deleted shape too (no refusal marker)', async () => {
+    const out = await decryptMessageForDisplay(live({ encrypted: false, content: 'forged plain words' }));
+    expectPlaceholderShape(out!, 'm-old');
+  });
+
+  it('a quote of the other person on my own row: "Message deleted", no cache read, nothing waits', async () => {
+    decryptMessage.mockResolvedValueOnce({ text: 'my answer' });
+    const out = await decryptMessageForDisplay(live({
+      id: 'm-mine', author: ME, replyToId: 'm-old',
+      replyTo: { id: 'm-old', content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy'), encrypted: true, author: PEER },
+    }));
+    expect(out!.content).toBe('my answer');
+    expect(out!.replyTo).toEqual({ id: 'm-old', content: '', encrypted: false, author: deletedParticipantAuthor(CONV) });
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+    expect(ledger.noteQuoteAwaiting).not.toHaveBeenCalled();
+  });
+
+  it('a quote of my own message keeps resolving from the cache', async () => {
+    decryptMessage.mockResolvedValueOnce({ text: 'my answer' });
+    getCachedPlaintext.mockResolvedValueOnce('my earlier words');
+    const out = await decryptMessageForDisplay(live({
+      id: 'm-mine2', author: ME, replyToId: 'm-mine',
+      replyTo: { id: 'm-mine', content: '', encrypted: true, author: ME },
+    }));
+    expect(out!.replyTo?.content).toBe('my earlier words');
+  });
+
+  it('quotedTextFromCache (the fill on key arrival) reads nothing for the other person\'s quote', async () => {
+    expect(await quotedTextFromCache(live({ author: ME, replyTo: { id: 'm-x', content: '', encrypted: true, author: PEER } }))).toBeNull();
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+  });
+
+  it('the list preview: the other person\'s last message is never read from the cache; my own is', async () => {
+    expect(await resolveEncryptedPreview('m-old', CONV, 'u-real')).toBeNull();
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+    getCachedPlaintext.mockResolvedValueOnce('my last words');
+    expect(await resolveEncryptedPreview('m-mine', CONV, 'me')).toBe('my last words');
+  });
+
+  it('a conversation an event named before the list loaded it is held read-only too', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: { [CONV]: true } });
+    const out = await decryptMessageForDisplay(live());
+    expectPlaceholderShape(out!, 'm-old');
+    expectUntouched();
+  });
+
+  it('a row served under another conversation in this page takes the page\'s conversation (the read-only state and the placeholder)', async () => {
+    const out = await decryptMessagesForDisplay([live({ conversationId: 'c-other' })], { conversationId: CONV });
+    expectPlaceholderShape(out[0], 'm-old');
+  });
+
+  it('a decrypt already running when the conversation turns: the deleted shape, and the entry it wrote is dropped', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    let answer: (r: { text: string }) => void = () => {};
+    decryptMessage.mockImplementationOnce(() => new Promise((r) => { answer = r; }));
+    const shown = decryptMessageForDisplay(live());
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(1));
+
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    answer({ text: 'their words' });
+
+    expectPlaceholderShape((await shown)!, 'm-old');
+    expect(forgetCachedPlaintext).toHaveBeenCalledWith('m-old', { scope: CONV, authorId: 'u-real' });
+    expect(ledger.noteUndecrypted).not.toHaveBeenCalled();
+  });
+
+  it('the other person\'s row FAILING to decrypt across the flip: the deleted shape, no retry note, no real author', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    let answer: (r: { text: string; failed: boolean }) => void = () => {};
+    decryptMessage.mockImplementationOnce(() => new Promise((r) => { answer = r; }));
+    const shown = decryptMessageForDisplay(live({ replyToId: 'm-q', replyTo: { id: 'm-q', content: '', encrypted: true, author: PEER } }));
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(1));
+
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    answer({ text: '', failed: true });
+
+    const out = (await shown)!;
+    expectPlaceholderShape(out, 'm-old');
+    expect(JSON.stringify(out)).not.toMatch(/alice|Alice|u-real/);
+    expect(ledger.noteUndecrypted).not.toHaveBeenCalled();
+    // the quote of the refused row is judged by the fresh flag: no cache read, nothing waits
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+    expect(ledger.noteQuoteAwaiting).not.toHaveBeenCalled();
+  });
+
+  it('a row failing to decrypt in a live conversation is still noted for a retry (the note waits for the last step)', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    decryptMessage.mockResolvedValueOnce({ text: '', failed: true });
+    const out = await decryptMessageForDisplay(live());
+    expect(out).toMatchObject({ id: 'm-old', content: DECRYPT_FAILED_CONTENT });
+    expect(ledger.noteUndecrypted).toHaveBeenCalledTimes(1);
+  });
+
+  it('my own row decrypting across the flip with a quote of the other person: my text, the quote "Message deleted", no cache read for it', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    let answer: (r: { text: string }) => void = () => {};
+    decryptMessage.mockImplementationOnce(() => new Promise((r) => { answer = r; }));
+    const shown = decryptMessageForDisplay(live({
+      id: 'm-mine', author: ME, replyToId: 'm-old',
+      replyTo: { id: 'm-old', content: buildMegolmEnvelope('c2Vzc0lk', 'Y2lwaGVy'), encrypted: true, author: PEER },
+    }));
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(1));
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    answer({ text: 'my answer' });
+
+    const out = (await shown)!;
+    expect(out.content).toBe('my answer');
+    expect(out.replyTo).toEqual({ id: 'm-old', content: '', encrypted: false, author: deletedParticipantAuthor(CONV) });
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+    expect(forgetCachedPlaintext).not.toHaveBeenCalled();
+  });
+
+  it('a flip during the quote\'s cache read: my row keeps its text, the quote comes back "Message deleted"', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    decryptMessage.mockResolvedValueOnce({ text: 'my answer' });
+    let cached: (text: string | null) => void = () => {};
+    getCachedPlaintext.mockImplementationOnce(() => new Promise((r) => { cached = r; }));
+    const shown = decryptMessageForDisplay(live({
+      id: 'm-mine', author: ME, replyToId: 'm-old',
+      replyTo: { id: 'm-old', content: '', encrypted: true, author: PEER },
+    }));
+    await vi.waitFor(() => expect(getCachedPlaintext).toHaveBeenCalledTimes(1));
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    cached('their cached words');
+
+    const out = (await shown)!;
+    expect(out.content).toBe('my answer');
+    expect(out.replyTo).toEqual({ id: 'm-old', content: '', encrypted: false, author: deletedParticipantAuthor(CONV) });
+    expect(JSON.stringify(out)).not.toContain('their cached words');
+  });
+
+  it('a flip during the quote\'s cache read of the other person\'s row: the deleted shape, its entry dropped', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    decryptMessage.mockResolvedValueOnce({ text: 'their words' });
+    let cached: (text: string | null) => void = () => {};
+    getCachedPlaintext.mockImplementationOnce(() => new Promise((r) => { cached = r; }));
+    const shown = decryptMessageForDisplay(live({ replyToId: 'm-q', replyTo: { id: 'm-q', content: '', encrypted: true, author: ME } }));
+    await vi.waitFor(() => expect(getCachedPlaintext).toHaveBeenCalledTimes(1));
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    cached('my quoted words');
+
+    expectPlaceholderShape((await shown)!, 'm-old');
+    expect(forgetCachedPlaintext).toHaveBeenCalledWith('m-old', { scope: CONV, authorId: 'u-real' });
+  });
+
+  it('a row naming another conversation in a page of this one: the deleted shape across the flip, but no entry of that other conversation is dropped', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    let answer: (r: { text: string }) => void = () => {};
+    decryptMessage.mockImplementationOnce(() => new Promise((r) => { answer = r; }));
+    const shown = decryptMessagesForDisplay([live({ conversationId: 'c-other' })], { conversationId: CONV });
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(1));
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    answer({ text: 'their words' });
+
+    expectPlaceholderShape((await shown)[0], 'm-old');
+    expect(forgetCachedPlaintext).not.toHaveBeenCalled();
+  });
+
+  it('a removal that fails is logged and the row still takes the deleted shape; a session that ended settles it as nothing', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let answer: (r: { text: string }) => void = () => {};
+    decryptMessage.mockImplementationOnce(() => new Promise((r) => { answer = r; }));
+    forgetCachedPlaintext.mockRejectedValueOnce(new Error('write refused'));
+    const shown = decryptMessageForDisplay(live());
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(1));
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    answer({ text: 'their words' });
+    expectPlaceholderShape((await shown)!, 'm-old');
+    expect(warn).toHaveBeenCalledWith('e2e: the cache entry of message m-old could not be dropped:', 'write refused');
+
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    decryptMessage.mockImplementationOnce(() => new Promise((r) => { answer = r; }));
+    const ended = new Error('E2E service disposed');
+    ended.name = 'E2EServiceDisposedError';
+    forgetCachedPlaintext.mockRejectedValueOnce(ended);
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const second = decryptMessageForDisplay(live({ id: 'm-two' }));
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(2));
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    answer({ text: 'their words' });
+    expect(await second).toBeNull();
+    warn.mockRestore();
+    debug.mockRestore();
+  });
+
+  it('my own row decrypting across the flip is shown as before, and its entry kept', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    let answer: (r: { text: string }) => void = () => {};
+    decryptMessage.mockImplementationOnce(() => new Promise((r) => { answer = r; }));
+    const shown = decryptMessageForDisplay(live({ author: ME }));
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(1));
+    useDMStore.setState({ conversations: [readOnlyConversation()] });
+    answer({ text: 'my words' });
+    expect((await shown)!.content).toBe('my words');
+    expect(forgetCachedPlaintext).not.toHaveBeenCalled();
+  });
+
+  it('a live conversation is gated exactly as before', async () => {
+    useDMStore.setState({ conversations: [], readOnlyPending: {} });
+    const out = await decryptMessageForDisplay(live());
+    expect(out).toMatchObject({ id: 'm-old', content: 'their words', encrypted: true, type: 'user' });
+    expect(decryptMessage).toHaveBeenCalledTimes(1);
+    expect(forgetCachedPlaintext).not.toHaveBeenCalled();
   });
 });

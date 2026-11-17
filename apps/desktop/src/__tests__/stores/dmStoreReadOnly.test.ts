@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DELETED_MESSAGE_TYPE } from '@voxium/shared';
 import type { Conversation } from '@voxium/shared';
 
@@ -26,6 +26,7 @@ vi.mock('../../stores/chatStore', () => ({ useChatStore: { getState: () => chat 
 vi.mock('../../services/dmReadOnly', () => ({ applyReadOnlyConversations }));
 
 import { useDMStore, isConversationReadOnly } from '../../stores/dmStore';
+import { registerE2ESessionUser } from '../../services/e2e/session';
 
 const ALICE = { id: 'u-alice', username: 'alice', displayName: 'Alice', avatarUrl: 'avatars/alice.webp', status: 'online', role: 'admin', isSupporter: true, supporterTier: 'top' };
 const PLACEHOLDER = { id: 'deleted:c1', username: 'deleted', displayName: 'Deleted user', avatarUrl: null, status: 'offline', role: 'user', isSupporter: false, supporterTier: null };
@@ -65,7 +66,12 @@ beforeEach(() => {
   applyReadOnlyConversations.mockReset();
   chat.clearMessages.mockReset();
   chat.fetchDMMessages.mockReset();
-  useDMStore.setState({ conversations: [], isLoading: false, participantStatuses: {}, activeConversationId: null, readOnlyPurges: {} });
+  useDMStore.setState({ conversations: [], isLoading: false, participantStatuses: {}, activeConversationId: null, readOnlyPurges: {}, readOnlyPending: {} });
+  // the signed-in account, as dmStore reads it (the E2E layer's session source)
+  registerE2ESessionUser(() => 'me');
+});
+afterEach(() => {
+  registerE2ESessionUser(null);
 });
 
 describe('the list reconciles read-only conversations without the event', () => {
@@ -199,5 +205,88 @@ describe('openDM never names the placeholder', () => {
   it('refuses a `deleted:` id without a request', async () => {
     await expect(useDMStore.getState().openDM('deleted:c1')).rejects.toThrow();
     expect(apiPost).not.toHaveBeenCalled();
+  });
+});
+
+describe('every read-only conversation goes through one shape (the event path and the list path end alike)', () => {
+  const theirEncrypted = { id: 'm7', content: 'ciphertext with words', encrypted: true, type: 'user', createdAt: '2026-11-01T10:00:00.000Z', authorId: 'u-alice' };
+  const myEncrypted = { id: 'm8', content: 'ciphertext', encrypted: true, type: 'user', createdAt: '2026-11-01T10:00:00.000Z', authorId: 'me' };
+
+  it('a list carrying participantDeleted with the OLD author\'s encrypted last message: it stands deleted, and nothing asks the cache', async () => {
+    apiGet.mockResolvedValue({ data: { data: [readOnlyConv({ lastMessage: theirEncrypted })] } });
+    await useDMStore.getState().fetchConversations();
+    await settle();
+    expect(useDMStore.getState().conversations[0].lastMessage).toMatchObject({ id: 'm7', type: DELETED_MESSAGE_TYPE, content: '', encrypted: false, authorId: 'deleted:c1' });
+    expect(resolveEncryptedPreview).not.toHaveBeenCalled();
+  });
+
+  it('my own encrypted last message of a read-only conversation keeps its preview from the cache', async () => {
+    apiGet.mockResolvedValue({ data: { data: [readOnlyConv({ lastMessage: myEncrypted })] } });
+    resolveEncryptedPreview.mockResolvedValue('my last words');
+    await useDMStore.getState().fetchConversations();
+    expect(resolveEncryptedPreview).toHaveBeenCalledWith('m8', 'c1', 'me');
+    expect(useDMStore.getState().conversations[0].lastMessage).toMatchObject({ id: 'm8', content: 'my last words', encrypted: true });
+  });
+
+  it('nobody known to be signed in: no preview can be shown to be our own, so it stands deleted', async () => {
+    registerE2ESessionUser(null);
+    apiGet.mockResolvedValue({ data: { data: [readOnlyConv({ lastMessage: myEncrypted })] } });
+    await useDMStore.getState().fetchConversations();
+    expect(useDMStore.getState().conversations[0].lastMessage).toMatchObject({ type: DELETED_MESSAGE_TYPE, content: '' });
+    expect(resolveEncryptedPreview).not.toHaveBeenCalled();
+  });
+
+  it('the event path and the list path give the same conversation', async () => {
+    useDMStore.setState({ conversations: [conv({ lastMessage: theirEncrypted })] });
+    useDMStore.getState().markParticipantDeleted('c1', 'me');
+    const byEvent = useDMStore.getState().conversations[0];
+    useDMStore.setState({ conversations: [conv({ lastMessage: theirEncrypted })] });
+    apiGet.mockResolvedValue({ data: { data: [readOnlyConv({ lastMessage: theirEncrypted })] } });
+    await useDMStore.getState().fetchConversations();
+    const byList = useDMStore.getState().conversations[0];
+    expect(byList.participant).toEqual(byEvent.participant);
+    expect(byList.participantDeleted).toBe(true);
+    expect(byList.lastMessage).toEqual(byEvent.lastMessage);
+  });
+
+  it('a preview read started before the flip writes no text into the deleted preview', async () => {
+    let answer: (text: string) => void = () => {};
+    resolveEncryptedPreview.mockImplementation(() => new Promise<string>((r) => { answer = r; }));
+    apiGet.mockResolvedValue({ data: { data: [conv({ lastMessage: theirEncrypted })] } });
+    const fetching = useDMStore.getState().fetchConversations();
+    await vi.waitFor(() => expect(resolveEncryptedPreview).toHaveBeenCalled());
+
+    useDMStore.getState().markParticipantDeleted('c1', 'me');
+    answer('their words');
+    await fetching;
+
+    expect(useDMStore.getState().conversations[0].lastMessage).toMatchObject({ type: DELETED_MESSAGE_TYPE, content: '' });
+  });
+});
+
+describe('an event for a conversation the list had not loaded', () => {
+  it('is held by its id (the gate and the stores read it), then applied by the next list: read-only, a transition, a purge', async () => {
+    useDMStore.getState().notePendingReadOnly('c1');
+    expect(isConversationReadOnly('c1')).toBe(true);
+    apiGet.mockResolvedValue({ data: { data: [conv(), conv({ id: 'c2' })] } });
+
+    await useDMStore.getState().fetchConversations();
+    await settle();
+
+    const c1 = useDMStore.getState().conversations.find((c) => c.id === 'c1')!;
+    expect(c1.participantDeleted).toBe(true);
+    expect(c1.participant.id).toBe('deleted:c1');
+    expect(useDMStore.getState().conversations.find((c) => c.id === 'c2')!.participantDeleted).toBeUndefined();
+    expect(applyReadOnlyConversations).toHaveBeenCalledWith([{ conversationId: 'c1', previousParticipantId: 'u-alice' }], ['c1']);
+    // held by the conversation itself from now on
+    expect(useDMStore.getState().readOnlyPending).toEqual({});
+    expect(isConversationReadOnly('c1')).toBe(true);
+  });
+
+  it('noting the same id twice changes nothing', () => {
+    useDMStore.getState().notePendingReadOnly('c9');
+    const first = useDMStore.getState().readOnlyPending;
+    useDMStore.getState().notePendingReadOnly('c9');
+    expect(useDMStore.getState().readOnlyPending).toBe(first);
   });
 });

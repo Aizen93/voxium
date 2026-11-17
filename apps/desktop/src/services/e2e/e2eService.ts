@@ -4167,6 +4167,20 @@ export class E2EService {
     return true;
   }
 
+  /**
+   * Drop the cache entry of one message, when it is of `scope` and written by
+   * `authorId`: a decrypt that was already running when its conversation
+   * turned read-only wrote it after the conversation's purge may have walked
+   * past it. On the serial queue, so after the decrypt that wrote it.
+   */
+  async forgetCachedPlaintext(messageId: string, expected: { scope: string; authorId: string }): Promise<void> {
+    return this.enqueue(async () => {
+      const cached = await this.vault.getPlaintext(messageId);
+      if (!cached || cached.conversationId !== expected.scope || cached.authorId !== expected.authorId) return;
+      await this.vault.deletePlaintext(messageId);
+    });
+  }
+
   /** Read cached plaintext for a message id the SERVER named (see cacheEntryAnswers). */
   async getCachedPlaintext(
     messageId: string,

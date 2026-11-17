@@ -30,13 +30,69 @@ import {
 } from './displayGate';
 import { isE2ESessionEnded } from './session';
 import { arrivalMark, noteQuoteAwaiting, noteUndecrypted } from './undecryptedRows';
-import { isParticipantDeleted, DMConversationReadOnlyError } from '../../utils/dmParticipant';
+import { isParticipantDeleted, isHeldReadOnly, DMConversationReadOnlyError } from '../../utils/dmParticipant';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
 
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
   return useAuthStore.getState().user?.id ?? null;
+}
+
+/**
+ * dmStore, once its dynamic import has settled (a static import would close
+ * an eval-order cycle with resetStores, see the note above). From then on
+ * each read-only lookup is one synchronous read of the store's state, with no
+ * promise (heldReadOnly answers a boolean). The gate looks before a row is
+ * opened, when its quote is read, and once more as its last step.
+ */
+let dmStoreModule: typeof import('../../stores/dmStore') | null = null;
+
+function readOnlyIn(module: typeof import('../../stores/dmStore'), ids: Array<string | null | undefined>): boolean {
+  const state = module.useDMStore.getState();
+  return ids.some((id) => isHeldReadOnly(state, id));
+}
+
+/**
+ * Whether the DM store holds any of these conversations read-only (the other
+ * side's account was deleted: utils/dmParticipant.ts): a boolean once dmStore
+ * is loaded, a promise only for the first lookup. A failed import says
+ * nothing about the conversation: logged, and the row is gated as before (the
+ * server refuses what a read-only conversation does not allow).
+ */
+function heldReadOnly(...conversationIds: Array<string | null | undefined>): boolean | Promise<boolean> {
+  if (dmStoreModule) return readOnlyIn(dmStoreModule, conversationIds);
+  return import('../../stores/dmStore').then(
+    (module) => {
+      dmStoreModule = module;
+      return readOnlyIn(module, conversationIds);
+    },
+    (err: unknown) => {
+      console.warn('e2e: the read-only state of a conversation could not be read:', err instanceof Error ? err.message : err);
+      return false;
+    },
+  );
+}
+
+/** heldReadOnly, awaited only when it had to load dmStore. */
+async function heldReadOnlyNow(...conversationIds: Array<string | null | undefined>): Promise<boolean> {
+  const answer = heldReadOnly(...conversationIds);
+  return typeof answer === 'boolean' ? answer : await answer;
+}
+
+/** One of the server's own call notices: the only plaintext a DM row may carry (DM_SYSTEM_NOTICES). */
+function isListedNotice(row: { type?: string; encrypted?: boolean; content: string }): boolean {
+  return row.type === 'system' && !row.encrypted && isDMSystemNotice(row.content);
+}
+
+/**
+ * In a conversation held read-only, a quote that is neither this account's own
+ * message nor a listed call notice stands for a deleted account's message: it
+ * keeps no text, from the server or the cache, and waits for nothing.
+ */
+function quoteStandsAsDeleted(quote: NonNullable<Message['replyTo']>, userId: string | null): boolean {
+  if (isDeletedQuote(quote)) return true;
+  return quote.author?.id !== userId && !(!quote.encrypted && isDMSystemNotice(quote.content));
 }
 
 /**
@@ -50,14 +106,16 @@ async function cachedQuoteText(scope: string, quote: NonNullable<Message['replyT
   return cached ? parseE2EPlaintext(cached).text : null;
 }
 
-async function resolveReplyPreview(message: Message, userId: string): Promise<Message> {
+async function resolveReplyPreview(message: Message, userId: string, readOnly = false): Promise<Message> {
   if (!message.replyTo) return message;
   // a quote names its author; one without is malformed and is dropped whole
   if (!message.replyTo.author) return { ...message, replyTo: null };
   const scope = message.conversationId ?? '';
-  // A deleted account's message, quoted: no text at all, from the server or
-  // the cache, and nothing to wait for (the UI says "Message deleted")
-  if (isDeletedQuote(message.replyTo)) {
+  // A deleted account's message, quoted (or, in a conversation held
+  // read-only, any quote that is not our own or a call notice): no text at
+  // all, from the server or the cache, and nothing to wait for (the UI says
+  // "Message deleted")
+  if (isDeletedQuote(message.replyTo) || (readOnly && quoteStandsAsDeleted(message.replyTo, userId))) {
     return scope ? { ...message, replyTo: deletedQuote(message.replyTo, scope) } : { ...message, replyTo: lockedQuote(message.replyTo) };
   }
   if (!message.replyTo.encrypted) {
@@ -84,6 +142,8 @@ export async function quotedTextFromCache(message: Message): Promise<string | nu
   if (!message.replyTo?.author || !message.conversationId) return null;
   const userId = await currentUserId();
   if (!userId) return null;
+  // the read-only rule of resolveReplyPreview: no cache read for such a quote
+  if ((await heldReadOnlyNow(message.conversationId)) && quoteStandsAsDeleted(message.replyTo, userId)) return null;
   return cachedQuoteText(message.conversationId, message.replyTo, userId);
 }
 
@@ -105,10 +165,10 @@ export async function quotedTextFromCache(message: Message): Promise<string | nu
  */
 export async function decryptMessageForDisplay(
   input: Message,
-  opts: { retry?: boolean } = {},
+  opts: { retry?: boolean; conversationId?: string } = {},
 ): Promise<Message | null> {
   try {
-    return await decryptOneForDisplay(input, opts.retry === true);
+    return await decryptOneForDisplay(input, opts.retry === true, opts.conversationId);
   } catch (err) {
     if (!isE2ESessionEnded(err)) throw err;
     console.debug(`e2e: decrypt of ${input.id} ended with the session:`, err instanceof Error ? err.message : err);
@@ -116,16 +176,99 @@ export async function decryptMessageForDisplay(
   }
 }
 
-async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Message> {
+async function decryptOneForDisplay(input: Message, retry: boolean, pageConversationId?: string): Promise<Message> {
+  // The conversation a row is shown in: the page's when a page was fetched
+  // for one (the row's own id is the server's word), the row's own otherwise
+  const shownIn = pageConversationId ?? input.conversationId ?? null;
   // A deleted account's message (the conversation outlived the account): its
   // own shape, every field set by the gate, before the refusal of unencrypted
   // rows and before anything reads the cache or notes the row. The type alone
   // decides: text or ciphertext a server put in such a row is never shown.
   if (input.type === DELETED_MESSAGE_TYPE) {
-    if (!input.conversationId) return refusedRow(withoutServerAssertions(input));
-    return deletedMessageRow(input, input.conversationId);
+    if (!shownIn) return refusedRow(withoutServerAssertions(input));
+    return deletedMessageRow(input, shownIn);
   }
   const message = withoutServerAssertions(input);
+  // A conversation held read-only (the other side's account was deleted): a
+  // row that is neither this account's own nor a listed call notice stands
+  // for that account's message, whether or not the server has rewritten it
+  // yet (a page or an event in flight when the conversation turned). The same
+  // shape as a `deleted` row, decided before any decrypt, cache read or retry
+  // note, so nothing of it is shown, counted, notified or cached. Every other
+  // conversation is gated as it was; the lookup is one read of the store's
+  // state once dmStore is loaded.
+  const lookup = shownIn ? heldReadOnly(shownIn, message.conversationId) : false;
+  // no await on the ordinary path once dmStore is loaded
+  const readOnly = typeof lookup === 'boolean' ? lookup : await lookup;
+  if (readOnly && !isListedNotice(message)) {
+    const userId = await currentUserId();
+    if (!userId || message.author?.id !== userId) return deletedMessageRow(input, shownIn!);
+  }
+  // a quote is judged by the flag as it stands when it is read (the
+  // conversation may turn during the decrypt): no cache read for the quote of
+  // a conversation that turned meanwhile
+  const quoteFlag = async () => readOnly || (!!shownIn && (await heldReadOnlyNow(shownIn, message.conversationId)));
+  const gated = await gateRow(message, retry, quoteFlag);
+  // The flag again, as the LAST step of every path: the conversation may have
+  // turned read-only during the decrypt, the cache reads or the quote's lookup
+  return settleReadOnly(input, message, shownIn, gated);
+}
+
+/**
+ * What gateRow decided: the row, the account it was gated for (null on the
+ * paths that read none), whether a decrypt ran for it (which may have written
+ * a cache entry), and the retry note it owes (taken only if the row stands).
+ */
+interface GatedRow {
+  row: Message;
+  userId: string | null;
+  decrypted: boolean;
+  noteRetry: (() => void) | null;
+}
+
+/**
+ * The last step of the gate: is the conversation held read-only NOW? Then a
+ * row that is not this account's own (nor a listed call notice) comes back as
+ * the deleted shape on every path, the refused one included, with no retry
+ * note, and the cache entry a decrypt may have written for it is dropped
+ * (only when the row is of the conversation it is shown in: a row naming
+ * another conversation's id costs that conversation nothing). An own row
+ * keeps its text, and its quote is judged again under the fresh flag (one the
+ * conversation turned under while its cache read ran).
+ */
+async function settleReadOnly(
+  input: Message,
+  message: Message,
+  shownIn: string | null,
+  { row, userId, decrypted, noteRetry }: GatedRow,
+): Promise<Message> {
+  if (!shownIn || isListedNotice(message) || !(await heldReadOnlyNow(shownIn, message.conversationId))) {
+    noteRetry?.();
+    return row;
+  }
+  const accountId = userId ?? (await currentUserId());
+  const own = !!accountId && message.author?.id === accountId;
+  if (!own) {
+    if (decrypted && userId && message.conversationId === shownIn) {
+      try {
+        await getE2EService(userId).forgetCachedPlaintext(message.id, { scope: shownIn, authorId: message.author?.id ?? '' });
+      } catch (err) {
+        if (isE2ESessionEnded(err)) throw err;
+        console.warn(`e2e: the cache entry of message ${message.id} could not be dropped:`, err instanceof Error ? err.message : err);
+      }
+    }
+    return deletedMessageRow(input, shownIn);
+  }
+  noteRetry?.();
+  // our own row: a quote that is not ours (nor a call notice) keeps no text now
+  if (row.replyTo?.author && !isDeletedQuote(row.replyTo) && quoteStandsAsDeleted(row.replyTo, accountId)) {
+    return { ...row, replyTo: deletedQuote(row.replyTo, shownIn) };
+  }
+  return row;
+}
+
+/** The gate past its first checks: the unencrypted rule, the decrypt, the own-message cache, the refused shape. */
+async function gateRow(message: Message, retry: boolean, quoteFlag: () => Promise<boolean>): Promise<GatedRow> {
   if (!message.encrypted) {
     // After the always-on cutover there is no plaintext DM path: conversations
     // are born encrypted, the enable route is gone, and the send side throws
@@ -145,22 +288,25 @@ async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Mes
     // The `type` field is the server's word too, so a "system" row is trusted
     // only when its text is one of the notices the server actually writes.
     if (message.type === 'system' && isDMSystemNotice(message.content)) {
-      return { ...message, attachments: [], replyTo: null };
+      return { row: { ...message, attachments: [], replyTo: null }, userId: null, decrypted: false, noteRetry: null };
     }
     console.warn(
       `e2e: refusing an unencrypted DM message (${message.id}) — every DM is encrypted`
     );
-    return refusedRow(message);
+    return { row: refusedRow(message), userId: null, decrypted: false, noteRetry: null };
   }
   // A DM row belongs to a conversation; one without is nothing the crypto can
   // scope a decrypt, or a cache read, to
-  if (!message.conversationId) return refusedRow(message);
+  if (!message.conversationId) return { row: refusedRow(message), userId: null, decrypted: false, noteRetry: null };
+  const conversationId = message.conversationId;
   const userId = await currentUserId();
-  if (!userId) return refusedRow(message);
+  if (!userId) return { row: refusedRow(message), userId: null, decrypted: false, noteRetry: null };
   // An encrypted row under the deleted account's placeholder: no session
   // speaks for that id and none ever will, so nothing is decrypted, claimed
   // or noted for a later try
-  if (isDeletedParticipantId(message.author?.id)) return resolveReplyPreview(refusedRow(message), userId);
+  if (isDeletedParticipantId(message.author?.id)) {
+    return { row: await resolveReplyPreview(refusedRow(message), userId, await quoteFlag()), userId, decrypted: false, noteRetry: null };
+  }
 
   const service = getE2EService(userId);
   const own = message.author?.id === userId;
@@ -170,7 +316,7 @@ async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Mes
   const result = await service.decryptMessage(
     {
       id: message.id,
-      conversationId: message.conversationId,
+      conversationId,
       authorId: message.author?.id ?? '',
       content: message.content,
       editedAt: message.editedAt ?? null,
@@ -179,7 +325,7 @@ async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Mes
     { claimMissing: !retry, storageFailureRejects: retry },
   );
   if (!result.failed) {
-    return resolveReplyPreview(decryptedRow(message, result.text), userId);
+    return { row: await resolveReplyPreview(decryptedRow(message, result.text), userId, await quoteFlag()), userId, decrypted: true, noteRetry: null };
   }
 
   if (own) {
@@ -196,29 +342,29 @@ async function decryptOneForDisplay(input: Message, retry: boolean): Promise<Mes
       // version-checked: an edit echo must not serve the pre-edit cache entry;
       // and only our OWN entry of this conversation answers for "own"
       const cached = await service.getCachedPlaintext(message.id, {
-        scope: message.conversationId,
+        scope: conversationId,
         authorId: userId,
         editedAt: message.editedAt ?? null,
       });
       if (cached !== null) {
-        return resolveReplyPreview(decryptedRow(message, cached), userId);
+        return { row: await resolveReplyPreview(decryptedRow(message, cached), userId, await quoteFlag()), userId, decrypted: true, noteRetry: null };
       }
     }
   }
   // Nothing vouched for this row: the refused shape, its quote still resolvable
   // from the local cache. The failure is noted for this version, so that its
   // group session reaching this device later opens the row in place once the
-  // view shows it (redecryptOnKeyArrival.ts)
-  const refused = await resolveReplyPreview(refusedRow(message), userId);
-  noteUndecrypted(message, message.conversationId, mark);
-  return refused;
+  // view shows it (redecryptOnKeyArrival.ts): noted by settleReadOnly, and
+  // only when the row stands as refused
+  const refused = await resolveReplyPreview(refusedRow(message), userId, await quoteFlag());
+  return { row: refused, userId, decrypted: true, noteRetry: () => noteUndecrypted(message, conversationId, mark) };
 }
 
 /**
  * Decrypt a fetched page of messages (order preserved). Only the server's call
  * notices pass unencrypted, beside the deleted-message rows the gate builds.
  */
-export async function decryptMessagesForDisplay(messages: Message[]): Promise<Message[]> {
+export async function decryptMessagesForDisplay(messages: Message[], opts: { conversationId?: string } = {}): Promise<Message[]> {
   // No `some(m => m.encrypted)` short-circuit: a page of forged plaintext rows
   // would satisfy it and bypass the per-message check entirely, which is
   // exactly the shape an attacker controls. Every row goes through the same
@@ -230,7 +376,7 @@ export async function decryptMessagesForDisplay(messages: Message[]): Promise<Me
   for (const m of messages) {
     try {
       // a row the session's end overtook keeps the page's shape as a refused row
-      out.push((await decryptMessageForDisplay(m)) ?? refusedRow(withoutServerAssertions(m)));
+      out.push((await decryptMessageForDisplay(m, { conversationId: opts.conversationId })) ?? refusedRow(withoutServerAssertions(m)));
     } catch (err) {
       // One message whose decrypt PIPELINE fails (vault IO, engine state —
       // not mere bad ciphertext, which degrades inside) must not abort the
@@ -329,7 +475,7 @@ export async function searchEncryptedHistory(
   // The other side's account was deleted: only this account's own lines are
   // found there, whatever the cache still holds before (or after a failed)
   // purge of that conversation (services/dmReadOnly.ts)
-  const ownOnly = isParticipantDeleted(conversation);
+  const ownOnly = isParticipantDeleted(conversation) || (await heldReadOnlyNow(conversationId));
   const hits = (await getE2EService(userId).searchDecrypted(conversationId, query))
     // pre-Phase-C cache entries lack createdAt — they can't be rendered or
     // jumped to reliably, so they're excluded rather than shown broken
@@ -377,6 +523,9 @@ export async function resolveEncryptedPreview(
 ): Promise<string | null> {
   const userId = await currentUserId();
   if (!userId) return null;
+  // held read-only: only this account's own last message has a preview from
+  // the cache; the other person's stands as deleted (no cache read)
+  if (authorId !== userId && (await heldReadOnlyNow(conversationId))) return null;
   const raw = await getE2EService(userId).getCachedPlaintext(messageId, { scope: conversationId, authorId });
   return raw === null ? null : parseE2EPlaintext(raw).text;
 }

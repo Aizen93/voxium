@@ -1416,6 +1416,30 @@ describe('voiceStore — socket reconnect clears stale voice occupancy', () => {
     expect(typeof reconnectHandler).toBe('function');
   });
 
+  describe('the re-join of a DM call', () => {
+    afterEach(() => {
+      dmEnv.conversations = [];
+      useVoiceStore.setState({ dmCallConversationId: null });
+    });
+
+    it('re-joins a live conversation\'s call', async () => {
+      dmEnv.conversations = [{ id: 'conv-1', participant: { id: 'peer-x', username: 'peer', displayName: 'Peer', avatarUrl: null } }];
+      useVoiceStore.setState({ dmCallConversationId: 'conv-1' });
+      await reconnectHandler();
+      expect(socket.emit).toHaveBeenCalledWith('dm:voice:join', 'conv-1', expect.objectContaining({ deviceId: 'device-me000001' }));
+    });
+
+    it('never re-joins a call of a conversation that turned read-only meanwhile', async () => {
+      dmEnv.conversations = [{ id: 'conv-ro', participant: { id: 'deleted:conv-ro', username: 'deleted', displayName: 'Deleted user', avatarUrl: null }, participantDeleted: true }];
+      useVoiceStore.setState({ dmCallConversationId: 'conv-ro' });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await reconnectHandler();
+      expect(socket.emit.mock.calls.filter((c) => c[0] === 'dm:voice:join')).toHaveLength(0);
+      expect(warn).toHaveBeenCalledWith('[DMVoice] Not re-joining a call in a read-only conversation');
+      warn.mockRestore();
+    });
+  });
+
   it('empties every voice list on reconnect, even when not in voice — the server only replays occupied channels', () => {
     // A channel that emptied while the socket was gone is never replayed, so
     // its last known occupants stayed on screen for good

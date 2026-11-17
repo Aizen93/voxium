@@ -44,7 +44,7 @@ import type { VoiceUser, TransportOptions, E2ECallSignal } from '@voxium/shared'
 import type { CallPeerDevice } from '../services/e2e/callCrypto';
 import { isE2ESessionEnded } from '../services/e2e/session';
 import { resolveStunUrl } from '../utils/stunUrl';
-import { conversationIsReadOnly } from '../utils/dmParticipant';
+import { isHeldReadOnly } from '../utils/dmParticipant';
 
 /** Debug log — stripped in production builds by Vite tree-shaking */
 const debugLog = import.meta.env.DEV
@@ -2452,7 +2452,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // Dynamic import per the resetStores eval-cycle rule.
     try {
       const { useDMStore } = await import('./dmStore');
-      if (conversationIsReadOnly(useDMStore.getState().conversations, conversationId)) {
+      if (isHeldReadOnly(useDMStore.getState(), conversationId)) {
         console.warn('[DMVoice] Refusing a call in a read-only conversation');
         if (get().incomingCall?.conversationId === conversationId) set({ incomingCall: null });
         return;
@@ -3078,7 +3078,14 @@ onSocketReconnect(async () => {
     debugLog('[DMVoice] Socket reconnected — re-joining DM call', dmCallConversationId);
     // deviceId must survive the rebind or the peer loses its sealing target
     const deviceId = await resolveOwnCallDeviceId();
-    socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf, deviceId });
+    // the conversation turned read-only meanwhile (the other side's account
+    // was deleted): no re-join of a call it can no longer have
+    const { useDMStore } = await import('./dmStore');
+    if (isHeldReadOnly(useDMStore.getState(), dmCallConversationId)) {
+      console.warn('[DMVoice] Not re-joining a call in a read-only conversation');
+    } else {
+      socket.emit('dm:voice:join', dmCallConversationId, { selfMute: isPTT ? true : selfMute, selfDeaf, deviceId });
+    }
   }
 
   // Re-start latency measurement with new socket

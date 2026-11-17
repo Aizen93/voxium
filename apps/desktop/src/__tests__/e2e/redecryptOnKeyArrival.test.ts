@@ -12,15 +12,16 @@ import type { Conversation, Message, ReactionGroup } from '@voxium/shared';
  * service and the key server are exercised in e2eService.test.ts.
  */
 
-const { decryptMessage, getCachedPlaintext, api } = vi.hoisted(() => ({
+const { decryptMessage, getCachedPlaintext, forgetCachedPlaintext, api } = vi.hoisted(() => ({
   decryptMessage: vi.fn(),
   getCachedPlaintext: vi.fn(),
+  forgetCachedPlaintext: vi.fn(async () => {}),
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
 
 vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/e2e/e2eService')>();
-  return { ...actual, getE2EService: () => ({ decryptMessage, getCachedPlaintext }) };
+  return { ...actual, getE2EService: () => ({ decryptMessage, getCachedPlaintext, forgetCachedPlaintext }) };
 });
 vi.mock('../../stores/authStore', () => ({
   useAuthStore: { getState: () => ({ user: { id: 'me' } }) },
@@ -724,5 +725,47 @@ describe('once a row opens', () => {
     arrive('ch:ch1', [SID_A]);
     await redecryptPassesSettled();
     expect(rowById('m2')?.replyTo?.content).toBe('text of m1');
+  });
+});
+
+describe('a conversation held read-only (the other side\'s account was deleted)', () => {
+  const readOnlyC1 = (lastMessage: Conversation['lastMessage']) => ({
+    id: 'c1', user1Id: 'me', user2Id: null, participant: { id: 'deleted:c1', username: 'deleted', displayName: 'Deleted user', avatarUrl: null },
+    participantDeleted: true, lastMessage, encryptedAt: '2026-11-01T09:00:00.000Z', createdAt: '2026-11-01T09:00:00.000Z',
+  }) as Conversation;
+
+  it('a row that failed before the flip is never tried again when its session arrives, and no preview is filled', async () => {
+    useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A)]) });
+    const closed = rowById('m1');
+    expect(decryptMessage).toHaveBeenCalledTimes(1);
+    // the conversation turns read-only (its preview, an encrypted row of the other person, left blank)
+    useDMStore.setState({
+      conversations: [readOnlyC1({ id: 'm1', content: '', encrypted: true, type: 'user', createdAt: '2026-11-01T10:00:00.000Z', authorId: 'peer' })],
+    });
+
+    arrive('c1', [SID_A]);
+    await redecryptPassesSettled();
+
+    expect(decryptMessage).toHaveBeenCalledTimes(1);
+    expect(rowById('m1')).toBe(closed);
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+    expect(useDMStore.getState().conversations[0].lastMessage?.content).toBe('');
+  });
+
+  it('a conversation that turned read-only during a try shows nothing of what the try opened', async () => {
+    useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A)]) });
+    const closed = rowById('m1');
+    const held = deferred<{ text: string }>();
+    decryptMessage.mockImplementationOnce(() => held.promise);
+    arrive('c1', [SID_A]);
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(2));
+
+    useDMStore.setState({ conversations: [readOnlyC1(null)] });
+    held.resolve({ text: buildE2EPlaintext('their words') });
+    await redecryptPassesSettled();
+
+    expect(rowById('m1')).toBe(closed);
+    // the gate dropped what that decrypt had written
+    expect(forgetCachedPlaintext).toHaveBeenCalledWith('m1', { scope: 'c1', authorId: 'peer' });
   });
 });

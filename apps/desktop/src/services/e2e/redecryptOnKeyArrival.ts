@@ -30,6 +30,7 @@ import { decryptChannelMessageForDisplay, quotedChannelTextFromCache } from './c
 import { isRefusedShape } from './displayGate';
 import type { E2ESessionsAvailable } from './e2eService';
 import { currentE2ESessionUser } from './session';
+import { isHeldReadOnly } from '../../utils/dmParticipant';
 import {
   countViewChange,
   hasDueRows,
@@ -67,6 +68,15 @@ function scopeOnScreen(): string | null {
   const { activeServerId, activeChannelId } = useServerStore.getState();
   if (activeServerId) return activeChannelId ? e2eChannelScope(activeChannelId) : null;
   return useDMStore.getState().activeConversationId;
+}
+
+/**
+ * A conversation the DM store holds read-only (the other side's account was
+ * deleted): nothing of it is tried again or filled in from the cache here.
+ * Its rows the gate shows as deleted; a page in flight is reloaded anyway.
+ */
+function heldReadOnly(scope: string): boolean {
+  return isHeldReadOnly(useDMStore.getState(), scope);
 }
 
 /** The same version by the same author: the row a held one was gated as. */
@@ -131,7 +141,7 @@ async function refreshWhatShowsIt(scope: string, opened: Message, live: () => bo
       return { messages };
     });
   }
-  if (inChannel) return;
+  if (inChannel || heldReadOnly(scope)) return;
   const last = useDMStore.getState().conversations.find((c) => c.id === scope)?.lastMessage;
   if (!last || last.id !== opened.id || !last.encrypted || last.content) return;
   let preview: string | null;
@@ -143,10 +153,13 @@ async function refreshWhatShowsIt(scope: string, opened: Message, live: () => bo
     return;
   }
   if (preview === null || !live()) return;
+  // turned read-only during the read: the preview stands as deleted, no text goes in
+  if (heldReadOnly(scope)) return;
   useDMStore.setState((state) => {
     let changed = false;
     const conversations = state.conversations.map((c) => {
       if (c.id !== scope || c.lastMessage?.id !== last.id || c.lastMessage.content) return c;
+      if (!c.lastMessage.encrypted || isHeldReadOnly(state, scope)) return c;
       changed = true;
       return { ...c, lastMessage: { ...c.lastMessage, content: preview } };
     });
@@ -158,6 +171,10 @@ async function refreshWhatShowsIt(scope: string, opened: Message, live: () => bo
 async function retryDueRows(scope: string, live: () => boolean): Promise<void> {
   if (!live() || scopeOnScreen() !== scope) return;
   syncWithView(scope, useChatStore.getState().messages);
+  // a conversation held read-only is never tried again: the gate would only
+  // answer the deleted shape for the other person's rows, and the view is
+  // reloaded with the server's (its held rows go as the view moves on)
+  if (parseE2EScope(scope).kind !== 'channel' && heldReadOnly(scope)) return;
   const rows = takeDueRows(scope);
   const inChannel = parseE2EScope(scope).kind === 'channel';
   for (const heldRow of rows) {
@@ -180,6 +197,8 @@ async function retryDueRows(scope: string, live: () => boolean): Promise<void> {
     if (!opened || !live() || scopeOnScreen() !== scope) return;
     // still closed: the row stays as it is (its new failure is held at the next view change)
     if (isRefusedShape(opened)) continue;
+    // the conversation turned read-only during the try: nothing of it is shown
+    if (parseE2EScope(scope).kind !== 'channel' && heldReadOnly(scope)) return;
     if (showOpened(heldRow, opened)) await refreshWhatShowsIt(scope, opened, live);
   }
 }

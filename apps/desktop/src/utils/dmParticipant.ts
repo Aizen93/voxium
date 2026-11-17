@@ -30,6 +30,23 @@ export function conversationIsReadOnly(
 }
 
 /**
+ * Whether the DM store holds `conversationId` read-only: a loaded conversation
+ * in that state, or one `dm:conversation:read_only` named before the list
+ * loaded it (`readOnlyPending`). Takes the store's state as it is (a test's
+ * partial state included), so it reads without importing the store.
+ */
+export function isHeldReadOnly(
+  state: {
+    conversations?: ReadonlyArray<Pick<Conversation, 'id' | 'participant' | 'participantDeleted'>> | null;
+    readOnlyPending?: Readonly<Record<string, true>> | null;
+  } | null | undefined,
+  conversationId: string | null | undefined,
+): boolean {
+  if (!conversationId || !state) return false;
+  return state.readOnlyPending?.[conversationId] === true || conversationIsReadOnly(state.conversations, conversationId);
+}
+
+/**
  * The English sentence of a refusal in a read-only conversation, the one the
  * server answers with too: `serverErrors.conversationReadOnly` translates
  * both (utils/serverErrors.ts).

@@ -5,7 +5,7 @@ import { getSocket } from '../services/socket';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { useDMStore } from './dmStore';
-import { DMConversationReadOnlyError, conversationIsReadOnly } from '../utils/dmParticipant';
+import { DMConversationReadOnlyError, isHeldReadOnly } from '../utils/dmParticipant';
 import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
@@ -19,9 +19,9 @@ import {
 import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, WEBHOOK_AUTHOR_ID_PREFIX } from '@voxium/shared';
 import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMeta } from '@voxium/shared';
 
-/** The loaded conversation is read-only (the other side's account was deleted: utils/dmParticipant.ts). */
+/** The store holds the conversation read-only (the other side's account was deleted: utils/dmParticipant.ts). */
 function isConversationReadOnly(conversationId: string): boolean {
-  return conversationIsReadOnly(useDMStore.getState().conversations, conversationId);
+  return isHeldReadOnly(useDMStore.getState(), conversationId);
 }
 
 // Track typing timers per user to prevent leaks
@@ -310,7 +310,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         signal: controller.signal,
       });
       // E2E conversations: ciphertext never reaches the store or the DOM
-      const newMessages = await decryptMessagesForDisplay(data.data);
+      // the page is this conversation's: its read-only state and placeholder rows follow it
+      const newMessages = await decryptMessagesForDisplay(data.data, { conversationId });
 
       if (controller.signal.aborted) return;
 
@@ -353,7 +354,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/dm/${conversationId}/messages?around=${messageId}`, {
         signal: controller.signal,
       });
-      const decrypted = await decryptMessagesForDisplay(data.data);
+      const decrypted = await decryptMessagesForDisplay(data.data, { conversationId });
 
       if (controller.signal.aborted) return;
 
