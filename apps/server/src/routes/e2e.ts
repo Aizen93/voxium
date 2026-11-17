@@ -159,7 +159,24 @@ async function bumpDeviceListVersion(tx: TxClient, userId: string): Promise<numb
 }
 
 async function getDeviceListVersion(userId: string): Promise<number> {
-  const registry = await prisma.e2EDeviceRegistry.findUnique({
+  return readDeviceListVersion(prisma, userId);
+}
+
+/** The caller's device row, locked FOR UPDATE on the transaction given; null when there is none. */
+async function lockDeviceRow(
+  tx: Pick<TxClient, '$queryRaw'>,
+  userId: string,
+  deviceId: string,
+): Promise<{ id: string; curve25519Key: string; ed25519Key: string } | null> {
+  const rows = await tx.$queryRaw<Array<{ id: string; curve25519_key: string; ed25519_key: string }>>`
+    SELECT id, curve25519_key, ed25519_key FROM e2e_devices WHERE user_id = ${userId} AND device_id = ${deviceId} FOR UPDATE`;
+  const row = rows[0];
+  return row ? { id: row.id, curve25519Key: row.curve25519_key, ed25519Key: row.ed25519_key } : null;
+}
+
+/** The current device-list version, on the client given (a transaction reads through its own). */
+async function readDeviceListVersion(client: Pick<TxClient, 'e2EDeviceRegistry'>, userId: string): Promise<number> {
+  const registry = await client.e2EDeviceRegistry.findUnique({
     where: { userId },
     select: { version: true },
   });
@@ -267,9 +284,11 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
     validatePreKeyShape(fallbackKey, 'fallbackKey');
     verifyPreKeySignature(fallbackKey, userId, deviceId, curve25519Key, ed25519Key, 'fallbackKey');
 
-    // Re-registering a deviceId replaces its identity, which invalidates every
-    // previously published one-time key (they belong to the old Olm account)
-    // and is a device-list change as far as peers are concerned.
+    // Re-registering a deviceId with new identity keys replaces its identity,
+    // which invalidates every previously published one-time key (they belong
+    // to the old Olm account) and is a device-list change as far as peers are
+    // concerned. With the same identity keys only the published keys are
+    // replaced (see sameIdentity below).
     //
     // The device cap (E2E_LIMITS.MAX_DEVICES) is a count followed by an
     // insert, so the transaction first locks the caller's ACCOUNT row, before
@@ -307,18 +326,35 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
       // Deleted since the request was authenticated
       if (!locked.has(userId)) throw new NotFoundError('User');
 
-      const existing = await tx.e2EDevice.findUnique({
-        where: { userId_deviceId: { userId, deviceId } },
-        // The identity keys are load-bearing, not decoration: they decide
-        // whether the inbox purge below fires (see it for why).
-        select: { id: true, curve25519Key: true, ed25519Key: true },
-      });
+      // The device row, locked FOR UPDATE right after the account row (account
+      // row, then device row). The identity keys it holds are load-bearing,
+      // not decoration: they decide whether the cross-signature, the inbox and
+      // the list version change (see below), so they are read under the lock.
+      // A revoke takes no account row: it either deletes the row before this
+      // read (the request is then a new device, counted against the cap and
+      // bumping the version) or waits for this commit. A revoke and this
+      // transaction take the device, key-share, transfer and registry rows in
+      // the same order, so the two cannot deadlock.
+      const existing = await lockDeviceRow(tx, userId, deviceId);
       if (!existing) {
         const deviceCount = await tx.e2EDevice.count({ where: { userId } });
         if (deviceCount >= E2E_LIMITS.MAX_DEVICES) {
           throw new ConflictError(`Device limit reached (${E2E_LIMITS.MAX_DEVICES}) — revoke a device first`);
         }
       }
+      const identityChanged = !!existing &&
+        (existing.curve25519Key !== curve25519Key || existing.ed25519Key !== ed25519Key);
+      // The same device id with the SAME identity keys (a retry whose first
+      // answer was lost, a second instance over the same vault, another
+      // client): nothing a peer reads as this account's device list changes.
+      // The cross-signature covers the user, the device id and both public
+      // keys (e2eDeviceCrossCanonical), so it is still valid and is kept; the
+      // stored device signature covers the same canonical, so it is kept too
+      // (a peer's list carries it). The published one-time keys and the
+      // fallback key ARE replaced, as for any registration: the client that
+      // sends them marks them published, and a second instance over one vault
+      // must find its own keys on the server (spec section 14.2).
+      const sameIdentity = !!existing && !identityChanged;
 
       const upserted = await tx.e2EDevice.upsert({
         where: { userId_deviceId: { userId, deviceId } },
@@ -332,19 +368,26 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
           fallbackKey: fallbackKey.key,
           fallbackKeySignature: fallbackKey.signature,
         },
-        update: {
-          curve25519Key,
-          ed25519Key,
-          deviceSignature,
-          // Re-registering mints new identity keys, so any existing master
-          // signature covers keys that no longer exist. Clients already reject
-          // it (the canonical binds both public keys); drop it server-side too
-          // rather than keep serving material we know is dead.
-          masterSignature: null,
-          fallbackKeyId: fallbackKey.keyId,
-          fallbackKey: fallbackKey.key,
-          fallbackKeySignature: fallbackKey.signature,
-        },
+        update: sameIdentity
+          ? {
+            fallbackKeyId: fallbackKey.keyId,
+            fallbackKey: fallbackKey.key,
+            fallbackKeySignature: fallbackKey.signature,
+          }
+          : {
+            curve25519Key,
+            ed25519Key,
+            deviceSignature,
+            // Re-registering with new identity keys: any existing master
+            // signature covers keys that no longer exist. Clients already
+            // reject it (the canonical binds both public keys); drop it
+            // server-side too rather than keep serving material we know is
+            // dead.
+            masterSignature: null,
+            fallbackKeyId: fallbackKey.keyId,
+            fallbackKey: fallbackKey.key,
+            fallbackKeySignature: fallbackKey.signature,
+          },
       });
       // A re-registration that MINTS A NEW IDENTITY leaves the same dead inbox
       // the revoke path already clears: every queued share is ciphertext under
@@ -359,8 +402,6 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
       // perfectly decryptable material. Recipient side only, mirroring the
       // revoke path: shares this device SENT are still decryptable by their
       // recipients, who hold sessions with the old identity.
-      const identityChanged = !!existing &&
-        (existing.curve25519Key !== curve25519Key || existing.ed25519Key !== ed25519Key);
       if (identityChanged) {
         await tx.e2EKeyShare.deleteMany({ where: { recipientUserId: userId, recipientDeviceId: deviceId } });
         await tx.e2EMasterTransfer.deleteMany({ where: { userId, recipientDeviceId: deviceId } });
@@ -375,7 +416,15 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
           signature: k.signature,
         })),
       });
-      const listVersion = await bumpDeviceListVersion(tx, userId);
+      // A device added or re-keyed is a device-list change; the same identity
+      // again is not (the list a peer reads, GET /devices/:userId and the
+      // channel batch, carries the device id, both public keys, the device
+      // signature, the cross-signature and createdAt, none of which moved, and
+      // never the one-time or fallback keys). So the version stays and the
+      // answer carries the current one.
+      const listVersion = sameIdentity
+        ? await readDeviceListVersion(tx, userId)
+        : await bumpDeviceListVersion(tx, userId);
       return { updatedAt: upserted.updatedAt, listVersion };
     }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The device registration of ${deviceId} for ${userId}`);
 

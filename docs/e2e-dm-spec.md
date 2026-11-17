@@ -129,6 +129,14 @@ a `deviceId` with a different identity replaces that device and invalidates its
 previous install; the account's other devices are untouched. Peers see the
 change (§12.5).
 
+Re-registering a `deviceId` with the **same** identity keys (both
+`curve25519Key` and `ed25519Key` equal to the stored ones) is validated in
+full like any registration and still **replaces the published one-time keys and
+the fallback key** with the request's, but changes nothing a peer reads as the
+device list: the stored device signature and the account cross-signature
+(§14.2) are kept, the device's inbox is kept, and the device-list version is not
+bumped (the answer carries the current one).
+
 ### 4.3 Bundle claim (`POST /api/v1/e2e/bundles/:userId/:deviceId`)
 
 Guards: requester must share a conversation with the target (limits pre-key
@@ -463,7 +471,9 @@ own others.
   `voxium-e2e-v2|device|<userId>|<deviceId>|<curve>|<ed>` and
   `voxium-e2e-v2|key|<userId>|<deviceId>|<curveIdentity>|<keyId>|<key>`.
 - `E2EDeviceRegistry.version` is bumped in the **same transaction** as any
-  device add or revoke; `GET /e2e/devices/:userId` returns `{devices[], listVersion}`.
+  device add or revoke, and any re-registration with new identity keys; a
+  re-registration with the same identity keys changes nothing in the list and
+  does not bump it (§4.2). `GET /e2e/devices/:userId` returns `{devices[], listVersion}`.
 
 ### 12.2 Envelope
 
@@ -842,6 +852,16 @@ read.
   it still succeeds at the cap. An account deleted meanwhile answers 404, and a
   deadlock with an account deletion (which takes the E2E rows before the
   account row) is retried.
+- A registration body carries no nonce, so a replay of an earlier same-key
+  body (it needs the account's access token) still replaces the device's
+  published one-time keys and fallback key with that body's: it can bring back
+  one-time keys the device has already consumed and an older fallback key, and
+  a peer that claims one fails to build a session with the device. Since a
+  same-key registration keeps the cross-signature and the list version (§4.2),
+  such a replay is no longer visible as a version bump or a lost
+  cross-signature. Accepting only new keys on a same-key registration is not
+  done: a second instance of the client over the same local store relies on
+  the replacement.
 - History reaches a new device only as far as the message-key backup (§16.4)
   covers: a session nobody backed up before every device was lost is gone.
 - A key share kept unacknowledged (its sender could not be checked yet, its
@@ -982,7 +1002,13 @@ withhold one boolean and "these devices are not signed by the account key"
 becomes silence. Once this client has seen cross-signing work, a later omission
 is read literally and the user is warned. Losing a cross-signature also counts
 as a device-list change in its own right — otherwise a withdrawn signature
-would leave the stored state calling the device signed forever. Revoking a
+would leave the stored state calling the device signed forever. So the server
+withdraws one only when it has to: a device re-registered with new identity
+keys loses its cross-signature (it covers keys that no longer exist), while one
+re-registered with the **same** keys keeps it, since the device binding names
+the user, the device id and both public keys and all four are unchanged; that
+re-registration replaces only the device's published one-time keys and fallback
+key and does not bump the device-list version (§4.2). Revoking a
 device drops it from the cross-signed set as well as the device set: under the
 grace that set stands in for checking a signature, so a stale entry would let a
 device re-registering under the same id be trusted without one.
