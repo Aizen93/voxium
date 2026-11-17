@@ -25,24 +25,51 @@ function normalise(text: string | null | undefined): string {
   return (text ?? '').replace(/\s+/g, ' ').trim();
 }
 
-/** The accessible name of an element, computed from the parts the app actually uses. */
+/** The elements a <label> can label (HTML "labelable elements" that a screen reader announces by label). */
+const LABELABLE = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'METER', 'PROGRESS', 'OUTPUT']);
+
+/** Hidden from assistive technology: the `hidden` attribute or aria-hidden="true", on the element or an ancestor. */
+function isHiddenFromAT(el: Element): boolean {
+  return el.closest('[hidden], [aria-hidden="true"]') !== null;
+}
+
+/**
+ * The accessible name of an element: a simplified reading of the accessible-name rules, covering
+ * only what the app uses. The order is
+ *   1. aria-labelledby (the text of the elements it names)
+ *   2. aria-label
+ *   3. <label for="id">
+ *   4. a wrapping <label>, for form controls only (never a button or a link inside a label)
+ *   5. the element's text content, for everything but form controls (a textarea's text is its
+ *      value, a select's is its options: neither is a name)
+ *   6. title
+ *   7. placeholder, last
+ */
 export function accessibleName(el: Element): string {
-  const aria = el.getAttribute('aria-label');
-  if (aria) return normalise(aria);
   const labelledBy = el.getAttribute('aria-labelledby');
   if (labelledBy) {
     const text = labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
     if (normalise(text)) return normalise(text);
   }
-  if (el.id) {
-    const label = document.querySelector(`label[for="${el.id}"]`);
-    if (label) return normalise(label.textContent);
+  const aria = el.getAttribute('aria-label');
+  if (aria) return normalise(aria);
+  const isFormControl = LABELABLE.has(el.tagName);
+  if (isFormControl) {
+    if (el.id) {
+      const label = document.querySelector(`label[for="${el.id}"]`);
+      if (label) return normalise(label.textContent);
+    }
+    const wrapping = el.closest('label');
+    if (wrapping) {
+      // The label's own words: not the value of a textarea or the options of a select inside it
+      const copy = wrapping.cloneNode(true) as HTMLElement;
+      copy.querySelectorAll('textarea, select').forEach((control) => control.remove());
+      return normalise(copy.textContent);
+    }
+  } else {
+    const text = normalise(el.textContent);
+    if (text) return text;
   }
-  const wrapping = el.closest('label');
-  if (wrapping) return normalise(wrapping.textContent);
-  // A textarea's text content is its current value, not a name.
-  const text = el instanceof HTMLTextAreaElement ? '' : normalise(el.textContent);
-  if (text) return text;
   const title = el.getAttribute('title');
   if (title) return normalise(title);
   return normalise(el.getAttribute('placeholder'));
@@ -54,6 +81,7 @@ const matches = (actual: string, wanted: Name) => (typeof wanted === 'string' ? 
 export function queryAllByRole(role: string, name?: Name): HTMLElement[] {
   const selector = ROLE_SELECTORS[role] ?? `[role="${role}"]`;
   return (Array.from(document.body.querySelectorAll(selector)) as HTMLElement[])
+    .filter((el) => !isHiddenFromAT(el))
     .filter((el) => name === undefined || matches(accessibleName(el), name));
 }
 
