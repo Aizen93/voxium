@@ -76,6 +76,10 @@ const state = {
   secureMembers: new Set<string>(), // `${userId}|${channelId}`
   everyonePermissions: DEFAULT_EVERYONE_PERMISSIONS as bigint,
   conversations: new Map<string, { user1Id: string; user2Id: string }>(),
+  // Roles a member holds: the role's id and permission mask, per user and space
+  memberRoles: [] as Array<{ userId: string; serverId: string; roleId: string; permissions: bigint }>,
+  // Channel permission overrides, one per channel and role ('everyone' is the default role's id)
+  overrides: [] as Array<{ channelId: string; roleId: string; allow: bigint; deny: bigint }>,
 };
 
 function resetState() {
@@ -85,6 +89,8 @@ function resetState() {
   state.secureMembers.clear();
   state.everyonePermissions = DEFAULT_EVERYONE_PERMISSIONS;
   state.conversations.clear();
+  state.memberRoles = [];
+  state.overrides = [];
 }
 
 function installFakeDatabase() {
@@ -120,6 +126,22 @@ function installFakeDatabase() {
     id: 'everyone',
     permissions: permissionsToString(state.everyonePermissions),
   }));
+  // The shapes permissionCalculator reads: memberRole rows carry their role's mask, overrides carry
+  // allow/deny as strings. Only the single-user, single-space and single-channel reads are answered.
+  mockPrisma.memberRole.findMany.mockImplementation(async (args: { where: { userId?: unknown; serverId?: unknown } }) => {
+    const { userId, serverId } = args.where;
+    if (typeof userId !== 'string' || typeof serverId !== 'string') return [];
+    return state.memberRoles
+      .filter((m) => m.userId === userId && m.serverId === serverId)
+      .map((m) => ({ userId, serverId, roleId: m.roleId, role: { permissions: permissionsToString(m.permissions) } }));
+  });
+  mockPrisma.channelPermissionOverride.findMany.mockImplementation(async (args: { where: { channelId?: unknown } }) => {
+    const { channelId } = args.where;
+    if (typeof channelId !== 'string') return [];
+    return state.overrides
+      .filter((o) => o.channelId === channelId)
+      .map((o) => ({ channelId, roleId: o.roleId, allow: permissionsToString(o.allow), deny: permissionsToString(o.deny) }));
+  });
   mockPrisma.conversation.findUnique.mockImplementation(async (args: { where: { id: string } }) => state.conversations.get(args.where.id) ?? null);
 }
 
@@ -253,6 +275,22 @@ describe('socketServer room handlers', () => {
       const { socket, handlers } = await connect();
       await fire(handlers, 'channel:join', 'nope');
       expect(socket.rooms.has('channel:nope')).toBe(false);
+    });
+
+    it('joins a member whose role grants VIEW_CHANNEL although @everyone lacks it', async () => {
+      state.everyonePermissions = DEFAULT_EVERYONE_PERMISSIONS & ~Permissions.VIEW_CHANNEL;
+      state.memberRoles.push({ userId: 'user-1', serverId: 's1', roleId: 'mod', permissions: Permissions.VIEW_CHANNEL });
+      const { socket, handlers } = await connect();
+      await fire(handlers, 'channel:join', 'c1');
+      expect(socket.rooms.has('channel:c1')).toBe(true);
+    });
+
+    it('does not join a member when a channel override denies VIEW_CHANNEL to a role they hold', async () => {
+      state.memberRoles.push({ userId: 'user-1', serverId: 's1', roleId: 'mod', permissions: Permissions.VIEW_CHANNEL });
+      state.overrides.push({ channelId: 'c1', roleId: 'mod', allow: 0n, deny: Permissions.VIEW_CHANNEL });
+      const { socket, handlers } = await connect();
+      await fire(handlers, 'channel:join', 'c1');
+      expect(socket.rooms.has('channel:c1')).toBe(false);
     });
 
     it('does not join a space member who is not in the secure channel', async () => {
@@ -412,6 +450,29 @@ describe('socketServer room handlers', () => {
       socket.rooms.add('channel:gone');
       await fire(handlers, 'typing:start', 'gone');
       expect(toEmit).not.toHaveBeenCalled();
+      // the early return for a missing channel, not the catch after it
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('typing:start is allowed by a role that grants SEND_MESSAGES although @everyone lacks it', async () => {
+      state.everyonePermissions = DEFAULT_EVERYONE_PERMISSIONS & ~Permissions.SEND_MESSAGES;
+      state.memberRoles.push({ userId: 'user-1', serverId: 's1', roleId: 'mod', permissions: Permissions.SEND_MESSAGES });
+      const { socket, handlers, toEmit } = await connect();
+      socket.rooms.add('channel:c1');
+      await fire(handlers, 'typing:start', 'c1');
+      expect(toEmit).toHaveBeenCalledTimes(1);
+      expect(toEmit).toHaveBeenCalledWith('channel:c1', 'typing:start', { channelId: 'c1', userId: 'user-1', username: 'alice' });
+    });
+
+    it('typing:start emits nothing when a channel override denies SEND_MESSAGES to a role the member holds', async () => {
+      state.memberRoles.push({ userId: 'user-1', serverId: 's1', roleId: 'mod', permissions: Permissions.SEND_MESSAGES });
+      state.overrides.push({ channelId: 'c1', roleId: 'mod', allow: 0n, deny: Permissions.SEND_MESSAGES });
+      const { socket, handlers, toEmit } = await connect();
+      socket.rooms.add('channel:c1');
+      await fire(handlers, 'typing:start', 'c1');
+      expect(toEmit).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
     });
 
     it('typing:start emits nothing and warns when the permission read fails', async () => {
