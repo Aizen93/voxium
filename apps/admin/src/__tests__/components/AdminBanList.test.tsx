@@ -275,6 +275,10 @@ describe('AdminBanList — adding an IP ban', () => {
   it.each([
     ['an octet above 255', '256.1.1.1'],
     ['an octet above 255 at the end', '1.2.3.999'],
+    ['a leading zero in the first octet', '01.2.3.4'],
+    ['a leading zero in the second octet', '1.02.3.4'],
+    ['leading zeros in the last octet', '1.2.3.004'],
+    ['an octet written 00', '1.2.3.00'],
     ['three octets', '1.2.3'],
     ['five octets', '1.2.3.4.5'],
     ['letters', 'not-an-ip'],
@@ -329,22 +333,29 @@ describe('AdminBanList — adding an IP ban', () => {
     expect(reasonBox().value).toBe('Scanner');
   });
 
-  // The IPv6 check compares the URL parser's hostname with the typed text, so
-  // an address the parser rewrites (upper case, zero groups written out, an
-  // embedded IPv4) is refused although it is valid. AdminBanList.tsx:156-157.
-  it.fails('accepts an upper-case IPv6 address', async () => {
+  it.each([
+    ['an upper-case address', '2001:DB8::1'],
+    ['an address written with all its groups', '2001:0db8:0000:0000:0000:0000:0000:0001'],
+    ['an embedded IPv4 form', '::ffff:1.2.3.4'],
+  ])('accepts %s and sends it as typed', async (_what, address) => {
     await renderList();
     await openAddForm();
-    await submitAddress('2001:DB8::1');
+    await submitAddress(address);
     await flush();
-    expect(store.addIpBan).toHaveBeenCalledWith('2001:DB8::1', undefined);
+    expect(store.addIpBan).toHaveBeenCalledWith(address, undefined);
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it.fails('accepts an IPv6 address written with all its groups', async () => {
+  it.each([
+    ['a zone id', 'fe80::1%eth0'],
+    ['brackets typed around a valid address', '[2001:db8::1]'],
+    ['a space inside', '2001:db8: :1'],
+  ])('refuses IPv6 with %s', async (_what, address) => {
     await renderList();
     await openAddForm();
-    await submitAddress('2001:0db8:0000:0000:0000:0000:0000:0001');
+    await submitAddress(address);
     await flush();
-    expect(store.addIpBan).toHaveBeenCalledWith('2001:0db8:0000:0000:0000:0000:0000:0001', undefined);
+    expect(toast.error).toHaveBeenCalledWith('Invalid IP address format');
+    expect(store.addIpBan).not.toHaveBeenCalled();
   });
 });
