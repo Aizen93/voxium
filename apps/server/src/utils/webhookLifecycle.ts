@@ -2,6 +2,7 @@ import { WS_EVENTS, type Webhook as WebhookDto, type WebhookType } from '@voxium
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { getIO } from '../websocket/socketServer';
+import { retryOnTransactionConflict } from './transactionRetry';
 
 /**
  * The webhook lifecycle both management surfaces share: the owner's router
@@ -100,8 +101,9 @@ export interface WebhookDeletion {
  * Delete a webhook; with `purge`, also EVERY message it posted, in every
  * channel (a PATCH may have moved it since), in the same transaction. Without
  * purge its messages stay, labelled with the stored webhookName (webhookId
- * SetNull). Resolves null when the lock finds no row: it never existed, or a
- * concurrent delete won the lock and already committed.
+ * SetNull). Resolves null when the lock finds no row: it never existed, a
+ * concurrent delete won the lock and already committed, or a channel or space
+ * delete's cascade removed it.
  *
  * No blob cleanup: the execute path never creates attachments, reactions
  * cascade with the message and replies SetNull. The purge (like the FK's SET
@@ -122,16 +124,57 @@ export interface WebhookDeletion {
  * transaction would blow its 60 s budget on every retry (P2028), leaving a
  * webhook that can never be deleted. The transaction below then meets only
  * the rows that were in flight.
+ *
+ * The locked transaction runs under retryOnTransactionConflict: a channel or
+ * space delete reaches the same message and webhook rows through its
+ * cascades, in its own order, and PostgreSQL aborts one of the two to break
+ * the deadlock. The aborted attempt is rolled back whole and run again from
+ * its first statement, the row lock; a row the cascade removed meanwhile
+ * makes that attempt resolve null (the callers' 404, as for any webhook gone
+ * by the lock). The disable runs once, and the batches above are not run
+ * again: both are committed and idempotent. The receipts count what the
+ * batches deleted plus what the COMMITTED attempt deleted: each attempt
+ * starts its counts from the batch counts afresh, so a rolled-back attempt,
+ * whose deletes were undone, adds nothing.
+ *
+ * The batches meet the same channel and space deletes, and they now do most
+ * of the deleting: each batch statement is its own transaction, run again
+ * under retryOnTransactionConflict when PostgreSQL aborts it (it is
+ * idempotent, and only the run that committed adds its RETURNING rows to the
+ * counts).
+ *
+ * The batches' deletes stay committed whatever follows them, and no caller
+ * announces anything for a delete that resolved null (a 404) or threw (a
+ * 500): on those paths this function sends their receipts itself
+ * (announceBatchedPurge), so open clients drop those rows. On a throw it
+ * announces and then rethrows, so the callers' answer is unchanged; a
+ * committed delete is announced by the caller, with every count.
  */
 export async function deleteWebhookWithPurge(webhookId: string, purge: boolean): Promise<WebhookDeletion | null> {
   await prisma.webhook.updateMany({ where: { id: webhookId }, data: { enabled: false } });
 
-  const batched = await detachOrPurgeInBatches(webhookId, purge);
+  // Filled batch by batch, so a batch or a transaction that fails for good
+  // still leaves the counts of the batches that committed before it
+  const batched = new Map<string, number>();
+  let result: WebhookDeletion | null;
+  try {
+    await detachOrPurgeInBatches(webhookId, purge, batched);
+    result = await lockAndDelete(webhookId, purge, batched);
+  } catch (err) {
+    announceBatchedPurge(webhookId, batched);
+    throw err;
+  }
+  if (!result) announceBatchedPurge(webhookId, batched);
+  return result;
+}
 
-  return prisma.$transaction(async (tx) => {
-    // Lock the webhook row FIRST. A concurrent delivery's INSERT takes a KEY
-    // SHARE lock on it (the FK check), so it waits for this commit and then
-    // fails its FK: no message can land between the purge and the delete.
+/** The locked transaction of deleteWebhookWithPurge, run again whole on a deadlock. */
+function lockAndDelete(webhookId: string, purge: boolean, batched: Map<string, number>): Promise<WebhookDeletion | null> {
+  return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+    // Lock the webhook row FIRST, on every attempt. A concurrent delivery's
+    // INSERT takes a KEY SHARE lock on it (the FK check), so it waits for this
+    // commit and then fails its FK: no message can land between the purge and
+    // the delete.
     const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM webhooks WHERE id = ${webhookId} FOR UPDATE`;
     if (locked.length === 0) return null;
 
@@ -144,7 +187,9 @@ export async function deleteWebhookWithPurge(webhookId: string, purge: boolean):
     if (!row) return null;
 
     // What the batches already removed, plus whatever landed since (a
-    // delivery that passed the token check before the disable committed)
+    // delivery that passed the token check before the disable committed).
+    // A fresh copy on each attempt: an earlier attempt's counts were rolled
+    // back with its deletes.
     const counts = new Map(batched);
     let deletedMessages = 0;
     for (const n of counts.values()) deletedMessages += n;
@@ -184,7 +229,42 @@ export async function deleteWebhookWithPurge(webhookId: string, purge: boolean):
     // as utils/accountDeletion.ts.
     timeout: 60_000,
     maxWait: 10_000,
-  });
+  }), `[Webhooks] The delete of webhook ${webhookId}`);
+}
+
+/**
+ * The receipts of the rows a purge's batches deleted when no delete of this
+ * call commits after them: the webhook row was gone by the lock (a
+ * concurrent delete of the same webhook won it, or a channel or space
+ * delete's cascade removed it), or a batch or the locked transaction failed
+ * for good. Those rows stay deleted, and nobody else counted them (a
+ * concurrent delete's own receipts count only what IT deleted). One
+ * `message:bulk_deleted` per channel that lost rows, in the shape
+ * emitWebhookDeletion sends, counts from the batches alone; no count-0
+ * receipt and no refetch hint, which belong to a delete that committed.
+ * Best effort after committed deletes: a failure is logged, never thrown.
+ */
+function announceBatchedPurge(webhookId: string, batched: Map<string, number>): void {
+  if (batched.size === 0) return;
+  try {
+    emitBulkDeletedReceipts(webhookId, Array.from(batched, ([channelId, count]) => ({ channelId, count })));
+  } catch (err) {
+    console.error(
+      `[Webhooks] The receipts of the messages purged with webhook ${webhookId} (gone by its lock) were not sent:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/** One `message:bulk_deleted` per channel, each to that channel's own room (the VIEW_CHANNEL audience). */
+function emitBulkDeletedReceipts(webhookId: string, receipts: Array<{ channelId: string; count: number }>): void {
+  for (const r of receipts) {
+    getIO().to(`channel:${r.channelId}`).emit(WS_EVENTS.MESSAGE_BULK_DELETED, {
+      channelId: r.channelId,
+      webhookId,
+      count: r.count,
+    });
+  }
 }
 
 /** Rows per statement: large enough to finish a 100k-row history in a few
@@ -197,29 +277,36 @@ const HISTORY_BATCH = 5000;
  * short transaction, with no lock on the webhook row: with `purge` the rows
  * are deleted (reactions cascade; the execute path never creates attachments),
  * without it `webhook_id` is set NULL as the FK's ON DELETE would, so the
- * messages keep their stored `webhook_name`. Returns what purge deleted per
- * channel, for the `message:bulk_deleted` receipts. Safe to run at any time
- * (idempotent), and the webhook is already disabled so new rows stop; the
- * locked transaction catches the few that were in flight.
+ * messages keep their stored `webhook_name`. Adds what purge deleted per
+ * channel to `perChannel` as each batch commits, for the
+ * `message:bulk_deleted` receipts, so the counts of committed batches survive
+ * a later throw. Safe to run at any time (idempotent), and the webhook is
+ * already disabled so new rows stop; the locked transaction catches the few
+ * that were in flight.
+ *
+ * A channel or space delete reaches the same message rows through its
+ * cascade, in index order, while a batch takes them in the order it scans
+ * them: PostgreSQL can abort either. A batch statement it aborts was rolled
+ * back alone and is run again (retryOnTransactionConflict); only the run that
+ * committed returns rows, so nothing is counted twice.
  */
-async function detachOrPurgeInBatches(webhookId: string, purge: boolean): Promise<Map<string, number>> {
-  const perChannel = new Map<string, number>();
+async function detachOrPurgeInBatches(webhookId: string, purge: boolean, perChannel: Map<string, number>): Promise<void> {
+  const label = `[Webhooks] A history batch of webhook ${webhookId}`;
   for (;;) {
     if (purge) {
-      const rows = (await prisma.$queryRaw<Array<{ channel_id: string | null }>>`
+      const rows = (await retryOnTransactionConflict(() => prisma.$queryRaw<Array<{ channel_id: string | null }>>`
         DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE webhook_id = ${webhookId} LIMIT ${HISTORY_BATCH})
-        RETURNING channel_id`) ?? [];
+        RETURNING channel_id`, label)) ?? [];
       if (rows.length === 0) break;
       for (const r of rows) {
         if (r.channel_id) perChannel.set(r.channel_id, (perChannel.get(r.channel_id) ?? 0) + 1);
       }
     } else {
-      const changed = Number(await prisma.$executeRaw`
-        UPDATE messages SET webhook_id = NULL WHERE id IN (SELECT id FROM messages WHERE webhook_id = ${webhookId} LIMIT ${HISTORY_BATCH})`) || 0;
+      const changed = Number(await retryOnTransactionConflict(() => prisma.$executeRaw`
+        UPDATE messages SET webhook_id = NULL WHERE id IN (SELECT id FROM messages WHERE webhook_id = ${webhookId} LIMIT ${HISTORY_BATCH})`, label)) || 0;
       if (changed === 0) break;
     }
   }
-  return perChannel;
 }
 
 /**
@@ -268,13 +355,7 @@ export function emitWebhookDeletion(result: WebhookDeletion, purge: boolean): vo
     const receipts = result.perChannel.length > 0
       ? result.perChannel
       : [{ channelId: result.channelId, count: 0 }];
-    for (const r of receipts) {
-      getIO().to(`channel:${r.channelId}`).emit(WS_EVENTS.MESSAGE_BULK_DELETED, {
-        channelId: r.channelId,
-        webhookId: result.webhookId,
-        count: r.count,
-      });
-    }
+    emitBulkDeletedReceipts(result.webhookId, receipts);
   }
   emitWebhookChanged(result.serverId);
 }
