@@ -3,6 +3,7 @@ import { X, ArrowRightLeft, Trash2, AlertTriangle } from 'lucide-react';
 import { useAdminStore } from '../stores/adminStore';
 import type { OwnedServerInfo, ServerAction } from '../stores/adminStore';
 import { toast } from '../stores/toastStore';
+import { apiErrorMessage } from '../utils/apiError';
 
 interface Props {
   userId: string;
@@ -77,8 +78,8 @@ export function AdminDeleteUserModal({ userId, username, onSuccess, onCancel }: 
       await deleteUserWithTransfers(userId, serverActions);
       toast.success('User deleted successfully');
       onSuccess();
-    } catch {
-      toast.error('Failed to delete user');
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to delete user'));
     } finally {
       setSubmitting(false);
     }
@@ -91,7 +92,7 @@ export function AdminDeleteUserModal({ userId, username, onSuccess, onCancel }: 
           <h3 className="text-lg font-semibold text-vox-text-primary">
             Delete {username}
           </h3>
-          <button onClick={onCancel} className="text-vox-text-muted hover:text-vox-text-primary">
+          <button onClick={onCancel} aria-label="Close" className="text-vox-text-muted hover:text-vox-text-primary">
             <X size={20} />
           </button>
         </div>
@@ -146,8 +147,9 @@ export function AdminDeleteUserModal({ userId, username, onSuccess, onCancel }: 
 
                   {row.action === 'transfer' && (
                     <div>
-                      <label className="text-xs text-vox-text-muted mb-1 block">Transfer ownership to:</label>
+                      <label htmlFor={`heir-${row.server.id}`} className="text-xs text-vox-text-muted mb-1 block">Transfer ownership to:</label>
                       <select
+                        id={`heir-${row.server.id}`}
                         value={row.newOwnerId}
                         onChange={(e) => updateRow(i, { newOwnerId: e.target.value })}
                         className="w-full rounded-md bg-vox-bg-secondary border border-vox-border text-sm text-vox-text-primary px-3 py-1.5 focus:outline-none focus:border-vox-accent-primary"

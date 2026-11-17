@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { AxiosError, AxiosHeaders, type InternalAxiosRequestConfig } from 'axios';
 import type { OwnedServerInfo } from '../../stores/adminStore';
 import { mount, click, choose, deferred, getByRole, queryByRole, queryAllByRole, bodyText, flush, type Mounted } from '../helpers/dom';
 
@@ -33,6 +34,12 @@ const RAID = owned({
   members: [member('m-1', 'member'), member('m-2', 'admin'), member('m-3', 'member')],
 });
 const EMPTY = owned({ id: 's-2', name: 'Ghost Town', memberCount: 0, members: [] });
+
+function refusal(data: Record<string, unknown>) {
+  return new AxiosError('Request failed', 'ERR_BAD_REQUEST', undefined, undefined, {
+    status: 400, statusText: 'Bad Request', data, headers: {}, config: { headers: new AxiosHeaders() } as InternalAxiosRequestConfig,
+  });
+}
 
 const onSuccess = vi.fn();
 const onCancel = vi.fn();
@@ -207,7 +214,7 @@ describe('AdminDeleteUserModal — what reaches the store', () => {
 });
 
 describe('AdminDeleteUserModal — the requirement before the destructive button works', () => {
-  it('has no typed-name or checkbox confirmation; the button is enabled once every transfer has an heir', async () => {
+  it('has no typed-name or checkbox step: the button is enabled as soon as every transfer has an heir', async () => {
     await renderModal();
     expect(queryAllByRole('checkbox')).toHaveLength(0);
     expect(queryAllByRole('textbox')).toHaveLength(0);
@@ -238,10 +245,9 @@ describe('AdminDeleteUserModal — cancelling and failing', () => {
     expect(onSuccess).not.toHaveBeenCalled();
   });
 
-  it('the close icon in the header cancels too (it has no accessible name)', async () => {
+  it('the close icon in the header, named "Close", cancels too', async () => {
     await renderModal();
-    const close = Array.from(document.body.querySelectorAll('button')).find((b) => b.textContent === '' && b.querySelector('svg'))!;
-    await click(close);
+    await click(getByRole('button', 'Close'));
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(store.deleteUserWithTransfers).not.toHaveBeenCalled();
   });
@@ -264,6 +270,31 @@ describe('AdminDeleteUserModal — cancelling and failing', () => {
     expect(toast.success).not.toHaveBeenCalled();
     expect(onSuccess).not.toHaveBeenCalled();
     expect(getByRole('heading', 'Delete alice')).toBeTruthy();
+  });
+
+  it('shows the reason the server gave when the response carries one', async () => {
+    store.deleteUserWithTransfers.mockRejectedValue(refusal({ error: 'Cannot delete the last superadmin' }));
+    await renderModal();
+    await click(destructive());
+    await flush();
+    expect(toast.error).toHaveBeenCalledWith('Cannot delete the last superadmin');
+    expect(toast.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the fixed sentence when the response carries no reason', async () => {
+    store.deleteUserWithTransfers.mockRejectedValue(refusal({}));
+    await renderModal();
+    await click(destructive());
+    await flush();
+    expect(toast.error).toHaveBeenCalledWith('Failed to delete user');
+  });
+
+  it('labels each heir select so it is found by name, one per space', async () => {
+    const second = owned({ id: 's-7', name: 'Other', members: [member('m-9', 'admin')] });
+    await renderModal([RAID, second]);
+    expect(queryAllByRole('combobox', 'Transfer ownership to:')).toHaveLength(2);
+    const ids = heirSelects().map((s) => s.id);
+    expect(new Set(ids).size).toBe(2);
   });
 
   it('lets the admin try again after a refusal, with the choices that were made kept', async () => {
