@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
-import { rateLimitSupport } from '../middleware/rateLimiter';
+import { rateLimitSupport, rateLimitSupportRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { LIMITS, WS_EVENTS } from '@voxium/shared';
@@ -132,7 +132,7 @@ supportRouter.post('/open', rateLimitSupport, async (req: Request, res: Response
 
 // ─── Get user's ticket + messages ────────────────────────────────────────────
 
-supportRouter.get('/ticket', async (req: Request, res: Response, next: NextFunction) => {
+supportRouter.get('/ticket', rateLimitSupportRead, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
 

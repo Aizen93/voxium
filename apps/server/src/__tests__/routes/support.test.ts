@@ -43,8 +43,12 @@ vi.mock('../../websocket/socketServer', () => ({
 const { limiterSpy } = vi.hoisted(() => ({
   limiterSpy: vi.fn((_req: unknown, _res: unknown, next: () => void) => next()),
 }));
+const { readLimiterSpy } = vi.hoisted(() => ({
+  readLimiterSpy: vi.fn((_req: unknown, _res: unknown, next: () => void) => next()),
+}));
 vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitSupport: limiterSpy,
+  rateLimitSupportRead: readLimiterSpy,
   normalizeIp: (ip: string) => ip,
 }));
 
@@ -122,6 +126,7 @@ describe('Support routes (user side)', () => {
     joins.length = 0;
     flagSpy.mockReturnValue(true);
     limiterSpy.mockImplementation((_req, _res, next) => next());
+    readLimiterSpy.mockImplementation((_req, _res, next) => next());
     mockAccount();
     prismaMock.supportTicket.count.mockResolvedValue(3);
     prismaMock.supportMessage.findMany.mockResolvedValue([]);
@@ -289,6 +294,26 @@ describe('Support routes (user side)', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ success: true, data: { ticket: null, messages: [] } });
       expect(prismaMock.supportMessage.findMany).not.toHaveBeenCalled();
+    });
+
+    it('runs behind the read bucket, not the posting one', async () => {
+      prismaMock.supportTicket.findUnique.mockResolvedValue(null);
+      await request(app).get('/api/v1/support/ticket').set('Authorization', `Bearer ${makeToken()}`);
+      expect(readLimiterSpy).toHaveBeenCalledTimes(1);
+      expect(limiterSpy).not.toHaveBeenCalled();
+    });
+
+    it('stops at the read limiter before reading the database when it refuses', async () => {
+      readLimiterSpy.mockImplementation((_req, res: any) => { res.status(429).json({ success: false }); });
+      const res = await request(app).get('/api/v1/support/ticket').set('Authorization', `Bearer ${makeToken()}`);
+      expect(res.status).toBe(429);
+      expect(prismaMock.supportTicket.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('does not run the read limiter for an unauthenticated request', async () => {
+      const res = await request(app).get('/api/v1/support/ticket');
+      expect(res.status).toBe(401);
+      expect(readLimiterSpy).not.toHaveBeenCalled();
     });
 
     it('still serves the read when the support flag is off', async () => {
