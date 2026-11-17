@@ -73,6 +73,28 @@ describe('docker-compose.production.yml: Redis keeps what it holds', () => {
   });
 });
 
+describe('docker-compose.production.yml: HTTP port of the server', () => {
+  const server = settings(serviceBlock(compose, 'server'));
+  const ports = [...server.matchAll(/^ {6}- "([^"]+)"$/gm)].map((m) => m[1]);
+
+  it('is published on the loopback address unless VOXIUM_HTTP_BIND names another', () => {
+    expect(ports).toContain('${VOXIUM_HTTP_BIND:-127.0.0.1}:3001:3001');
+  });
+
+  it('is published nowhere without an address (a bare "3001:3001" listens on every interface)', () => {
+    const http = ports.filter((p) => /(?:^|:)3001(?::|$)/.test(p));
+    expect(http).toHaveLength(1);
+    expect(http[0]).toMatch(/^\$\{VOXIUM_HTTP_BIND:-127\.0\.0\.1\}:/);
+  });
+
+  it('explains the setting next to it', () => {
+    const block = serviceBlock(compose, 'server');
+    const comment = block.slice(block.indexOf('    ports:'), block.indexOf('VOXIUM_HTTP_BIND:-'));
+    expect(comment).toMatch(/loopback/);
+    expect(comment).toMatch(/firewall rule cannot\s+# be relied on/);
+  });
+});
+
 /** The `command:` list of a service, one argument per `- ` item. */
 function commandList(block: string): string[] {
   const at = block.indexOf('\n    command:\n');
@@ -122,7 +144,7 @@ describe('docker-compose.production.yml: a STUN server for direct calls', () => 
     expect(stun).not.toMatch(/^ {4}ports:/m);
   });
 
-  it('passes no option the pinned coturn refuses, in either file (4.19 exits on --no-dtls and --no-cli)', () => {
+  it('passes no option the pinned coturn refuses, in either file (4.19 exits on --no-dtls; --no-cli is kept out of both files as well, neither needs it)', () => {
     const devArgs = commandList(settings(serviceBlock(dev, 'stun')));
     expect(devArgs.length).toBeGreaterThan(0);
     for (const list of [args, devArgs]) {
