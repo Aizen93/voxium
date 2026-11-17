@@ -5,7 +5,8 @@ import { mount, click, type, keyDown, getByRole, queryByRole, queryAllByRole, bo
 /**
  * The support inbox: the ticket list on the left (filter tabs, pagination),
  * the open thread on the right (claim, close, reply). Success paths only: how
- * a failing claim, close or reply is reported is not pinned here.
+ * a failing claim or close is reported by the store (tested with it); a reply
+ * that failed (the store resolves false) stays in the box.
  */
 
 const store = vi.hoisted(() => ({
@@ -54,8 +55,8 @@ async function renderInbox() {
   await view.render(<AdminSupportTickets />);
 }
 const composer = () => getByRole('textbox', 'Type a message...') as HTMLTextAreaElement;
-// The send button is an icon without an accessible name: it is the composer's only button.
-const sendButton = () => composer().parentElement!.querySelector('button') as HTMLButtonElement;
+
+const sendButton = () => getByRole('button', 'Send reply') as HTMLButtonElement;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -67,9 +68,9 @@ beforeEach(() => {
   store.supportTicketsFilter = 'all';
   store.activeTicket = null;
   store.activeTicketMessages = [];
-  store.claimTicket.mockResolvedValue(undefined);
-  store.sendTicketMessage.mockResolvedValue(undefined);
-  store.closeTicket.mockResolvedValue(undefined);
+  store.claimTicket.mockResolvedValue(true);
+  store.sendTicketMessage.mockResolvedValue(true);
+  store.closeTicket.mockResolvedValue(true);
   view = mount();
 });
 afterEach(() => view.unmount());
@@ -267,16 +268,31 @@ describe('AdminSupportTickets — replying', () => {
   });
 
   it('cannot send the same reply twice while the first is in flight', async () => {
-    let resolve!: () => void;
-    store.sendTicketMessage.mockReturnValue(new Promise<void>((r) => { resolve = r; }));
+    let resolve!: (ok: boolean) => void;
+    store.sendTicketMessage.mockReturnValue(new Promise<boolean>((r) => { resolve = r; }));
     await renderInbox();
     await type(composer(), 'once');
     await keyDown(composer(), 'Enter');
     await keyDown(composer(), 'Enter');
     await click(sendButton());
     expect(store.sendTicketMessage).toHaveBeenCalledTimes(1);
-    resolve();
+    resolve(true);
     await flush();
     expect(queryAllByRole('textbox', 'Type a message...')).toHaveLength(1);
+  });
+
+  it('keeps the typed text in the box when the reply failed, and lets the admin send it again', async () => {
+    store.sendTicketMessage.mockResolvedValueOnce(false);
+    await renderInbox();
+    await type(composer(), 'Please try again later');
+    await click(sendButton());
+    await flush();
+    expect(composer().value).toBe('Please try again later');
+    expect(sendButton().disabled).toBe(false);
+
+    await click(sendButton());
+    await flush();
+    expect(store.sendTicketMessage).toHaveBeenCalledTimes(2);
+    expect(composer().value).toBe('');
   });
 });

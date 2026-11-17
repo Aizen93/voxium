@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AxiosError, AxiosHeaders, type InternalAxiosRequestConfig } from 'axios';
 import type { AdminServer, AdminWebhook } from '@voxium/shared';
 
@@ -300,5 +300,90 @@ describe('adminStore — a failed request logs a sentence, never the request', (
         expect(arg).not.toContain('SECRET');
       }
     }
+  });
+});
+
+describe('adminStore — support actions report their failures', () => {
+  const refusal = (data: Record<string, unknown>) => new AxiosError('Request failed', 'ERR_BAD_REQUEST', undefined, undefined, {
+    status: 409, statusText: '', headers: {}, config: { headers: new AxiosHeaders() }, data,
+  });
+  const ACTIONS = [
+    { name: 'claimTicket', fallback: 'Failed to claim the ticket', url: '/admin/support/tickets/t-1/claim', run: () => useAdminStore.getState().claimTicket('t-1') },
+    { name: 'closeTicket', fallback: 'Failed to close the ticket', url: '/admin/support/tickets/t-1/close', run: () => useAdminStore.getState().closeTicket('t-1') },
+    { name: 'sendTicketMessage', fallback: 'Failed to send the reply', url: '/admin/support/tickets/t-1/messages', run: () => useAdminStore.getState().sendTicketMessage('t-1', 'hi') },
+  ] as const;
+
+  let unhandled: ReturnType<typeof vi.fn<(reason: unknown) => void>>;
+  beforeEach(() => {
+    unhandled = vi.fn<(reason: unknown) => void>();
+    process.on('unhandledRejection', unhandled);
+    useAdminStore.setState({ activeTicket: null, activeTicketMessages: [], supportTickets: [] });
+  });
+  afterEach(() => {
+    process.off('unhandledRejection', unhandled);
+    vi.restoreAllMocks();
+  });
+
+  it.each(ACTIONS)('$name toasts the server reason, logs the message only, resolves false and rejects nothing', async ({ run, url }) => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    api.post.mockRejectedValueOnce(refusal({ error: 'Ticket already claimed' }));
+    await expect(run()).resolves.toBe(false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(api.post.mock.calls[0][0]).toBe(url);
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenCalledWith('Ticket already claimed');
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0][1]).toBe('Ticket already claimed');
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it.each(ACTIONS)('$name falls back to its fixed sentence when the response carries no reason', async ({ run, fallback }) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    api.post.mockRejectedValueOnce(new Error('Network Error'));
+    await expect(run()).resolves.toBe(false);
+    expect(toast.error).toHaveBeenCalledWith(fallback);
+  });
+
+  it('a failed claim or close changes nothing in the open ticket', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const open = { id: 't-1', status: 'open' } as never;
+    useAdminStore.setState({ activeTicket: open });
+    api.post.mockRejectedValue(new Error('x'));
+    await useAdminStore.getState().claimTicket('t-1');
+    await useAdminStore.getState().closeTicket('t-1');
+    expect(useAdminStore.getState().activeTicket).toBe(open);
+    expect(api.get).not.toHaveBeenCalled();
+  });
+
+  it('a successful claim marks the open ticket claimed, refreshes, and resolves true without a toast', async () => {
+    useAdminStore.setState({ activeTicket: { id: 't-1', status: 'open' } as never });
+    api.post.mockResolvedValueOnce({ data: {} });
+    await expect(useAdminStore.getState().claimTicket('t-1')).resolves.toBe(true);
+    expect(useAdminStore.getState().activeTicket?.status).toBe('claimed');
+    expect(api.get).toHaveBeenCalledWith('/admin/support/tickets/t-1/messages');
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('a successful close marks the open ticket closed and resolves true', async () => {
+    useAdminStore.setState({ activeTicket: { id: 't-1', status: 'claimed' } as never });
+    api.post.mockResolvedValueOnce({ data: {} });
+    await expect(useAdminStore.getState().closeTicket('t-1')).resolves.toBe(true);
+    expect(useAdminStore.getState().activeTicket?.status).toBe('closed');
+  });
+
+  it('a claim that went through is still a success when only the list refresh fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    api.post.mockResolvedValueOnce({ data: {} });
+    api.get.mockRejectedValueOnce(new Error('Network Error'));
+    await expect(useAdminStore.getState().claimTicket('t-1')).resolves.toBe(true);
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a sent reply is appended once (a repeat of the same message is not doubled) and resolves true', async () => {
+    api.post.mockResolvedValue({ data: { data: { id: 'm-1', content: 'hi' } } });
+    await expect(useAdminStore.getState().sendTicketMessage('t-1', 'hi')).resolves.toBe(true);
+    await expect(useAdminStore.getState().sendTicketMessage('t-1', 'hi')).resolves.toBe(true);
+    expect(useAdminStore.getState().activeTicketMessages).toHaveLength(1);
   });
 });

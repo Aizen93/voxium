@@ -246,10 +246,11 @@ interface AdminState {
 
   fetchSupportTickets: (page?: number) => Promise<void>;
   setSupportTicketsFilter: (filter: string) => void;
-  claimTicket: (id: string) => Promise<void>;
+  /** Claim / close / reply: toast and log a failure, and resolve false (true on success) instead of throwing. */
+  claimTicket: (id: string) => Promise<boolean>;
   fetchTicketMessages: (id: string) => Promise<void>;
-  sendTicketMessage: (id: string, content: string) => Promise<void>;
-  closeTicket: (id: string) => Promise<void>;
+  sendTicketMessage: (id: string, content: string) => Promise<boolean>;
+  closeTicket: (id: string) => Promise<boolean>;
   setActiveTicket: (ticket: SupportTicket | null) => void;
   subscribeSupport: () => void;
   unsubscribeSupport: () => void;
@@ -762,14 +763,26 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   claimTicket: async (id) => {
-    await api.post(`/admin/support/tickets/${id}/claim`);
-    // Update activeTicket status immediately + refetch messages (includes system message)
-    const activeTicket = get().activeTicket;
-    if (activeTicket && activeTicket.id === id) {
-      set({ activeTicket: { ...activeTicket, status: 'claimed' } });
-      await get().fetchTicketMessages(id);
+    try {
+      await api.post(`/admin/support/tickets/${id}/claim`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to claim the ticket'));
+      console.error('Failed to claim the ticket:', logMessage(err));
+      return false;
     }
-    await get().fetchSupportTickets();
+    // The action went through: the refresh below only brings the view up to date.
+    try {
+      // Update activeTicket status immediately + refetch messages (includes system message)
+      const activeTicket = get().activeTicket;
+      if (activeTicket && activeTicket.id === id) {
+        set({ activeTicket: { ...activeTicket, status: 'claimed' } });
+        await get().fetchTicketMessages(id);
+      }
+      await get().fetchSupportTickets();
+    } catch (err) {
+      console.warn('Failed to refresh the ticket list:', logMessage(err));
+    }
+    return true;
   },
 
   fetchTicketMessages: async (id) => {
@@ -782,24 +795,43 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   sendTicketMessage: async (id, content) => {
-    const { data } = await api.post(`/admin/support/tickets/${id}/messages`, { content });
-    // Append message from REST response immediately (dedup with socket events)
-    const msg = data.data as SupportMessageData;
-    const msgs = get().activeTicketMessages;
-    if (!msgs.some((m) => m.id === msg.id)) {
-      set({ activeTicketMessages: [...msgs, msg] });
+    try {
+      const { data } = await api.post(`/admin/support/tickets/${id}/messages`, { content });
+      // Append message from REST response immediately (dedup with socket events)
+      const msg = data.data as SupportMessageData;
+      const msgs = get().activeTicketMessages;
+      if (!msgs.some((m) => m.id === msg.id)) {
+        set({ activeTicketMessages: [...msgs, msg] });
+      }
+      return true;
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to send the reply'));
+      console.error('Failed to send the reply:', logMessage(err));
+      return false;
     }
   },
 
   closeTicket: async (id) => {
-    await api.post(`/admin/support/tickets/${id}/close`);
-    // Update activeTicket status immediately + refetch messages (includes system message)
-    const activeTicket = get().activeTicket;
-    if (activeTicket && activeTicket.id === id) {
-      set({ activeTicket: { ...activeTicket, status: 'closed' } });
-      await get().fetchTicketMessages(id);
+    try {
+      await api.post(`/admin/support/tickets/${id}/close`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to close the ticket'));
+      console.error('Failed to close the ticket:', logMessage(err));
+      return false;
     }
-    await get().fetchSupportTickets();
+    // The action went through: the refresh below only brings the view up to date.
+    try {
+      // Update activeTicket status immediately + refetch messages (includes system message)
+      const activeTicket = get().activeTicket;
+      if (activeTicket && activeTicket.id === id) {
+        set({ activeTicket: { ...activeTicket, status: 'closed' } });
+        await get().fetchTicketMessages(id);
+      }
+      await get().fetchSupportTickets();
+    } catch (err) {
+      console.warn('Failed to refresh the ticket list:', logMessage(err));
+    }
+    return true;
   },
 
   setActiveTicket: (ticket) => {
