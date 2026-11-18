@@ -2087,6 +2087,13 @@ unheard.
 
 - **Arrival:** every sender hash-ratchets its key forward (HKDF-SHA256,
   keyId+1) and seals the POST-ratchet key to the joiner — no past audio.
+  This holds on every path that first keys a joiner (the arrival, a vet
+  retried after a transient failure, a key request): the joiner is only ever
+  sealed a generation installed after their arrival, and arrivals announced
+  at the same generation share one step. Only occupants listed before the
+  sender's encrypt transform is attached (so before its first frame) are not
+  arrivals; a participant re-announced in a new session (a new epoch) is a
+  departure of the old one (below) and an arrival.
   Existing receivers perform **tag-verified trial-ratchet** on keyId+1
   frames: GCM success proves an arrival ratchet (installed gaplessly, no
   wire flag an attacker could flip); failure means a fresh rotation whose
