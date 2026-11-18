@@ -211,7 +211,8 @@ fn build_keychain_services(app: &tauri::AppHandle) -> KeychainServices {
 }
 
 // ─── E2E pickle key in the OS keychain (docs/e2e-dm-spec.md §7.3) ────────────
-// The 32-byte vodozemac pickle key is the one secret the webview handles.
+// The 32-byte vodozemac pickle key guards every pickle and the sealed master
+// secret (docs/e2e-dm-spec.md §3 lists what else the webview holds).
 // These commands move it from localStorage into the platform credential store
 // (Windows Credential Manager / macOS Keychain / Linux Secret Service), under
 // the build's own service (`keychain_services`), so webview code can only

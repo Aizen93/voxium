@@ -1,5 +1,30 @@
 // Frame-level cipher core for secure voice channels (docs/e2e-dm-spec.md §21).
 //
+// REVIEW NOTE: this is cryptographic code outside the engine, the one
+// cryptographic construction the client runs in JavaScript (spec §3, decided
+// 2026-11-18, issue #175): the HKDF-SHA256 sender-key ratchet, the IV and AAD
+// construction, AES-256-GCM per encoded frame, the receiver's key ring with its
+// trial ratchet, and the replay window. A change here takes the same review as
+// a change to packages/crypto-engine, and the construction stays exactly the
+// one spec §21.2 specifies (native clients implement it too). It holds:
+//  - No IV twice under one key. Every generation is a distinct key, and within
+//    one the counter starts at 0 on setKey() and only rises: encrypt() claims
+//    its seq before its first await, so concurrent calls never share one, and
+//    it refuses from VOICE_FRAME_SEQ_ROTATE_AT (2^32 - 2^16) on, so the 4-byte
+//    seq never wraps. Because setKey() restarts the counter, the caller must
+//    never install the same key twice: secureVoiceKeys.ts installs only fresh
+//    random keys and ratchets of its current one.
+//  - The ratchet is one-way (HKDF): a key handed to a joiner opens no earlier
+//    generation, and the receiver derives only from its newest generation and
+//    only one step ahead, never backward.
+//  - The replay window (128 frames per generation) moves only after the GCM
+//    tag verifies, so a forged header cannot push it; re-installing a
+//    generation already held keeps its window, and a generation pruned from
+//    the ring does not come back.
+//  - Keys are never persisted: raw bytes live in this module's memory (the ring
+//    keeps them for the trial ratchet and the re-install check) and go with
+//    the worker.
+//
 // Pure WebCrypto AES-256-GCM over ENCODED Opus frames — DOM-free and
 // worker-agnostic so it unit-tests without a Worker and runs identically in
 // the frame-crypto worker. NO Olm/vodozemac here: key DISTRIBUTION lives on

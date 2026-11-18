@@ -1,6 +1,7 @@
 // Pickle-key storage backends (docs/e2e-dm-spec.md §7.3).
 //
-// The 32-byte vodozemac pickle key is the only secret the webview handles.
+// The 32-byte vodozemac pickle key guards every pickle and the sealed master
+// secret (what else the webview holds is listed in spec §3).
 // In the Tauri desktop app it lives in the OS credential store (Windows
 // Credential Manager / macOS Keychain / Linux Secret Service) via the
 // e2e_pickle_key_* commands; pre-keychain installs are migrated out of

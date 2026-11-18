@@ -30,7 +30,9 @@
 // group path (search/previews depend on it) but remains the ONLY way to read
 // legacy olm1 history — Olm message keys are one-shot.
 //
-// The 32-byte pickle key is the only secret JS touches. In the Tauri app it
+// The 32-byte pickle key guards every pickle and the sealed master secret
+// (what else JS holds, the unsealed `pt:` cache included, is listed in spec
+// §3). In the Tauri app it
 // lives in the OS keychain; browser dev builds fall back to localStorage
 // (spec §7.3, providers in ./pickleKeyProvider). Keys never leave the device
 // either way.

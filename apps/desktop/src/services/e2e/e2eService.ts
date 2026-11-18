@@ -1502,8 +1502,7 @@ export class E2EService {
       // it, because approval is offered only for unsigned devices. Failing
       // before the signature just means the user retries.
       // The payload is assembled inside the engine: the private half never
-      // becomes a JS string (spec §7 — the pickle key is the only secret JS
-      // handles).
+      // becomes a JS string (spec §3, §14.4).
       const olm = await this.ensureOlmSession(this.userId, deviceId);
       const { messageType, body } = olm.encryptMasterSecret(master) as { messageType: 0 | 1; body: string };
       await this.persistOlmSession(this.userId, deviceId, olm);
