@@ -79,8 +79,9 @@ vi.mock('../../stores/authStore', () => ({
 vi.mock('../../stores/e2eStore', () => ({
   useE2EStore: { getState: () => ({ flagIdentityChanged: vi.fn() }) },
 }));
+const markExcluded = vi.hoisted(() => vi.fn());
 vi.mock('../../stores/voiceStore', () => ({
-  useVoiceStore: { getState: () => ({ markSecureVoicePeerExcluded: vi.fn(), clearSecureVoicePeerIssue: vi.fn() }) },
+  useVoiceStore: { getState: () => ({ markSecureVoicePeerExcluded: markExcluded, clearSecureVoicePeerIssue: vi.fn() }) },
 }));
 
 import {
@@ -542,6 +543,205 @@ describe('a participant vetted at a later membership check', () => {
     expect(installs.map((i) => i.keyId)).toEqual([0, 1]);
     expect(resealed.keyId).toBe(1);
     await expectClosedTo(resealed, beforeArrival, 0);
+  });
+});
+
+describe('a member excluded during a call stays excluded until they start a new session', () => {
+  const refusals = (id: string) =>
+    warn.mock.calls.filter((args) => String(args[0]).includes(`${id} was excluded in this session`)).length;
+  const sealCount = (id: string) => encryptToDevice.mock.calls.filter((call) => call[0] === id).length;
+
+  /** Every way a participant can be named again without a new epoch, and what must not follow. */
+  async function expectNotKeyedAgain(id: string, epoch: string, deviceId: string): Promise<void> {
+    const seals = sealCount(id);
+    const installed = installs.length;
+    const refused = refusals(id);
+    // An occupant list naming them again
+    onParticipantJoined(CH, { id, deviceId, epoch }, { initialReplay: true });
+    // A plain re-announcement of the same session
+    onParticipantJoined(CH, { id, deviceId, epoch }, { initialReplay: false });
+    // An announcement with no epoch at all
+    onParticipantJoined(CH, { id, deviceId }, { initialReplay: false });
+    // Settled once all three are refused, or once any of them was keyed
+    await until(() => refusals(id) === refused + 3 || sealCount(id) > seals);
+    // ...and their key requests
+    handleKeyRequest(CH, id);
+    await membershipCheck();
+    await settle();
+    expect(sealCount(id)).toBe(seals);
+    expect(installs.length).toBe(installed);
+  }
+
+  it('excluded at their first vet, before our first frame: named again by an occupant list before and after it, they are not keyed', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const session = await begin();
+      onParticipantJoined(CH, user('old'), { initialReplay: true });
+      // Listed on a device their verified list does not hold: excluded
+      onParticipantJoined(CH, user('x', 'epoch-x-1', 'device-unlisted1'), { initialReplay: true });
+      await until(() => sealedTo('old').length === 1 && error.mock.calls.some((args) => String(args[0]).includes('Vetting x failed')));
+
+      // Before our first frame
+      await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+      session.frames.attachSender({} as RTCRtpSender);
+      // After it
+      await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('excluded for a key payload that is not an envelope: the exclusion rotates fresh, and they are not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+
+    handleInboundKey(CH, 'x', DEVICES.x[0], '{"keyB64":"not-an-envelope"}');
+    await until(() => installs.length === 3);
+    expect(hex(installs[2].key)).not.toBe(hex(await ratchetVoiceKey(installs[1].key)));
+
+    await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+  });
+
+  it('excluded for an identity change found by the membership check: not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+
+    fetchChannelDeviceLists.mockRejectedValueOnce(new TestIdentityChangedError('x'));
+    confirmMembership(CH);
+    await until(() => installs.length === 3);
+
+    await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+  });
+
+  it('excluded for a revoked device: not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+
+    // Their pinned device is no longer published
+    fetchChannelDeviceLists.mockResolvedValueOnce({ ...ALL_MEMBERS, lists: new Map([['x', deviceListFor('y')]]) });
+    confirmMembership(CH);
+    await until(() => installs.length === 3);
+
+    await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+  });
+
+  const excludedAs = (id: string, kind: string) =>
+    markExcluded.mock.calls.some((call) => call[0] === CH && call[1] === id && call[2] === kind);
+
+  it('excluded for a failed vet at the membership check: not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    await arriveWithFailingVet('x');
+    // At the check, their verified list does not hold the device they announced
+    fetchDeviceList.mockResolvedValueOnce(deviceListFor('y'));
+
+    await membershipCheck();
+    await until(() => excludedAs('x', 'binding-mismatch'));
+
+    await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+  });
+
+  it('excluded for an identity change found while sealing their first key: no rotation, and not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    encryptToDevice.mockImplementationOnce(async () => {
+      throw new TestIdentityChangedError('x');
+    });
+
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => excludedAs('x', 'identity-changed'));
+    await settle();
+    // The arrival ratchet only: their first key never reached them
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1]);
+
+    await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+  });
+
+  it('excluded for an identity change on an inbound key: the exclusion rotates fresh, and they are not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    decryptFromDevice.mockRejectedValueOnce(new TestIdentityChangedError('x'));
+
+    handleInboundKey(CH, 'x', DEVICES.x[0], ENV);
+    await until(() => installs.length === 3);
+
+    await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+  });
+
+  it('removed from the channel: the removal rotates fresh, and they are not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    fetchChannelDeviceLists.mockResolvedValueOnce({
+      ...ALL_MEMBERS,
+      members: ALL_MEMBERS.members.filter((m) => m.userId !== 'x'),
+    });
+
+    confirmMembership(CH);
+    await until(() => installs.length === 3);
+
+    // Listed as a member again, but under the session that was removed
+    await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+  });
+
+  it('announced with a new epoch, an excluded participant is vetted again and keyed past their arrival generation', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    handleInboundKey(CH, 'x', DEVICES.x[0], '{"keyB64":"not-an-envelope"}');
+    await until(() => installs.length === 3);
+    const beforeNewSession = await speak(1);
+
+    onParticipantJoined(CH, user('x', 'epoch-x-2'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 2);
+    const afterNewSession = await speak(2);
+
+    expect(fetchDeviceList.mock.calls.filter((call) => call[0] === 'x')).toHaveLength(2);
+    const sealed = sealedTo('x')[1];
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1, 2, 3]);
+    expect(sealed.keyId).toBe(3);
+    await expectClosedTo(sealed, beforeNewSession, 2);
+    expect(await opens([sealed], afterNewSession)).toBe(true);
+  });
+
+  it('excluded for an identity change at the membership check, then announced with a new epoch whose first vet fails transiently: vetted and keyed at a later check', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    fetchChannelDeviceLists.mockRejectedValueOnce(new TestIdentityChangedError('x'));
+    confirmMembership(CH);
+    await until(() => installs.length === 3);
+    const beforeNewSession = await speak(1);
+
+    await arriveWithFailingVet('x', 'epoch-x-2');
+    await membershipCheck();
+    await until(() => sealedTo('x').length === 2);
+    const afterKeying = await speak(2);
+
+    const sealed = sealedTo('x')[1];
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1, 2, 3]);
+    expect(sealed.keyId).toBe(3);
+    await expectClosedTo(sealed, beforeNewSession, 2);
+    expect(await opens([sealed], afterKeying)).toBe(true);
+  });
+
+  it('a participant who left, with no exclusion, is keyed again when announced again', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    onParticipantLeft(CH, 'x');
+    await until(() => installs.length === 3);
+    const whileAway = await speak(1);
+
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 2);
+
+    expect(refusals('x')).toBe(0);
+    const sealed = sealedTo('x')[1];
+    expect(sealed.keyId).toBe(3);
+    await expectClosedTo(sealed, whileAway, 2);
   });
 });
 

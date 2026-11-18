@@ -127,9 +127,14 @@ interface SecureVoiceSessionState {
    * the mirror of the `recipientEpoch` guard, which only covers OUR restarts.
    */
   seenSenderEpochs: Map<string, Set<string>>;
-  /** Members already excluded for an identity change — skipped on later polls
-   *  so one unresolved conflict cannot wedge the check for everyone. */
-  identityConflicts: Set<string>;
+  /**
+   * The epochs each participant was excluded under in this session, for cause
+   * (a failed vet, an identity change, a legacy key payload, a revoked device,
+   * removal from the channel). A participant excluded during a session is not
+   * keyed again in it until they are announced with a new epoch, which is a
+   * new session of theirs and goes through vetting like any arrival.
+   */
+  excludedEpochs: Map<string, Set<string>>;
   /** Watchdog bookkeeping per sender: last key_request + un-healed timer. */
   keyRequests: Map<string, { lastAt: number; timer: ReturnType<typeof setTimeout> | null }>;
   /** Periodic re-confirmation of membership AND pinned devices. */
@@ -226,7 +231,19 @@ async function vetParticipant(state: SecureVoiceSessionState, userId: string, de
   if (!state.members.has(userId)) {
     // The socket event claimed a participant the authoritative list doesn't
     // know — refetch once (they may have JUST been invited), then fail closed.
-    const { members } = await service.fetchChannelDeviceLists(state.channelId);
+    let members: Array<{ userId: string }>;
+    try {
+      ({ members } = await service.fetchChannelDeviceLists(state.channelId));
+    } catch (err) {
+      if (!(err instanceof E2EIdentityChangedError)) throw err;
+      await flagIdentityChanged(err.peerUserId);
+      // The list verifies every member, so it fails on any member whose
+      // identity changed. Only a change of their own is a verdict on this
+      // participant; another member's leaves them unvetted, and the next
+      // membership check retries them.
+      if (err.peerUserId === userId) throw err;
+      throw new Error(`the member list could not be verified for ${userId}: another member's identity changed`, { cause: err });
+    }
     state.members = new Set(members.map((m) => m.userId));
     if (!state.members.has(userId)) {
       throw new SecureVoiceError('binding-mismatch', `${userId} is not a member of channel ${state.channelId}`);
@@ -245,6 +262,16 @@ async function vetParticipant(state: SecureVoiceSessionState, userId: string, de
     if (err instanceof E2EIdentityChangedError) await flagIdentityChanged(err.peerUserId);
     throw err;
   }
+}
+
+/** Remember the session a participant was excluded in (see `excludedEpochs`). */
+function recordExclusion(state: SecureVoiceSessionState, userId: string, epoch: string): void {
+  let epochs = state.excludedEpochs.get(userId);
+  if (!epochs) {
+    epochs = new Set();
+    state.excludedEpochs.set(userId, epochs);
+  }
+  epochs.add(epoch);
 }
 
 /** Whether our current generation is one the participant must never be given. */
@@ -338,9 +365,15 @@ async function sealKeyTo(state: SecureVoiceSessionState, userId: string, reason:
     // Transient seal failure: one retry, then give up — the peer's decrypt
     // watchdog asks for a re-seal (handleKeyRequest) if this key never lands.
     console.warn(`[SecureVoice] Sealing key to ${userId} failed, retrying once:`, err);
-    const envelope = await service.encryptToDevice(userId, peer.deviceId, plaintext);
-    if (state.ended) return;
-    getSocket()?.emit('voice:e2e:key', { to: userId, envelope });
+    try {
+      const envelope = await service.encryptToDevice(userId, peer.deviceId, plaintext);
+      if (state.ended) return;
+      getSocket()?.emit('voice:e2e:key', { to: userId, envelope });
+    } catch (retryErr) {
+      // An identity change found by the retry is flagged like one found by the first attempt.
+      if (retryErr instanceof E2EIdentityChangedError) await flagIdentityChanged(retryErr.peerUserId);
+      throw retryErr;
+    }
   }
 }
 
@@ -400,7 +433,7 @@ export async function beginSecureVoiceSession(
     members: new Set(members.map((m) => m.userId)),
     pendingKeys: new Map(),
     seenSenderEpochs: new Map(),
-    identityConflicts: new Set(),
+    excludedEpochs: new Map(),
     keyRequests: new Map(),
     confirmTimer: null,
     sending: false,
@@ -473,6 +506,13 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
   const keyIdAtAnnouncement = state.keyId;
   const presentAtOurJoin = opts.initialReplay && !state.sending;
   enqueue(state, async () => {
+    // Read in the step: an exclusion recorded by an earlier step applies.
+    const excludedEpochs = state.excludedEpochs.get(user.id);
+    if (excludedEpochs && (!user.epoch || excludedEpochs.has(user.epoch))) {
+      console.warn(`[SecureVoice] ${user.id} was excluded in this session — not keyed again until announced with a new epoch`);
+      state.pendingKeys.delete(user.id);
+      return;
+    }
     const known = state.peers.get(user.id);
     let repinned = false;
     if (known) {
@@ -530,6 +570,7 @@ export function onParticipantJoined(channelId: string, user: Pick<VoiceUser, 'id
       }
       state.peers.delete(user.id);
       state.pendingKeys.delete(user.id);
+      recordExclusion(state, user.id, peer.epoch);
       console.error(`[SecureVoice] Vetting ${user.id} failed — excluded from the session:`, err);
       await notifyPeerExcluded(channelId, user.id, err);
       return;
@@ -559,6 +600,14 @@ async function keyVettedParticipantLocked(
 ): Promise<void> {
   try {
     await keyParticipantLocked(state, userId, reason);
+  } catch (err) {
+    if (!(err instanceof E2EIdentityChangedError)) throw err;
+    // The seal found their identity changed (already flagged). This was their
+    // first key, and it never reached them: excluding them needs no rotation.
+    state.peers.delete(userId);
+    recordExclusion(state, userId, peer.epoch);
+    forgetPeer(state, userId);
+    await notifyPeerExcluded(state.channelId, userId, err);
   } finally {
     const buffered = state.pendingKeys.get(userId) ?? [];
     state.pendingKeys.delete(userId);
@@ -655,16 +704,14 @@ export function confirmMembership(channelId: string): void {
         // exactly like the inbound-key identity path.
         await flagIdentityChanged(err.peerUserId);
         if (state.ended) return;
-        if (state.peers.delete(err.peerUserId)) {
+        const conflicted = state.peers.get(err.peerUserId);
+        if (conflicted) {
+          state.peers.delete(err.peerUserId);
+          recordExclusion(state, err.peerUserId, conflicted.epoch);
           forgetPeer(state, err.peerUserId);
           await notifyPeerExcluded(channelId, err.peerUserId, err);
           await rotateFreshLocked(state);
         }
-        // Remember them so the NEXT poll is not thrown by the same member
-        // again: the fetch verifies every member, so one unresolved identity
-        // conflict would otherwise wedge membership AND revocation checking
-        // for the whole call — every tick dying on the same throw.
-        state.identityConflicts.add(err.peerUserId);
         return;
       }
       throw err;
@@ -678,12 +725,13 @@ export function confirmMembership(channelId: string): void {
     // them is keyed past the generation in use when they arrived, exactly as
     // if their first vet had passed.
     for (const [userId, peer] of [...state.peers.entries()]) {
-      if (peer.vetted || state.identityConflicts.has(userId)) continue;
+      if (peer.vetted) continue;
       try {
         await vetParticipant(state, userId, peer.deviceId);
       } catch (err) {
         if (err instanceof SecureVoiceError || err instanceof E2EIdentityChangedError) {
           state.peers.delete(userId);
+          recordExclusion(state, userId, peer.epoch);
           forgetPeer(state, userId);
           await notifyPeerExcluded(channelId, userId, err);
         } else {
@@ -696,17 +744,10 @@ export function confirmMembership(channelId: string): void {
       try {
         await keyVettedParticipantLocked(state, userId, peer, 'fresh');
       } catch (err) {
-        if (err instanceof E2EIdentityChangedError) {
-          // The seal found their identity changed (already flagged): exclude.
-          state.peers.delete(userId);
-          forgetPeer(state, userId);
-          await notifyPeerExcluded(channelId, userId, err);
-        } else {
-          // Vetted, so no later check retries them. A seal that did not reach
-          // them is recovered by their key request, and a buffered key of
-          // theirs we could not install by ours (the decrypt watchdogs).
-          console.warn(`[SecureVoice] Keying ${userId} after a passed re-vet failed — not retried here; recovery comes from the key requests:`, err);
-        }
+        // Vetted, so no later check retries them. A seal that did not reach
+        // them is recovered by their key request, and a buffered key of
+        // theirs we could not install by ours (the decrypt watchdogs).
+        console.warn(`[SecureVoice] Keying ${userId} after a passed re-vet failed — not retried here; recovery comes from the key requests:`, err);
       }
     }
 
@@ -714,6 +755,7 @@ export function confirmMembership(channelId: string): void {
     for (const [userId, peer] of [...state.peers.entries()]) {
       if (!state.members.has(userId)) {
         state.peers.delete(userId);
+        recordExclusion(state, userId, peer.epoch);
         forgetPeer(state, userId);
         removed = true;
         continue;
@@ -726,6 +768,7 @@ export function confirmMembership(channelId: string): void {
       if (list && !list.devices.some((d) => d.deviceId === peer.deviceId)) {
         console.warn(`[SecureVoice] Pinned device of ${userId} is no longer published — excluding`);
         state.peers.delete(userId);
+        recordExclusion(state, userId, peer.epoch);
         forgetPeer(state, userId);
         removed = true;
         await notifyPeerExcluded(channelId, userId, new SecureVoiceError('device-revoked', 'the pinned device was revoked'));
@@ -791,6 +834,7 @@ async function processInboundKeyLocked(
     if (typeof envelope !== 'string' || !envelope.startsWith('{"v":1,"e":"olm1"')) {
       console.warn(`[SecureVoice] Non-envelope key payload from ${from} — excluding sender (legacy-key)`);
       state.peers.delete(from);
+      recordExclusion(state, from, peer.epoch);
       forgetPeer(state, from);
       await notifyPeerExcluded(channelId, from, new SecureVoiceError('legacy-key', 'key payload is not an olm1 envelope'));
       // Excluding a peer we already keyed means our current key is in hands we
@@ -810,6 +854,7 @@ async function processInboundKeyLocked(
       if (err instanceof E2EIdentityChangedError) {
         await flagIdentityChanged(err.peerUserId);
         state.peers.delete(from);
+        recordExclusion(state, from, peer.epoch);
         forgetPeer(state, from);
         await notifyPeerExcluded(channelId, from, err);
         // Spec §21.4 lists identity change as a FRESH-rotation trigger: the
