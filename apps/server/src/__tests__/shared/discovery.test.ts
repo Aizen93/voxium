@@ -89,6 +89,7 @@ describe('Server discovery — shared constants', () => {
     expect(WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED).toBe('server:join_request_resolved');
     expect(WS_EVENTS.SERVER_JOIN_APPROVED).toBe('server:join_approved');
     expect(WS_EVENTS.SERVER_JOIN_DECLINED).toBe('server:join_declined');
+    expect(WS_EVENTS.SERVER_BANS_CHANGED).toBe('server:bans_changed');
     expect(new Set(Object.values(WS_EVENTS)).size).toBe(Object.values(WS_EVENTS).length);
   });
 

@@ -418,7 +418,15 @@ interface ServerState {
   handleJoinRequestResolved: (serverId: unknown, userId: unknown) => void;
   fetchBans: (serverId: string) => Promise<void>;
   unbanMember: (serverId: string, userId: string) => Promise<void>;
+  /** server:bans_changed — the event carries no ban data. When the ban list
+   *  of THAT space is loaded, fetch it again (one fetch in flight per space,
+   *  one more queued if events arrive meanwhile); otherwise do nothing.
+   *  Shape-validated: a malformed payload is dropped. */
+  handleBansChanged: (payload: unknown) => void;
 }
+
+/** Per space: a ban-list refetch is running, and another event came in meanwhile. */
+const bansRefetch = new Map<string, { queued: boolean }>();
 
 // Dedup: prevent redundant mark-as-read API calls when multiple code paths
 // fire within a short window (e.g. setActiveChannel + joinAndFetch on channel switch)
@@ -983,8 +991,9 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   kickMember: async (serverId: string, memberId: string, reason?: string) => {
     await api.post(`/servers/${serverId}/members/${memberId}/kick`, reason ? { reason } : {});
-    // Every removal is a ban and no socket event carries bans: with that
-    // server's Banned section open, refetch so the row shows at once.
+    // Every removal is a ban: with that server's Banned section open,
+    // refetch so the row shows at once (server:bans_changed reaches the
+    // OTHER moderators; this one need not wait for it).
     if (get().bansServerId === serverId) {
       await get().fetchBans(serverId).catch((err) => console.warn('[Members] Failed to refresh the banned list:', err));
     }
@@ -1338,11 +1347,38 @@ export const useServerStore = create<ServerState>((set, get) => ({
     try {
       await api.delete(`/servers/${serverId}/bans/${userId}`);
     } catch (err) {
-      // No event carries bans: a 404 means another moderator lifted it already
+      // A 404 means another moderator lifted it already (server:bans_changed
+      // refreshes an open list, but this click can beat the event)
       if (axios.isAxiosError(err) && err.response?.status === 404) drop();
       throw err;
     }
     drop();
+  },
+
+  handleBansChanged: (payload) => {
+    const serverId = (payload as { serverId?: unknown } | null | undefined)?.serverId;
+    if (typeof serverId !== 'string' || serverId.length === 0) return;
+    if (get().bansServerId !== serverId) return;
+    const running = bansRefetch.get(serverId);
+    if (running) { running.queued = true; return; }
+    const state = { queued: false };
+    bansRefetch.set(serverId, state);
+    void (async () => {
+      try {
+        do {
+          state.queued = false;
+          // Still loaded for this space? (the section may have moved on)
+          if (get().bansServerId !== serverId) break;
+          try {
+            await get().fetchBans(serverId);
+          } catch (err) {
+            console.warn('[Members] Failed to refresh the banned list:', err instanceof Error ? err.message : err);
+          }
+        } while (state.queued);
+      } finally {
+        bansRefetch.delete(serverId);
+      }
+    })();
   },
 
   handleChannelMembersUpdated: (payload) => {

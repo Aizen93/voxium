@@ -577,6 +577,31 @@ describe('DELETE /admin/users/:userId — E2E key material dies with the account
     expectAtomicPurgeAndDelete('target-1');
   });
 
+  it("a transfer that lifts the heir's ban tells the moderator audience (no ban data); one with no ban to lift does not", async () => {
+    mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' }, 'heir-1': { role: 'user' } });
+    prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-owned', name: 'Owned' }]);
+    prismaMock.serverMember.findMany.mockResolvedValue([{ serverId: 'srv-owned' }]);
+    prismaMock.serverMember.findUnique.mockResolvedValue(null);
+    prismaMock.channel.findMany.mockResolvedValue([]);
+    prismaMock.server.findUnique.mockResolvedValue({
+      id: 'srv-owned', name: 'Owned', iconUrl: null, ownerId: 'heir-1', invitesLocked: false,
+      createdAt: new Date('2026-01-01T00:00:00Z'), description: null, tags: [], discoverable: true, joinMode: 'approval',
+    });
+    const send = () => request(app)
+      .delete('/api/v1/admin/users/target-1')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ serverActions: [{ serverId: 'srv-owned', action: 'transfer', newOwnerId: 'heir-1' }] });
+
+    prismaMock.serverBan.deleteMany.mockResolvedValueOnce({ count: 1 });
+    expect((await send()).status).toBe(200);
+    expect(mockEmitToModerators).toHaveBeenCalledWith('srv-owned', 'server:bans_changed', { serverId: 'srv-owned' });
+
+    mockEmitToModerators.mockClear();
+    prismaMock.serverBan.deleteMany.mockResolvedValueOnce({ count: 0 });
+    expect((await send()).status).toBe(200);
+    expect(mockEmitToModerators).not.toHaveBeenCalledWith('srv-owned', 'server:bans_changed', expect.anything());
+  });
+
   it('an heir who is not a member joins past the space\'s member limit (deliberately not applied), the inline count moving with the row in the same batch', async () => {
     mockUsers({ 'admin-1': { role: 'admin' }, 'target-1': { role: 'user' }, 'heir-1': { role: 'user' } });
     prismaMock.server.findMany.mockResolvedValue([{ id: 'srv-owned', name: 'Owned' }]);

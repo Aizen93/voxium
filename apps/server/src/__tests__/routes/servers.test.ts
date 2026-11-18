@@ -1924,7 +1924,22 @@ describe('Server Routes', () => {
       expect(mockHasServerPermission).toHaveBeenCalledWith('user-1', 'srv-1', Permissions.KICK_MEMBERS);
     });
 
-    it('returns 404 when there is no ban to lift', async () => {
+    it('tells the moderator audience (and only it) that the list changed, with no ban data', async () => {
+      const token = makeToken();
+      prismaMock.serverBan.deleteMany.mockResolvedValue({ count: 1 });
+
+      const res = await request(app)
+        .delete('/api/v1/servers/srv-1/bans/user-2')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(mockEmitToModerators).toHaveBeenCalledTimes(1);
+      expect(mockEmitToModerators).toHaveBeenCalledWith('srv-1', 'server:bans_changed', { serverId: 'srv-1' });
+      // never the server room, which every member is in
+      expect(mockTo).not.toHaveBeenCalledWith('server:srv-1');
+    });
+
+    it('returns 404 when there is no ban to lift, and announces nothing', async () => {
       const token = makeToken();
       prismaMock.serverBan.deleteMany.mockResolvedValue({ count: 0 });
 
@@ -1934,6 +1949,8 @@ describe('Server Routes', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('Ban not found');
+      expect(mockEmitToModerators).not.toHaveBeenCalled();
+      expect(mockTo).not.toHaveBeenCalled();
     });
 
     it('returns 403 without KICK_MEMBERS', async () => {
@@ -1944,6 +1961,7 @@ describe('Server Routes', () => {
         .set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(403);
       expect(prismaMock.serverBan.deleteMany).not.toHaveBeenCalled();
+      expect(mockEmitToModerators).not.toHaveBeenCalled();
     });
   });
 

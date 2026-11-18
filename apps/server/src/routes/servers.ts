@@ -905,6 +905,11 @@ serverRouter.delete(
       const { count } = await prisma.serverBan.deleteMany({ where: { serverId, userId } });
       if (count === 0) throw new NotFoundError('Ban');
 
+      // After the commit, best effort (emitToModerators logs its own failure):
+      // the other moderators' open Banned section fetches the list again.
+      // Moderator audience only, never server:{id}; no ban data in the payload.
+      await emitToModerators(serverId, WS_EVENTS.SERVER_BANS_CHANGED, { serverId });
+
       res.json({ success: true, message: 'Member unbanned' });
     } catch (err) {
       next(err);

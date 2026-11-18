@@ -11,6 +11,8 @@ import {
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
 import { isTransactionConflict, retryOnTransactionConflict } from './transactionRetry';
 import { broadcastMemberLeft } from './memberBroadcast';
+import { emitToModerators } from './moderatorAudience';
+import { WS_EVENTS } from '@voxium/shared';
 import { emitWebhookChanged } from './webhookLifecycle';
 import type { PermissionReadClient } from './permissionCalculator';
 import type { Prisma } from '../generated/prisma/client';
@@ -286,4 +288,9 @@ export async function removeMemberFromServer(
   await broadcastMemberLeft(userId, serverId);
 
   if (disabledWebhooks > 0) emitWebhookChanged(serverId);
+
+  // A removal WITH a ban wrote a ServerBan row: tell the moderators' open
+  // Banned sections to fetch the list again (a voluntary leave bans nobody).
+  // Moderator audience only; the helper logs its own failure.
+  if (opts.ban) await emitToModerators(serverId, WS_EVENTS.SERVER_BANS_CHANGED, { serverId });
 }

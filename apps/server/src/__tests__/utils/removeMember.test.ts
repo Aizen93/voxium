@@ -62,6 +62,9 @@ vi.mock('../../utils/memberBroadcast', () => ({ broadcastMemberLeft: (...a: unkn
 const webhookChanged = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/webhookLifecycle', () => ({ emitWebhookChanged: (...a: unknown[]) => webhookChanged(...a) }));
 
+const emitToModerators = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/moderatorAudience', () => ({ emitToModerators: (...a: unknown[]) => emitToModerators(...a) }));
+
 import { removeMemberFromServer } from '../../utils/removeMember';
 import { ForbiddenError } from '../../utils/errors';
 import { lazyStatement } from '../helpers/lazyStatement';
@@ -102,6 +105,7 @@ beforeEach(() => {
   announceSecure.mockImplementation(async () => { order.push('secure:notices'); });
   memberLeft.mockImplementation(async () => { order.push('left'); });
   webhookChanged.mockImplementation(() => { order.push('webhook:changed'); });
+  emitToModerators.mockImplementation(async () => { order.push('bans:changed'); });
 });
 
 describe('removeMemberFromServer', () => {
@@ -552,6 +556,28 @@ describe('removeMemberFromServer', () => {
   });
 });
 
+describe("removeMemberFromServer: the moderators' open ban lists", () => {
+  it('a removal WITH a ban tells the moderator audience (no ban data) after the transaction committed and the member left', async () => {
+    await removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: 'spam' } });
+
+    expect(emitToModerators).toHaveBeenCalledTimes(1);
+    expect(emitToModerators).toHaveBeenCalledWith('s-1', 'server:bans_changed', { serverId: 's-1' });
+    expect(order.indexOf('bans:changed')).toBeGreaterThan(order.indexOf('txn:end'));
+    expect(order.indexOf('bans:changed')).toBeGreaterThan(order.indexOf('left'));
+  });
+
+  it('a voluntary leave writes no ban and emits nothing', async () => {
+    await removeMemberFromServer('u-1', 's-1');
+    expect(emitToModerators).not.toHaveBeenCalled();
+  });
+
+  it('a removal that failed (nobody banned) emits nothing', async () => {
+    tx.serverMember.deleteMany.mockResolvedValueOnce({ count: 0 });
+    await expect(removeMemberFromServer('u-1', 's-1', { ban: { by: 'mod-1', reason: null } })).rejects.toMatchObject({ statusCode: 404 });
+    expect(emitToModerators).not.toHaveBeenCalled();
+  });
+});
+
 describe('removeMemberFromServer: a kick disables the removed creator\'s webhooks', () => {
   const KICK = { ban: { by: 'mod-1', reason: 'spam' } };
 
@@ -584,7 +610,7 @@ describe('removeMemberFromServer: a kick disables the removed creator\'s webhook
 
     expect(webhookChanged).toHaveBeenCalledTimes(1);
     expect(webhookChanged).toHaveBeenCalledWith('s-1');
-    expect(order.slice(-2)).toEqual(['left', 'webhook:changed']);
+    expect(order.slice(-3)).toEqual(['left', 'webhook:changed', 'bans:changed']);
   });
 
   it('when the member created none (count 0): the statement runs, but no event is sent', async () => {

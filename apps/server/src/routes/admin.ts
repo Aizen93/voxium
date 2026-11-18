@@ -730,8 +730,8 @@ function parseOwnedServerActions(raw: unknown, targetId: string): OwnedServerAct
   });
 }
 
-/** Whether the batch's demotion of the departing owner's row changed a row. */
-function demotedRow(result: unknown): boolean {
+/** Whether a statement of a batch changed or removed at least one row (the demotion of the departing owner's row, the lift of the heir's ban). */
+function changedARow(result: unknown): boolean {
   const count = (result as { count?: unknown } | null | undefined)?.count;
   return typeof count === 'number' && count > 0;
 }
@@ -772,7 +772,7 @@ export async function transferOwnedSpaceToHeir(
   serverId: string,
   fromId: string,
   heirId: string,
-): Promise<{ joined: boolean; heirRequestPending: boolean; fromDemoted: boolean }> {
+): Promise<{ joined: boolean; heirRequestPending: boolean; fromDemoted: boolean; banLifted: boolean }> {
   try {
     return await retryOnTransactionConflict(async () => {
       // The heir's rows the batch takes after the space row, waited for
@@ -803,7 +803,7 @@ export async function transferOwnedSpaceToHeir(
           }),
           prisma.serverMember.updateMany({ where: { userId: fromId, serverId, role: 'owner' }, data: { role: 'admin' } }),
         ], LOCK_WAIT_TRANSACTION_OPTIONS);
-        return { joined: false, heirRequestPending: false, fromDemoted: demotedRow(demotion) };
+        return { joined: false, heirRequestPending: false, fromDemoted: changedARow(demotion), banLifted: false };
       }
 
       // Add them as a member first, seed ChannelRead records (secure
@@ -851,7 +851,13 @@ export async function transferOwnedSpaceToHeir(
         // LAST: its result is the batch's last
         prisma.serverMember.updateMany({ where: { userId: fromId, serverId, role: 'owner' }, data: { role: 'admin' } }),
       ], LOCK_WAIT_TRANSACTION_OPTIONS);
-      return { joined: true, heirRequestPending: heirRequest?.status === 'pending', fromDemoted: demotedRow(results[results.length - 1]) };
+      return {
+        joined: true,
+        heirRequestPending: heirRequest?.status === 'pending',
+        fromDemoted: changedARow(results[results.length - 1]),
+        // results[0] is the heir's ban delete: a ban was lifted when it removed a row
+        banLifted: changedARow(results[0]),
+      };
     }, `[Admin] The transfer of space ${serverId}`);
   } catch (err) {
     const code = prismaErrorCode(err);
@@ -946,6 +952,11 @@ adminRouter.delete('/users/:userId', async (req: Request<{ userId: string }>, re
 
           if (outcome.joined) {
             await broadcastMemberJoined(action.newOwnerId, action.serverId);
+            // The heir's ban was lifted in the batch: the moderators' open
+            // Banned sections fetch the list again (no ban data on the socket)
+            if (outcome.banLifted) {
+              await emitToModerators(action.serverId, WS_EVENTS.SERVER_BANS_CHANGED, { serverId: action.serverId });
+            }
             if (outcome.heirRequestPending) {
               await emitToModerators(action.serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, {
                 serverId: action.serverId, userId: action.newOwnerId, outcome: 'joined',
