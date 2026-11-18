@@ -1,6 +1,6 @@
 // @vitest-environment node
 // Pure WebCrypto — node env gives us the real crypto.subtle without jsdom.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   createSenderCipher,
   createReceiverCipher,
@@ -198,5 +198,85 @@ describe('voiceFrameCipher — counter exhaustion (IV-reuse firewall)', () => {
     // Ceiling reached — the cipher goes silent rather than ever reusing an IV
     expect(await sender.encrypt(frame([3]))).toBeNull();
     expect(sender.framesRemaining()).toBe(0);
+  });
+});
+
+describe('voiceFrameCipher — the sender counter restarts only with a new key', () => {
+  const seqOf = (sealed: ArrayBuffer) => new DataView(sealed).getUint32(1, false);
+  const nibbleOf = (sealed: ArrayBuffer) => new Uint8Array(sealed)[0] & 0x0f;
+
+  it('the key in use, installed again, keeps its counter: no seq repeats under it', async () => {
+    const key = randomKey();
+    const sender = createSenderCipher(CH, ME);
+    await sender.setKey(0, key);
+    const sealed = [];
+    for (let i = 0; i < 3; i++) sealed.push((await sender.encrypt(frame([i])))!);
+
+    await sender.setKey(0, key.slice()); // the same bytes, another array
+    sealed.push((await sender.encrypt(frame([3])))!);
+
+    expect(sealed.map(seqOf)).toEqual([0, 1, 2, 3]);
+    const receiver = createReceiverCipher(CH, ME);
+    await receiver.setKey(0, key);
+    for (const f of sealed) expect(await receiver.decrypt(f)).not.toBeNull();
+    expect(receiver.stats()).toMatchObject({ ok: 4, replayed: 0 });
+  });
+
+  it('installed again under another keyId it keeps its counter too, since the IV carries only the low byte of the keyId', async () => {
+    const key = randomKey();
+    const sender = createSenderCipher(CH, ME);
+    await sender.setKey(0, key);
+    const first = (await sender.encrypt(frame([1])))!;
+
+    await sender.setKey(256, key);
+    const second = (await sender.encrypt(frame([2])))!;
+
+    expect(nibbleOf(second)).toBe(0);
+    expect([seqOf(first), seqOf(second)]).toEqual([0, 1]);
+  });
+
+  it('a new key restarts the counter', async () => {
+    const sender = createSenderCipher(CH, ME);
+    await sender.setKey(0, randomKey());
+    await sender.encrypt(frame([1]));
+    await sender.encrypt(frame([2]));
+
+    await sender.setKey(1, randomKey());
+
+    expect(seqOf((await sender.encrypt(frame([3])))!)).toBe(0);
+  });
+
+  it('a spent key installed again stays spent', async () => {
+    const key = randomKey();
+    const sender = createSenderCipher(CH, ME, { initialSeqForTest: VOICE_FRAME_SEQ_ROTATE_AT - 1 });
+    await sender.setKey(0, key);
+    expect(await sender.encrypt(frame([1]))).not.toBeNull();
+    expect(await sender.encrypt(frame([2]))).toBeNull();
+
+    await sender.setKey(0, key);
+
+    expect(await sender.encrypt(frame([3]))).toBeNull();
+    expect(sender.framesRemaining()).toBe(0);
+  });
+
+  it('the private copy of a replaced key is zero-filled, and the caller\'s array is left alone', async () => {
+    const first = randomKey();
+    const sender = createSenderCipher(CH, ME);
+    // The copy is private: read it back as the one array setKey sliced from `first`
+    const slice = vi.spyOn(Uint8Array.prototype, 'slice');
+    try {
+      await sender.setKey(0, first);
+      const at = slice.mock.contexts.indexOf(first);
+      expect(at).toBeGreaterThanOrEqual(0);
+      const copy = slice.mock.results[at].value as Uint8Array;
+      expect([...copy]).toEqual([...first]);
+
+      await sender.setKey(1, randomKey());
+
+      expect(copy.every((b) => b === 0)).toBe(true);
+      expect(first.some((b) => b !== 0)).toBe(true);
+    } finally {
+      slice.mockRestore();
+    }
   });
 });

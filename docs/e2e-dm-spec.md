@@ -2034,10 +2034,12 @@ invariants:
   from `seq` 2^32 − 2^16 (`VOICE_FRAME_SEQ_ROTATE_AT`) on, so the 4-byte field
   never wraps, and the frame worker asks for a fresh rotation once fewer than
   1,000,000 frames remain (about five and a half hours of 20 ms frames). The
-  counter restarts at 0 whenever the sender installs a key, so the cipher
-  relies on the key layer never installing the same key twice: it installs only
-  a fresh random key or the ratchet of its current one (`secureVoiceKeys.ts`),
-  and a session restart mints a new key (§21.5).
+  counter starts at 0 when the sender installs new key bytes; the key in use,
+  installed again, keeps its count. The cipher recognises only the key in use,
+  so it relies on the key layer installing every key once and never one that
+  has been replaced: it installs only a fresh random key or the ratchet of its
+  current one (`secureVoiceKeys.ts`), and a session restart mints a new key
+  (§21.5).
 - **Replay window.** Per (sender, keyId), a frame whose `seq` is 128 or more
   below the highest that decrypted is refused, a `seq` already seen is
   refused, and any other is accepted once, in any order. The window moves only
