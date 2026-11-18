@@ -288,8 +288,16 @@ fn get_windows_app_id(app: &tauri::AppHandle) -> String {
 /// is fetched or shown (`allowed_avatar_base`); an avatar that cannot be
 /// downloaded leaves the toast without one.
 /// On other platforms: returns Err so the JS side falls through to the Tauri plugin / Web API.
+///
+/// The download, the file cache and the toast block (a network round trip of
+/// up to 10 s, disk work, a WinRT call): they run on the blocking pool, off
+/// the thread that paints the window. The toast has no thread of its own to
+/// keep: tauri-winrt-notification makes plain WinRT calls with no apartment
+/// set up, which windows-core runs in the process's multithreaded apartment
+/// on any thread, and Tauri's notification plugin shows its toasts from a
+/// runtime task too. Only the compiled configuration is read here.
 #[tauri::command]
-fn notify_with_avatar(
+async fn notify_with_avatar(
     app: tauri::AppHandle,
     title: String,
     body: String,
@@ -298,22 +306,20 @@ fn notify_with_avatar(
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use tauri_winrt_notification::{IconCrop, Toast};
-
         let app_id = get_windows_app_id(&app);
-        let mut toast = Toast::new(&app_id).title(&title).text2(&body);
-
-        if let (Some(base), Some(key)) = (&api_base, &avatar_key) {
-            let connect_src = connect_src_of(app.config().app.security.csp.as_ref());
-            let base = allowed_avatar_base(&connect_src, base, cfg!(debug_assertions))?;
-            match cache_avatar_to_file(&base, key) {
-                Ok(path) => toast = toast.icon(&path, IconCrop::Circular, ""),
-                Err(e) => eprintln!("[Voxium] Notification avatar: {e}"),
-            }
-        }
-
-        toast.show().map_err(|e| format!("{e:?}"))?;
-        Ok(())
+        let connect_src = connect_src_of(app.config().app.security.csp.as_ref());
+        tauri::async_runtime::spawn_blocking(move || {
+            show_avatar_toast(
+                &app_id,
+                &title,
+                &body,
+                &connect_src,
+                api_base.as_deref(),
+                avatar_key.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -321,6 +327,33 @@ fn notify_with_avatar(
         let _ = (app, title, body, api_base, avatar_key);
         Err("Avatar notifications not implemented on this platform".to_string())
     }
+}
+
+/// The toast `notify_with_avatar` shows, on the blocking pool: the base
+/// checked against the build's `connect-src` before anything else.
+#[cfg(target_os = "windows")]
+fn show_avatar_toast(
+    app_id: &str,
+    title: &str,
+    body: &str,
+    connect_src: &[String],
+    api_base: Option<&str>,
+    avatar_key: Option<&str>,
+) -> Result<(), String> {
+    use tauri_winrt_notification::{IconCrop, Toast};
+
+    let mut toast = Toast::new(app_id).title(title).text2(body);
+
+    if let (Some(base), Some(key)) = (api_base, avatar_key) {
+        let base = allowed_avatar_base(connect_src, base, cfg!(debug_assertions))?;
+        match cache_avatar_to_file(&base, key) {
+            Ok(path) => toast = toast.icon(&path, IconCrop::Circular, ""),
+            Err(e) => eprintln!("[Voxium] Notification avatar: {e}"),
+        }
+    }
+
+    toast.show().map_err(|e| format!("{e:?}"))?;
+    Ok(())
 }
 
 // ─── Which credential-store services a build uses ────────────────────────────
@@ -435,14 +468,21 @@ fn delete_pickle_key(service: &str, user_id: &str) -> Result<(), String> {
     remove_pickle_key_entry(&pickle_key_entry(service, user_id)?)
 }
 
-#[tauri::command]
-fn e2e_pickle_key_get(app: tauri::AppHandle, user_id: String) -> Result<Option<String>, String> {
-    read_pickle_key(&build_keychain_services(&app).e2e_pickle_key, &user_id)
-}
-
-// The keyring call blocks (Credential Manager, the Keychain, a D-Bus round
+// The keyring calls block (Credential Manager, the Keychain, a D-Bus round
 // trip to the Secret Service): on the blocking pool, off the thread that
 // paints the window, like the session commands below.
+
+#[tauri::command]
+async fn e2e_pickle_key_get(
+    app: tauri::AppHandle,
+    user_id: String,
+) -> Result<Option<String>, String> {
+    let service = build_keychain_services(&app).e2e_pickle_key;
+    tauri::async_runtime::spawn_blocking(move || read_pickle_key(&service, &user_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn e2e_pickle_key_delete(app: tauri::AppHandle, user_id: String) -> Result<(), String> {
     let service = build_keychain_services(&app).e2e_pickle_key;
@@ -452,16 +492,15 @@ async fn e2e_pickle_key_delete(app: tauri::AppHandle, user_id: String) -> Result
 }
 
 #[tauri::command]
-fn e2e_pickle_key_set(
+async fn e2e_pickle_key_set(
     app: tauri::AppHandle,
     user_id: String,
     key_b64: String,
 ) -> Result<(), String> {
-    write_pickle_key(
-        &build_keychain_services(&app).e2e_pickle_key,
-        &user_id,
-        &key_b64,
-    )
+    let service = build_keychain_services(&app).e2e_pickle_key;
+    tauri::async_runtime::spawn_blocking(move || write_pickle_key(&service, &user_id, &key_b64))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ─── Session credentials in the OS keychain ──────────────────────────────────
@@ -1599,7 +1638,7 @@ mod avatar_origin_tests {
             .expect("the tests follow the code")];
         let command = &code[code.find("fn notify_with_avatar(").expect("the command")..];
         let checked = command
-            .find("allowed_avatar_base(&connect_src, base, cfg!(debug_assertions))?")
+            .find("allowed_avatar_base(connect_src, base, cfg!(debug_assertions))?")
             .expect("the base is checked, and a refusal returns");
         let cached = command
             .find("cache_avatar_to_file(&base, key)")
@@ -1612,5 +1651,46 @@ mod avatar_origin_tests {
         assert_eq!(code.matches("cache_avatar_to_file(").count(), 2);
         assert_eq!(code.matches("download_avatar(").count(), 2);
         assert_eq!(code.matches("ureq::").count(), 1);
+    }
+}
+
+/// No command blocks the thread that paints the window: every command is
+/// `async`, and the ones that block (the keychain, the avatar download, its
+/// file and the toast) do it on the blocking pool, a join failure answered
+/// as an error string.
+#[cfg(test)]
+mod blocking_commands_tests {
+    #[test]
+    fn every_command_is_async_and_blocks_only_on_the_blocking_pool() {
+        let source = include_str!("lib.rs");
+        let code = &source[..source
+            .find("\n#[cfg(test)]")
+            .expect("the tests follow the code")];
+
+        let list = &code
+            [code.find("generate_handler![").expect("the handler") + "generate_handler![".len()..];
+        let list = &list[..list.find(']').expect("its end")];
+        let commands: Vec<&str> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert_eq!(commands.len(), 7, "{commands:?}");
+
+        for name in commands {
+            let start = code
+                .find(&format!("async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} is async"));
+            let body = &code[start..start + code[start..].find("\n}\n").expect("its end")];
+            assert!(
+                body.contains("tauri::async_runtime::spawn_blocking(move ||"),
+                "{name} blocks on the blocking pool"
+            );
+            assert!(
+                body.contains(".map_err(|e| e.to_string())?"),
+                "{name} answers a join failure as an error"
+            );
+        }
+        assert!(!code.contains("#[tauri::command]\nfn "));
     }
 }
