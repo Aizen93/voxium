@@ -217,9 +217,16 @@ export function createReceiverCipher(channelId: string, senderUserId: string): R
     const existing = ring.get(keyId);
     if (existing && sameKeyBytes(existing.raw, raw)) return;
 
+    const key = await importGcmKey(raw, 'decrypt');
+    // Look again after the import: a trial ratchet may have installed this
+    // very generation meanwhile and recorded frames under it, and its window
+    // is the one that must stay.
+    const installed = ring.get(keyId);
+    if (installed && sameKeyBytes(installed.raw, raw)) return;
+
     ring.set(keyId, {
       raw,
-      key: await importGcmKey(raw, 'decrypt'),
+      key,
       highestSeq: -1n,
       windowMask: 0n,
     });
@@ -293,6 +300,15 @@ export function createReceiverCipher(channelId: string, senderUserId: string): R
         };
         const plain = await tryDecrypt(candidateEntry, top + 1, seq, header, body);
         if (plain !== null) {
+          // The sealed copy of this generation may have been installed while
+          // we derived it, with frames already recorded: keep that entry and
+          // its window, and judge this frame against it.
+          const installed = ring.get(top + 1);
+          if (installed && sameKeyBytes(installed.raw, derived)) {
+            if (!checkAndRecordSeq(installed, BigInt(seq))) { stats.replayed++; return null; }
+            stats.ok++;
+            return plain;
+          }
           ring.set(top + 1, candidateEntry);
           pruneRing();
           checkAndRecordSeq(candidateEntry, BigInt(seq));
