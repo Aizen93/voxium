@@ -18,7 +18,7 @@ import { E2EVault, type PickleKeyProvider } from '../../services/e2e/vault';
 const ME = 'me-forget';
 let n = 0;
 const key = btoa(String.fromCharCode(...new Uint8Array(32).fill(3)));
-const keyProvider: PickleKeyProvider = { load: async () => key, save: async () => {} };
+const keyProvider = { load: async () => key, save: async () => {}, remove: async () => {} } as PickleKeyProvider;
 
 const live: E2EService[] = [];
 afterEach(async () => {

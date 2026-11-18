@@ -21,7 +21,7 @@ import { E2EVault, type PickleKeyProvider, type PlaintextPurgeEntry } from '../.
 const ME = 'me-purge';
 let n = 0;
 const key = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
-const keyProvider: PickleKeyProvider = { load: async () => key, save: async () => {} };
+const keyProvider = { load: async () => key, save: async () => {}, remove: async () => {} } as PickleKeyProvider;
 
 function makeService() {
   n++;

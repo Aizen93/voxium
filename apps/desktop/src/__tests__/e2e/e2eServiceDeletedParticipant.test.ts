@@ -30,7 +30,7 @@ function makeService() {
   };
   const api = { get: refuse('GET'), post: refuse('POST'), put: refuse('PUT'), delete: refuse('DELETE') };
   const key = btoa(String.fromCharCode(...new Uint8Array(32).fill(5)));
-  const keyProvider: PickleKeyProvider = { load: async () => key, save: async () => {} };
+  const keyProvider = { load: async () => key, save: async () => {}, remove: async () => {} } as PickleKeyProvider;
   const service = new E2EService(`peer-guard-${n}`, {
     api: api as unknown as E2EServiceOptions['api'],
     keyProvider,
