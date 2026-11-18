@@ -392,6 +392,48 @@ describe('inbound keys', () => {
     expect(frameSession.setRemoteKey).toHaveBeenCalledWith('peer', 0, expect.any(Uint8Array));
   });
 
+  it('once a buffered payload excludes its sender, the rest of their buffer is not processed', async () => {
+    await begunSession();
+    decryptFromDevice.mockResolvedValue(peerKeyPlaintext({ seq: 0 }));
+    // Both arrive before the participant event: a payload that is not an envelope, then a sealed key
+    handleInboundKey(CH, 'peer', PEER_DEVICE, '{"keyB64":"plaintext-key"}');
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    // The exclusion rotates fresh; the step ends after it
+    await vi.waitFor(() => expect(frameSession.setLocalKey).toHaveBeenCalledWith(1, expect.any(Uint8Array)));
+    await flush();
+
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'legacy-key');
+    expect(decryptFromDevice).not.toHaveBeenCalled();
+    expect(frameSession.setRemoteKey).not.toHaveBeenCalled();
+  });
+
+  it('a sender excluded by one of their buffered keys at a later vet: one rotation, and nothing of theirs installed', async () => {
+    await begunSession();
+    fetchDeviceList.mockRejectedValueOnce(new Error('Network Error'));
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+    // Buffered while they are not vetted: the first fails its identity pin, the second is a valid key
+    decryptFromDevice
+      .mockRejectedValueOnce(new E2EIdentityChangedError('peer'))
+      .mockResolvedValue(peerKeyPlaintext({ seq: 0 }));
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    handleInboundKey(CH, 'peer', PEER_DEVICE, ENV);
+    await flush();
+    frameSession.setLocalKey.mockClear();
+
+    confirmMembership(CH);
+    await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'identity-changed'));
+    await flush();
+
+    expect(decryptFromDevice).toHaveBeenCalledTimes(1);
+    expect(frameSession.setRemoteKey).not.toHaveBeenCalled();
+    expect(frameSession.setLocalKey).toHaveBeenCalledTimes(1);
+    expect(markExcluded).toHaveBeenCalledTimes(1);
+  });
+
   it('key_request re-seals the current key to the requester', async () => {
     await withVettedPeer();
     encryptToDevice.mockClear();
