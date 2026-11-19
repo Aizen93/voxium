@@ -4,19 +4,21 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { ConnectionQuality } from './ConnectionQuality';
+import { useLocalMicIndicator } from '../../hooks/useLocalMicIndicator';
 import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Monitor, MonitorOff, Lock, ShieldAlert, Presentation } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export function VoicePanel() {
   const { t } = useTranslation();
   const {
-    activeChannelId, channelUsers, selfMute, selfDeaf,
+    activeChannelId, channelUsers, selfDeaf,
     toggleMute, toggleDeaf, leaveChannel, latency,
     isScreenSharing, screenSharingUserId, startScreenShare, startWhiteboardShare, stopScreenShare,
   } = useVoiceStore();
   const secureVoicePeerIssues = useVoiceStore((s) => s.secureVoicePeerIssues);
   const secureVoiceActive = useVoiceStore((s) => s.secureVoiceActive);
   const { channels } = useServerStore();
+  const mic = useLocalMicIndicator();
   const { user } = useAuthStore();
   const servers = useServerStore((s) => s.servers);
   const activeVoiceServerId = useVoiceStore((s) => s.activeVoiceServerId);
@@ -112,14 +114,16 @@ export function VoicePanel() {
               'rounded-md p-1.5 transition-colors',
               isServerMuted
                 ? 'bg-vox-accent-danger/20 text-vox-accent-danger cursor-not-allowed'
-                : selfMute
+                : mic.manualMute
                   ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
-                  : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
+                  : mic.pttIdle
+                    ? 'bg-vox-bg-hover text-vox-voice-muted hover:bg-vox-bg-active'
+                    : 'bg-vox-bg-hover text-vox-text-secondary hover:bg-vox-bg-active hover:text-vox-text-primary'
             )}
-            title={isServerMuted ? t('voice.mutedByModerator') : selfMute ? t('voice.unmute') : t('voice.mute')}
-            aria-label={isServerMuted ? t('voice.mutedByModerator') : selfMute ? t('voice.unmute') : t('voice.mute')}
+            title={isServerMuted ? t('voice.mutedByModerator') : mic.label}
+            aria-label={isServerMuted ? t('voice.mutedByModerator') : mic.label}
           >
-            {selfMute || isServerMuted ? <MicOff size={16} /> : <Mic size={16} />}
+            {mic.micOff || isServerMuted ? <MicOff size={16} /> : <Mic size={16} />}
           </button>
 
           {/* Deafen */}
