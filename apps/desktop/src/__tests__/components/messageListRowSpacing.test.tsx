@@ -188,4 +188,23 @@ describe('message lists keep vertical space inside what Virtuoso measures', () =
     expect(boxIn(notice!).querySelector('[data-message-id]')).toBeNull();
     expectMarginsContained();
   });
+
+  it('DM list: a deleted account\'s line is a row of its own, flow-root, with no margin of its own', async () => {
+    const messages = conversation({ channelId: null, conversationId: 'dm-1' });
+    messages.splice(2, 0, {
+      id: 'del-1', type: 'deleted', content: '', encrypted: false, channelId: null, conversationId: 'dm-1',
+      replyToId: null, replyTo: null, author: { id: 'deleted:dm-1', username: 'deleted', displayName: 'Deleted user', avatarUrl: null },
+      mentions: [], attachments: [], reactions: [], createdAt: messages[1].createdAt, editedAt: null,
+    });
+    chatState.messages = messages;
+    await render(<DMMessageList conversationId="dm-1" readOnly />);
+
+    const line = slots('row').find((s) => s.getAttribute('data-row-id') === 'del-1');
+    expect(line, 'the deleted line is rendered as its own row').toBeDefined();
+    const box = boxIn(line!);
+    expect(box.classList.contains('flow-root')).toBe(true);
+    expect(box.querySelector('[data-testid="deleted-message-row"]')).not.toBeNull();
+    for (const el of [box, ...box.querySelectorAll('*')]) expect(verticalMargins(el), 'no margin inside the deleted line').toEqual([]);
+    expectMarginsContained();
+  });
 });

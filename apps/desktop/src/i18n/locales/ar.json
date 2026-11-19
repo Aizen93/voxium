@@ -839,7 +839,12 @@
     "beginningOfConversation": "بداية المحادثة",
     "conversationStart": "هذه بداية سجل رسائلك المباشرة.",
     "welcomeMessage": "اختر محادثة من الشريط الجانبي، أو انقر على عضو في أي مساحة لبدء محادثة جديدة.",
-    "failedToLoadConversations": "تعذّر تحميل المحادثات"
+    "failedToLoadConversations": "تعذّر تحميل المحادثات",
+    "deletedParticipant": {
+      "name": "مستخدم محذوف",
+      "readOnlyNotice": "هذه المحادثة للقراءة فقط: تم حذف حساب الطرف الآخر.",
+      "messageDeleted": "رسالة محذوفة"
+    }
   },
   "friends": {
     "title": "الأصدقاء",
@@ -1388,6 +1393,7 @@
     "noPermissionViewChannel": "ليس لديك صلاحية عرض هذه القناة",
     "cannotDmSelf": "لا يمكنك إنشاء محادثة مع نفسك",
     "notAParticipant": "لست مشاركاً في هذه المحادثة",
+    "conversationReadOnly": "هذه المحادثة للقراءة فقط",
     "voiceDisabled": "القنوات الصوتية معطّلة حالياً",
     "voiceCallsDisabled": "المكالمات الصوتية معطّلة حالياً",
     "voiceChannelFull": "القناة الصوتية ممتلئة",

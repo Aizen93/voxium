@@ -22,6 +22,10 @@ import { ReportModal } from './ReportModal';
 import { useAuthStore } from '../../stores/authStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useMember } from '../../hooks/useMember';
+import { getTranslatedActionError } from '../../utils/serverErrors';
+import { isDeletedParticipantId } from '@voxium/shared';
+import { isDeletedMessageRow, isDeletedQuote } from '../../services/e2e/displayGate';
+import { DeletedMessageRow, DeletedUserAvatar } from '../dm/DeletedParticipant';
 
 interface Props {
   message: Message;
@@ -31,6 +35,11 @@ interface Props {
   canDelete: boolean;
   channelId?: string;
   conversationId?: string;
+  /**
+   * A DM whose other side's account was deleted: no edit, reply or reaction
+   * (deleting one's own message stays). The stores refuse those too.
+   */
+  readOnly?: boolean;
 }
 
 function formatMessageTime(dateStr: string, t: TFunction) {
@@ -40,7 +49,7 @@ function formatMessageTime(dateStr: string, t: TFunction) {
   return format(date, 'MM/dd/yyyy h:mm a');
 }
 
-export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId }: Props) {
+export const MessageItem = memo(function MessageItem({ message, showHeader, addTopMargin, isOwn, canDelete, channelId, conversationId, readOnly = false }: Props) {
   const { t } = useTranslation();
   const { editMessage, editDMMessage } = useChatStore();
   const [isEditing, setIsEditing] = useState(false);
@@ -51,6 +60,14 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   const [showReportModal, setShowReportModal] = useState(false);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const reactionBtnRef = useRef<HTMLButtonElement>(null);
+
+  // the conversation turned read-only under an edit being typed: the edit is dropped
+  useEffect(() => {
+    if (readOnly) {
+      setIsEditing(false);
+      setShowReactionPicker(false);
+    }
+  }, [readOnly]);
 
   useEffect(() => {
     if (isEditing && editRef.current) {
@@ -63,6 +80,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   }, [isEditing]);
 
   const handleStartEdit = () => {
+    if (readOnly) return;
     setEditContent(message.content);
     setIsEditing(true);
   };
@@ -88,8 +106,9 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
       }
       setIsEditing(false);
       setEditContent('');
-    } catch {
-      toast.error(t('chat.failedToEdit'));
+    } catch (err) {
+      console.warn('[MessageItem] Edit failed:', err instanceof Error ? err.message : err);
+      toast.error(getTranslatedActionError(err, t, 'chat.failedToEdit'));
     } finally {
       setIsSaving(false);
     }
@@ -113,8 +132,9 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
       } else if (channelId) {
         await useChatStore.getState().toggleReaction(channelId, message.id, emoji);
       }
-    } catch {
-      toast.error(t('messageItem.failedToToggleReaction'));
+    } catch (err) {
+      console.warn('[MessageItem] Reaction failed:', err instanceof Error ? err.message : err);
+      toast.error(getTranslatedActionError(err, t, 'messageItem.failedToToggleReaction'));
     }
   };
 
@@ -141,6 +161,11 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
   );
 
   const isSystemMessage = message.type === 'system';
+  // The deleted account's placeholder as the author (`deleted:{conversationId}`,
+  // DM rows only): no profile card, no badge, no report, the localised name
+  const authorDeleted = !!conversationId && isDeletedParticipantId(message.author.id);
+  // ...and as the quoted author: the quote says "Message deleted", never text
+  const quoteDeleted = !!conversationId && !!message.replyTo && isDeletedQuote(message.replyTo);
   const currentUserId = useAuthStore((s) => s.user?.id);
   const isMentioned = !!(message.mentions && currentUserId && message.mentions.some((m) => m.id === currentUserId));
   // A webhook posted this: the author id is `webhook:<id>` / `webhook:deleted`,
@@ -197,10 +222,15 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
     if (message.replyTo) {
       // Encrypted parent whose plaintext isn't in the local cache: never show
       // the ciphertext envelope — show a lock placeholder instead
-      const replySource = message.replyTo.encrypted &&
-        (!message.replyTo.content || message.replyTo.content.startsWith('{"v":1'))
-        ? t('e2e.encryptedMessage')
-        : message.replyTo.content;
+      const replySource = quoteDeleted
+        ? t('dm.deletedParticipant.messageDeleted')
+        : message.replyTo.encrypted &&
+          (!message.replyTo.content || message.replyTo.content.startsWith('{"v":1'))
+          ? t('e2e.encryptedMessage')
+          : message.replyTo.content;
+      const quotedName = conversationId && isDeletedParticipantId(message.replyTo.author.id)
+        ? t('dm.deletedParticipant.name')
+        : message.replyTo.author.displayName;
       const truncated = replySource.length > 80
         ? replySource.slice(0, 80) + '...'
         : replySource;
@@ -212,11 +242,11 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
           <Reply size={12} className="shrink-0 rotate-180" />
           {/* Plain text, never a hover target: the quoted author may be a
               webhook (`webhook:` id, no profile), and the quote shows no badges */}
-          <span className="font-semibold text-vox-text-secondary">{message.replyTo.author.displayName}</span>
+          <span className="font-semibold text-vox-text-secondary">{quotedName}</span>
           {/* ...but a quoted webhook keeps its APP tag: it picks its own name,
               and a bare "alice" here would pass for the member */}
           {quotesWebhook && <AppTag />}
-          <span className="truncate">{truncated}</span>
+          <span className={clsx('truncate', quoteDeleted && 'italic')}>{truncated}</span>
         </div>
       );
     }
@@ -231,6 +261,22 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
     return null;
   })();
 
+  // A deleted account's message in a DM (the gate's placeholder row): the
+  // quiet line alone — no author, no toolbar, no action. DMMessageList renders
+  // it itself; this keeps any other list of DM rows to the same shape.
+  if (conversationId && isDeletedMessageRow(message)) {
+    return <DeletedMessageRow messageId={message.id} createdAt={message.createdAt} />;
+  }
+
+  // What the hover toolbar offers (a read-only DM keeps only the delete of one's own)
+  const showReply = !isSystemMessage && !readOnly;
+  const showReact = !readOnly;
+  const showEdit = isOwn && !isWebhook && !readOnly;
+  // A webhook author is not a user, nor is the deleted account's placeholder:
+  // there is no one to report (a moderator deletes the message or the webhook)
+  const showReport = !isOwn && !isSystemMessage && !inSecureChannel && !isWebhook && !authorDeleted;
+  const hasActions = showReply || showReact || showEdit || canDelete || showReport;
+
   return (
     <>
       <div
@@ -244,12 +290,12 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
         {replyPreview}
 
         {/* Hover action buttons */}
-        {!isEditing && (
+        {!isEditing && hasActions && (
           <div data-testid="message-actions" className={clsx(
             'absolute -top-3 right-2 z-10 items-center gap-0.5 rounded-md border border-vox-border bg-vox-bg-secondary px-1 py-0.5 shadow-lg',
             showReactionPicker ? 'flex' : 'hidden group-hover:flex'
           )}>
-            {!isSystemMessage && (
+            {showReply && (
               <button
                 onClick={handleReply}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
@@ -259,23 +305,25 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 <Reply size={14} />
               </button>
             )}
-            <button
-              ref={reactionBtnRef}
-              onClick={() => setShowReactionPicker(!showReactionPicker)}
-              className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-              title={t('messageItem.addReaction')}
-              aria-label={t('messageItem.addReaction')}
-            >
-              <SmilePlus size={14} />
-            </button>
-            {showReactionPicker && (
+            {showReact && (
+              <button
+                ref={reactionBtnRef}
+                onClick={() => setShowReactionPicker(!showReactionPicker)}
+                className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+                title={t('messageItem.addReaction')}
+                aria-label={t('messageItem.addReaction')}
+              >
+                <SmilePlus size={14} />
+              </button>
+            )}
+            {showReact && showReactionPicker && (
               <EmojiPicker
                 anchorRef={reactionBtnRef}
                 onEmojiSelect={handleReactionSelect}
                 onClose={() => setShowReactionPicker(false)}
               />
             )}
-            {isOwn && !isWebhook && (
+            {showEdit && (
               <button
                 onClick={handleStartEdit}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
@@ -295,9 +343,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 <Trash2 size={14} />
               </button>
             )}
-            {/* A webhook author is not a user: there is no one to report (a
-                moderator deletes the message or the webhook instead) */}
-            {!isOwn && !isSystemMessage && !inSecureChannel && !isWebhook && (
+            {showReport && (
               <button
                 onClick={() => setShowReportModal(true)}
                 className="rounded p-1 text-vox-text-muted hover:text-vox-accent-warning hover:bg-vox-accent-warning/10 transition-colors"
@@ -313,8 +359,13 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
         {showHeader ? (
           <>
             <div className="flex items-start gap-3">
-              {/* Avatar + Name hover target — plain for a webhook author (no profile to open) */}
-              {isWebhook ? (
+              {/* Avatar + Name hover target — plain for a webhook author (no profile
+                  to open), neutral for the deleted account's placeholder */}
+              {authorDeleted ? (
+                <div className="mt-0.5 shrink-0">
+                  <DeletedUserAvatar size="md" />
+                </div>
+              ) : isWebhook ? (
                 <div className="mt-0.5 shrink-0">
                   <Avatar avatarUrl={message.author.avatarUrl} displayName={message.author.displayName} size="md" />
                 </div>
@@ -326,7 +377,11 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
 
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
-                  {isWebhook ? (
+                  {authorDeleted ? (
+                    <span data-testid="deleted-author-name" className="text-[14px] font-semibold text-vox-text-muted">
+                      {t('dm.deletedParticipant.name')}
+                    </span>
+                  ) : isWebhook ? (
                     <span
                       data-testid="webhook-author-name"
                       className={clsx('text-[14px] font-semibold', isDeletedWebhook ? 'text-vox-text-muted' : 'text-vox-text-primary')}
@@ -347,7 +402,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                       </span>
                     </UserHoverTarget>
                   )}
-                  {isWebhook ? (
+                  {authorDeleted ? null : isWebhook ? (
                     <AppTag />
                   ) : (
                     <>
@@ -397,7 +452,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 )}
               </div>
             </div>
-            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} />
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly} />
           </>
         ) : (
           <>
@@ -440,7 +495,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
                 </div>
               )}
             </div>
-            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} />
+            <ReactionDisplay reactions={message.reactions || []} messageId={message.id} channelId={channelId} conversationId={conversationId} readOnly={readOnly} />
           </>
         )}
       </div>
@@ -454,7 +509,7 @@ export const MessageItem = memo(function MessageItem({ message, showHeader, addT
         />
       )}
 
-      {showReportModal && !isWebhook && (
+      {showReportModal && showReport && (
         <ReportModal
           type="message"
           reportedUserId={message.author.id}

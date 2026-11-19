@@ -835,7 +835,12 @@
     "beginningOfConversation": "Beginning of conversation",
     "conversationStart": "This is the start of your direct message history.",
     "welcomeMessage": "Select a conversation from the sidebar, or click on a member in any space to start a new one.",
-    "failedToLoadConversations": "Failed to load conversations"
+    "failedToLoadConversations": "Failed to load conversations",
+    "deletedParticipant": {
+      "name": "Deleted user",
+      "readOnlyNotice": "This conversation is read-only: the other person's account was deleted.",
+      "messageDeleted": "Message deleted"
+    }
   },
   "friends": {
     "title": "Friends",
@@ -1333,6 +1338,7 @@
     "noPermissionViewChannel": "You do not have permission to view this channel",
     "cannotDmSelf": "Cannot create conversation with yourself",
     "notAParticipant": "Not a participant of this conversation",
+    "conversationReadOnly": "This conversation is read-only",
     "voiceDisabled": "Voice channels are currently disabled",
     "voiceCallsDisabled": "Voice calls are currently disabled",
     "voiceChannelFull": "Voice channel is full",

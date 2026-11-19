@@ -835,7 +835,12 @@
     "beginningOfConversation": "Beginn der Unterhaltung",
     "conversationStart": "Dies ist der Beginn deines Direktnachrichtenverlaufs.",
     "welcomeMessage": "Wähle eine Unterhaltung in der Seitenleiste aus oder klicke auf ein Mitglied in einem beliebigen Space, um eine neue zu starten.",
-    "failedToLoadConversations": "Unterhaltungen konnten nicht geladen werden"
+    "failedToLoadConversations": "Unterhaltungen konnten nicht geladen werden",
+    "deletedParticipant": {
+      "name": "Gelöschter Benutzer",
+      "readOnlyNotice": "Diese Unterhaltung ist schreibgeschützt: Das Konto der anderen Person wurde gelöscht.",
+      "messageDeleted": "Nachricht gelöscht"
+    }
   },
   "friends": {
     "title": "Freunde",
@@ -1380,6 +1385,7 @@
     "noPermissionViewChannel": "Du hast keine Berechtigung, diesen Kanal anzuzeigen",
     "cannotDmSelf": "Du kannst keine Unterhaltung mit dir selbst erstellen",
     "notAParticipant": "Du bist kein Teilnehmer dieser Unterhaltung",
+    "conversationReadOnly": "Diese Unterhaltung ist schreibgeschützt",
     "voiceDisabled": "Sprachkanäle sind derzeit deaktiviert",
     "voiceCallsDisabled": "Sprachanrufe sind derzeit deaktiviert",
     "voiceChannelFull": "Der Sprachkanal ist voll",

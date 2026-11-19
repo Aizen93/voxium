@@ -29,6 +29,7 @@ import {
   parseE2EPlaintext,
   e2eChannelScope,
   parseE2EScope,
+  isDeletedParticipantId,
 } from '@voxium/shared';
 import type {
   E2EDeviceEntry,
@@ -65,6 +66,7 @@ import {
   type PendingKeyShare,
   type PickleKeyProvider,
   type PinnedIdentity,
+  type PlaintextPurgeEntry,
   vaultDbName,
 } from './vault';
 import { pinSecure, securePinGeneration } from '../../utils/securePins';
@@ -290,6 +292,49 @@ export class E2EServiceDisposedError extends Error {
     this.name = 'E2EServiceDisposedError';
   }
 }
+
+/**
+ * A peer named by the server's deleted-account placeholder
+ * (`deleted:{conversationId}`, DELETED_PARTICIPANT_ID_PREFIX): a conversation
+ * that outlived the other side's account. There is nobody behind that id: no
+ * device list to fetch, no identity to pin or verify, nothing to encrypt to,
+ * no session to set up, so the service refuses it at its boundary
+ * (refuseDeletedParticipant) and asks the server nothing about it. Not a
+ * session ending (isE2ESessionEnded does not match it) and not a peer that has
+ * no device yet (E2EPeerNotReadyError): the conversation is read-only.
+ */
+export class E2EDeletedParticipantError extends Error {
+  constructor() {
+    super('The other side of this conversation is a deleted account');
+    this.name = 'E2EDeletedParticipantError';
+  }
+}
+
+/** Whether a peer id the service was handed is the deleted-account placeholder. */
+function namesDeletedParticipant(userId: unknown): boolean {
+  return isDeletedParticipantId(userId);
+}
+
+/** The boundary check of every public method that asks or tells the server about a peer: throws for the placeholder. */
+function refuseDeletedParticipant(userId: unknown): void {
+  if (namesDeletedParticipant(userId)) throw new E2EDeletedParticipantError();
+}
+
+/** Up to this many `pt:` entries are walked per queue task of a cache purge (purgeCachedPlaintexts). */
+export const PLAINTEXT_PURGE_BATCH = 500;
+
+/**
+ * The purge mark of a conversation whose other side's account was deleted
+ * (`ptpurge:read-only:{conversationId}`): written once a conversation list
+ * confirmed the deletion and the walk ended. A marked scope is read-only from
+ * the start of every later session (scopeMarkedPurged) until a list of that
+ * session names the conversation; one serving it live clears the mark
+ * (clearPurgeMarks), so that the next session starts right.
+ */
+export const READ_ONLY_PURGE_MARK = 'read-only';
+
+/** After a read of the purge marks failed, questions answer "not marked" for this long before the marks are read again. */
+export const PURGE_MARK_RETRY_MS = 30_000;
 
 export interface E2EServiceOptions {
   api?: typeof defaultApi;
@@ -681,6 +726,19 @@ export class E2EService {
    * scope → session ids: announced once that task is done (enqueue).
    */
   private sessionsStored = new Map<string, Set<string>>();
+  /** Purge marks read from the vault, per mark (scopePurged); absent until the read ended. */
+  private purgeMarks = new Map<string, Set<string>>();
+  /** Marks this service wrote before their read ended: merged into it. */
+  private purgeMarksWritten = new Map<string, Set<string>>();
+  /** The read of a mark's scopes in flight (one range read, shared). */
+  private purgeMarkLoads = new Map<string, Promise<Set<string>>>();
+  /**
+   * How many times each `{mark}:{scope}` was voided (a failed removal, a list serving it live):
+   * a walk that began before one records no mark for that scope.
+   */
+  private purgeMarkVoids = new Map<string, number>();
+  /** When the last read of a mark's scopes failed: no new read before PURGE_MARK_RETRY_MS. */
+  private purgeMarkLoadFailedAt = new Map<string, number>();
 
   constructor(
     private readonly userId: string,
@@ -835,6 +893,12 @@ export class E2EService {
     // connection it was making and throws (E2EVaultClosedError).
     await this.vault.open();
     this.assertLive();
+    // the read-only marks, from the start: the display gate asks for them
+    // before any list (scopePurged); a failed read is logged there
+    void this.loadPurgeMarks(READ_ONLY_PURGE_MARK).catch((err: unknown) => {
+      // logged by loadPurgeMarks; the next question reads them again
+      console.debug('e2e: the read-only purge marks were not read at start:', errText(err));
+    });
 
     let deviceId = await this.vault.getDeviceId();
     this.assertLive();
@@ -2130,6 +2194,10 @@ export class E2EService {
     freshness: boolean | number = false
   ): Promise<E2EPinnedDeviceList> {
     this.assertLive();
+    // No `GET /e2e/devices/deleted:…`, no pin, no recorded state, no
+    // onDeviceListChanged: there is no account behind the placeholder. Every
+    // path that reaches the server for a peer's list comes through here.
+    refuseDeletedParticipant(userId);
     // `freshness`: false = normal cache, true = force a round trip, or a
     // max-age in ms. The send path passes a small max-age instead of forcing —
     // two uncached GETs per message would exhaust the per-user rate limit
@@ -2424,8 +2492,11 @@ export class E2EService {
    * acknowledged, so the warning still fires.
    */
   async deviceListStatus(userId: string): Promise<E2EDeviceListStatus> {
+    const nothing: E2EDeviceListStatus = { version: 0, deviceIds: [], newDeviceIds: [], unsignedDeviceIds: [], changed: false };
+    // the deleted-account placeholder has no list: nothing new, nothing to warn about
+    if (namesDeletedParticipant(userId)) return nothing;
     const state = await this.liveVault.getDeviceListState(userId);
-    if (!state) return { version: 0, deviceIds: [], newDeviceIds: [], unsignedDeviceIds: [], changed: false };
+    if (!state) return nothing;
     const crossSigned = new Set(state.crossSignedDeviceIds ?? []);
     // Only meaningful once the account HAS a master key: before cross-signing
     // is bootstrapped every device is unsigned, which is not a signal (D11).
@@ -2527,6 +2598,8 @@ export class E2EService {
    * approved or revoked. Clicking "I've seen it" cannot manufacture trust.
    */
   async acknowledgeDeviceList(userId: string, seenDeviceIds?: string[]): Promise<void> {
+    // no list was ever recorded for the deleted-account placeholder: nothing to acknowledge
+    if (namesDeletedParticipant(userId)) return;
     return this.enqueue(() => this.acknowledgeDeviceListUnqueued(userId, seenDeviceIds));
   }
 
@@ -2571,6 +2644,8 @@ export class E2EService {
    * may have gone to a device we no longer trust).
    */
   async acceptNewIdentity(peerUserId: string): Promise<void> {
+    // its own GET of the list, so its own check: no identity to accept for the placeholder
+    refuseDeletedParticipant(peerUserId);
     return this.enqueue(async () => {
       const res = await this.api.get(`/e2e/devices/${peerUserId}`);
       const data = res.data.data as {
@@ -2644,6 +2719,8 @@ export class E2EService {
 
   /** Drop every pairwise session with a user so the next share re-establishes. */
   async resetSession(peerUserId: string): Promise<void> {
+    // no pairwise session was ever set up with the placeholder
+    if (namesDeletedParticipant(peerUserId)) return;
     return this.enqueue(async () => {
       this.dropOlmSessionsInMemory(peerUserId);
       await this.vault.deleteSessionsForUser(peerUserId);
@@ -3838,6 +3915,10 @@ export class E2EService {
     ) {
       throw new Error('malformed key share');
     }
+    // A share naming the deleted-account placeholder as its sender can never
+    // be imported: unusable for good (discarded and acknowledged), and its
+    // sender is never looked up
+    if (namesDeletedParticipant(senderUserId)) throw new Error('key share names a deleted account as its sender');
     const envelope = parseE2EEnvelope(share.body);
     if (!envelope || envelope.e !== E2E_ENGINE_OLM1) throw new Error('key share body is not an olm1 envelope');
 
@@ -3913,6 +3994,8 @@ export class E2EService {
     peerUserId: string,
     plaintext: string
   ): Promise<{ envelope: string; position: E2EMessagePosition }> {
+    // nothing is encrypted, and no key shared, to the deleted-account placeholder
+    refuseDeletedParticipant(peerUserId);
     return this.enqueue(async () => {
       const { session, record } = await this.ensureGroupSession(conversationId, peerUserId);
       // Read BEFORE encrypt(), which advances the ratchet: this is the index a
@@ -3967,6 +4050,8 @@ export class E2EService {
    * the peer has published nothing — callers abort, never degrade.
    */
   async encryptToDevice(userId: string, deviceId: string, plaintext: string): Promise<string> {
+    // no device, no session, no call signal or voice key for the placeholder
+    refuseDeletedParticipant(userId);
     return this.enqueue(async () => {
       const olm = await this.ensureOlmSession(userId, deviceId);
       const { messageType, body } = olm.encrypt(plaintext) as { messageType: 0 | 1; body: string };
@@ -3987,6 +4072,8 @@ export class E2EService {
    * dropped packet.
    */
   async decryptFromDevice(userId: string, deviceId: string, envelopeStr: string): Promise<string | null> {
+    // its answer to anything that cannot be decrypted: no list fetched, no session set up
+    if (namesDeletedParticipant(userId)) return null;
     const envelope = parseE2EEnvelope(envelopeStr);
     if (!envelope || envelope.e !== E2E_ENGINE_OLM1) return null;
     // First contact with this sender device: verify + TOFU-pin its identity
@@ -4112,6 +4199,132 @@ export class E2EService {
     return true;
   }
 
+  /**
+   * Drop the cache entry of one message, when it is of `scope` and written by
+   * `authorId`: a decrypt that was already running when its conversation
+   * turned read-only wrote it after the conversation's purge may have walked
+   * past it. On the serial queue, so after the decrypt that wrote it.
+   */
+  async forgetCachedPlaintext(
+    messageId: string,
+    expected: { scope: string; authorId: string },
+    opts: { mark?: string } = {},
+  ): Promise<void> {
+    return this.enqueue(async () => {
+      try {
+        const cached = await this.vault.getPlaintext(messageId);
+        if (!cached || cached.conversationId !== expected.scope || cached.authorId !== expected.authorId) return;
+        await this.vault.deletePlaintext(messageId);
+      } catch (err) {
+        // The entry may still be there: a scope recorded as purged under
+        // `mark` is not any more, so the next walk of it runs again
+        if (opts.mark && !isE2ESessionEnded(err)) await this.voidPurgeRecord(opts.mark, expected.scope);
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Whether a purge under `mark` has ended for `scope` (its mark in the vault):
+   * a boolean once the marks are read (one range read at the start of the
+   * service, or at the first question), a promise only until then. A read that
+   * fails answers false, logged once per attempt; for PURGE_MARK_RETRY_MS after
+   * it, every question answers false at once, with no new read.
+   */
+  scopePurged(mark: string, scope: string): boolean | Promise<boolean> {
+    const loaded = this.purgeMarks.get(mark);
+    if (loaded) return loaded.has(scope);
+    const failedAt = this.purgeMarkLoadFailedAt.get(mark);
+    if (failedAt !== undefined && Date.now() - failedAt < PURGE_MARK_RETRY_MS) return false;
+    return this.loadPurgeMarks(mark).then(
+      (scopes) => scopes.has(scope),
+      () => false,
+    );
+  }
+
+  private loadPurgeMarks(mark: string): Promise<Set<string>> {
+    const inFlight = this.purgeMarkLoads.get(mark);
+    if (inFlight) return inFlight;
+    const load = this.liveVault.listPurgedScopes(mark).then(
+      (scopes) => {
+        const set = new Set(scopes);
+        // marks written meanwhile (this service's own purges) are kept
+        for (const scope of this.purgeMarksWritten.get(mark) ?? []) set.add(scope);
+        this.purgeMarksWritten.delete(mark);
+        this.purgeMarks.set(mark, set);
+        this.purgeMarkLoadFailedAt.delete(mark);
+        return set;
+      },
+      (err: unknown) => {
+        this.purgeMarkLoads.delete(mark);
+        this.purgeMarkLoadFailedAt.set(mark, Date.now());
+        if (!isE2ESessionEnded(err)) console.warn(`e2e: the "${mark}" purge marks could not be read:`, errText(err));
+        throw err;
+      },
+    );
+    this.purgeMarkLoads.set(mark, load);
+    return load;
+  }
+
+  /** A walk of this scope running now must not write the mark when it ends (purgeCachedPlaintexts). */
+  private voidRunningWalks(mark: string, scope: string): void {
+    const key = `${mark}:${scope}`;
+    this.purgeMarkVoids.set(key, (this.purgeMarkVoids.get(key) ?? 0) + 1);
+  }
+
+  /**
+   * A removal under `mark` failed (inside a queue task): the scope's record in
+   * the vault goes, so its next walk runs again, and a walk running now writes
+   * none. The in-memory mark stays: it feeds the display gate alone, and the
+   * scope is still held read-only (the walk decision reads the vault).
+   */
+  private async voidPurgeRecord(mark: string, scope: string): Promise<void> {
+    this.voidRunningWalks(mark, scope);
+    try {
+      await this.vault.deletePurgeMark(mark, scope);
+    } catch (err) {
+      console.warn(`e2e: the "${mark}" purge mark of a scope could not be cleared:`, errText(err));
+    }
+  }
+
+  /**
+   * Clear the mark of these scopes, in the vault and in memory, on the serial
+   * queue: a conversation list served them live, so they are gated as live
+   * again (what was purged stays purged). A walk running for one writes no
+   * mark for it. A scope that holds no mark costs a delete of nothing; one
+   * whose record could not be deleted is logged, and is held again by a later
+   * session until its first list clears it.
+   */
+  async clearPurgeMarks(mark: string, scopes: readonly string[]): Promise<void> {
+    this.assertLive();
+    const wanted = [...new Set(scopes)].filter((scope) => typeof scope === 'string' && scope.length > 0);
+    if (wanted.length === 0) return;
+    // in memory at once: the gate asks before the queue gets here
+    const forget = () => {
+      for (const scope of wanted) {
+        this.voidRunningWalks(mark, scope);
+        this.purgeMarks.get(mark)?.delete(scope);
+        this.purgeMarksWritten.get(mark)?.delete(scope);
+      }
+    };
+    forget();
+    await this.enqueue(async () => {
+      // a read of the marks in flight lands first, so it cannot bring a cleared scope back
+      await this.purgeMarkLoads.get(mark)?.catch((err: unknown) => {
+        console.debug(`e2e: the "${mark}" purge marks were not read before a clear:`, errText(err));
+      });
+      forget();
+      for (const scope of wanted) {
+        try {
+          await this.vault.deletePurgeMark(mark, scope);
+        } catch (err) {
+          if (isE2ESessionEnded(err)) throw err;
+          console.warn(`e2e: the "${mark}" purge mark of a scope could not be cleared:`, errText(err));
+        }
+      }
+    });
+  }
+
   /** Read cached plaintext for a message id the SERVER named (see cacheEntryAnswers). */
   async getCachedPlaintext(
     messageId: string,
@@ -4149,6 +4362,9 @@ export class E2EService {
     },
     opts: { claimMissing?: boolean; storageFailureRejects?: boolean } = {},
   ): Promise<DecryptResult> {
+    // A row under the deleted-account placeholder: no session speaks for that
+    // id, so nothing is read, claimed or decrypted for it
+    if (namesDeletedParticipant(message.authorId)) return { text: '', failed: true };
     const claimMissing = opts.claimMissing ?? true;
     const storageFailureRejects = opts.storageFailureRejects ?? false;
     const version = message.editedAt ?? null;
@@ -4349,6 +4565,86 @@ export class E2EService {
       }));
   }
 
+  /**
+   * Remove decrypted-text cache entries (`pt:`) of a SET of scopes (conversation
+   * ids, or `ch:{channelId}`) for which `remove` answers true, in ONE walk of
+   * the cache; answers how many went (`removed`) and, with a mark, which of
+   * the scopes asked for hold it when the call ends (`marked`). `remove` sees each entry's scope, its
+   * author (as the entry recorded it), message id and creation and edit times,
+   * never the text, and runs synchronously: a conversation whose other side's
+   * account was deleted drops every entry another author wrote; a time floor
+   * can drop the entries up to it.
+   *
+   * With a `mark`, a purge that ends is recorded per scope in the vault
+   * (`ptpurge:{mark}:{scope}`), and a scope already recorded under that mark is
+   * left out: a later session walks nothing for it. `record`, asked once per
+   * scope when the walk ends, narrows the scopes recorded (all, without it): a
+   * read-only conversation is recorded only once a conversation list confirmed
+   * it, never on an event alone. Only for a purge whose entries cannot come
+   * back (a read-only conversation's other author writes nothing new, and the
+   * display gate decrypts none of their rows).
+   *
+   * Bounded: a cursor walks the cache PLAINTEXT_PURGE_BATCH entries at a time,
+   * each batch its own task of the serial queue (so it is ordered with the
+   * decrypts that write entries, refused once the service is disposed, and
+   * holds the queue for one batch at most), resuming after the last key it
+   * visited; nothing loads the whole store. Idempotent: a second run over a
+   * purged scope deletes nothing. A batch that fails rejects with what failed,
+   * records no mark, and leaves the entries after it for the next run; the
+   * caller logs it.
+   */
+  async purgeCachedPlaintexts(
+    scopes: readonly string[],
+    remove: (entry: PlaintextPurgeEntry) => boolean,
+    opts: { mark?: string; record?: (scope: string) => boolean } = {},
+  ): Promise<{ removed: number; marked: string[] }> {
+    this.assertLive();
+    const wanted = [...new Set(scopes)];
+    if (wanted.length === 0 || wanted.some((scope) => typeof scope !== 'string' || scope.length === 0)) {
+      throw new Error('a cache purge needs a scope');
+    }
+    const mark = opts.mark;
+    if (mark !== undefined && (typeof mark !== 'string' || !/^[a-z][a-z0-9-]*$/.test(mark))) {
+      throw new Error('a cache purge mark is a lowercase word');
+    }
+    // a removal that fails from here on voids the mark of its scope for this walk
+    const voidsAtStart = new Map(wanted.map((scope) => [scope, this.purgeMarkVoids.get(`${mark}:${scope}`) ?? 0]));
+    const pending = mark ? await this.enqueue(() => this.vault.scopesNotPurged(mark, wanted)) : wanted;
+    const alreadyMarked = mark ? wanted.filter((scope) => !pending.includes(scope)) : [];
+    if (pending.length === 0) return { removed: 0, marked: alreadyMarked };
+    const set = new Set(pending);
+    let after: string | null = null;
+    let removed = 0;
+    do {
+      const from: string | null = after;
+      const batch: { removed: number; next: string | null } = await this.enqueue(() =>
+        this.vault.purgePlaintextBatch(set, remove, from, PLAINTEXT_PURGE_BATCH)
+      );
+      removed += batch.removed;
+      after = batch.next;
+    } while (after !== null);
+    // The mark only for the scopes `record` names when the walk ends (all,
+    // without it) and no removal failed for since the walk began: decided and
+    // written in ONE queue task, so a removal (also a queue task) that fails
+    // is either seen here or clears the mark written here
+    const recorded: string[] = !mark ? [] : await this.enqueue(async () => {
+      const chosen = pending.filter((scope) =>
+        (opts.record?.(scope) ?? true) && (this.purgeMarkVoids.get(`${mark}:${scope}`) ?? 0) === voidsAtStart.get(scope));
+      if (chosen.length === 0) return chosen;
+      await this.vault.putScopesPurged(mark, chosen);
+      const known = this.purgeMarks.get(mark);
+      if (known) {
+        for (const scope of chosen) known.add(scope);
+      } else {
+        const written = this.purgeMarksWritten.get(mark) ?? new Set<string>();
+        for (const scope of chosen) written.add(scope);
+        this.purgeMarksWritten.set(mark, written);
+      }
+      return chosen;
+    });
+    return { removed, marked: [...alreadyMarked, ...recorded] };
+  }
+
   // ─── Device management for the UI ───────────────────────────────────────────
 
   /** This account's registered devices, as the server sees them. */
@@ -4437,6 +4733,8 @@ export class E2EService {
   /** One safety number per device of the peer (D10). */
   async perDeviceSafetyNumbers(peerUserId: string): Promise<E2EDeviceSafetyNumber[]> {
     this.assertLive();
+    // no device, so no number (the "unavailable" answer), and no list fetched for it
+    if (namesDeletedParticipant(peerUserId)) return [];
     let devices: E2EDeviceIdentity[];
     try {
       devices = (await this.fetchDeviceList(peerUserId)).devices;
@@ -4477,6 +4775,8 @@ export class E2EService {
    */
   async accountSafetyNumber(peerUserId: string): Promise<E2EAccountSafetyNumber | null> {
     this.assertLive();
+    // no account key behind the placeholder: the "unavailable" answer, nothing fetched
+    if (namesDeletedParticipant(peerUserId)) return null;
     const own = await this.ownMasterKey();
     if (!own) return null;
     try {
@@ -4496,11 +4796,14 @@ export class E2EService {
 
   /** Has the peer's ACCOUNT key been compared out of band (D9)? */
   async isAccountVerified(peerUserId: string): Promise<boolean> {
+    if (namesDeletedParticipant(peerUserId)) return false;
     return (await this.liveVault.getMasterIdentity(peerUserId))?.verified ?? false;
   }
 
   /** Mark ONE device of a peer as verified out of band. */
   async markDeviceVerified(peerUserId: string, deviceId: string): Promise<void> {
+    // nothing was ever pinned for the placeholder: "verified" would be a claim about nobody
+    refuseDeletedParticipant(peerUserId);
     const identity = await this.liveVault.getIdentity(peerUserId, deviceId);
     if (!identity) return;
     await this.liveVault.putIdentity(peerUserId, deviceId, { ...identity, verified: true });
@@ -4524,6 +4827,8 @@ export class E2EService {
    * individually so accounts without a master key (D11) keep working.
    */
   async markIdentityVerified(peerUserId: string): Promise<void> {
+    // no account key and no device behind the placeholder: "verified" would be a claim about nobody
+    refuseDeletedParticipant(peerUserId);
     const master = await this.liveVault.getMasterIdentity(peerUserId);
     if (master && !master.verified) {
       await this.liveVault.putMasterIdentity(peerUserId, { ...master, verified: true });
@@ -4568,6 +4873,18 @@ export function getE2EService(userId: string): E2EService {
   activeService = new E2EService(userId);
   activeUserId = userId;
   return activeService;
+}
+
+/**
+ * Whether the signed-in account's service holds `scope` as purged under the
+ * read-only mark: a conversation an earlier session confirmed as read-only,
+ * read-only from the start of this one (the display gate asks before any
+ * list). False when no service of that account exists yet; a boolean once
+ * the marks are read, a promise only until then.
+ */
+export function scopeMarkedPurged(userId: string | null | undefined, scope: string): boolean | Promise<boolean> {
+  if (!userId || !activeService || activeUserId !== userId) return false;
+  return activeService.scopePurged(READ_ONLY_PURGE_MARK, scope);
 }
 
 export function disposeE2EService(): void {

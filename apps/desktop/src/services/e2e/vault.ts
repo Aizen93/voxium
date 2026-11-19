@@ -20,6 +20,7 @@
 //   pka:{shareId}                    an acknowledgement of a claimed share still owed to the server (§12.3)
 //   history_pull                     where an unfinished history pull stands (§16.3)
 //   pt:{messageId}                   decrypted-plaintext cache entry
+//   ptpurge:{mark}:{scope}           a purge of the `pt:` entries of a scope that ended (purgeCachedPlaintexts)
 //
 // `master_secret` holds the Ed25519 master private key that cross-signs this
 // account's devices. Like every other secret it is stored SEALED (AES-256-GCM
@@ -251,6 +252,20 @@ export interface CachedPlaintext {
    *  below it is an older ciphertext presented as a newer version (rollback). */
   sessionId?: string;
   messageIndex?: number;
+}
+
+/**
+ * What a purge of the plaintext cache decides on, per entry: its scope (a
+ * conversation id, or `ch:{channelId}`), who wrote it (an entry that records
+ * no author says nothing about it), which message it is, and when it was
+ * created and last edited. Never the text.
+ */
+export interface PlaintextPurgeEntry {
+  scope: string;
+  messageId: string;
+  authorId?: string;
+  createdAt?: string;
+  editedAt: string | null;
 }
 
 /** One Megolm ratchet position: the session and the index within it. */
@@ -748,6 +763,9 @@ export class E2EVault {
   putPlaintext(messageId: string, entry: CachedPlaintext): Promise<void> {
     return this.put(`pt:${messageId}`, entry);
   }
+  deletePlaintext(messageId: string): Promise<void> {
+    return this.delete(`pt:${messageId}`);
+  }
 
   // ── Ratchet-position bindings (replay / rollback firewall) ──
   getMessagePosition(sessionId: string, messageIndex: number): Promise<MessagePositionBinding | undefined> {
@@ -784,6 +802,112 @@ export class E2EVault {
           cursor.continue();
         };
       })
+    );
+  }
+
+  /**
+   * One batch of a purge of the plaintext cache (E2EService.purgeCachedPlaintexts):
+   * ONE readwrite cursor over the `pt:` range, starting after the key `after`
+   * (from the start when null), that visits at most `limit` entries of any
+   * scope, deletes those of `scopes` for which `remove` answers true, and stops.
+   * Answers how many it deleted and the key to resume after, or `next: null`
+   * once the range is done. Settles when the transaction has committed.
+   *
+   * `remove` runs synchronously inside the transaction (nothing may be awaited
+   * there, or IndexedDB commits it); one that throws aborts the batch, so it
+   * deletes nothing.
+   */
+  purgePlaintextBatch(
+    scopes: ReadonlySet<string>,
+    remove: (entry: PlaintextPurgeEntry) => boolean,
+    after: string | null,
+    limit: number,
+  ): Promise<{ removed: number; next: string | null }> {
+    return this.withStore('readwrite', (store) =>
+      new Promise((resolve, reject) => {
+        const tx = store.transaction;
+        const upper = `pt:${KEY_MAX}`;
+        const range = after === null ? IDBKeyRange.bound('pt:', upper) : IDBKeyRange.bound(after, upper, true, false);
+        let removed = 0;
+        let visited = 0;
+        let next: string | null = null;
+        let failure: unknown = null;
+        tx.oncomplete = () => resolve({ removed, next });
+        tx.onabort = () => reject(failure ?? tx.error ?? new Error('IndexedDB purge transaction aborted'));
+        const cursorReq = store.openCursor(range);
+        cursorReq.onerror = () => {
+          failure = cursorReq.error ?? new Error('IndexedDB cursor failed');
+        };
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) {
+            next = null;
+            return;
+          }
+          const key = String(cursor.key);
+          const entry = cursor.value as CachedPlaintext | undefined;
+          visited += 1;
+          if (entry && scopes.has(entry.conversationId)) {
+            let drop: boolean;
+            try {
+              drop = remove({
+                scope: entry.conversationId,
+                messageId: key.slice(3),
+                ...(entry.authorId !== undefined && { authorId: entry.authorId }),
+                ...(entry.createdAt !== undefined && { createdAt: entry.createdAt }),
+                editedAt: entry.editedAt ?? null,
+              });
+            } catch (err) {
+              failure = err;
+              tx.abort();
+              return;
+            }
+            if (drop) {
+              cursor.delete();
+              removed += 1;
+            }
+          }
+          if (visited >= limit) {
+            next = key;
+            return;
+          }
+          cursor.continue();
+        };
+      })
+    );
+  }
+
+  // ── Purges that ended, per scope (ptpurge:{mark}:{scope}) ──
+  // `mark` names what the purge removed, so a later session skips the walk
+  // for a scope already done; nothing but the time is stored.
+
+  /** The scopes among `scopes` a purge under `mark` has not ended for yet, in one transaction. */
+  scopesNotPurged(mark: string, scopes: readonly string[]): Promise<string[]> {
+    if (scopes.length === 0) return Promise.resolve([]);
+    return this.withStore('readonly', async (s) => {
+      // every request issued in this tick: one transaction
+      const done = await Promise.all(scopes.map((scope) => requestToPromise(s.get(`ptpurge:${mark}:${scope}`))));
+      return scopes.filter((_scope, i) => done[i] === undefined);
+    });
+  }
+
+  /** Every scope a purge under `mark` has ended for: one range read of `ptpurge:{mark}:`. */
+  async listPurgedScopes(mark: string): Promise<string[]> {
+    const prefix = `ptpurge:${mark}:`;
+    return (await this.keysWithPrefix(prefix)).map((key) => key.slice(prefix.length));
+  }
+
+  /** Forget that a purge under `mark` ended for `scope`: the next session walks it again. */
+  deletePurgeMark(mark: string, scope: string): Promise<void> {
+    return this.delete(`ptpurge:${mark}:${scope}`);
+  }
+
+  /** Record that a purge under `mark` ended for `scopes`, in one transaction. */
+  putScopesPurged(mark: string, scopes: readonly string[]): Promise<void> {
+    if (scopes.length === 0) return Promise.resolve();
+    const at = Date.now();
+    return this.withStore('readwrite', (s) =>
+      Promise.all(scopes.map((scope) => requestToPromise(s.put({ at }, `ptpurge:${mark}:${scope}`)))).then(() => undefined)
     );
   }
 

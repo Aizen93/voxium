@@ -12,15 +12,22 @@ import type { Conversation, Message, ReactionGroup } from '@voxium/shared';
  * service and the key server are exercised in e2eService.test.ts.
  */
 
-const { decryptMessage, getCachedPlaintext, api } = vi.hoisted(() => ({
+const { decryptMessage, getCachedPlaintext, forgetCachedPlaintext, scopeMarkedPurged, api } = vi.hoisted(() => ({
   decryptMessage: vi.fn(),
   getCachedPlaintext: vi.fn(),
+  forgetCachedPlaintext: vi.fn(async () => {}),
+  // the purge marks of an earlier session, per scope (E2EService.scopePurged)
+  scopeMarkedPurged: vi.fn<(userId: string | null | undefined, scope: string) => boolean | Promise<boolean>>(() => false),
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
 
 vi.mock('../../services/e2e/e2eService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/e2e/e2eService')>();
-  return { ...actual, getE2EService: () => ({ decryptMessage, getCachedPlaintext }) };
+  return {
+    ...actual,
+    getE2EService: () => ({ decryptMessage, getCachedPlaintext, forgetCachedPlaintext }),
+    scopeMarkedPurged: (userId: string | null | undefined, scope: string) => scopeMarkedPurged(userId, scope),
+  };
 });
 vi.mock('../../stores/authStore', () => ({
   useAuthStore: { getState: () => ({ user: { id: 'me' } }) },
@@ -133,6 +140,8 @@ beforeEach(() => {
   decryptMessage.mockImplementation(decryptsFromSessionsHere);
   getCachedPlaintext.mockReset();
   getCachedPlaintext.mockImplementation(readsTheCache);
+  scopeMarkedPurged.mockReset();
+  scopeMarkedPurged.mockImplementation(() => false);
   for (const fn of Object.values(api)) fn.mockReset();
   sessionsHere.clear();
   cache.clear();
@@ -724,5 +733,98 @@ describe('once a row opens', () => {
     arrive('ch:ch1', [SID_A]);
     await redecryptPassesSettled();
     expect(rowById('m2')?.replyTo?.content).toBe('text of m1');
+  });
+});
+
+describe('a conversation held read-only (the other side\'s account was deleted)', () => {
+  const readOnlyC1 = (lastMessage: Conversation['lastMessage']) => ({
+    id: 'c1', user1Id: 'me', user2Id: null, participant: { id: 'deleted:c1', username: 'deleted', displayName: 'Deleted user', avatarUrl: null },
+    participantDeleted: true, lastMessage, encryptedAt: '2026-11-01T09:00:00.000Z', createdAt: '2026-11-01T09:00:00.000Z',
+  }) as Conversation;
+
+  it('a row that failed before the flip is never tried again when its session arrives, and no preview is filled', async () => {
+    useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A)]) });
+    const closed = rowById('m1');
+    expect(decryptMessage).toHaveBeenCalledTimes(1);
+    // the conversation turns read-only (its preview, an encrypted row of the other person, left blank)
+    useDMStore.setState({
+      conversations: [readOnlyC1({ id: 'm1', content: '', encrypted: true, type: 'user', createdAt: '2026-11-01T10:00:00.000Z', authorId: 'peer' })],
+    });
+
+    arrive('c1', [SID_A]);
+    await redecryptPassesSettled();
+
+    expect(decryptMessage).toHaveBeenCalledTimes(1);
+    expect(rowById('m1')).toBe(closed);
+    expect(getCachedPlaintext).not.toHaveBeenCalled();
+    expect(useDMStore.getState().conversations[0].lastMessage?.content).toBe('');
+  });
+
+  it('a conversation that turned read-only during a try shows nothing of what the try opened', async () => {
+    useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A)]) });
+    const closed = rowById('m1');
+    const held = deferred<{ text: string }>();
+    decryptMessage.mockImplementationOnce(() => held.promise);
+    arrive('c1', [SID_A]);
+    await vi.waitFor(() => expect(decryptMessage).toHaveBeenCalledTimes(2));
+
+    useDMStore.setState({ conversations: [readOnlyC1(null)] });
+    held.resolve({ text: buildE2EPlaintext('their words') });
+    await redecryptPassesSettled();
+
+    expect(rowById('m1')).toBe(closed);
+    // the gate dropped what that decrypt had written
+    expect(forgetCachedPlaintext).toHaveBeenCalledWith('m1', { scope: 'c1', authorId: 'peer' }, { mark: 'read-only' });
+  });
+
+  it('a conversation an earlier session marked as purged: no row is tried again, own rows included, before any list', async () => {
+    const own = dmRow('m-own', SID_A, { author: { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null } });
+    useChatStore.setState({ messages: await decryptMessagesForDisplay([own]) });
+    const closed = rowById('m-own');
+    expect(closed?.content).toBe(DECRYPT_FAILED_CONTENT);
+    const tries = decryptMessage.mock.calls.length;
+    // the marks read at the service's start name the conversation; no list has loaded it
+    scopeMarkedPurged.mockImplementation((_userId, scope) => scope === 'c1');
+
+    arrive('c1', [SID_A]);
+    await redecryptPassesSettled();
+
+    expect(decryptMessage).toHaveBeenCalledTimes(tries);
+    expect(rowById('m-own')).toBe(closed);
+  });
+
+  it('the same while the marks are still being read', async () => {
+    const own = dmRow('m-own', SID_A, { author: { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null } });
+    useChatStore.setState({ messages: await decryptMessagesForDisplay([own]) });
+    const tries = decryptMessage.mock.calls.length;
+    scopeMarkedPurged.mockImplementation(async (_userId, scope) => scope === 'c1');
+    arrive('c1', [SID_A]);
+    await redecryptPassesSettled();
+    expect(decryptMessage).toHaveBeenCalledTimes(tries);
+  });
+
+  it('a marked conversation a list of this session loaded live: its rows are tried again (the list decides)', async () => {
+    useChatStore.setState({ messages: await decryptMessagesForDisplay([dmRow('m1', SID_A)]) });
+    const tries = decryptMessage.mock.calls.length;
+    scopeMarkedPurged.mockImplementation((_userId, scope) => scope === 'c1');
+    useDMStore.setState({
+      conversations: [{
+        id: 'c1', user1Id: 'me', user2Id: 'peer', participant: { ...peer, avatarUrl: null }, lastMessage: null,
+        encryptedAt: '2026-11-01T09:00:00.000Z', createdAt: '2026-11-01T09:00:00.000Z',
+      } as Conversation],
+    });
+    arrive('c1', [SID_A]);
+    await redecryptPassesSettled();
+    expect(decryptMessage.mock.calls.length).toBeGreaterThan(tries);
+    expect(scopeMarkedPurged).not.toHaveBeenCalledWith(expect.anything(), 'c1');
+  });
+
+  it('the own row of a conversation with no mark is tried again as before', async () => {
+    const own = dmRow('m-own', SID_A, { author: { id: 'me', username: 'me', displayName: 'Me', avatarUrl: null } });
+    useChatStore.setState({ messages: await decryptMessagesForDisplay([own]) });
+    const tries = decryptMessage.mock.calls.length;
+    arrive('c1', [SID_A]);
+    await redecryptPassesSettled();
+    expect(decryptMessage.mock.calls.length).toBeGreaterThan(tries);
   });
 });

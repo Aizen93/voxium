@@ -2,7 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dmPreviewText } from '../../utils/dmPreview';
+import { dmPreviewText, isDeletedPreview } from '../../utils/dmPreview';
 
 /**
  * Since the 2.0 cutover every user DM is end-to-end encrypted; the only
@@ -94,6 +94,48 @@ describe('a message event whose decrypt outlived the session is dropped', () => 
       }
     });
   }
+});
+
+describe('a deleted account\'s message (the conversation outlived the account)', () => {
+  const source = readFileSync(LAYOUT, 'utf8');
+
+  it('dmMessageNew decides on the GATE\'s row, and a deleted one moves no preview, unread count, sound or notification', () => {
+    const body = handlerBody(source, 'dmMessageNew');
+    const gate = body.indexOf('message = shown;');
+    const early = body.indexOf('if (isDeletedMessageRow(message)) {');
+    expect(early, 'dmMessageNew must recognise the deleted row').toBeGreaterThan(gate);
+    // the block it opens returns before any of the news side effects (its
+    // closing brace at the handler body's indentation; CRLF on a checkout too)
+    const close = body.slice(early).search(/\r?\n {8}\}\r?\n/);
+    expect(close, 'the block closes').toBeGreaterThan(-1);
+    const block = body.slice(early, early + close);
+    expect(block).toMatch(/return;/);
+    expect(block).not.toMatch(/updateLastMessage\(|incrementDMUnread\(|play[A-Za-z]*Sound\(|notify\(|fetchConversations\(/);
+    const news = body.search(/updateLastMessage\(|incrementDMUnread\(|play[A-Za-z]*Sound\(|notify\(/);
+    expect(news).toBeGreaterThan(early);
+  });
+
+  it('the placeholder author notifies nobody, whatever the row', () => {
+    const body = handlerBody(source, 'dmMessageNew');
+    const unread = body.indexOf('incrementDMUnread(');
+    const guard = body.lastIndexOf('!isDeletedParticipantId(message.author?.id)', unread);
+    expect(guard, 'the unread and notification branch checks the placeholder author').toBeGreaterThan(-1);
+  });
+
+  it('dm:conversation:read_only is registered and handed, untyped, to the validating handler', () => {
+    expect(source).toMatch(/\[WS_EVENTS\.DM_CONVERSATION_READ_ONLY, handlers\.dmConversationReadOnly\]/);
+    const start = source.indexOf('      dmConversationReadOnly: (data: unknown) => {');
+    expect(start).toBeGreaterThan(-1);
+    expect(source.slice(start, start + 200)).toMatch(/handleConversationReadOnly\(data\);/);
+  });
+
+  it('the list prints "Message deleted" for such a row, never its text (isDeletedPreview), and dmPreviewText keeps it locked', () => {
+    const last = { id: 'm-1', createdAt: '2026-10-14T00:00:00.000Z', authorId: 'deleted:c-1', type: 'deleted' };
+    expect(isDeletedPreview({ ...last, content: 'leaked', encrypted: false })).toBe(true);
+    expect(isDeletedPreview({ ...last, content: '', encrypted: true })).toBe(true);
+    expect(dmPreviewText({ ...last, content: 'Voice call started', encrypted: false })).toBeNull();
+    expect(isDeletedPreview({ ...last, type: 'user', content: '', encrypted: true })).toBe(false);
+  });
 });
 
 describe('dmPreviewText — what the conversation list may print', () => {

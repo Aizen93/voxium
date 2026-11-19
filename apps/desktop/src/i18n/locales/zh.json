@@ -834,7 +834,12 @@
     "beginningOfConversation": "对话开始",
     "conversationStart": "这是你们私信记录的开始。",
     "welcomeMessage": "从侧边栏选择一个对话，或点击任意空间中的成员来开始新的对话。",
-    "failedToLoadConversations": "无法加载对话"
+    "failedToLoadConversations": "无法加载对话",
+    "deletedParticipant": {
+      "name": "已删除的用户",
+      "readOnlyNotice": "此对话为只读：对方的账号已被删除。",
+      "messageDeleted": "消息已删除"
+    }
   },
   "friends": {
     "title": "好友",
@@ -1378,6 +1383,7 @@
     "noPermissionViewChannel": "你没有查看该频道的权限",
     "cannotDmSelf": "无法与自己创建对话",
     "notAParticipant": "你不是该对话的参与者",
+    "conversationReadOnly": "此对话为只读",
     "voiceDisabled": "语音频道目前已禁用",
     "voiceCallsDisabled": "语音通话目前已禁用",
     "voiceChannelFull": "语音频道已满",

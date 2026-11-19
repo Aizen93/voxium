@@ -2,7 +2,11 @@ import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type Chan
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { useServerStore } from '../../stores/serverStore';
+import { useDMStore } from '../../stores/dmStore';
+import { isHeldReadOnly } from '../../utils/dmParticipant';
+import { ReadOnlyConversationNotice } from '../dm/DeletedParticipant';
 import { getSocket } from '../../services/socket';
+import { getTranslatedActionError } from '../../utils/serverErrors';
 import { toast } from '../../stores/toastStore';
 import { EmojiPicker } from '../common/EmojiPicker';
 import { AppTag } from '../common/AppTag';
@@ -60,6 +64,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
     (s) => !!channelId && s.channels.some((c) => c.id === channelId && c.secure === true)
   );
   const isEncrypted = isEncryptedDM || isSecureChannel;
+  // The other side's account was deleted: nothing can be written here, so no
+  // composer at all (no typing signal, no upload, no send) — the notice in
+  // its place (a primitive selector: no allocation per read)
+  const readOnly = useDMStore((s) => !!conversationId && isHeldReadOnly(s, conversationId));
   const [content, setContent] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -71,6 +79,14 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
+  // Turned read-only while a typing signal was pending: its "stop" never goes
+  // out (nothing is signalled in a read-only conversation)
+  useEffect(() => {
+    if (!readOnly) return;
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = null;
+    isTypingRef.current = false;
+  }, [readOnly]);
   const [cursorPos, setCursorPos] = useState(0);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -332,8 +348,9 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       }
       setPendingFiles([]);
       isTypingRef.current = false;
-    } catch {
-      toast.error(t('chat.failedToSend'));
+    } catch (err) {
+      // the store logged it; a refusal of a read-only conversation reads like the server's 403
+      toast.error(getTranslatedActionError(err, t, 'chat.failedToSend'));
     } finally {
       setIsSending(false);
     }
@@ -402,6 +419,8 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   };
 
   const canSend = content.trim() || pendingFiles.some((pf) => pf.status === 'uploaded');
+
+  if (readOnly) return <ReadOnlyConversationNotice />;
 
   return (
     <div

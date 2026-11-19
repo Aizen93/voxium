@@ -7,6 +7,7 @@ import { useLocalSpeaking } from '../../hooks/useLocalSpeaking';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Phone, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
+import { participantDisplayName } from '../../utils/dmParticipant';
 
 /**
  * Global DM voice panel — mirrors VoicePanel but for DM calls.
@@ -43,7 +44,7 @@ function DMVoicePanelCall({ dmCallConversationId }: { dmCallConversationId: stri
   const activeServerId = useServerStore((s) => s.activeServerId);
 
   const conversation = conversations.find((c) => c.id === dmCallConversationId);
-  const participantName = conversation?.participant.displayName || 'DM Call';
+  const participantName = conversation ? participantDisplayName(conversation, t) : 'DM Call';
   const waiting = dmCallUsers.length <= 1;
 
   const handleNavigateToCall = () => {
