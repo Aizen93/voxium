@@ -21,7 +21,7 @@ vi.mock('react-i18next', async (importOriginal) => {
 
 const S = vi.hoisted(() => ({
   fetchDirectory: vi.fn(), fetchDirectoryMore: vi.fn(), assignMemberRoles: vi.fn(),
-  updateMemberRole: vi.fn(), kickMember: vi.fn(), transferOwnership: vi.fn(), fetchEffectivePermissions: vi.fn(),
+  kickMember: vi.fn(), transferOwnership: vi.fn(), fetchEffectivePermissions: vi.fn(),
   toastSuccess: vi.fn(), toastError: vi.fn(),
 }));
 let directory: DirectoryState;

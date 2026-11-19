@@ -38,7 +38,6 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
   const view = useMemberRules(activeServerId);
   const rules = view?.rules ?? null;
   const isSelf = member.userId === currentUser?.id;
-  const isOwner = view?.isOwner ?? false;
 
   // Roles the viewer may hand out: below their own position, never @everyone
   const assignableRoles = rules ? rules.assignableRoles() : [];
@@ -126,8 +125,6 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
 
   if (!rules || !activeServerId) return null;
 
-  const canPromote = !isSelf && isOwner && member.role === 'member';
-  const canDemote = !isSelf && isOwner && member.role === 'admin';
   const canKick = rules.canKick(member);
   const canManageRoles = rules.canAssignRoles(member) && assignableRoles.length > 0;
   // Mute/deafen need the target in the actor's own voice channel; move works
@@ -142,25 +139,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
   // Setting a nickname needs CHANGE_NICKNAME; clearing one's own never does
   const canClearOwnNickname = isSelf && !canEditOwnNickname && !!member.nickname;
 
-  if (!canPromote && !canDemote && !canKick && !canManageRoles && !canMute && !canDeafen && !canMoveUser && !canManageNicknames && !canEditOwnNickname && !canClearOwnNickname) return null;
-
-  async function handlePromote() {
-    try {
-      await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'admin');
-      onClose();
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'contextMenu.failedToPromote'));
-    }
-  }
-
-  async function handleDemote() {
-    try {
-      await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'member');
-      onClose();
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'contextMenu.failedToDemote'));
-    }
-  }
+  if (!canKick && !canManageRoles && !canMute && !canDeafen && !canMoveUser && !canManageNicknames && !canEditOwnNickname && !canClearOwnNickname) return null;
 
   // Every removal is a ban (server discovery): the first click opens the
   // reason panel, the confirm sends it. The undo is the Members tab's Banned
@@ -390,30 +369,6 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
             </div>
           )}
         </>
-      )}
-
-      {canPromote && (
-        <button
-          onClick={handlePromote}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-        >
-          <svg className="h-4 w-4 text-vox-accent-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-          </svg>
-          {t('contextMenu.promoteToAdmin')}
-        </button>
-      )}
-
-      {canDemote && (
-        <button
-          onClick={handleDemote}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-        >
-          <svg className="h-4 w-4 text-vox-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-          </svg>
-          {t('contextMenu.demoteToMember')}
-        </button>
       )}
 
       {canKick && (

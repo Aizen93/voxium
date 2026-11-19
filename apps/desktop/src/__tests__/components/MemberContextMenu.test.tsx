@@ -20,7 +20,7 @@ vi.mock('react-i18next', async (importOriginal) => {
 });
 
 const S = vi.hoisted(() => ({
-  kickMember: vi.fn(), updateMemberRole: vi.fn(), assignMemberRoles: vi.fn(), setNickname: vi.fn(), setMemberNickname: vi.fn(),
+  kickMember: vi.fn(), assignMemberRoles: vi.fn(), setNickname: vi.fn(), setMemberNickname: vi.fn(),
   fetchEffectivePermissions: vi.fn(),
   toastSuccess: vi.fn(), toastError: vi.fn(),
 }));
