@@ -137,3 +137,65 @@ describe('AdminReports — server reports', () => {
     expect(document.body.textContent).not.toContain('Delete reported message');
   });
 });
+
+describe('AdminReports — resolving and dismissing', () => {
+  const rowButton = (text: string) => qa('tbody tr button').find((b) => b.textContent?.trim() === text && rowWith('Offensive listing').contains(b)) as HTMLButtonElement;
+
+  it('Resolve sends the report and closes the modal once the store reports success', async () => {
+    store.resolveReport.mockResolvedValue(true);
+    await render();
+    await act(async () => { rowButton('Resolve').click(); });
+    await act(async () => { buttonByText('Resolve').click(); });
+    expect(store.resolveReport).toHaveBeenCalledWith('r-server', { resolution: 'Resolved' });
+    expect(buttonByText('Resolve')).toBeUndefined();
+  });
+
+  it('the Resolve dialog keeps a typed note and a ticked box through Escape and a click on the backdrop', async () => {
+    await render();
+    await act(async () => { rowButton('Resolve').click(); });
+    const note = qa('.fixed textarea')[0] as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(note, 'Owner warned, listing edited');
+      note.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const ban = qa('.fixed input[type="checkbox"]')[0] as HTMLInputElement;
+    await act(async () => { ban.click(); });
+    expect(ban.checked).toBe(true);
+
+    await act(async () => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    const backdrop = qa('.fixed').find((el) => el.querySelector('[role="dialog"]'))!;
+    await act(async () => {
+      backdrop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect((qa('.fixed textarea')[0] as HTMLTextAreaElement).value).toBe('Owner warned, listing edited');
+    expect((qa('.fixed input[type="checkbox"]')[0] as HTMLInputElement).checked).toBe(true);
+    expect(store.resolveReport).not.toHaveBeenCalled();
+    // Cancel still closes it and discards the draft
+    await act(async () => { buttonByText('Cancel').click(); });
+    expect(qa('.fixed textarea')).toHaveLength(0);
+  });
+
+  it('Resolve keeps the modal open for another try when the store reports a failure', async () => {
+    store.resolveReport.mockResolvedValue(false);
+    await render();
+    await act(async () => { rowButton('Resolve').click(); });
+    await act(async () => { buttonByText('Resolve').click(); });
+    expect(store.resolveReport).toHaveBeenCalledTimes(1);
+    expect(buttonByText('Resolve')).toBeDefined();
+    expect((buttonByText('Resolve') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('Dismiss closes the modal on success and keeps it open on failure', async () => {
+    store.dismissReport.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await render();
+    await act(async () => { rowButton('Dismiss').click(); });
+    await act(async () => { buttonByText('Dismiss').click(); });
+    expect(buttonByText('Dismiss')).toBeDefined();
+    await act(async () => { buttonByText('Dismiss').click(); });
+    expect(store.dismissReport).toHaveBeenCalledTimes(2);
+    expect(buttonByText('Dismiss')).toBeUndefined();
+  });
+});

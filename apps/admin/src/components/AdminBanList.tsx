@@ -5,6 +5,26 @@ import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { toast } from '../stores/toastStore';
 
+/** Four dot-separated parts, each 0 or a number from 1 to 255 without a leading zero. */
+const IPV4_PART = '(?:0|[1-9]\\d?|1\\d\\d|2[0-4]\\d|25[0-5])';
+const IPV4_RE = new RegExp(`^${IPV4_PART}(?:\\.${IPV4_PART}){3}$`);
+
+/**
+ * An IPv6 literal is valid when the URL parser accepts it as a bracketed host
+ * and the text holds only what a literal may hold (hex digits, colons and dots
+ * for an embedded IPv4): no brackets, zone id, path or spaces ride along.
+ */
+function isValidIpv6(text: string): boolean {
+  if (!/^[0-9a-fA-F:.]+$/.test(text)) return false;
+  try {
+    new URL(`http://[${text}]/`);
+    return true;
+  } catch {
+    // A parse failure IS the answer: the text is not an IPv6 address.
+    return false;
+  }
+}
+
 export function AdminBanList() {
   const { bans, bansTotal, bansPage, ipBans, ipBansTotal, ipBansPage, fetchBans, fetchIpBans, unbanUser, addIpBan, removeIpBan } = useAdminStore();
   const [tab, setTab] = useState<'account' | 'ip'>('account');
@@ -145,18 +165,9 @@ export function AdminBanList() {
                 onClick={async () => {
                   const trimmed = ipInput.trim();
                   if (!trimmed) return;
-                  // Validate IPv4: 4 octets 0-255
-                  const ipv4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-                  const v4Match = trimmed.match(ipv4Re);
-                  const isValidV4 = v4Match && v4Match.slice(1).every((o) => parseInt(o) <= 255);
-                  // Validate IPv6: use browser URL parser as reliable check
-                  let isValidV6 = false;
-                  if (!isValidV4) {
-                    try {
-                      const url = new URL(`http://[${trimmed}]`);
-                      isValidV6 = url.hostname === `[${trimmed}]`;
-                    } catch { /* invalid */ }
-                  }
+                  // Validate IPv4 the way the server does: 4 parts, each 0 or 1 to 255 without a leading zero
+                  const isValidV4 = IPV4_RE.test(trimmed);
+                  const isValidV6 = !isValidV4 && isValidIpv6(trimmed);
                   if (!isValidV4 && !isValidV6) {
                     toast.error('Invalid IP address format');
                     return;

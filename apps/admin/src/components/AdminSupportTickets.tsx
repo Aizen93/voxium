@@ -43,10 +43,8 @@ export function AdminSupportTickets() {
     if (!activeTicket || !msgInput.trim() || sending) return;
     setSending(true);
     try {
-      await sendTicketMessage(activeTicket.id, msgInput.trim());
-      setMsgInput('');
-    } catch {
-      // Error handled by store
+      // The store reports a failure itself and resolves false: the reply stays in the box.
+      if (await sendTicketMessage(activeTicket.id, msgInput.trim())) setMsgInput('');
     } finally {
       setSending(false);
     }
@@ -266,6 +264,7 @@ export function AdminSupportTickets() {
                     />
                     <button
                       onClick={handleSend}
+                      aria-label="Send reply"
                       disabled={!msgInput.trim() || sending}
                       className="flex h-9 w-9 items-center justify-center rounded-md bg-vox-accent-primary text-white transition-colors hover:bg-vox-accent-primary/90 disabled:opacity-50"
                     >
