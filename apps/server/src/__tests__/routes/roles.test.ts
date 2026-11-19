@@ -1663,6 +1663,9 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
+      // an override every bit of which a 2.1.x client knows: nothing is kept
+      prismaMock.channelPermissionOverride.findUnique.mockResolvedValue({ allow: permissionsToString(Permissions.SEND_MESSAGES), deny: '0' });
       prismaMock.channelPermissionOverride.deleteMany.mockResolvedValue({ count: 1 });
       prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
 
@@ -1671,7 +1674,9 @@ describe('Role Routes', () => {
       );
 
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
+      expect(res.body).toEqual({ success: true, message: 'Override removed' });
+      expect(prismaMock.channelPermissionOverride.deleteMany).toHaveBeenCalledWith({ where: { channelId: 'ch1', roleId: 'r2' } });
+      expect(prismaMock.channelPermissionOverride.upsert).not.toHaveBeenCalled();
       // The space-wide room gets { serverId } only: no channel id, no overrides
       expect(mockTo).toHaveBeenCalledWith('server:srv1');
       expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId: 'srv1' });

@@ -968,3 +968,112 @@ describe('PUT /roles/channels/:channelId/permissions/:roleId — allow and deny 
     });
   });
 });
+
+// ─── The override DELETE: a 0/0 write with the 2.1.x set ─────────────────────
+
+describe('DELETE /roles/channels/:channelId/permissions/:roleId — a 0/0 write with the 2.1.x set', () => {
+  const deleteOverride = () => request(app).delete('/api/v1/servers/srv1/roles/channels/ch1/permissions/role1');
+
+  it('an override holding only bits a 2.1.x client knows: the row is removed, as before', async () => {
+    actorIs(OWNER);
+    overrideIs({ allow: Permissions.SEND_MESSAGES, deny: Permissions.ATTACH_FILES });
+
+    const res = await deleteOverride();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, message: 'Override removed' });
+    expect(storedOverride()).toBe('deleted');
+    expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId: 'srv1' });
+    expect(mockSync).toHaveBeenCalledWith('srv1', { channelId: 'ch1' });
+  });
+
+  it('a stored bit outside the 2.1.x set survives: the row keeps it, everything else cleared', async () => {
+    actorIs(OWNER);
+    overrideIs({ allow: Permissions.SEND_MESSAGES | FUTURE, deny: Permissions.ATTACH_FILES | (FUTURE << 1n) });
+
+    const res = await deleteOverride();
+
+    expect(res.status).toBe(200);
+    expect(storedOverride()).toEqual({ allow: FUTURE, deny: FUTURE << 1n });
+    expect(mockSync).toHaveBeenCalledWith('srv1', { channelId: 'ch1' });
+  });
+
+  it('the same lock and checks as the PUT, inside one transaction with the long budget; the actor\'s bits are not read (nothing is turned on)', async () => {
+    actorIs(MODERATOR);
+    overrideIs({ allow: Permissions.KICK_MEMBERS, deny: 0n });
+
+    expect((await deleteOverride()).status).toBe(200);
+
+    expect(order).toEqual([
+      'may-manage',
+      'channel',
+      'role',
+      'rank',
+      `txn ${JSON.stringify({ timeout: 60_000, maxWait: 10_000 })}`,
+      'tx:SELECT position, is_default FROM roles WHERE id = ? AND server_id = ? FOR NO KEY UPDATE [role1,srv1]',
+      'tx:may-manage',
+      'tx:channel',
+      'tx:rank',
+      'tx:override',
+      'tx:override.deleteMany',
+    ]);
+    // the moderator lacks KICK_MEMBERS: clearing it is never refused
+    expect(storedOverride()).toBe('deleted');
+  });
+
+  it('no override stored: nothing changes, no re-sync (the event still goes out)', async () => {
+    actorIs(OWNER);
+    overrideIs(null);
+
+    const res = await deleteOverride();
+
+    expect(res.status).toBe(200);
+    expect(mockSync).not.toHaveBeenCalled();
+    expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId: 'srv1' });
+  });
+
+  it('a role at or above the actor by then: 403 with the route\'s own sentence, nothing written', async () => {
+    actorIs(MODERATOR, { rank: 2 });
+    overrideIs({ allow: Permissions.SEND_MESSAGES, deny: 0n });
+
+    const res = await deleteOverride();
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Cannot modify overrides for roles at or above your own position');
+    expect(tx.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('an actor who may no longer manage roles by then: 403, nothing written', async () => {
+    actorIs(MODERATOR, { mayManage: false });
+    overrideIs({ allow: Permissions.SEND_MESSAGES, deny: 0n });
+
+    const res = await deleteOverride();
+
+    expect(res.status).toBe(403);
+    expect(tx.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('a role gone by the time the lock is taken: 404 Role', async () => {
+    actorIs(OWNER);
+    overrideIs(null);
+    tx.$queryRaw.mockImplementation((strings: TemplateStringsArray) => lazyStatement(order, `tx:${strings.join('?')}`, []));
+
+    const res = await deleteOverride();
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Role not found');
+  });
+
+  it('a channel gone by then: 404 Channel, nothing written', async () => {
+    actorIs(OWNER);
+    overrideIs({ allow: Permissions.SEND_MESSAGES, deny: 0n });
+    tx.channel.findFirst.mockResolvedValue(null);
+
+    const res = await deleteOverride();
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Channel not found');
+    expect(tx.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+  });
+});
