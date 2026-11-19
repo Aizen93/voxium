@@ -2107,13 +2107,27 @@ unheard.
 - **Departure / kick / device revocation / identity change:** fresh random
   keys sealed to everyone remaining — no future audio for the leaver.
   Server-side, secure-member removal force-evicts live voice cluster-wide.
-  Every exclusion is a rotation trigger, including ones discovered mid-call
-  (an inbound key that fails its identity pin, or a `legacy-key` payload):
-  the excluded device already holds the current key and the server keeps
-  forwarding audio to it, since neither event is a membership change.
+  Every exclusion of a participant who holds the key in use is a rotation
+  trigger, including ones discovered mid-call (an inbound key that fails its
+  identity pin, a `legacy-key` payload, an identity change found by the
+  periodic check or when a key is sealed to them again): the excluded device
+  holds the current key and the server keeps forwarding audio to it, since
+  none of these is a membership change. An exclusion takes no rotation of its
+  own only when the excluded device does not hold the key in use: a
+  participant who was never keyed (excluded at their vet or at their first
+  seal), or one excluded while a fresh rotation is sealing, which replaces
+  the key they held.
   Revocation has no event of its own, so participants re-ask the authoritative
   endpoint periodically and drop any peer whose PINNED device has left their
-  published list — the stolen-device response.
+  published list — the stolen-device response. The same check excludes a
+  participant whose identity changed since it was accepted, and it runs for
+  every participant on every pass: one member's unaccepted change is reported
+  for that member and does not stop the check for the others.
+- **Excluded for the session:** a participant excluded during a session is
+  not keyed again in it. The sender records the epoch each participant was
+  excluded under and refuses a later announcement under that epoch, or under
+  none; an announcement with a new epoch (a new session of theirs) is vetted
+  like any arrival. A participant who only left is not recorded.
 - Receivers hold a 3-generation key ring per sender (rotation races), and
   sealed key messages carry §20-style epoch/seq replay state (superseded
   epochs never return). Re-installing a generation already held preserves its

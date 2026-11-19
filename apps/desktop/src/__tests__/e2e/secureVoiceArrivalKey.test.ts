@@ -748,6 +748,55 @@ describe('a member excluded during a call stays excluded until they start a new 
     await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
   });
 
+  it('excluded for an identity change found while resealing at their key request: one fresh rotation, and not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    encryptToDevice.mockImplementationOnce(async () => {
+      throw new TestIdentityChangedError('x');
+    });
+
+    handleKeyRequest(CH, 'x');
+    await until(() => excludedAs('x', 'identity-changed') && installs.length === 3);
+    await settle();
+
+    // A fresh key, not a ratchet of the one they held, sealed to the member who stays
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1, 2]);
+    expect(hex(installs[2].key)).not.toBe(hex(await ratchetVoiceKey(installs[1].key)));
+    expect(sealedTo('old').at(-1)).toMatchObject({ keyId: 2, reason: 'fresh' });
+    // Their first key and the reseal that failed; the fresh key is not theirs
+    expect(sealedTo('x').map((s) => s.keyId)).toEqual([1, 1]);
+
+    await expectNotKeyedAgain('x', 'epoch-x-1', DEVICES.x[0]);
+  });
+
+  it('excluded for an identity change found while sealing a fresh rotation: no further rotation, and not keyed again under the same epoch', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    onParticipantJoined(CH, user('y'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1 && sealedTo('y').length === 1);
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1]);
+    encryptToDevice.mockImplementation(async (userId: string) => {
+      if (userId === 'y') throw new TestIdentityChangedError('y');
+      return ENV;
+    });
+
+    // `old` leaves: a fresh rotation for x and y
+    onParticipantLeft(CH, 'old');
+    await until(() => excludedAs('y', 'identity-changed'));
+    await settle();
+    const afterRotation = await speak(1);
+
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1, 2]);
+    expect(sealedTo('x').at(-1)).toMatchObject({ keyId: 2, reason: 'fresh' });
+    expect(await opens([sealedTo('x').at(-1)!], afterRotation)).toBe(true);
+    // The rotation's key never reached y, and their earlier key opens nothing after it
+    expect(await opens([sealedTo('y')[0]], afterRotation)).toBe(false);
+
+    encryptToDevice.mockResolvedValue(ENV);
+    await expectNotKeyedAgain('y', 'epoch-y-1', DEVICES.y[0]);
+  });
+
   it('excluded for an identity change on an inbound key: the exclusion rotates fresh, and they are not keyed again under the same epoch', async () => {
     await callWithOccupant();
     onParticipantJoined(CH, user('x'), { initialReplay: false });
