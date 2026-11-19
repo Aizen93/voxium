@@ -1,15 +1,17 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
+import axios from 'axios';
 import { Camera, Clipboard, Download, Hash, Send } from 'lucide-react';
 import { toast } from '../../stores/toastStore';
-import type { Channel } from '@voxium/shared';
+import type { AttachmentTarget, Channel } from '@voxium/shared';
 import { api } from '../../services/api';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { composeSnapshotCanvas, encodeSnapshot, encodeSnapshotPng } from '../../utils/shareSnapshot';
 import { isSecureChannelId } from '../../utils/secureChannelGate';
+import { getTranslatedActionError } from '../../utils/serverErrors';
 
 /**
  * Snapshot of the share (item 10): one button, three exits — copy to the
@@ -24,12 +26,20 @@ import { isSecureChannelId } from '../../utils/secureChannelGate';
  * a viewer can screenshot their monitor anyway; the notice expresses the
  * privacy stance, it does not enforce anything).
  *
- * The channel list comes from `GET /servers/:id/channels` for the VOICE
- * server — never `serverStore.channels`, which holds the VIEWED server while
- * voice survives navigation. The server filters by VIEW_CHANNEL; secure
- * channels are excluded here (their attachments take the E2E path, v2), and
- * SEND_MESSAGES is enforced by the message POST itself.
+ * The channel list comes from `GET /servers/:id/channels/attachment-targets`
+ * for the VOICE server — never `serverStore.channels`, which holds the VIEWED
+ * server while voice survives navigation. The server answers exactly the
+ * non-secure text channels where the caller holds VIEW_CHANNEL, SEND_MESSAGES
+ * and ATTACH_FILES (the presign and the message POST ask for those), so the
+ * picker never offers a channel that is certain to refuse. A server that
+ * predates the route answers 404: the picker then falls back to
+ * `GET /servers/:id/channels` (VIEW_CHANNEL only; the posting permissions are
+ * enforced by the presign and the message POST, whose refusal is shown in the
+ * user's language). Secure channels are excluded either way (their
+ * attachments take the E2E path, v2).
  */
+
+type PickerChannel = Pick<Channel, 'id' | 'name'>;
 
 export function SnapshotMenu({
   videoRef,
@@ -43,7 +53,7 @@ export function SnapshotMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const [snapshot, setSnapshot] = useState<HTMLCanvasElement | null>(null);
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
-  const [channels, setChannels] = useState<Channel[] | null>(null);
+  const [channels, setChannels] = useState<PickerChannel[] | null>(null);
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -166,13 +176,21 @@ export function SnapshotMenu({
       return;
     }
     try {
-      const { data } = await api.get(`/servers/${serverId}/channels`);
-      const fetched = data.data as Channel[];
+      let list: PickerChannel[];
+      try {
+        const { data } = await api.get(`/servers/${serverId}/channels/attachment-targets`);
+        list = data.data as AttachmentTarget[];
+      } catch (err) {
+        // A server older than the route: today's listing
+        if (!axios.isAxiosError(err) || err.response?.status !== 404) throw err;
+        const { data } = await api.get(`/servers/${serverId}/channels`);
+        list = (data.data as Channel[]).filter((c) => c.type === 'text');
+      }
       // A snapshot is a PLAINTEXT upload: a channel this device has pinned as
-      // secure stays off the list even when the server now lists it without
-      // the flag (a flipped flag must not turn a secure channel into a target).
-      const list = fetched.filter((c) => c.type === 'text' && !isSecureChannelId(c.id, fetched));
-      setChannels(list);
+      // secure stays off the list even when the server lists it without the
+      // flag (a flipped flag must not turn a secure channel into a target).
+      // The listing's own `secure` flag counts too (the fallback carries it).
+      setChannels(list.filter((c) => !isSecureChannelId(c.id, [c as Pick<Channel, 'id' | 'secure'>])));
     } catch (err) {
       console.warn('[Snapshot] channel list failed:', err);
       setChannels([]);
@@ -210,7 +228,9 @@ export function SnapshotMenu({
       close();
     } catch (err) {
       console.error('[Snapshot] send failed:', err);
-      toast.error(t('voice.snapshot.failed'));
+      // A refusal of the server (permissions changed since the list) is shown
+      // in the user's language; anything else keeps the generic message
+      toast.error(getTranslatedActionError(err, t, 'voice.snapshot.failed'));
       setBusy(false);
     }
   };

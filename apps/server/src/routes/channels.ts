@@ -2,12 +2,12 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError, prismaErrorCode } from '../utils/errors';
-import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type Channel } from '@voxium/shared';
+import { validateChannelName, WS_EVENTS, Permissions, permissionsFromString, hasPermission, DEFAULT_EVERYONE_PERMISSIONS, type AttachmentTarget, type Channel } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
-import { rateLimitCategoryManage, rateLimitMarkRead } from '../middleware/rateLimiter';
+import { rateLimitCategoryManage, rateLimitMarkRead, rateLimitMemberRead } from '../middleware/rateLimiter';
 import { sanitizeText } from '../utils/sanitize';
 import { getEffectiveLimits } from '../utils/serverLimits';
-import { hasServerPermission, hasChannelPermission, filterVisibleChannels, computeServerPermissions } from '../utils/permissionCalculator';
+import { hasServerPermission, hasChannelPermission, filterVisibleChannels, filterChannelsWithPermissions, computeServerPermissions } from '../utils/permissionCalculator';
 import { deleteSecureChannel } from '../utils/secureChannelLifecycle';
 import { emitWebhookChanged } from '../utils/webhookLifecycle';
 import { broadcastChannelVoiceCleanup } from '../websocket/voiceCluster';
@@ -240,6 +240,52 @@ channelRouter.get('/', async (req: Request<{ serverId: string }>, res: Response,
     const channels = await filterVisibleChannels(req.user!.userId, serverId, allChannels);
 
     res.json({ success: true, data: channels });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Where the caller can post a message WITH an attachment: the non-secure text
+// channels of the space where they hold VIEW_CHANNEL, SEND_MESSAGES and
+// ATTACH_FILES (the presign checks the last, the message POST the other two).
+// One batched permission pass for the whole list, never a computation per
+// channel. Registered before every /:channelId route, none of which is a GET.
+// The read bucket is `memberRead` (60 a minute per user), the one the member
+// directory and People panel reads and the space's bans, join-request and
+// discovery reads already use; this route shares it. A person opening a picker
+// is one request (one membership read plus the batched pass), so a bucket of
+// its own would only add a place in the admin tool.
+channelRouter.get('/attachment-targets', rateLimitMemberRead, async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const { serverId } = req.params;
+    const userId = req.user!.userId;
+
+    // Not a member: the answer GET / gives (the batched filter itself does not
+    // check membership)
+    const membership = await prisma.serverMember.findUnique({
+      where: { userId_serverId: { userId, serverId } },
+    });
+    if (!membership) throw new ForbiddenError('Not a member of this server');
+
+    const channels = await prisma.channel.findMany({
+      where: { serverId, type: 'text', secure: false },
+      orderBy: [{ position: 'asc' }, { id: 'asc' }],
+      // `secure` MUST be selected for the filter (it fails open without it),
+      // although the query already excludes secure channels
+      select: { id: true, name: true, categoryId: true, position: true, type: true, secure: true },
+    });
+    // The where clause again, in code: what this route answers must never
+    // rest on a query filter alone (secure-channel opacity; attachments of a
+    // secure channel take the encrypted path)
+    const candidates = channels.filter((c) => c.type === 'text' && c.secure === false);
+    const allowed = candidates.length > 0
+      ? await filterChannelsWithPermissions(
+        userId, serverId, candidates,
+        Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.ATTACH_FILES,
+      )
+      : [];
+    const data: AttachmentTarget[] = allowed.map((c) => ({ id: c.id, name: c.name, categoryId: c.categoryId, position: c.position }));
+    res.json({ success: true, data });
   } catch (err) {
     next(err);
   }

@@ -364,7 +364,7 @@ const limits = vi.hoisted(() => ({
 vi.mock('../../utils/serverLimits', () => ({ getEffectiveLimits: async () => ({ ...limits }) }));
 vi.mock('../../middleware/rateLimiter', () => {
   const pass = (_req: unknown, _res: unknown, next: () => void) => next();
-  return { rateLimitCategoryManage: pass, rateLimitMarkRead: pass, rateLimitSecureChannelManage: pass, rateLimitMemberManage: pass };
+  return { rateLimitCategoryManage: pass, rateLimitMarkRead: pass, rateLimitMemberRead: pass, rateLimitSecureChannelManage: pass, rateLimitMemberManage: pass };
 });
 vi.mock('../../middleware/auth', () => ({
   authenticate: (req: any, _res: unknown, next: () => void) => {
