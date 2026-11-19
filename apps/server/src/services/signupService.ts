@@ -8,7 +8,7 @@ import {
   validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain,
   emailDomain, isCommonEmailProvider,
 } from '@voxium/shared';
-import { BadRequestError, ConflictError, ForbiddenError } from '../utils/errors';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { sanitizeLabel } from '../utils/sanitize';
 import {
   sendSignupCodeEmail, sendSignupExistingAccountEmail, describeEmailError, MailSuppressedError,
@@ -375,8 +375,9 @@ export async function completeRegistration(
     try {
       await deleteUserAccount(legacy.id, { reason: 'superseded by a verified sign-up', logPrefix: '[Signup]' });
     } catch (err) {
-      // A parallel completion with the same code deleted it first: already gone.
-      if ((err as { code?: string })?.code !== 'P2025') throw err;
+      // A parallel completion with the same code deleted it first: already
+      // gone (the deletion answers it as an unknown account)
+      if (!(err instanceof NotFoundError) && (err as { code?: string })?.code !== 'P2025') throw err;
       console.warn('[Signup] Legacy account already deleted by a parallel completion');
     }
   }

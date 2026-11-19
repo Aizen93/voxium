@@ -79,7 +79,9 @@ const RULES: Rule[] = [
   {
     what: 'raw SQL naming user1_id / user2_id',
     pattern: /\buser[12]_id\b/gi,
-    allowed: {},
+    allowed: {
+      'utils/conversationLifecycle.ts': { count: 10, reason: 'settleConversationsOfDeletedAccount: the lock of the deleted account\'s conversations (both sides read, `=` against the account\'s own id, which a NULL side never equals: a conversation whose other side is NULL is still found by the account\'s side) and the CASE that sets only the account\'s side NULL (a side that is not the account is written back as it was, NULL included)' },
+    },
   },
   {
     what: 'pick of a loaded side (.user1 / .user2)',
@@ -99,6 +101,7 @@ const RULES: Rule[] = [
     pattern: /\?\s*[\w$.?]*\.user[12]Id\s*:\s*[\w$.?]*\.user[12]Id\b/g,
     allowed: {
       'routes/e2e.ts': { count: 1, reason: 'the key-share gate: a NULL other side is compared with a string recipient id, so only the sender\'s own devices pass' },
+      'utils/conversationLifecycle.ts': { count: 1, reason: 'settleConversationsOfDeletedAccount: the other side of a deleted account\'s conversation; a NULL one (that account is gone too) sends the conversation to the delete, and is never put into a string' },
     },
   },
   {

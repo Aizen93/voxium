@@ -1,11 +1,13 @@
-import { CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
+import { CONVERSATION_READ_ONLY_MESSAGE, DELETED_MESSAGE_TYPE, DM_SYSTEM_NOTICES } from '@voxium/shared';
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { ForbiddenError, NotFoundError } from './errors';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from './transactionRetry';
 import { collectAttachmentKeys } from './attachmentBlobs';
+import { VALID_ATTACHMENT_KEY_RE } from './s3';
 import { readConversationAudience } from './conversationAudience';
 import {
+  conversationAfterAccountDeletion,
   isReadOnlyConversation,
   newMessageTime,
   nobodyCanReach,
@@ -18,7 +20,9 @@ import {
 /**
  * The transactions that change one person's side of a direct conversation
  * (#47): a new message, an edit, a reaction or a delete of one, a removal, a
- * reopen. What each person sees is decided in utils/conversationVisibility.ts.
+ * reopen, and what an account deletion does with the account's
+ * conversations (#131). What each person sees is decided in
+ * utils/conversationVisibility.ts.
  *
  * LOCK ORDER of every transaction that touches a conversation. The
  * conversation row comes FIRST in each of the four below, and none takes
@@ -63,21 +67,37 @@ import {
  * upsert (the reader's read row; an insert key-shares the conversation row,
  * so it waits for a removal and holds nothing while it does).
  *
- * THE ACCOUNT DELETION (utils/accountDeletion.ts) takes the account row FOR
- * UPDATE and then cascades into every conversation of the account (both
- * sides), their messages and read rows, and the account's own messages and
- * read rows elsewhere, in the order PostgreSQL fires the cascade triggers,
- * which is the text order of the trigger names and can differ between
- * databases. One of the transactions above, holding a conversation row
- * of that account, can then need a row the cascade already holds: the
- * author's or the remover's account row (for the key of an insert), a read
- * row the cascade deleted first, a message of the account that a real
- * deletion's cascade reaches, while the cascade waits for that conversation
- * row. No single order serves both, since the cascade's order is the
- * triggers'. PostgreSQL aborts one side and it runs again whole: all of them
- * run under retryOnTransactionConflict, the account deletion included, and
- * one of them retried after the account deletion committed finds no
- * conversation row and answers 404 `Conversation`.
+ * THE ACCOUNT DELETION (utils/accountDeletion.ts, settleConversationsOfDeletedAccount
+ * below) takes, after its member rows, secure channels, E2E material and the
+ * account row (FOR UPDATE), EVERY conversation row of the account FOR UPDATE
+ * in id order, in one statement, before it touches anything in any of them:
+ * the account row lock holds back every new conversation with the account
+ * (its insert key-shares that row), so the set it locks is the whole set.
+ * Then, under those locks: the other sides' read rows (read), the account's
+ * messages in the conversations that survive (rewritten to placeholders,
+ * each message row before its reaction and attachment rows, which are
+ * deleted), the other sides' read rows it unhides, the conversations' sides
+ * (set NULL), and the conversations that do not survive (deleted, with their
+ * cascade); last, the user delete and its cascade (the account's messages in
+ * channels, its reactions and read rows everywhere). Against the four
+ * transactions above, by the other person: each takes the conversation row
+ * first and then only rows the deletion does not hold before its own lock on
+ * that conversation (the other person's account row, read row and messages,
+ * a reply's parent, new rows), so either it commits first and the deletion
+ * waits for it at the conversation row, or it waits there for the deletion
+ * and then finds the conversation read-only (the write, an edit, a reaction:
+ * 403 CONVERSATION_READ_ONLY_MESSAGE; a delete of one's own message and a
+ * removal go on) or gone (404 `Conversation`). By the deleted account itself
+ * (a request in flight, or the "call ended" notice its sockets' disconnect
+ * writes once its sessions are revoked): an insert key-shares the account
+ * row the deletion holds, while the deletion waits for the conversation row
+ * that insert's transaction holds. That cycle is real; PostgreSQL aborts one
+ * side and it runs again whole (all of them run under
+ * retryOnTransactionConflict, the account deletion included), and the
+ * account's own write retried after the deletion committed finds no
+ * conversation (404) or no longer a participant in it (403). Two deletions of
+ * the two people of one conversation take it in the same id order; the
+ * second finds the first's NULL side and deletes the conversation.
  */
 
 const LOG_PREFIX = '[DM]';
@@ -326,4 +346,163 @@ export function changeConversationMessage<T>(
     if (opts.refuseReadOnly && isReadOnlyConversation(view)) throw new ForbiddenError(CONVERSATION_READ_ONLY_MESSAGE);
     return act(tx, view);
   }, LOCK_WAIT_TRANSACTION_OPTIONS), `${LOG_PREFIX} A change of a message in conversation ${conversationId}`);
+}
+
+/** What an account deletion did with the account's direct conversations, for the steps after its commit. */
+export interface DeletedAccountConversations {
+  /** Survived for the other person, read-only (`dm:conversation:read_only` goes to their rooms). */
+  kept: string[];
+  /** Deleted with every row in them (their rooms are emptied). */
+  deleted: string[];
+  /**
+   * The files to delete after the commit: those of the deleted account's own
+   * messages in the conversations kept, and every file of the conversations
+   * deleted. Never a file of the other person's messages in a conversation
+   * kept.
+   */
+  attachmentKeys: string[];
+}
+
+/**
+ * What an account deletion does with every direct conversation of the
+ * account, inside the deletion's transaction (utils/accountDeletion.ts),
+ * after it has locked the account row and before the user delete:
+ *  1. every conversation row of the account FOR UPDATE, in id order, in one
+ *     statement (see the lock order above), its sides read under the lock;
+ *  2. with `keep` off: every one of them deleted, both people's messages,
+ *     files, reactions and read rows with it, as an account deletion always
+ *     did. Deleted explicitly here, so that nothing rests on the foreign
+ *     keys from the sides to the account (CASCADE today): with every
+ *     conversation of the account settled before the user delete, no cascade
+ *     reaches one, and the keys can later become SET NULL without changing
+ *     what a deletion does;
+ *  3. with `keep` on, each decided under its lock
+ *     (conversationAfterAccountDeletion) from whether it holds any message,
+ *     the other side's read row and whether anything lies above its floor: a
+ *     conversation that holds no message at all, whose other side is gone
+ *     too, or that the other person removed with nothing above their floor,
+ *     is deleted as in 2; every other one SURVIVES for the other person,
+ *     read-only:
+ *       - each message of the account there becomes a placeholder that keeps
+ *         only its id, its conversation and its time (type `deleted`, empty
+ *         content, not encrypted, no author, quote, edit time, webhook marks
+ *         or `@everyone` claim); a call notice of the account ("Voice call
+ *         started" / "ended": a `system` row holding one of DM_SYSTEM_NOTICES)
+ *         keeps its fixed text and only loses its author. Each such row
+ *         first (the row before its children, as every writer of messages
+ *         takes them), then its reactions (the other person's too) and its
+ *         attachment rows are deleted, the files after the commit;
+ *       - the other person's read row: hidden (they had removed it without
+ *         clearing what is there) becomes unhidden, so the conversation is
+ *         back on their list; their floor and last read stay;
+ *       - the account's side becomes NULL. A raw statement that names only
+ *         the two sides: the `conversations` row's `updated_at` orders the
+ *         other person's list and is never written here;
+ *     the other person's own messages, files and reactions are not touched.
+ * The account's own read rows, its reactions on the other person's messages
+ * and its messages anywhere else go with the user delete that follows.
+ * A conversation with both sides NULL is never left behind: one whose other
+ * side is already gone is always deleted.
+ */
+export async function settleConversationsOfDeletedAccount(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  opts: { keep: boolean },
+): Promise<DeletedAccountConversations> {
+  const conversations = await tx.$queryRaw<Array<{ id: string; user1Id: string | null; user2Id: string | null }>>`
+    SELECT id, user1_id AS "user1Id", user2_id AS "user2Id"
+    FROM conversations
+    WHERE user1_id = ${userId} OR user2_id = ${userId}
+    ORDER BY id
+    FOR UPDATE`;
+  const result: DeletedAccountConversations = { kept: [], deleted: [], attachmentKeys: [] };
+  if (conversations.length === 0) return result;
+
+  // The other side of each, under the locks (NULL: that account is gone too)
+  const others = conversations.map((c) => ({ id: c.id, otherId: c.user1Id === userId ? c.user2Id : c.user1Id }));
+  const unhide: Array<{ conversationId: string; userId: string }> = [];
+  if (!opts.keep) {
+    result.deleted = others.map((o) => o.id);
+  } else {
+    const live = others.filter((o): o is { id: string; otherId: string } => o.otherId !== null);
+    const states = live.length === 0 ? [] : await tx.$queryRaw<Array<{ conversationId: string; hidden: boolean; messageAboveFloor: boolean; hasMessages: boolean }>>`
+      SELECT s.id AS "conversationId", (r.hidden_at IS NOT NULL) AS hidden,
+        EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.conversation_id = s.id
+            AND (r.cleared_at IS NULL OR m.created_at > r.cleared_at)
+        ) AS "messageAboveFloor",
+        EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = s.id) AS "hasMessages"
+      FROM unnest(${live.map((o) => o.id)}::text[], ${live.map((o) => o.otherId)}::text[]) AS s(id, other_id)
+      LEFT JOIN conversation_reads r ON r.conversation_id = s.id AND r.user_id = s.other_id`;
+    const stateOf = new Map(states.map((s) => [s.conversationId, s]));
+    for (const { id, otherId } of others) {
+      if (otherId === null) {
+        result.deleted.push(id);
+        continue;
+      }
+      // every live pair has a state row (the LEFT JOIN over the pairs); were
+      // one missing, the conversation would be kept, never deleted on a guess
+      const state = stateOf.get(id) ?? { hidden: false, messageAboveFloor: true, hasMessages: true };
+      const outcome = conversationAfterAccountDeletion(userId, { userId: otherId, hidden: state.hidden, messageAboveFloor: state.messageAboveFloor }, state.hasMessages);
+      if (!outcome.survives) {
+        result.deleted.push(id);
+        continue;
+      }
+      result.kept.push(id);
+      if (outcome.unhide) unhide.push({ conversationId: id, userId: otherId });
+    }
+  }
+
+  if (result.kept.length > 0) {
+    // The account's messages there, rewritten in place: a placeholder, or a
+    // call notice that only loses its author. The CASE reads the row's old
+    // values (in an UPDATE every right-hand side does).
+    const rewritten = await tx.$queryRaw<Array<{ id: string }>>`
+      UPDATE messages SET
+        type = CASE WHEN type = 'system' AND content = ANY(${[...DM_SYSTEM_NOTICES]}::text[]) THEN type ELSE ${DELETED_MESSAGE_TYPE} END,
+        content = CASE WHEN type = 'system' AND content = ANY(${[...DM_SYSTEM_NOTICES]}::text[]) THEN content ELSE '' END,
+        author_id = NULL,
+        encrypted = false,
+        reply_to_id = NULL,
+        edited_at = NULL,
+        mentions_everyone = false,
+        webhook_id = NULL,
+        webhook_name = NULL
+      WHERE conversation_id = ANY(${result.kept}::text[]) AND author_id = ${userId}
+      RETURNING id`;
+    const ids = rewritten.map((r) => r.id);
+    if (ids.length > 0) {
+      await tx.$executeRaw`DELETE FROM message_reactions WHERE message_id = ANY(${ids}::text[])`;
+      const files = await tx.$queryRaw<Array<{ s3Key: string; expired: boolean }>>`
+        DELETE FROM message_attachments WHERE message_id = ANY(${ids}::text[])
+        RETURNING s3_key AS "s3Key", expired`;
+      for (const file of files) {
+        // An expired row's file is already gone; only keys of the attachment
+        // shape ever reach the store (collectAttachmentKeys' rule)
+        if (file.expired) continue;
+        if (VALID_ATTACHMENT_KEY_RE.test(file.s3Key)) result.attachmentKeys.push(file.s3Key);
+        else console.warn('[Attachments] Skipping a stored attachment key of an unexpected shape');
+      }
+    }
+    if (unhide.length > 0) {
+      await tx.conversationRead.updateMany({
+        where: { OR: unhide, hiddenAt: { not: null } },
+        data: { hiddenAt: null },
+      });
+    }
+    await tx.$executeRaw`
+      UPDATE conversations SET
+        user1_id = CASE WHEN user1_id = ${userId} THEN NULL ELSE user1_id END,
+        user2_id = CASE WHEN user2_id = ${userId} THEN NULL ELSE user2_id END
+      WHERE id = ANY(${result.kept}::text[])`;
+  }
+
+  if (result.deleted.length > 0) {
+    // Their files after the commit, their keys read here under the locks,
+    // right before the cascade takes the rows
+    result.attachmentKeys.push(...await collectAttachmentKeys({ conversationId: { in: result.deleted } }, tx));
+    await tx.conversation.deleteMany({ where: { id: { in: result.deleted } } });
+  }
+  return result;
 }

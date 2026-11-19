@@ -84,6 +84,9 @@ const DEFAULT_ANSWERS: Record<FeatureFlagName, boolean> = {
   annotations_v2: true,
   server_discovery: true,
   webhooks: true,
+  // OFF until the Privacy Policy has given its notice: an account deletion
+  // deletes its conversations for both people, as before
+  account_deletion_keeps_conversations: false,
 };
 
 describe('featureFlags — the registered names and their defaults (#72)', () => {

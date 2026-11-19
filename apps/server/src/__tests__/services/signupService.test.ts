@@ -1050,6 +1050,16 @@ describe('completeRegistration', () => {
       expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');
     });
 
+    it("a legacy holder the deletion finds gone under its lock (404 User) counts as gone too", async () => {
+      const { NotFoundError } = await import('../../utils/errors');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
+      h.deleteUserAccount.mockRejectedValueOnce(new NotFoundError('User'));
+      const result = await completeRegistration(ID, CODE, undefined, undefined);
+      expect(result.user.id).toBe('user-1');
+      expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');
+    });
+
     it('two parallel completions over one legacy holder: one account, the other a 409, no 500', async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       h.prisma.user.findMany.mockResolvedValue([legacy('u-legacy-1')]);

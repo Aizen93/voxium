@@ -41,9 +41,11 @@ export async function resolveMentionsForServer(
  * webhookId, a frozen webhookName — which outlives the webhook — or a NULL
  * authorId outside a conversation): an unauthenticated webhook URL must never
  * ping anyone, and a refetch must agree with the live event, which carries no
- * mentions for it. Inside a conversation a NULL author is reserved for a
- * deleted account's message (nothing writes one yet); mentions are resolved
- * for channel rows only.
+ * mentions for it. Inside a conversation a NULL author is a deleted account's
+ * message (a placeholder, or a call notice that lost its author, written by
+ * the account deletion that keeps the conversation for the other person:
+ * utils/conversationLifecycle.ts); it is not a webhook row, and it holds no
+ * text to resolve. Mentions are resolved for channel rows only.
  */
 export interface MentionSourceRow extends WebhookRowMarkers {
   content: string;

@@ -2012,6 +2012,17 @@ describe('dmVoiceHandler — endDMCall', () => {
     });
   });
 
+  it("names the user it is given in dm:voice:left (an account deletion names the conversation's placeholder, never the deleted account)", async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+
+    await endDMCall(io as any, 'conv-1', { notice: false, leftUserId: 'deleted:conv-1' });
+
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-1', userId: 'deleted:conv-1' });
+    expect(io._emit).not.toHaveBeenCalledWith('dm:voice:left', expect.objectContaining({ userId: 'user-1' }));
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:ended', { conversationId: 'conv-1' });
+  });
+
   it('makes every socket in the call room leave it with ONE adapter-wide operation, never a fetch', async () => {
     const io = createMockIO();
     mockRedis.hGetAll.mockResolvedValueOnce(inCall);

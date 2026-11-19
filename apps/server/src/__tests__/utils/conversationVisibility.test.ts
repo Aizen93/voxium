@@ -7,6 +7,7 @@ vi.mock('../../utils/prisma', () => ({
 import { prisma } from '../../utils/prisma';
 import {
   aboveFloorWhere,
+  conversationAfterAccountDeletion,
   dmListedSql,
   dmUnreadSinceSql,
   isAboveFloor,
@@ -194,6 +195,35 @@ describe("isReadOnlyConversation: one side's account is gone", () => {
     expect(isReadOnlyConversation({ user1Id: 'user-1', user2Id: 'user-2' })).toBe(false);
     // the placeholder's name or id as a side value is not a NULL side
     expect(isReadOnlyConversation({ user1Id: 'deleted', user2Id: 'deleted:conv-1' })).toBe(false);
+  });
+});
+
+describe('conversationAfterAccountDeletion: what an account deletion does with one of its conversations', () => {
+  const B = (hidden: boolean, messageAboveFloor: boolean): SideReach => ({ userId: 'user-b', hidden, messageAboveFloor });
+
+  it('the other side gone too: deleted (never two NULL sides)', () => {
+    expect(conversationAfterAccountDeletion('user-a', { userId: null, hidden: true, messageAboveFloor: false }, true)).toEqual({ survives: false, unhide: false });
+  });
+
+  it('the other person has it on their list: it survives, with or without anything above their floor', () => {
+    expect(conversationAfterAccountDeletion('user-a', B(false, true), true)).toEqual({ survives: true, unhide: false });
+    expect(conversationAfterAccountDeletion('user-a', B(false, false), true)).toEqual({ survives: true, unhide: false });
+  });
+
+  it('a conversation that holds no message at all is deleted whatever the read rows say: listed, hidden, or no read row (taken as listed)', () => {
+    for (const side of [B(false, false), B(true, false), B(false, true)]) {
+      expect(conversationAfterAccountDeletion('user-a', side, false), JSON.stringify(side)).toEqual({ survives: false, unhide: false });
+    }
+  });
+
+  it('the other person HID it without clearing what is there: it survives and comes back to their list', () => {
+    // with the deleted side passed as a NULL side, nobodyCanReach would
+    // count a hidden side facing it as unable to reach anything, and delete it
+    expect(conversationAfterAccountDeletion('user-a', B(true, true), true)).toEqual({ survives: true, unhide: true });
+  });
+
+  it('the other person removed it with nothing above their floor (cleared it, or it is empty): deleted', () => {
+    expect(conversationAfterAccountDeletion('user-a', B(true, false), true)).toEqual({ survives: false, unhide: false });
   });
 });
 

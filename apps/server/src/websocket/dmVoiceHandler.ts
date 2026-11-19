@@ -427,12 +427,18 @@ export async function leaveCurrentDMVoiceChannel(
  * Without a participant there is no call and nothing is touched (a late
  * decline must not reach a call that starts in the same conversation).
  *
+ * `leftUserId` is the user `dm:voice:left` names (by default the call's
+ * first participant): an account deletion names the conversation's
+ * placeholder instead, never the deleted account (the client drops the user
+ * it names from the call, which a placeholder is not in, and `dm:voice:ended`
+ * ends the call either way).
+ *
  * Resolves the ids of the participants it removed (none: no call).
  */
 export async function endDMCall(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   conversationId: string,
-  opts: { notice: boolean },
+  opts: { notice: boolean; leftUserId?: string },
 ): Promise<string[]> {
   const callUsers = await getDMVoiceUsers(conversationId);
   const participants = Array.from(callUsers.keys());
@@ -448,7 +454,7 @@ export async function endDMCall(
   clearCallTimeout(conversationId);
 
   const [first] = participants;
-  io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: first });
+  io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: opts.leftUserId ?? first });
   io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
   if (opts.notice) createSystemMessage(io, conversationId, first, DM_NOTICE_CALL_ENDED);
   return participants;

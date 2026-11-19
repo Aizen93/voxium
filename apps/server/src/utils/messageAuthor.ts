@@ -20,9 +20,10 @@ import {
  * @voxium/shared, applied by routes/servers.ts), and it can never EQUAL a user
  * id (a cuid holds no colon).
  *
- * Webhooks post in channels only. Inside a conversation a NULL author is
- * reserved for a deleted account's message (nothing writes one before a later
- * change of #131): such a row gets the deleted-account placeholder
+ * Webhooks post in channels only. Inside a conversation a NULL author is a
+ * deleted account's message (the account deletion that keeps a conversation
+ * for the other person writes it, utils/conversationLifecycle.ts): such a
+ * row gets the deleted-account placeholder
  * (`deleted:{conversationId}`, utils/deletedParticipant.ts), never a webhook
  * label. A DM reader shapes its rows with shapeConversationMessageRow() /
  * shapeConversationMessageAuthor(), which take the conversation as a REQUIRED
