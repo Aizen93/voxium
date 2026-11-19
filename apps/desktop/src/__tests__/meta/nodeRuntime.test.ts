@@ -58,7 +58,7 @@ describe('supported Node.js runtime', () => {
   });
 
   it('workflows set up Node at the runtime major (the lint/test matrix also keeps the minimum) and never rely on Corepack', () => {
-    for (const file of ['.github/workflows/ci.yml', '.github/workflows/release.yml']) {
+    for (const file of ['.github/workflows/ci.yml', '.github/workflows/release.yml', '.github/workflows/integration-scripts.yml']) {
       const yml = read(file);
       expect(yml, file).not.toMatch(/corepack (enable|prepare)/i);
       const versions = [...yml.matchAll(/node-version: (\S+)/g)].map((m) => m[1]);
@@ -72,7 +72,7 @@ describe('supported Node.js runtime', () => {
   });
 
   it('workflows install pnpm through an env var checked to be an exact version, never interpolated into the script', () => {
-    for (const [file, count] of [['.github/workflows/ci.yml', 3], ['.github/workflows/release.yml', 1]] as const) {
+    for (const [file, count] of [['.github/workflows/ci.yml', 3], ['.github/workflows/release.yml', 1], ['.github/workflows/integration-scripts.yml', 1]] as const) {
       const yml = read(file).replace(/\r\n/g, '\n');
       expect(yml, file).not.toMatch(/run:.*\$\{\{\s*steps\.pnpm-ver/);
       const steps = yml.split('\n      - name: ').filter((s) => s.startsWith('Install pnpm\n'));

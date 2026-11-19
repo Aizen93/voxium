@@ -12,7 +12,7 @@ import path from 'node:path';
 // the real pnpm. release.yml has no pnpm cache at all (see below).
 
 const ROOT = path.resolve(__dirname, '../../../../..');
-const WORKFLOWS = ['ci.yml', 'release.yml'].map((f) => path.join(ROOT, '.github/workflows', f));
+const WORKFLOWS = ['ci.yml', 'release.yml', 'integration-scripts.yml'].map((f) => path.join(ROOT, '.github/workflows', f));
 
 const read = (file: string) => readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 
@@ -57,9 +57,9 @@ const cachingJobs = WORKFLOWS.flatMap((file) =>
 );
 
 describe('the pnpm store cache', () => {
-  it('is in the three CI jobs that install with pnpm', () => {
+  it('is in the three CI jobs that install with pnpm, and the integration-scripts job', () => {
     expect(cachingJobs.map((j) => `${j.file}:${j.id}`).sort()).toEqual(
-      ['ci.yml:build', 'ci.yml:e2e', 'ci.yml:lint-typecheck'].sort(),
+      ['ci.yml:build', 'ci.yml:e2e', 'ci.yml:lint-typecheck', 'integration-scripts.yml:scripts'].sort(),
     );
   });
 

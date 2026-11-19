@@ -2,7 +2,11 @@
  * Permission System Integration Test
  *
  * Tests all permission scenarios end-to-end against a running backend.
- * Requires: backend on localhost:3001, PostgreSQL, Redis
+ * Requires: backend on localhost:3001, PostgreSQL, Redis, and the seed
+ * account alice@example.com a platform admin: the run raises the rate limits
+ * through the admin API as her first, and a refused raise is not reported
+ * (the run then meets the default limits). CI runs this script with its own
+ * database, promoted so (.github/workflows/integration-scripts.yml).
  *
  * Usage: npx tsx scripts/test-permissions.ts
  */

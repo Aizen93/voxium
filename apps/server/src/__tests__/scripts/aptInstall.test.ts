@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -223,7 +223,10 @@ describe('the release build installs its Linux packages through the bounded scri
 
   it('no workflow calls apt-get without the bound', () => {
     const workflows = path.join(ROOT, '.github/workflows');
-    for (const file of ['ci.yml', 'release.yml', 'docker.yml', 'desktop-shell.yml', 'crypto-deps-watch.yml']) {
+    // Every workflow, so a new one is held to it without being listed here
+    const files = readdirSync(workflows).filter((f) => /\.ya?ml$/.test(f));
+    expect(files).toEqual(expect.arrayContaining(['ci.yml', 'release.yml', 'docker.yml', 'desktop-shell.yml', 'crypto-deps-watch.yml', 'integration-scripts.yml']));
+    for (const file of files) {
       const text = readFileSync(path.join(workflows, file), 'utf8')
         .split(/\r?\n/)
         .filter((l) => !/^\s*#/.test(l))

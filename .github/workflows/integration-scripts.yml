@@ -1,0 +1,324 @@
+name: Integration scripts
+
+# scripts/test-permissions.ts runs the permission matrix against a live
+# backend, and scripts/test-multi-node.ts runs two real nodes against one
+# Redis (cross-node events, presence, DM calls, server voice with real media,
+# visibility resyncs, an owner-node crash). Both exit non-zero on a failed
+# check, and until this workflow nothing ran them but a developer by hand
+# (#73). They run on what they exercise: the server, the shared package, the
+# scripts, the dependencies; and once a week whatever changed, which catches
+# what moves outside the repository (the runner image, the service images'
+# floating tags, prebuilt binaries such as mediasoup's worker and wrtc's).
+# GitHub runs a schedule from the default branch's copy of this file, against
+# that branch.
+#
+# Not a required check, and not one of the jobs ci.yml's gate needs: a
+# required check that a path filter leaves out never reports, and the pull
+# requests it skipped would wait on it for ever. Its red X is visible on the
+# pull request all the same.
+on:
+  pull_request:
+    paths:
+      - apps/server/**
+      - '!apps/server/src/__tests__/**'
+      - packages/shared/**
+      - scripts/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .github/workflows/integration-scripts.yml
+  push:
+    branches: [develop]
+    paths:
+      - apps/server/**
+      - '!apps/server/src/__tests__/**'
+      - packages/shared/**
+      - scripts/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .github/workflows/integration-scripts.yml
+  schedule:
+    # Weekly, Thursday 03:23 UTC: away from the hour, the day and the other
+    # scheduled workflows (crypto-deps-watch Monday 06:17, desktop-shell
+    # Monday 06:41)
+    - cron: '23 3 * * 4'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-scripts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    name: Multi-node and permission scripts
+    runs-on: ubuntu-latest
+    # About 10 minutes expected: install, migrations, the permission script
+    # (a couple of minutes) and the multi-node one (3 to 5: it waits out a
+    # node heartbeat's 30 s TTL twice, once for a resync follow-up and once
+    # for the crash takeover). 30 is the hang ceiling.
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: voxium_scripts
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Every server either script talks to boots from this environment:
+      # the backend started below, and the two nodes test-multi-node.ts
+      # spawns with its own environment (no .env is read: there is none)
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/voxium_scripts?schema=public
+      REDIS_URL: redis://127.0.0.1:6379
+      JWT_SECRET: ci-scripts-secret-at-least-32-characters-long
+      JWT_REFRESH_SECRET: ci-scripts-refresh-secret-at-least-32-chars
+      TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      # Required at boot. Neither script uploads, so no store listens here:
+      # a space or message they delete owns no file
+      S3_ASSETS_ENDPOINT: http://127.0.0.1:9000
+      S3_ASSETS_REGION: us-east-1
+      S3_ACCESS_KEY: ci-placeholder
+      S3_SECRET_KEY: ci-placeholder
+      S3_ASSETS_BUCKET: voxium-scripts
+      # Development: the registration proof-of-work at its trivial difficulty
+      # (the scripts register their accounts through the real flow), and the
+      # proxy settings off
+      NODE_ENV: development
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read pnpm version from package.json
+        id: pnpm-ver
+        shell: bash
+        run: echo "version=$(sed -n 's/.*"packageManager".*"pnpm@\([^"]*\)".*/\1/p' package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node 26
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      # Node 25+ no longer ships Corepack: install the pnpm package.json names,
+      # passed through env and checked to be an exact version before it is installed.
+      - name: Install pnpm
+        env:
+          PNPM_VERSION: ${{ steps.pnpm-ver.outputs.version }}
+        run: |
+          [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
+          npm install -g "pnpm@$PNPM_VERSION"
+
+      # The store is where pnpm puts it by default (~/.local/share/pnpm/store
+      # on Linux, under LOCALAPPDATA on Windows), never ~/.pnpm-store: that path
+      # never existed, so this cache saved nothing ("Path Validation Error").
+      - name: Locate the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: |
+          dir=$(pnpm store path --silent)
+          [ -n "$dir" ] || { echo "::error::pnpm named no store path"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client (v7 — reads prisma.config.ts)
+        working-directory: apps/server
+        run: npx prisma generate
+
+      - name: Apply migrations
+        working-directory: apps/server
+        run: npx prisma migrate deploy
+
+      # alice, bob and charlie (password123): both scripts sign in as alice
+      - name: Seed the demo accounts
+        run: pnpm db:seed
+
+      # Both scripts call admin routes as alice@example.com (the feature flags
+      # and live stats test-multi-node.ts compares across nodes, the
+      # rate-limit raise test-permissions.ts makes before it registers its
+      # accounts), and the seed creates her as a plain user. A developer's
+      # database has her promoted by hand; this one is promoted here, to the
+      # least role those routes need.
+      - name: Make the seed account alice a platform admin
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          # The count of rows updated, alone (psql -t still prints an UPDATE's
+          # command tag, so the statement is read through a CTE)
+          promoted=$(timeout 30 docker exec "$POSTGRES_CONTAINER" psql -U postgres -d voxium_scripts -v ON_ERROR_STOP=1 -tA -c "WITH promoted AS (UPDATE users SET role = 'admin' WHERE email = 'alice@example.com' RETURNING id) SELECT count(*) FROM promoted")
+          if [ "$promoted" != "1" ]; then
+            echo "::error::the seed did not create alice@example.com (rows updated: '$promoted')"
+            exit 1
+          fi
+          echo "alice@example.com is an admin"
+
+      # The server imports the BUILT shared package
+      - name: Build shared
+        run: pnpm build:shared
+
+      # The scripts' WebRTC clients (mediasoup-client on @roamhq/wrtc) reach
+      # the SFU on the address it announces, as the e2e job's browsers do
+      - name: Announce mediasoup on the runner's real IP
+        run: |
+          RUNNER_IP=$(hostname -I | awk '{print $1}')
+          # An empty value would silently fall back to announcing 127.0.0.1
+          # (the || default in mediasoupConfig), reintroducing the Firefox
+          # DTLS failure with no visible cause. Refuse loudly instead.
+          if [ -z "$RUNNER_IP" ]; then
+            echo "Could not resolve the runner's IP — refusing to announce loopback"
+            exit 1
+          fi
+          echo "MEDIASOUP_ANNOUNCED_IP=$RUNNER_IP" >> "$GITHUB_ENV"
+          echo "MEDIASOUP_LISTEN_IP=0.0.0.0" >> "$GITHUB_ENV"
+          echo "mediasoup will announce $RUNNER_IP"
+
+      # test-permissions.ts talks to a backend on localhost:3001 and starts
+      # none. This one runs from source the way test-multi-node.ts starts its
+      # nodes (this node binary with tsx's loader, no shell, no watch), so the
+      # pid kept is the server's own; its output goes to a file, which the
+      # stop step prints. Ready means fully started (/ready, after listen). A
+      # /ready answer does not say which process gave it, so nothing may answer
+      # on 3001 before the start, and the started process must still be
+      # running: one that exits at boot ends the wait at once, said so.
+      - name: Start a backend for the permission script
+        working-directory: apps/server
+        timeout-minutes: 5
+        env:
+          PORT: 3001
+        run: |
+          # Running: the process exists and is not a zombie (an exited child
+          # nobody has reaped yet still answers kill -0)
+          running() {
+            state=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
+            case "$state" in ''|Z*) return 1 ;; esac
+          }
+          log="$RUNNER_TEMP/permissions-backend.log"
+          if curl -sS --max-time 3 -o /dev/null http://127.0.0.1:3001/ready 2>/dev/null; then
+            echo "::error::something already answers on port 3001"
+            exit 1
+          fi
+          nohup node --import tsx src/index.ts > "$log" 2>&1 &
+          pid=$!
+          echo "$pid" > "$RUNNER_TEMP/permissions-backend.pid"
+          ready=
+          for i in $(seq 1 60); do
+            if ! running "$pid"; then
+              echo "::error::the backend (pid $pid) exited during start-up"
+              cat "$log"
+              exit 1
+            fi
+            if curl -fsS --max-time 3 -o /dev/null http://127.0.0.1:3001/ready; then ready=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ready" ]; then
+            echo "::error::the backend (pid $pid) is running but was not ready after 60 checks, 2 s apart"
+            cat "$log"
+            exit 1
+          fi
+          echo "Backend ready (pid $pid)"
+
+      - name: Permission script (scripts/test-permissions.ts)
+        id: permissions
+        timeout-minutes: 10
+        run: npx tsx scripts/test-permissions.ts
+
+      # Whatever the script did. SIGTERM runs the server's shutdown, which
+      # deletes its node heartbeat; a server still up 30 s later is killed,
+      # and its heartbeat goes with the Redis flush below. Gone is judged by
+      # the process state, as in the start step: the backend outlived the
+      # shell that started it, and an exited process nobody reaps (a zombie)
+      # still answers kill -0.
+      - name: Stop the permission script's backend
+        if: always()
+        timeout-minutes: 2
+        run: |
+          running() {
+            state=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
+            case "$state" in ''|Z*) return 1 ;; esac
+          }
+          pidfile="$RUNNER_TEMP/permissions-backend.pid"
+          log="$RUNNER_TEMP/permissions-backend.log"
+          if [ ! -s "$pidfile" ]; then
+            echo "No backend was started."
+            exit 0
+          fi
+          pid=$(cat "$pidfile")
+          kill -TERM "$pid" 2>/dev/null || true
+          for i in $(seq 1 30); do
+            running "$pid" || break
+            sleep 1
+          done
+          if running "$pid"; then
+            echo "::warning::the backend did not exit within 30 s of SIGTERM; killing it"
+            kill -KILL "$pid" 2>/dev/null || true
+            for i in $(seq 1 10); do
+              running "$pid" || break
+              sleep 1
+            done
+          fi
+          if running "$pid"; then
+            echo "::error::the backend (pid $pid) is still running"
+            exit 1
+          fi
+          echo "::group::Backend log"
+          cat "$log" || true
+          echo "::endgroup::"
+
+      # Each script on a clean Redis. test-permissions.ts raises the rate
+      # limits while it runs, and a counter created under the raise outlives
+      # the reset of the override (rate-limiter-flexible sets a key's expiry
+      # only when it creates it): the multi-node run's registrations, on the
+      # default limits, would meet the first run's counters. A heartbeat or a
+      # presence key of the backend above would meet its nodes too.
+      - name: Empty Redis between the two scripts
+        if: ${{ !cancelled() && (success() || steps.permissions.outcome == 'failure') }}
+        env:
+          REDIS_CONTAINER: ${{ job.services.redis.id }}
+        run: |
+          timeout 30 docker exec "$REDIS_CONTAINER" redis-cli FLUSHALL
+          keys=$(timeout 30 docker exec "$REDIS_CONTAINER" redis-cli DBSIZE)
+          if [ "$keys" != "0" ]; then
+            echo "::error::Redis still holds $keys keys after FLUSHALL"
+            exit 1
+          fi
+
+      # Every scenario, the two that wait out a heartbeat's TTL included. The
+      # script refuses a bound 3001/3002 and a live heartbeat itself, starts
+      # both nodes, and ends their process trees on every exit path. Run also
+      # when only the permission script failed, so both results are seen.
+      - name: Multi-node script (scripts/test-multi-node.ts)
+        if: ${{ !cancelled() && (success() || steps.permissions.outcome == 'failure') }}
+        timeout-minutes: 15
+        run: npx tsx scripts/test-multi-node.ts

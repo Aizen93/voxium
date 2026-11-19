@@ -1,0 +1,21 @@
+# Findings gitleaks reports that are not secrets, by fingerprint:
+#
+#   <commit>:<file>:<rule>:<line>   the commit that added the line, and the
+#                                   line's number in that commit
+#
+# Only this form. gitleaks also accepts <file>:<rule>:<line>, but it checks
+# every finding of a git scan against that form too: such an entry would hide
+# any NEW finding later made on the same line of the same file, and it goes
+# stale without a word when the file shifts. A fingerprint names one finding in
+# one commit; a line that changes is reported again and decided again. A
+# directory scan (`gitleaks dir .`) is not what CI runs, and it reports the
+# findings below; that is expected.
+#
+# Each fingerprint below is the one gitleaks 8.24.3 printed for it.
+
+# apps/desktop/src-tauri/src/lib.rs: a unit test's fake access and refresh
+# tokens (two findings on one line, one fingerprint)
+973bb258ee125327a9f71efb6544c1a1bd61f5dd:apps/desktop/src-tauri/src/lib.rs:generic-api-key:320
+
+# apps/server/src/routes/e2e.ts: a comparison of two public device keys
+8ed089510dce73c251e8a526e993e539be9bb2eb:apps/server/src/routes/e2e.ts:generic-api-key:312
