@@ -724,31 +724,59 @@ export function confirmMembership(channelId: string): void {
     if (state.ended) return;
     state.members = new Set(members.map((m) => m.userId));
 
-    // A member whose identity changed since it was accepted is flagged, and
-    // excluded if they are in the call, exactly like the inbound-key identity
-    // path. The fresh rotation every exclusion takes (spec §21.4) runs at once,
-    // before anyone is keyed below. They stay in the member list: a new session
-    // of theirs goes through vetting like any arrival.
-    let identityExcluded = false;
+    // A member whose identity changed since it was accepted is flagged, in the
+    // call or not. They stay in the member list: a new session of theirs goes
+    // through vetting like any arrival.
+    const identityChanged = new Set(identityChangedUserIds);
     for (const userId of identityChangedUserIds) {
       await flagIdentityChanged(userId);
       if (state.ended) return;
-      const conflicted = state.peers.get(userId);
-      if (!conflicted) continue;
-      state.peers.delete(userId);
-      recordExclusion(state, userId, conflicted.epoch);
-      forgetPeer(state, userId);
-      await notifyPeerExcluded(channelId, userId, new E2EIdentityChangedError(userId));
-      identityExcluded = true;
     }
-    if (identityExcluded) await rotateFreshLocked(state);
+
+    // Every exclusion of the pass is decided before anyone is keyed in it:
+    // an identity change, a participant no longer a member, a pinned device
+    // no longer published. When one of them had been keyed, one fresh
+    // rotation follows (spec §21.4), so nothing keyed below derives from a key
+    // an excluded device holds. A participant never keyed takes none.
+    let keyedExcluded = false;
+    for (const [userId, peer] of [...state.peers.entries()]) {
+      let notice: unknown;
+      if (identityChanged.has(userId)) {
+        notice = new E2EIdentityChangedError(userId);
+      } else if (!state.members.has(userId)) {
+        // Keyed: removed without a notice, like a departure. Never vetted: the
+        // notice their vet gives a non-member.
+        notice = peer.vetted
+          ? undefined
+          : new SecureVoiceError('binding-mismatch', `${userId} is not a member of channel ${channelId}`);
+      } else if (peer.vetted && devicePublished(lists, userId, peer.deviceId) === false) {
+        // The device we pinned at vet time may since have been REVOKED — the
+        // stolen-laptop response. Revocation is not a membership change, so no
+        // event fires and the server never evicts them; without this check we
+        // would keep sealing every future key to a device its owner disowned.
+        console.warn(`[SecureVoice] Pinned device of ${userId} is no longer published — excluding`);
+        notice = new SecureVoiceError('device-revoked', 'the pinned device was revoked');
+      } else {
+        continue;
+      }
+      if (peer.vetted) keyedExcluded = true;
+      state.peers.delete(userId);
+      recordExclusion(state, userId, peer.epoch);
+      forgetPeer(state, userId);
+      if (notice) await notifyPeerExcluded(channelId, userId, notice);
+    }
+    if (state.ended) return;
+    if (keyedExcluded) await rotateFreshLocked(state);
     if (state.ended) return;
 
     // Retry peers whose vet failed transiently (a blip, a 429, a node
     // restarting). They are still in the channel and will never re-announce,
     // so this poll is their only way back into the session. An arrival among
     // them is keyed past the generation in use when they arrived, exactly as
-    // if their first vet had passed.
+    // if their first vet had passed. Their device is checked against this
+    // pass's list too, whatever their vet answered, and before any key: one
+    // the list no longer publishes is excluded as revoked, with no rotation
+    // (they were never keyed).
     for (const [userId, peer] of [...state.peers.entries()]) {
       if (peer.vetted) continue;
       try {
@@ -759,12 +787,22 @@ export function confirmMembership(channelId: string): void {
           recordExclusion(state, userId, peer.epoch);
           forgetPeer(state, userId);
           await notifyPeerExcluded(channelId, userId, err);
-        } else {
-          console.warn(`[SecureVoice] Re-vetting ${userId} failed transiently — retried at the next membership check:`, err);
+          continue;
         }
-        continue;
+        if (devicePublished(lists, userId, peer.deviceId) !== false) {
+          console.warn(`[SecureVoice] Re-vetting ${userId} failed transiently — retried at the next membership check:`, err);
+          continue;
+        }
       }
       if (state.ended) return;
+      if (devicePublished(lists, userId, peer.deviceId) === false) {
+        console.warn(`[SecureVoice] Pinned device of ${userId} is no longer published — excluding`);
+        state.peers.delete(userId);
+        recordExclusion(state, userId, peer.epoch);
+        forgetPeer(state, userId);
+        await notifyPeerExcluded(channelId, userId, new SecureVoiceError('device-revoked', 'the pinned device was revoked'));
+        continue;
+      }
       peer.vetted = true;
       try {
         await keyVettedParticipantLocked(state, userId, peer, 'fresh');
@@ -775,32 +813,18 @@ export function confirmMembership(channelId: string): void {
         console.warn(`[SecureVoice] Keying ${userId} after a passed re-vet failed — not retried here; recovery comes from the key requests:`, err);
       }
     }
-
-    let removed = false;
-    for (const [userId, peer] of [...state.peers.entries()]) {
-      if (!state.members.has(userId)) {
-        state.peers.delete(userId);
-        recordExclusion(state, userId, peer.epoch);
-        forgetPeer(state, userId);
-        removed = true;
-        continue;
-      }
-      // The device we pinned at vet time may since have been REVOKED — the
-      // stolen-laptop response. Revocation is not a membership change, so no
-      // event fires and the server never evicts them; without this check we
-      // would keep sealing every future key to a device its owner disowned.
-      const list = lists.get(userId);
-      if (list && !list.devices.some((d) => d.deviceId === peer.deviceId)) {
-        console.warn(`[SecureVoice] Pinned device of ${userId} is no longer published — excluding`);
-        state.peers.delete(userId);
-        recordExclusion(state, userId, peer.epoch);
-        forgetPeer(state, userId);
-        removed = true;
-        await notifyPeerExcluded(channelId, userId, new SecureVoiceError('device-revoked', 'the pinned device was revoked'));
-      }
-    }
-    if (removed) await rotateFreshLocked(state);
   });
+}
+
+/** Whether a member's device list publishes this device; undefined when the list does not hold theirs. */
+function devicePublished(
+  lists: Map<string, { devices: Array<{ deviceId: string }> }>,
+  userId: string,
+  deviceId: string,
+): boolean | undefined {
+  const list = lists.get(userId);
+  if (!list) return undefined;
+  return list.devices.some((d) => d.deviceId === deviceId);
 }
 
 /**

@@ -257,6 +257,8 @@ let log: MockInstance<typeof console.log>;
 beforeEach(() => {
   endSecureVoiceSession(CH);
   vi.clearAllMocks();
+  // An answer queued for a call that never came must not reach the next test
+  for (const serviceMock of [fetchChannelDeviceLists, fetchDeviceList, encryptToDevice, decryptFromDevice]) serviceMock.mockReset();
   failingVets.clear();
   routeLocalKeysToCipher();
   fetchChannelDeviceLists.mockResolvedValue(ALL_MEMBERS);
@@ -633,6 +635,61 @@ describe('one member\'s unaccepted identity change does not hold back the others
     }
     const last = await recorded[recorded.length - 1].frame;
     expect(await opens(sealedTo('x'), last!)).toBe(true);
+  });
+});
+
+describe('a membership check decides every exclusion before a retried vet is keyed', () => {
+  /**
+   * `y` keyed, `x` waiting on a retried vet, and a check whose answer excludes
+   * `y`: no generation installed during that check opens with the keys `y`
+   * held, and `x` is keyed with the last of them.
+   */
+  async function checkExcludingKeyedMemberBesideRetriedVet(answer: typeof ALL_MEMBERS): Promise<void> {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('y'), { initialReplay: false });
+    await until(() => sealedTo('y').length === 1);
+    await arriveWithFailingVet('x');
+    const heldByY = sealedTo('y');
+
+    const recorded: Array<{ keyId: number; frame: Promise<ArrayBuffer | null> }> = [];
+    frameSession.setLocalKey.mockImplementation((keyId: number, raw: Uint8Array) => {
+      const key = raw.slice();
+      installs.push({ keyId, key });
+      let resolveFrame!: (frame: ArrayBuffer | null) => void;
+      recorded.push({ keyId, frame: new Promise((resolve) => { resolveFrame = resolve; }) });
+      senderReady = senderReady
+        .then(() => sender.setKey(keyId, key))
+        .then(async () => resolveFrame(await sender.encrypt(new Uint8Array([9, keyId, 9]).buffer)));
+    });
+
+    fetchChannelDeviceLists.mockResolvedValue(answer);
+    await membershipCheck();
+    await until(() => sealedTo('x').length >= 1 && frameSession.removeRemote.mock.calls.some((call) => call[0] === 'y'));
+    await settle();
+
+    // One fresh rotation for y's exclusion, then x keyed with it: no ratchet of a key y held
+    expect(recorded.map((generation) => generation.keyId)).toEqual([2]);
+    for (const generation of recorded) {
+      const frame = await generation.frame;
+      expect(frame).not.toBeNull();
+      expect(await opens(heldByY, frame!)).toBe(false);
+    }
+    const last = await recorded[recorded.length - 1].frame;
+    expect(await opens(sealedTo('x'), last!)).toBe(true);
+  }
+
+  it('a pinned device revoked in the same check', async () => {
+    await checkExcludingKeyedMemberBesideRetriedVet({ ...ALL_MEMBERS, lists: new Map([['y', deviceListFor('z')]]) });
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'y', 'device-revoked');
+  });
+
+  it('a removal from the channel in the same check', async () => {
+    await checkExcludingKeyedMemberBesideRetriedVet({
+      ...ALL_MEMBERS,
+      members: ALL_MEMBERS.members.filter((m) => m.userId !== 'y'),
+    });
+    // Removed without a notice, as before
+    expect(markExcluded).not.toHaveBeenCalledWith(CH, 'y', expect.anything());
   });
 });
 
