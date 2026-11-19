@@ -143,6 +143,12 @@ export interface E2EChannelDeviceLists {
   lists: Map<string, E2EPinnedDeviceList>;
   /** Members whose published devices all failed verification (not "no devices"). */
   unverifiableUserIds: string[];
+  /**
+   * Members whose identity changed since it was accepted; they have no entry
+   * in `lists`. Present only when the fetch was asked to collect them
+   * (`collectIdentityChanges`): by default such a member fails the whole call.
+   */
+  identityChangedUserIds?: string[];
 }
 
 /** UI signal: this peer's device list changed since the user acknowledged it. */
@@ -2358,8 +2364,17 @@ export class E2EService {
    * An E2EIdentityChangedError for any member propagates and blocks the send,
    * exactly like the DM path: sending anyway would either leak to keys the
    * user has not accepted or silently exclude a member.
+   *
+   * `collectIdentityChanges` is for a caller that decides per member and goes
+   * on with the others (the secure voice membership check): a member whose
+   * identity changed is then named in `identityChangedUserIds`, with no entry
+   * in `lists`, instead of failing the call. Every other error still
+   * propagates, and without the option nothing changes.
    */
-  async fetchChannelDeviceLists(channelId: string): Promise<E2EChannelDeviceLists> {
+  async fetchChannelDeviceLists(
+    channelId: string,
+    opts?: { collectIdentityChanges?: boolean }
+  ): Promise<E2EChannelDeviceLists> {
     const res = await this.api.get(`/e2e/channels/${encodeURIComponent(channelId)}/devices`);
     const data = res.data.data as {
       members?: Array<{ userId?: unknown; isCreator?: unknown }>;
@@ -2376,15 +2391,32 @@ export class E2EService {
 
     const lists = new Map<string, E2EPinnedDeviceList>();
     const unverifiableUserIds: string[] = [];
+    const identityChangedUserIds: string[] = [];
     for (const member of members) {
       const payload = payloadByUser.get(member.userId) ?? { devices: [], listVersion: 0 };
-      const list = await this.processDeviceListPayload(member.userId, payload);
+      let list: E2EPinnedDeviceList;
+      try {
+        list = await this.processDeviceListPayload(member.userId, payload);
+      } catch (err) {
+        if (
+          opts?.collectIdentityChanges &&
+          err instanceof E2EIdentityChangedError &&
+          err.peerUserId === member.userId
+        ) {
+          identityChangedUserIds.push(member.userId);
+          continue;
+        }
+        throw err;
+      }
       lists.set(member.userId, list);
       if (list.devices.length === 0 && list.servedDeviceCount > 0) {
         // Published devices exist but none survived verification — a directory
         // problem, not an un-onboarded member (see servedDeviceCount docs)
         unverifiableUserIds.push(member.userId);
       }
+    }
+    if (opts?.collectIdentityChanges) {
+      return { members, lists, unverifiableUserIds, identityChangedUserIds };
     }
     return { members, lists, unverifiableUserIds };
   }

@@ -690,34 +690,35 @@ export function confirmMembership(channelId: string): void {
     const selfId = await currentUserId();
     if (!selfId) return;
 
-    let members: Array<{ userId: string }>;
-    let lists: Map<string, { devices: Array<{ deviceId: string }> }>;
-    try {
-      ({ members, lists } = await getE2EService(selfId).fetchChannelDeviceLists(channelId));
-    } catch (err) {
-      if (err instanceof E2EIdentityChangedError) {
-        // The endpoint fetch verifies EVERY member's identity, so one member
-        // whose identity changed makes the whole call throw. Left to the
-        // chain's catch this would silently disable membership AND revocation
-        // checking for the rest of the call — for every participant — while
-        // the changed identity keeps receiving our keys. Exclude and rotate,
-        // exactly like the inbound-key identity path.
-        await flagIdentityChanged(err.peerUserId);
-        if (state.ended) return;
-        const conflicted = state.peers.get(err.peerUserId);
-        if (conflicted) {
-          state.peers.delete(err.peerUserId);
-          recordExclusion(state, err.peerUserId, conflicted.epoch);
-          forgetPeer(state, err.peerUserId);
-          await notifyPeerExcluded(channelId, err.peerUserId, err);
-          await rotateFreshLocked(state);
-        }
-        return;
-      }
-      throw err;
-    }
+    // The fetch verifies EVERY member's identity. Asked to collect, it names
+    // the members whose identity changed instead of failing on the first, so
+    // the checks below run for everyone else whatever one member's state.
+    const { members, lists, identityChangedUserIds = [] } = await getE2EService(selfId).fetchChannelDeviceLists(
+      channelId,
+      { collectIdentityChanges: true },
+    );
     if (state.ended) return;
     state.members = new Set(members.map((m) => m.userId));
+
+    // A member whose identity changed since it was accepted is flagged, and
+    // excluded if they are in the call, exactly like the inbound-key identity
+    // path. The fresh rotation every exclusion takes (spec §21.4) runs at once,
+    // before anyone is keyed below. They stay in the member list: a new session
+    // of theirs goes through vetting like any arrival.
+    let identityExcluded = false;
+    for (const userId of identityChangedUserIds) {
+      await flagIdentityChanged(userId);
+      if (state.ended) return;
+      const conflicted = state.peers.get(userId);
+      if (!conflicted) continue;
+      state.peers.delete(userId);
+      recordExclusion(state, userId, conflicted.epoch);
+      forgetPeer(state, userId);
+      await notifyPeerExcluded(channelId, userId, new E2EIdentityChangedError(userId));
+      identityExcluded = true;
+    }
+    if (identityExcluded) await rotateFreshLocked(state);
+    if (state.ended) return;
 
     // Retry peers whose vet failed transiently (a blip, a 429, a node
     // restarting). They are still in the channel and will never re-announce,
