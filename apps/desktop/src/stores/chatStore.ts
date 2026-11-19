@@ -5,6 +5,7 @@ import { getSocket } from '../services/socket';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { useDMStore } from './dmStore';
+import { DMConversationReadOnlyError, isHeldReadOnly } from '../utils/dmParticipant';
 import { useServerStore } from './serverStore';
 import { E2EPeerNotReadyError } from '../services/e2e/e2eService';
 import { decryptMessagesForDisplay, prepareOutgoingDM, cacheSentPlaintext } from '../services/e2e/dmCrypto';
@@ -17,6 +18,11 @@ import {
 } from '../services/e2e/channelCrypto';
 import { E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, WEBHOOK_AUTHOR_ID_PREFIX } from '@voxium/shared';
 import type { Message, MessageAuthor, Attachment, ReactionGroup, E2EAttachmentMeta } from '@voxium/shared';
+
+/** The store holds the conversation read-only (the other side's account was deleted: utils/dmParticipant.ts). */
+function isConversationReadOnly(conversationId: string): boolean {
+  return isHeldReadOnly(useDMStore.getState(), conversationId);
+}
 
 // Track typing timers per user to prevent leaks
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -78,7 +84,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   replyingTo: null,
   targetMessageId: null,
 
-  setReplyingTo: (message) => set({ replyingTo: message }),
+  setReplyingTo: (message) => {
+    // nobody is answered in a read-only conversation (the other side's account was deleted)
+    if (message?.conversationId && isConversationReadOnly(message.conversationId)) return;
+    set({ replyingTo: message });
+  },
   clearReplyingTo: () => set({ replyingTo: null }),
 
   fetchMessages: async (channelId: string, before?: string) => {
@@ -300,7 +310,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         signal: controller.signal,
       });
       // E2E conversations: ciphertext never reaches the store or the DOM
-      const newMessages = await decryptMessagesForDisplay(data.data);
+      // the page is this conversation's: its read-only state and placeholder rows follow it
+      const newMessages = await decryptMessagesForDisplay(data.data, { conversationId });
 
       if (controller.signal.aborted) return;
 
@@ -343,7 +354,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { data } = await api.get(`/dm/${conversationId}/messages?around=${messageId}`, {
         signal: controller.signal,
       });
-      const decrypted = await decryptMessagesForDisplay(data.data);
+      const decrypted = await decryptMessagesForDisplay(data.data, { conversationId });
 
       if (controller.signal.aborted) return;
 
@@ -367,6 +378,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendDMMessage: async (conversationId: string, content: string, e2eAttachments?: E2EAttachmentMeta[]) => {
+    // a read-only conversation takes no message: refused before anything is
+    // encrypted or sent (no typing signal either)
+    if (isConversationReadOnly(conversationId)) throw new DMConversationReadOnlyError(conversationId);
     try {
       const replyingTo = get().replyingTo;
 
@@ -424,6 +438,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   editDMMessage: async (conversationId: string, messageId: string, content: string) => {
+    // a read-only conversation keeps its messages as they are (deleting one's own stays)
+    if (isConversationReadOnly(conversationId)) throw new DMConversationReadOnlyError(conversationId);
     // An edit is a fresh ciphertext for the same id
     const prepared = await prepareOutgoingDM(conversationId, content);
     const { data } = await api.patch(`/dm/${conversationId}/messages/${messageId}`, {
@@ -441,6 +457,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   toggleDMReaction: async (conversationId: string, messageId: string, emoji: string) => {
+    // no reaction is added or taken back in a read-only conversation
+    if (isConversationReadOnly(conversationId)) throw new DMConversationReadOnlyError(conversationId);
     try {
       await api.put(`/dm/${conversationId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
     } catch (err) {

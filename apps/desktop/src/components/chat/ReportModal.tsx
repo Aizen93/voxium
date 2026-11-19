@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { X, Flag } from 'lucide-react';
 import { api } from '../../services/api';
 import { toast } from '../../stores/toastStore';
-import { LIMITS } from '@voxium/shared';
+import { LIMITS, isDeletedParticipantId } from '@voxium/shared';
 import { getTranslatedError } from '../../utils/serverErrors';
 
 interface Props {
@@ -36,6 +36,13 @@ export function ReportModal({ type, reportedUserId, serverId, messageId, reporte
   };
 
   const handleSubmit = async () => {
+    // The deleted-account placeholder names nobody: never sent as a report
+    // target (no surface offers it; this is the last lock before the request)
+    if (type !== 'server' && isDeletedParticipantId(reportedUserId)) {
+      console.warn('[Report] Refusing to report the deleted-account placeholder');
+      onClose();
+      return;
+    }
     if (reason.trim().length < LIMITS.REPORT_REASON_MIN) {
       toast.error(t('chat.report.reasonMinLength', { min: LIMITS.REPORT_REASON_MIN }));
       return;

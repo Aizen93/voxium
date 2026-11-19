@@ -13,17 +13,20 @@ interface Props {
   messageId: string;
   channelId?: string;
   conversationId?: string;
+  /** A read-only DM (the other side's account was deleted): the reactions are shown, never toggled or added. */
+  readOnly?: boolean;
 }
 
-export function ReactionDisplay({ reactions, messageId, channelId, conversationId }: Props) {
+export function ReactionDisplay({ reactions, messageId, channelId, conversationId, readOnly = false }: Props) {
   const { t } = useTranslation();
   const [showPicker, setShowPicker] = useState(false);
   const userId = useAuthStore((s) => s.user?.id);
   const addBtnRef = useRef<HTMLButtonElement>(null);
 
-  if (reactions.length === 0 && !showPicker) return null;
+  if (reactions.length === 0 && (!showPicker || readOnly)) return null;
 
   const handleToggle = async (emoji: string) => {
+    if (readOnly) return;
     try {
       if (conversationId) {
         await useChatStore.getState().toggleDMReaction(conversationId, messageId, emoji);
@@ -48,7 +51,8 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
           <button
             key={r.emoji}
             onClick={() => handleToggle(r.emoji)}
-            className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors ${
+            disabled={readOnly}
+            className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors disabled:cursor-default ${
               isOwn
                 ? 'border-vox-accent-primary/40 bg-vox-accent-tint text-vox-text-primary'
                 : 'border-vox-border bg-vox-bg-hover text-vox-text-secondary hover:border-vox-border-strong'
@@ -59,16 +63,18 @@ export function ReactionDisplay({ reactions, messageId, channelId, conversationI
           </button>
         );
       })}
-      <button
-        ref={addBtnRef}
-        onClick={() => setShowPicker(!showPicker)}
-        className="flex h-[26px] w-[30px] items-center justify-center rounded-full border border-dashed border-vox-border-strong text-vox-text-muted hover:border-vox-text-muted hover:text-vox-text-primary transition-colors"
-        title={t('messageItem.addReaction')}
-        aria-label={t('messageItem.addReaction')}
-      >
-        <Plus size={12} />
-      </button>
-      {showPicker && (
+      {!readOnly && (
+        <button
+          ref={addBtnRef}
+          onClick={() => setShowPicker(!showPicker)}
+          className="flex h-[26px] w-[30px] items-center justify-center rounded-full border border-dashed border-vox-border-strong text-vox-text-muted hover:border-vox-text-muted hover:text-vox-text-primary transition-colors"
+          title={t('messageItem.addReaction')}
+          aria-label={t('messageItem.addReaction')}
+        >
+          <Plus size={12} />
+        </button>
+      )}
+      {!readOnly && showPicker && (
         <EmojiPicker
           anchorRef={addBtnRef}
           onEmojiSelect={handlePickerSelect}

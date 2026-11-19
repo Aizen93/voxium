@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useServerStore } from '../../stores/serverStore';
-import { useDMStore } from '../../stores/dmStore';
+import { useDMStore, isConversationReadOnly } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
@@ -32,6 +32,9 @@ function IncomingCallContent({ incomingCall }: { incomingCall: { conversationId:
       if (!dmStore.conversations.some((c) => c.id === conversationId)) {
         await dmStore.fetchConversations();
       }
+      // A read-only conversation (the other side's account was deleted): the
+      // accept was refused (voiceStore.joinDMCall), so there is no call to show
+      if (isConversationReadOnly(conversationId)) return;
 
       // Navigate to the DM conversation so the user sees the call UI
       useServerStore.setState({ activeServerId: null, activeChannelId: null });

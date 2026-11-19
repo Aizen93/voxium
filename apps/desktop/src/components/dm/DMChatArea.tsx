@@ -14,6 +14,8 @@ import { Phone, PhoneOff } from 'lucide-react';
 import { SearchModal } from '../search/SearchModal';
 import { SearchField } from '../search/SearchField';
 import { E2EControls } from './E2EControls';
+import { DeletedUserAvatar } from './DeletedParticipant';
+import { isParticipantDeleted } from '../../utils/dmParticipant';
 import { clsx } from 'clsx';
 import type { UserStatus } from '@voxium/shared';
 
@@ -35,17 +37,20 @@ export function DMChatArea() {
   const dmCallConversationId = useVoiceStore((s) => s.dmCallConversationId);
   const conversation = conversations.find((c) => c.id === activeConversationId);
   const isInCall = dmCallConversationId === activeConversationId;
+  // The other side's account was deleted: read-only (utils/dmParticipant.ts).
+  // Its placeholder id is never sent anywhere: no status, profile or E2E request.
+  const readOnly = isParticipantDeleted(conversation);
 
-  const participantId = conversation?.participant.id;
+  const participantId = readOnly ? undefined : conversation?.participant.id;
   const participantStatus: UserStatus = participantId
     ? participantStatuses[participantId] || 'offline'
     : 'offline';
 
   const handleStartCall = useCallback(() => {
-    if (activeConversationId) {
+    if (activeConversationId && !readOnly) {
       useVoiceStore.getState().joinDMCall(activeConversationId);
     }
-  }, [activeConversationId]);
+  }, [activeConversationId, readOnly]);
 
   const handleEndCall = useCallback(() => {
     useVoiceStore.getState().leaveDMCall();
@@ -146,27 +151,40 @@ export function DMChatArea() {
     <div className="flex h-full min-w-0 flex-col bg-vox-chat">
       {/* DM Header */}
       <div className="flex h-12 items-center gap-2 border-b border-vox-border px-4 shadow-sm">
-        <UserHoverTarget userId={conversation.participant.id} className="shrink-0 cursor-pointer">
-          <div className="relative">
-            <Avatar
-              avatarUrl={conversation.participant.avatarUrl}
-              displayName={conversation.participant.displayName}
-              size="sm"
-            />
-            <div className={clsx(
-              'absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-vox-bg-primary',
-              STATUS_COLORS[participantStatus]
-            )} />
-          </div>
-        </UserHoverTarget>
-        <UserHoverTarget userId={conversation.participant.id} className="flex-1 min-w-0 cursor-pointer">
-          <h3 className="text-sm font-semibold text-vox-text-primary hover:underline truncate">
-            {conversation.participant.displayName}
-          </h3>
-        </UserHoverTarget>
-        <E2EControls conversation={conversation} />
+        {readOnly ? (
+          // A deleted account: the localised name and a neutral avatar; no
+          // presence, no badge, no profile card, no safety number, no call
+          <>
+            <DeletedUserAvatar size="sm" />
+            <h3 className="flex-1 min-w-0 truncate text-sm font-semibold text-vox-text-muted" data-testid="dm-header-name">
+              {t('dm.deletedParticipant.name')}
+            </h3>
+          </>
+        ) : (
+          <>
+            <UserHoverTarget userId={conversation.participant.id} className="shrink-0 cursor-pointer">
+              <div className="relative">
+                <Avatar
+                  avatarUrl={conversation.participant.avatarUrl}
+                  displayName={conversation.participant.displayName}
+                  size="sm"
+                />
+                <div className={clsx(
+                  'absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-vox-bg-primary',
+                  STATUS_COLORS[participantStatus]
+                )} />
+              </div>
+            </UserHoverTarget>
+            <UserHoverTarget userId={conversation.participant.id} className="flex-1 min-w-0 cursor-pointer">
+              <h3 className="text-sm font-semibold text-vox-text-primary hover:underline truncate" data-testid="dm-header-name">
+                {conversation.participant.displayName}
+              </h3>
+            </UserHoverTarget>
+            <E2EControls conversation={conversation} />
+          </>
+        )}
         <SearchField onOpen={() => setShowSearch(true)} label={t('dm.searchMessages')} />
-        {isInCall ? (
+        {readOnly ? null : isInCall ? (
           <button
             onClick={handleEndCall}
             className="rounded-md p-1.5 text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
@@ -188,22 +206,27 @@ export function DMChatArea() {
       </div>
 
       {/* Active Call Panel */}
-      {isInCall && <DMCallPanel />}
+      {isInCall && !readOnly && <DMCallPanel />}
 
       {/* Messages */}
-      <DMMessageList conversationId={conversation.id} />
+      <DMMessageList conversationId={conversation.id} readOnly={readOnly} />
 
-      {/* Input */}
+      {/* Input — MessageInput renders the read-only notice itself when nothing
+          can be written; it stays mounted across the flip, so a typing signal
+          it had pending is dropped there instead of sent by an unmount */}
       <MessageInput
         conversationId={conversation.id}
-        placeholderName={conversation.participant.displayName}
+        placeholderName={readOnly ? t('dm.deletedParticipant.name') : conversation.participant.displayName}
       />
+
 
       {showSearch && (
         <SearchModal
+          // turning read-only starts the search over: results found before the purge are not kept
+          key={readOnly ? 'read-only' : 'open'}
           onClose={() => setShowSearch(false)}
           conversationId={conversation.id}
-          participantName={conversation.participant.displayName}
+          participantName={readOnly ? t('dm.deletedParticipant.name') : conversation.participant.displayName}
         />
       )}
     </div>

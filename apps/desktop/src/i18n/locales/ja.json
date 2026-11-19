@@ -834,7 +834,12 @@
     "beginningOfConversation": "会話の始まり",
     "conversationStart": "ダイレクトメッセージの履歴の始まりです。",
     "welcomeMessage": "サイドバーから会話を選択するか、いずれかのスペースのメンバーをクリックして新しい会話を始めましょう。",
-    "failedToLoadConversations": "会話を読み込めませんでした"
+    "failedToLoadConversations": "会話を読み込めませんでした",
+    "deletedParticipant": {
+      "name": "削除されたユーザー",
+      "readOnlyNotice": "この会話は閲覧のみです。相手のアカウントは削除されました。",
+      "messageDeleted": "メッセージは削除されました"
+    }
   },
   "friends": {
     "title": "フレンド",
@@ -1378,6 +1383,7 @@
     "noPermissionViewChannel": "このチャンネルを閲覧する権限がありません",
     "cannotDmSelf": "自分自身とのダイレクトメッセージは作成できません",
     "notAParticipant": "この会話の参加者ではありません",
+    "conversationReadOnly": "この会話は閲覧のみです",
     "voiceDisabled": "現在、ボイスチャンネルは無効になっています",
     "voiceCallsDisabled": "現在、音声通話は無効になっています",
     "voiceChannelFull": "ボイスチャンネルが満員です",

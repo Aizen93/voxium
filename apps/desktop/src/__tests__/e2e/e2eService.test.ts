@@ -916,6 +916,24 @@ beforeAll(async () => {
 });
 
 describe('E2EService (client crypto core)', () => {
+  it('reads the read-only purge marks once, at its start, so the display gate has them before any list', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    await alice.service.initialize();
+    await alice.service.purgeCachedPlaintexts(['conv-ro'], () => false, { mark: 'read-only' });
+
+    const list = vi.spyOn(E2EVault.prototype, 'listPurgedScopes');
+    const restarted = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await restarted.service.initialize();
+    expect(list).toHaveBeenCalledWith('read-only');
+    // nobody asked yet: the start read them, and the answers are booleans once it ends
+    await vi.waitFor(() => expect(restarted.service.scopePurged('read-only', 'conv-ro')).toBe(true));
+    expect(restarted.service.scopePurged('read-only', 'conv-live')).toBe(false);
+    expect(list).toHaveBeenCalledTimes(1);
+    list.mockRestore();
+  });
+
   it('registers a device with signed keys and a stable device id on first initialize', async () => {
     uniq++;
     const server = createFakeServer();
@@ -4815,6 +4833,29 @@ describe('E2EService — lifecycle', () => {
         await again.initialize();
         expect((await again.decryptMessage(message)).text).toBe('next to junk');
         expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/malformed key share/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('discards a share that names the deleted-account placeholder as its sender, without looking it up', async () => {
+      const { server, alice, message } = await bobWroteWhileAliceWasAway('from an account now gone');
+      const asPlaceholder = (res: { data: { data?: { shares?: unknown[] } } }) => {
+        res.data.data!.shares = (res.data.data!.shares ?? []).map((s) => ({ ...(s as object), senderUserId: 'deleted:c1' }));
+        return res;
+      };
+      const base = mangledClaims(server.apiFor(alice.userId), asPlaceholder);
+      const asked: string[] = [];
+      const recording = { ...base, async get(url: string) { asked.push(url); return base.get(url); } } as unknown as typeof base;
+      const warn = vi.spyOn(console, 'warn');
+      try {
+        const again = serviceOver(alice.userId, recording, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+        await again.initialize();
+        await flushQueue();
+        // unusable for good: discarded (so it is acknowledged), never kept for a later run
+        expect(warn.mock.calls.flat().map(String).join('\n')).toMatch(/discarding an unusable key share.*deleted account/s);
+        expect(asked.some((url) => url.includes('deleted:'))).toBe(false);
+        expect((await again.decryptMessage(message, { claimMissing: false })).failed).toBe(true);
       } finally {
         warn.mockRestore();
       }

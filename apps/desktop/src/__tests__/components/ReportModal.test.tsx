@@ -65,6 +65,16 @@ describe('ReportModal — server reports', () => {
     expect(mockPost).toHaveBeenCalledWith('/reports', { type: 'user', reportedUserId: 'u-2', reason: 'Harassment in the voice lounge.' });
   });
 
+  it('never sends the deleted-account placeholder as a target: no request, the dialog closes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await act(async () => { root.render(<ReportModal type="message" reportedUserId="deleted:conv-1" messageId="m-1" onClose={onClose} />); });
+    await act(async () => { setValue(document.body.querySelector('textarea')!, 'Reporting the placeholder row.'); });
+    await act(async () => { submit().click(); });
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
   it('a refused report toasts the translated error and stays open', async () => {
     mockPost.mockRejectedValue(new Error('You cannot report your own server'));
     await act(async () => { root.render(<ReportModal type="server" serverId="srv-1" onClose={onClose} />); });
