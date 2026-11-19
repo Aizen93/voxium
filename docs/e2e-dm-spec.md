@@ -60,19 +60,144 @@ Authority (2022), Apache-2.0.
 ## 3. Architecture: the engine boundary
 
 ```
-UI / stores  →  services/e2e/dmCrypto.ts   (display glue; no crypto)
-             →  services/e2e/e2eService.ts (orchestration; no crypto)
-             →  services/e2e/vault.ts      (IndexedDB persistence; no crypto)
-             →  @voxium/crypto-engine      (wasm-bindgen marshalling; no crypto LOGIC)
-             →  vodozemac (Rust→WASM)      (ALL cryptography)
+UI / stores  →  services/e2e/dmCrypto.ts             (display glue)
+             →  services/e2e/e2eService.ts           (orchestration)
+             →  services/e2e/vault.ts                (IndexedDB persistence; mints the pickle key)
+             →  @voxium/crypto-engine                (wasm-bindgen binding + the constructions below)
+             →  vodozemac (Rust→WASM)                (Olm, Megolm, Ed25519, Curve25519, pickles)
+
+voiceStore   →  services/e2e/secureVoiceKeys.ts      (media keys: mint, ratchet, seal over Olm)
+             →  services/e2e/voiceFrameTransform.ts  (worker handle; raw keys posted to it)
+             →  workers/voiceFrameCrypto.worker.ts   (encoded-frame transforms)
+             →  services/e2e/voiceFrameCipher.ts     (the §21 frame cipher, over WebCrypto)
 ```
 
-**Binding rule (hard):** `packages/crypto-engine/src/lib.rs` is pure
-marshalling — base64/UTF-8 conversion and type wrapping only. No key
-derivation, MAC, or signature construction may be added there or anywhere in
-JS. The only computation it performs beyond encoding is the safety-number
-digest (§8), which operates exclusively on public keys. The one secret JS
-handles is the 32-byte pickle key (§7.3).
+**Where cryptographic logic lives.** In three places, and nowhere else. This
+is a decision, recorded at the end of this section.
+
+1. **vodozemac** holds the protocols: Olm session establishment and its Double
+   Ratchet, Megolm and its ratchet, their MACs and signatures, Ed25519 signing
+   and strict verification, Curve25519, one-time and fallback keys, and the
+   encryption of every pickle (§7).
+2. **The engine crate** (`packages/crypto-engine/src/lib.rs`) implements no
+   primitive of its own: SHA-512 is RustCrypto `sha2`, AES-256-GCM is RustCrypto
+   `aes-gcm`, and randomness is `OsRng`, which in WASM reads the runtime's
+   `crypto.getRandomValues`. It does compose those primitives into constructions
+   of its own, and these are all of them:
+
+   | Construction | Over | Entry point | Spec |
+   |---|---|---|---|
+   | Device safety number: `d(0) = seed`, `d(i+1) = SHA-512(d(i) ‖ seed)` for 5200 rounds, with `seed = "voxium-sn-v1" ‖ ed25519 (32 raw bytes) ‖ curve25519 (32 raw bytes) ‖ userId`; the first 30 bytes of `d(5200)` as six 5-byte big-endian groups mod 100000, 30 digits a party, the two halves sorted and joined | public keys | `safety_number` | §8 |
+   | Account safety number: the same 5200 rounds and digits, with `seed = "voxium-sn-master-v1" ‖ master key (Ed25519, 32 raw bytes) ‖ userId` | public keys | `master_safety_number` | §8, §14 |
+   | Linking code: one SHA-512 over `"voxium-link-v1" ‖ userId ‖ 0x00 ‖ deviceId ‖ 0x00 ‖ curve25519 (base64 text) ‖ 0x00 ‖ ed25519 (base64 text)`, its first 10 bytes in base32 | public keys | `linkingCode` | §17.1 |
+   | Recovery key: 32 bytes from `OsRng` and the checksum byte `SHA-512("voxium-recovery-key-v1" ‖ secret)[0]`, in base32 | a secret | `generateRecoveryKey`, `isRecoveryKeyWellFormed` | §15.2 |
+   | Message-backup subkey: `SHA-512("voxium-msgbackup-v1" ‖ master_seed)[..32]`, the one place the crate derives a secret key | a secret | `message_backup_key` (internal) | §16.1 |
+   | Sealed secrets: AES-256-GCM, a random 12-byte nonce prepended, a context string as AAD; under the pickle key (the vault's `master_secret`), the recovery key (the backup blob) and the message-backup subkey (backed-up session keys) | secrets | `EngineMasterKey.seal` / `fromSealed`, `sealForBackup` / `openMasterKeyBackup`, `sealSessionKey` / `openSessionKey`, and the generic `sealSecret` / `openSecret` | §14.5, §15.3, §16.2 |
+   | Attachments: AES-256-GCM under a random 32-byte key and 12-byte nonce per file | file bytes | `encryptAttachment` / `decryptAttachment` | §13 |
+
+   Beyond these the crate encodes (base64, base32, UTF-8), wraps vodozemac
+   types, and runs the checks that keep the account's private keys inside it:
+   the reserved seal contexts, the refusal of a device-approval payload
+   anywhere but its own entrance, and the match against the published key of a
+   master key that was recovered or transferred (§14.4, §15.3).
+3. **The secure-voice frame cipher runs in JavaScript**, over WebCrypto, by the
+   construction §21.2 and §21.4 specify. It is the one cryptographic
+   construction outside the engine.
+   - `apps/desktop/src/services/e2e/voiceFrameCipher.ts` computes the
+     sender-key ratchet (HKDF-SHA256, `ratchetVoiceKey`), builds each frame's
+     IV (`seq ‖ keyId ‖ 0×7`) and AAD, encrypts and decrypts every encoded
+     frame with AES-256-GCM (`crypto.subtle`, keys imported non-extractable),
+     and keeps the receiver's 3-generation key ring, its one-step trial
+     ratchet and the 128-frame replay window. The cipher runs in the frame
+     worker; its `ratchetVoiceKey` also runs on the main thread, where
+     `secureVoiceKeys.ts` ratchets its own key on an arrival.
+   - `apps/desktop/src/services/e2e/secureVoiceKeys.ts` mints each fresh
+     32-byte media key with `crypto.getRandomValues`, ratchets its own key on
+     an arrival, and posts raw keys to the worker. Raw media keys sit in
+     JavaScript memory, on the main thread and in the worker, for the life of
+     a call session. They are never persisted, and a session restart mints a
+     new key with a fresh counter (§21.5). Teardown zero-fills only the current
+     key on the main thread: superseded generations, the peers' keys decoded
+     on the main thread and the base64 copies inside sealed-key plaintexts are
+     left to the garbage collector, and the worker's copies go, unwiped, with
+     the terminated worker.
+
+**Also in JavaScript, and none of it a construction:**
+
+- **Randomness** for E2E, only ever from `crypto.getRandomValues` (the source
+  the engine's `OsRng` reads as well). The pickle key (`services/e2e/vault.ts`,
+  §7.3) and the media keys are secrets. The session epochs of secure voice
+  (`secureVoiceKeys.ts`) and of DM call signaling
+  (`services/e2e/callCrypto.ts`), 16 characters of a 64-character alphabet
+  drawn from 16 random bytes (96 bits), are not secret but are
+  security-bearing: their unpredictability is what stops an envelope withheld
+  from one session being accepted in a later one (§20, §21.3). The device id
+  (`services/e2e/e2eService.ts`) is an identifier and is not security-bearing.
+- **Two digests outside E2E, over public input.**
+  `apps/desktop/src/utils/sha256.ts` is a hand-written synchronous SHA-256: it
+  names the vault database of a desktop build for another server after that
+  server's API origin (§7, `serverVaultNamespace`), and a test pins it against
+  `node:crypto`. `packages/shared/src/pow.ts` hashes with WebCrypto SHA-256 to
+  solve the registration proof-of-work. Neither carries a secret, and neither
+  is security-bearing for E2E.
+
+Nothing else in `apps/desktop/src` or `packages/shared` derives, hashes, signs,
+MACs or encrypts. Three hashes there are not cryptography: FNV-1a picking a
+space icon's colour (`components/server/ServerIcon.tsx`), a multiply-by-31
+string hash picking an avatar's colour (`components/common/Avatar.tsx`), and
+the same kind giving each screen-share reaction its jitter
+(`components/voice/Reactions.tsx`). Server-side cryptography (token digests,
+sealed webhook secrets, the proof-of-work HMAC) protects the server's own
+data, never touches E2E material, and is outside this section.
+
+**What JavaScript holds.** The account's private keys never become JavaScript
+values: the Olm identity and one-time keys leave vodozemac only inside an
+encrypted pickle, and the cross-signing master secret is assembled, sealed,
+transferred and opened only inside the engine (§14.4, §15.3). JavaScript does
+hold the pickle key, the key at rest that guards every pickle and the sealed
+master secret (§7.3); the secure-voice media keys, in memory for a call; and,
+in transit, Megolm session keys while they are shared or received (as Olm
+plaintext, §12.3, §12.4) or backed up and restored (as the plaintext the
+engine seals and opens, §16.2), attachment keys and IVs inside the encrypted
+message payload (§13), the recovery key while it is shown or typed (§15.2),
+and message plaintext itself, which the vault also keeps unsealed in its `pt:`
+cache (§7), the attachment keys and IVs of each message with it.
+
+**Binding rule (hard):**
+
+- A new cryptographic construction goes into the engine crate, composed from
+  vodozemac or a vetted RustCrypto crate, specified in this document and added
+  to the table above. Never into JavaScript.
+- JavaScript calls WebCrypto (`crypto.subtle`) for E2E only to run the §21
+  frame cipher, exactly as §21.2 and §21.4 specify. `voiceFrameCipher.ts` and
+  the key lifecycle in `secureVoiceKeys.ts` are cryptographic code: a change to
+  either takes the same review as a change to the engine.
+- Every random value E2E depends on comes from `crypto.getRandomValues`, never
+  `Math.random`. No secret enters a primitive Voxium implements itself: the
+  engine implements none, and the one in JavaScript (the synchronous SHA-256
+  above) hashes a public origin.
+
+**Why the frame cipher stays in JavaScript (decided 2026-11-18, issue #175).**
+The alternative was to move the cipher and its ratchet into the engine and load
+the WASM inside each frame worker, so that media keys and nonces would never
+live in JavaScript. That costs a WASM instance per worker and a call across the
+WASM boundary for every encoded frame, about fifty a second per sender in each
+direction. It was judged worse than a small construction of standard WebCrypto
+primitives, specified in §21 and tested against that specification written out
+a second time by hand over `node:crypto`. Native clients implement the same
+construction in their own core: the frame format and the ratchet of §21 are
+the contract, not the TypeScript file.
+
+**Not yet in step: the crate's own text.** The description in
+`packages/crypto-engine/Cargo.toml` (which wasm-pack copies into the committed
+`pkg/package.json`), the header of `src/lib.rs`, and two comments in its body
+still describe a marshalling-only crate: the recovery-key note that cites §1
+for a slow KDF the crate "is not allowed to implement", and the Megolm
+section's "this is marshalling only". The header also names three digests
+where the table above lists every construction. This section is the
+reference. All of that text is corrected at the crate's next rebuild: CI's
+`check:wasm-fresh` hashes `Cargo.toml` and every `src/**/*.rs`, so none of it
+can change without rebuilding the committed `pkg/`.
 
 The engine is versioned: envelopes carry `e: "olm1"` (pairwise) or
 `e: "megolm1"` (message bodies, §12.2), and
@@ -223,11 +348,16 @@ send messages"), never a silent downgrade. It is now the only path.
 
 Per account, IndexedDB `voxium-e2e-v2-{userId}` (`services/e2e/vault.ts`,
 `VAULT_DB_PREFIX`; a vault under the older `voxium-e2e-{userId}` name predates
-the always-on cutover and is dropped when the new one opens):
+the always-on cutover and is dropped when the new one opens). A desktop build
+for another server names it
+`voxium-e2e-v2-{userId}-s<first 16 hex digits of the SHA-256 of the API origin>`
+(`serverVaultNamespace`, `vaultDbName`), so builds for different servers keep
+separate vaults; the official desktop build and every browser build keep the
+plain name:
 
 | Key | Value |
 |---|---|
-| `account` | Olm account pickle (encrypted **inside vodozemac**, ChaCha20-Poly1305, pickle key) |
+| `account` | Olm account pickle (encrypted **inside vodozemac** under the pickle key: AES-256-CBC with PKCS#7 padding and an HMAC-SHA-256 truncated to 8 bytes, the AES key, the HMAC key and the IV all expanded from the pickle key by HKDF-SHA-256, salt one zero byte, info `Pickle`) |
 | `master_secret` | our account master key, sealed (§14.5) |
 | `master:{userId}` | pinned account master key of a user (public material, §14) |
 | `session:{userId}:{deviceId}` | pairwise Olm session pickle, per device (same encryption); a `:fb` suffix holds the glare-fallback session |
@@ -243,7 +373,8 @@ the always-on cutover and is dropped when the new one opens):
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 | `ptpurge:read-only:{conversationId}` | `{at}`: when the purge of a read-only conversation's `pt:` entries ended, after a conversation list confirmed it read-only; cleared when a list serves the conversation live (§9.1) |
 
-Only the `pickle` fields are encrypted (by vodozemac, under the pickle key).
+Only the `pickle` fields (by vodozemac) and `master_secret` (sealed by the
+engine, §14.5) are encrypted, both under the pickle key.
 Everything else in a record — session ids, device ids, counters, and the
 plaintext cache — is readable by anyone who can read the IndexedDB file. **No
 raw Megolm or Olm key material is ever stored outside a pickle**: key-share
@@ -271,7 +402,9 @@ to the vault in the same order the ratchet advances.
 
 ### 7.3 Pickle key
 
-32 random bytes per account; the only secret JS handles. Pickle
+32 random bytes per account (`crypto.getRandomValues`): the key that guards
+every pickle and the sealed master secret (what else JS holds, the unsealed
+plaintext cache included, is listed in §3). Pickle
 encryption/decryption itself happens inside vodozemac; the binding zeroizes
 its copy after each use.
 
@@ -305,10 +438,18 @@ changes — the honest signal).
 Computed in the Rust binding (public keys only):
 
 ```
-half(user) = first 30 bytes of SHA-512^5200("voxium-sn-v1" || ed25519 || curve25519 || userId)
-             → six 5-digit groups (5-byte BE chunks mod 100000)
-safety_number = concat(sort(half(A), half(B)))   // 60 digits, same on both sides
+seed(user)    = "voxium-sn-v1" || ed25519 (32 raw bytes) || curve25519 (32 raw bytes) || userId (UTF-8)
+d(0)          = seed(user)
+d(i+1)        = SHA-512(d(i) || seed(user))        for i = 0 … 5199
+half(user)    = first 30 bytes of d(5200)
+                → six 5-digit groups (each 5-byte chunk as a big-endian integer mod 100000,
+                  zero-padded to 5 digits)
+safety_number = concat(sort(half(A), half(B)))     // 60 digits, same on both sides
 ```
+
+The seed goes into every round, not only the first. The account safety number
+(§14) runs the same rounds, digits and sorted join over
+`seed(user) = "voxium-sn-master-v1" || master key (Ed25519, 32 raw bytes) || userId`.
 
 Rendered as 12 groups of 5 digits. Users compare out-of-band and "Mark as
 verified" (stored on the pinned identity). Any identity change resets
@@ -958,7 +1099,8 @@ rows rather than carrying a compatibility path. Clients re-register their
 
 - Client encrypts file bytes with a random per-file **AES-256-GCM** key inside
   the Rust binding (`encryptAttachment`/`decryptAttachment`, RustCrypto
-  `aes-gcm` — the no-crypto-in-JS rule holds) before the presigned S3 upload;
+  `aes-gcm`, one of the engine's own constructions listed in §3; JS sees the
+  key and IV it returns, never the cipher) before the presigned S3 upload;
   the server stores an opaque blob. GCM's auth tag makes a swapped or
   corrupted blob fail decryption, so no separate content hash is needed.
 - **Structured plaintext**: messages with attachments encrypt
@@ -1129,8 +1271,8 @@ disappears with it, because approval is only offered for unsigned devices.
 The secret is assembled, encrypted, parsed and checked **inside the engine**
 (`EngineSession.encryptMasterSecret` / `decryptMasterSecret`,
 `EngineAccount.createInboundSessionForMasterSecret` for the pre-key case), so
-§7's "the pickle key is the only secret JS handles" holds. Keeping it true takes
-three guards, not just the absence of a getter:
+the master secret never becomes a JS value (§3). Keeping it true takes three
+guards, not just the absence of a getter:
 
 - the generic `openSecret`/`sealSecret` refuse the `master_secret` context, or
   one call with the (constant, published) context would return the raw key —
@@ -1260,8 +1402,8 @@ implementation of it, and accepting a non-canonical length would let several
 different strings stand for the same key — so a key with a character appended
 would still verify, which is the typo the checksum exists to catch.
 
-**Deliberately not a passphrase.** A passphrase needs a slow KDF, which is key
-derivation this crate is not allowed to implement (§1) — and worse, it would
+**Deliberately not a passphrase.** A passphrase needs a slow KDF, a further
+construction the engine would have to take on (§3) — and worse, it would
 make a server-held blob guessable offline at whatever entropy the user chose.
 A 256-bit random key has no such attack. The cost is that the user must keep it;
 that is the honest trade, and it is the same one Matrix's "security key" makes.
@@ -1364,9 +1506,9 @@ distribute, no approval-payload version to bump, no envelope handed between
 devices, and no second string for the user to keep. Exactly the devices that can
 read new messages can read old ones.
 
-This is the third place the engine computes rather than marshals (with the
-safety-number digest and the recovery checksum), and the crate header says so.
-A single domain-separated hash over an already-uniform 32-byte seed is the
+It is one of the engine's own constructions (§3 lists them all), and the only
+one that derives a secret key. A single domain-separated hash over an
+already-uniform 32-byte seed is the
 smallest construction that does the job; anything more belongs in vodozemac or
 a vetted crate.
 
@@ -1458,14 +1600,16 @@ Approving a second device used to mean finding it in a list and pressing a
 button, with nothing to check it against. Linking replaces that with "type the
 code your new device is showing" — which is easier *and* strictly safer.
 
-It is not new cryptography. It is a safer trigger for the approval flow of
-§14.4.
+It is not a new protocol: one digest the engine computes (§3), and a safer
+trigger for the approval flow of §14.4.
 
 ### 17.1 The code
 
-`base32(SHA-512("voxium-link-v1" || userId || 0x00 || deviceId || 0x00 || curve25519 || 0x00 || ed25519))`,
-first 16 characters (the first 10 bytes of the digest), grouped
-`XXXX-XXXX-XXXX-XXXX`. Public material only, like a safety number. The four
+`base32(first 10 bytes of SHA-512("voxium-link-v1" || userId || 0x00 || deviceId || 0x00 || curve25519 || 0x00 || ed25519))`,
+16 characters, grouped `XXXX-XXXX-XXXX-XXXX`. `userId` and `deviceId` enter
+as UTF-8, and the two keys as their unpadded base64 text, exactly as the
+server serves it, not as raw bytes (the engine parses each key first only to
+refuse a malformed one). Public material only, like a safety number. The four
 fields are separated by a NUL byte (`0x00`) so no two different tuples can
 concatenate to the same input.
 
@@ -1874,6 +2018,38 @@ sender, generation, and sequence into the tag. Per-(sender, keyId) SRTP-style
 passes through unencrypted in either direction, ever. Sender counters force a
 fresh rotation long before the u32 ceiling (IV-reuse firewall).
 
+In full, because native clients implement the same construction (§3): `seq` is
+big-endian, the IV's `keyId` byte is the generation mod 256, the AAD string is
+UTF-8, and AES-256-GCM runs with a 96-bit IV and a 128-bit tag. This is the one
+cryptographic construction outside the engine (§3): it runs in JavaScript over
+WebCrypto, from `services/e2e/voiceFrameCipher.ts`. The cipher runs in the
+frame worker; its ratchet also runs on the main thread, where
+`secureVoiceKeys.ts` ratchets its own key on an arrival. It holds these
+invariants:
+
+- **No IV twice under one key.** Every generation is a distinct key (a ratchet
+  output, or 32 fresh random bytes), and within one the sender's counter starts
+  at 0 and only rises: each frame claims its `seq` before the cipher awaits
+  anything, so concurrent frames never share one. The cipher refuses to encrypt
+  from `seq` 2^32 − 2^16 (`VOICE_FRAME_SEQ_ROTATE_AT`) on, so the 4-byte field
+  never wraps, and the frame worker asks for a fresh rotation once fewer than
+  1,000,000 frames remain (about five and a half hours of 20 ms frames). The
+  counter restarts at 0 whenever the sender installs a key, so the cipher
+  relies on the key layer never installing the same key twice: it installs only
+  a fresh random key or the ratchet of its current one (`secureVoiceKeys.ts`),
+  and a session restart mints a new key (§21.5).
+- **Replay window.** Per (sender, keyId), a frame whose `seq` is 128 or more
+  below the highest that decrypted is refused, a `seq` already seen is
+  refused, and any other is accepted once, in any order. The window moves only
+  after the tag verifies, so a forged header cannot push it forward. A
+  generation that leaves the key ring (the newest three are kept) takes its
+  frames with it, and delivering its key again does not bring it back.
+- **One-way ratchet.** `next = HKDF-SHA256(IKM = key, salt = "voxium-voice-ratchet",
+  info = "voxv1-sender-key", 32 bytes)`, both strings UTF-8: a key received on
+  arrival opens no earlier generation (§21.4).
+- **Keys stay in memory.** Raw media keys live in JavaScript for the call
+  session only and are never persisted (§3, §21.5).
+
 ### 21.3 Sender keys and distribution
 
 Each participant has its own AES-256 sender key, generation-counted by
@@ -1914,7 +2090,11 @@ unheard.
   Existing receivers perform **tag-verified trial-ratchet** on keyId+1
   frames: GCM success proves an arrival ratchet (installed gaplessly, no
   wire flag an attacker could flip); failure means a fresh rotation whose
-  sealed key is still in flight.
+  sealed key is still in flight. A receiver derives only from the newest
+  generation it holds, and only one generation ahead of it, so it never derives
+  backward. A receiver that saw no frame of a generation (two arrivals while a
+  sender stayed silent) cannot follow the second ratchet; it is healed by the
+  key_request watchdog below.
 - **Departure / kick / device revocation / identity change:** fresh random
   keys sealed to everyone remaining — no future audio for the leaver.
   Server-side, secure-member removal force-evicts live voice cluster-wide.

@@ -35,8 +35,8 @@ philosophy — the classical protocol stays untouched, PQ protection wraps it:
    olm_ciphertext)` — envelope `e: "olm1+mlkem"`. An attacker must break
    **both** X25519 (Olm) and ML-KEM-768 to read anything.
 4. All of it lives in the Rust binding (RustCrypto `ml-kem` + `aes-gcm` +
-   `hkdf`, all Apache/MIT) — the "no crypto in JS" rule holds; JS marshals one
-   more opaque field.
+   `hkdf`, all Apache/MIT) — a new construction goes into the engine, as the
+   spec's §3 requires; JS marshals one more opaque field.
 
 Honest limitation vs Signal's SPQR: the PQ secret is per-session, not
 ratcheted, so PQ *forward secrecy within a session* is weaker — but

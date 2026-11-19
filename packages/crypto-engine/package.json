@@ -2,7 +2,7 @@
   "name": "@voxium/crypto-engine",
   "version": "0.1.0",
   "private": true,
-  "description": "Voxium E2E crypto engine v1 (olm1) — wasm-bindgen marshalling layer over pinned vodozemac. Built artifact in pkg/ is committed; rebuild with `pnpm build:wasm` (requires Rust + wasm32 target + wasm-pack).",
+  "description": "Voxium E2E crypto engine v1 (olm1) — wasm-bindgen binding over pinned vodozemac, plus the few constructions of its own that docs/e2e-dm-spec.md section 3 lists. Built artifact in pkg/ is committed; rebuild with `pnpm build:wasm` (requires Rust + wasm32 target + wasm-pack).",
   "license": "SEE LICENSE IN LICENSE.md",
   "type": "module",
   "main": "./pkg/voxium_crypto_engine.js",

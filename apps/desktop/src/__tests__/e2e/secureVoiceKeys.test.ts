@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { buildVoiceKeyPlaintext, e2eVoiceScope } from '@voxium/shared';
+import { ratchetVoiceKey } from '../../services/e2e/voiceFrameCipher';
 
 /**
  * secureVoiceKeys is the binding layer between voice membership events and
@@ -648,5 +649,111 @@ describe('teardown', () => {
 
   it('SecureVoiceError carries its kind', () => {
     expect(new SecureVoiceError('legacy-key', 'x').kind).toBe('legacy-key');
+  });
+});
+
+const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+const fromHex = (text: string) => Uint8Array.from(text.match(/../g) ?? [], (pair) => parseInt(pair, 16));
+
+/**
+ * What the frame worker is handed, captured at hand-over. The worker gets a
+ * structured clone of the bytes; the module keeps its own array and zero-fills
+ * it at teardown, so the bytes are copied here and the array is kept to look at.
+ */
+function recordInstalls() {
+  const installs: Array<{ keyId: number; hex: string; raw: Uint8Array }> = [];
+  frameSession.setLocalKey.mockImplementation((keyId: number, raw: Uint8Array) => {
+    installs.push({ keyId, hex: toHex(raw), raw });
+  });
+  return installs;
+}
+
+/** The sealed key plaintexts handed to Olm, in order. */
+function sealedKeys(): Array<{ keyId: number; keyB64: string; reason: string }> {
+  return encryptToDevice.mock.calls.map((call) => JSON.parse(call[2] as string));
+}
+
+describe('every key the session installs is new (the frame cipher restarts its IV counter on each)', () => {
+  afterEach(() => {
+    frameSession.setLocalKey.mockReset();
+  });
+
+  it('arrival, departure and counter exhaustion each install a new key under the next keyId', async () => {
+    const installs = recordInstalls();
+    await begunSession();
+    fetchChannelDeviceLists.mockResolvedValue({
+      members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'other', isCreator: false }],
+      lists: new Map(),
+      unverifiableUserIds: [],
+    });
+    fetchDeviceList.mockImplementation(async (userId: string) =>
+      userId === 'other' ? deviceListFor('device-other001') : deviceListFor(PEER_DEVICE));
+
+    onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001', epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: false }); // ratchet
+    await flush();
+    onParticipantLeft(CH, 'peer'); // fresh
+    await flush();
+    const counterLow = frameSession.onCounterLow.mock.calls[0][0] as () => void;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      counterLow(); // fresh
+      await flush();
+    } finally {
+      log.mockRestore();
+    }
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: false }); // ratchet
+    await flush();
+
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1, 2, 3, 4]);
+    expect(new Set(installs.map((i) => i.hex)).size).toBe(5);
+    // An arrival installs exactly the ratchet of the key before it...
+    expect(installs[1].hex).toBe(toHex(await ratchetVoiceKey(fromHex(installs[0].hex))));
+    expect(installs[4].hex).toBe(toHex(await ratchetVoiceKey(fromHex(installs[3].hex))));
+    // ...and a departure or an exhausted counter a key unrelated to it
+    expect(installs[2].hex).not.toBe(toHex(await ratchetVoiceKey(fromHex(installs[1].hex))));
+    expect(installs[3].hex).not.toBe(toHex(await ratchetVoiceKey(fromHex(installs[2].hex))));
+  });
+
+  it('an exhausted counter rotates to a fresh key, sealed to every peer before frames switch', async () => {
+    const installs = recordInstalls();
+    await begunSession();
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    await flush();
+    encryptToDevice.mockClear();
+    frameSession.setLocalKey.mockClear();
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      (frameSession.onCounterLow.mock.calls[0][0] as () => void)();
+      await flush();
+    } finally {
+      log.mockRestore();
+    }
+
+    const sealed = sealedKeys();
+    expect(sealed).toHaveLength(1);
+    expect(sealed[0]).toMatchObject({ keyId: 1, reason: 'fresh' });
+    expect(installs.at(-1)).toMatchObject({ keyId: 1 });
+    expect(installs.at(-1)!.hex).not.toBe(installs[0].hex);
+    expect(frameSession.setLocalKey.mock.invocationCallOrder[0]).toBeGreaterThan(encryptToDevice.mock.invocationCallOrder[0]);
+  });
+
+  it('a session restart installs a key unlike any of the last session, and teardown wipes the current key', async () => {
+    const installs = recordInstalls();
+    await begunSession();
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: false });
+    await flush();
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1]);
+    const current = installs[1].raw;
+
+    endSecureVoiceSession(CH);
+    expect(current.every((b) => b === 0)).toBe(true);
+
+    await begunSession();
+    const restarted = installs.at(-1)!;
+    expect(restarted.keyId).toBe(0);
+    expect(installs.slice(0, 2).map((i) => i.hex)).not.toContain(restarted.hex);
   });
 });
