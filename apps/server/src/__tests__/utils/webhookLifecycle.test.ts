@@ -1,4 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { lazyStatement } from '../helpers/lazyStatement';
+import { TRANSACTION_CONFLICT_RETRIES } from '../../utils/transactionRetry';
 
 // utils/webhookLifecycle.ts: the response whitelist, the refetch hint and the
 // delete transaction + receipts the owner's router and the admin routes share.
@@ -45,6 +47,7 @@ import {
   disarmWebhookRowsHeldBy,
   type WebhookDeletion,
 } from '../../utils/webhookLifecycle';
+import { getIO } from '../../websocket/socketServer';
 
 const CREATED_AT = new Date('2026-10-18T10:00:00.000Z');
 const USED_AT = new Date('2026-10-18T11:30:00.000Z');
@@ -310,6 +313,297 @@ describe('deleteWebhookWithPurge — the history goes in batches with no lock he
     await expect(deleteWebhookWithPurge('wh-1', false)).rejects.toThrow('db down');
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
     expect(h.emitted).toHaveLength(0);
+  });
+});
+
+describe('deleteWebhookWithPurge — a deadlock or serialization failure runs the locked transaction again', () => {
+  // A channel or space delete reaches the webhook row and its messages through
+  // cascades, in its own order: PostgreSQL aborts one side, and the aborted
+  // delete is run again whole (utils/transactionRetry.ts).
+  const writeConflict = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock'), { code: 'P2034' });
+  const rawDeadlock = () => Object.assign(
+    new Error('Raw query failed. Code: `40P01`. Message: `deadlock detected`'),
+    { code: 'P2010', meta: { driverAdapterError: { cause: { kind: 'postgres', originalCode: '40P01' } } } },
+  );
+
+  /** A statement that records `name` when it RUNS (is awaited), then fails with `err`. */
+  const lazyFailure = (ran: string[], name: string, err: unknown): PromiseLike<never> => ({
+    then(onFulfilled, onRejected) {
+      ran.push(name);
+      return Promise.reject(err).then(onFulfilled, onRejected);
+    },
+  });
+
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => { warn.mockRestore(); });
+
+  it('a P2034 is retried and the delete then succeeds; the receipts merge the batches with the COMMITTED attempt only', async () => {
+    // the batches removed three rows before the transaction
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ channel_id: 'ch-1' }, { channel_id: 'ch-1' }, { channel_id: 'ch-old' }])
+      .mockResolvedValueOnce([]);
+    // attempt 1 finds 5 in-flight rows, deletes them, then loses the deadlock
+    // on the row delete: rolled back, its 5 must not be counted
+    txMock.message.groupBy
+      .mockResolvedValueOnce([{ channelId: 'ch-1', _count: { _all: 5 } }])
+      .mockResolvedValueOnce([{ channelId: 'ch-1', _count: { _all: 1 } }]);
+    txMock.message.deleteMany.mockResolvedValueOnce({ count: 5 }).mockResolvedValueOnce({ count: 1 });
+    txMock.webhook.delete.mockRejectedValueOnce(writeConflict()).mockResolvedValueOnce({ id: 'wh-1' });
+
+    const result = await deleteWebhookWithPurge('wh-1', true);
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+    // each attempt keeps the long budget
+    for (const call of prismaMock.$transaction.mock.calls) expect(call[1]).toEqual({ timeout: 60_000, maxWait: 10_000 });
+    // the disable and the batches are committed work: they run once, before the first attempt
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(prismaMock.$transaction.mock.invocationCallOrder[0]);
+    // the lock opened each attempt
+    expect(txMock.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      webhookId: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'github',
+      deletedMessages: 4,
+      perChannel: [{ channelId: 'ch-1', count: 3 }, { channelId: 'ch-old', count: 1 }],
+    });
+    expect(warn).toHaveBeenCalledWith(
+      '[Webhooks] The delete of webhook wh-1 was aborted by a deadlock or a serialization failure; retrying (1 of 2)',
+    );
+    // the transaction emits nothing: the caller announces after the commit
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('a driver deadlock (40P01) on the row lock is retried, and the delete then succeeds', async () => {
+    txMock.$queryRaw.mockRejectedValueOnce(rawDeadlock()).mockResolvedValueOnce([{ id: 'wh-1' }]);
+
+    const result = await deleteWebhookWithPurge('wh-1', false);
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+    expect(txMock.webhook.delete).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      webhookId: 'wh-1', serverId: 'srv-1', channelId: 'ch-1', name: 'CI', type: 'github',
+      deletedMessages: 0, perChannel: [],
+    });
+  });
+
+  it('a retry that finds the row gone (the cascade removed it) resolves null, the callers\' 404, and touches nothing else', async () => {
+    txMock.webhook.delete.mockRejectedValueOnce(writeConflict());
+    txMock.$queryRaw.mockResolvedValueOnce([{ id: 'wh-1' }]).mockResolvedValueOnce([]);
+
+    await expect(deleteWebhookWithPurge('wh-1', true)).resolves.toBeNull();
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+    // attempt 2 stopped at its lock
+    expect(txMock.webhook.findUnique).toHaveBeenCalledTimes(1);
+    expect(txMock.message.deleteMany).toHaveBeenCalledTimes(1);
+    expect(txMock.webhook.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it('a conflict on every attempt surfaces after the retry limit (1 + TRANSACTION_CONFLICT_RETRIES attempts)', async () => {
+    const conflict = writeConflict();
+    txMock.webhook.delete.mockRejectedValue(conflict);
+
+    await expect(deleteWebhookWithPurge('wh-1', true)).rejects.toBe(conflict);
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1 + TRANSACTION_CONFLICT_RETRIES);
+    expect(prismaMock.webhook.updateMany).toHaveBeenCalledTimes(1);
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it.each([
+    ['a timeout (P2028)', () => Object.assign(new Error('Transaction already closed'), { code: 'P2028' })],
+    ['a foreign-key refusal (23503)', () => Object.assign(
+      new Error('Raw query failed. Code: `23503`.'),
+      { code: 'P2010', meta: { driverAdapterError: { cause: { kind: 'postgres', originalCode: '23503' } } } },
+    )],
+    ['a plain error', () => new Error('connection reset')],
+  ])('%s is the answer: never retried', async (_label, makeError) => {
+    const err = makeError();
+    txMock.webhook.delete.mockRejectedValueOnce(err);
+
+    await expect(deleteWebhookWithPurge('wh-1', true)).rejects.toBe(err);
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // ── the history batches meet the same deletes ─────────────────────────────
+
+  it('a purge batch aborted by a deadlock is run again alone; only the run that committed is counted', async () => {
+    const ran: string[] = [];
+    prismaMock.$queryRaw
+      .mockImplementationOnce(() => lazyFailure(ran, 'batch', rawDeadlock()))
+      .mockImplementationOnce(() => lazyStatement(ran, 'batch', [{ channel_id: 'ch-1' }, { channel_id: 'ch-1' }]))
+      .mockImplementationOnce(() => lazyStatement(ran, 'batch', []));
+
+    const result = await deleteWebhookWithPurge('wh-1', true);
+
+    expect(ran).toEqual(['batch', 'batch', 'batch']);
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(result!.deletedMessages).toBe(2);
+    expect(result!.perChannel).toEqual([{ channelId: 'ch-1', count: 2 }]);
+    expect(warn).toHaveBeenCalledWith(
+      '[Webhooks] A history batch of webhook wh-1 was aborted by a deadlock or a serialization failure; retrying (1 of 2)',
+    );
+  });
+
+  it('a detach batch aborted by a write conflict is run again too', async () => {
+    prismaMock.$executeRaw.mockRejectedValueOnce(writeConflict()).mockResolvedValueOnce(4).mockResolvedValueOnce(0);
+
+    const result = await deleteWebhookWithPurge('wh-1', false);
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(3);
+    expect(result!.deletedMessages).toBe(0);
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('a batch failing for good after earlier batches committed: their receipts go out, then the error surfaces', async () => {
+    const reset = new Error('connection reset');
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ channel_id: 'ch-1' }, { channel_id: 'ch-1' }, { channel_id: 'ch-old' }])
+      .mockRejectedValueOnce(reset);
+
+    await expect(deleteWebhookWithPurge('wh-1', true)).rejects.toBe(reset);
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(h.emitted).toEqual([
+      { room: 'channel:ch-1', event: 'message:bulk_deleted', payload: { channelId: 'ch-1', webhookId: 'wh-1', count: 2 } },
+      { room: 'channel:ch-old', event: 'message:bulk_deleted', payload: { channelId: 'ch-old', webhookId: 'wh-1', count: 1 } },
+    ]);
+  });
+
+  it('a batch deadlocked on every run surfaces after the retry limit, with the committed batches announced', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ channel_id: 'ch-1' }]);
+    for (let i = 0; i <= TRANSACTION_CONFLICT_RETRIES; i++) prismaMock.$queryRaw.mockRejectedValueOnce(rawDeadlock());
+
+    await expect(deleteWebhookWithPurge('wh-1', true)).rejects.toMatchObject({ code: 'P2010' });
+
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2 + TRANSACTION_CONFLICT_RETRIES);
+    expect(h.emitted).toEqual([
+      { room: 'channel:ch-1', event: 'message:bulk_deleted', payload: { channelId: 'ch-1', webhookId: 'wh-1', count: 1 } },
+    ]);
+  });
+
+  it.each([
+    ['a conflict on every attempt', () => {
+      for (let i = 0; i <= TRANSACTION_CONFLICT_RETRIES; i++) txMock.webhook.delete.mockRejectedValueOnce(writeConflict());
+    }, 1 + TRANSACTION_CONFLICT_RETRIES],
+    ['a timeout (P2028)', () => {
+      txMock.webhook.delete.mockRejectedValueOnce(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }));
+    }, 1],
+  ])('the locked transaction failing for good (%s) after committed batches: the batch counts are announced, then the error surfaces', async (_label, arrange, attempts) => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ channel_id: 'ch-1' }]).mockResolvedValueOnce([]);
+    // every attempt finds and deletes in-flight rows, then is rolled back
+    txMock.message.groupBy.mockResolvedValue([{ channelId: 'ch-1', _count: { _all: 5 } }]);
+    txMock.message.deleteMany.mockResolvedValue({ count: 5 });
+    arrange();
+
+    await expect(deleteWebhookWithPurge('wh-1', true)).rejects.toThrow();
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(attempts);
+    // the batches only: the rolled-back attempts' 5 are not counted
+    expect(h.emitted).toEqual([
+      { room: 'channel:ch-1', event: 'message:bulk_deleted', payload: { channelId: 'ch-1', webhookId: 'wh-1', count: 1 } },
+    ]);
+  });
+
+  it('each attempt runs the lock FIRST, then the read, the count, the purge and the delete (recorded when each statement runs)', async () => {
+    const ran: string[] = [];
+    txMock.$queryRaw.mockImplementation(() => lazyStatement(ran, 'lock', [{ id: 'wh-1' }]));
+    txMock.webhook.findUnique.mockImplementation(() => lazyStatement(ran, 'read', LOCKED_ROW));
+    txMock.message.groupBy.mockImplementation(() => lazyStatement(ran, 'count', []));
+    txMock.message.deleteMany.mockImplementation(() => lazyStatement(ran, 'purge', { count: 0 }));
+    txMock.webhook.delete
+      .mockImplementationOnce(() => lazyFailure(ran, 'delete', writeConflict()))
+      .mockImplementationOnce(() => lazyStatement(ran, 'delete', { id: 'wh-1' }));
+
+    await deleteWebhookWithPurge('wh-1', true);
+
+    expect(ran).toEqual([
+      'lock', 'read', 'count', 'purge', 'delete', // attempt 1: aborted on the delete
+      'lock', 'read', 'count', 'purge', 'delete', // attempt 2: from the lock again
+    ]);
+  });
+});
+
+describe('deleteWebhookWithPurge — a webhook gone by the lock still announces what the batches deleted', () => {
+  // The batches commit before the transaction. When the lock then finds no row
+  // (a concurrent delete of the same webhook won it, or a cascade removed it)
+  // the callers answer 404 and announce nothing, so the function sends the
+  // batches' receipts itself, or open clients keep showing those rows.
+  const BATCH_ROWS = [{ channel_id: 'ch-1' }, { channel_id: 'ch-1' }, { channel_id: 'ch-old' }];
+
+  it('with purge: one receipt per channel the batches emptied, counts from the batches, and nothing else', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce(BATCH_ROWS).mockResolvedValueOnce([]);
+    txMock.$queryRaw.mockResolvedValue([]);
+
+    await expect(deleteWebhookWithPurge('wh-1', true)).resolves.toBeNull();
+
+    expect(h.emitted).toEqual([
+      { room: 'channel:ch-1', event: 'message:bulk_deleted', payload: { channelId: 'ch-1', webhookId: 'wh-1', count: 2 } },
+      { room: 'channel:ch-old', event: 'message:bulk_deleted', payload: { channelId: 'ch-old', webhookId: 'wh-1', count: 1 } },
+    ]);
+    // no count-0 receipt and no refetch hint: those belong to the delete that committed
+    expect(h.emitted.some((e) => e.room.startsWith('server:'))).toBe(false);
+  });
+
+  it('a retry that finds the row gone counts the batches only, never the rolled-back attempt', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ channel_id: 'ch-1' }]).mockResolvedValueOnce([]);
+      txMock.$queryRaw.mockResolvedValueOnce([{ id: 'wh-1' }]).mockResolvedValueOnce([]);
+      txMock.message.groupBy.mockResolvedValueOnce([{ channelId: 'ch-1', _count: { _all: 5 } }]);
+      txMock.message.deleteMany.mockResolvedValueOnce({ count: 5 });
+      txMock.webhook.delete.mockRejectedValueOnce(Object.assign(new Error('write conflict'), { code: 'P2034' }));
+
+      await expect(deleteWebhookWithPurge('wh-1', true)).resolves.toBeNull();
+
+      expect(h.emitted).toEqual([
+        { room: 'channel:ch-1', event: 'message:bulk_deleted', payload: { channelId: 'ch-1', webhookId: 'wh-1', count: 1 } },
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('nothing to announce: without purge (rows detached, none deleted) and when the batches found nothing', async () => {
+    prismaMock.$executeRaw.mockResolvedValueOnce(3).mockResolvedValueOnce(0);
+    txMock.$queryRaw.mockResolvedValue([]);
+    await expect(deleteWebhookWithPurge('wh-1', false)).resolves.toBeNull();
+    expect(h.emitted).toHaveLength(0);
+
+    await expect(deleteWebhookWithPurge('wh-0', true)).resolves.toBeNull();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('a committed delete announces nothing itself: the caller sends the receipts (emitWebhookDeletion)', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce(BATCH_ROWS).mockResolvedValueOnce([]);
+
+    const result = await deleteWebhookWithPurge('wh-1', true);
+
+    expect(result!.perChannel).toEqual([{ channelId: 'ch-1', count: 2 }, { channelId: 'ch-old', count: 1 }]);
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  it('a receipt that cannot be sent is logged, and the answer stays null (the deletes are committed)', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      prismaMock.$queryRaw.mockResolvedValueOnce(BATCH_ROWS).mockResolvedValueOnce([]);
+      txMock.$queryRaw.mockResolvedValue([]);
+      vi.mocked(getIO).mockImplementationOnce(() => { throw new Error('Socket.IO not initialized'); });
+
+      await expect(deleteWebhookWithPurge('wh-1', true)).resolves.toBeNull();
+
+      expect(error).toHaveBeenCalledWith(
+        '[Webhooks] The receipts of the messages purged with webhook wh-1 (gone by its lock) were not sent:',
+        'Socket.IO not initialized',
+      );
+    } finally {
+      error.mockRestore();
+    }
   });
 });
 

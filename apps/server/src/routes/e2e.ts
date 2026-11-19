@@ -10,6 +10,8 @@ import {
   rateLimitE2EApprove,
 } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
+import { lockAccountRows } from '../utils/accountRowLocks';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { acknowledgeKeyShares, claimAndDeleteKeyShares, leaseKeyShares } from '../utils/keyShareInbox';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import {
@@ -157,7 +159,66 @@ async function bumpDeviceListVersion(tx: TxClient, userId: string): Promise<numb
 }
 
 async function getDeviceListVersion(userId: string): Promise<number> {
-  const registry = await prisma.e2EDeviceRegistry.findUnique({
+  return readDeviceListVersion(prisma, userId);
+}
+
+/**
+ * Before each attempt of a registration's transaction, holding nothing: when
+ * the device is stored with other identity keys than the request's, the
+ * transaction will delete the key shares and master transfers addressed to
+ * it, so those rows are waited for here, one statement per kind of row on
+ * the shared client and outside any transaction, in the mode the deletes take
+ * them (FOR UPDATE). The transaction then does not wait for them while it
+ * holds the caller's account row. The read is unlocked and decides nothing:
+ * the transaction reads the device row again under its lock and decides
+ * there; a row locked again in between is simply waited for there.
+ */
+async function waitForReRegistrationRows(
+  userId: string,
+  deviceId: string,
+  curve25519Key: string,
+  ed25519Key: string,
+): Promise<void> {
+  const stored = await prisma.e2EDevice.findUnique({
+    where: { userId_deviceId: { userId, deviceId } },
+    select: { curve25519Key: true, ed25519Key: true },
+  });
+  if (!stored || (stored.curve25519Key === curve25519Key && stored.ed25519Key === ed25519Key)) return;
+  await prisma.$queryRaw`
+    SELECT id FROM e2e_key_shares WHERE recipient_user_id = ${userId} AND recipient_device_id = ${deviceId} FOR UPDATE`;
+  await prisma.$queryRaw`
+    SELECT id FROM e2e_master_transfers WHERE user_id = ${userId} AND recipient_device_id = ${deviceId} FOR UPDATE`;
+}
+
+/** The caller's device row, locked FOR UPDATE on the transaction given; null when there is none. */
+async function lockDeviceRow(
+  tx: Pick<TxClient, '$queryRaw'>,
+  userId: string,
+  deviceId: string,
+): Promise<{ id: string; curve25519Key: string; ed25519Key: string } | null> {
+  const rows = await tx.$queryRaw<Array<{ id: string; curve25519_key: string; ed25519_key: string }>>`
+    SELECT id, curve25519_key, ed25519_key FROM e2e_devices WHERE user_id = ${userId} AND device_id = ${deviceId} FOR UPDATE`;
+  const row = rows[0];
+  return row ? { id: row.id, curve25519Key: row.curve25519_key, ed25519Key: row.ed25519_key } : null;
+}
+
+/** The caller's devices among `deviceIds`, locked FOR UPDATE in id order on the transaction given. */
+async function lockDeviceRows(
+  tx: Pick<TxClient, '$queryRaw'>,
+  userId: string,
+  deviceIds: string[],
+): Promise<Array<{ id: string; deviceId: string; curve25519Key: string; ed25519Key: string }>> {
+  const rows = await tx.$queryRaw<Array<{ id: string; device_id: string; curve25519_key: string; ed25519_key: string }>>`
+    SELECT id, device_id, curve25519_key, ed25519_key FROM e2e_devices
+    WHERE user_id = ${userId} AND device_id = ANY(${deviceIds}::text[])
+    ORDER BY id
+    FOR UPDATE`;
+  return rows.map((r) => ({ id: r.id, deviceId: r.device_id, curve25519Key: r.curve25519_key, ed25519Key: r.ed25519_key }));
+}
+
+/** The current device-list version, on the client given (a transaction reads through its own). */
+async function readDeviceListVersion(client: Pick<TxClient, 'e2EDeviceRegistry'>, userId: string): Promise<number> {
+  const registry = await client.e2EDeviceRegistry.findUnique({
     where: { userId },
     select: { version: true },
   });
@@ -265,81 +326,161 @@ e2eRouter.put('/devices', rateLimitE2EDevice, async (req: Request, res: Response
     validatePreKeyShape(fallbackKey, 'fallbackKey');
     verifyPreKeySignature(fallbackKey, userId, deviceId, curve25519Key, ed25519Key, 'fallbackKey');
 
-    // Re-registering a deviceId replaces its identity, which invalidates every
-    // previously published one-time key (they belong to the old Olm account)
-    // and is a device-list change as far as peers are concerned.
-    const result = await prisma.$transaction(async (tx) => {
-      const existing = await tx.e2EDevice.findUnique({
-        where: { userId_deviceId: { userId, deviceId } },
-        // The identity keys are load-bearing, not decoration: they decide
-        // whether the inbox purge below fires (see it for why).
-        select: { id: true, curve25519Key: true, ed25519Key: true },
-      });
-      if (!existing) {
-        const deviceCount = await tx.e2EDevice.count({ where: { userId } });
-        if (deviceCount >= E2E_LIMITS.MAX_DEVICES) {
-          throw new ConflictError(`Device limit reached (${E2E_LIMITS.MAX_DEVICES}) — revoke a device first`);
+    // Re-registering a deviceId with new identity keys replaces its identity,
+    // which invalidates every previously published one-time key (they belong
+    // to the old Olm account) and is a device-list change as far as peers are
+    // concerned. With the same identity keys only the published keys are
+    // replaced (see sameIdentity below).
+    //
+    // The device cap (E2E_LIMITS.MAX_DEVICES) is a count followed by an
+    // insert, so the transaction first locks the caller's ACCOUNT row, before
+    // it reads anything (FOR NO KEY UPDATE, lockAccountRows): an account's
+    // registrations then run one after the other, and each one's count sees
+    // the devices the ones before it committed (READ COMMITTED: a statement
+    // reads what was committed before it started). The account row and not
+    // the registry row, because an account's first device has no registry row
+    // yet. This route is the only writer that adds a device row, so this one
+    // lock keeps the cap a hard bound: a revoke and an account deletion only
+    // remove device rows, the cross-signing writes and the key upload only
+    // update them.
+    //
+    // Where this stands in an account deletion's lock order (deleteAccountRows,
+    // utils/accountDeletion.ts): the deletion takes the account's E2E material
+    // (its step 3: key shares, master transfers, master key, registry, then
+    // the devices with their one-time keys) and only then the account row (its
+    // step 4). This transaction takes the account row first and then device,
+    // inbox, one-time-key and registry rows: the opposite order, so the two
+    // CAN deadlock, when the deletion is between its steps 3 and 4 holding a
+    // row this transaction waits for (the device row, the registry row, a key
+    // share) while it waits for the account row held here. PostgreSQL then
+    // aborts one of them and both run under retryOnTransactionConflict: a
+    // retried deletion runs again from its first step; a retried registration
+    // waits for the deletion to commit, and its lock then finds no row (404
+    // User). A deletion that already holds the account row is simply waited
+    // for. Rows this transaction INSERTS are invisible to the deletion's
+    // step-3 deletes until this commits: a new device and its one-time keys
+    // still go with the account (e2e_devices cascades from the user delete),
+    // and an account's FIRST registry row, which has no key to the account,
+    // is deleted a second time once the deletion holds the account row (its
+    // step 4), which a registration committing between steps 3 and 4
+    // precedes.
+    //
+    // The account row lock conflicts with every UPDATE of that account's row
+    // (the presence write at socket connect, the presence reaper, a ban) for
+    // as long as the transaction runs. On the identity-changed path it
+    // deletes the key shares and master transfers addressed to the device,
+    // rows another transaction can hold for long (an account deletion of a
+    // sender, a secure-channel removal): waited for first, holding nothing
+    // (waitForReRegistrationRows), before each attempt's transaction.
+    const result = await retryOnTransactionConflict(async () => {
+      await waitForReRegistrationRows(userId, deviceId, curve25519Key, ed25519Key);
+      return prisma.$transaction(async (tx) => {
+        const locked = await lockAccountRows(tx, [{ id: userId, mode: 'update' }]);
+        // Deleted since the request was authenticated
+        if (!locked.has(userId)) throw new NotFoundError('User');
+
+        // The device row, locked FOR UPDATE right after the account row (account
+        // row, then device row). The identity keys it holds are load-bearing,
+        // not decoration: they decide whether the cross-signature, the inbox and
+        // the list version change (see below), so they are read under the lock.
+        // A revoke takes no account row: it either deletes the row before this
+        // read (the request is then a new device, counted against the cap and
+        // bumping the version) or waits for this commit. A revoke and this
+        // transaction take the device, key-share, transfer and registry rows in
+        // the same order, so the two cannot deadlock.
+        const existing = await lockDeviceRow(tx, userId, deviceId);
+        if (!existing) {
+          const deviceCount = await tx.e2EDevice.count({ where: { userId } });
+          if (deviceCount >= E2E_LIMITS.MAX_DEVICES) {
+            throw new ConflictError(`Device limit reached (${E2E_LIMITS.MAX_DEVICES}) — revoke a device first`);
+          }
         }
-      }
+        const identityChanged = !!existing &&
+          (existing.curve25519Key !== curve25519Key || existing.ed25519Key !== ed25519Key);
+        // The same device id with the SAME identity keys (a retry whose first
+        // answer was lost, a second instance over the same vault, another
+        // client): nothing a peer reads as this account's device list changes.
+        // The cross-signature covers the user, the device id and both public
+        // keys (e2eDeviceCrossCanonical), so it is still valid and is kept; the
+        // stored device signature covers the same canonical, so it is kept too
+        // (a peer's list carries it). The published one-time keys and the
+        // fallback key ARE replaced, as for any registration: the client that
+        // sends them marks them published, and a second instance over one vault
+        // must find its own keys on the server (spec section 14.2).
+        const sameIdentity = !!existing && !identityChanged;
 
-      const upserted = await tx.e2EDevice.upsert({
-        where: { userId_deviceId: { userId, deviceId } },
-        create: {
-          userId,
-          deviceId,
-          curve25519Key,
-          ed25519Key,
-          deviceSignature,
-          fallbackKeyId: fallbackKey.keyId,
-          fallbackKey: fallbackKey.key,
-          fallbackKeySignature: fallbackKey.signature,
-        },
-        update: {
-          curve25519Key,
-          ed25519Key,
-          deviceSignature,
-          // Re-registering mints new identity keys, so any existing master
-          // signature covers keys that no longer exist. Clients already reject
-          // it (the canonical binds both public keys); drop it server-side too
-          // rather than keep serving material we know is dead.
-          masterSignature: null,
-          fallbackKeyId: fallbackKey.keyId,
-          fallbackKey: fallbackKey.key,
-          fallbackKeySignature: fallbackKey.signature,
-        },
-      });
-      // A re-registration that MINTS A NEW IDENTITY leaves the same dead inbox
-      // the revoke path already clears: every queued share is ciphertext under
-      // an Olm session that no longer exists. The client polls, fails to
-      // decrypt, and the rows keep counting against KEYSHARE_STORE_CAP_PER_SENDER
-      // and KEYSHARE_SENDER_TOTAL_CAP — evicting senders' genuinely needed new
-      // shares — until they age out 30 days later.
-      //
-      // ONLY when the keys actually changed. A client that re-registers
-      // idempotently with the SAME identity still holds the Olm sessions those
-      // shares were sealed to, so an unconditional purge would destroy
-      // perfectly decryptable material. Recipient side only, mirroring the
-      // revoke path: shares this device SENT are still decryptable by their
-      // recipients, who hold sessions with the old identity.
-      const identityChanged = !!existing &&
-        (existing.curve25519Key !== curve25519Key || existing.ed25519Key !== ed25519Key);
-      if (identityChanged) {
-        await tx.e2EKeyShare.deleteMany({ where: { recipientUserId: userId, recipientDeviceId: deviceId } });
-        await tx.e2EMasterTransfer.deleteMany({ where: { userId, recipientDeviceId: deviceId } });
-      }
+        const upserted = await tx.e2EDevice.upsert({
+          where: { userId_deviceId: { userId, deviceId } },
+          create: {
+            userId,
+            deviceId,
+            curve25519Key,
+            ed25519Key,
+            deviceSignature,
+            fallbackKeyId: fallbackKey.keyId,
+            fallbackKey: fallbackKey.key,
+            fallbackKeySignature: fallbackKey.signature,
+          },
+          update: sameIdentity
+            ? {
+              fallbackKeyId: fallbackKey.keyId,
+              fallbackKey: fallbackKey.key,
+              fallbackKeySignature: fallbackKey.signature,
+            }
+            : {
+              curve25519Key,
+              ed25519Key,
+              deviceSignature,
+              // Re-registering with new identity keys: any existing master
+              // signature covers keys that no longer exist. Clients already
+              // reject it (the canonical binds both public keys); drop it
+              // server-side too rather than keep serving material we know is
+              // dead.
+              masterSignature: null,
+              fallbackKeyId: fallbackKey.keyId,
+              fallbackKey: fallbackKey.key,
+              fallbackKeySignature: fallbackKey.signature,
+            },
+        });
+        // A re-registration that MINTS A NEW IDENTITY leaves the same dead inbox
+        // the revoke path already clears: every queued share is ciphertext under
+        // an Olm session that no longer exists. The client polls, fails to
+        // decrypt, and the rows keep counting against KEYSHARE_STORE_CAP_PER_SENDER
+        // and KEYSHARE_SENDER_TOTAL_CAP — evicting senders' genuinely needed new
+        // shares — until they age out 30 days later.
+        //
+        // ONLY when the keys actually changed. A client that re-registers
+        // idempotently with the SAME identity still holds the Olm sessions those
+        // shares were sealed to, so an unconditional purge would destroy
+        // perfectly decryptable material. Recipient side only, mirroring the
+        // revoke path: shares this device SENT are still decryptable by their
+        // recipients, who hold sessions with the old identity.
+        if (identityChanged) {
+          await tx.e2EKeyShare.deleteMany({ where: { recipientUserId: userId, recipientDeviceId: deviceId } });
+          await tx.e2EMasterTransfer.deleteMany({ where: { userId, recipientDeviceId: deviceId } });
+        }
 
-      await tx.e2EOneTimeKey.deleteMany({ where: { deviceId: upserted.id } });
-      await tx.e2EOneTimeKey.createMany({
-        data: (oneTimeKeys as E2EPreKey[]).map((k) => ({
-          deviceId: upserted.id,
-          keyId: k.keyId,
-          publicKey: k.key,
-          signature: k.signature,
-        })),
-      });
-      const listVersion = await bumpDeviceListVersion(tx, userId);
-      return { updatedAt: upserted.updatedAt, listVersion };
-    });
+        await tx.e2EOneTimeKey.deleteMany({ where: { deviceId: upserted.id } });
+        await tx.e2EOneTimeKey.createMany({
+          data: (oneTimeKeys as E2EPreKey[]).map((k) => ({
+            deviceId: upserted.id,
+            keyId: k.keyId,
+            publicKey: k.key,
+            signature: k.signature,
+          })),
+        });
+        // A device added or re-keyed is a device-list change; the same identity
+        // again is not (the list a peer reads, GET /devices/:userId and the
+        // channel batch, carries the device id, both public keys, the device
+        // signature, the cross-signature and createdAt, none of which moved, and
+        // never the one-time or fallback keys). So the version stays and the
+        // answer carries the current one.
+        const listVersion = sameIdentity
+          ? await readDeviceListVersion(tx, userId)
+          : await bumpDeviceListVersion(tx, userId);
+        return { updatedAt: upserted.updatedAt, listVersion };
+      }, LOCK_WAIT_TRANSACTION_OPTIONS);
+    }, `[E2E] The device registration of ${deviceId} for ${userId}`);
 
     res.status(201).json({
       success: true,
@@ -423,11 +564,19 @@ e2eRouter.delete(
       const userId = req.user!.userId;
       const deviceId = validateDeviceId(req.params.deviceId);
 
-      const listVersion = await prisma.$transaction(async (tx) => {
-        const device = await tx.e2EDevice.findUnique({
-          where: { userId_deviceId: { userId, deviceId } },
-          select: { id: true },
-        });
+      // Takes the device row first, then the registry row
+      // (bumpDeviceListVersion), while an account deletion takes the registry
+      // row (its second delete, under the account row) before the device rows
+      // its user delete reaches through the cascade (deleteAccountRows,
+      // utils/accountDeletion.ts): PostgreSQL may abort this one, which then
+      // runs again whole, every check made again on the attempt's own reads.
+      // The deletion holds those rows through its cascade, hence the
+      // lock-wait budget. The device is READ under its lock (still the first
+      // row this takes, so no new cycle): a deletion that holds it is waited
+      // for and the row is then gone (404), where an unlocked read saw it and
+      // the delete after it found nothing to delete (P2025, a 500).
+      const listVersion = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+        const device = await lockDeviceRow(tx, userId, deviceId);
         if (!device) throw new NotFoundError('E2E device');
 
         // Cascades the device's one-time keys; pending key shares addressed to
@@ -439,7 +588,7 @@ e2eRouter.delete(
         // the Olm session it was encrypted to is gone with the device.
         await tx.e2EMasterTransfer.deleteMany({ where: { userId, recipientDeviceId: deviceId } });
         return bumpDeviceListVersion(tx, userId);
-      });
+      }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The revoke of device ${deviceId} for ${userId}`);
 
       res.json({ success: true, data: { revoked: true, deviceId, listVersion } });
     } catch (err) {
@@ -619,7 +768,16 @@ e2eRouter.put('/master-key', rateLimitE2EApprove, async (req: Request, res: Resp
       if (unique.size !== pending.length) throw new BadRequestError('Duplicate deviceSignatures entries');
     }
 
-    const result = await prisma.$transaction(async (tx) => {
+    // With device signatures (or a replaced key) this takes device rows and
+    // then the registry row (bumpDeviceListVersion), while an account deletion
+    // takes the registry row (its second delete, under the account row)
+    // before the device rows its user delete reaches through the cascade
+    // (deleteAccountRows, utils/accountDeletion.ts): PostgreSQL may abort this
+    // one, which then runs again whole, every check made again on the
+    // attempt's own reads (the existing key, the devices to sign). The
+    // deletion holds those rows through its cascade, hence the lock-wait
+    // budget.
+    const result = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const existing = await tx.e2EMasterKey.findUnique({ where: { userId }, select: { publicKey: true } });
       const replacing = existing !== null && existing !== undefined && existing.publicKey !== masterKey;
 
@@ -652,12 +810,16 @@ e2eRouter.put('/master-key', rateLimitE2EApprove, async (req: Request, res: Resp
 
       let signed = 0;
       if (pending.length > 0) {
-        // Read the identities INSIDE the transaction: a device re-registered
-        // concurrently must not end up with a signature over its old keys.
-        const devices = await tx.e2EDevice.findMany({
-          where: { userId, deviceId: { in: pending.map((p) => p.deviceId) } },
-          select: { id: true, deviceId: true, curve25519Key: true, ed25519Key: true },
-        });
+        // Read the identities INSIDE the transaction and under a lock
+        // (lockDeviceRows, in id order): a device re-registered concurrently
+        // must not end up with a signature over its old keys, and one an
+        // account deletion is removing is waited for and then missing (the
+        // 400 below), where an unlocked read saw it and the update after it
+        // found nothing to update (P2025, a 500). The lock takes the rows the
+        // updates below took, at the same point (after the master-key row, and
+        // after every device row when the key is replaced), only earlier and
+        // in id order, so no new cycle arises.
+        const devices = await lockDeviceRows(tx, userId, pending.map((p) => p.deviceId));
         const byDeviceId = new Map(devices.map((d) => [d.deviceId, d]));
         for (const entry of pending) {
           const device = byDeviceId.get(entry.deviceId);
@@ -680,7 +842,7 @@ e2eRouter.put('/master-key', rateLimitE2EApprove, async (req: Request, res: Resp
 
       const listVersion = await bumpDeviceListVersion(tx, userId);
       return { listVersion, signed, updatedAt: saved.updatedAt };
-    });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The master-key publication for ${userId}`);
 
     res.json({
       success: true,
@@ -708,12 +870,20 @@ e2eRouter.post(
       const deviceId = validateDeviceId(req.params.deviceId);
       const signature = validateSignatureB64((req.body ?? {}).signature, 'signature');
 
-      const listVersion = await prisma.$transaction(async (tx) => {
+      // Takes the device row first, then the registry row
+      // (bumpDeviceListVersion), while an account deletion takes the registry
+      // row (its second delete, under the account row) before the device rows
+      // its user delete reaches through the cascade (deleteAccountRows,
+      // utils/accountDeletion.ts): PostgreSQL may abort this one, which then
+      // runs again whole, every check made again on the attempt's own reads.
+      // The deletion holds those rows through its cascade, hence the
+      // lock-wait budget. The device is READ under its lock (still the first
+      // row this takes, so no new cycle): a deletion that holds it is waited
+      // for and the row is then gone (404), where an unlocked read saw it and
+      // the update after it found nothing to update (P2025, a 500).
+      const listVersion = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
         // Composite lookup: you can only sign your OWN devices.
-        const device = await tx.e2EDevice.findUnique({
-          where: { userId_deviceId: { userId, deviceId } },
-          select: { id: true, curve25519Key: true, ed25519Key: true },
-        });
+        const device = await lockDeviceRow(tx, userId, deviceId);
         if (!device) throw new NotFoundError('E2E device');
 
         const master = await tx.e2EMasterKey.findUnique({ where: { userId }, select: { publicKey: true } });
@@ -733,7 +903,7 @@ e2eRouter.post(
         // Peers must re-fetch: a device that just became trusted changes the
         // warning state of the list even though membership did not change.
         return bumpDeviceListVersion(tx, userId);
-      });
+      }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The approval of device ${deviceId} for ${userId}`);
 
       res.json({ success: true, data: { deviceId, signed: true, listVersion } });
     } catch (err) {
@@ -760,43 +930,86 @@ e2eRouter.post('/devices/me/keys', rateLimitE2EKeys, async (req: Request, res: R
       throw new BadRequestError('Nothing to upload');
     }
 
-    if (oneTimeKeys !== undefined) {
-      if (!Array.isArray(oneTimeKeys) || oneTimeKeys.length === 0 || oneTimeKeys.length > E2E_LIMITS.OTK_UPLOAD_MAX) {
-        throw new BadRequestError(`oneTimeKeys must contain 1–${E2E_LIMITS.OTK_UPLOAD_MAX} keys`);
+    // The whole upload is checked before anything is written: an invalid
+    // fallback key no longer leaves the one-time keys of the same request
+    // stored behind a 400.
+    const checkUpload = (identity: { curve25519Key: string; ed25519Key: string }) => {
+      if (oneTimeKeys !== undefined) {
+        if (!Array.isArray(oneTimeKeys) || oneTimeKeys.length === 0 || oneTimeKeys.length > E2E_LIMITS.OTK_UPLOAD_MAX) {
+          throw new BadRequestError(`oneTimeKeys must contain 1–${E2E_LIMITS.OTK_UPLOAD_MAX} keys`);
+        }
+        for (const k of oneTimeKeys) {
+          validatePreKeyShape(k, 'oneTimeKey');
+          verifyPreKeySignature(k, userId, deviceId, identity.curve25519Key, identity.ed25519Key, 'oneTimeKey');
+        }
       }
-      for (const k of oneTimeKeys) {
-        validatePreKeyShape(k, 'oneTimeKey');
-        verifyPreKeySignature(k, userId, deviceId, device.curve25519Key, device.ed25519Key, 'oneTimeKey');
+      if (fallbackKey !== undefined) {
+        validatePreKeyShape(fallbackKey, 'fallbackKey');
+        verifyPreKeySignature(fallbackKey, userId, deviceId, identity.curve25519Key, identity.ed25519Key, 'fallbackKey');
       }
-      const existing = await prisma.e2EOneTimeKey.count({ where: { deviceId: device.id } });
-      if (existing + oneTimeKeys.length > E2E_LIMITS.MAX_STORED_OTKS) {
-        throw new ConflictError(`Key storage full (${existing}/${E2E_LIMITS.MAX_STORED_OTKS})`);
-      }
-      await prisma.e2EOneTimeKey.createMany({
-        data: (oneTimeKeys as E2EPreKey[]).map((k) => ({
-          deviceId: device.id,
-          keyId: k.keyId,
-          publicKey: k.key,
-          signature: k.signature,
-        })),
-        skipDuplicates: true,
-      });
-    }
+    };
+    checkUpload(device);
 
-    if (fallbackKey !== undefined) {
-      validatePreKeyShape(fallbackKey, 'fallbackKey');
-      verifyPreKeySignature(fallbackKey, userId, deviceId, device.curve25519Key, device.ed25519Key, 'fallbackKey');
-      await prisma.e2EDevice.update({
-        where: { id: device.id },
-        data: {
-          fallbackKeyId: fallbackKey.keyId,
-          fallbackKey: fallbackKey.key,
-          fallbackKeySignature: fallbackKey.signature,
-        },
-      });
-    }
+    // The stored one-time-key cap (E2E_LIMITS.MAX_STORED_OTKS) is per device
+    // row and is a count followed by an insert, so the transaction first
+    // locks that DEVICE row (FOR UPDATE), before it counts: two uploads for
+    // one device then run one after the other, and each count sees the keys
+    // the one before it committed. The lock also re-asserts what the checks
+    // above rest on: a device revoked since the read answers as an unknown
+    // one (403), and one re-registered with new identity keys meanwhile has
+    // the upload's signatures checked again against the keys it now holds.
+    //
+    // What it can wait on, and why it cannot close a cycle: an account
+    // deletion deletes the device rows in its E2E step and holds them through
+    // its cascade until it commits, a revoke deletes the row first thing, a
+    // re-registration updates it right after the account row, a cross-signing
+    // write updates it; each holds the device row before anything else this
+    // transaction takes, and this transaction takes nothing after the device
+    // row but that device's one-time keys (whose inserts reference the row it
+    // already holds) and the row itself. So it waits, possibly for as long as
+    // an account deletion runs (LOCK_WAIT_TRANSACTION_OPTIONS), and a device
+    // deleted meanwhile is then gone (403). retryOnTransactionConflict stays
+    // the net for an order nobody foresaw.
+    const oneTimeKeyCount = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      const row = await lockDeviceRow(tx, userId, deviceId);
+      if (!row) throw new ForbiddenError('No E2E device registered');
+      // Re-keyed since the first read: the upload passed the check above
+      // against the keys that read returned, so it is refused here unless it
+      // also verifies against the keys the device holds now
+      if (row.curve25519Key !== device.curve25519Key || row.ed25519Key !== device.ed25519Key) {
+        checkUpload(row);
+      }
 
-    const oneTimeKeyCount = await prisma.e2EOneTimeKey.count({ where: { deviceId: device.id } });
+      if (oneTimeKeys !== undefined) {
+        const stored = await tx.e2EOneTimeKey.count({ where: { deviceId: row.id } });
+        if (stored + oneTimeKeys.length > E2E_LIMITS.MAX_STORED_OTKS) {
+          throw new ConflictError(`Key storage full (${stored}/${E2E_LIMITS.MAX_STORED_OTKS})`);
+        }
+        await tx.e2EOneTimeKey.createMany({
+          data: (oneTimeKeys as E2EPreKey[]).map((k) => ({
+            deviceId: row.id,
+            keyId: k.keyId,
+            publicKey: k.key,
+            signature: k.signature,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      if (fallbackKey !== undefined) {
+        await tx.e2EDevice.update({
+          where: { id: row.id },
+          data: {
+            fallbackKeyId: fallbackKey.keyId,
+            fallbackKey: fallbackKey.key,
+            fallbackKeySignature: fallbackKey.signature,
+          },
+        });
+      }
+
+      return tx.e2EOneTimeKey.count({ where: { deviceId: row.id } });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[E2E] The key upload of ${deviceId} for ${userId}`);
+
     res.json({ success: true, data: { oneTimeKeyCount } });
   } catch (err) {
     next(err);
