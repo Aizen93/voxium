@@ -741,6 +741,36 @@ export interface ChannelPermissionOverride {
   role?: Role;
 }
 
+/**
+ * `knownPermissions` on the three permission writes: the bitmask (decimal
+ * string) of every permission the calling build knows. The server takes those
+ * bits from the request and keeps every other bit as stored, so a client
+ * never clears a permission it does not know. Omitted, the server assumes the
+ * bits a 2.1.x client knows (`LEGACY_CLIENT_KNOWN_PERMISSIONS`). A client
+ * sends it with every permission value it sends.
+ */
+export interface CreateRoleRequest {
+  name: string;
+  color?: string | null;
+  permissions?: string;
+  knownPermissions?: string;
+}
+
+export interface UpdateRoleRequest {
+  name?: string;
+  color?: string | null;
+  /** Sent only when a permission changed: a rename or a colour change sends none. */
+  permissions?: string;
+  knownPermissions?: string;
+}
+
+/** Both masks zero (after the merge) removes the override. */
+export interface SetChannelPermissionOverrideRequest {
+  allow: string;
+  deny: string;
+  knownPermissions?: string;
+}
+
 export interface EffectivePermissions {
   permissions: string; // bigint as decimal string
   source: 'owner' | 'computed';
