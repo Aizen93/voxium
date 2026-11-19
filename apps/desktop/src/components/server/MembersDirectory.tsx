@@ -6,7 +6,7 @@ import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import type { ServerMember, MemberRole } from '@voxium/shared';
 import { LIMITS, MEMBER_LIST, MEMBER_DIRECTORY_ROLE_FILTERS, validateBanReason } from '@voxium/shared';
-import { outranksRole } from '../../utils/roles';
+import { useMemberRules } from '../../hooks/useMemberRules';
 import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
 
 /** Module-level constant so a selector for another server's list never allocates. */
@@ -33,8 +33,12 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
   const fetchDirectory = useServerStore((s) => s.fetchDirectory);
   const fetchDirectoryMore = useServerStore((s) => s.fetchDirectoryMore);
   const assignMemberRoles = useServerStore((s) => s.assignMemberRoles);
-  // The viewer's own row is always among the known rows (the slice includes them)
-  const currentMember = useServerStore((s) => s.members.find((m) => m.userId === currentUser?.id));
+  // What the viewer may do to a member: their effective permission bits and
+  // the role order, the rules the server applies per action (never the
+  // legacy member.role string)
+  const view = useMemberRules(serverId);
+  const rules = view?.rules ?? null;
+  const isOwner = view?.isOwner ?? false;
 
   const [confirmAction, setConfirmAction] = useState<{ type: 'kick' | 'transfer'; userId: string } | null>(null);
   const [banReason, setBanReason] = useState('');
@@ -45,10 +49,9 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
   const [query, setQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<string | null>(null);
 
-  const isOwner = currentMember?.role === 'owner';
-  const isAdmin = currentMember?.role === 'admin';
-  const canManageRoles = isOwner || isAdmin;
-  const assignableRoles = roles.filter((r) => !r.isDefault).sort((a, b) => b.position - a.position);
+  // Every role can be filtered on; only those below the viewer can be handed out
+  const filterRoles = roles.filter((r) => !r.isDefault).sort((a, b) => b.position - a.position);
+  const assignableRoles = rules ? rules.assignableRoles() : [];
 
   // Typing settles before it becomes a request; the filter is immediate
   useEffect(() => {
@@ -141,12 +144,6 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
     }
   }
 
-  function canKickMember(member: ServerMember): boolean {
-    if (!currentMember || member.userId === currentUser?.id) return false;
-    if (!isOwner && !isAdmin) return false;
-    return outranksRole(currentMember.role, member.role);
-  }
-
   const filtered = !!query || !!roleFilter;
   const total = Math.max(memberCount, matching);
 
@@ -178,7 +175,7 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
           {MEMBER_DIRECTORY_ROLE_FILTERS.filter((f) => f !== 'none').map((f) => (
             <option key={f} value={f}>{t(f === 'owner' ? 'serverSettings.members.owners' : 'serverSettings.members.admins')}</option>
           ))}
-          {assignableRoles.map((r) => (
+          {filterRoles.map((r) => (
             <option key={r.id} value={r.id}>{r.name}</option>
           ))}
           <option value="none">{t('serverSettings.members.noRoles')}</option>
@@ -197,9 +194,9 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
           const isExpanded = expandedMember === member.userId;
           const showPromote = isOwner && member.role === 'member' && !isSelf;
           const showDemote = isOwner && member.role === 'admin' && !isSelf;
-          const showKick = canKickMember(member);
+          const showKick = !!rules && rules.canKick(member);
           const showTransfer = isOwner && !isSelf;
-          const showRoleEdit = canManageRoles && !isSelf && member.role !== 'owner' && assignableRoles.length > 0;
+          const showRoleEdit = !!rules && rules.canAssignRoles(member) && assignableRoles.length > 0;
           const hasActions = showPromote || showDemote || showKick || showTransfer || showRoleEdit;
           const isConfirmingKick = confirmAction?.type === 'kick' && confirmAction.userId === member.userId;
           const isConfirmingTransfer = confirmAction?.type === 'transfer' && confirmAction.userId === member.userId;

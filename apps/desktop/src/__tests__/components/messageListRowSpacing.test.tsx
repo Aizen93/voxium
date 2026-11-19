@@ -86,6 +86,7 @@ const { serverState } = vi.hoisted(() => ({
     roles: [],
     channels: [] as Channel[],
     fetchEffectivePermissions: vi.fn(),
+    servers: [] as { id: string; ownerId: string }[],
   },
 }));
 vi.mock('../../stores/serverStore', () => {

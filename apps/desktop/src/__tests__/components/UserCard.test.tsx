@@ -30,6 +30,10 @@ vi.mock('../../services/socket', () => ({
   },
 }));
 
+// The viewer's effective permissions: the nickname editor needs CHANGE_NICKNAME
+const perms = vi.hoisted(() => ({ bits: null as bigint | null }));
+vi.mock('../../hooks/useServerPermissions', () => ({ useServerPermissions: () => perms.bits }));
+
 vi.mock('../../stores/authStore', () => {
   // status: 'offline' on purpose — the stale DB snapshot that caused the bug.
   const state = () => ({
@@ -94,6 +98,7 @@ vi.mock('../../utils/serverErrors', () => ({
 import { UserCard } from '../../components/layout/UserCard';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
+import { Permissions } from '@voxium/shared';
 
 const serverStore = useServerStore as unknown as {
   getState: () => {
@@ -125,6 +130,7 @@ const offlineDot = () => document.body.querySelector('.bg-gray-500');
 
 beforeEach(() => {
   statusRef.current = 'connected';
+  perms.bits = Permissions.CHANGE_NICKNAME;
   listeners.clear();
   // Reset the shared server store to a fresh, inactive state per test.
   const s = serverStore.getState();
@@ -331,5 +337,32 @@ describe('UserCard space-nickname save', () => {
     expect(serverStore.getState().setNickname).toHaveBeenCalledWith('srv', 'NewNick');
     expect(toast.success).toHaveBeenCalledWith('channel.nicknameSet');
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('without CHANGE_NICKNAME there is no editor and no "Set nickname"; with no nickname nothing is offered', () => {
+    perms.bits = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES;
+    setServerActive(null);
+    render();
+    expect(Array.from(document.body.querySelectorAll('button')).some((b) => b.textContent === 'channel.setNickname')).toBe(false);
+    expect(document.body.querySelector('[data-testid="clear-nickname"]')).toBeNull();
+  });
+
+  it('while the permissions are unknown the editor stays closed too', () => {
+    perms.bits = null;
+    setServerActive(null);
+    render();
+    expect(Array.from(document.body.querySelectorAll('button')).some((b) => b.textContent === 'channel.setNickname')).toBe(false);
+  });
+
+  it('without CHANGE_NICKNAME an existing nickname can still be cleared, and only cleared', async () => {
+    perms.bits = Permissions.VIEW_CHANNEL;
+    setServerActive('OldNick');
+    render();
+    expect(container.textContent).toContain('OldNick');
+    expect(Array.from(document.body.querySelectorAll('button')).some((b) => b.textContent === 'OldNick')).toBe(false);
+    serverStore.getState().setNickname.mockResolvedValue(undefined);
+    await act(async () => { (document.body.querySelector('[data-testid="clear-nickname"]') as HTMLButtonElement).click(); });
+    expect(serverStore.getState().setNickname).toHaveBeenCalledWith('srv', null);
+    expect(toast.success).toHaveBeenCalledWith('channel.nicknameCleared');
   });
 });

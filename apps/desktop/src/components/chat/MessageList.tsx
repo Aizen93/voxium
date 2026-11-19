@@ -32,17 +32,15 @@ function DaySeparatorRow({ iso }: { iso: string }) {
 export function MessageList() {
   const { t } = useTranslation();
   const { messages, hasMore, hasMoreAfter, isLoading, fetchMessages, typingUsers, targetMessageId, clearTargetMessage } = useChatStore();
-  const { activeChannelId, activeServerId, members, channels } = useServerStore();
+  const { activeChannelId, activeServerId, channels } = useServerStore();
   const { user } = useAuthStore();
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const fetchingRef = useRef(false);
   const [showScrollButton, setShowScrollButton] = useState(false);
 
-  const currentMember = members.find((m) => m.userId === user?.id);
-  const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
-  // A custom role can carry MANAGE_MESSAGES: the legacy role field alone
-  // would hide Delete from a moderator the server lets delete (a webhook's
-  // posts included — they are deleted only this way)
+  // The server lets MANAGE_MESSAGES delete other people's messages (a
+  // webhook's posts included — they are deleted only this way), however the
+  // bit was obtained; the legacy role field decides nothing
   const serverPerms = useServerPermissions(activeServerId, user?.id);
   const canManageMessages = serverPerms !== null && hasPermission(serverPerms, Permissions.MANAGE_MESSAGES);
   // SECURE channels: moderation is membership-derived, never role-derived —
@@ -52,7 +50,7 @@ export function MessageList() {
   const activeChannel = channels.find((c) => c.id === activeChannelId);
   const canModerate = activeChannel?.secure
     ? activeChannel.createdById === user?.id
-    : isAdmin || canManageMessages;
+    : canManageMessages;
 
   // Scroll to bottom on channel change
   useEffect(() => {

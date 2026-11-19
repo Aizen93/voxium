@@ -21,15 +21,16 @@ vi.mock('react-i18next', async (importOriginal) => {
 
 const S = vi.hoisted(() => ({
   fetchDirectory: vi.fn(), fetchDirectoryMore: vi.fn(), assignMemberRoles: vi.fn(),
-  updateMemberRole: vi.fn(), kickMember: vi.fn(), transferOwnership: vi.fn(),
+  updateMemberRole: vi.fn(), kickMember: vi.fn(), transferOwnership: vi.fn(), fetchEffectivePermissions: vi.fn(),
   toastSuccess: vi.fn(), toastError: vi.fn(),
 }));
 let directory: DirectoryState;
 let members: ServerMember[] = [];
 let roles: Role[] = [];
 let people: PeopleState;
+let servers: { id: string; ownerId: string }[] = [];
 vi.mock('../../stores/serverStore', () => {
-  const state = () => ({ directory, members, roles, people, ...S });
+  const state = () => ({ directory, members, roles, people, servers, ...S });
   const useServerStore = <T,>(sel?: (s: ReturnType<typeof state>) => T) => (sel ? sel(state()) : state());
   useServerStore.getState = state;
   return { useServerStore };
@@ -42,7 +43,8 @@ vi.mock('../../stores/authStore', () => {
 });
 vi.mock('../../stores/toastStore', () => ({ toast: { success: S.toastSuccess, error: S.toastError, info: vi.fn(), warning: vi.fn() } }));
 
-import { MEMBER_LIST } from '@voxium/shared';
+import { ALL_PERMISSIONS, MEMBER_LIST, Permissions } from '@voxium/shared';
+import { resetServerPermissionsCache } from '../../hooks/useServerPermissions';
 import { MembersDirectory } from '../../components/server/MembersDirectory';
 const DIRECTORY_SEARCH_DEBOUNCE_MS = MEMBER_LIST.TYPING_DEBOUNCE_MS;
 
@@ -54,6 +56,7 @@ const row = (id: string, role: ServerMember['role'] = 'member'): ServerMember =>
 const listed = (rows: ServerMember[], extra: Partial<DirectoryState> = {}): DirectoryState =>
   ({ serverId: 'srv-1', rows, total: rows.length, nextCursor: null, hasMore: false, q: '', role: null, loading: false, error: false, ...extra });
 
+let spaceBits: bigint = ALL_PERMISSIONS;
 let container: HTMLDivElement;
 let root: Root;
 const q = (sel: string) => container.querySelector(sel) as HTMLElement | null;
@@ -61,6 +64,8 @@ const qa = (sel: string) => Array.from(container.querySelectorAll(sel)) as HTMLE
 
 async function render() {
   await act(async () => { root.render(<MembersDirectory serverId="srv-1" />); });
+  // the viewer's effective permission bits arrive after the first paint
+  for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
 }
 function setInput(el: HTMLElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value')!.set!;
@@ -74,6 +79,10 @@ beforeEach(() => {
   S.fetchDirectory.mockResolvedValue(undefined);
   S.fetchDirectoryMore.mockResolvedValue(undefined);
   S.kickMember.mockResolvedValue(undefined);
+  resetServerPermissionsCache();
+  servers = [{ id: 'srv-1', ownerId: 'me' }];
+  spaceBits = ALL_PERMISSIONS;
+  S.fetchEffectivePermissions.mockImplementation(() => Promise.resolve(spaceBits.toString()));
   members = [row('me', 'owner')];
   roles = [];
   people = { full: false, truncated: false, onlineCount: 5, memberCount: 3000, loaded: true };
@@ -190,3 +199,94 @@ describe('MembersDirectory', () => {
     expect(S.toastSuccess).toHaveBeenCalledWith('server.removeAndBanned:BOB');
   });
 });
+
+describe('MembersDirectory — actions follow the real permissions, not the legacy label', () => {
+  const roleOf = (id: string, position: number, permissions: bigint = 0n): Role =>
+    ({ id, serverId: 'srv-1', name: id, color: null, position, permissions: permissions.toString(), isDefault: false, createdAt: '2026-01-01T00:00:00.000Z' });
+  const withRoles = (r: ServerMember, ...assigned: Role[]): ServerMember => ({ ...r, roles: assigned });
+  const mine = roleOf('mine', 5, Permissions.KICK_MEMBERS);
+  const lowRole = roleOf('low', 1);
+  const equalRole = roleOf('equal', 5);
+  const highRole = roleOf('high', 9);
+
+  function viewerWith(bits: bigint) {
+    const me = roleOf('mine', 5, bits);
+    roles = [lowRole, me, equalRole, highRole];
+    servers = [{ id: 'srv-1', ownerId: 'owner' }];
+    spaceBits = bits;
+    members = [withRoles(row('me'), me)];
+    directory = listed([
+      withRoles(row('me'), me), withRoles(row('lower'), lowRole), row('norole'), withRoles(row('equal'), equalRole),
+      withRoles(row('higher'), highRole), row('owner', 'owner'),
+    ], { total: 6 });
+  }
+  const expand = async (userId: string) => {
+    const el = qa('[data-testid="member-row"]').find((r) => r.textContent?.includes(`@${userId}`))!;
+    await act(async () => { (el.firstElementChild as HTMLElement).click(); });
+    return el;
+  };
+  const hasKick = (el: HTMLElement) => !!el.querySelector('[data-testid="remove-and-ban"]');
+
+  it('KICK_MEMBERS alone: Remove and ban on lower-ranked members, not on an equal or higher one, nor the owner, nor oneself', async () => {
+    viewerWith(Permissions.KICK_MEMBERS);
+    await render();
+    expect(hasKick(await expand('lower'))).toBe(true);
+    expect(hasKick(await expand('norole'))).toBe(true);
+    for (const id of ['equal', 'higher', 'owner', 'me']) {
+      const el = await expand(id);
+      expect(hasKick(el), id).toBe(false);
+    }
+  });
+
+  it('a legacy "admin" or "owner" label without the bit gets no removal and no role editor', async () => {
+    viewerWith(0n);
+    members = [{ ...members[0], role: 'admin' }];
+    directory = { ...directory, rows: directory.rows.map((r) => (r.userId === 'me' ? { ...r, role: 'admin' as const } : r)) };
+    await render();
+    await expand('norole');
+    expect(q('[data-testid="remove-and-ban"]')).toBeNull();
+    expect(container.textContent).not.toContain('serverSettings.members.assignRoles');
+  });
+
+  it('MANAGE_ROLES alone: the role editor offers roles below the viewer, for lower-ranked members only', async () => {
+    viewerWith(Permissions.MANAGE_ROLES);
+    await render();
+    const lower = await expand('lower');
+    expect(lower.textContent).toContain('serverSettings.members.assignRoles');
+    const pills = Array.from(lower.querySelectorAll('button')).map((b) => b.textContent);
+    expect(pills).toContain('low');
+    expect(pills).not.toContain('equal');
+    expect(pills).not.toContain('high');
+    for (const id of ['equal', 'higher', 'owner']) {
+      const el = await expand(id);
+      expect(el.textContent, id).not.toContain('serverSettings.members.assignRoles');
+    }
+  });
+
+  it('the role filter still lists every role; Transfer ownership is for the real owner only', async () => {
+    viewerWith(Permissions.MANAGE_ROLES);
+    await render();
+    const select = q('[data-testid="members-role-filter"]') as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['', 'owner', 'admin', 'high', 'mine', 'equal', 'low', 'none']);
+    expect(container.textContent).not.toContain('serverSettings.members.transferOwnership');
+    // The owner of the space (by Server.ownerId), whatever the label says
+    servers = [{ id: 'srv-1', ownerId: 'me' }];
+    members = [{ ...members[0], role: 'member' }];
+    spaceBits = ALL_PERMISSIONS;
+    resetServerPermissionsCache();
+    await render();
+    await expand('lower');
+    expect(container.textContent).toContain('serverSettings.members.transferOwnership');
+  });
+
+  it('a role edit that grants KICK_MEMBERS shows the control with no role reassigned', async () => {
+    viewerWith(0n);
+    await render();
+    expect(hasKick(await expand('lower'))).toBe(false);
+    roles = roles.map((r) => (r.id === 'mine' ? { ...r, permissions: mine.permissions } : r));
+    spaceBits = Permissions.KICK_MEMBERS;
+    await render();
+    expect(hasKick(await expand('lower'))).toBe(true);
+  });
+});
+
