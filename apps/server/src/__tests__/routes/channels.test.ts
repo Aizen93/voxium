@@ -156,6 +156,7 @@ vi.mock('../../middleware/rateLimiter', () => {
     rateLimitGeneral: passthrough,
     rateLimitCategoryManage: passthrough,
     rateLimitMarkRead: passthrough,
+    rateLimitMemberRead: passthrough,
   };
 });
 
