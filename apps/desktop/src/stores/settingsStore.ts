@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { CommunityThemeData } from '@voxium/shared';
 import { BUILT_IN_THEME_IDS } from '@voxium/shared';
 import { applyCustomThemeColors, clearCustomThemeColors, applyCustomPatterns } from '../services/themeEngine';
+import { DEFAULT_NOISE_GATE_THRESHOLD } from '../services/audioDefaults';
 import i18n from '../i18n';
 import { applyLanguageDirection } from '../i18n';
 
@@ -164,7 +165,7 @@ function loadPersistedSettings(): PersistedSettings {
         language: typeof parsed.language === 'string' ? parsed.language : '',
         audioInputDeviceId: parsed.audioInputDeviceId || '',
         audioOutputDeviceId: parsed.audioOutputDeviceId || '',
-        noiseGateThreshold: typeof parsed.noiseGateThreshold === 'number' ? parsed.noiseGateThreshold : 0.03,
+        noiseGateThreshold: Number.isFinite(parsed.noiseGateThreshold) ? parsed.noiseGateThreshold : DEFAULT_NOISE_GATE_THRESHOLD,
         voiceMode: parsed.voiceMode === 'push_to_talk' ? 'push_to_talk' : 'voice_activity',
         voiceQuality: (['low', 'medium', 'high'].includes(parsed.voiceQuality) ? parsed.voiceQuality : 'medium') as VoiceQuality,
         pushToTalkKey: typeof parsed.pushToTalkKey === 'string' ? parsed.pushToTalkKey : 'Backquote',
@@ -183,7 +184,7 @@ function loadPersistedSettings(): PersistedSettings {
     language: '',
     audioInputDeviceId: '',
     audioOutputDeviceId: '',
-    noiseGateThreshold: 0.008,
+    noiseGateThreshold: DEFAULT_NOISE_GATE_THRESHOLD,
     voiceMode: 'voice_activity',
     voiceQuality: 'medium',
     pushToTalkKey: 'Backquote',
