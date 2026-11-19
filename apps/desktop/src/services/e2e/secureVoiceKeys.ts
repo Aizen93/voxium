@@ -14,6 +14,25 @@
 //  - A sender key never survives a session restart, and seq is never
 //    persisted (the IV-reuse firewall).
 //
+// REVIEW NOTE: this key lifecycle is cryptographic code outside the engine
+// (spec §3, decided 2026-11-18, issue #175). It mints the raw 32-byte media
+// keys (crypto.getRandomValues), ratchets them (ratchetVoiceKey, HKDF-SHA256)
+// and hands them to the frame worker; a change here takes the same review as a
+// change to packages/crypto-engine. What it must keep:
+//  - Every key it installs with frames.setLocalKey() is new: a fresh random key
+//    (session start at keyId 0; departure, exclusion and counter exhaustion,
+//    each at keyId + 1) or the ratchet of the current one (an arrival, at
+//    keyId + 1). The frame cipher restarts its IV counter on every install, so
+//    re-installing a key would reuse IVs under it.
+//  - A joiner is keyed with a post-arrival generation only (no past audio), and
+//    every departure or exclusion rotates to a fresh key (no future audio).
+//  - Neither a key nor seq is ever persisted. Teardown zero-fills only the
+//    current key; superseded generations, the peers' keys decoded here and the
+//    base64 copies sealed into Olm plaintexts are left to the garbage collector.
+//  - Session epochs (mintEpoch) carry 96 random bits (16 random bytes, each
+//    mapped to one of 64 characters): their unpredictability is what stops an
+//    envelope withheld from an earlier session from installing.
+//
 // NOTE: stores are imported DYNAMICALLY inside functions (resetStores
 // eval-order rule, same as callCrypto.ts / dmCrypto.ts).
 import {

@@ -1,6 +1,8 @@
-// Loader for the E2E crypto engine (docs/e2e-dm-spec.md §3). All protocol
-// crypto executes inside the vodozemac WASM module; this file only initializes
-// it and re-exports the marshalling API.
+// Loader for the E2E crypto engine (docs/e2e-dm-spec.md §3). vodozemac's
+// protocols and the crate's own constructions (listed in spec §3) execute
+// inside the WASM module; this file only initializes it and re-exports its API.
+// The one construction outside the engine, the secure-voice frame cipher, is
+// voiceFrameCipher.ts (spec §3, §21.2).
 import init, {
   EngineAccount,
   EngineSession,
