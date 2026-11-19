@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
-import { rateLimitSupport } from '../middleware/rateLimiter';
+import { rateLimitSupport, rateLimitSupportRead } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { LIMITS, WS_EVENTS } from '@voxium/shared';
@@ -10,6 +10,9 @@ import { getIO } from '../websocket/socketServer';
 import { sanitizeText } from '../utils/sanitize';
 
 export const supportRouter = Router();
+
+const TICKET_PAGE_DEFAULT = 50;
+const TICKET_PAGE_MAX = 100;
 
 supportRouter.use(authenticate, requireVerifiedEmail, requireConsent);
 
@@ -129,7 +132,7 @@ supportRouter.post('/open', rateLimitSupport, async (req: Request, res: Response
 
 // ─── Get user's ticket + messages ────────────────────────────────────────────
 
-supportRouter.get('/ticket', async (req: Request, res: Response, next: NextFunction) => {
+supportRouter.get('/ticket', rateLimitSupportRead, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
 
@@ -139,7 +142,11 @@ supportRouter.get('/ticket', async (req: Request, res: Response, next: NextFunct
     }
 
     const before = req.query.before as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
+    // A whole number of at least 1, capped at the maximum. Anything else (a negative, fractional,
+    // exponent, repeated or absurdly long value) reads the default page and never reaches take
+    const rawLimit = req.query.limit;
+    const parsedLimit = typeof rawLimit === 'string' && /^[0-9]{1,9}$/.test(rawLimit) ? Number(rawLimit) : NaN;
+    const limit = parsedLimit >= 1 ? Math.min(parsedLimit, TICKET_PAGE_MAX) : TICKET_PAGE_DEFAULT;
 
     const where: Record<string, unknown> = { ticketId: ticket.id };
     if (before) {
@@ -180,6 +187,7 @@ supportRouter.get('/ticket', async (req: Request, res: Response, next: NextFunct
 
 supportRouter.post('/messages', rateLimitSupport, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (!isFeatureEnabled('support')) throw new ForbiddenError('Support tickets are currently disabled');
     const userId = req.user!.userId;
 
     const ticket = await prisma.supportTicket.findUnique({ where: { userId } });

@@ -285,6 +285,8 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // Management (create, edit, rotate, delete) and the moderators' list reads.
   webhookManage:    { keyPrefix: 'rl:whmanage', points: 30,   duration: 3600, blockDuration: 0, keyType: 'userId',  label: 'Webhook Manage' },
   webhookRead:      { keyPrefix: 'rl:whread',   points: 60,   duration: 60,   blockDuration: 0, keyType: 'userId',  label: 'Webhook Read' },
+  // Reading one's own support ticket; apart from `support` so reads never spend the budget of messages.
+  supportRead:      { keyPrefix: 'rl:supportread', points: 60, duration: 60,  blockDuration: 0, keyType: 'userId',  label: 'Support Read' },
 };
 
 // Overrides loaded from Redis on init, updated via admin API
@@ -969,6 +971,7 @@ export const rateLimitStats = createMiddleware('stats', byIp);
 export const rateLimitAdmin = createMiddleware('admin', byUserId);
 export const rateLimitReport = createMiddleware('report', byUserId);
 export const rateLimitSupport = createMiddleware('support', byUserId);
+export const rateLimitSupportRead = createMiddleware('supportRead', byUserId);
 export const rateLimitTOTP = createMiddleware('totp', byUserId);
 export const rateLimitVerifyEmail = createMiddleware('verifyEmail', byIp);
 export const rateLimitMailBlock = createMiddleware('mailBlock', byIp);

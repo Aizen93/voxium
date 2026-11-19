@@ -3088,6 +3088,24 @@ function mapSupportMessage(m: SupportMessageRow): SupportMessageData {
   };
 }
 
+/**
+ * The room support:{id} is for the requester and the claiming admin only. When a claim takes a
+ * ticket over, the previous claimer's sockets leave it: this node's now, then every node's, through
+ * the user room (never fetchSockets). Best effort: the claim has already been written. A previous
+ * claimer who is also the ticket's requester (an admin who opened their own ticket) stays: they
+ * are still the requester.
+ */
+function removePreviousClaimerFromRoom(previousClaimerId: string | null, newClaimerId: string, requesterId: string, ticketId: string): void {
+  if (!previousClaimerId || previousClaimerId === newClaimerId || previousClaimerId === requesterId) return;
+  try {
+    const io = getIO();
+    io.local.in(`user:${previousClaimerId}`).socketsLeave(`support:${ticketId}`);
+    io.in(`user:${previousClaimerId}`).socketsLeave(`support:${ticketId}`);
+  } catch (err) {
+    console.error('[Admin] Failed to remove the previous claimer from the support room:', err instanceof Error ? err.message : err);
+  }
+}
+
 async function emitSupportTicketCount() {
   const total = await prisma.supportTicket.count({ where: { status: { in: ['open', 'claimed'] } } });
   getIO().to('admin:support').emit(WS_EVENTS.SUPPORT_TICKET_NEW, { total });
@@ -3157,6 +3175,8 @@ adminRouter.post('/support/tickets/:id/claim', async (req: Request<{ id: string 
       where: { id },
       data: { status: 'claimed', claimedById: adminUserId, claimedAt: new Date() },
     });
+
+    removePreviousClaimerFromRoom(ticket.claimedById, adminUserId, ticket.userId, id);
 
     const adminUser = await prisma.user.findUnique({ where: { id: adminUserId }, select: { username: true } });
 
@@ -3242,6 +3262,12 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
     if (!ticket) throw new NotFoundError('Ticket');
     if (ticket.status === 'closed') throw new BadRequestError('Ticket is closed');
 
+    // Validate the reply BEFORE anything is written or announced: a refused reply must not claim the ticket
+    const content = sanitizeText(req.body.content ?? '');
+    if (content.length < LIMITS.SUPPORT_MESSAGE_MIN || content.length > LIMITS.SUPPORT_MESSAGE_MAX) {
+      throw new BadRequestError(`Message must be ${LIMITS.SUPPORT_MESSAGE_MIN}-${LIMITS.SUPPORT_MESSAGE_MAX} characters`);
+    }
+
     // Auto-claim if open
     if (ticket.status === 'open') {
       await prisma.supportTicket.update({
@@ -3255,6 +3281,8 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
         include: { author: supportAuthorSelect },
       });
       const io = getIO();
+      // Join the admin's sockets BEFORE announcing, as the claim route does
+      io.in(`user:${adminUserId}`).socketsJoin(`support:${id}`);
       const autoClaimPayload = mapSupportMessage(claimMsg);
       io.to(`support:${id}`).emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, autoClaimPayload);
       io.to('admin:support').emit(WS_EVENTS.SUPPORT_MESSAGE_NEW, autoClaimPayload);
@@ -3269,11 +3297,6 @@ adminRouter.post('/support/tickets/:id/messages', async (req: Request<{ id: stri
         targetId: id,
         metadata: { userId: ticket.userId },
       });
-    }
-
-    const content = sanitizeText(req.body.content ?? '');
-    if (content.length < LIMITS.SUPPORT_MESSAGE_MIN || content.length > LIMITS.SUPPORT_MESSAGE_MAX) {
-      throw new BadRequestError(`Message must be ${LIMITS.SUPPORT_MESSAGE_MIN}-${LIMITS.SUPPORT_MESSAGE_MAX} characters`);
     }
 
     const message = await prisma.supportMessage.create({

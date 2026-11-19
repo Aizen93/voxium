@@ -40,6 +40,7 @@ const RULE_DESCRIPTIONS: Record<string, string> = {
   admin: 'Limits admin panel API requests.',
   report: 'Limits how often a user can submit reports.',
   support: 'Limits opening support tickets and sending ticket messages.',
+  supportRead: "Limits reads of a user's own support ticket, apart from the budget for sending.",
   webhookExecute: 'Deliveries accepted per webhook per minute, charged only after the token matched.',
   webhookExecuteIp: "Webhook deliveries per client address per minute; generous because GitHub's deliveries share a few egress addresses.",
   webhookSigFail: "GitHub webhook deliveries in flight or not verified, per webhook and client network (/24, /48); given back once the signature matches. GitHub's published hook ranges are not counted.",
