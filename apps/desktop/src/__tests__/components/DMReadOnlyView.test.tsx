@@ -276,7 +276,7 @@ describe('DMList row of a read-only conversation', () => {
     expect(ro.querySelector('[data-testid="avatar"]')).toBeNull();
     expect(ro.querySelector('[data-testid="staff-badge"]')).toBeNull();
     expect(ro.querySelector('[data-testid="supporter-badge"]')).toBeNull();
-    expect(ro.querySelector('button[aria-label="common.delete"]')).not.toBeNull();
+    expect(ro.querySelector('button[aria-label="dm.remove.actionWith"]')).not.toBeNull();
     // the live one keeps its own
     const live = rows[1];
     expect(live.textContent).toContain('Alice');

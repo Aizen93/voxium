@@ -836,6 +836,19 @@
     "conversationStart": "Este é o início do seu histórico de mensagens diretas.",
     "welcomeMessage": "Selecione uma conversa na barra lateral ou clique em um membro de qualquer espaço para iniciar uma nova.",
     "failedToLoadConversations": "Não foi possível carregar as conversas",
+    "remove": {
+      "action": "Remover conversa",
+      "actionWith": "Remover a conversa com {{name}}",
+      "title": "Remover esta conversa?",
+      "body": "Sua conversa com {{name}} sairá da sua lista e o histórico será apagado para você, em todos os seus dispositivos. Isso não pode ser desfeito.",
+      "bodyOther": "A outra pessoa mantém a cópia dela e não é avisada. Se qualquer uma das duas escrever de novo, a conversa volta apenas com as mensagens novas.",
+      "bodyDeleted": "Esta conversa sairá da sua lista e o histórico será apagado para você, em todos os seus dispositivos. A outra conta foi excluída, então ela não poderá voltar.",
+      "callEnds": "A chamada em andamento será encerrada.",
+      "confirm": "Remover",
+      "removing": "Removendo…",
+      "done": "Conversa removida",
+      "failed": "Não foi possível remover a conversa"
+    },
     "deletedParticipant": {
       "name": "Usuário excluído",
       "readOnlyNotice": "Esta conversa é somente leitura: a conta da outra pessoa foi excluída.",

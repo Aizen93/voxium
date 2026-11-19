@@ -17,7 +17,7 @@ import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/lega
 type PerLanguage = Record<LegalLanguage, string>;
 
 const PHRASES = {
-  lastUpdated: { en: 'Last updated: October 30, 2026', fr: 'Dernière mise à jour : 30 octobre 2026' },
+  lastUpdated: { en: 'Last updated: November 19, 2026', fr: 'Dernière mise à jour : 19 novembre 2026' },
   retentionHeading: { en: 'Retention', fr: 'Conservation' },
   webhooksItem: { en: 'Incoming webhooks', fr: 'Les webhooks entrants' },
   everythingElseItem: { en: 'Everything else', fr: 'Tout le reste' },
@@ -112,7 +112,7 @@ describe.each(LEGAL_LANGUAGES)('PrivacyContent (%s)', (lang) => {
     return Array.from(list!.querySelectorAll('li')).map((li) => clean(li.textContent));
   }
 
-  it('shows the date of the last change (2026-10-30: the sign-up data, its retention and the sign-up mails)', () => {
+  it('shows the date of the last change (2026-11-19: a removed direct conversation in the retention list)', () => {
     expect(clean(container.textContent)).toContain(phrase('lastUpdated'));
   });
 

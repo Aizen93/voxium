@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Hash, Pencil, Plus, Power, PowerOff, RefreshCw, Trash2, Webhook as WebhookIcon, X } from 'lucide-react';
+import { AlertTriangle, Hash, Pencil, Plus, Power, PowerOff, RefreshCw, Trash2, Webhook as WebhookIcon } from 'lucide-react';
 import type { ResourceLimits, Webhook, WebhookCreated, WebhookTarget, WebhookType } from '@voxium/shared';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
@@ -20,7 +20,7 @@ import {
 import { getTranslatedError } from '../../utils/serverErrors';
 import { WebhookCreateDialog } from './WebhookCreateDialog';
 import { WebhookCreatedPanel } from './WebhookCreatedPanel';
-import { WebhookDialog } from './WebhookDialog';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 import { WebhookEditDialog, type WebhookEditPatch } from './WebhookEditDialog';
 
 interface Props {
@@ -736,37 +736,3 @@ function RowAction({ label, title, disabled, danger = false, onClick, testId, ch
   );
 }
 
-function ConfirmDialog({ id, title, body, confirmLabel, busy, danger = false, onConfirm, onClose, testId, children }: {
-  id: string;
-  title: string;
-  body: string;
-  confirmLabel: string;
-  busy: boolean;
-  danger?: boolean;
-  onConfirm: () => void;
-  onClose: () => void;
-  testId: string;
-  children?: React.ReactNode;
-}) {
-  const { t } = useTranslation();
-  return (
-    <WebhookDialog labelledBy={id} onClose={onClose} busy={busy} testId={testId}>
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <h2 id={id} className="text-base font-bold text-vox-text-primary">{title}</h2>
-        <button type="button" onClick={onClose} disabled={busy} className="shrink-0 text-vox-text-muted hover:text-vox-text-primary transition-colors disabled:opacity-50" aria-label={t('common.close')}>
-          <X size={18} />
-        </button>
-      </div>
-      <p className="text-sm text-vox-text-secondary">{body}</p>
-      {children}
-      <div className="mt-5 flex justify-end gap-3">
-        <button type="button" onClick={onClose} disabled={busy} className="btn-secondary">
-          {t('common.cancel')}
-        </button>
-        <button type="button" onClick={onConfirm} disabled={busy} className={danger ? 'btn-danger' : 'btn-primary'} data-testid={`${testId}-confirm`}>
-          {confirmLabel}
-        </button>
-      </div>
-    </WebhookDialog>
-  );
-}

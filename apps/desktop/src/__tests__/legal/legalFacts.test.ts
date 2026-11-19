@@ -147,8 +147,8 @@ const cases = pageNames.flatMap((name) => LEGAL_LANGUAGES.map((lang) => [name, l
 /** Each document's own revision date: a document changes alone. */
 const LAST_UPDATED: Record<PageName, PerLanguage> = {
   privacy: {
-    en: 'Last updated: October 30, 2026',
-    fr: 'Dernière mise à jour : 30 octobre 2026',
+    en: 'Last updated: November 19, 2026',
+    fr: 'Dernière mise à jour : 19 novembre 2026',
   },
   terms: {
     en: 'Last updated: October 25, 2026',
@@ -325,6 +325,22 @@ describe('legal pages: dates and structure', () => {
     const numbers = pages[name][lang].headings.map((h) => Number(/^(\d+)\. /.exec(h)?.[1]));
     expect(numbers.length).toBeGreaterThan(0);
     expect(numbers).toEqual(numbers.map((_, i) => i + 1));
+  });
+});
+
+describe('the Privacy Policy tells what removing a direct conversation does', () => {
+  const REMOVED_CONVERSATION: PerLanguage = {
+    en: 'A direct conversation you remove leaves your own list, and its history up to that moment is no longer shown to you; the other participant keeps the conversation and its messages. It is deleted from our servers once neither participant can reach any of it',
+    fr: 'Une conversation privée que vous retirez quitte votre propre liste, et son historique jusqu’à ce moment ne vous est plus affiché ; l’autre participant conserve la conversation et ses messages. Elle est supprimée de nos serveurs dès qu’aucun des deux participants ne peut plus accéder à quoi que ce soit de son contenu',
+  };
+  const EVERYTHING_ELSE: PerLanguage = { en: 'Everything else is kept', fr: 'Tout le reste est conservé' };
+
+  it.each(LEGAL_LANGUAGES)('states it, once, in the retention list right before "everything else" (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    const at = text.indexOf(REMOVED_CONVERSATION[lang]);
+    expect(at, REMOVED_CONVERSATION[lang]).toBeGreaterThan(-1);
+    expect(text.indexOf(REMOVED_CONVERSATION[lang], at + 1)).toBe(-1);
+    expect(text.indexOf(EVERYTHING_ELSE[lang])).toBe(at + REMOVED_CONVERSATION[lang].length + 1);
   });
 });
 
