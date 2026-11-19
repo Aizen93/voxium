@@ -539,12 +539,13 @@ describe('removeConversationForUser', () => {
 // ─── A reopen ───────────────────────────────────────────────────────────────
 
 describe('reopenConversationForUser', () => {
-  it('locks the conversation row first (key share), then clears the opener\'s hidden mark only, keeping the floor', async () => {
+  it("locks the conversation row first (key share), reads its sides under it, then clears the opener's hidden mark only, keeping the floor", async () => {
     h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', { user1Id: 'user-1', user2Id: 'user-2' });
 
-    expect(await reopenConversationForUser('conv-1', 'user-1')).toBe(true);
+    expect(await reopenConversationForUser('conv-1', 'user-1', 'user-2')).toBe('reopened');
 
-    expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'update: unhide read rows']);
+    expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'read: conversation sides', 'update: unhide read rows']);
     expect(tx.conversationRead.updateMany).toHaveBeenCalledWith({
       where: { userId: 'user-1', conversationId: 'conv-1', hiddenAt: { not: null } },
       data: { hiddenAt: null },
@@ -555,8 +556,20 @@ describe('reopenConversationForUser', () => {
   it('a conversation a removal deleted while it waited: false, nothing written (the route creates a new one)', async () => {
     h.results.set('lock: conversation FOR KEY SHARE', []);
 
-    expect(await reopenConversationForUser('conv-1', 'user-1')).toBe(false);
+    expect(await reopenConversationForUser('conv-1', 'user-1', 'user-2')).toBe('missing');
     expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE']);
+  });
+
+  it("the other person's account deleted while it waited (the side NULL under the lock, either side): 'other-side-gone', nothing written", async () => {
+    for (const sides of [{ user1Id: 'user-1', user2Id: null }, { user1Id: null, user2Id: 'user-1' }]) {
+      h.ran.length = 0;
+      h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+      h.results.set('read: conversation sides', sides);
+
+      expect(await reopenConversationForUser('conv-1', 'user-1', 'user-2')).toBe('other-side-gone');
+      expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'read: conversation sides']);
+    }
+    expect(tx.conversationRead.updateMany).not.toHaveBeenCalled();
   });
 });
 

@@ -80,7 +80,7 @@ vi.mock('../../utils/conversationLifecycle', async () => {
       return { message, context };
     }),
     removeConversationForUser: vi.fn(),
-    reopenConversationForUser: vi.fn().mockResolvedValue(true),
+    reopenConversationForUser: vi.fn().mockResolvedValue('reopened'),
     // An edit, a reaction, a delete: the write on the transaction's client
     // (here the mocked one), under the conversation row lock whose checks
     // are tested in utils/conversationLifecycle.test.ts
@@ -1618,5 +1618,49 @@ describe('DM routes — a read-only conversation (the other side is gone)', () =
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('User not found');
     expect(prisma.conversation.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('DM routes — POST /dm toward an account deleted while the request ran', () => {
+  const bob = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(bob as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(null);
+  });
+
+  it('the new conversation\'s key to the account refused (either side): 404 User, as for an unknown account, and nobody joins a room', async () => {
+    for (const constraint of ['conversations_user1_id_fkey', 'conversations_user2_id_fkey']) {
+      vi.mocked(prisma.conversation.create).mockRejectedValueOnce(foreignKeyRefused('Conversation', constraint));
+
+      const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+      expect(res.status, constraint).toBe(404);
+      expect(res.body.error).toBe('User not found');
+    }
+    expect(prisma.conversationRead.createMany).not.toHaveBeenCalled();
+    expect(mockSocketsJoin).not.toHaveBeenCalled();
+  });
+
+  it('its read rows refused because the account went in between: 404 User, nobody joins a room', async () => {
+    vi.mocked(prisma.conversation.create).mockResolvedValueOnce({ ...mockConversation } as any);
+    vi.mocked(prisma.conversationRead.createMany).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_user_id_fkey'));
+
+    const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('User not found');
+    expect(mockSocketsJoin).not.toHaveBeenCalled();
+  });
+
+  it('any other refusal surfaces as itself', async () => {
+    vi.mocked(prisma.conversation.create).mockRejectedValueOnce(foreignKeyRefused('Conversation', 'some_other_fkey'));
+    expect((await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' })).status).toBe(500);
+
+    vi.mocked(prisma.conversation.create).mockResolvedValueOnce({ ...mockConversation } as any);
+    vi.mocked(prisma.conversationRead.createMany).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_conversation_id_fkey'));
+    expect((await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' })).status).toBe(500);
   });
 });

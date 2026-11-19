@@ -246,7 +246,13 @@ dmRouter.post('/', rateLimitDmOpen, async (req: Request, res: Response, next: Ne
     // Opening a conversation the caller removed puts it back on their list
     // (their floor stays: only what lies above it shows). A removal that
     // deleted it meanwhile leaves the pair free for a new one.
-    const existing = found && await reopenConversationForUser(found.id, currentUserId) ? found : null;
+    const reopened = found ? await reopenConversationForUser(found.id, currentUserId, targetUserId) : 'missing';
+    // The target's account was deleted while the reopen waited for the
+    // conversation (an account deletion kept it read-only): the answer an
+    // unknown account always gets, never the deleted account's profile read
+    // above
+    if (reopened === 'other-side-gone') throw new NotFoundError('User');
+    const existing = reopened === 'reopened' ? found : null;
     // a new conversation (the pair free, or a removal deleted it) has none
     const floor = existing?.reads[0]?.clearedAt ?? null;
 
@@ -263,19 +269,31 @@ dmRouter.post('/', rateLimitDmOpen, async (req: Request, res: Response, next: Ne
         });
         if (found) return found;
       }
+      // The target's account was deleted after the lookup above (its key
+      // refused): the answer an unknown account always gets
+      if (violatesForeignKey(err, 'conversations_user1_id_fkey') || violatesForeignKey(err, 'conversations_user2_id_fkey')) {
+        throw new NotFoundError('User');
+      }
       throw err;
     });
 
     if (isNew) {
       // Create read records for both participants
       const now = new Date();
-      await prisma.conversationRead.createMany({
-        data: [
-          { userId: user1Id, conversationId: conversation.id, lastReadAt: now },
-          { userId: user2Id, conversationId: conversation.id, lastReadAt: now },
-        ],
-        skipDuplicates: true,
-      });
+      try {
+        await prisma.conversationRead.createMany({
+          data: [
+            { userId: user1Id, conversationId: conversation.id, lastReadAt: now },
+            { userId: user2Id, conversationId: conversation.id, lastReadAt: now },
+          ],
+          skipDuplicates: true,
+        });
+      } catch (err) {
+        // The same, between the conversation's insert and its read rows: the
+        // account deletion settled the new conversation with the others
+        if (violatesForeignKey(err, 'conversation_reads_user_id_fkey')) throw new NotFoundError('User');
+        throw err;
+      }
 
       // Join both users' sockets to the DM room via their per-user rooms —
       // adapter-wide socketsJoin instead of fetching every socket on every node

@@ -55,7 +55,7 @@ import {
  *    conversation with its cascade: messages, their attachments and
  *    reactions, both read rows, and the keys of replies and reports set NULL.
  *  - a reopen (reopenConversationForUser): the conversation row FOR KEY
- *    SHARE, then the opener's read row.
+ *    SHARE, its sides (read), then the opener's read row.
  *  Message writes, edits, reactions and deletes share the conversation row and
  *  meet only on rows of their own (a read row two writes both unhide, in the
  *  same index order; a message a delete removes while a reply to it is
@@ -297,20 +297,33 @@ export function removeConversationForUser(
 
 /**
  * Open a conversation again for the person who asks (POST /dm on an existing
- * pair): their `hiddenAt` cleared, their floor kept, so it is back on their
- * list with only what lies above the floor. One transaction, the
- * conversation row first (FOR KEY SHARE: it queues behind a removal that
- * may be deleting the row). False: the row is gone (a removal deleted it
- * meanwhile), and the caller creates a new conversation.
+ * pair, with `withUserId`): their `hiddenAt` cleared, their floor kept, so it
+ * is back on their list with only what lies above the floor. One
+ * transaction, the conversation row first (FOR KEY SHARE: it queues behind a
+ * removal that may be deleting the row, and behind an account deletion
+ * settling it), then its sides as they stand under that lock:
+ *  - 'reopened': both people are its sides; the caller's side is unhidden;
+ *  - 'missing': the row is gone (a removal or an account deletion deleted it
+ *    meanwhile), and the caller creates a new conversation;
+ *  - 'other-side-gone': `withUserId` is no longer a side (their account was
+ *    deleted while this waited, and the conversation was kept read-only):
+ *    nothing is written, and the caller answers as for an unknown account.
  */
-export function reopenConversationForUser(conversationId: string, userId: string): Promise<boolean> {
+export function reopenConversationForUser(
+  conversationId: string,
+  userId: string,
+  withUserId: string,
+): Promise<'reopened' | 'missing' | 'other-side-gone'> {
   return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
-    if (!(await keyShareConversationRow(tx, conversationId))) return false;
+    if (!(await keyShareConversationRow(tx, conversationId))) return 'missing' as const;
+    const sides = await tx.conversation.findUnique({ where: { id: conversationId }, select: { user1Id: true, user2Id: true } });
+    if (!sides) return 'missing' as const;
+    if (sides.user1Id !== withUserId && sides.user2Id !== withUserId) return 'other-side-gone' as const;
     await tx.conversationRead.updateMany({
       where: { userId, conversationId, hiddenAt: { not: null } },
       data: { hiddenAt: null },
     });
-    return true;
+    return 'reopened' as const;
   }, LOCK_WAIT_TRANSACTION_OPTIONS), `${LOG_PREFIX} The reopening of conversation ${conversationId}`);
 }
 
