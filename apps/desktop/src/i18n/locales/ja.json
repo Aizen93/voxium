@@ -1005,7 +1005,10 @@
       "mutedByModerator": "モデレーターによってミュートされました",
       "deafenedByModerator": "モデレーターによってスピーカーミュートされました",
       "screenShareFailed": "画面共有に失敗しました — もう一度お試しください",
-      "micIssue": "マイクの問題を検出しました — ボイスに再参加してください"
+      "micIssue": "マイクの問題を検出しました — ボイスに再参加してください",
+      "noiseSuppressionUnavailable": "ノイズ抑制は現在利用できません — マイクはノイズ抑制なしで引き続き使えます。",
+      "micSwitchFailed": "選択したマイクに切り替えられませんでした — 以前のマイクを引き続き使用しています",
+      "micDefaultInUse": "選択したマイクを開けませんでした — システムのデフォルトのマイクを使用しています"
     }
   },
   "attachment": {

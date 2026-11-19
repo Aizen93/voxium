@@ -934,6 +934,7 @@ function AudioTab() {
     voiceQuality,
     pushToTalkKey,
     enableNoiseSuppression,
+    noiseSuppressionUnavailable,
     enableNotificationSounds,
     enableDesktopNotifications,
     setAudioInputDeviceId,
@@ -1110,12 +1111,20 @@ function AudioTab() {
             <div>
               <p className="text-sm text-vox-text-primary">{t('settings.audio.noiseSuppression')}</p>
               <p className="text-[10px] text-vox-text-muted">{t('settings.audio.noiseSuppressionDesc')}</p>
+              {/* The switch shows the saved preference; this says it is not
+                  active in this app session (it failed, the mic goes out raw) */}
+              {enableNoiseSuppression && noiseSuppressionUnavailable && (
+                <p id="noise-suppression-unavailable" data-testid="noise-suppression-unavailable" className="text-[10px] text-vox-accent-warning">
+                  {t('voice.toasts.noiseSuppressionUnavailable')}
+                </p>
+              )}
             </div>
           </div>
           <button
             type="button"
             role="switch"
             aria-checked={enableNoiseSuppression}
+            aria-describedby={enableNoiseSuppression && noiseSuppressionUnavailable ? 'noise-suppression-unavailable' : undefined}
             onClick={() => setEnableNoiseSuppression(!enableNoiseSuppression)}
             className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
               enableNoiseSuppression ? 'bg-vox-accent-primary' : 'bg-vox-bg-secondary'

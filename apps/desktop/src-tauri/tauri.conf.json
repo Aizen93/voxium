@@ -53,6 +53,9 @@
         "installerHooks": "windows/installer-hooks.nsh"
       }
     },
+    "macOS": {
+      "entitlements": "./Entitlements.plist"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

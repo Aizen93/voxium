@@ -16,73 +16,228 @@ let nsDestination: MediaStreamAudioDestinationNode | null = null;
 /** Whether noise suppression is enabled (user setting). */
 let noiseSuppEnabled = true;
 
+/** Bumped by every start and every stop: a start that is no longer the latest
+ *  gives up at its next step, on its OWN context, and commits nothing. */
+let nsGeneration = 0;
+
+/** How long a start waits for the context to render before it gives up on
+ *  this pipeline (the raw mic is used; the next rebuild tries again). */
+const NS_START_TIMEOUT_MS = 2000;
+const NS_START_POLL_MS = 10;
+/** Render quanta (128 frames) the context must have played since the node was
+ *  created before the start is taken as healthy. */
+const NS_START_QUANTA = 2;
+
 export function setNoiseSuppression(enabled: boolean) {
   noiseSuppEnabled = enabled;
 }
 
 /**
+ * Noise suppression could not run: the worklet's module did not load
+ * (`load-error`) or its processor threw (`processor-error`), at `start` (the
+ * caller already got the raw stream back) or while `running` (the outgoing
+ * audio was silent since the failure: the caller must rebuild on `rawStream`
+ * and swap the outgoing track). A context that merely did not render in time
+ * is not reported: that start uses the raw mic and the next one tries again.
+ */
+export interface NoiseSuppressionFailure {
+  phase: 'start' | 'running';
+  reason: 'load-error' | 'processor-error';
+  rawStream: MediaStream;
+}
+let failureListener: ((failure: NoiseSuppressionFailure) => void) | null = null;
+
+/** The one place told when an enabled noise suppression could not run. */
+export function onNoiseSuppressionFailure(listener: ((failure: NoiseSuppressionFailure) => void) | null) {
+  failureListener = listener;
+}
+
+function reportFailure(failure: NoiseSuppressionFailure) {
+  try {
+    failureListener?.(failure);
+  } catch (err) {
+    console.error('[NoiseSuppression] Failure listener threw:', err);
+  }
+}
+
+class NoiseSuppressionSuperseded extends Error {
+  constructor() {
+    super('superseded by a newer start or a stop');
+    this.name = 'NoiseSuppressionSuperseded';
+  }
+}
+
+/** The context did not render within the start window: nothing is broken that
+ *  this start can tell, so it is not reported. */
+class NoiseSuppressionNotRendering extends Error {
+  constructor() {
+    super(`the AudioContext did not render within ${NS_START_TIMEOUT_MS} ms`);
+    this.name = 'NoiseSuppressionNotRendering';
+  }
+}
+
+class NoiseSuppressionProcessorError extends Error {
+  constructor(event: Event) {
+    super(`AudioWorklet processor error (${describeProcessorError(event)})`);
+    this.name = 'NoiseSuppressionProcessorError';
+  }
+}
+
+function describeProcessorError(event: Event): string {
+  const message = (event as ErrorEvent).message;
+  return typeof message === 'string' && message ? `${event.type}: ${message}` : event.type;
+}
+
+/**
+ * Resolves once the context has rendered a few quanta since the node was made
+ * with no `processorerror` (and one more poll, which leaves room for an error
+ * task queued meanwhile); rejects on that error, on a supersession, or when the
+ * context never rendered within the timeout.
+ *
+ * A processor's failure (a WASM compile error, a CSP refusal, a throw in
+ * `process()`) reaches this thread as a `processorerror` TASK, so a microtask
+ * queued at construction always runs before it and can never see it. What does
+ * tell is the context's `currentTime`, which only the rendering thread
+ * advances. Chromium constructs the processor at the start of the first
+ * quantum after the node is made, so by then a constructor error is on its
+ * way; Gecko may construct it later and report the error after this check has
+ * passed. That is why the `processorerror` listener stays armed for the node's
+ * lifetime: a later error is a `running` failure, handled the same way.
+ *
+ * The timeout is not itself a failure. When it fires, a context that HAS
+ * rendered enough (a long main-thread task or a hidden page's throttled
+ * timers starved the polls) is taken as healthy; one that never rendered
+ * gives up on this pipeline only.
+ */
+function waitForProcessorStart(ctx: AudioContext, node: AudioWorkletNode, isCurrent: () => boolean): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const startedAt = ctx.currentTime;
+    const quantum = 128 / (ctx.sampleRate || 48_000);
+    const hasRendered = () => ctx.currentTime >= startedAt + NS_START_QUANTA * quantum;
+    let rendered = false;
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      clearTimeout(timeout);
+      if (err) reject(err);
+      else resolve();
+    };
+    node.onprocessorerror = (event) => finish(new NoiseSuppressionProcessorError(event));
+    const timeout = setTimeout(() => {
+      if (!isCurrent()) finish(new NoiseSuppressionSuperseded());
+      else if (hasRendered()) finish();
+      else finish(new NoiseSuppressionNotRendering());
+    }, NS_START_TIMEOUT_MS);
+    const poll = setInterval(() => {
+      if (!isCurrent()) {
+        finish(new NoiseSuppressionSuperseded());
+        return;
+      }
+      if (!hasRendered()) return;
+      if (rendered) finish();
+      else rendered = true;
+    }, NS_START_POLL_MS);
+  });
+}
+
+/** The processor threw on the live node (in `process()`, or a constructor
+ *  Gecko ran late): the node outputs silence from now on. */
+function handleRunningFailure(node: AudioWorkletNode, rawStream: MediaStream, event: Event) {
+  if (node !== nsWorklet) return; // a pipeline replaced since
+  console.error(`[NoiseSuppression] RNNoise worklet failed during the call (${describeProcessorError(event)}), falling back to the raw mic`);
+  stopNoiseSuppression();
+  reportFailure({ phase: 'running', reason: 'processor-error', rawStream });
+}
+
+/**
  * Apply RNNoise noise suppression to a mic stream.
  * Returns the processed stream, or the original stream if suppression is
- * disabled or the worklet fails to load.
+ * disabled, fails to start, its context does not render in time, or a newer
+ * start or a stop superseded this one. A failure of the worklet itself (not a
+ * supersession, not a context that did not render) is reported to
+ * onNoiseSuppressionFailure.
  *
  * This follows the isolated-pipeline pattern: a dedicated AudioContext with
  * source → NoiseSuppressorWorklet → destination. Nothing else in the path.
  *
- * The worklet compiles RNNoise WASM synchronously in its constructor. If
- * WASM compilation fails (e.g. CSP blocks it), the constructor throws in
- * the AudioWorklet thread — invisible to the main thread. We detect this
- * via the `processorerror` event and fall back to the raw mic stream.
+ * The worklet compiles RNNoise WASM synchronously in its constructor, on the
+ * rendering thread. If that fails (e.g. CSP blocks it), or `process()` throws
+ * later in the call, the node outputs silence; the browser reports either as
+ * `processorerror`, which stays armed for the node's lifetime.
  */
 export async function applyNoiseSuppression(micStream: MediaStream): Promise<MediaStream> {
-  // Clean up any previous suppression context
+  // Clean up any previous suppression context (and supersede a start in flight)
   stopNoiseSuppression();
+  const generation = nsGeneration;
+  const isCurrent = () => generation === nsGeneration;
 
   if (!noiseSuppEnabled) return micStream;
 
+  // Built in locals and committed only by the latest start: an overlapping
+  // start must never build its node on another start's context
+  let ctx: AudioContext | null = null;
+  let node: AudioWorkletNode | null = null;
+  let source: MediaStreamAudioSourceNode | null = null;
+  // Set when this start closes its own context: the resume still pending on it
+  // is then refused (Firefox does so), which is no news
+  let closedHere = false;
   try {
-    nsContext = new AudioContext();
-
-    if (nsContext.state === 'suspended') {
-      await nsContext.resume();
+    const created = new AudioContext();
+    ctx = created;
+    if (created.state === 'suspended') {
+      // Not awaited: a context that never starts is caught by the start check
+      created.resume().catch((err) => {
+        if (closedHere || created.state === 'closed') return;
+        console.warn('[NoiseSuppression] Failed to resume AudioContext:', err);
+      });
     }
 
-    await nsContext.audioWorklet.addModule(NoiseSuppressorWorkletUrl);
-    nsWorklet = new AudioWorkletNode(nsContext, NoiseSuppressorWorklet_Name);
+    await ctx.audioWorklet.addModule(NoiseSuppressorWorkletUrl);
+    if (!isCurrent()) throw new NoiseSuppressionSuperseded();
+    node = new AudioWorkletNode(ctx, NoiseSuppressorWorklet_Name);
+    await waitForProcessorStart(ctx, node, isCurrent);
+    if (!isCurrent()) throw new NoiseSuppressionSuperseded();
 
-    // Detect worklet-thread failures (WASM compile error, CSP block, etc.).
-    // These throw inside AudioWorkletGlobalScope and don't propagate to the
-    // main thread — the node just outputs silence. processorerror lets us
-    // catch this and fall back to the raw mic stream.
-    const processorReady = new Promise<void>((resolve, reject) => {
-      const errorTimeout = setTimeout(() => resolve(), 2000);
-      nsWorklet!.onprocessorerror = (event) => {
-        clearTimeout(errorTimeout);
-        reject(new Error(`AudioWorklet processor error: ${event.type}`));
-      };
-      // The processor is initialized synchronously during AudioWorkletNode
-      // construction. If we reach this point without processorerror firing,
-      // the worklet is healthy. Use a microtask to let any pending error
-      // event fire first.
-      queueMicrotask(() => {
-        clearTimeout(errorTimeout);
-        resolve();
-      });
-    });
-
-    await processorReady;
-
-    nsSource = nsContext.createMediaStreamSource(micStream);
-    nsDestination = nsContext.createMediaStreamDestination();
-
+    source = ctx.createMediaStreamSource(micStream);
+    const destination = ctx.createMediaStreamDestination();
     // Clean pipeline: source → RNNoise → destination
-    nsSource.connect(nsWorklet);
-    nsWorklet.connect(nsDestination);
+    source.connect(node);
+    node.connect(destination);
+
+    const live = node;
+    live.onprocessorerror = (event) => handleRunningFailure(live, micStream, event);
+    nsContext = ctx;
+    nsWorklet = live;
+    nsSource = source;
+    nsDestination = destination;
 
     if (import.meta.env.DEV) console.log('[NoiseSuppression] RNNoise pipeline active');
-    return nsDestination.stream;
+    return destination.stream;
   } catch (err) {
+    if (node) node.onprocessorerror = null;
+    try { source?.disconnect(); } catch (disconnectErr) {
+      console.warn('[NoiseSuppression] Source disconnect error (already disconnected):', disconnectErr);
+    }
+    closedHere = true;
+    ctx?.close().catch((closeErr) => {
+      console.warn('[NoiseSuppression] AudioContext close error:', closeErr);
+    });
+    if (err instanceof NoiseSuppressionSuperseded || !isCurrent()) {
+      if (import.meta.env.DEV) console.log('[NoiseSuppression] Start superseded');
+      return micStream;
+    }
+    if (err instanceof NoiseSuppressionNotRendering) {
+      console.warn('[NoiseSuppression] Its AudioContext did not render in time; this pipeline uses the raw mic, the next one tries again');
+      return micStream;
+    }
     console.warn('[NoiseSuppression] Failed to initialize RNNoise worklet, using raw mic:', err);
-    stopNoiseSuppression();
+    reportFailure({
+      phase: 'start',
+      reason: err instanceof NoiseSuppressionProcessorError ? 'processor-error' : 'load-error',
+      rawStream: micStream,
+    });
     return micStream;
   }
 }
@@ -94,6 +249,8 @@ export function getSuppressedStream(): MediaStream | null {
 
 /** Tear down the noise suppression pipeline. */
 export function stopNoiseSuppression() {
+  nsGeneration++;
+  if (nsWorklet) nsWorklet.onprocessorerror = null;
   if (nsSource) {
     try { nsSource.disconnect(); } catch (err) {
       console.warn('[NoiseSuppression] Source disconnect error (already disconnected):', err);
@@ -174,6 +331,11 @@ export function getAudioLevel(): number {
   return currentLevel;
 }
 
+/** The kind of call speaking detection runs for, or null when it is not running. */
+export function getSpeakingDetectionMode(): 'server' | 'dm' | null {
+  return tickInterval !== null ? speakingMode : null;
+}
+
 /**
  * Returns the noise-gated stream for SFU producer use.
  * For SFU: the gain gate silences audio when not speaking (saves bandwidth).
@@ -220,7 +382,11 @@ export function startSpeakingDetection(stream: MediaStream, mode: 'server' | 'dm
   }
 
   if (sdContext.state === 'suspended') {
-    sdContext.resume().catch((err) => {
+    const resuming = sdContext;
+    resuming.resume().catch((err) => {
+      // A rebuild that closed this context meanwhile is refused its pending
+      // resume (Firefox does so): no news
+      if (sdContext !== resuming || resuming.state === 'closed') return;
       console.warn('[SpeakingDetection] Failed to resume AudioContext:', err);
     });
   }

@@ -312,9 +312,6 @@ export function MainLayout() {
       voiceSpeaking: ({ channelId, userId, speaking }: { channelId: string; userId: string; speaking: boolean }) => {
         useVoiceStore.getState().setUserSpeaking(channelId, userId, speaking);
       },
-      voiceSignal: ({ from, signal }: { from: string; signal: unknown }) => {
-        useVoiceStore.getState().handleSignal(from, signal);
-      },
       // Secure voice channels (spec §21): Olm-sealed media keys relayed
       // between participants. secureVoiceKeys drops anything for a channel
       // without an active session — no guard needed here.
@@ -762,7 +759,6 @@ export function MainLayout() {
       ['voice:speaking', handlers.voiceSpeaking],
       ['voice:e2e:key', handlers.voiceE2EKey],
       ['voice:e2e:key_request', handlers.voiceE2EKeyRequest],
-      ['voice:signal', handlers.voiceSignal],
       ['voice:transport_created', handlers.voiceTransportCreated],
       ['voice:new_consumer', handlers.voiceNewConsumer],
       ['voice:producer_closed', handlers.voiceProducerClosed],

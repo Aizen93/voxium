@@ -1,6 +1,6 @@
 import type { TFunction } from 'i18next';
 import axios from 'axios';
-import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE } from '@voxium/shared';
+import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE, VOICE_SPEAK_REFUSED_MESSAGE } from '@voxium/shared';
 
 /**
  * Maps known server error strings → i18n keys under "serverErrors.*".
@@ -361,7 +361,7 @@ const ERROR_MAP: Record<string, string> = {
   'This voice channel requires end-to-end encryption support.': 'voiceRequiresE2E',
   'Screen sharing is not available in secure voice channels': 'screenShareNotInSecure',
   'Someone else is already sharing in this channel': 'screenShareTaken',
-  'You do not have permission to speak in this channel': 'noPermissionSpeak',
+  [VOICE_SPEAK_REFUSED_MESSAGE]: 'noPermissionSpeak',
 
   // ─── Admin ─────────────────────────────────────────────────────────────
   'Cannot ban yourself': 'cannotBanSelf',

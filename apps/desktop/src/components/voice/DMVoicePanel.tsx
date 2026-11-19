@@ -3,7 +3,7 @@ import { useVoiceStore } from '../../stores/voiceStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
-import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
+import { useLocalSpeaking } from '../../hooks/useLocalSpeaking';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Phone, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -12,10 +12,19 @@ import { clsx } from 'clsx';
  * Global DM voice panel — mirrors VoicePanel but for DM calls.
  * Renders in both ChannelSidebar (server view) and DMList (DM view)
  * so the user always sees their active DM call.
+ *
+ * Mounted in both sidebars for good, so it reads ONE value until there is a
+ * call: everything else, the local speaking ring's frame loop included, lives
+ * in DMVoicePanelCall, which exists only during a DM call.
  */
 export function DMVoicePanel() {
-  const { t } = useTranslation();
   const dmCallConversationId = useVoiceStore((s) => s.dmCallConversationId);
+  if (!dmCallConversationId) return null;
+  return <DMVoicePanelCall dmCallConversationId={dmCallConversationId} />;
+}
+
+function DMVoicePanelCall({ dmCallConversationId }: { dmCallConversationId: string }) {
+  const { t } = useTranslation();
   const dmCallUsers = useVoiceStore((s) => s.dmCallUsers);
   const selfMute = useVoiceStore((s) => s.selfMute);
   const selfDeaf = useVoiceStore((s) => s.selfDeaf);
@@ -25,13 +34,13 @@ export function DMVoicePanel() {
   const leaveDMCall = useVoiceStore((s) => s.leaveDMCall);
   const dmCallPeerDevice = useVoiceStore((s) => s.dmCallPeerDevice);
   const { user } = useAuthStore();
-  const localAudioLevel = useLocalAudioLevel();
+  // Push-to-talk overrides mute: the ring can light only while either lets the mic through
+  const micOpen = !selfMute || pttActive;
+  const localSpeaking = useLocalSpeaking(micOpen);
 
   const conversations = useDMStore((s) => s.conversations);
   const setActiveConversation = useDMStore((s) => s.setActiveConversation);
   const activeServerId = useServerStore((s) => s.activeServerId);
-
-  if (!dmCallConversationId) return null;
 
   const conversation = conversations.find((c) => c.id === dmCallConversationId);
   const participantName = conversation?.participant.displayName || 'DM Call';
@@ -88,7 +97,7 @@ export function DMVoicePanel() {
         <div className="max-h-24 overflow-y-auto px-2 py-1">
           {dmCallUsers.map((voiceUser) => {
             const isLocal = voiceUser.id === user?.id;
-            const isSpeaking = isLocal ? (localAudioLevel > 0.05 && (!selfMute || pttActive)) : voiceUser.speaking;
+            const isSpeaking = isLocal ? (localSpeaking && micOpen) : voiceUser.speaking;
 
             return (
               <UserHoverTarget key={voiceUser.id} userId={voiceUser.id}>

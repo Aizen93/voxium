@@ -1005,7 +1005,10 @@
       "mutedByModerator": "관리자가 회원님을 음소거했습니다",
       "deafenedByModerator": "관리자가 회원님의 소리를 껐습니다",
       "screenShareFailed": "화면 공유에 실패했습니다 — 다시 시도해 주세요",
-      "micIssue": "마이크 문제가 감지되었습니다 — 음성에 다시 참여해 보세요"
+      "micIssue": "마이크 문제가 감지되었습니다 — 음성에 다시 참여해 보세요",
+      "noiseSuppressionUnavailable": "노이즈 억제를 지금은 사용할 수 없습니다 — 마이크는 노이즈 억제 없이 계속 작동합니다.",
+      "micSwitchFailed": "선택한 마이크로 전환할 수 없습니다 — 이전 마이크를 계속 사용합니다",
+      "micDefaultInUse": "선택한 마이크를 열 수 없습니다 — 시스템 기본 마이크를 사용합니다"
     }
   },
   "attachment": {

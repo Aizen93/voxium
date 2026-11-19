@@ -1,16 +1,27 @@
 import { useTranslation } from 'react-i18next';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useAuthStore } from '../../stores/authStore';
-import { useLocalAudioLevel } from '../../hooks/useLocalAudioLevel';
+import { useLocalSpeaking } from '../../hooks/useLocalSpeaking';
 import { Avatar } from '../common/Avatar';
 import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff } from 'lucide-react';
 import { clsx } from 'clsx';
 
+/** Rendered only during a DM call (DMChatArea), so its frame loop is too. */
 export function DMCallPanel() {
   const { t } = useTranslation();
-  const { dmCallUsers, selfMute, selfDeaf, pttActive, toggleMute, toggleDeaf, leaveDMCall } = useVoiceStore();
+  // One selector per field: the whole store would re-render this on every
+  // voice event the socket receives, the speaking of other channels included
+  const dmCallUsers = useVoiceStore((s) => s.dmCallUsers);
+  const selfMute = useVoiceStore((s) => s.selfMute);
+  const selfDeaf = useVoiceStore((s) => s.selfDeaf);
+  const pttActive = useVoiceStore((s) => s.pttActive);
+  const toggleMute = useVoiceStore((s) => s.toggleMute);
+  const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
+  const leaveDMCall = useVoiceStore((s) => s.leaveDMCall);
   const { user } = useAuthStore();
-  const localAudioLevel = useLocalAudioLevel();
+  // Push-to-talk overrides mute: the ring can light only while either lets the mic through
+  const micOpen = !selfMute || pttActive;
+  const localSpeaking = useLocalSpeaking(micOpen);
 
   const waiting = dmCallUsers.length <= 1;
 
@@ -20,9 +31,7 @@ export function DMCallPanel() {
       <div className="flex items-center justify-center gap-8 mb-4">
         {dmCallUsers.map((voiceUser) => {
           const isLocal = voiceUser.id === user?.id;
-          const isSpeaking = isLocal
-            ? (localAudioLevel > 0.05 && (!selfMute || pttActive))
-            : voiceUser.speaking;
+          const isSpeaking = isLocal ? (localSpeaking && micOpen) : voiceUser.speaking;
 
           return (
             <div key={voiceUser.id} className="flex flex-col items-center gap-2">

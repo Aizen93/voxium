@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -1280,11 +1280,83 @@ describe('dmVoiceHandler — dm:voice:speaking', () => {
     handleDMVoiceEvents(io as any, socket as any);
   });
 
-  it('returns early when rate limited', () => {
-    vi.mocked(socketRateLimit).mockReturnValueOnce(false);
-    const handler = handlers.get('dm:voice:speaking')!;
-    handler(true);
-    expect(io.to).not.toHaveBeenCalled();
+  describe('over its budget the latest state wins (#90)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      socket.data.dmCallConversationId = 'conv-1';
+      socket.rooms.add('dm:voice:conv-1');
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+    const sent = () => io._emit.mock.calls.filter(([event]) => event === 'dm:voice:speaking').map(([, p]) => p.speaking);
+    const toggles = (count: number) => {
+      for (let i = 0; i < count; i++) handlers.get('dm:voice:speaking')!(i % 2 === 0);
+    };
+
+    it('an honest choppy speaker (~360 toggles a minute) has every one sent', () => {
+      toggles(360);
+      expect(sent()).toHaveLength(360);
+    });
+
+    it('past 360 a minute (the indicator budget) the last state is held, never dropped, and sent when the window ends', async () => {
+      toggles(365); // ends on true
+      expect(sent()).toHaveLength(360);
+      expect(sent().at(-1)).toBe(false);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sent()).toHaveLength(361);
+      expect(sent().at(-1)).toBe(true);
+    });
+
+    it('a held state is not sent once that call ended (the socket left its room)', async () => {
+      toggles(361);
+      socket.rooms.delete('dm:voice:conv-1');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sent()).toHaveLength(360);
+      expect(socket.data.dmCallConversationId).toBeUndefined();
+    });
+
+    it('a held state is not sent for a call in another conversation', async () => {
+      toggles(361);
+      socket.data.dmCallConversationId = 'conv-2';
+      socket.rooms.add('dm:voice:conv-2');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sent()).toHaveLength(360);
+    });
+
+    it('a held state is not sent once its call ended, even when this socket is in a NEW call of the same conversation', async () => {
+      toggles(361); // the 361st is held
+      // That call ends elsewhere: this node sees only the room leave
+      socket.rooms.delete('dm:voice:conv-1');
+      // A new call of the same conversation, joined on this socket
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+      mockRedis.hGetAll.mockResolvedValueOnce({});
+      mockRedis.hGetAll.mockResolvedValueOnce({
+        'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+      });
+      await handlers.get('dm:voice:join')!('conv-1');
+      expect(socket.join).toHaveBeenCalledWith('dm:voice:conv-1');
+      socket.rooms.add('dm:voice:conv-1'); // what socket.join does on a real socket
+      expect(socket.data.dmCallConversationId).toBe('conv-1');
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sent()).toHaveLength(360);
+    });
+
+    it('a state sent in the new call still goes out (only the old call\'s held one is dropped)', async () => {
+      socket.rooms.delete('dm:voice:conv-1');
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+      vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
+      mockRedis.hGetAll.mockResolvedValueOnce({});
+      mockRedis.hGetAll.mockResolvedValueOnce({
+        'user-1': JSON.stringify({ socketId: 'socket-1', selfMute: false, selfDeaf: false }),
+      });
+      await handlers.get('dm:voice:join')!('conv-1');
+      socket.rooms.add('dm:voice:conv-1');
+      handlers.get('dm:voice:speaking')!(true);
+      expect(sent()).toEqual([true]);
+    });
   });
 
   it('rejects non-boolean speaking value', () => {
@@ -1808,11 +1880,10 @@ describe('dmVoiceHandler — rate limiting', () => {
     expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:deaf', 120);
   });
 
-  it('dm:voice:speaking uses rate limit of 120 per minute', () => {
-    vi.mocked(socketRateLimit).mockReturnValueOnce(false);
-    const handler = handlers.get('dm:voice:speaking')!;
-    handler(true);
-    expect(socketRateLimit).toHaveBeenCalledWith(socket, 'dm:voice:speaking', 120);
+  it('dm:voice:speaking does not go through the drop-on-limit socketRateLimit (its budget is latest-wins)', () => {
+    socket.data.dmCallConversationId = 'conv-1';
+    handlers.get('dm:voice:speaking')!(true);
+    expect(socketRateLimit).not.toHaveBeenCalledWith(socket, 'dm:voice:speaking', expect.anything());
   });
 
   it('dm:voice:signal uses rate limit of 300 per minute', async () => {
