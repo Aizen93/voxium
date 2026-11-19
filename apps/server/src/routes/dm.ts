@@ -71,8 +71,9 @@ const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true, status: true, role: true, isSupporter: true, supporterTier: true },
 };
 
-// webhookId/webhookName: a DM row has a user author, or none once a later
-// change lets a conversation outlive a deleted account, and every reader here
+// webhookId/webhookName: a DM row has a user author, or none in a conversation
+// kept for the other person after an account deletion (the deleted account's
+// rows there, utils/conversationLifecycle.ts), and every reader here
 // shapes through shapeConversationMessageRow() (utils/messageAuthor.ts), which
 // needs both to keep the author non-null. It takes the conversation from the
 // route, never from a select, so an authorless row or quote here becomes the

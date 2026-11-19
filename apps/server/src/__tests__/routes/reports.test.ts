@@ -349,6 +349,47 @@ describe('Report Routes — webhook-posted messages', () => {
   });
 });
 
+// ─── A deleted account's placeholder row in a kept conversation (#131) ─────
+
+describe('Report Routes — a placeholder row of a deleted account', () => {
+  const placeholder = {
+    id: 'msg-p', content: '', encrypted: false, channelId: null, conversationId: 'conv-1',
+    authorId: null, createdAt: new Date('2026-11-11T10:00:00.000Z'), channel: null,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.report.count).mockResolvedValue(0);
+    vi.mocked(prisma.report.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.message.findUnique).mockResolvedValue(placeholder as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue({ id: 'conv-1', user1Id: 'user-1', user2Id: null, reads: [] } as any);
+  });
+
+  it("names the placeholder id or the deleted account's old id: no such account, 404 User, no report", async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+    for (const reportedUserId of ['deleted:conv-1', 'user-2']) {
+      const res = await request(createApp())
+        .post('/api/v1/reports')
+        .send({ type: 'message', reportedUserId, messageId: 'msg-p', reason: 'Harassment in this DM' });
+      expect(res.status, reportedUserId).toBe(404);
+      expect(res.body.error).toBe('User not found');
+    }
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+
+  it('pinned on a live account: the row has no author, 400 author mismatch, no report', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ id: 'user-3' } as any);
+
+    const res = await request(createApp())
+      .post('/api/v1/reports')
+      .send({ type: 'message', reportedUserId: 'user-3', messageId: 'msg-p', reason: 'Harassment in this DM' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Reported user does not match message author');
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+});
+
 // ─── Server reports (directory listings) ────────────────────────────────────
 
 describe('Report Routes — type: server', () => {

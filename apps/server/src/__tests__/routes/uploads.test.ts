@@ -676,10 +676,10 @@ describe('uploads — POST /presign/attachment', () => {
 });
 
 // ─── A conversation whose other side was deleted (NULL side) ────────────────
-// Nothing writes a NULL side yet; the rows are constructed. Both DM checks
-// compare each side with the caller: the remaining person passes as before
-// (a read-only refusal of the presign is a later change), nobody passes as
-// the deleted side.
+// The rows are constructed (an account deletion that keeps the conversation
+// writes them). Both DM checks compare each side with the caller: the
+// remaining person passes (downloads, but no presign: the conversation is
+// read-only), nobody passes as the deleted side.
 
 describe('uploads — a conversation with a NULL side', () => {
   beforeEach(() => {
@@ -704,6 +704,16 @@ describe('uploads — a conversation with a NULL side', () => {
     const res = await request(createApp()).get('/api/v1/uploads/attachments/dm-conv1/abc-encrypted.bin');
 
     expect(res.status).toBe(200);
+  });
+
+  it("GET /attachments/*: a file of a deleted account's message is gone with its row (the deletion deletes the attachment rows of its placeholders): 404, nothing read from the store", async () => {
+    vi.mocked(prisma.messageAttachment.findFirst).mockResolvedValueOnce(null);
+
+    const res = await request(createApp()).get('/api/v1/uploads/attachments/dm-conv1/abc-encrypted.bin');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Attachment not found');
+    expect(getS3Object).not.toHaveBeenCalled();
   });
 
   it('GET /attachments/*: nobody downloads as the deleted side, nor from a row with both sides gone', async () => {

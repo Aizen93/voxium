@@ -5,7 +5,8 @@ import type { Conversation } from '@voxium/shared';
  * A direct conversation whose other side's account was deleted: the server
  * serves it with `participantDeleted: true` and a placeholder participant whose
  * id is `deleted:{conversationId}`. Recognised by either, NEVER by a name: the
- * username `deleted` is not reserved, and a real account can be called so.
+ * server reserves the username `deleted` for new accounts only, and an older
+ * real account can be called so.
  *
  * Such a conversation is read-only: reading, marking read, deleting one's own
  * messages and removing it from the list stay; sending, editing, reacting,

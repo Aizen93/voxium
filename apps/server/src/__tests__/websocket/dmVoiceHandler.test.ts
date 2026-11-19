@@ -2345,10 +2345,10 @@ describe('dmVoiceHandler — endDMCallIfParticipant', () => {
 });
 
 // ─── A conversation whose other side was deleted (NULL side) ────────────────
-// Nothing writes a NULL side yet; the rows are constructed. The participant
-// checks compare a side with the caller (`null !== userId`): the remaining
-// person passes as before (refusing a call there is a later change), nobody
-// passes as the deleted side.
+// The rows are constructed (an account deletion that keeps the conversation
+// writes them). The participant checks compare a side with the caller
+// (`null !== userId`): the remaining person passes them but is refused a call
+// (the conversation is read-only), nobody passes as the deleted side.
 
 describe('dmVoiceHandler — a conversation whose other side was deleted (NULL side)', () => {
   let socket: ReturnType<typeof createMockSocket>['socket'];
