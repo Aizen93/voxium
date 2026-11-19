@@ -98,7 +98,6 @@ export function ChannelPermissionsEditor({
   const roles = useServerStore((s) => s.roles);
   const fetchChannelPermissions = useServerStore((s) => s.fetchChannelPermissions);
   const setChannelPermissionOverride = useServerStore((s) => s.setChannelPermissionOverride);
-  const deleteChannelPermissionOverride = useServerStore((s) => s.deleteChannelPermissionOverride);
 
   const [overrides, setOverrides] = useState<Record<string, OverrideState>>({});
   const [originalOverrides, setOriginalOverrides] = useState<Record<string, OverrideState>>({});
@@ -183,14 +182,15 @@ export function ChannelPermissionsEditor({
     if (!selectedRoleId) return;
     setSaving(true);
     try {
-      const override = overrides[selectedRoleId];
-      if (!override || (override.allow === 0n && override.deny === 0n)) {
-        // If both masks are empty, delete the override entirely
-        const hadOriginal = originalOverrides[selectedRoleId];
-        if (hadOriginal) {
-          await deleteChannelPermissionOverride(serverId, channelId, selectedRoleId);
-        }
-      } else {
+      // The editor holds the bits this build knows (permissionsFromString
+      // masks the fetched override), and the write names those bits
+      // (knownPermissions, added by the store): the server keeps every other
+      // stored bit. Clearing every bit shown is a write of 0/0 too, never the
+      // DELETE route, which removes the whole row and so any bit added after
+      // this build; the server removes the row itself when nothing is left.
+      const override = overrides[selectedRoleId] ?? { allow: 0n, deny: 0n };
+      const emptied = override.allow === 0n && override.deny === 0n;
+      if (!emptied || originalOverrides[selectedRoleId]) {
         await setChannelPermissionOverride(
           serverId,
           channelId,
@@ -203,7 +203,7 @@ export function ChannelPermissionsEditor({
       // Update original to track new baseline
       setOriginalOverrides((prev) => ({
         ...prev,
-        [selectedRoleId]: override || { allow: 0n, deny: 0n },
+        [selectedRoleId]: override,
       }));
       toast.success(t('channelPermissions.updated'));
     } catch (err) {
@@ -219,7 +219,6 @@ export function ChannelPermissionsEditor({
     serverId,
     channelId,
     setChannelPermissionOverride,
-    deleteChannelPermissionOverride,
   ]);
 
   const handleReset = useCallback(() => {

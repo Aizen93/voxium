@@ -380,7 +380,6 @@ interface ServerState {
   // Channel permissions
   fetchChannelPermissions: (serverId: string, channelId: string) => Promise<ChannelPermissionOverride[]>;
   setChannelPermissionOverride: (serverId: string, channelId: string, roleId: string, allow: string, deny: string) => Promise<void>;
-  deleteChannelPermissionOverride: (serverId: string, channelId: string, roleId: string) => Promise<void>;
 
   // Permission calculator
   fetchEffectivePermissions: (serverId: string, channelId?: string) => Promise<string>;
@@ -1169,10 +1168,6 @@ export const useServerStore = create<ServerState>((set, get) => ({
   setChannelPermissionOverride: async (serverId: string, channelId: string, roleId: string, allow: string, deny: string) => {
     const body: SetChannelPermissionOverrideRequest = { allow, deny, knownPermissions: KNOWN_PERMISSIONS };
     await api.put(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`, body);
-  },
-
-  deleteChannelPermissionOverride: async (serverId: string, channelId: string, roleId: string) => {
-    await api.delete(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`);
   },
 
   fetchEffectivePermissions: async (serverId: string, channelId?: string) => {
