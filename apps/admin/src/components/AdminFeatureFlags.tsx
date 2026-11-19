@@ -1,36 +1,8 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
-import { createPortal } from 'react-dom';
-import { ToggleLeft, ToggleRight, RotateCcw, HelpCircle, Zap } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ToggleLeft, ToggleRight, RotateCcw, Zap } from 'lucide-react';
+import { Tip } from './Tip';
 import { useAdminStore } from '../stores/adminStore';
 import { toast } from '../stores/toastStore';
-
-function Tip({ text }: { text: string }) {
-  const iconRef = useRef<HTMLSpanElement>(null);
-  const [show, setShow] = useState(false);
-  const [pos, setPos] = useState({ top: 0, left: 0 });
-
-  const handleEnter = useCallback(() => {
-    if (!iconRef.current) return;
-    const rect = iconRef.current.getBoundingClientRect();
-    setPos({ top: rect.bottom + 6, left: rect.left + rect.width / 2 });
-    setShow(true);
-  }, []);
-
-  return (
-    <span ref={iconRef} className="inline-flex ml-1 cursor-help" onMouseEnter={handleEnter} onMouseLeave={() => setShow(false)}>
-      <HelpCircle size={12} className="text-vox-text-muted" />
-      {show && createPortal(
-        <div
-          style={{ position: 'fixed', top: pos.top, left: pos.left, transform: 'translateX(-50%)' }}
-          className="w-52 px-2 py-1.5 text-[10px] leading-tight text-vox-text-primary bg-vox-bg-primary border border-vox-border rounded shadow-lg z-[9999] normal-case font-normal tracking-normal whitespace-normal"
-        >
-          {text}
-        </div>,
-        document.body
-      )}
-    </span>
-  );
-}
 
 export function AdminFeatureFlags() {
   const { featureFlags, fetchFeatureFlags, updateFeatureFlag, resetFeatureFlag } = useAdminStore();
