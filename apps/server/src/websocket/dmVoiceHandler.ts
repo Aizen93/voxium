@@ -11,7 +11,7 @@ import { shapeConversationMessageAuthor } from '../utils/messageAuthor';
 import { writeConversationMessage } from '../utils/conversationLifecycle';
 import { viewersRoom } from '../utils/conversationAudience';
 import { isReadOnlyConversation } from '../utils/conversationVisibility';
-import { ForbiddenError } from '../utils/errors';
+import { ForbiddenError, NotFoundError } from '../utils/errors';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -25,9 +25,11 @@ const authorSelect = {
  * right after the commit, to the audience read then, through the same helper
  * as every DM message event (utils/conversationAudience.ts): a side whose
  * floor a removal raised past it meanwhile is not told. A conversation
- * deleted meanwhile refuses it (logged, no notice), and so does one whose
- * other side's account is gone (#131: read-only, the writer refuses every
- * message there under the row lock), with a warning instead of an error.
+ * deleted meanwhile refuses it, and so does one whose other side's account
+ * is gone (#131: read-only, the writer refuses every message there under the
+ * row lock) and one the notice's author is no longer a side of (their account
+ * was deleted meanwhile): each a warning and no notice. Anything else the
+ * writer throws is a failure and is logged as an error.
  */
 async function createSystemMessage(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
@@ -64,6 +66,14 @@ async function createSystemMessage(
   } catch (err) {
     if (err instanceof ForbiddenError && err.message === CONVERSATION_READ_ONLY_MESSAGE) {
       console.warn(`[DMVoice] No call notice in conversation ${conversationId}: it is read-only`);
+      return;
+    }
+    // The writer's other refusals are answers too, not failures: the
+    // conversation was deleted while the notice waited for its row (404), or
+    // the notice's author is no longer one of its sides (403: their account
+    // was deleted meanwhile). The sentence is the writer's own, never a value.
+    if (err instanceof NotFoundError || err instanceof ForbiddenError) {
+      console.warn(`[DMVoice] No call notice in conversation ${conversationId}: ${err.message}`);
       return;
     }
     console.error('[DMVoice] Failed to create system message:', err);

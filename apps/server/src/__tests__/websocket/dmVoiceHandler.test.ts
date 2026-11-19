@@ -2198,17 +2198,20 @@ describe('dmVoiceHandler — call notices', () => {
     expect(except).toHaveBeenCalledWith(['user:user-2']);
   });
 
-  it('a notice the writer refuses (the conversation was deleted meanwhile) is logged and sends nothing', async () => {
+  it('a notice the writer refuses because the conversation was deleted meanwhile is a warning, not an error, and sends nothing', async () => {
     const io = createMockIO();
     mockRedis.hGetAll.mockResolvedValueOnce(inCall);
     mockWriteConversationMessage.mockRejectedValueOnce(new NotFoundError('Conversation'));
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await endDMCall(io as any, 'conv-1', { notice: true });
 
-    await vi.waitFor(() => expect(errorLog).toHaveBeenCalledWith('[DMVoice] Failed to create system message:', expect.any(NotFoundError)));
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('[DMVoice] No call notice in conversation conv-1: Conversation not found'));
+    expect(errorLog).not.toHaveBeenCalled();
     expect(io._emit).not.toHaveBeenCalledWith('dm:message:new', expect.anything());
     errorLog.mockRestore();
+    warn.mockRestore();
   });
 
   it('a notice the writer refuses because the conversation is read-only (the other side was deleted) is a warning, not an error, and sends nothing', async () => {
@@ -2227,16 +2230,37 @@ describe('dmVoiceHandler — call notices', () => {
     warn.mockRestore();
   });
 
-  it('any other refusal of a notice stays an error (a Forbidden with another sentence included)', async () => {
+  it('a notice the writer refuses because its author is no longer a side of the conversation (their account was deleted meanwhile) is a warning too', async () => {
     const io = createMockIO();
     mockRedis.hGetAll.mockResolvedValueOnce(inCall);
     mockWriteConversationMessage.mockRejectedValueOnce(new ForbiddenError('Not a participant of this conversation'));
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await endDMCall(io as any, 'conv-1', { notice: true });
 
-    await vi.waitFor(() => expect(errorLog).toHaveBeenCalledWith('[DMVoice] Failed to create system message:', expect.any(ForbiddenError)));
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('[DMVoice] No call notice in conversation conv-1: Not a participant of this conversation'));
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalledWith('dm:message:new', expect.anything());
     errorLog.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('a notice the writer could not write for any other reason (a failed statement) stays an error', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+    const failure = Object.assign(new Error('the statement failed'), { code: 'P1017' });
+    mockWriteConversationMessage.mockRejectedValueOnce(failure);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await endDMCall(io as any, 'conv-1', { notice: true });
+
+    await vi.waitFor(() => expect(errorLog).toHaveBeenCalledWith('[DMVoice] Failed to create system message:', failure));
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('No call notice'));
+    expect(io._emit).not.toHaveBeenCalledWith('dm:message:new', expect.anything());
+    errorLog.mockRestore();
+    warn.mockRestore();
   });
 
   it('after a call was ended from elsewhere (a removal), the remover\'s socket leaving it writes no notice', async () => {
