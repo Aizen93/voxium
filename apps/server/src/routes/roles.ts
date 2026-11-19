@@ -27,7 +27,7 @@ import {
   type PermissionReadClient,
 } from '../utils/permissionCalculator';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
-import { planOverrideWrite, readKnownPermissions, storedPermissionBits } from '../utils/permissionWrites';
+import { planOverrideWrite, readKnownPermissions, readPermissionValue, storedPermissionBits } from '../utils/permissionWrites';
 
 export const roleRouter = Router({ mergeParams: true });
 
@@ -183,7 +183,7 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
     let permissions = 0n;
     if (req.body.permissions !== undefined) {
       if (typeof req.body.permissions !== 'string') throw new BadRequestError('permissions must be a string');
-      permissions = mergeKnownPermissions(0n, permissionsFromString(req.body.permissions), known);
+      permissions = mergeKnownPermissions(0n, readPermissionValue('permissions', req.body.permissions), known);
       // Cannot grant permissions the actor doesn't have (except owner): every
       // bit a creation stores is one it turns on
       if (actorHighest !== Infinity) {
@@ -284,7 +284,7 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
     }
 
     if (typeof req.body.permissions !== 'string') throw new BadRequestError('permissions must be a string');
-    const sent = permissionsFromString(req.body.permissions);
+    const sent = readPermissionValue('permissions', req.body.permissions);
     const actorId = req.user!.userId;
 
     // The actor must hold every bit the write turns ON. A bit it turns off
@@ -306,15 +306,18 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
     }
 
     // One transaction under the role row, so the value merged over is the
-    // value replaced: the row FIRST, in the mode its update takes it (FOR NO
-    // KEY UPDATE: a member-role insert's key check on it still passes), then
-    // the checks above made again on the transaction's client, then the
-    // write. Two saves of one role run one after the other; without the lock
-    // a save judged against a stale value could put back a permission the
-    // actor lacks (a bit taken away meanwhile is turned on again: judged as
-    // such), or drop a bit another save had just set. The long budget:
-    // a space or role delete holds the row through its cascade. Run again
-    // whole when PostgreSQL aborts it to break a deadlock.
+    // value replaced: the row FIRST (FOR NO KEY UPDATE, the mode a
+    // permission-only update takes it: a member-role insert's key check on it
+    // still passes; a save that also renames takes the stronger lock at its
+    // update, because the name is in a unique index), then the checks above
+    // made again on the transaction's client, then the write. Two saves of
+    // one role run one after the other; without the lock a save judged
+    // against a stale value could put back a permission the actor lacks (a
+    // bit taken away meanwhile is turned on again: judged as such), or drop a
+    // bit outside its own mask that another save had just set (inside its
+    // mask the later save decides, as before). The long budget: a space or
+    // role delete holds the row through its cascade. Run again whole when
+    // PostgreSQL aborts it to break a deadlock.
     const { updated, changed } = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const [locked] = await tx.$queryRaw<{ permissions: string; position: number }[]>`SELECT permissions, position FROM roles WHERE id = ${roleId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
       if (!locked) throw new NotFoundError('Role');
@@ -606,9 +609,15 @@ roleRouter.get(
  * value merged over is the value replaced. Then every check of the route made
  * again on the transaction's client, the override read again, and the write.
  * The long budget: a space, channel or role delete holds these rows through
- * its cascade. Run again whole when PostgreSQL aborts it to break a deadlock.
- * A channel deleted while it ran answers 404 Channel. Returns the bits that
- * changed (the room re-sync is decided on them).
+ * its cascade. Run again whole when PostgreSQL aborts it to break a deadlock:
+ * a space delete's cascade reaches the channel before the role, the reverse
+ * of this write's order, so the two can meet as a deadlock; both sides run
+ * under retryOnTransactionConflict, and whichever is aborted runs again (this
+ * write then answers 404 Role, or 200 before the space goes).
+ * A write that stores something for a channel deleted while it ran answers
+ * 404 Channel; one that leaves nothing to store (a 0/0 write, the DELETE)
+ * finds no row to remove and answers as for an override that did not exist.
+ * Returns the bits that changed (the room re-sync is decided on them).
  */
 async function writeChannelOverride(w: {
   serverId: string;
@@ -709,8 +718,8 @@ roleRouter.put(
         throw new BadRequestError('allow and deny must be strings (decimal bigint)');
       }
       const known = readKnownPermissions(req.body.knownPermissions);
-      const sentAllow = permissionsFromString(allow);
-      const sentDeny = permissionsFromString(deny);
+      const sentAllow = readPermissionValue('allow', allow);
+      const sentDeny = readPermissionValue('deny', deny);
       const actorId = req.user!.userId;
 
       // The early answer (see writeChannelOverride for the rules), against the

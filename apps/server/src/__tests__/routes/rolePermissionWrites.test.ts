@@ -534,7 +534,7 @@ describe('a knownPermissions that is not a permission bitmask string is a 400 on
     const res = await patchRole({ permissions: s(Permissions.VIEW_CHANNEL), knownPermissions: value });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('knownPermissions must be a permission bitmask: a string of 1 to 40 decimal digits');
+    expect(res.body.error).toBe('knownPermissions must be a permission bitmask: a non-negative whole number as a string of 1 to 40 decimal digits');
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
     expect(prismaMock.role.update).not.toHaveBeenCalled();
   });
@@ -556,7 +556,7 @@ describe('a knownPermissions that is not a permission bitmask string is a 400 on
     const res = await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: '0', knownPermissions: value });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('knownPermissions must be a permission bitmask: a string of 1 to 40 decimal digits');
+    expect(res.body.error).toBe('knownPermissions must be a permission bitmask: a non-negative whole number as a string of 1 to 40 decimal digits');
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
@@ -1075,5 +1075,81 @@ describe('DELETE /roles/channels/:channelId/permissions/:roleId — a 0/0 write 
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Channel not found');
     expect(tx.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── A permission value that does not parse is a 400, never a silent 0 ───────
+
+describe('a permission value that is present but not a permission bitmask string is a 400 naming the field', () => {
+  // What a 2.1.x client sends is always permissionsToString's output (digits,
+  // '0' for none); these are what it never sends
+  const unparseable = ['', ' ', ' 1', '1 ', '0x10', '-1', '+1', '1e3', '1.0', 'abc', '1'.repeat(41)];
+  const message = (field: string) =>
+    `${field} must be a permission bitmask: a non-negative whole number as a string of 1 to 40 decimal digits`;
+
+  it.each(unparseable)('PATCH permissions %j: 400, nothing written', async (value) => {
+    actorIs(OWNER);
+    roleIs({ permissions: Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES });
+
+    const res = await patchRole({ permissions: value });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(message('permissions'));
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.role.update).not.toHaveBeenCalled();
+  });
+
+  it.each(unparseable)('POST permissions %j: 400, nothing created', async (value) => {
+    actorIs(OWNER);
+    prismaMock.role.findFirst.mockResolvedValue(null);
+    prismaMock.role.count.mockResolvedValue(0);
+    prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
+
+    const res = await createRole({ name: 'Helpers', permissions: value });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(message('permissions'));
+    expect(prismaMock.role.create).not.toHaveBeenCalled();
+  });
+
+  it.each(unparseable)('PUT allow %j: 400, nothing written', async (value) => {
+    actorIs(OWNER);
+    overrideIs({ allow: Permissions.SEND_MESSAGES, deny: 0n });
+
+    const res = await putOverride({ allow: value, deny: '0' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(message('allow'));
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it.each(unparseable)('PUT deny %j: 400, nothing written', async (value) => {
+    actorIs(OWNER);
+    overrideIs({ allow: 0n, deny: Permissions.SEND_MESSAGES });
+
+    const res = await putOverride({ allow: '0', deny: value });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(message('deny'));
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('what a released client sends still passes: "0", plain digits, leading zeros, a bit this server does not know', async () => {
+    actorIs(OWNER);
+    roleIs({ permissions: 0n });
+    expect((await patchRole({ permissions: '0' })).status).toBe(200);
+    expect((await patchRole({ permissions: '0001' })).status).toBe(200);
+    expect((await patchRole({ permissions: s(ALL_PERMISSIONS | FUTURE) })).status).toBe(200);
+    overrideIs(null);
+    expect((await putOverride({ allow: '0', deny: '0' })).status).toBe(200);
+    expect((await putOverride({ allow: s(Permissions.SEND_MESSAGES), deny: s(Permissions.ATTACH_FILES) })).status).toBe(200);
+  });
+
+  it('a value of another type keeps its existing answer', async () => {
+    actorIs(OWNER);
+    roleIs({ permissions: 0n });
+    expect((await patchRole({ permissions: 7 })).body.error).toBe('permissions must be a string');
+    overrideIs(null);
+    expect((await putOverride({ allow: 1, deny: '0' })).body.error).toBe('allow and deny must be strings (decimal bigint)');
   });
 });

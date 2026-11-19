@@ -144,14 +144,24 @@ export function validateRoleColor(color: string): string | null {
 }
 
 /**
+ * A permission bitmask field of a request (`permissions`, `allow`, `deny`,
+ * `knownPermissions`): what `permissionsToString` writes, a non-negative whole
+ * number as a string of decimal digits, at most PERMISSION_STRING_MAX_DIGITS
+ * of them. The message names the field.
+ */
+export function validatePermissionString(field: string, value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > PERMISSION_STRING_MAX_DIGITS || permissionBitsFromString(value) === null) {
+    return `${field} must be a permission bitmask: a non-negative whole number as a string of 1 to ${PERMISSION_STRING_MAX_DIGITS} decimal digits`;
+  }
+  return null;
+}
+
+/**
  * `knownPermissions` on a role or channel-override write: the bitmask of every
  * permission the calling build knows, as `permissionsToString` writes it.
  */
 export function validateKnownPermissions(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length > PERMISSION_STRING_MAX_DIGITS || permissionBitsFromString(value) === null) {
-    return `knownPermissions must be a permission bitmask: a string of 1 to ${PERMISSION_STRING_MAX_DIGITS} decimal digits`;
-  }
-  return null;
+  return validatePermissionString('knownPermissions', value);
 }
 
 export function validateThemeName(name: string): string | null {

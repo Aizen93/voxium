@@ -4,7 +4,9 @@ import {
   Permissions,
   mergeKnownPermissions,
   permissionBitsFromString,
+  permissionsFromString,
   validateKnownPermissions,
+  validatePermissionString,
 } from '@voxium/shared';
 import { BadRequestError } from './errors';
 
@@ -36,6 +38,18 @@ export function readKnownPermissions(value: unknown): bigint {
   const invalid = validateKnownPermissions(value);
   if (invalid) throw new BadRequestError(invalid);
   return BigInt(value as string) & ALL_PERMISSIONS;
+}
+
+/**
+ * A permission value a request sent (`permissions`, `allow`, `deny`), already
+ * known to be a string: the bits this server knows of it. A value that is not
+ * a permission bitmask string is a 400 naming the field, never read as 0 (as
+ * `permissionsFromString` would, clearing every bit the client knows).
+ */
+export function readPermissionValue(field: string, value: string): bigint {
+  const invalid = validatePermissionString(field, value);
+  if (invalid) throw new BadRequestError(invalid);
+  return permissionsFromString(value);
 }
 
 /**
