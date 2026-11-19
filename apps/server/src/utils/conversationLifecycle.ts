@@ -97,7 +97,11 @@ import {
  * account's own write retried after the deletion committed finds no
  * conversation (404) or no longer a participant in it (403). Two deletions of
  * the two people of one conversation take it in the same id order; the
- * second finds the first's NULL side and deletes the conversation.
+ * second finds the first's NULL side and deletes the conversation. The
+ * registration hygiene sweep takes the same step for the stale unverified
+ * accounts it deletes: their account rows first (FOR UPDATE, id order), then
+ * every conversation of them in one statement (FOR UPDATE, id order), then
+ * the step for each account, then the accounts.
  */
 
 const LOG_PREFIX = '[DM]';
@@ -378,8 +382,10 @@ export interface DeletedAccountConversations {
 
 /**
  * What an account deletion does with every direct conversation of the
- * account, inside the deletion's transaction (utils/accountDeletion.ts),
- * after it has locked the account row and before the user delete:
+ * account, inside the deletion's transaction (utils/accountDeletion.ts; the
+ * registration hygiene sweep runs it too, for each stale unverified account
+ * it deletes, utils/registrationHygiene.ts), after the account row is locked
+ * and before the account is deleted:
  *  1. every conversation row of the account FOR UPDATE, in id order, in one
  *     statement (see the lock order above), its sides read under the lock;
  *  2. with `keep` off: every one of them deleted, both people's messages,

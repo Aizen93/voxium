@@ -80,6 +80,7 @@ const RULES: Rule[] = [
     what: 'raw SQL naming user1_id / user2_id',
     pattern: /\buser[12]_id\b/gi,
     allowed: {
+      'utils/registrationHygiene.ts': { count: 4, reason: 'the sweep locks every conversation of the accounts it deletes (both sides read; `= ANY` of the swept ids, which a NULL side never matches, so a conversation whose other side is NULL is still found by the swept side) before the conversation step of each account that is a side' },
       'utils/conversationLifecycle.ts': { count: 10, reason: 'settleConversationsOfDeletedAccount: the lock of the deleted account\'s conversations (both sides read, `=` against the account\'s own id, which a NULL side never equals: a conversation whose other side is NULL is still found by the account\'s side) and the CASE that sets only the account\'s side NULL (a side that is not the account is written back as it was, NULL included)' },
     },
   },

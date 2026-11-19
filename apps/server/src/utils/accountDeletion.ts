@@ -329,9 +329,10 @@ export interface AccountRowsDeleted {
 }
 
 /**
- * After a committed account deletion, its direct conversations' people are
- * told (#131), each step on its own, logged, never failing the deletion
- * (which has committed):
+ * After a committed account deletion (or the registration hygiene sweep's,
+ * utils/registrationHygiene.ts), its direct conversations' people are told
+ * (#131), each step on its own, logged, never failing the deletion (which
+ * has committed):
  *  - a conversation kept for the other person: `dm:conversation:read_only`
  *    to its room, only now that its rows are rewritten (a client that
  *    decrypted a row still holding the account's ciphertext after the event
@@ -347,7 +348,7 @@ export interface AccountRowsDeleted {
  *    notice: a deleted conversation cannot hold one, and a kept one is
  *    read-only.
  */
-async function announceConversationsOfDeletedAccount(conversations: DeletedAccountConversations, logPrefix: string): Promise<void> {
+export async function announceConversationsOfDeletedAccount(conversations: DeletedAccountConversations, logPrefix: string): Promise<void> {
   const { kept, deleted } = conversations;
   if (kept.length === 0 && deleted.length === 0) return;
   let io: ReturnType<typeof getIO>;

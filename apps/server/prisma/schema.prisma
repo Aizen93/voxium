@@ -576,17 +576,18 @@ model Conversation {
   id        String   @id @default(cuid())
   // Nullable since migration 20261116120000_conversation_lifecycle_expand, so
   // that a conversation can outlive one participant's account (#131): an
-  // account deletion sets its side NULL in a conversation it keeps for the
-  // other person, or deletes the conversation, explicitly
-  // (utils/conversationLifecycle.ts settleConversationsOfDeletedAccount),
-  // before the account row goes. Both foreign keys still CASCADE, and no
-  // cascade reaches a conversation of a deleted account through them. A
-  // reader treats a NULL side as a deleted account: never a participant,
-  // shown as the placeholder utils/deletedParticipant.ts builds, and the
-  // conversation is read-only. The unique pair below
-  // still refuses a second (A, B): PostgreSQL treats NULLs as DISTINCT in a
-  // unique index, so (NULL, B) rows may coexist and never block B from
-  // opening a new conversation. Keep it that way, never NULLS NOT DISTINCT.
+  // account deletion (and the registration hygiene sweep) sets its side NULL
+  // in a conversation it keeps for the other person, or deletes the
+  // conversation, explicitly (utils/conversationLifecycle.ts
+  // settleConversationsOfDeletedAccount), before the account row goes. Both
+  // foreign keys still CASCADE, and no cascade reaches a conversation of a
+  // deleted account through them. A reader treats a NULL side as a deleted
+  // account: never a participant, shown as the placeholder
+  // utils/deletedParticipant.ts builds, and the conversation is read-only.
+  // The unique pair below still refuses a second (A, B):
+  // PostgreSQL treats NULLs as DISTINCT in a unique index, so (NULL, B) rows
+  // may coexist and never block B from opening a new conversation. Keep it
+  // that way, never NULLS NOT DISTINCT.
   user1Id   String?  @map("user1_id")
   user2Id   String?  @map("user2_id")
   // E2E DMs: conversations are BORN encrypted (docs/e2e-always-on-plan.md
