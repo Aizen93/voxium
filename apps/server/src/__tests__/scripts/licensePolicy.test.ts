@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   checkLicenses,
   describeFinding,
+  isPackageName,
   judgeLicense,
   validatePolicy,
 } from '../../../../../scripts/lib/licensePolicy.mjs';
@@ -232,9 +233,64 @@ describe('exceptions bound to their dependents', () => {
   });
 });
 
+describe('isPackageName', () => {
+  it('accepts the names the registry writes, scoped or not, old capitals included', () => {
+    for (const name of ['react', 'lodash.merge', '@prisma/studio-core', '@fontsource/inter', 'JSONStream', 'a_b-c~d', '7zip-bin', 'x'.repeat(214)]) {
+      expect(isPackageName(name), name).toBe(true);
+    }
+  });
+
+  it('refuses what a command line would read as an option or as more than one word', () => {
+    for (const name of ['-r', '--json', '-', 'a b', ' a', 'a\tb', 'a\nb', '']) {
+      expect(isPackageName(name), JSON.stringify(name)).toBe(false);
+    }
+  });
+
+  it('refuses every character a shell interprets', () => {
+    for (const ch of ['&', '|', ';', '<', '>', '^', '%', '"', "'", '`', '$', '(', ')', '!', '*', '?', '=', ',', '\\', '{', '}', '[', ']', '#', ':', '+']) {
+      expect(isPackageName(`a${ch}b`), ch).toBe(false);
+    }
+  });
+
+  it('refuses a malformed scope, a path, a leading dot or underscore, a name past 214 characters and a non-string', () => {
+    for (const name of ['@scope', '@scope/', '@/name', 'a/b', '@a/b/c', '.hidden', '_private', '@-a/b', '@a/-b', 'x'.repeat(215)]) {
+      expect(isPackageName(name), name).toBe(false);
+    }
+    for (const value of [undefined, null, 7, ['react'], { name: 'react' }]) {
+      expect(isPackageName(value)).toBe(false);
+    }
+  });
+});
+
 describe('scripts/check-npm-licenses.mjs', () => {
   let dir: string;
   const script = path.join(ROOT, 'scripts/check-npm-licenses.mjs');
+
+  // A guard on the script's SOURCE TEXT. The rule it holds: no argument list is
+  // ever given to a shell, and a word that is not written in the script is a
+  // package name that passed isPackageName(). A refactor that keeps the rule
+  // updates the strings below.
+  it('starts pnpm from one function, through a shell only as ONE command string, and checks a package name before it reaches a command line', () => {
+    const src = readFileSync(script, 'utf8');
+    expect(src.match(/spawnSync\(/g)).toHaveLength(2);
+    expect(src).toContain("spawnSync(`pnpm ${words.join(' ')}`, { ...options, shell: true })");
+    expect(src).toContain("spawnSync('pnpm', words, options)");
+    // no argument list is ever handed to a shell
+    expect(src).not.toMatch(/shell:\s*process\.platform/);
+    expect(src.match(/shell: true \}\)/g)).toHaveLength(1);
+    const dependents = src.slice(src.indexOf('function pnpmDirectDependents'));
+    const guard = dependents.indexOf('if (!isPackageName(name)) return null;');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(dependents.indexOf('runPnpm('));
+    // every other word is written in the script: the two calls, and the two
+    // lists `extra` can be
+    expect(src.match(/runPnpm\(\[[^\]]*\]\)/g)).toEqual([
+      "runPnpm(['licenses', 'list', '--json', ...extra])",
+      "runPnpm(['why', name, '-r', '--json'])",
+    ]);
+    expect(src).toContain("load(option('--input'), [])");
+    expect(src).toContain("load(option('--prod-input'), ['--prod'])");
+  });
 
   beforeAll(() => { dir = mkdtempSync(path.join(tmpdir(), 'lic-')); });
   afterAll(() => { rmSync(dir, { recursive: true, force: true }); });

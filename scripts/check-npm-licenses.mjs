@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkLicenses, describeFinding, validatePolicy } from './lib/licensePolicy.mjs';
+import { checkLicenses, describeFinding, isPackageName, validatePolicy } from './lib/licensePolicy.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -50,13 +50,22 @@ function fail(message) {
   process.exit(1);
 }
 
+/**
+ * Run pnpm with `words`. On Windows pnpm is pnpm.cmd, which only a shell can
+ * start, and the command is then ONE string: an argument list together with
+ * `shell: true` is deprecated (DEP0190) because the arguments are joined
+ * unescaped. So every word given here is either written in this file or has
+ * passed isPackageName(), whose characters no shell interprets.
+ */
+function runPnpm(words) {
+  const options = { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 };
+  return process.platform === 'win32'
+    ? spawnSync(`pnpm ${words.join(' ')}`, { ...options, shell: true })
+    : spawnSync('pnpm', words, options);
+}
+
 function pnpmLicenses(extra) {
-  const result = spawnSync('pnpm', ['licenses', 'list', '--json', ...extra], {
-    encoding: 'utf8',
-    maxBuffer: 512 * 1024 * 1024,
-    // pnpm is pnpm.cmd on Windows
-    shell: process.platform === 'win32',
-  });
+  const result = runPnpm(['licenses', 'list', '--json', ...extra]);
   if (result.error || result.status !== 0) {
     fail(`pnpm licenses list failed (${result.error?.message ?? `exit ${result.status}`}): ${(result.stderr ?? '').slice(0, 500)}`);
   }
@@ -65,11 +74,10 @@ function pnpmLicenses(extra) {
 
 /** The packages that depend directly on `name` (`pnpm why`), or null when pnpm cannot say. */
 function pnpmDirectDependents(name) {
-  const result = spawnSync('pnpm', ['why', name, '-r', '--json'], {
-    encoding: 'utf8',
-    maxBuffer: 512 * 1024 * 1024,
-    shell: process.platform === 'win32',
-  });
+  // a name that is not a package name is never put on a command line: unknown
+  // dependents, so an exception bound to its dependents does not apply
+  if (!isPackageName(name)) return null;
+  const result = runPnpm(['why', name, '-r', '--json']);
   if (result.error || result.status !== 0) return null;
   try {
     const found = JSON.parse(result.stdout);

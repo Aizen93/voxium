@@ -13,6 +13,7 @@ export interface LicenseFinding {
   strayDependents?: string[];
 }
 
+export function isPackageName(name: unknown): name is string;
 export function judgeLicense(license: string | null | undefined, allowed: Iterable<string>): LicenseVerdict;
 export function validatePolicy(policy: unknown): Required<LicensePolicy>;
 export function checkLicenses(
