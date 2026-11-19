@@ -22,10 +22,18 @@
 //  - Every key it installs with frames.setLocalKey() is new: a fresh random key
 //    (session start at keyId 0; departure, exclusion and counter exhaustion,
 //    each at keyId + 1) or the ratchet of the current one (an arrival, at
-//    keyId + 1). The frame cipher restarts its IV counter on every install, so
-//    re-installing a key would reuse IVs under it.
+//    keyId + 1). The frame cipher starts a new IV counter for each new key and
+//    recognises only the key in use (given again, it keeps its count), so a
+//    key that has been replaced is never installed again.
 //  - A joiner is keyed with a post-arrival generation only (no past audio), and
-//    every departure or exclusion rotates to a fresh key (no future audio).
+//    every departure rotates to a fresh key (no future audio). After an
+//    exclusion the key in use is one the excluded device was never sealed: a
+//    fresh rotation, except for a participant who was never keyed, or one
+//    excluded while a fresh rotation is sealing (it replaces the key they
+//    held).
+//  - A participant excluded during a session is not keyed again in it: the
+//    epoch they were excluded under is recorded, and only an announcement
+//    with a new epoch is vetted again.
 //  - Neither a key nor seq is ever persisted. Teardown zero-fills only the
 //    current key; superseded generations, the peers' keys decoded here and the
 //    base64 copies sealed into Olm plaintexts are left to the garbage collector.
@@ -667,14 +675,30 @@ async function rotateFreshLocked(state: SecureVoiceSessionState): Promise<void> 
   }
   // Seal to everyone BEFORE switching our frames — shrinks the receiver gap
   // to the socket-vs-RTP skew instead of adding our sealing latency to it.
-  for (const userId of state.peers.keys()) {
+  const identityChanged: Array<{ userId: string; peer: PeerState; err: E2EIdentityChangedError }> = [];
+  for (const [userId, peer] of state.peers) {
     try {
       await sealKeyTo(state, userId, 'fresh');
     } catch (err) {
+      if (err instanceof E2EIdentityChangedError) {
+        identityChanged.push({ userId, peer, err });
+        continue;
+      }
       console.error(`[SecureVoice] Fresh-key seal to ${userId} failed:`, err);
     }
   }
   state.frames.setLocalKey(state.keyId, state.currentKey);
+  if (state.ended) return;
+  // A participant whose identity the seal found changed (the seal flagged it)
+  // is excluded once our frames have switched. The fresh key never reached
+  // them, so their exclusion needs no further rotation.
+  for (const { userId, peer, err } of identityChanged) {
+    console.warn(`[SecureVoice] ${userId}'s identity changed — excluded at the fresh rotation`);
+    state.peers.delete(userId);
+    recordExclusion(state, userId, peer.epoch);
+    forgetPeer(state, userId);
+    await notifyPeerExcluded(state.channelId, userId, err);
+  }
 }
 
 /**
@@ -921,7 +945,22 @@ export function handleKeyRequest(channelId: string, from: string): void {
   const state = sessions.get(channelId);
   if (!state) return;
   enqueue(state, async () => {
-    await keyParticipantLocked(state, from, 'fresh');
+    const peer = state.peers.get(from);
+    try {
+      await keyParticipantLocked(state, from, 'fresh');
+    } catch (err) {
+      if (!(err instanceof E2EIdentityChangedError) || !peer) throw err;
+      // The seal found their identity changed (the seal flagged it). They are
+      // excluded as at their first seal and, since they may hold the key in
+      // use, it is rotated fresh for everyone remaining (spec §21.4).
+      console.warn(`[SecureVoice] ${from}'s identity changed — excluded at their key request`);
+      state.peers.delete(from);
+      recordExclusion(state, from, peer.epoch);
+      forgetPeer(state, from);
+      await notifyPeerExcluded(channelId, from, err);
+      if (state.ended) return;
+      await rotateFreshLocked(state);
+    }
   });
 }
 
