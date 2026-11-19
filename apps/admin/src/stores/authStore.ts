@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import axios from 'axios';
 import { api } from '../services/api';
 import { connectSocket, disconnectSocket } from '../services/socket';
-import { getAccessToken, setTokens, clearTokens } from '../services/tokenStorage';
+import { getAccessToken, setTokens, clearTokens, getTrustedDeviceToken, setTrustedDeviceToken } from '../services/tokenStorage';
 import type { User } from '@voxium/shared';
 
 interface AuthState {
@@ -34,7 +34,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   login: async (email, password) => {
     set({ isSubmitting: true, error: null });
     try {
-      const trustedDeviceToken = localStorage.getItem('voxium_admin_trusted_device') || undefined;
+      const trustedDeviceToken = getTrustedDeviceToken();
       const { data } = await api.post('/auth/login', { email, password, rememberMe: true, trustedDeviceToken });
 
       if (data.data.totpRequired) {
@@ -76,7 +76,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       setTokens(accessToken, refreshToken, true);
       if (trustedDeviceToken) {
-        localStorage.setItem('voxium_admin_trusted_device', trustedDeviceToken);
+        setTrustedDeviceToken(trustedDeviceToken);
       }
       connectSocket(accessToken);
       set({ user, isAuthenticated: true, isSubmitting: false, totpRequired: false, totpToken: null });
