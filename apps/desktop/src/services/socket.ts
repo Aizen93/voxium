@@ -1,6 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
 import { getAccessToken, flushTokenStorage } from './tokenStorage';
+import { accountDeletionSettled } from './accountDeletion';
 import { bumpRequestGeneration } from './requestGeneration';
 
 /** Events that arrive many times a second during a call and carry no state a REST read would show. */
@@ -266,7 +267,11 @@ export function connectSocket(token: string): VoxSocket {
     forceLoggedOut = true;
     if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);
     const reason = data?.reason;
-    const toLogin = () => {
+    const toLogin = async () => {
+      // This client's own account deletion, in flight, finishes its local
+      // clean-up first: the server sends this before its transaction too, so
+      // it proves nothing and erases nothing (services/accountDeletion.ts)
+      await accountDeletionSettled();
       window.location.href = reason ? `/login?reason=${encodeURIComponent(reason)}` : '/login';
     };
     import('../stores/authStore')
@@ -276,13 +281,13 @@ export function connectSocket(token: string): VoxSocket {
         // desktop app writes them to the OS credential store over IPC), or
         // the next launch restores the session this logout just ended
         await flushTokenStorage();
-        toLogin();
+        await toLogin();
       })
       .catch((err: unknown) => {
         // The server ended this session: the login page is where to be
         // even when the local clean-up failed
         console.error('[WS] Forced logout could not clean up locally:', err instanceof Error ? err.message : err);
-        toLogin();
+        void toLogin();
       });
   });
 

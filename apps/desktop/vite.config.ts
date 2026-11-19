@@ -2,9 +2,12 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
+import { browserEntryGuard } from './scripts/browserEntryGuard.mjs';
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  // The guard fails a production build whose startup chunks hold @tauri-apps
+  // code: the browser downloads exactly those (scripts/browserEntryGuard.mjs)
+  plugins: [react(), tailwindcss(), browserEntryGuard()],
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, './src'),

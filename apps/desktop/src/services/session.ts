@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { API_BASE } from './apiBase';
 import { getAccessToken, getRefreshToken, setTokens, clearTokens, flushTokenStorage } from './tokenStorage';
+import { accountDeletionSettled } from './accountDeletion';
 
 /**
  * The signed-in session's access token, and the ONE way it is renewed.
@@ -156,14 +157,19 @@ export function endSessionRenewals(): void {
  * navigation waits for the persisted clear: in the desktop app the tokens
  * live in the OS credential store, written over IPC, and a reload that
  * outran the clear would load the refused tokens again at the next launch
- * and be refused again — a reload loop.
+ * and be refused again — a reload loop. It also waits for an account deletion
+ * of this client in flight: the server refuses the account's requests while
+ * it deletes it, and the deletion's local clean-up must run before the page
+ * changes (services/accountDeletion.ts).
  */
 export function handleSessionLost(): void {
   endSessionRenewals();
   clearTokens();
   if (sessionLost) return;
   sessionLost = true;
-  void flushTokenStorage().then(() => navigateToLogin());
+  void flushTokenStorage()
+    .then(() => accountDeletionSettled())
+    .then(() => navigateToLogin());
 }
 
 /**

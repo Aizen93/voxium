@@ -3,9 +3,10 @@ import { api, type SessionRequestConfig } from '../services/api';
 import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange, beginCredentialChange } from '../services/socket';
 import {
   getAccessToken, setTokens, clearTokens, isRemembered, hydrateTokens,
-  getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken,
+  getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage,
 } from '../services/tokenStorage';
 import { SessionLostError, endSessionRenewals } from '../services/session';
+import { accountDeletionInFlight, accountDeletionSettled, beginAccountDeletion } from '../services/accountDeletion';
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useVoiceStore } from './voiceStore';
@@ -305,6 +306,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isSubmitting: true, error: null });
     discardStaleSession();
     try {
+      // An account deletion of this client still in flight finishes first:
+      // its cleanup signs out and clears the trusted-device token, which
+      // must not land on this new session (services/accountDeletion.ts).
+      // With none in flight nothing is awaited: the order is today's
+      if (accountDeletionInFlight()) await accountDeletionSettled();
       const trustedDeviceToken = getTrustedDeviceToken() || undefined;
       const { data } = await api.post('/auth/login', { email, password, rememberMe, trustedDeviceToken });
 
@@ -336,6 +342,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (!totpToken) return;
     set({ isSubmitting: true, error: null });
     try {
+      // as in login
+      if (accountDeletionInFlight()) await accountDeletionSettled();
       const { data } = await api.post('/auth/totp/verify', { totpToken, code });
       const { user, accessToken, refreshToken, trustedDeviceToken } = data.data;
       setTokens(accessToken, refreshToken, totpRememberMe);
@@ -369,6 +377,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isRegistering: true, error: null, powProgress: 0, pendingRegistration: null });
     discardStaleSession();
     try {
+      // as in login
+      if (accountDeletionInFlight()) await accountDeletionSettled();
       // Anti-bot proof-of-work: fetch a challenge and burn CPU solving it. No
       // captcha, no third-party service, nothing leaves our infrastructure.
       // Solved in a worker so the page stays interactive, with progress shown
@@ -437,6 +447,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // must not ride along on it, nor be renewed over the new one
     discardStaleSession();
     try {
+      // as in login
+      if (accountDeletionInFlight()) await accountDeletionSettled();
       const body: { pendingId: string; code: string; username?: string } = { pendingId: pending.pendingId, code };
       if (username !== undefined) body.username = username;
       const { data } = await api.post('/auth/register/complete', body);
@@ -561,6 +573,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (!get().isAuthenticated) void get().checkAuth();
     };
     const run = (async () => {
+      // A restore during an account deletion of this client would sign in
+      // whatever session another tab stored meanwhile, which the deletion's
+      // cleanup then ends: it waits (services/accountDeletion.ts)
+      if (accountDeletionInFlight()) await accountDeletionSettled();
       const outcome = await withDeadline<RestoreOutcome>(
         attemptRestore(),
         SESSION_RESTORE_TIMEOUT_MS,
@@ -671,6 +687,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   changePassword: async (currentPassword, newPassword) => {
+    // It stores a renewed pair: never while an account deletion of this
+    // client is in flight (services/accountDeletion.ts)
+    if (accountDeletionInFlight()) await accountDeletionSettled();
     // The server disconnects this socket when the change commits, possibly
     // before the answer arrives: no reopen with the old token meanwhile
     const endCredentialChange = beginCredentialChange();
@@ -692,17 +711,32 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   deleteAccount: async (password, totpCode) => {
     const userId = get().user?.id;
-    await api.delete('/auth/account', { data: { password, ...(totpCode ? { totpCode } : {}) } });
-    // The server has purged the account and disconnected its sockets; what is
-    // left is this device's copy of it. Same cleanup as logout, plus the E2E
-    // vault logout deliberately keeps — every key it pairs with is gone.
-    get().logout();
-    if (userId) {
-      forgetLocalE2EState(userId);
+    // From before the request goes out until the local clean-up below has
+    // finished (or the request failed): the server's force:logout, and the
+    // refusal of any other request, change the page only after that
+    // (services/accountDeletion.ts). Nothing below reads a store logout()
+    // resets: the account is the id read here.
+    const endDeletion = beginAccountDeletion();
+    try {
+      await api.delete('/auth/account', { data: { password, ...(totpCode ? { totpCode } : {}) } });
+      // The server has purged the account and disconnected its sockets; what
+      // is left is this device's copy of it. Same cleanup as logout, plus the
+      // E2E vault and its key, which logout deliberately keeps — every key
+      // the vault pairs with is gone.
+      get().logout();
+      // Never rejects: a part it could not remove is logged, and the account
+      // is deleted either way
+      const localE2EStateForgotten = userId ? forgetLocalE2EState(userId) : Promise.resolve();
       // The secure-channel pins pair with the same vanished account.
-      forgetSecurePins(userId);
+      if (userId) forgetSecurePins(userId);
+      clearTrustedDeviceToken();
+      await localE2EStateForgotten;
+      // The trusted-device clear is written to the OS credential store over
+      // IPC: persisted before anything changes the page
+      await flushTokenStorage();
+    } finally {
+      endDeletion();
     }
-    clearTrustedDeviceToken();
   },
 
   acceptConsent: async (consent) => {

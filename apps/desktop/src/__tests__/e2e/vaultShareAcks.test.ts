@@ -11,7 +11,7 @@ let n = 0;
 function makeVault() {
   n++;
   const key = btoa(String.fromCharCode(...new Uint8Array(32).fill(9)));
-  const provider: PickleKeyProvider = { load: async () => key, save: async () => {} };
+  const provider: PickleKeyProvider = { load: async () => key, save: async () => {}, remove: async () => {} };
   return new E2EVault(`acks-user-${n}`, provider, `acks-${n}`);
 }
 
