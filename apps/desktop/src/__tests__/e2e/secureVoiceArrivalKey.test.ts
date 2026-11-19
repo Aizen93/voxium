@@ -580,7 +580,7 @@ describe('one member\'s unaccepted identity change does not hold back the others
     expect(markExcluded).not.toHaveBeenCalled();
   });
 
-  it('a joiner the list did not name yet, whose refetch fails on that change, is keyed past their arrival at the next check', async () => {
+  it('a joiner the list did not name yet, whose refetch names that change, is keyed past their arrival at once', async () => {
     // Our join's list does not name `x` yet
     fetchChannelDeviceLists.mockResolvedValueOnce({
       ...ALL_MEMBERS,
@@ -591,15 +591,24 @@ describe('one member\'s unaccepted identity change does not hold back the others
     fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('z'));
 
     onParticipantJoined(CH, user('x'), { initialReplay: false });
-    await until(() => warn.mock.calls.some((args) => String(args[0]).includes('Vetting x failed transiently')));
-    expect(sealedTo('x')).toHaveLength(0);
-
-    await membershipCheck();
     await until(() => sealedTo('x').length === 1);
+    const afterKeying = await speak(2);
 
     const [sealed] = sealedTo('x');
     expect(sealed.keyId).toBe(1);
     await expectClosedTo(sealed, beforeArrival, 0);
+    expect(await opens([sealed], afterKeying)).toBe(true);
+    expect(markExcluded).not.toHaveBeenCalled();
+    expect(warn.mock.calls.some((args) => String(args[0]).includes('Vetting x failed transiently'))).toBe(false);
+  });
+
+  it('a session starts while that change is not accepted, and keys everyone else', async () => {
+    fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('z'));
+    await callWithOccupant();
+    const first = await speak(1);
+
+    expect(sealedTo('old')).toHaveLength(1);
+    expect(await opens(sealedTo('old'), first)).toBe(true);
     expect(markExcluded).not.toHaveBeenCalled();
   });
 

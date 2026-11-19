@@ -239,20 +239,16 @@ async function vetParticipant(state: SecureVoiceSessionState, userId: string, de
   if (!state.members.has(userId)) {
     // The socket event claimed a participant the authoritative list doesn't
     // know — refetch once (they may have JUST been invited), then fail closed.
-    let members: Array<{ userId: string }>;
-    try {
-      ({ members } = await service.fetchChannelDeviceLists(state.channelId));
-    } catch (err) {
-      if (!(err instanceof E2EIdentityChangedError)) throw err;
-      await flagIdentityChanged(err.peerUserId);
-      // The list verifies every member, so it fails on any member whose
-      // identity changed. Only a change of their own is a verdict on this
-      // participant; another member's leaves them unvetted, and the next
-      // membership check retries them.
-      if (err.peerUserId === userId) throw err;
-      throw new Error(`the member list could not be verified for ${userId}: another member's identity changed`, { cause: err });
-    }
+    // The list verifies every member and is read collecting identity changes:
+    // each member it names is flagged, and only a change of the participant's
+    // own is a verdict on them; another member's does not hold their vet up.
+    const { members, identityChangedUserIds = [] } = await service.fetchChannelDeviceLists(
+      state.channelId,
+      { collectIdentityChanges: true },
+    );
+    for (const changed of identityChangedUserIds) await flagIdentityChanged(changed);
     state.members = new Set(members.map((m) => m.userId));
+    if (identityChangedUserIds.includes(userId)) throw new E2EIdentityChangedError(userId);
     if (!state.members.has(userId)) {
       throw new SecureVoiceError('binding-mismatch', `${userId} is not a member of channel ${state.channelId}`);
     }
@@ -409,8 +405,17 @@ export async function beginSecureVoiceSession(
   const service = getE2EService(selfId);
 
   // Authoritative member list up front — also proves WE are a member and the
-  // E2E stack is alive before any media plumbing exists.
-  const { members } = await service.fetchChannelDeviceLists(channelId);
+  // E2E stack is alive before any media plumbing exists. Read collecting
+  // identity changes, so one member's unaccepted change does not stop the
+  // session from starting: each member it names is flagged, and stays in the
+  // member list. Nobody is keyed at start; a named member in the call is
+  // excluded by their vet, and a new session of theirs is vetted like any
+  // arrival.
+  const { members, identityChangedUserIds = [] } = await service.fetchChannelDeviceLists(
+    channelId,
+    { collectIdentityChanges: true },
+  );
+  for (const changed of identityChangedUserIds) await flagIdentityChanged(changed);
   if (opts?.isCurrent && !opts.isCurrent()) {
     throw new SecureVoiceSupersededError();
   }
