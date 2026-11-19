@@ -672,6 +672,8 @@ export function rotateFresh(channelId: string, why: string): void {
 }
 
 async function rotateFreshLocked(state: SecureVoiceSessionState): Promise<void> {
+  // A session that has ended rotates nothing: no key is minted for it.
+  if (state.ended) return;
   state.currentKey = mintKey();
   state.keyId += 1;
   if (state.keyId >= VOICE_KEY_ID_MAX) {
@@ -692,8 +694,10 @@ async function rotateFreshLocked(state: SecureVoiceSessionState): Promise<void> 
       console.error(`[SecureVoice] Fresh-key seal to ${userId} failed:`, err);
     }
   }
-  state.frames.setLocalKey(state.keyId, state.currentKey);
+  // A session that ended while the key was being sealed never installs it:
+  // it is the current key, which the teardown zero-filled.
   if (state.ended) return;
+  state.frames.setLocalKey(state.keyId, state.currentKey);
   // A participant whose identity the seal found changed (the seal flagged it)
   // is excluded once our frames have switched. The fresh key never reached
   // them, so their exclusion needs no further rotation.

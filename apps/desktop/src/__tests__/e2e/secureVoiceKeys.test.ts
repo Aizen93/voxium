@@ -1014,6 +1014,78 @@ describe('teardown', () => {
   it('SecureVoiceError carries its kind', () => {
     expect(new SecureVoiceError('legacy-key', 'x').kind).toBe('legacy-key');
   });
+
+  describe('a rotation never runs for a session that has ended', () => {
+    /** Every 32-byte key minted from here on (the epochs are 16 bytes). */
+    function recordMintedKeys(): { keys: Uint8Array[]; restore: () => void } {
+      const keys: Uint8Array[] = [];
+      const real = crypto.getRandomValues.bind(crypto);
+      const record = (array: Uint8Array<ArrayBuffer>) => {
+        const filled = real(array);
+        if (array instanceof Uint8Array && array.length === 32) keys.push(array);
+        return filled;
+      };
+      const spy = vi.spyOn(crypto, 'getRandomValues').mockImplementation(record as typeof crypto.getRandomValues);
+      return { keys, restore: () => spy.mockRestore() };
+    }
+
+    async function withTwoVettedPeers() {
+      await begunSession();
+      fetchChannelDeviceLists.mockResolvedValue({
+        members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'other', isCreator: false }],
+        lists: new Map(),
+        unverifiableUserIds: [],
+      });
+      fetchDeviceList.mockImplementation(async (userId: string) =>
+        userId === 'other' ? deviceListFor('device-other001') : deviceListFor(PEER_DEVICE));
+      onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+      onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001', epoch: PEER_EPOCH }, { initialReplay: true });
+      await vi.waitFor(() => expect(encryptToDevice).toHaveBeenCalledTimes(2));
+      frameSession.setLocalKey.mockClear();
+      encryptToDevice.mockClear();
+      socketEmit.mockClear();
+    }
+
+    it('a session that ends during the notice of an exclusion mints and installs no key for that exclusion', async () => {
+      await withTwoVettedPeers();
+      const minted = recordMintedKeys();
+      try {
+        // The exclusion's notice is where the session ends
+        markExcluded.mockImplementationOnce(() => { endSecureVoiceSession(CH); });
+        handleInboundKey(CH, 'peer', PEER_DEVICE, '{"keyB64":"plaintext-key"}');
+        await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'legacy-key'));
+        await flush();
+
+        expect(minted.keys).toHaveLength(0);
+        expect(frameSession.setLocalKey).not.toHaveBeenCalled();
+        expect(encryptToDevice).not.toHaveBeenCalled();
+      } finally {
+        minted.restore();
+      }
+    });
+
+    it('a key minted for a session that ends while the rotation seals it is zero-filled and never installed', async () => {
+      await withTwoVettedPeers();
+      const minted = recordMintedKeys();
+      try {
+        // The session ends while the departure's fresh key is being sealed to `peer`
+        encryptToDevice.mockImplementationOnce(async () => {
+          endSecureVoiceSession(CH);
+          return ENV;
+        });
+        onParticipantLeft(CH, 'other');
+        await vi.waitFor(() => expect(encryptToDevice).toHaveBeenCalledTimes(1));
+        await flush();
+
+        expect(minted.keys).toHaveLength(1);
+        expect(minted.keys[0].every((byte) => byte === 0)).toBe(true);
+        expect(frameSession.setLocalKey).not.toHaveBeenCalled();
+        expect(socketEmit).not.toHaveBeenCalledWith('voice:e2e:key', expect.anything());
+      } finally {
+        minted.restore();
+      }
+    });
+  });
 });
 
 const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
