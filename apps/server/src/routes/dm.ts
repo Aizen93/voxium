@@ -4,7 +4,7 @@ import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead, rateLimitDm
 import { prisma } from '../utils/prisma';
 import type { Prisma } from '../generated/prisma/client';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam, prismaErrorCode, violatesForeignKey } from '../utils/errors';
-import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, DM_CLEARED_LIST_MAX } from '@voxium/shared';
+import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, DM_CLEARED_LIST_MAX, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
@@ -16,12 +16,29 @@ import { otherParticipant, deletedParticipantId } from '../utils/deletedParticip
 import {
   aboveFloorWhere,
   isAboveFloor,
+  isReadOnlyConversation,
   isVisibleMessage,
   loadConversationView,
   rowForViewer,
+  type ConversationView,
 } from '../utils/conversationVisibility';
 import { emitRowToViewers, readConversationAudience, viewersRoom } from '../utils/conversationAudience';
-import { reopenConversationForUser, removeConversationForUser, writeConversationMessage } from '../utils/conversationLifecycle';
+import {
+  changeConversationMessage,
+  reopenConversationForUser,
+  removeConversationForUser,
+  writeConversationMessage,
+} from '../utils/conversationLifecycle';
+
+/**
+ * The early refusal of a write in a conversation whose other side's account
+ * is gone (#131): 403 CONVERSATION_READ_ONLY_MESSAGE. Every write repeats it
+ * under the conversation row lock (utils/conversationLifecycle.ts), which is
+ * where an account deletion that commits while the request runs is seen.
+ */
+function refuseReadOnly(view: ConversationView): void {
+  if (isReadOnlyConversation(view)) throw new ForbiddenError(CONVERSATION_READ_ONLY_MESSAGE);
+}
 
 /** A step after a removal committed failed: logged, never thrown. */
 function logRemovalFanOutFailure(conversationId: string, step: string, err: unknown): void {
@@ -386,9 +403,10 @@ dmRouter.post('/:conversationId/messages', rateLimitMessageSend, async (req: Req
   try {
     const { conversationId } = req.params;
     const userId = req.user!.userId;
-    // The early answer (404 / 403, the caller's floor for the reply check);
-    // the write repeats both under the conversation row lock
+    // The early answer (404 / 403, read-only, the caller's floor for the
+    // reply check); the write repeats all of it under the conversation row lock
     const view = await loadConversationView(conversationId, userId);
+    refuseReadOnly(view);
     const wantsEncrypted = req.body.encrypted === true;
 
     // Every conversation is born encrypted (plan §4.2 — encrypted_at is NOT
@@ -527,6 +545,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
     const wantsEncrypted = req.body.encrypted === true;
 
     const view = await loadConversationView(conversationId, userId);
+    refuseReadOnly(view);
 
     const message = await prisma.message.findUnique({ where: { id: messageId } });
     // a row the caller cleared answers like a missing one
@@ -551,7 +570,7 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
     }
     const content = req.body.content as string; // verbatim — never sanitized
 
-    const editMessage = () => prisma.message.update({
+    const editMessage = (db: Pick<Prisma.TransactionClient, 'message'>) => db.message.update({
       where: { id: messageId },
       data: { content, editedAt: new Date() },
       include: {
@@ -561,14 +580,18 @@ dmRouter.patch('/:conversationId/messages/:messageId', rateLimitInteract, async 
         attachments: attachmentSelect,
       },
     });
-    let updated: Awaited<ReturnType<typeof editMessage>>;
-    try {
-      updated = await editMessage();
-    } catch (err) {
-      // deleted after the read above (no row to update): a missing message
-      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Message');
-      throw err;
-    }
+    // Under the conversation row lock, read-only refused again there
+    // (utils/conversationLifecycle.ts): an account deletion that committed
+    // meanwhile turned the conversation read-only
+    const updated = await changeConversationMessage(conversationId, userId, { refuseReadOnly: true }, async (tx) => {
+      try {
+        return await editMessage(tx);
+      } catch (err) {
+        // deleted after the read above (no row to update): a missing message
+        if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Message');
+        throw err;
+      }
+    });
 
     const row = { ...shapeConversationMessageRow(updated, conversationId), reactions: aggregateReactions(updated.reactions) };
     // to the audience as it stands after the write
@@ -596,14 +619,20 @@ dmRouter.delete('/:conversationId/messages/:messageId', rateLimitInteract, async
     if (!isVisibleMessage(message, conversationId, view.floor)) throw new NotFoundError('Message');
     if (message.authorId !== userId) throw new ForbiddenError('You can only delete your own messages');
 
-    try {
-      await prisma.message.delete({ where: { id: messageId } });
-    } catch (err) {
-      // deleted after the read above (a second delete of the same row): a
-      // missing message, whose files the first delete took care of
-      if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Message');
-      throw err;
-    }
+    // Under the conversation row lock (utils/conversationLifecycle.ts), where
+    // it queues with an account deletion of the other person instead of
+    // meeting its rewrite of their messages row by row. Allowed in a
+    // read-only conversation: the person left may delete their own messages.
+    await changeConversationMessage(conversationId, userId, { refuseReadOnly: false }, async (tx) => {
+      try {
+        await tx.message.delete({ where: { id: messageId } });
+      } catch (err) {
+        // deleted after the read above (a second delete of the same row): a
+        // missing message, whose files the first delete took care of
+        if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Message');
+        throw err;
+      }
+    });
 
     // Fire-and-forget S3 cleanup
     if (message.attachments.length > 0) {
@@ -632,6 +661,7 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitI
     if (emojiErr) throw new BadRequestError(emojiErr);
 
     const view = await loadConversationView(conversationId, userId);
+    refuseReadOnly(view);
 
     const message = await prisma.message.findUnique({
       where: { id: messageId },
@@ -639,18 +669,22 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitI
     });
     if (!isVisibleMessage(message, conversationId, view.floor)) throw new NotFoundError('Message');
 
-    const existing = await prisma.messageReaction.findUnique({
-      where: { messageId_userId_emoji: { messageId, userId, emoji } },
-    });
+    // Under the conversation row lock, read-only refused again there
+    // (utils/conversationLifecycle.ts): an account deletion that committed
+    // meanwhile deleted every reaction on the deleted account's messages, and
+    // one added after it would sit on a placeholder.
+    const action = await changeConversationMessage(conversationId, userId, { refuseReadOnly: true }, async (tx): Promise<'add' | 'remove'> => {
+      const existing = await tx.messageReaction.findUnique({
+        where: { messageId_userId_emoji: { messageId, userId, emoji } },
+      });
 
-    // Toggle is check-then-act — both branches must be idempotent so a
-    // double-click's losing request doesn't 500 (see messages.ts reactions)
-    let action: 'add' | 'remove';
-    if (existing) {
-      await prisma.messageReaction.deleteMany({ where: { messageId, userId, emoji } });
-      action = 'remove';
-    } else {
-      const distinctCount = await prisma.messageReaction.groupBy({
+      // Toggle is check-then-act — both branches must be idempotent so a
+      // double-click's losing request doesn't 500 (see messages.ts reactions)
+      if (existing) {
+        await tx.messageReaction.deleteMany({ where: { messageId, userId, emoji } });
+        return 'remove';
+      }
+      const distinctCount = await tx.messageReaction.groupBy({
         by: ['emoji'],
         where: { messageId },
       });
@@ -658,16 +692,17 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitI
         throw new BadRequestError(`Maximum of ${LIMITS.MAX_REACTIONS_PER_MESSAGE} different reactions per message`);
       }
       try {
-        await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+        // ON CONFLICT DO NOTHING: the concurrent duplicate add won the race,
+        // same outcome, and no failed statement aborts the transaction
+        await tx.messageReaction.createMany({ data: [{ messageId, userId, emoji }], skipDuplicates: true });
       } catch (err) {
-        // P2002: the concurrent duplicate add won the race — same outcome.
         // The message deleted after the read above (its key refused): a
         // missing message. Anything else is itself.
         if (violatesForeignKey(err, 'message_reactions_message_id_fkey')) throw new NotFoundError('Message');
-        if (prismaErrorCode(err) !== 'P2002') throw err;
+        throw err;
       }
-      action = 'add';
-    }
+      return 'add';
+    });
 
     const rawReactions = await prisma.messageReaction.findMany({
       where: { messageId },

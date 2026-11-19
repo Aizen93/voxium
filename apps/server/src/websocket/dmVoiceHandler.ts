@@ -1,5 +1,5 @@
 import type { Server as SocketServer, Socket } from 'socket.io';
-import { DM_SIGNAL_MAX, E2E_DEVICE_ID_RE, DM_NOTICE_CALL_STARTED, DM_NOTICE_CALL_ENDED } from '@voxium/shared';
+import { DM_SIGNAL_MAX, E2E_DEVICE_ID_RE, DM_NOTICE_CALL_STARTED, DM_NOTICE_CALL_ENDED, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
 import type { ServerToClientEvents, ClientToServerEvents, Message, DMSystemNotice } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
@@ -10,6 +10,8 @@ import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, 
 import { shapeConversationMessageAuthor } from '../utils/messageAuthor';
 import { writeConversationMessage } from '../utils/conversationLifecycle';
 import { viewersRoom } from '../utils/conversationAudience';
+import { isReadOnlyConversation } from '../utils/conversationVisibility';
+import { ForbiddenError } from '../utils/errors';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -23,7 +25,9 @@ const authorSelect = {
  * right after the commit, to the audience read then, through the same helper
  * as every DM message event (utils/conversationAudience.ts): a side whose
  * floor a removal raised past it meanwhile is not told. A conversation
- * deleted meanwhile refuses it (logged, no notice).
+ * deleted meanwhile refuses it (logged, no notice), and so does one whose
+ * other side's account is gone (#131: read-only, the writer refuses every
+ * message there under the row lock), with a warning instead of an error.
  */
 async function createSystemMessage(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
@@ -58,6 +62,10 @@ async function createSystemMessage(
       viewersRoom(io, conversationId, audience, message.createdAt).emit('dm:message:new', payload);
     });
   } catch (err) {
+    if (err instanceof ForbiddenError && err.message === CONVERSATION_READ_ONLY_MESSAGE) {
+      console.warn(`[DMVoice] No call notice in conversation ${conversationId}: it is read-only`);
+      return;
+    }
     console.error('[DMVoice] Failed to create system message:', err);
   }
 }
@@ -515,6 +523,13 @@ export function handleDMVoiceEvents(
     });
     if (!conv || (conv.user1Id !== userId && conv.user2Id !== userId)) {
       console.log(`[DMVoice] User ${userId} not a participant of conversation ${conversationId}`);
+      return;
+    }
+    // The other side's account is gone (#131): there is nobody to call.
+    // Refused before anything is left, rung or written, a reconnect's re-join
+    // of a call there included
+    if (isReadOnlyConversation(conv)) {
+      socket.emit('voice:error', { message: CONVERSATION_READ_ONLY_MESSAGE });
       return;
     }
 

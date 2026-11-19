@@ -80,7 +80,7 @@ vi.mock('../../utils/prisma', () => ({
     // findMany: the audience of an event, read after the write (utils/conversationAudience.ts)
     conversationRead: { createMany: vi.fn(), upsert: vi.fn(), findMany: vi.fn() },
     message: { findMany: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
-    messageReaction: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), deleteMany: vi.fn(), groupBy: vi.fn() },
+    messageReaction: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), createMany: vi.fn(), deleteMany: vi.fn(), groupBy: vi.fn() },
     messageAttachment: { createMany: vi.fn() },
     user: { findUnique: vi.fn() },
     $transaction: vi.fn(),
@@ -92,6 +92,7 @@ const lifecycle = vi.hoisted(() => ({
   writeConversationMessage: vi.fn(),
   removeConversationForUser: vi.fn(),
   reopenConversationForUser: vi.fn(),
+  changeConversationMessage: vi.fn(),
 }));
 vi.mock('../../utils/conversationLifecycle', () => lifecycle);
 
@@ -154,6 +155,12 @@ beforeEach(() => {
   });
   lifecycle.reopenConversationForUser.mockReset().mockResolvedValue(true);
   lifecycle.writeConversationMessage.mockReset().mockImplementation(writeAs());
+  // An edit, a reaction, a delete: the write on the transaction's client,
+  // under the conversation row lock (its checks are tested in
+  // utils/conversationLifecycle.test.ts)
+  lifecycle.changeConversationMessage.mockReset().mockImplementation(
+    async (_conversationId: string, _userId: string, _opts: unknown, act: (tx: unknown, view: unknown) => unknown) => act(prisma, {}),
+  );
 });
 
 /**
@@ -840,7 +847,7 @@ describe('edit, delete, reaction — a row the caller cleared answers like a mis
 
     expect(res.status).toBe(404);
     expect(prisma.messageReaction.findUnique).not.toHaveBeenCalled();
-    expect(prisma.messageReaction.create).not.toHaveBeenCalled();
+    expect(prisma.messageReaction.createMany).not.toHaveBeenCalled();
     expect((vi.mocked(prisma.message.findUnique).mock.calls[0][0] as any).select).toEqual({ id: true, conversationId: true, createdAt: true });
   });
 });
@@ -906,7 +913,7 @@ describe('edit, delete, reaction — the events skip a side that cleared the row
     vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1', createdAt: BELOW } as any);
     vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
     vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
-    vi.mocked(prisma.messageReaction.create).mockResolvedValueOnce({} as any);
+    vi.mocked(prisma.messageReaction.createMany).mockResolvedValueOnce({ count: 1 } as any);
     vi.mocked(prisma.messageReaction.findMany).mockResolvedValueOnce([] as any);
     await request(createApp()).put(`/api/v1/dm/conv-1/messages/msg-1/reactions/${encodeURIComponent('👍')}`);
 

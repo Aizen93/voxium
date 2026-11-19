@@ -719,14 +719,29 @@ describe('uploads — a conversation with a NULL side', () => {
     expect(getS3Object).not.toHaveBeenCalled();
   });
 
-  it('POST /presign/attachment: the remaining person passes the participant check as before', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', user1Id: 'user-1', user2Id: null } as any);
+  it('POST /presign/attachment: the remaining person passes the participant check, but nothing is signed for a read-only conversation (403, the shared sentence)', async () => {
+    for (const sides of [{ user1Id: 'user-1', user2Id: null }, { user1Id: null, user2Id: 'user-1' }]) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', ...sides } as any);
+
+      const res = await request(createApp())
+        .post('/api/v1/uploads/presign/attachment')
+        .send({ fileName: 'encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream', conversationId: 'conv-1', encrypted: true });
+
+      expect(res.status, JSON.stringify(sides)).toBe(403);
+      expect(res.body.error).toBe('This conversation is read-only');
+    }
+    expect(generatePresignedPutUrl).not.toHaveBeenCalled();
+  });
+
+  it('POST /presign/attachment: a live conversation is signed for as before', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2' } as any);
 
     const res = await request(createApp())
       .post('/api/v1/uploads/presign/attachment')
       .send({ fileName: 'encrypted.bin', fileSize: 1024, mimeType: 'application/octet-stream', conversationId: 'conv-1', encrypted: true });
 
     expect(res.status).toBe(200);
+    expect(generatePresignedPutUrl).toHaveBeenCalledTimes(1);
   });
 
   it('POST /presign/attachment: nobody presigns as the deleted side, nor into a row with both sides gone', async () => {

@@ -24,7 +24,8 @@ import { ForbiddenError, NotFoundError } from './errors';
  *
  * A side whose account is gone (a NULL `user1Id` / `user2Id`) is no
  * participant: it sees nothing, counts as hidden with an infinite floor in
- * the real-deletion rule (nobodyCanReach) and is never in an audience.
+ * the real-deletion rule (nobodyCanReach) and is never in an audience. The
+ * person left has the conversation read-only (isReadOnlyConversation).
  *
  * The rule exists once, here, in three forms that must agree: the predicate
  * (isAboveFloor), the Prisma filter (aboveFloorWhere) and the SQL used by the
@@ -164,6 +165,17 @@ export function nobodyCanReach(sides: readonly [SideReach, SideReach]): boolean 
     const facesDeletedSide = sides[1 - i].userId === null;
     return side.hidden && (!side.messageAboveFloor || facesDeletedSide);
   });
+}
+
+/**
+ * Whether a conversation is read-only: one side's account is gone (a NULL
+ * side, #131). The person left may read it, mark it read, delete their own
+ * messages and remove it; every write that adds to it (a message, an edit, a
+ * reaction, an upload, a call and its notices) is refused
+ * (CONVERSATION_READ_ONLY_MESSAGE).
+ */
+export function isReadOnlyConversation(sides: { user1Id: string | null; user2Id: string | null }): boolean {
+  return sides.user1Id === null || sides.user2Id === null;
 }
 
 /** A conversation as one participant sees it. */

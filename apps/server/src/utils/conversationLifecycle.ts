@@ -1,3 +1,4 @@
+import { CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
 import type { Prisma } from '../generated/prisma/client';
 import { prisma } from './prisma';
 import { ForbiddenError, NotFoundError } from './errors';
@@ -5,20 +6,22 @@ import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from './tra
 import { collectAttachmentKeys } from './attachmentBlobs';
 import { readConversationAudience } from './conversationAudience';
 import {
+  isReadOnlyConversation,
   newMessageTime,
   nobodyCanReach,
   readConversationView,
   type ConversationSideState,
+  type ConversationView,
   type SideReach,
 } from './conversationVisibility';
 
 /**
  * The transactions that change one person's side of a direct conversation
- * (#47): a new message, a removal, a reopen. What each person sees is
- * decided in utils/conversationVisibility.ts.
+ * (#47): a new message, an edit, a reaction or a delete of one, a removal, a
+ * reopen. What each person sees is decided in utils/conversationVisibility.ts.
  *
  * LOCK ORDER of every transaction that touches a conversation. The
- * conversation row comes FIRST in each of the three below, and none takes
+ * conversation row comes FIRST in each of the four below, and none takes
  * another conversation's row:
  *  - a new message (writeConversationMessage: the send route and the call
  *    notices of websocket/dmVoiceHandler.ts): the conversation row FOR KEY
@@ -29,6 +32,14 @@ import {
  *    audience read, the event, then the list-order bump (`updatedAt`), a
  *    statement of its own on the shared client that waits for a removal
  *    queued behind the write, which is why it comes after the event.
+ *  - an edit, a reaction or the delete of one message (changeConversationMessage,
+ *    routes/dm.ts): the conversation row FOR KEY SHARE; then the message row
+ *    (the edit's and the delete's update or delete; a reaction's insert
+ *    key-shares it and the reactor's account row, its toggle-off deletes the
+ *    reactor's own reaction row); a delete then reaches the message's
+ *    attachment and reaction rows and the quotes of it (SET NULL) through
+ *    its cascade. A message's own row comes before its children, as in every
+ *    other writer of messages.
  *  - a removal (removeConversationForUser): the conversation row FOR UPDATE,
  *    which waits for every message write in flight and holds back every new
  *    one (a message insert key-shares that row through its foreign key, so
@@ -41,23 +52,23 @@ import {
  *    reactions, both read rows, and the keys of replies and reports set NULL.
  *  - a reopen (reopenConversationForUser): the conversation row FOR KEY
  *    SHARE, then the opener's read row.
- *  Message writes share the conversation row and meet only on a read row
- *  they both unhide (in the same index order); a removal queues behind every
- *  message write and every removal or reopen of that conversation, and they
- *  queue behind it.
+ *  Message writes, edits, reactions and deletes share the conversation row and
+ *  meet only on rows of their own (a read row two writes both unhide, in the
+ *  same index order; a message a delete removes while a reply to it is
+ *  inserted, which then answers its missing parent); a removal queues behind
+ *  every one of them and every removal or reopen of that conversation, and
+ *  they queue behind it.
  * Outside a transaction: the creation (POST /dm: the conversation insert,
- * which key-shares both account rows, then both read rows), the mark-read
+ * which key-shares both account rows, then both read rows) and the mark-read
  * upsert (the reader's read row; an insert key-shares the conversation row,
- * so it waits for a removal and holds nothing while it does), an edit, a
- * message delete and a reaction (the message row, and through a reaction's
- * keys the message and the account).
+ * so it waits for a removal and holds nothing while it does).
  *
  * THE ACCOUNT DELETION (utils/accountDeletion.ts) takes the account row FOR
  * UPDATE and then cascades into every conversation of the account (both
  * sides), their messages and read rows, and the account's own messages and
  * read rows elsewhere, in the order PostgreSQL fires the cascade triggers,
  * which is the text order of the trigger names and can differ between
- * databases. One of the three transactions above, holding a conversation row
+ * databases. One of the transactions above, holding a conversation row
  * of that account, can then need a row the cascade already holds: the
  * author's or the remover's account row (for the key of an insert), a read
  * row the cascade deleted first, a message of the account that a real
@@ -65,7 +76,7 @@ import {
  * row. No single order serves both, since the cascade's order is the
  * triggers'. PostgreSQL aborts one side and it runs again whole: all of them
  * run under retryOnTransactionConflict, the account deletion included, and
- * one of the three retried after the account deletion committed finds no
+ * one of them retried after the account deletion committed finds no
  * conversation row and answers 404 `Conversation`.
  */
 
@@ -99,7 +110,11 @@ export interface MessageWriteContext {
  * above), run again whole after a deadlock:
  *  1. the conversation row FOR KEY SHARE (gone: 404 `Conversation`);
  *  2. the participation of the author, re-checked after any wait (403), and
- *     both read rows; the newest message's time (one indexed max);
+ *     both read rows; a conversation whose other side's account is gone is
+ *     refused (403 CONVERSATION_READ_ONLY_MESSAGE), a call notice as much as
+ *     a message, and so is one that an account deletion turned read-only
+ *     while this write waited for its row; the newest message's time (one
+ *     indexed max);
  *  3. `write`, which inserts the row with `createdAt: context.createdAt` and
  *     whatever goes with it (attachments), repeats its own checks against
  *     `context.authorFloor`, and resolves the row as it must be sent;
@@ -126,6 +141,7 @@ export async function writeConversationMessage<T extends { createdAt: Date }>(
     if (!(await keyShareConversationRow(tx, conversationId))) throw new NotFoundError('Conversation');
     const view = await readConversationView(conversationId, authorId, tx);
     if (!view) throw new ForbiddenError('Not a participant of this conversation');
+    if (isReadOnlyConversation(view)) throw new ForbiddenError(CONVERSATION_READ_ONLY_MESSAGE);
 
     const newest = await tx.message.aggregate({ where: { conversationId }, _max: { createdAt: true } });
     const context: MessageWriteContext = {
@@ -276,4 +292,38 @@ export function reopenConversationForUser(conversationId: string, userId: string
     });
     return true;
   }, LOCK_WAIT_TRANSACTION_OPTIONS), `${LOG_PREFIX} The reopening of conversation ${conversationId}`);
+}
+
+/**
+ * An edit, a reaction or the delete of one message of a conversation, in one
+ * transaction that takes the conversation row FOR KEY SHARE first (as a new
+ * message does; see the lock order above), run again whole after a deadlock:
+ *  1. the conversation row (gone: 404 `Conversation`), then the participation
+ *     of the caller, re-checked after any wait (403);
+ *  2. with `refuseReadOnly` (an edit, a reaction), a conversation whose other
+ *     side's account is gone is refused (403 CONVERSATION_READ_ONLY_MESSAGE).
+ *     An account deletion holds the row FOR UPDATE while it turns the
+ *     conversation read-only, so a change that waited for it sees the NULL
+ *     side here and is refused, instead of landing in a read-only
+ *     conversation (a reaction on a row the deletion has just reduced to a
+ *     placeholder). A delete of one's own message is allowed there;
+ *  3. `act`, the write, on the transaction's own client, with the view read
+ *     under the lock (the caller's floor among it).
+ * The route's own early checks (the same view, the message, its author) stay
+ * before it: this repeats under the lock only what an account deletion or a
+ * real deletion of the conversation can change while the request runs.
+ */
+export function changeConversationMessage<T>(
+  conversationId: string,
+  userId: string,
+  opts: { refuseReadOnly: boolean },
+  act: (tx: Prisma.TransactionClient, view: ConversationView) => Promise<T>,
+): Promise<T> {
+  return retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+    if (!(await keyShareConversationRow(tx, conversationId))) throw new NotFoundError('Conversation');
+    const view = await readConversationView(conversationId, userId, tx);
+    if (!view) throw new ForbiddenError('Not a participant of this conversation');
+    if (opts.refuseReadOnly && isReadOnlyConversation(view)) throw new ForbiddenError(CONVERSATION_READ_ONLY_MESSAGE);
+    return act(tx, view);
+  }, LOCK_WAIT_TRANSACTION_OPTIONS), `${LOG_PREFIX} A change of a message in conversation ${conversationId}`);
 }

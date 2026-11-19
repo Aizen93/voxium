@@ -10,6 +10,7 @@ import {
   dmListedSql,
   dmUnreadSinceSql,
   isAboveFloor,
+  isReadOnlyConversation,
   isVisibleMessage,
   loadConversationView,
   newMessageTime,
@@ -179,6 +180,20 @@ describe('nobodyCanReach: when the rows can really be deleted', () => {
   it('a deleted side counts as hidden with an infinite floor whatever the flags it is given', () => {
     const odd: SideReach = { userId: null, hidden: false, messageAboveFloor: true };
     expect(nobodyCanReach([live('a', true, false), odd])).toBe(true);
+  });
+});
+
+describe("isReadOnlyConversation: one side's account is gone", () => {
+  it('is read-only with either side NULL, both included', () => {
+    expect(isReadOnlyConversation({ user1Id: null, user2Id: 'user-2' })).toBe(true);
+    expect(isReadOnlyConversation({ user1Id: 'user-1', user2Id: null })).toBe(true);
+    expect(isReadOnlyConversation({ user1Id: null, user2Id: null })).toBe(true);
+  });
+
+  it('a live conversation is not, whatever the sides are called', () => {
+    expect(isReadOnlyConversation({ user1Id: 'user-1', user2Id: 'user-2' })).toBe(false);
+    // the placeholder's name or id as a side value is not a NULL side
+    expect(isReadOnlyConversation({ user1Id: 'deleted', user2Id: 'deleted:conv-1' })).toBe(false);
   });
 });
 

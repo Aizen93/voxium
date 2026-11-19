@@ -73,6 +73,7 @@ import { prisma } from '../../utils/prisma';
 import { collectAttachmentKeys } from '../../utils/attachmentBlobs';
 import { LOCK_WAIT_TRANSACTION_OPTIONS } from '../../utils/transactionRetry';
 import {
+  changeConversationMessage,
   reopenConversationForUser,
   removeConversationForUser,
   writeConversationMessage,
@@ -319,6 +320,22 @@ describe('writeConversationMessage', () => {
     expect(announce).not.toHaveBeenCalled();
   });
 
+  it('a conversation whose other side is gone (read-only) is refused under the lock, a write that waited for an account deletion included: 403, nothing written', async () => {
+    for (const other of [{ user1Id: 'user-1', user2Id: null }, { user1Id: null, user2Id: 'user-1' }]) {
+      h.ran.length = 0;
+      h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+      // the sides as the lock finds them: the deletion committed while the write waited
+      h.results.set('read: conversation sides', sides([{ userId: 'user-1', hiddenAt: null, clearedAt: null }], other));
+
+      await expect(write()).rejects.toMatchObject({ statusCode: 403, message: 'This conversation is read-only' });
+      expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'read: conversation sides']);
+    }
+    expect(insert).not.toHaveBeenCalled();
+    expect(announce).not.toHaveBeenCalled();
+    expect(sharedUpdateMany).not.toHaveBeenCalled();
+    expect(sharedAudience).not.toHaveBeenCalled();
+  });
+
   it('refuses a row written with any other time: the guarantee rests on it', async () => {
     stage([]);
 
@@ -524,5 +541,69 @@ describe('reopenConversationForUser', () => {
 
     expect(await reopenConversationForUser('conv-1', 'user-1')).toBe(false);
     expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE']);
+  });
+});
+
+// ─── An edit, a reaction, a delete ──────────────────────────────────────────
+
+describe('changeConversationMessage', () => {
+  const act = vi.fn(async (_tx: unknown, _view: unknown) => {
+    h.ran.push('act: the write');
+    return 'done';
+  });
+
+  beforeEach(() => act.mockClear());
+
+  it("locks the conversation row FIRST (key share), re-reads the view under it, then runs the write on the transaction's own client", async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([{ userId: 'user-1', hiddenAt: null, clearedAt: new Date('2026-11-16T10:00:00Z') }]));
+
+    expect(await changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: true }, act)).toBe('done');
+
+    expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'read: conversation sides', 'act: the write']);
+    expect(act).toHaveBeenCalledWith(tx, expect.objectContaining({ id: 'conv-1', floor: new Date('2026-11-16T10:00:00Z') }));
+    expect(h.options).toEqual([LOCK_WAIT_TRANSACTION_OPTIONS]);
+  });
+
+  it('an edit or a reaction in a conversation found read-only under the lock is refused: 403, nothing written', async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([], { user1Id: 'user-1', user2Id: null }));
+
+    await expect(changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: true }, act))
+      .rejects.toMatchObject({ statusCode: 403, message: 'This conversation is read-only' });
+    expect(act).not.toHaveBeenCalled();
+  });
+
+  it("a delete of one's own message goes on in a read-only conversation", async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([], { user1Id: null, user2Id: 'user-1' }));
+
+    expect(await changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: false }, act)).toBe('done');
+    expect(act).toHaveBeenCalledTimes(1);
+  });
+
+  it('a conversation deleted while it waited: 404 Conversation; a caller no longer a participant: 403; nothing written', async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', []);
+    await expect(changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: false }, act)).rejects.toMatchObject({ statusCode: 404, message: 'Conversation not found' });
+    expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE']);
+
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([], { user1Id: null, user2Id: 'user-2' }));
+    await expect(changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: false }, act)).rejects.toMatchObject({ statusCode: 403, message: 'Not a participant of this conversation' });
+    expect(act).not.toHaveBeenCalled();
+  });
+
+  it('runs again whole after a deadlock (an account deletion of the caller holds its account row)', async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([]));
+    vi.mocked(prisma.$transaction).mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: 'P2034' }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useRealTimers();
+
+    expect(await changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: true }, act)).toBe('done');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[DM] A change of a message in conversation conv-1 was aborted by a deadlock'));
+    warn.mockRestore();
   });
 });
