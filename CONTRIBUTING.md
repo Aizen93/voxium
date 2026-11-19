@@ -28,7 +28,7 @@ cp apps/server/.env.example apps/server/.env
 # Edit .env with your PostgreSQL password
 pnpm --filter @voxium/server db:generate
 pnpm --filter @voxium/server db:migrate
-pnpm --filter @voxium/server db:seed    # Optional: demo data (alice/bob/charlie, password123)
+pnpm --filter @voxium/server db:seed    # Optional, development only: demo data (alice/bob/charlie, password123)
 
 # Build shared types (required before first run)
 pnpm build:shared

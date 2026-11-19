@@ -1,7 +1,24 @@
+// Demo data for DEVELOPMENT databases: three verified accounts with a
+// published password. It refuses a production configuration unless told
+// otherwise for one run (prisma/seedGuard.ts, beside this file: the server
+// image copies prisma/ and the generated client, not the rest of src/).
 import { PrismaClient } from '../src/generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import bcrypt from 'bcryptjs';
 import 'dotenv/config';
+import { demoSeedOverrideWarning, demoSeedRefusal } from './seedGuard';
+
+// Before anything touches the database. NODE_ENV is read after dotenv, so
+// an apps/server/.env that says production counts too.
+const refusal = demoSeedRefusal({
+  nodeEnv: process.env.NODE_ENV,
+  allowDemoSeed: process.env.VOXIUM_ALLOW_DEMO_SEED,
+});
+if (refusal) {
+  console.error(refusal);
+  process.exit(1);
+}
+if (process.env.NODE_ENV === 'production') console.warn(demoSeedOverrideWarning());
 
 if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL environment variable is required for seeding');

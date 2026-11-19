@@ -385,6 +385,24 @@ describe('totpService — verifyTOTP replay protection (#103)', () => {
     }
   });
 
+  it('says Redis did not record the check, whether it was unreachable or refused the write (full under noeviction)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { verify, code } = await freshService(async () => {
+        throw Object.assign(new Error("OOM command not allowed when used memory > 'maxmemory'."), { name: 'ReplyError' });
+      });
+      const c = code();
+      expect(await verify('user-r10', c)).toBe(true);
+      expect(await verify('user-r10', c)).toBe(false);
+      const said = warn.mock.calls.filter((call) => String(call[0]).startsWith('[TOTP]'));
+      expect(said).toEqual([[
+        "[TOTP] Redis did not record the replay check (ReplyError: OOM command not allowed when used memory > 'maxmemory'.); codes are checked against this node's memory until it does",
+      ]]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('a code accepted during the outage stays refused on this node once Redis answers again', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {

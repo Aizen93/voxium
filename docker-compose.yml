@@ -13,8 +13,11 @@ services:
   # Self-hosted STUN server for DM P2P NAT traversal (cross-internet calls).
   # STUN-only mode: stateless UDP request/response (~100 bytes each way).
   # No relay, no auth, no media passes through — just tells each peer its public IP.
+  # The image is pinned to a minor version: coturn's options change between
+  # them (4.19 exits on --no-dtls, which 4.7 took; DTLS is now off unless
+  # --dtls is given). docker-compose.production.yml runs the same settings.
   stun:
-    image: coturn/coturn:alpine
+    image: coturn/coturn:4.19-alpine
     container_name: voxium-stun
     restart: unless-stopped
     network_mode: host
@@ -22,7 +25,6 @@ services:
       - --stun-only
       - --no-auth
       - --no-tls
-      - --no-dtls
       - --listening-port=3478
       - --log-file=stdout
       - --no-multicast-peers

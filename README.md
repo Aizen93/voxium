@@ -245,7 +245,7 @@ pnpm --filter @voxium/server db:generate
 # Run database migrations
 pnpm --filter @voxium/server db:migrate
 
-# (Optional) Seed with demo data
+# (Optional, development only) Seed with demo data
 pnpm --filter @voxium/server db:seed
 ```
 
@@ -328,18 +328,20 @@ NODE_ENV=production node dist/index.js
 
 ```bash
 cd apps/desktop
-VITE_API_URL=https://chat.example.org/api/v1 \
-VITE_WS_URL=https://chat.example.org \
-TAURI_ASSET_ORIGIN=https://storage.example.org \
+VITE_API_URL=https://chat.example.com/api/v1 \
+VITE_WS_URL=https://chat.example.com \
+VITE_CLIENT_URL=https://chat.example.com \
+TAURI_ASSET_ORIGIN=https://storage.example.com \
 pnpm tauri:build
 ```
 
 | Setting | Example | What it feeds |
 |---------|---------|---------------|
-| `VITE_API_URL` | `https://chat.example.org/api/v1` | **Required.** The API the app is compiled for. Its origin goes into the Content Security Policy's `connect-src` (requests) and `img-src` (avatars and icons are `<img>` loads from `/uploads/`). |
-| `VITE_WS_URL` | `https://chat.example.org` | **Required.** The socket server. `connect-src` gets its origin in both forms the client uses: `https://` (polling) and `wss://` (WebSocket); `http://` gives `http://` + `ws://`. |
-| `TAURI_ASSET_ORIGIN` | `https://storage.example.org` | Your object storage's origin (`https://host[:port]`, comma-separated for several). The server answers avatar and icon requests with a redirect there and uploads are sent straight to it, so it goes into `img-src` and `connect-src`. Without it, images and uploads work only if the storage answers on the API origin. |
-| `TAURI_UPDATER_ENDPOINTS` | `https://updates.example.org/voxium/latest.json` | Optional, with `TAURI_UPDATER_PUBKEY`: your own update feed (`https` only, comma-separated for several; Tauri's `{{target}}` / `{{arch}}` / `{{current_version}}` placeholders work). |
+| `VITE_API_URL` | `https://chat.example.com/api/v1` | **Required.** The API the app is compiled for. Its origin goes into the Content Security Policy's `connect-src` (requests) and `img-src` (avatars and icons are `<img>` loads from `/uploads/`). |
+| `VITE_WS_URL` | `https://chat.example.com` | **Required.** The socket server. `connect-src` gets its origin in both forms the client uses: `https://` (polling) and `wss://` (WebSocket); `http://` gives `http://` + `ws://`. |
+| `VITE_CLIENT_URL` | `https://chat.example.com` | Your web client's origin (`scheme://host[:port]`, no path): the invite links the app hands out open `/invite/<code>` there. Not part of the policy (a link is opened by someone's browser, not fetched by the app). Without it the build warns, and the links start with `VITE_WS_URL`, which opens the invite page only if the web client is served on that origin too. |
+| `TAURI_ASSET_ORIGIN` | `https://storage.example.com` | Your object storage's origin (`https://host[:port]`, comma-separated for several). The server answers avatar and icon requests with a redirect there and uploads are sent straight to it, so it goes into `img-src` and `connect-src`. Without it, images and uploads work only if the storage answers on the API origin. |
+| `TAURI_UPDATER_ENDPOINTS` | `https://updates.example.com/voxium/latest.json` | Optional, with `TAURI_UPDATER_PUBKEY`: your own update feed (`https` only, comma-separated for several; Tauri's `{{target}}` / `{{arch}}` / `{{current_version}}` placeholders work). |
 | `TAURI_UPDATER_PUBKEY` | the `.pub` content `pnpm tauri signer generate` prints | Optional, with `TAURI_UPDATER_ENDPOINTS`: the public key your updates are signed with. |
 | `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) | the private key from `tauri signer generate` | Needed only with your own feed: `tauri build` signs the update artifacts with it. |
 
@@ -402,7 +404,7 @@ JWT_REFRESH_SECRET=another_random_64_char_secret
 TOTP_ENCRYPTION_KEY=
 
 # ── S3 / Object Storage (required for file uploads) ──────────────────────────
-S3_ASSETS_ENDPOINT=https://s3.us-east-1.amazonaws.com
+S3_ASSETS_ENDPOINT=https://s3.example.com
 S3_ASSETS_REGION=us-east-1
 S3_ACCESS_KEY=your_access_key
 S3_SECRET_KEY=your_secret_key
@@ -413,7 +415,13 @@ SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_USER=your_smtp_user
 SMTP_PASS=your_smtp_password
-SMTP_FROM=noreply@yourdomain.com
+SMTP_FROM=noreply@example.com
+# With neither of the next two set, NODE_ENV=production requires STARTTLS:
+# no mail goes to a relay that does not complete it. SMTP_SECURE=true for
+# implicit TLS (port 465); SMTP_REQUIRE_TLS=false only for a relay you trust
+# on its network (plain text when it offers no STARTTLS).
+# SMTP_SECURE=false
+# SMTP_REQUIRE_TLS=true
 
 # ── App ───────────────────────────────────────────────────────────────────────
 PORT=3001
@@ -421,12 +429,12 @@ PORT=3001
 # For local testing with the dev frontend, use: http://localhost:8080
 # Add the Tauri desktop origins so the native apps can connect too:
 # https://tauri.localhost (Windows), tauri://localhost (macOS), http://tauri.localhost (Linux)
-CORS_ORIGIN=https://yourdomain.com,https://tauri.localhost,tauri://localhost,http://tauri.localhost
+CORS_ORIGIN=https://chat.example.com,https://tauri.localhost,tauri://localhost,http://tauri.localhost
 # The object-storage BUCKET needs the same origins in its own CORS rules (methods GET, PUT, HEAD;
 # headers *): avatars, space icons and attachments are uploaded straight from the client to a
 # presigned URL, and a bucket that allows only the web origin fails the desktop app's uploads
 # with "Failed to fetch" while the images still display. scripts/setup-dev-bucket.ts shows the rule.
-CLIENT_URL=https://yourdomain.com
+CLIENT_URL=https://chat.example.com
 # Set to true when running behind a reverse proxy (nginx etc.)
 TRUST_PROXY=true
 
@@ -440,7 +448,7 @@ MEDIASOUP_MIN_PORT=10000
 MEDIASOUP_MAX_PORT=10007
 ```
 
-See `.env.production.example` for the full list of options (S3 encryption, proxy hops, logging).
+See `.env.production.example` for the full list of options (token lifetimes, S3 encryption, SMTP connection security, the node name, proxy hops, mediasoup workers, logging) and the [Configuration Reference](#configuration-reference) for what each one does.
 
 > **Important:** `MEDIASOUP_ANNOUNCED_IP` must be your server's public IP address. Voice channels will not work without this.
 
@@ -452,13 +460,14 @@ See `.env.production.example` for the full list of options (S3 encryption, proxy
 docker compose -f docker-compose.production.yml --env-file .env.production up -d
 ```
 
-This starts three services:
+This starts four services:
 
 | Service           | Description              | Port     |
 | ----------------- | ------------------------ | -------- |
-| `voxium-server`   | Backend API + WebSocket  | 3001, plus the mediasoup range (UDP + TCP) |
+| `voxium-server`   | Backend API + WebSocket  | 3001 (on `127.0.0.1` only, see below), plus the mediasoup range (UDP + TCP) |
 | `voxium-postgres` | PostgreSQL 16            | internal |
 | `voxium-redis`    | Redis 7                  | internal |
+| `voxium-stun`     | STUN-only coturn for direct calls | 3478 (UDP, TCP too), on the host's network |
 
 Database migrations run **automatically** on every container start (`migrate deploy`) — no manual steps needed. On a new, empty database the first start applies all of them. Unless `VOXIUM_ALLOW_CUTOVER=1` is set (below), the container first reads `prisma migrate status` until the database answers (10 attempts, 3 s apart, each failed read logged with its error) and does not migrate a database it could not read: if PostgreSQL stays unreachable, the server container exits and its log shows the last error.
 
@@ -470,24 +479,48 @@ Database migrations run **automatically** on every container start (`migrate dep
 docker compose -f docker-compose.production.yml ps
 ```
 
-All services should show `healthy`. You can also check the health endpoint:
+All services should show `healthy`. You can also check the health endpoint from the server itself (the port is published on the loopback address only), or from your machine through an SSH tunnel to it:
 
 ```bash
-curl http://localhost:3001/health
+curl http://127.0.0.1:3001/health
 ```
 
 ### 5. Connect a Client
 
-Point the Voxium desktop app (or web client) to your server by setting these in the client's `.env`:
+Point the Voxium desktop app (or web client) to your server by setting these in the client's `.env`. In production the clients reach the server through the reverse proxy ([`docs/reverse-proxy.md`](docs/reverse-proxy.md)), on its public name:
 
 ```env
-VITE_API_URL=http://YOUR_SERVER_IP:3001/api/v1
-VITE_WS_URL=http://YOUR_SERVER_IP:3001
+VITE_API_URL=https://chat.example.com/api/v1
+VITE_WS_URL=https://chat.example.com
+# For the desktop app: where your web client is served, for its invite links
+VITE_CLIENT_URL=https://chat.example.com
 ```
 
-The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
+For a first test before the proxy is in place, test from the server itself (`curl http://127.0.0.1:3001/health`), or forward the port through an SSH tunnel (`ssh -L 3001:127.0.0.1:3001 user@your-server`) and point a client at `http://localhost:3001/api/v1` and `http://localhost:3001`. The compose file publishes the port on the loopback address only; to reach it directly on a private network, set `VOXIUM_HTTP_BIND` to the host's private address in `.env.production`, and never open that port to the internet (see [Production Recommendations](#production-recommendations)). `apps/desktop/.env.example` lists every client setting. The desktop installers are then built with `pnpm tauri:build`, which also takes your object storage's origin and, optionally, your own update feed: see [Build the Desktop App](#build-the-desktop-app).
 
 > **CORS:** The `CORS_ORIGIN` value in `.env.production` must match the URL your frontend runs on. If you're testing locally with `pnpm dev:desktop` (which serves at `http://localhost:8080`), set `CORS_ORIGIN=http://localhost:8080` in `.env.production` and restart the Docker server. Without this, the browser will block all requests.
+
+### STUN for Direct Calls
+
+DM calls are peer to peer, so each client needs to learn the public address its network gives it: that is all STUN does (a request of about 100 bytes, an answer of the same size; no media and no credentials). The compose file's `stun` service is a STUN-only coturn (`--stun-only --no-auth`, TURN requests ignored, the same settings as the development `docker-compose.yml`). Voice channels do not need it: their media goes through the server's SFU on the mediasoup ports.
+
+- **Where the clients look.** A client asks `stun:<host of VITE_WS_URL>:3478`, so with `VITE_WS_URL=https://chat.example.com` the machine `chat.example.com` resolves to must answer on 3478. When that name leads somewhere else (a load balancer or a proxy on another machine) or coturn runs on its own machine, build the clients with `VITE_STUN_URL`, for example `VITE_STUN_URL=stun:stun.example.com:3478` (only `stun:` and `stuns:` are accepted; a malformed value is ignored with a warning and the derived address is used). The value is compiled in: changing it means rebuilding the web client and the desktop installers.
+- **Firewall.** Open 3478/udp (browsers send their STUN requests over UDP; coturn answers on 3478/tcp too).
+- **Host networking.** The service uses the host's network so coturn sees each client's own address and port; behind Docker's port publishing it can see the bridge's address instead, and the answer would be wrong. That needs a Linux host (Docker Desktop only with its host networking feature turned on).
+- **What STUN cannot do.** Without a relay (TURN), two peers whose networks allow no direct path (symmetric NATs, strict firewalls) still cannot connect. Voxium ships no TURN server and the client refuses `turn:` URLs on purpose. It never uses a third-party STUN server.
+
+### Redis Memory and Eviction
+
+Redis holds the server's state, not a cache: rate-limit and abuse budgets, the single-use marks of solved sign-up challenges and of used two-factor codes, the feature-flag and rate-limit overrides set from the admin dashboard, scheduled-job locks, node heartbeats, presence and voice state. The compose file runs it with `--maxmemory 256mb --maxmemory-policy noeviction` and the append-only file written to disk every second, and gives the container a 512 MB limit. If you run Redis yourself (another host, a managed service), set `maxmemory-policy noeviction` there too: any other policy drops those keys without an error once memory runs short (`volatile-*` as well, since the marks, budgets and locks all carry a TTL). The server logs a warning at startup when the policy evicts, or when it cannot read it (some managed services refuse `CONFIG GET`).
+
+- **When Redis is full** it refuses new writes and keeps everything it holds; reads, deletes and expiry keep working, so memory comes back as keys expire. Meanwhile the server log shows each refused write (`OOM command not allowed when used memory > 'maxmemory'`): rate limits fall back to a count kept in each server process's memory, scheduled jobs skip their run and try again later, the marks of used two-factor codes are kept in each server process's memory instead (a code is still refused a second time on that process), the marks of solved sign-up challenges are not recorded (the request goes through, as when Redis is down), voice joins can fail, and users who connect are not shown online. Four more consequences: a server process cannot start while Redis is full (it writes its node heartbeat at boot, a refusal ends the process with exit code 1, and the container restarts in a loop until memory frees); an administrator cannot set a feature flag or a rate-limit override from the dashboard (the write is refused; a reset works); a running node's heartbeat lapses after 30 seconds without a successful write, and where several nodes run its peers then reap its voice channels and their visibility resyncs fail closed; Explore can serve a page up to 60 seconds stale.
+- **Sizing.** Most of what Redis holds is small and expires on its own: one small key per caller and rate limit (gone when its window ends), the Explore page cache (60 seconds). The largest items are screen-share annotation scenes, up to 800 KB per voice channel with an active share, kept up to four hours. 256 MB is ample for a community on one server; for more, raise `--maxmemory` and keep the container's memory limit at about twice it (rewriting the append-only file forks Redis, and the copy can double the memory in use while it runs).
+- **Monitoring.** `docker compose -f docker-compose.production.yml exec redis redis-cli INFO memory` prints `used_memory` and `maxmemory`; alert well before the first reaches the second.
+
+### Upgrading an Existing Deployment
+
+- **The server's HTTP port is now published on the loopback address only** (`127.0.0.1:3001`; `VOXIUM_HTTP_BIND` changes the address). A host nginx that proxies to `127.0.0.1:3001`, and a proxy container joined to the compose network, are unaffected. Set `VOXIUM_HTTP_BIND` in `.env.production` if a reverse proxy on another host, a proxy container that reaches the server through the host's or the bridge's address, or a plain-HTTP setup on a private network connects to that port; until you do, those connections are refused. Three more things change. A proxy on the same host must point at `127.0.0.1:3001`, not `localhost:3001`: the name also resolves to the IPv6 loopback, where nothing listens now, so nginx logs a failed attempt before it falls back to IPv4, and a proxy pointed at `[::1]:3001` gets no answer. Anything on another machine that reads `:3001/health` directly, an uptime monitor for one, must go through the proxy or needs `VOXIUM_HTTP_BIND`. And `VOXIUM_HTTP_BIND=0.0.0.0` publishes on every IPv4 address only (the earlier mapping also published on IPv6); an IPv6 address is written in brackets, for example `[::1]`.
+- **Mail:** with `NODE_ENV=production` STARTTLS is now required unless `SMTP_SECURE=true` (implicit TLS) or `SMTP_REQUIRE_TLS=false` is set. After upgrading, read the start-up log line that states the SMTP mode and send yourself a password reset: a relay that refuses STARTTLS now fails every mail, and each sign-up attempt meanwhile uses one of the two sign-up mails an address may receive in 30 days.
 
 ### Managing the Docker Stack
 
@@ -507,8 +540,9 @@ docker compose -f docker-compose.production.yml --env-file .env.production up -d
 
 ### Production Recommendations
 
-- Put **nginx** or another reverse proxy in front for TLS/SSL termination
-- Open the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall — UDP, plus TCP as a fallback
+- Put **nginx** or another reverse proxy in front for TLS termination: [`docs/reverse-proxy.md`](docs/reverse-proxy.md) lists what it must do (the WebSocket upgrade, `TRUST_PROXY_HOPS`, the paths whose URL is a credential and must stay out of its logs, HSTS for the static files, the web client's fallback to `index.html`, the bucket's CORS rules) and gives a complete nginx example
+- Clients reach the server only through the proxy, the one party that may set `X-Forwarded-For` (the server trusts it when `NODE_ENV=production`): `docker-compose.production.yml` publishes the server's port on the loopback address only (`VOXIUM_HTTP_BIND`, default `127.0.0.1`), which is all a proxy on the same host needs. For a proxy on another host set `VOXIUM_HTTP_BIND` to the address it reaches, and close the port to everything but the proxy. Do not count on a firewall rule alone to close a port Docker publishes: published ports bypass `ufw`'s rules, and `firewalld` gives Docker its own zone, so binding the published port to an address is the reliable way
+- Open the mediasoup range (`MEDIASOUP_MIN_PORT` to `MEDIASOUP_MAX_PORT`) in your firewall — UDP, plus TCP as a fallback — and 3478/udp for STUN (see [STUN for Direct Calls](#stun-for-direct-calls))
 - For better reliability, use a managed PostgreSQL instance (change `DATABASE_URL` in `docker-compose.production.yml` — its `environment:` entry takes precedence over `.env.production`)
 - Set up regular database backups
 
@@ -527,14 +561,16 @@ npx prisma migrate dev --name your_migration_name
 # Reset database (deletes all data)
 npx prisma migrate reset
 
-# Seed demo data
+# Seed demo data (development databases only)
 pnpm run db:seed
 ```
 
-Demo seed creates:
-- **Users:** `alice`, `bob`, `charlie` (password: `password123`)
-- **Server:** "Voxium Community" with text and voice channels
+The demo seed is for **development**: it fills a local database so you can sign in and try the app at once. It creates:
+- **Users:** `alice`, `bob`, `charlie`, e-mail-verified, with the password `password123`
+- **Space:** "Voxium Community" with text and voice channels
 - **Messages:** Sample messages in #general
+
+Never seed a database other people can reach: anyone who has read this page could sign in to those accounts. The seed refuses to run when `NODE_ENV=production` (what the server image and `docker-compose.production.yml` set, or what `apps/server/.env` says); to seed a production-configured database anyway, for a private test instance, put `VOXIUM_ALLOW_DEMO_SEED=1` in that one command's environment (`VOXIUM_ALLOW_DEMO_SEED=1 pnpm run db:seed`), never in an env file. Only the exact value `1` counts.
 
 > **Note:** usernames are kept case-insensitively unique by a functional index Prisma cannot express, so `prisma migrate dev` reports it as drift and may offer to reset the database or drop it. Do not accept — keep the index.
 
@@ -571,38 +607,56 @@ curl http://localhost:3001/api/v1/servers \
 
 ## Configuration Reference
 
+Every setting below is in the matching template: `apps/server/.env.example` (development), `.env.production.example` (the Docker deployment), `apps/desktop/.env.example` and `apps/admin/.env.example`. A test keeps the templates, this table and the code in step.
+
 ### Server Environment Variables (`apps/server/.env`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | — | **Required.** PostgreSQL connection string |
-| `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
+| `DATABASE_URL` | — | **Required.** PostgreSQL connection string (set by `docker-compose.production.yml` in the Docker deployment) |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection string (set by the compose file in the Docker deployment) |
 | `JWT_SECRET` | — | **Required.** Secret for signing access tokens |
 | `JWT_REFRESH_SECRET` | — | **Required.** Secret for signing refresh tokens |
 | `JWT_EXPIRES_IN` | `15m` | Access token expiry |
-| `JWT_REFRESH_EXPIRES_IN` | `30d` | Refresh token expiry for "remember me" sessions (otherwise 24h); `.env.example` sets `7d` |
+| `JWT_REFRESH_EXPIRES_IN` | `30d` | Refresh token expiry for "remember me" sessions (otherwise 24h); the Cookie Policy states up to 30 days |
+| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest (and the signing secrets of GitHub-type webhooks). Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. When set, it must be 64 hexadecimal characters: a value that does not give 32 bytes stops the start in every environment, and characters after the 64th are ignored with a warning. |
 | `PORT` | `3001` | HTTP server port |
-| `NODE_ENV` | `development` | Environment mode |
-| `CORS_ORIGIN` | `http://localhost:8080` | Allowed CORS origin(s) |
-| `S3_ASSETS_ENDPOINT` | — | S3-compatible storage endpoint |
-| `S3_ASSETS_REGION` | — | S3 bucket region |
-| `S3_ACCESS_KEY` | — | S3 access key |
-| `S3_SECRET_KEY` | — | S3 secret key |
-| `S3_ASSETS_BUCKET` | — | S3 bucket name |
+| `NODE_ENV` | `development` | `production` (set by the compose file) makes `TOTP_ENCRYPTION_KEY` mandatory and turns on HSTS, the trusted proxy, JSON access logs and the STARTTLS requirement for mail; the demo seed refuses it |
+| `NODE_ID` | a random id per start | This process's name in a cluster: one stable value per node, never shared by two processes running at once. Unset, a process killed without a clean stop looks like a live peer to its own replacement for up to 30 s (its heartbeat), which delays the stale-presence cleanup at start |
+| `CORS_ORIGIN` | `http://localhost:8080` | Allowed browser origins, comma-separated (the web client, the admin dashboard, the desktop app's origins) |
+| `CLIENT_URL` | `http://localhost:8080` | The web client's address, used for the links in e-mails |
+| `LOG_FORMAT` | `json` in production, `dev` otherwise | Access log format: `json` (one JSON line per request) or `dev` |
+| `S3_ASSETS_ENDPOINT` | — | **Required.** S3-compatible storage endpoint |
+| `S3_ASSETS_REGION` | — | **Required.** S3 bucket region |
+| `S3_ACCESS_KEY` | — | **Required.** S3 access key |
+| `S3_SECRET_KEY` | — | **Required.** S3 secret key |
+| `S3_ASSETS_BUCKET` | — | **Required.** S3 bucket name |
 | `S3_SSE` | — | Optional bucket-default encryption at rest: `AES256` or `aws:kms` |
 | `SMTP_HOST` | `localhost` | SMTP server host |
 | `SMTP_PORT` | `1025` | SMTP server port |
-| `SMTP_USER` | — | SMTP auth username |
+| `SMTP_USER` | — | SMTP auth username (the server logs in only when both this and `SMTP_PASS` are set) |
 | `SMTP_PASS` | — | SMTP auth password |
-| `SMTP_FROM` | `noreply@voxium.app` | Sender email address |
-| `CLIENT_URL` | `http://localhost:8080` | Frontend URL (used in emails) |
-| `CLEANUP_REPORT_EMAIL` | — | Email address for daily attachment cleanup reports. If not set, no report is sent. |
-| `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest. Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. When set, it must be 64 hexadecimal characters: a value that does not give 32 bytes stops the start in every environment, and characters after the 64th are ignored with a warning. |
+| `SMTP_FROM` | `noreply@voxium.app` | Sender email address: set one of your own domain |
+| `SMTP_FROM_NAME` | `Voxium` | Sender display name |
+| `SMTP_SECURE` | `false` | `true`: implicit TLS from the first byte (usually port 465). Only the exact value `true` turns it on |
+| `SMTP_REQUIRE_TLS` | `true` when `NODE_ENV=production`, else `false` | `true`: STARTTLS, and no mail at all to a relay that does not complete it. `false`: STARTTLS when the relay offers it, plain text otherwise (a relay on a network you trust, a local catcher; warned about at start in production). Unset or empty takes the default; any other value (`1`, `yes`, `TRUE`: only the exact `true` and `false` are recognised) is reported at start and reads as `false` outside production but as `true` under `NODE_ENV=production`. The server logs the mode in effect once at start, and in production asks the relay once whether it accepts that setup (a refusal is logged as a warning with its error code; the start does not wait for it) |
+| `CLEANUP_REPORT_EMAIL` | — | Where the nightly attachment-cleanup report and the hourly sign-up spike alert go. If not set, neither is sent. |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers (always on when `NODE_ENV=production`) |
-| `TRUST_PROXY_HOPS` | `1` | Number of reverse proxies in front of the server — must match your setup exactly |
+| `TRUST_PROXY_HOPS` | `1` | Number of reverse proxies in front of the server (1 to 10) — must match your setup exactly |
 | `MEDIASOUP_LISTEN_IP` | `0.0.0.0` | IP the mediasoup workers bind to |
-| `MEDIASOUP_ANNOUNCED_IP` | `127.0.0.1` | IP address announced to WebRTC clients for mediasoup SFU connectivity. Set it to the machine's LAN IP for cross-machine voice in development, and its public IP in production. The Vite dev servers listen on localhost only; start them with `VOXIUM_DEV_LAN=1` to reach them from another machine. |
+| `MEDIASOUP_ANNOUNCED_IP` | `127.0.0.1` | IP address announced to WebRTC clients for mediasoup SFU connectivity. Set it to the machine's LAN IP in development (Firefox does not complete ICE/DTLS against a loopback address, so its voice fails on `127.0.0.1` even on one machine), and its public IP in production. The Vite dev servers listen on localhost only; start them with `VOXIUM_DEV_LAN=1` to reach them from another machine. |
 | `MEDIASOUP_MIN_PORT` / `MEDIASOUP_MAX_PORT` | `10000` / `59999` | mediasoup port range. Each worker (one per CPU core, max 8) binds one UDP + TCP port at `MIN_PORT + slot`, so only the first few ports are used |
+| `MEDIASOUP_NUM_WORKERS` | one per CPU core | Fewer mediasoup workers than CPU cores (at most 8 either way); the port range must hold one port per worker |
+| `MEDIASOUP_WEBRTC_SERVER` | `true` | `false`: the legacy mode where each WebRTC transport binds its own port out of the range (two per user), so the whole range must be open and published |
+
+Read by the Docker deployment around the server, not by the server itself:
+
+| Variable | Read by | Description |
+|----------|---------|-------------|
+| `POSTGRES_PASSWORD` | `docker-compose.production.yml` | The database password, used by both the PostgreSQL container and the server's `DATABASE_URL` |
+| `VOXIUM_HTTP_BIND` | `docker-compose.production.yml` | The address the server's HTTP port (3001) is published on. Default `127.0.0.1`: only a reverse proxy on the same host reaches it. Set the host's private address (or `0.0.0.0`) for a proxy on another host, a proxy container that reaches the server through the host's address, or a plain-HTTP setup on a private network, and keep the port closed to everything else |
+| `VOXIUM_ALLOW_CUTOVER` | `docker-entrypoint.sh` | `1` lets one start apply the always-on E2E cutover migration (see [Start the Stack](#3-start-the-stack)); remove it afterwards |
+| `VOXIUM_ALLOW_DEMO_SEED` | `prisma/seed.ts` | `1` lets the demo seed run under `NODE_ENV=production`, for that one command (see [Database Management](#database-management)); never in an env file |
 
 ### Frontend Environment Variables (`apps/desktop/.env`)
 
@@ -611,8 +665,9 @@ curl http://localhost:3001/api/v1/servers \
 | `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
 | `VITE_STUN_URL` | `stun:<VITE_WS_URL host>:3478` | Optional STUN server for DM calls (`stun:`/`stuns:` only). Compiled into the build. |
+| `VITE_CLIENT_URL` | — (desktop app: `VITE_WS_URL`) | The public web client's origin, for the invite links the **desktop app** hands out. In a browser, links always use the page's own origin and this is not read; `tauri dev` uses the dev server's. A desktop build without it starts its links with `VITE_WS_URL`, as before. Compiled into the build. |
 
-The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VITE_WS_URL`, and also reads `TAURI_ASSET_ORIGIN`, `TAURI_UPDATER_ENDPOINTS` and `TAURI_UPDATER_PUBKEY` from the environment: see [Build the Desktop App](#build-the-desktop-app).
+`VOXIUM_DEV_LAN=1`, from the environment only, makes the Vite dev server listen on every interface. The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VITE_WS_URL`, and also reads `TAURI_ASSET_ORIGIN`, `TAURI_UPDATER_ENDPOINTS`, `TAURI_UPDATER_PUBKEY` and `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) from the environment: see [Build the Desktop App](#build-the-desktop-app).
 
 ### Admin Dashboard Environment Variables (`apps/admin/.env`)
 
@@ -620,6 +675,8 @@ The desktop installer build (`pnpm tauri:build`) requires `VITE_API_URL` and `VI
 |----------|---------|-------------|
 | `VITE_API_URL` | `http://localhost:3001/api/v1` | Backend API base URL |
 | `VITE_WS_URL` | `http://localhost:3001` | WebSocket server URL |
+
+`VOXIUM_DEV_LAN=1` works for the admin dev server the same way.
 
 ---
 
@@ -739,7 +796,7 @@ tagged; no spec is tagged at the moment.
 | `pnpm test:watch` | Run server tests in watch mode |
 | `pnpm test:e2e` | Run Playwright E2E tests (`test:e2e:ui` / `test:e2e:headed` for UI mode / visible browser) |
 | `pnpm db:migrate` | Run Prisma migrations |
-| `pnpm db:seed` | Seed database with demo data |
+| `pnpm db:seed` | Seed a development database with demo data (refuses `NODE_ENV=production`) |
 | `pnpm db:studio` | Open Prisma Studio |
 | `npx tsx scripts/test-permissions.ts` | Run permission system integration test against a running backend (11 phases) |
 | `npx tsx scripts/test-multi-node.ts` | Spawn two server nodes and validate cross-node behavior, including real voice media and owner-crash takeover |

@@ -8,6 +8,7 @@ import {
   isHostSource,
   isDeploymentHost,
   parseServerUrl,
+  selfHostedClientOrigin,
   serverSources,
   selfHostedCsp,
   parseUpdaterPubkey,
@@ -167,6 +168,34 @@ describe('no message quotes a refused value (a CI log may be public, and a value
       expect(message.startsWith('TAURI_UPDATER_ENDPOINTS entry '), message).toBe(true);
       for (const fragment of [...FRAGMENTS, 'github', 'ok.example']) expect(message, `${value} -> ${message}`).not.toContain(fragment);
     }
+  });
+});
+
+describe('selfHostedClientOrigin (VITE_CLIENT_URL, the web client\'s origin for invite links)', () => {
+  it('is null when unset, the origin otherwise', () => {
+    expect(selfHostedClientOrigin(undefined)).toBeNull();
+    expect(selfHostedClientOrigin('  ')).toBeNull();
+    expect(selfHostedClientOrigin('https://chat.example.org')).toBe('https://chat.example.org');
+    expect(selfHostedClientOrigin('https://chat.example.org/')).toBe('https://chat.example.org');
+    expect(selfHostedClientOrigin('http://192.0.2.10:8080')).toBe('http://192.0.2.10:8080');
+  });
+
+  it('refuses what would make a link miss its page, without quoting the value', () => {
+    for (const bad of ['chat.example.org', 'wss://secret.example.org', 'https://admin:hunter2@secret.example.org', 'https://secret.example.org/app', 'https://secret.example.org/?x', 'https://secret.example.org#top']) {
+      let message = '';
+      try {
+        selfHostedClientOrigin(bad);
+      } catch (err) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+      expect(message, bad).toMatch(/^VITE_CLIENT_URL /);
+      for (const fragment of ['secret', 'hunter2', 'admin']) expect(message, bad).not.toContain(fragment);
+    }
+  });
+
+  it('is no input of the overlay: a link is opened by a browser, never fetched by the app', () => {
+    const overlay = selfHostedConfig(conf, { apiUrl: API, wsUrl: WS, assetOrigin: STORAGE });
+    expect(Object.keys(overlay)).toEqual(['identifier', 'app', 'bundle', 'plugins']);
   });
 });
 
@@ -662,6 +691,26 @@ describe('tauri-build-config.mjs (the CLI `pnpm tauri:build` runs)', () => {
   it('warns when no storage origin is set', () => {
     writeEnvFiles({ '.env': `VITE_API_URL=${API}\nVITE_WS_URL=${WS}\n` });
     expect(run([]).stderr).toContain('TAURI_ASSET_ORIGIN is unset');
+  });
+
+  it('warns when VITE_CLIENT_URL is unset, takes it from the .env files like the frontend, and stops on a malformed one', () => {
+    writeEnvFiles({ '.env': `VITE_API_URL=${API}\nVITE_WS_URL=${WS}\n` });
+    const unset = run([], { TAURI_ASSET_ORIGIN: STORAGE });
+    expect(unset.status, unset.stderr).toBe(0);
+    expect(unset.stderr).toContain('VITE_CLIENT_URL is unset: invite links start with VITE_WS_URL');
+
+    writeEnvFiles({ '.env': `VITE_API_URL=${API}\nVITE_WS_URL=${WS}\nVITE_CLIENT_URL=https://chat.example.org\n` });
+    const set = run([], { TAURI_ASSET_ORIGIN: STORAGE });
+    expect(set.status, set.stderr).toBe(0);
+    expect(set.stderr).not.toContain('VITE_CLIENT_URL');
+    // the overlay is the same with or without it
+    expect(JSON.parse(set.stdout)).toEqual(JSON.parse(unset.stdout));
+
+    const bad = run([], { TAURI_ASSET_ORIGIN: STORAGE, VITE_CLIENT_URL: 'https://secret.internal.example.org/app' });
+    expect(bad.status).toBe(1);
+    expect(bad.stdout).toBe('');
+    expect(bad.stderr).toContain('VITE_CLIENT_URL must be the web client');
+    expect(bad.stderr).not.toContain('secret');
   });
 
   it('fails with the reason and prints nothing when the frontend URLs are missing or an input is malformed', () => {

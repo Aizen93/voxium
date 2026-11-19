@@ -2,9 +2,10 @@
 //
 // Privacy-first: STUN only, self-hosted, no third-party servers. A STUN
 // request is ~100 bytes each way and carries no media; it tells the peer its
-// own public address. The host defaults to the API host (coturn runs on the
-// edge box next to nginx), and `VITE_STUN_URL` overrides it for a deployment
-// that moves coturn to its own machine — the value is compiled into the
+// own public address. The host defaults to the API host (the STUN server of
+// the deployment, by default the host the socket connects to), and
+// `VITE_STUN_URL` overrides it for a deployment that runs coturn on its own
+// machine — the value is compiled into the
 // bundle, so a change means rebuilding the desktop installers.
 
 export const DEFAULT_STUN_PORT = 3478;
