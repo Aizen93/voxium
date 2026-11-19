@@ -50,6 +50,8 @@ import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
 import { startDiscoveryStats, stopDiscoveryStats } from './utils/discoveryStats';
 import { prisma } from './utils/prisma';
 import { initRedis, clearPresenceState, NODE_ID, NODE_HEARTBEAT_TTL_S, startNodeHeartbeat, stopNodeHeartbeat } from './utils/redis';
+import { checkRedisEvictionPolicy } from './utils/redisPolicy';
+import { logSmtpSecurity, verifySmtpRelayAtStart } from './utils/email';
 import { ensureBucketEncryption } from './utils/s3';
 import { loadRateLimitOverrides } from './middleware/rateLimiter';
 import { repairIpBanSpellings } from './utils/ipBans';
@@ -70,11 +72,13 @@ async function main() {
   console.log('[DB] Connected to PostgreSQL');
 
   // Connect to Redis
-  await initRedis();
+  const redis = await initRedis();
   console.log('[Redis] Connected');
+  // Warns when Redis may evict the state kept there (never throws, decides nothing)
+  await checkRedisEvictionPolicy(redis);
 
   // Announce this node's liveness IMMEDIATELY so peer reapers stop treating our
-  // state as dead. Production runs multiple horizontally-scaled instances.
+  // state as dead. When several instances run, every one announces itself.
   await startNodeHeartbeat();
   console.log(`[Node ${NODE_ID()}] Heartbeat started`);
 
@@ -101,6 +105,11 @@ async function main() {
   // Apply bucket-default encryption when S3_SSE is set (never throws;
   // logs loudly if the provider/key can't do it — uploads keep working)
   await ensureBucketEncryption();
+
+  // Which security the mail transport uses (one line; no host, user or address)
+  logSmtpSecurity();
+  // Production only: ask the relay once whether it accepts that setup (not awaited)
+  verifySmtpRelayAtStart();
 
   // Initialize mediasoup workers
   await initMediasoup();

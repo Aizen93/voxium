@@ -74,6 +74,25 @@ export function parseServerUrl(name, value, protocols) {
 }
 
 /**
+ * The web client's origin a build hands out in links (VITE_CLIENT_URL; the
+ * app reads it in src/utils/webClientUrl.ts): null when unset, the origin
+ * when it is an http(s) URL of the root, a refusal otherwise. The web
+ * client's routes live at the root, so a path would make every invite link
+ * miss its page. Like parseServerUrl, no message quotes the value. Not part
+ * of the overlay: a link is opened by someone else's browser, never fetched
+ * by the app, so the policy needs nothing for it.
+ */
+export function selfHostedClientOrigin(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return null;
+  const url = parseServerUrl('VITE_CLIENT_URL', raw, ['http:', 'https:']);
+  if (url.pathname !== '/') {
+    throw new Error('VITE_CLIENT_URL must be the web client\'s origin, scheme://host[:port], with no path: its pages (/invite/<code>) live at the root');
+  }
+  return url.origin;
+}
+
+/**
  * The sources the app's own server needs: the API origin for requests and
  * for `<img src="{VITE_API_URL}/uploads/…">` (avatars, icons, attachments),
  * the socket origin in both forms socket.io uses (`transports: ['polling',

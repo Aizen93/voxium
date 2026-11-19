@@ -230,14 +230,14 @@ function recordLocalUse(replayKey: string): boolean {
   return true;
 }
 
-/** The outage, once a minute at most: the error's name and message, never the key (it holds the code) nor the account. */
+/** Redis down or refusing the write, once a minute at most: the error's name and message, never the key (it holds the code) nor the account. */
 function warnReplayCheckUnavailable(err: unknown): void {
   const now = Date.now();
   if (now - lastReplayWarnAt < REPLAY_WARN_INTERVAL_MS) return;
   lastReplayWarnAt = now;
   const name = err instanceof Error ? err.name : typeof err;
   const message = err instanceof Error ? err.message : 'non-error value thrown';
-  console.warn(`[TOTP] Replay check could not reach Redis (${name}: ${message}); codes are checked against this node's memory until it answers`);
+  console.warn(`[TOTP] Redis did not record the replay check (${name}: ${message}); codes are checked against this node's memory until it does`);
 }
 
 /** Verify TOTP code during login */

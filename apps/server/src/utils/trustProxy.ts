@@ -28,9 +28,10 @@ let hopsCache: { raw: string | undefined; hops: number } | null = null;
  * This number is what makes the per-IP and per-subnet abuse controls mean
  * anything: Express's `trust proxy` and the socket handshake's
  * X-Forwarded-For parse both take the N-th address from the RIGHT of the
- * chain as the caller. Put an OVH Load Balancer in front of nginx without
+ * chain as the caller. Put a load balancer in front of nginx without
  * raising it to 2 and every user on the internet collapses into one bucket
- * keyed on nginx's address; raise it to 2 WITHOUT the second proxy and any
+ * keyed on the load balancer's address; raise it to 2 WITHOUT the second
+ * proxy and any
  * client can pick its own address by sending an X-Forwarded-For header.
  * Change the topology and this value together, never one without the other.
  *

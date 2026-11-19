@@ -56,9 +56,9 @@ describe('trustsProxy — one answer for Express and the socket handshake', () =
 
 // ─── TRUST_PROXY_HOPS ───────────────────────────────────────────────────────
 //
-// One nginx is one hop. An OVH Load Balancer in front of it is two — and at
+// One nginx is one hop. A load balancer in front of it is two — and at
 // `trust proxy: 1` every user on the internet then collapses into ONE
-// rate-limit bucket keyed on nginx's address. The count has to move with the
+// rate-limit bucket keyed on the load balancer's address. The count has to move with the
 // topology, on BOTH surfaces at once.
 
 describe('trustedProxyHops', () => {

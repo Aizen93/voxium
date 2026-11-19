@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { X, Copy, Check } from 'lucide-react';
 import { getTranslatedError } from '../../utils/serverErrors';
+import { inviteLink } from '../../utils/webClientUrl';
 
 interface Props {
   serverId: string;
@@ -17,8 +18,8 @@ export function InviteModal({ serverId, onClose }: Props) {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const baseUrl = import.meta.env.VITE_WS_URL || window.location.origin;
-  const inviteLink = `${baseUrl}/invite/${inviteCode}`;
+  // The web client's /invite/:code page, on the web client's origin (utils/webClientUrl.ts)
+  const link = inviteLink(inviteCode);
 
   useEffect(() => {
     createInvite(serverId)
@@ -34,13 +35,13 @@ export function InviteModal({ serverId, onClose }: Props) {
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(inviteLink);
+      await navigator.clipboard.writeText(link);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
       // Fallback for non-secure contexts
       const textarea = document.createElement('textarea');
-      textarea.value = inviteLink;
+      textarea.value = link;
       document.body.appendChild(textarea);
       textarea.select();
       document.execCommand('copy');
@@ -84,7 +85,7 @@ export function InviteModal({ serverId, onClose }: Props) {
                 <input
                   type="text"
                   className="input flex-1"
-                  value={inviteLink}
+                  value={link}
                   readOnly
                   onFocus={(e) => e.target.select()}
                 />

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { resolveStunUrl, deriveStunUrl, isValidStunUrl, DEFAULT_STUN_PORT } from '../../utils/stunUrl';
 
 describe('stunUrl — where DM calls send their STUN binding requests', () => {
-  it('derives stun:<api-host>:3478 from VITE_WS_URL by default (coturn lives on the edge box)', () => {
+  it('derives stun:<api-host>:3478 from VITE_WS_URL by default (the STUN server of the deployment is by default the host the socket connects to)', () => {
     expect(resolveStunUrl({ VITE_WS_URL: 'https://voxium.app' })).toBe(`stun:voxium.app:${DEFAULT_STUN_PORT}`);
     expect(resolveStunUrl({ VITE_WS_URL: 'http://192.168.1.15:3001' })).toBe('stun:192.168.1.15:3478');
     expect(resolveStunUrl({ VITE_WS_URL: 'http://[::1]:3001' })).toBe('stun:[::1]:3478');

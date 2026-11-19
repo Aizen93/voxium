@@ -69,7 +69,7 @@ export function getRedisConfigSub(): RedisClientType {
 // ─── Node liveness heartbeat (multi-node) ────────────────────────────────────
 // Each node maintains `node:alive:{NODE_ID}` with a short TTL. Peers use it to
 // decide whether another node's state (voice mirrors, etc.) is live or reapable.
-// Production runs multiple horizontally-scaled instances — boot/periodic cleanup
+// When several instances run (horizontal scaling), boot/periodic cleanup
 // must NEVER assume it is the only node.
 
 export const NODE_HEARTBEAT_TTL_S = 30;
@@ -352,7 +352,7 @@ export interface PresenceSweepResult {
  * Called on server startup (crash/redeploy leftovers), on shutdown, and every
  * minute while serving (utils/presenceReaper.ts).
  *
- * Multi-node aware: production runs multiple instances, so wiping ALL presence
+ * Multi-node aware: when several instances run, wiping ALL presence
  * would mark every user on the peer nodes offline. When another node is alive
  * (heartbeat present) and an `io` is provided, only sockets that no longer
  * exist anywhere in the cluster are reaped. The full wipe is used only when

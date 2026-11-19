@@ -6,7 +6,7 @@
 #
 # Database migrations run automatically on server startup.
 # The server image is built from the root Dockerfile (multi-stage, non-root).
-# Put nginx/TLS in front of this (see DEPLOYMENT.md sections 11-12).
+# Put a reverse proxy with TLS in front of this.
 
 services:
   server:
@@ -16,7 +16,22 @@ services:
     container_name: voxium-server
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      # The HTTP port is published on the loopback address only: clients reach
+      # the server through the reverse proxy on this host,
+      # the one party that may set X-Forwarded-For, and a firewall rule cannot
+      # be relied on to close a port Docker publishes. VOXIUM_HTTP_BIND (set in
+      # the --env-file) is the address to publish it on instead: the host's
+      # private address for a proxy on another machine or a proxy container
+      # that reaches the server through the host, 0.0.0.0 for every IPv4
+      # address (the mapping this replaced also published on IPv6; an IPv6
+      # address is written in brackets, for example [::1]). A proxy on this
+      # host connects to 127.0.0.1:3001, not localhost:3001: the name also
+      # resolves to the IPv6 loopback, where nothing listens now (nginx logs
+      # a failed attempt before it falls back, and a proxy pointed at
+      # [::1]:3001 gets no answer). Anything on another machine that reads
+      # :3001/health directly, an uptime monitor for one, must go through the
+      # proxy or needs VOXIUM_HTTP_BIND.
+      - "${VOXIUM_HTTP_BIND:-127.0.0.1}:3001:3001"
       # mediasoup WebRtcServer ports (UDP required, TCP fallback): one udp+tcp
       # pair per worker at MIN_PORT + slot, one worker per CPU core (max 8), so
       # MIN..MIN+7 covers any host. Keep MEDIASOUP_MAX_PORT small here — Docker
@@ -28,6 +43,10 @@ services:
       # defaults below are what gets published, whatever the container believes.
       - "${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}:${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}/udp"
       - "${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}:${MEDIASOUP_MIN_PORT:-10000}-${MEDIASOUP_MAX_PORT:-10007}/tcp"
+    # Every other setting comes from .env.production (.env.production.example
+    # lists them all). NODE_ID, when set, names this node: a second server
+    # container needs one of its own, set per container and not in a file
+    # both read (two running processes must never share one).
     env_file:
       - .env.production
     environment:
@@ -92,7 +111,43 @@ services:
     image: redis:7-alpine
     container_name: voxium-redis
     restart: unless-stopped
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes --appendfsync everysec
+    # Redis holds the server's STATE, not a cache: rate-limit and abuse
+    # budgets, the single-use marks of solved sign-up challenges and of used
+    # two-factor codes, the feature-flag and rate-limit overrides set from the
+    # admin dashboard, scheduled-job locks, node heartbeats, presence and
+    # voice state. Any eviction policy would drop such keys without a word
+    # once memory runs short (a volatile-* policy too: the marks, budgets and
+    # locks all carry a TTL), hence noeviction.
+    #
+    # With noeviction a full Redis refuses new writes and loses nothing it
+    # holds; reads, deletes and expiry keep working, so memory comes back as
+    # keys expire. Meanwhile the server logs each refused write: rate limits
+    # fall back to a per-process count in memory, scheduled jobs skip the run,
+    # the marks of used two-factor codes are kept in each server process's
+    # memory instead (a code is still refused a second time on that process),
+    # the marks of solved sign-up challenges are not recorded (the request goes
+    # through, as when Redis is down), and new voice joins and connections are
+    # not recorded (a voice join can fail, a user who connects is not shown
+    # online). Four more consequences:
+    #  - a server process cannot START while Redis is full: it writes its node
+    #    heartbeat at boot, a refusal ends the process with exit code 1, and
+    #    the container restarts in a loop until memory frees;
+    #  - an administrator cannot set a feature flag or a rate-limit override
+    #    from the dashboard (the write is refused; a reset works);
+    #  - a running node's heartbeat lapses after 30 seconds without a
+    #    successful write, and where several nodes run its peers then reap its
+    #    voice channels and their visibility resyncs fail closed;
+    #  - Explore can serve a page up to 60 seconds stale.
+    # So size maxmemory with room to spare and watch used_memory against it
+    # (`docker compose -f docker-compose.production.yml exec redis redis-cli
+    # INFO memory`). Keep the container's memory limit (below) at about twice
+    # maxmemory: rewriting the append-only file forks Redis, and the copy can
+    # double the memory in use while it runs.
+    #
+    # Persistence: the append-only file, written to disk every second (a crash
+    # loses about the last second of writes), so the admin's overrides, the
+    # budgets and the single-use marks survive a restart.
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec
     volumes:
       - redisdata:/data
     healthcheck:
@@ -108,6 +163,44 @@ services:
         reservations:
           cpus: "0.1"
           memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # STUN for direct calls (DM calls are peer to peer; voice channels go
+  # through the server's SFU and do not need it). STUN only: a client asks
+  # "what is my public address?" in about 100 bytes and gets the answer; no
+  # media, no relay (TURN requests are ignored), no credentials. The same
+  # settings as the development docker-compose.yml.
+  #
+  # The clients ask stun:<host of VITE_WS_URL>:3478 unless they were built
+  # with VITE_STUN_URL (apps/desktop/src/utils/stunUrl.ts), so that host must
+  # reach this machine on 3478/udp (coturn answers on TCP too): open it in the
+  # firewall. Host networking, so coturn sees each client's own address and
+  # port; behind Docker's port publishing it can see the bridge's instead.
+  # Linux hosts (Docker Desktop needs its host networking feature).
+  stun:
+    image: coturn/coturn:4.19-alpine
+    container_name: voxium-stun
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --stun-only
+      - --no-auth
+      - --no-tls
+      - --listening-port=3478
+      - --log-file=stdout
+      - --no-multicast-peers
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 16M
     logging:
       driver: json-file
       options:

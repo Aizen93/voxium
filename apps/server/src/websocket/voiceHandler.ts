@@ -211,7 +211,7 @@ function mirrorScreenShare(channelId: string, userId: string | null, keepScene =
  * Clear stale server-voice Redis mirror state on startup. mediasoup objects are
  * node-local, so after a crash/redeploy THIS node's mirrored channels are ghosts.
  *
- * Multi-node aware (production runs several instances): only channels owned by
+ * Multi-node aware (when several instances run): only channels owned by
  * this NODE_ID, or by a node with no live heartbeat, are reaped — a live peer's
  * mirror is NEVER touched (the old wipe-all erased the peer's live voice state
  * on every deploy). Persistent moderation keys (voice:server_muted:*,
