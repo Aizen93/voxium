@@ -193,6 +193,18 @@ const ALL_MEMBERS = {
   unverifiableUserIds: [],
 };
 
+/**
+ * The channel device lists as the service answers them while `id`'s identity
+ * change is not accepted: the default call fails on them, a collecting call
+ * names them and lists everyone else.
+ */
+function listsWhileIdentityChanged(id: string) {
+  return async (_channelId: string, opts?: { collectIdentityChanges?: boolean }) => {
+    if (!opts?.collectIdentityChanges) throw new TestIdentityChangedError(id);
+    return { ...ALL_MEMBERS, identityChangedUserIds: [id] };
+  };
+}
+
 async function begin() {
   const session = await beginSecureVoiceSession(CH);
   myEpoch = session.epoch;
@@ -546,6 +558,84 @@ describe('a participant vetted at a later membership check', () => {
   });
 });
 
+describe('one member\'s unaccepted identity change does not hold back the others', () => {
+  it('a joiner whose first vet failed transiently is keyed past their arrival at the next check', async () => {
+    await callWithOccupant();
+    const beforeArrival = await speak(1);
+    await arriveWithFailingVet('x');
+    // `z`, a member of the channel who is not in the call, has an identity change not accepted
+    fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('z'));
+
+    await membershipCheck();
+    await until(() => sealedTo('x').length === 1);
+    const afterKeying = await speak(2);
+
+    const [sealed] = sealedTo('x');
+    expect(installs.map((i) => i.keyId)).toEqual([0, 1]);
+    expect(sealed.keyId).toBe(1);
+    await expectClosedTo(sealed, beforeArrival, 0);
+    expect(await opens([sealed], afterKeying)).toBe(true);
+    expect(markExcluded).not.toHaveBeenCalled();
+  });
+
+  it('a joiner the list did not name yet, whose refetch fails on that change, is keyed past their arrival at the next check', async () => {
+    // Our join's list does not name `x` yet
+    fetchChannelDeviceLists.mockResolvedValueOnce({
+      ...ALL_MEMBERS,
+      members: ALL_MEMBERS.members.filter((m) => m.userId !== 'x'),
+    });
+    await callWithOccupant();
+    const beforeArrival = await speak(1);
+    fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('z'));
+
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => warn.mock.calls.some((args) => String(args[0]).includes('Vetting x failed transiently')));
+    expect(sealedTo('x')).toHaveLength(0);
+
+    await membershipCheck();
+    await until(() => sealedTo('x').length === 1);
+
+    const [sealed] = sealedTo('x');
+    expect(sealed.keyId).toBe(1);
+    await expectClosedTo(sealed, beforeArrival, 0);
+    expect(markExcluded).not.toHaveBeenCalled();
+  });
+
+  it('a member excluded at the check is rotated away from before a retried vet is keyed: no generation installed in that check opens with the key they held', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('y'), { initialReplay: false });
+    await until(() => sealedTo('y').length === 1);
+    await arriveWithFailingVet('x');
+    const heldByY = sealedTo('y');
+
+    // From here on, one frame of ours is sealed under every generation the moment it is installed
+    const recorded: Array<{ keyId: number; frame: Promise<ArrayBuffer | null> }> = [];
+    frameSession.setLocalKey.mockImplementation((keyId: number, raw: Uint8Array) => {
+      const key = raw.slice();
+      installs.push({ keyId, key });
+      let resolveFrame!: (frame: ArrayBuffer | null) => void;
+      recorded.push({ keyId, frame: new Promise((resolve) => { resolveFrame = resolve; }) });
+      senderReady = senderReady
+        .then(() => sender.setKey(keyId, key))
+        .then(async () => resolveFrame(await sender.encrypt(new Uint8Array([9, keyId, 9]).buffer)));
+    });
+
+    fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('y'));
+    await membershipCheck();
+    await until(() => sealedTo('x').length >= 1 && markExcluded.mock.calls.some((call) => call[1] === 'y'));
+    await settle();
+
+    expect(recorded.length).toBeGreaterThan(0);
+    for (const generation of recorded) {
+      const frame = await generation.frame;
+      expect(frame).not.toBeNull();
+      expect(await opens(heldByY, frame!)).toBe(false);
+    }
+    const last = await recorded[recorded.length - 1].frame;
+    expect(await opens(sealedTo('x'), last!)).toBe(true);
+  });
+});
+
 describe('a member excluded during a call stays excluded until they start a new session', () => {
   const refusals = (id: string) =>
     warn.mock.calls.filter((args) => String(args[0]).includes(`${id} was excluded in this session`)).length;
@@ -608,7 +698,7 @@ describe('a member excluded during a call stays excluded until they start a new 
     onParticipantJoined(CH, user('x'), { initialReplay: false });
     await until(() => sealedTo('x').length === 1);
 
-    fetchChannelDeviceLists.mockRejectedValueOnce(new TestIdentityChangedError('x'));
+    fetchChannelDeviceLists.mockImplementationOnce(listsWhileIdentityChanged('x'));
     confirmMembership(CH);
     await until(() => installs.length === 3);
 
@@ -710,7 +800,7 @@ describe('a member excluded during a call stays excluded until they start a new 
     await callWithOccupant();
     onParticipantJoined(CH, user('x'), { initialReplay: false });
     await until(() => sealedTo('x').length === 1);
-    fetchChannelDeviceLists.mockRejectedValueOnce(new TestIdentityChangedError('x'));
+    fetchChannelDeviceLists.mockImplementationOnce(listsWhileIdentityChanged('x'));
     confirmMembership(CH);
     await until(() => installs.length === 3);
     const beforeNewSession = await speak(1);
