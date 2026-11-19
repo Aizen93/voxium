@@ -7,6 +7,7 @@ import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { prisma } from '../utils/prisma';
 import { deleteUserAccount } from '../utils/accountDeletion';
 import { revokeUserSessions } from '../utils/sessionRevocation';
+import { broadcastProfileUpdate } from '../utils/profileBroadcast';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
@@ -2213,7 +2214,7 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
   }
 });
 
-adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, next: NextFunction) => {
+adminRouter.delete('/storage/files/*path', async (req: Request<{ path: string[] }>, res: Response, next: NextFunction) => {
   try {
     const pathSegments = req.params.path;
     const key = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments as string;
@@ -2221,15 +2222,51 @@ adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, n
       throw new BadRequestError('Invalid file key');
     }
 
-    // Nullify or expire DB reference
+    // Nullify or expire DB reference. Who held the key is read first: the
+    // update commits, and then connected clients are told (below).
+    let formerOwnerIds: string[] = [];
+    let formerSpaceIds: string[] = [];
     if (key.startsWith('avatars/')) {
+      formerOwnerIds = (await prisma.user.findMany({ where: { avatarUrl: key }, select: { id: true } })).map((u) => u.id);
       await prisma.user.updateMany({ where: { avatarUrl: key }, data: { avatarUrl: null } });
     } else if (key.startsWith('server-icons/')) {
+      formerSpaceIds = (await prisma.server.findMany({ where: { iconUrl: key }, select: { id: true } })).map((s) => s.id);
       const cleared = await prisma.server.updateMany({ where: { iconUrl: key }, data: { iconUrl: null } });
       // A space lost its icon: its Explore card changed (never throws)
       if (cleared.count > 0) await bumpDiscoveryPageCache('admin storage delete (space icon)');
     } else if (key.startsWith('attachments/')) {
       await prisma.messageAttachment.updateMany({ where: { s3Key: key }, data: { expired: true } });
+    }
+
+    // Connected clients drop the dead key live, like after a profile or space
+    // edit. Each step is best effort: the delete has committed. Each former
+    // owner is announced as their row reads AFTER the write, so a rename or a
+    // new avatar that landed meanwhile is what clients are told.
+    if (formerOwnerIds.length > 0) {
+      let owners: Array<{ id: string; displayName: string; avatarUrl: string | null }> = [];
+      try {
+        owners = await prisma.user.findMany({ where: { id: { in: formerOwnerIds } }, select: { id: true, displayName: true, avatarUrl: true } });
+      } catch (readErr) {
+        console.error('[Admin] Failed to read the profiles to announce after an avatar removal:', readErr instanceof Error ? readErr.message : readErr);
+      }
+      for (const owner of owners) {
+        try {
+          await broadcastProfileUpdate(owner.id, { displayName: owner.displayName, avatarUrl: owner.avatarUrl });
+        } catch (broadcastErr) {
+          console.error('[Admin] Failed to broadcast avatar removal:', broadcastErr instanceof Error ? broadcastErr.message : broadcastErr);
+        }
+      }
+    }
+    if (formerSpaceIds.length > 0) {
+      try {
+        const spaces = await prisma.server.findMany({ where: { id: { in: formerSpaceIds } }, select: serverSelect });
+        const io = getIO();
+        for (const space of spaces) {
+          io.to(`server:${space.id}`).emit(WS_EVENTS.SERVER_UPDATED, space as unknown as Server);
+        }
+      } catch (broadcastErr) {
+        console.error('[Admin] Failed to broadcast space icon removal:', broadcastErr instanceof Error ? broadcastErr.message : broadcastErr);
+      }
     }
 
     await deleteFromS3(key);
