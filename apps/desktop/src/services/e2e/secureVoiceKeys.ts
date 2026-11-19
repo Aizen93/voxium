@@ -26,17 +26,26 @@
 //    recognises only the key in use (given again, it keeps its count), so a
 //    key that has been replaced is never installed again.
 //  - A joiner is keyed with a post-arrival generation only (no past audio), and
-//    every departure rotates to a fresh key (no future audio). After an
-//    exclusion the key in use is one the excluded device was never sealed: a
-//    fresh rotation, except for a participant who was never keyed, or one
-//    excluded while a fresh rotation is sealing (it replaces the key they
-//    held).
+//    every departure rotates to a fresh key (no future audio); a departure
+//    naming another session than the one held for a participant is not
+//    theirs and changes nothing. After an exclusion the key in use is one the
+//    excluded device was never sealed: a fresh rotation, except for a
+//    participant who was never keyed, or one excluded while a fresh rotation
+//    is sealing (it replaces the key they held). A membership check excludes
+//    everyone it holds who must go (an identity change, no longer a member, a
+//    pinned device no longer published), and takes their one rotation, before
+//    it keys anyone; a participant whose retried vet it refuses is excluded
+//    without ever having been keyed. So nothing it seals derives from a key
+//    an excluded device holds.
 //  - A participant excluded during a session is not keyed again in it: the
 //    epoch they were excluded under is recorded, and only an announcement
 //    with a new epoch is vetted again.
 //  - Neither a key nor seq is ever persisted. Teardown zero-fills only the
 //    current key; superseded generations, the peers' keys decoded here and the
 //    base64 copies sealed into Olm plaintexts are left to the garbage collector.
+//    A rotation for a session that has ended mints nothing, and a fresh key
+//    whose session ends while it is being sealed is never installed (it is the
+//    current key, which the teardown zero-filled).
 //  - Session epochs (mintEpoch) carry 96 random bits (16 random bytes, each
 //    mapped to one of 64 characters): their unpredictability is what stops an
 //    envelope withheld from an earlier session from installing.
@@ -754,11 +763,12 @@ export function confirmMembership(channelId: string): void {
       if (state.ended) return;
     }
 
-    // Every exclusion of the pass is decided before anyone is keyed in it:
-    // an identity change, a participant no longer a member, a pinned device
-    // no longer published. When one of them had been keyed, one fresh
+    // Everyone held who must go is excluded before anyone is keyed in the
+    // pass: an identity change, a participant no longer a member, a pinned
+    // device no longer published. When one of them had been keyed, one fresh
     // rotation follows (spec §21.4), so nothing keyed below derives from a key
-    // an excluded device holds. A participant never keyed takes none.
+    // an excluded device holds. A participant never keyed takes none, and one
+    // whose retried vet is refused below is excluded without having been keyed.
     let keyedExcluded = false;
     for (const [userId, peer] of [...state.peers.entries()]) {
       let notice: unknown;

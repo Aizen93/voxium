@@ -2113,6 +2113,15 @@ the §20 precedent) after vetting against BOTH the authoritative member
 endpoint (`GET /e2e/channels/:id/devices` — socket events are hints, §19.3)
 and the signature-checked verified device list.
 
+That endpoint's answer verifies every member's identity. A sender starting a
+session reads it so that a member whose identity changed since it was
+accepted is named and flagged rather than failing the start: the session
+starts, that member stays on its member list and is keyed only once a vet of
+theirs passes, which their unaccepted change refuses. The same holds when a
+vet reads the list again for a participant it did not name yet: a change of
+the participant's own excludes them, another member's is flagged and the vet
+goes on.
+
 Both sides' session epochs bind a sealed key to the exact pair of sessions that
 are talking. Each participant announces its epoch alongside its `deviceId` at
 `voice:join`; a sealed key carries the sender's own epoch AND `recipientEpoch`,
@@ -2155,6 +2164,10 @@ unheard.
 - **Departure / kick / device revocation / identity change:** fresh random
   keys sealed to everyone remaining — no future audio for the leaver.
   Server-side, secure-member removal force-evicts live voice cluster-wide.
+  A departure (`voice:user_left`) names the epoch of the session that left
+  when it announced one; a sender holding another epoch for that participant
+  (a new session of theirs announced before the departure of the previous one
+  arrived) ignores it, and a departure without one applies as before.
   Every exclusion of a participant who holds the key in use is a rotation
   trigger, including ones discovered mid-call (an inbound key that fails its
   identity pin, a `legacy-key` payload, an identity change found by the
@@ -2170,7 +2183,13 @@ unheard.
   published list — the stolen-device response. The same check excludes a
   participant whose identity changed since it was accepted, and it runs for
   every participant on every pass: one member's unaccepted change is reported
-  for that member and does not stop the check for the others.
+  for that member and does not stop the check for the others. A pass first
+  excludes everyone it holds who must go (an identity change, a participant
+  no longer a member, a pinned device no longer published), takes one fresh
+  rotation for them when one of them had been keyed, and only then keys a
+  participant whose vet it retries; one whose retried vet it refuses is
+  excluded without ever having been keyed. So nothing it seals derives from
+  a key an excluded device holds.
 - **Excluded for the session:** a participant excluded during a session is
   not keyed again in it. The sender records the epoch each participant was
   excluded under and refuses a later announcement under that epoch, or under
@@ -2193,8 +2212,11 @@ No plaintext fallback exists at any layer: no encoded-transform support ⇒
 the channel is unjoinable (WebKitGTK/Linux is hard-blocked in v1); a
 transform/worker failure mid-call closes the producer and leaves; a
 non-envelope key payload excludes its sender (`legacy-key`); reconnects and
-transport restarts re-begin the session with a fresh key and epoch — a
-sender key never survives a session restart and seq is never persisted.
+transport restarts re-begin the session with a fresh key and epoch, while
+another member's identity change is unaccepted too (§21.3) — a sender key
+never survives a session restart and seq is never persisted. A session that
+has ended rotates nothing: no key is minted for it, and a fresh key it was
+still sealing when it ended is never installed.
 Server moderation inside secure voice is impossible BY DESIGN: members get
 CONNECT+SPEAK only (no mute/deafen/move bits exist for anyone), force-move
 in or out is rejected opacity-preservingly, and voice diagnostics are blind
