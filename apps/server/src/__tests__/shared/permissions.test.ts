@@ -13,6 +13,7 @@ import {
   permissionBitsFromString,
   mergeKnownPermissions,
   validateKnownPermissions,
+  validatePermissionString,
 } from '@voxium/shared';
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -375,8 +376,23 @@ describe('Shared permissions utilities', () => {
 
     it.each([['1'.repeat(41)], [''], ['0x1f'], [' 1'], ['-1'], [1], [null], [undefined], [{}]])('refuses %j, saying what it must be', (value) => {
       expect(validateKnownPermissions(value)).toBe(
-        `knownPermissions must be a permission bitmask: a string of 1 to ${PERMISSION_STRING_MAX_DIGITS} decimal digits`,
+        `knownPermissions must be a permission bitmask: a non-negative whole number as a string of 1 to ${PERMISSION_STRING_MAX_DIGITS} decimal digits`,
       );
+    });
+  });
+
+  describe('validatePermissionString', () => {
+    it('names the field it judges', () => {
+      expect(validatePermissionString('allow', 'abc')).toBe(
+        `allow must be a permission bitmask: a non-negative whole number as a string of 1 to ${PERMISSION_STRING_MAX_DIGITS} decimal digits`,
+      );
+      expect(validatePermissionString('deny', '')).toContain('deny must be');
+      expect(validatePermissionString('permissions', '-1')).toContain('permissions must be');
+    });
+
+    it('accepts what permissionsToString writes', () => {
+      expect(validatePermissionString('permissions', permissionsToString(0n))).toBeNull();
+      expect(validatePermissionString('permissions', permissionsToString(ALL_PERMISSIONS))).toBeNull();
     });
   });
 });

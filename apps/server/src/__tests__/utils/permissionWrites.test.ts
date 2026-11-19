@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ALL_PERMISSIONS, LEGACY_CLIENT_KNOWN_PERMISSIONS, Permissions } from '@voxium/shared';
-import { planOverrideWrite, readKnownPermissions, storedPermissionBits, SERVER_LEVEL_ONLY_PERMISSIONS } from '../../utils/permissionWrites';
+import { planOverrideWrite, readKnownPermissions, readPermissionValue, storedPermissionBits, SERVER_LEVEL_ONLY_PERMISSIONS } from '../../utils/permissionWrites';
 import { BadRequestError } from '../../utils/errors';
 
 // A bit no flag uses yet: a permission added after this build
@@ -19,6 +19,18 @@ describe('readKnownPermissions', () => {
 
   it.each([null, '', '0x1', ' 1', 7, '1'.repeat(41)])('%j is a 400', (value) => {
     expect(() => readKnownPermissions(value)).toThrow(BadRequestError);
+  });
+});
+
+describe('readPermissionValue', () => {
+  it('reads the bits this server knows of a bitmask string', () => {
+    expect(readPermissionValue('permissions', (FUTURE | Permissions.SEND_MESSAGES).toString())).toBe(Permissions.SEND_MESSAGES);
+    expect(readPermissionValue('allow', '0')).toBe(0n);
+  });
+
+  it.each(['', 'abc', '-1', '0x1', ' 1', '1'.repeat(41)])('%j is a 400 naming the field, never 0', (value) => {
+    expect(() => readPermissionValue('deny', value)).toThrow(BadRequestError);
+    expect(() => readPermissionValue('deny', value)).toThrow(/^deny must be a permission bitmask/);
   });
 });
 
