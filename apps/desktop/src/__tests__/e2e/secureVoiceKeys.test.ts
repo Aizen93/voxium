@@ -75,6 +75,7 @@ import {
   confirmMembership,
   SecureVoiceError,
   E2EIdentityChangedError,
+  secureVoiceKeyChain,
 } from '../../services/e2e/secureVoiceKeys';
 
 const CH = 'chan-1';
@@ -84,10 +85,20 @@ const KEY_B64 = 'A'.repeat(43);
 /** OUR session epoch — peers must echo it back as recipientEpoch. */
 let myEpoch = '';
 
+/**
+ * Wait until the key chain of the session under test is at rest twice in a
+ * row. Every key step runs on that chain, so waiting on it is waiting on the
+ * work itself, however slow its WebCrypto calls are; the turn between the two
+ * looks lets a step queued meanwhile, or a notice or a module import a step
+ * started without awaiting, land before the second look.
+ */
 const flush = async () => {
-  // The session chain nests dynamic imports + async steps — settle generously
-  // (a 2-round flush was observed to race under parallel-worker contention)
-  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  for (let calm = 0; calm < 2; ) {
+    const chain = secureVoiceKeyChain(CH);
+    await chain;
+    await new Promise((r) => setTimeout(r, 0));
+    calm = secureVoiceKeyChain(CH) === chain ? calm + 1 : 0;
+  }
 };
 
 function deviceListFor(deviceId: string) {
@@ -849,9 +860,9 @@ describe('cross-session and exclusion hardening', () => {
   it('a departing member stops being reported as un-hearable', async () => {
     await withVettedPeer();
     onParticipantLeft(CH, 'peer');
-    await flush();
 
-    expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+    // The badge is cleared by a notice the step starts without waiting for it
+    await vi.waitFor(() => expect(clearIssue).toHaveBeenCalledWith(CH, 'peer'));
   });
 
   it('an ALREADY-EXCLUDED member also stops being reported when they leave', async () => {
@@ -864,9 +875,9 @@ describe('cross-session and exclusion hardening', () => {
     // They are no longer in `peers`, so the badge must be cleared before the
     // "was this peer known?" early return.
     onParticipantLeft(CH, 'peer');
-    await flush();
 
-    expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+    // The badge is cleared by a notice the step starts without waiting for it
+    await vi.waitFor(() => expect(clearIssue).toHaveBeenCalledWith(CH, 'peer'));
   });
 
   it('a TRANSIENT vet failure does not exclude — the next membership tick re-vets and keys them', async () => {
@@ -997,8 +1008,8 @@ describe('decrypt watchdog (spec §21.4 lost-key healing)', () => {
       // Healed before the grace period: no warning, and any existing one goes
       onStalled('peer', true);
       onStalled('peer', false);
-      await flush();
-      expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+      // The badge is cleared by a notice started outside the key chain
+      await vi.waitFor(() => expect(clearIssue).toHaveBeenCalledWith(CH, 'peer'));
       vi.advanceTimersByTime(30_000);
       await flush();
       expect(markExcluded).not.toHaveBeenCalledWith(CH, 'peer', 'no-key');
@@ -1006,8 +1017,8 @@ describe('decrypt watchdog (spec §21.4 lost-key healing)', () => {
       // Never healed: the member is surfaced as one we cannot hear
       onStalled('peer', true);
       vi.advanceTimersByTime(30_000);
-      await flush();
-      expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'no-key');
+      // Raised by the watchdog's timer, outside the key chain
+      await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'no-key'));
     } finally {
       vi.useRealTimers();
     }
@@ -1083,8 +1094,10 @@ describe('teardown', () => {
         // The exclusion's notice is where the session ends
         markExcluded.mockImplementationOnce(() => { endSecureVoiceSession(CH); });
         handleInboundKey(CH, 'peer', PEER_DEVICE, '{"keyB64":"plaintext-key"}');
-        await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'legacy-key'));
-        await flush();
+        // The session ends inside this step, so the step itself is what is waited on
+        await secureVoiceKeyChain(CH);
+
+        expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'legacy-key');
 
         expect(minted.keys).toHaveLength(0);
         expect(frameSession.setLocalKey).not.toHaveBeenCalled();
@@ -1104,9 +1117,10 @@ describe('teardown', () => {
           return ENV;
         });
         onParticipantLeft(CH, 'other');
-        await vi.waitFor(() => expect(encryptToDevice).toHaveBeenCalledTimes(1));
-        await flush();
+        // The session ends inside this step, so the step itself is what is waited on
+        await secureVoiceKeyChain(CH);
 
+        expect(encryptToDevice).toHaveBeenCalledTimes(1);
         expect(minted.keys).toHaveLength(1);
         expect(minted.keys[0].every((byte) => byte === 0)).toBe(true);
         expect(frameSession.setLocalKey).not.toHaveBeenCalled();

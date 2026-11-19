@@ -1032,6 +1032,19 @@ export function endSecureVoiceSessionFor(channelId: string, frames: FrameCryptoS
   frames.destroy();
 }
 
+/**
+ * What the unit tests of this module wait on; nothing in the app does. The
+ * serial key chain of the channel's session, which settles once every step
+ * queued on it so far has run, or one settled promise, the same on every
+ * call, when the channel has no session. It never rejects (see `enqueue`).
+ */
+export function secureVoiceKeyChain(channelId: string): Promise<void> {
+  return sessions.get(channelId)?.chain ?? NO_CHAIN;
+}
+
+/** What secureVoiceKeyChain answers for a channel with no chain to wait on. */
+const NO_CHAIN: Promise<void> = Promise.resolve();
+
 function endSessionState(state: SecureVoiceSessionState): void {
   state.ended = true;
   if (sessions.get(state.channelId) === state) sessions.delete(state.channelId);

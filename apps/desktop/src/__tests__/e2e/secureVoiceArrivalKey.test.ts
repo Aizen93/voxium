@@ -92,6 +92,7 @@ import {
   handleInboundKey,
   handleKeyRequest,
   confirmMembership,
+  secureVoiceKeyChain,
 } from '../../services/e2e/secureVoiceKeys';
 
 const CH = 'chan-1';
@@ -226,10 +227,22 @@ async function until(condition: () => boolean): Promise<void> {
   }, { timeout: 3000, interval: 2 });
 }
 
-/** Let the key chain finish whatever it was given (it mixes imports, timers and WebCrypto). */
+/**
+ * Let the key chain finish whatever it was given: the chain of the session
+ * under test and the sender cipher's installs (`senderReady`, which the
+ * module's setLocalKey feeds here, outside the chain) both at rest twice in a
+ * row. The turn between the two looks lets a step queued meanwhile, or a
+ * notice or an import a step started without awaiting, land before the second.
+ */
 async function settle(): Promise<void> {
-  for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 2));
-  await senderReady;
+  for (let calm = 0; calm < 2; ) {
+    const chain = secureVoiceKeyChain(CH);
+    const ready = senderReady;
+    await chain;
+    await ready;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    calm = secureVoiceKeyChain(CH) === chain && senderReady === ready ? calm + 1 : 0;
+  }
 }
 
 /** A transiently failing first vet: the step logs it and leaves them un-vetted. */
