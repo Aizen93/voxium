@@ -3,7 +3,8 @@ import base from './playwright.config';
 
 // Firefox (Gecko) variant for cross-engine validation of secure voice
 // (RTCRtpScriptTransform path — Firefox has no createEncodedStreams).
-// Untracked helper: run with
+// CI runs it as a blocking step ("E2E secure voice (Firefox ...)" in
+// .github/workflows/ci.yml); locally:
 //   npx playwright test secure-voice --config=playwright-firefox.config.ts
 // Differences from the Chromium config:
 // - fake mic via firefoxUserPrefs (Chromium's --use-fake-* flags don't exist)
