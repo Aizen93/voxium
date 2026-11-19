@@ -519,7 +519,10 @@ export interface ServerToClientEvents {
   // join replay is fresher and the snapshot can land after it.
   'voice:channel_users': (data: { channelId: string; serverId?: string; users: VoiceUser[]; source?: 'connect' }) => void;
   'voice:user_joined': (data: { channelId: string; serverId?: string; user: VoiceUser }) => void;
-  'voice:user_left': (data: { channelId: string; userId: string }) => void;
+  // `epoch` is the E2E session epoch of the session that left (secure voice
+  // channels only, spec §21.4): a client holding another epoch for that
+  // participant ignores the departure. Absent, a departure applies as before.
+  'voice:user_left': (data: { channelId: string; userId: string; epoch?: string }) => void;
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
   // Secure voice channels (spec §21): an Olm-sealed media sender key relayed

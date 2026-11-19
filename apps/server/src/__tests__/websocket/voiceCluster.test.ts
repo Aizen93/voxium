@@ -183,7 +183,7 @@ describe('voiceCluster — reapDeadNodeVoiceState', () => {
     mockRedis.sMembers.mockResolvedValue(['ch-dead']);
     mockRedis.get.mockResolvedValue('gone-node');
     mockIsNodeAlive.mockResolvedValue(false);
-    mockGuardedReap.mockResolvedValue(['u-1', 'u-2']);
+    mockGuardedReap.mockResolvedValue([{ userId: 'u-1' }, { userId: 'u-2', epoch: 'epochAAAA0001' }]);
 
     const io = createMockIO();
     await reapDeadNodeVoiceState(io as never);
@@ -191,8 +191,9 @@ describe('voiceCluster — reapDeadNodeVoiceState', () => {
     // The reap is guarded by the OBSERVED owner — never a blind delete
     expect(mockGuardedReap).toHaveBeenCalledWith('ch-dead', 'gone-node');
     expect(io.to).toHaveBeenCalledWith('channel:ch-dead');
+    // A ghost whose session announced an epoch (secure voice) leaves with it; one that did not, without the field
     expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead', userId: 'u-1' });
-    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead', userId: 'u-2' });
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead', userId: 'u-2', epoch: 'epochAAAA0001' });
     warnSpy.mockRestore();
   });
 

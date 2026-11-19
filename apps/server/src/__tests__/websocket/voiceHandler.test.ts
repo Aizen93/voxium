@@ -665,6 +665,33 @@ describe('voiceHandler — clearVoiceState (boot cleanup, multi-node aware)', ()
     expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead', userId: 'u-9' });
   });
 
+  it('the departure of a reaped ghost carries the epoch its mirror entry holds, and none when the entry holds no well-formed one', async () => {
+    mockVoiceRedis.sMembers.mockResolvedValue(['ch-dead-e2e']);
+    mockVoiceRedis.get.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:channel:node:ch-dead-e2e' ? 'gone-node' : null));
+    vi.mocked(redisIsNodeAlive).mockResolvedValue(false);
+    mockVoiceRedis.hGetAll.mockImplementation((key: string) =>
+      Promise.resolve(key === 'voice:channel:users:ch-dead-e2e'
+        ? {
+          'u-e1': JSON.stringify({ selfMute: false, selfDeaf: false, e2eDeviceId: 'device-aaaa1111', e2eEpoch: 'epochAAAA0001' }),
+          'u-e2': JSON.stringify({ selfMute: false, selfDeaf: false, e2eEpoch: 'no' }),
+          'u-e3': 'not json',
+          'u-e4': 'null',
+        }
+        : {}));
+
+    const io = createMockIO();
+    await clearVoiceState(io as any);
+
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead-e2e', userId: 'u-e1', epoch: 'epochAAAA0001' });
+    for (const userId of ['u-e2', 'u-e3', 'u-e4']) {
+      expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-dead-e2e', userId });
+    }
+    // Every entry is reaped, whatever it holds
+    const chain = mockVoiceRedis.multi();
+    for (const userId of ['u-e1', 'u-e2', 'u-e3', 'u-e4']) expect(chain.del).toHaveBeenCalledWith(`voice:user:${userId}`);
+  });
+
   it('reaps orphaned voice:user keys pointing at channels no longer active', async () => {
     mockVoiceRedis.scanIterator.mockImplementation(async function* (opts: { MATCH?: string }) {
       if (opts?.MATCH === 'voice:user:*') yield ['voice:user:u-orphan'];
@@ -1460,6 +1487,7 @@ describe('voiceHandler — private channel broadcasts (HIGH-8)', () => {
     handlers.get('voice:leave')!();
     expect(io.to).toHaveBeenCalledWith('channel:ch-h8-4');
     expect(io.to).not.toHaveBeenCalledWith('server:s1');
+    // A plaintext channel's session announces no epoch: the departure keeps its two fields
     expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-h8-4', userId: 'h8-4' });
   });
 
@@ -2210,7 +2238,8 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     evictUserFromChannelVoice(io as any, 'sec-ev', 'sv-ev');
     expect(io.to).toHaveBeenCalledWith('sock-sv-ev');
     expect(io._emit).toHaveBeenCalledWith('voice:error', { message: 'You have been disconnected from this voice channel.' });
-    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'sec-ev', userId: 'sv-ev' });
+    // The departure carries the epoch of the session that left
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'sec-ev', userId: 'sv-ev', epoch: EPOCH });
 
     // Rejoin, then delete the whole channel
     mockJoinableSecurePrisma();
@@ -2221,7 +2250,7 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
     io._emit.mockClear();
     cleanupChannelVoice(io as any, 'sec-ev2');
     expect(io._emit).toHaveBeenCalledWith('voice:error', { message: 'This voice channel no longer exists.' });
-    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'sec-ev2', userId: 'sv-ev2' });
+    expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'sec-ev2', userId: 'sv-ev2', epoch: EPOCH });
     // Idempotent on an already-empty channel
     cleanupChannelVoice(io as any, 'sec-ev2');
   });
@@ -2249,6 +2278,27 @@ describe('voiceHandler — secure voice channels (spec §21)', () => {
 
     const joined = io._emit.mock.calls.find((c) => c[0] === 'voice:user_joined');
     expect(joined?.[1].user).toMatchObject({ deviceId: DEVICE, epoch: EPOCH });
+  });
+
+  it('a departure carries the epoch of the session that left: a re-join announces the new epoch after the old session leaves with its own', async () => {
+    const io = createMockIO();
+    const { socket: first, handlers: h1 } = createMockSocket('sv-rj', 'sock-sv-rj-1');
+    handleVoiceEvents(io as any, first as any);
+    await h1.get('voice:join')!('sec-rj', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: EPOCH });
+    io._emit.mockClear();
+
+    // The same user joins again from a new socket (a reconnect), in a new session
+    mockJoinableSecurePrisma();
+    const { socket: second, handlers: h2 } = createMockSocket('sv-rj', 'sock-sv-rj-2');
+    handleVoiceEvents(io as any, second as any);
+    await h2.get('voice:join')!('sec-rj', { selfMute: false, selfDeaf: false, deviceId: DEVICE, epoch: 'epochNEWW0002' });
+
+    const events = io._emit.mock.calls.map((call) => call[0]);
+    const left = io._emit.mock.calls.find((call) => call[0] === 'voice:user_left');
+    const joined = io._emit.mock.calls.find((call) => call[0] === 'voice:user_joined');
+    expect(left?.[1]).toEqual({ channelId: 'sec-rj', userId: 'sv-rj', epoch: EPOCH });
+    expect(joined?.[1].user).toMatchObject({ deviceId: DEVICE, epoch: 'epochNEWW0002' });
+    expect(events.indexOf('voice:user_left')).toBeLessThan(events.indexOf('voice:user_joined'));
   });
 
   it('strips a malformed epoch rather than relaying it', async () => {

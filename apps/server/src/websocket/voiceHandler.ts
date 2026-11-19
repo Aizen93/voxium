@@ -236,15 +236,16 @@ export async function clearVoiceState(
     // Own channels reap unconditionally (our heartbeat is already up, so no
     // peer can be taking them over); dead-owner channels use the CAS-guarded
     // reap so a concurrent takeover by a peer is never wiped.
-    const userIds = ownedByUs
+    const occupants = ownedByUs
       ? await reapVoiceChannelMirror(channelId)
       : await reapDeadOwnerChannelMirror(channelId, owner);
-    if (userIds === null) continue; // ownership changed under us — hands off
+    if (occupants === null) continue; // ownership changed under us — hands off
     reapedChannels++;
-    reapedUsers += userIds.length;
+    reapedUsers += occupants.length;
     if (io) {
-      for (const uid of userIds) {
-        io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId: uid });
+      for (const { userId: uid, epoch } of occupants) {
+        // With the epoch the ghost's session announced (secure voice), as a live leave carries it
+        io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId: uid, ...(epoch && { epoch }) });
       }
     }
   }
@@ -1913,8 +1914,14 @@ export function leaveCurrentVoiceChannel(
       .catch((err) => console.warn(`[Voice] VIEW re-check on leave failed for ${userId}:`, err));
   }
 
-  // Broadcast to the channel's visibility room (VIEW_CHANNEL-scoped)
-  io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId });
+  // Broadcast to the channel's visibility room (VIEW_CHANNEL-scoped), with the
+  // E2E epoch of the session that left when it announced one (secure voice):
+  // a client already holding a newer session of this participant ignores it.
+  io.to(`channel:${channelId}`).emit('voice:user_left', {
+    channelId,
+    userId,
+    ...(userMedia?.e2eEpoch && { epoch: userMedia.e2eEpoch }),
+  });
 }
 
 /**
