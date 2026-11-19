@@ -43,7 +43,9 @@ vi.mock('../../hooks/useViewerPermissions', async (importOriginal) => ({
   useViewerPermissions: () => viewer.bits,
 }));
 
+import { AxiosError, type AxiosResponse } from 'axios';
 import { ChannelPermissionsEditor } from '../../components/server/ChannelPermissionsEditor';
+import { toast } from '../../stores/toastStore';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -163,7 +165,7 @@ describe('ChannelPermissionsEditor — what a save sends', () => {
  * allow or in deny, a bit its author does not hold. A bit the viewer lacks
  * that the stored override leaves as inherit cannot move (disabled, with the
  * refusal as its title); one stored as allow or deny moves between that state
- * and inherit only.
+ * and inherit only. A failed save shows the server's reason.
  */
 describe('ChannelPermissionsEditor — a toggle the server would refuse', () => {
   const stored = (allow: bigint, deny: bigint) => [{ id: 'o1', channelId: 'ch-1', roleId: 'r-everyone', allow: String(allow), deny: String(deny) }];
@@ -252,5 +254,33 @@ describe('ChannelPermissionsEditor — a toggle the server would refuse', () => 
     viewer.bits = Permissions.ADMINISTRATOR;
     await render('text');
     expect([...container.querySelectorAll('.group button')].some((b) => (b as HTMLButtonElement).disabled)).toBe(false);
+  });
+
+  it('a failed save shows the server\'s reason, translated', async () => {
+    const refusal = { status: 403, statusText: 'Forbidden', headers: {}, config: {}, data: { success: false, error: 'Cannot set overrides for permissions you do not have' } } as unknown as AxiosResponse;
+    serverState.setChannelPermissionOverride.mockRejectedValueOnce(new AxiosError('Request failed with status code 403', 'ERR_BAD_REQUEST', undefined, undefined, refusal) as never);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await render('text');
+      click('SEND_MESSAGES');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('serverErrors.cannotOverrideUnheldPermissions');
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it('a failure with no server reason shows the editor\'s own line', async () => {
+    const noReason = { status: 500, statusText: 'Error', headers: {}, config: {}, data: {} } as unknown as AxiosResponse;
+    serverState.setChannelPermissionOverride.mockRejectedValueOnce(new AxiosError('Request failed', 'ERR_BAD_RESPONSE', undefined, undefined, noReason) as never);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await render('text');
+      click('SEND_MESSAGES');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('channelPermissions.failedToSave');
+    } finally {
+      err.mockRestore();
+    }
   });
 });

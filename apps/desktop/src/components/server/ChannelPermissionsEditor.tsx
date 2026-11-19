@@ -10,6 +10,7 @@ import {
   hasPermission,
 } from '@voxium/shared';
 import type { ChannelPermissionOverride, PermissionInfo } from '@voxium/shared';
+import { getTranslatedError } from '../../utils/serverErrors';
 import { useViewerPermissions, mayTurnOn } from '../../hooks/useViewerPermissions';
 
 interface ChannelPermissionsEditorProps {
@@ -226,8 +227,8 @@ export function ChannelPermissionsEditor({
       }));
       toast.success(t('channelPermissions.updated'));
     } catch (err) {
-      console.error('Failed to save channel permissions:', err);
-      toast.error(t('channelPermissions.failedToSave'));
+      console.error('Failed to save channel permissions:', err instanceof Error ? err.message : err);
+      toast.error(getTranslatedError(err, t, 'channelPermissions.failedToSave'));
     } finally {
       setSaving(false);
     }
