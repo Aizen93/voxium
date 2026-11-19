@@ -419,19 +419,31 @@ function createFakeServer() {
           )) {
             throw new Error('400: device signature verification failed');
           }
+          // routes/e2e.ts: the same identity keys again keep the device and
+          // cross-signatures and the list version, and replace only the
+          // published keys; new identity keys clear the cross-signature, purge
+          // the device's inbox and bump the version, as a new device does
+          const sameIdentity = !!existing &&
+            existing.curve25519Key === body.curve25519Key && existing.ed25519Key === body.ed25519Key;
           user.devices.set(body.deviceId, {
             deviceId: body.deviceId,
             curve25519Key: body.curve25519Key,
             ed25519Key: body.ed25519Key,
-            deviceSignature: body.deviceSignature,
-            // like the real route, re-registering does NOT clear the stored
-            // cross-signature — it simply stops verifying against the new keys
-            masterSignature: existing?.masterSignature ?? null,
+            deviceSignature: existing && sameIdentity ? existing.deviceSignature : body.deviceSignature,
+            masterSignature: existing && sameIdentity ? existing.masterSignature : null,
             fallbackKey: body.fallbackKey,
             oneTimeKeys: [...body.oneTimeKeys],
             createdAt: existing?.createdAt ?? new Date(Date.now() + user.devices.size).toISOString(),
           });
-          user.listVersion += 1;
+          if (existing && !sameIdentity) {
+            for (let i = shares.length - 1; i >= 0; i--) {
+              if (shares[i].recipientUserId === userId && shares[i].recipientDeviceId === body.deviceId) shares.splice(i, 1);
+            }
+            for (let i = transfers.length - 1; i >= 0; i--) {
+              if (transfers[i].userId === userId && transfers[i].recipientDeviceId === body.deviceId) transfers.splice(i, 1);
+            }
+          }
+          if (!sameIdentity) user.listVersion += 1;
           return ok({
             registered: true,
             deviceId: body.deviceId,
@@ -1901,6 +1913,69 @@ describe('E2EService (cross-signing)', () => {
     // from a hostile withdrawal and that device already holds a session key
     // (§12.5 flap-back).
     expect(cleared.newDeviceIds).toEqual([injected.service.deviceId]);
+  });
+
+  it('a device stays cross-signed across a same-key re-register, and loses the signature when its keys change (#136)', async () => {
+    // A same-key PUT /e2e/devices: a retry whose first answer was lost, a
+    // second instance over the same vault, another client, or the same body
+    // sent again. The route keeps the cross-signature (it covers the user, the
+    // device id and both public keys) and the list version.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    let registration: unknown = null;
+    const base = server.apiFor(aliceId);
+    const recording = {
+      ...base,
+      async put(url: string, payload: FakePutBody) {
+        if (url === '/e2e/devices') registration = payload;
+        return base.put(url, payload);
+      },
+    };
+    const phone = new E2EService(aliceId, {
+      api: recording as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 0,
+    });
+    await phone.initialize();
+    await flushQueue();
+    const deviceId = phone.deviceId;
+    expect(registration).not.toBeNull();
+    expect(crossSignatureValid(server, aliceId, deviceId)).toBe(true);
+
+    const bob = makeParty(server, 'bob');
+    await bob.service.initialize();
+    await flushQueue();
+    const seenByBob = await bob.service.fetchDeviceList(aliceId, true);
+    expect(seenByBob.devices.find((d) => d.deviceId === deviceId)?.crossSigned).toBe(true);
+    const statusBefore = await bob.service.deviceListStatus(aliceId);
+    const versionBefore = server.userOf(aliceId).listVersion;
+    const signatureBefore = server.deviceOf(aliceId, deviceId).masterSignature;
+
+    // the same registration again
+    await base.put('/e2e/devices', registration as FakePutBody);
+
+    expect(server.deviceOf(aliceId, deviceId).masterSignature).toBe(signatureBefore);
+    expect(crossSignatureValid(server, aliceId, deviceId)).toBe(true);
+    expect(server.userOf(aliceId).listVersion).toBe(versionBefore);
+    // what the client checks (hasValidCrossSignature), on both sides
+    const own = await phone.listOwnDevices();
+    expect(own.devices.find((d) => d.deviceId === deviceId)?.crossSigned).toBe(true);
+    const again = await bob.service.fetchDeviceList(aliceId, true);
+    expect(again.devices.find((d) => d.deviceId === deviceId)?.crossSigned).toBe(true);
+    // nothing for Bob to act on: the same status as before the re-register
+    const status = await bob.service.deviceListStatus(aliceId);
+    expect(status).toEqual(statusBefore);
+    expect(status.unsignedDeviceIds).toEqual([]);
+
+    // new identity keys under the same device id: the signature goes, the version moves
+    await registerRawDevice(server, aliceId, deviceId);
+    expect(server.deviceOf(aliceId, deviceId).masterSignature).toBeNull();
+    expect(server.userOf(aliceId).listVersion).toBe(versionBefore + 1);
+    const ownAfter = await phone.listOwnDevices();
+    expect(ownAfter.devices.find((d) => d.deviceId === deviceId)?.crossSigned).toBe(false);
   });
 
   it('computes one account safety number per peer, stable across cross-signed devices (D3, D9)', async () => {
