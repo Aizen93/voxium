@@ -306,6 +306,7 @@ export function AdminServerWebhooksModal({ serverId, serverName, onClose }: { se
             </div>
           )}
           confirmLabel="Delete Webhook"
+          dismissible={false}
           onConfirm={async () => {
             await deleteServerWebhook(deleteTarget.id, purgeMessages);
             setDeleteTarget(null);

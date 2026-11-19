@@ -248,6 +248,15 @@ describe('AdminServerWebhooksModal — actions', () => {
     expect(store.deleteServerWebhook).toHaveBeenCalledWith('wh-1', true);
   });
 
+  it('the delete confirmation keeps the ticked purge box through Escape', async () => {
+    await render();
+    await act(async () => { (rowNamed('CI').querySelector('[data-testid="webhook-delete"]') as HTMLButtonElement).click(); });
+    await act(async () => { (q('[data-testid="webhook-delete-purge"]') as HTMLInputElement).click(); });
+    await act(async () => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    expect((q('[data-testid="webhook-delete-purge"]') as HTMLInputElement).checked).toBe(true);
+    expect(store.deleteServerWebhook).not.toHaveBeenCalled();
+  });
+
   it('the purge box starts unticked on every opening, and Cancel deletes nothing', async () => {
     await render();
     await act(async () => { (rowNamed('CI').querySelector('[data-testid="webhook-delete"]') as HTMLButtonElement).click(); });

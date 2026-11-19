@@ -185,3 +185,57 @@ describe('AdminAuditLog — resource limit rows', () => {
     ]));
   });
 });
+
+describe('AdminAuditLog — rows with no actor', () => {
+  const actorCell = (row: HTMLElement) => row.querySelectorAll('td')[1].textContent;
+  const detailsCell = (row: HTMLElement) => row.querySelectorAll('td')[3].textContent;
+  const SWEEP = { deletedUsers: 4, deletedAvatars: 3, deletedIpRecords: 2, durationMs: 120 };
+
+  async function renderRows(...logs: AuditLogEntry[]) {
+    store.auditLogs = logs;
+    store.auditLogsTotal = logs.length;
+    await act(async () => { root.render(<AdminAuditLog />); });
+    return rows();
+  }
+  const sweep = (id: string, metadata: Record<string, unknown> | null, over: Partial<AuditLogEntry> = {}) =>
+    entry({ id, action: 'registration.hygiene_sweep', actorId: null, actorUsername: null, targetType: null, targetId: null, metadata, ...over });
+
+  it('shows "System" for a scheduled hygiene sweep', async () => {
+    const [row] = await renderRows(sweep('s', { trigger: 'scheduled', ...SWEEP }));
+    expect(actorCell(row)).toBe('System');
+  });
+
+  it('shows "Deleted" for a manual hygiene sweep whose admin account is gone', async () => {
+    const [row] = await renderRows(sweep('m', { trigger: 'manual', ...SWEEP }));
+    expect(actorCell(row)).toBe('Deleted');
+  });
+
+  it('shows "System" for an older hygiene row that recorded no trigger', async () => {
+    const [noTrigger, noMetadata] = await renderRows(
+      sweep('o1', { ...SWEEP }),
+      sweep('o2', null),
+    );
+    expect(actorCell(noTrigger)).toBe('System');
+    expect(actorCell(noMetadata)).toBe('System');
+  });
+
+  it('shows "Deleted" for any other action without an actor', async () => {
+    const [ban, flag] = await renderRows(
+      entry({ id: 'b', action: 'user.ban', actorId: null, actorUsername: null, metadata: { reason: 'spam' } }),
+      entry({ id: 'f', action: 'feature_flag.update', actorId: null, actorUsername: null, metadata: { enabled: true, trigger: 'scheduled' } }),
+    );
+    expect(actorCell(ban)).toBe('Deleted');
+    // a "scheduled" trigger on an action that is not a scheduled job does not make it the system
+    expect(actorCell(flag)).toBe('Deleted');
+  });
+
+  it('shows the actor\'s name when there is one, even on a hygiene sweep', async () => {
+    const [row] = await renderRows(sweep('n', { trigger: 'manual', ...SWEEP }, { actorId: 'admin-1', actorUsername: 'root' }));
+    expect(actorCell(row)).toBe('root');
+  });
+
+  it('describes a hygiene sweep by its trigger and what it deleted', async () => {
+    const [row] = await renderRows(sweep('d', { trigger: 'scheduled', ...SWEEP }));
+    expect(detailsCell(row)).toBe('scheduled: 4 account(s), 3 avatar(s), 2 IP record(s) in 120ms');
+  });
+});
