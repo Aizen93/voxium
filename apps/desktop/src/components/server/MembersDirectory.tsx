@@ -90,14 +90,6 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
     return () => observer.disconnect();
   }, [hasMore, rows.length, serverId]);
 
-  async function handleRoleChange(memberId: string, newRole: MemberRole) {
-    try {
-      await useServerStore.getState().updateMemberRole(serverId, memberId, newRole);
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToUpdateRole'));
-    }
-  }
-
   async function handleKick(memberId: string, name: string) {
     if (removing) return;
     const reason = banReason.trim();
@@ -192,12 +184,10 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
         {rows.map((member) => {
           const isSelf = member.userId === currentUser?.id;
           const isExpanded = expandedMember === member.userId;
-          const showPromote = isOwner && member.role === 'member' && !isSelf;
-          const showDemote = isOwner && member.role === 'admin' && !isSelf;
           const showKick = !!rules && rules.canKick(member);
           const showTransfer = isOwner && !isSelf;
           const showRoleEdit = !!rules && rules.canAssignRoles(member) && assignableRoles.length > 0;
-          const hasActions = showPromote || showDemote || showKick || showTransfer || showRoleEdit;
+          const hasActions = showKick || showTransfer || showRoleEdit;
           const isConfirmingKick = confirmAction?.type === 'kick' && confirmAction.userId === member.userId;
           const isConfirmingTransfer = confirmAction?.type === 'transfer' && confirmAction.userId === member.userId;
 
@@ -302,34 +292,6 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
                           );
                         })}
                       </div>
-                    </div>
-                  )}
-
-                  {/* Promote / Demote */}
-                  {(showPromote || showDemote) && (
-                    <div className="flex items-center gap-2">
-                      {showPromote && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleRoleChange(member.userId, 'admin'); }}
-                          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-vox-accent-primary hover:bg-vox-accent-primary/10 transition-colors"
-                        >
-                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                          </svg>
-                          {t('serverSettings.members.promoteToAdmin')}
-                        </button>
-                      )}
-                      {showDemote && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleRoleChange(member.userId, 'member'); }}
-                          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
-                        >
-                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-                          </svg>
-                          {t('serverSettings.members.demoteToMember')}
-                        </button>
-                      )}
                     </div>
                   )}
 
