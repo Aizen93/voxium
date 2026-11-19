@@ -604,9 +604,13 @@ model ConversationRead {
   // One person's side of removing a conversation (#47), on their own row so
   // the other person is told nothing (a write to `conversations` bumps its
   // updatedAt, which orders their list). Added by migration
-  // 20261116120000_conversation_lifecycle_expand; nothing reads or writes them
-  // yet. hiddenAt: off this person's list. clearedAt: the floor below which
-  // this person no longer sees messages.
+  // 20261116120000_conversation_lifecycle_expand. hiddenAt: off this
+  // person's list, set by their removal (DELETE /dm/:id), cleared by a
+  // message newer than their floor or by their reopening (POST /dm).
+  // clearedAt: their floor, set by a removal with clearHistory to the newest
+  // message, never moved back; a message at or below it is gone for them
+  // everywhere. Written only by utils/conversationLifecycle.ts, applied
+  // through utils/conversationVisibility.ts.
   hiddenAt       DateTime? @map("hidden_at")
   clearedAt      DateTime? @map("cleared_at")
 

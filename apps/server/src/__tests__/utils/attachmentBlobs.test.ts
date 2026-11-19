@@ -41,6 +41,19 @@ describe('collectAttachmentKeys', () => {
     });
   });
 
+  it('reads through the client it is given, every page of it (a delete decided inside a transaction reads under its locks)', async () => {
+    const txFindMany = vi.fn()
+      .mockResolvedValueOnce(page(0, ATTACHMENT_KEY_BATCH))
+      .mockResolvedValueOnce([{ id: 'att-x' }])
+      .mockResolvedValueOnce([{ s3Key: key(9) }]);
+
+    const keys = await collectAttachmentKeys({ conversationId: 'conv1' }, { messageAttachment: { findMany: txFindMany } } as any);
+
+    expect(keys).toHaveLength(ATTACHMENT_KEY_BATCH + 1);
+    expect(txFindMany).toHaveBeenCalledTimes(3);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
   describe('a shape with more live files than one batch', () => {
     const lastId = (n: number) => `att-${String(n - 1).padStart(6, '0')}`;
 
