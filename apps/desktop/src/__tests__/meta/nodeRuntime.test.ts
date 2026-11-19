@@ -72,7 +72,7 @@ describe('supported Node.js runtime', () => {
   });
 
   it('workflows install pnpm through an env var checked to be an exact version, never interpolated into the script', () => {
-    for (const [file, count] of [['.github/workflows/ci.yml', 3], ['.github/workflows/release.yml', 1], ['.github/workflows/integration-scripts.yml', 1]] as const) {
+    for (const [file, count] of [['.github/workflows/ci.yml', 4], ['.github/workflows/release.yml', 1], ['.github/workflows/integration-scripts.yml', 1]] as const) {
       const yml = read(file).replace(/\r\n/g, '\n');
       expect(yml, file).not.toMatch(/run:.*\$\{\{\s*steps\.pnpm-ver/);
       const steps = yml.split('\n      - name: ').filter((s) => s.startsWith('Install pnpm\n'));
