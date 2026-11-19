@@ -12,6 +12,7 @@ import {
 } from '@voxium/shared';
 import type { Role, PermissionInfo } from '@voxium/shared';
 import { getTranslatedError } from '../../utils/serverErrors';
+import { useViewerPermissions, mayTurnOn } from '../../hooks/useViewerPermissions';
 
 interface RoleEditorProps {
   serverId: string;
@@ -164,6 +165,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
   // bits this build knows with every permission value it sends)
   const storedPermissions = useMemo(() => permissionsFromString(role.permissions), [role.permissions]);
   const [permissions, setPermissions] = useState(storedPermissions);
+  const viewerPermissions = useViewerPermissions(serverId);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -334,11 +336,20 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
                   {perms.map((perm) => {
                     const isChecked = (permissions & perm.flag) === perm.flag;
                     const isAdmin = perm.flag === Permissions.ADMINISTRATOR;
+                    // The server refuses a save that turns on a bit the viewer
+                    // does not hold, so such a toggle, off in the role and in
+                    // this edit, is disabled; one the role holds stays usable
+                    // (turning it off is never refused, and back on within
+                    // this edit is no change), and so does one switched on
+                    // before the viewer's bits were known, so it can be undone
+                    const locked = !isChecked && !mayTurnOn(viewerPermissions, perm.flag) && (storedPermissions & perm.flag) !== perm.flag;
+                    const disabled = !canManageRoles || locked;
                     return (
                       <label
                         key={perm.key}
+                        title={locked ? t('serverErrors.cannotGrantPermissions') : undefined}
                         className={`flex items-start gap-3 px-3 py-2.5 cursor-pointer transition-colors hover:bg-vox-bg-hover ${
-                          !canManageRoles ? 'opacity-60 cursor-not-allowed' : ''
+                          disabled ? 'opacity-60 cursor-not-allowed' : ''
                         } ${isAdmin ? 'bg-vox-accent-danger/5' : ''}`}
                       >
                         <div className="pt-0.5 shrink-0">
@@ -355,7 +366,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
                             type="checkbox"
                             checked={isChecked}
                             onChange={() => handleTogglePermission(perm.flag)}
-                            disabled={!canManageRoles}
+                            disabled={disabled}
                             className="sr-only"
                           />
                         </div>

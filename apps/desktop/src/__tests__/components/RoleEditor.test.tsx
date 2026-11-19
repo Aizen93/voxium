@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { Permissions } from '@voxium/shared';
+import { ALL_PERMISSIONS, Permissions } from '@voxium/shared';
 import type { Role } from '@voxium/shared';
 
 /**
@@ -25,6 +25,14 @@ vi.mock('../../stores/serverStore', () => {
 
 vi.mock('../../stores/toastStore', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+}));
+
+// The viewer's server permissions (null: not known yet, which restricts nothing)
+const viewer = vi.hoisted(() => ({ bits: null as bigint | null }));
+vi.mock('../../stores/authStore', () => ({ useAuthStore: () => undefined }));
+vi.mock('../../hooks/useViewerPermissions', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../hooks/useViewerPermissions')>()),
+  useViewerPermissions: () => viewer.bits,
 }));
 
 import { RoleEditor } from '../../components/server/RoleEditor';
@@ -51,6 +59,7 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.clearAllMocks();
+  viewer.bits = null;
 });
 
 /** The category panel whose heading reads `label` (the heading's panel, not the whole grid). */
@@ -156,5 +165,88 @@ describe('RoleEditor — what a save sends', () => {
     toggle('SEND_MESSAGES');
     toggle('SEND_MESSAGES');
     expect(unsavedBar()).toBe(false);
+  });
+});
+
+/**
+ * The editor shows what the server will refuse: a save that turns on a bit
+ * its author does not hold. Such a toggle, off in the stored role, is
+ * disabled and says why; one the role holds stays usable (turning it off is
+ * never refused, and back on within the same edit is no change).
+ */
+describe('RoleEditor — a toggle the server would refuse', () => {
+  const holderOf = (perms: bigint): Role[] => [{ ...roles[0], permissions: String(perms) }, roles[1]];
+  const row = (key: string) => {
+    const span = [...container.querySelectorAll('label span')].find((el) => el.textContent === `permissions.${key}.name`)!;
+    const label = span.closest('label') as HTMLLabelElement;
+    return { label, box: label.querySelector('input[type="checkbox"]') as HTMLInputElement };
+  };
+  const updateRole = () => useServerStore.getState().updateRole as unknown as Mock;
+
+  it('a bit the viewer lacks, off in the role: disabled, titled with the refusal', () => {
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_ROLES;
+    render(holderOf(Permissions.VIEW_CHANNEL));
+    const kick = row('KICK_MEMBERS');
+    expect(kick.box.disabled).toBe(true);
+    expect(kick.label.title).toBe('serverErrors.cannotGrantPermissions');
+    act(() => kick.box.click());
+    expect(kick.box.checked).toBe(false);
+  });
+
+  it('a bit the viewer holds: usable, untitled', () => {
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_ROLES;
+    render(holderOf(Permissions.VIEW_CHANNEL));
+    const send = row('SEND_MESSAGES');
+    expect(send.box.disabled).toBe(false);
+    expect(send.label.title).toBe('');
+  });
+
+  it('a bit the viewer lacks, on in the role: usable, off and back on, and its removal is saved', async () => {
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES;
+    render(holderOf(Permissions.VIEW_CHANNEL | Permissions.KICK_MEMBERS));
+    const kick = row('KICK_MEMBERS');
+    expect(kick.box.disabled).toBe(false);
+    expect(kick.label.title).toBe('');
+    act(() => kick.box.click());
+    expect(kick.box.checked).toBe(false);
+    act(() => kick.box.click());
+    expect(kick.box.checked).toBe(true);
+    act(() => kick.box.click());
+    const saveButton = [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('settings.profile.saveChanges'))!;
+    await act(async () => saveButton.click());
+    expect(updateRole()).toHaveBeenCalledWith('s1', 'r-mod', { permissions: String(Permissions.VIEW_CHANNEL) });
+  });
+
+  it('a toggle switched on before the viewer bits were known stays usable until it is off again', () => {
+    viewer.bits = null;
+    render(holderOf(Permissions.VIEW_CHANNEL));
+    act(() => row('KICK_MEMBERS').box.click());
+    expect(row('KICK_MEMBERS').box.checked).toBe(true);
+    // the bits arrive (any re-render reads them): KICK_MEMBERS is not held
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_ROLES;
+    act(() => row('SEND_MESSAGES').box.click());
+    expect(row('KICK_MEMBERS').box.disabled).toBe(false);
+    act(() => row('KICK_MEMBERS').box.click());
+    expect(row('KICK_MEMBERS').box.checked).toBe(false);
+    expect(row('KICK_MEMBERS').box.disabled).toBe(true);
+  });
+
+  it('ADMINISTRATOR held means every toggle is usable', () => {
+    viewer.bits = Permissions.ADMINISTRATOR;
+    render(holderOf(0n));
+    expect(row('KICK_MEMBERS').box.disabled).toBe(false);
+    expect(row('ADMINISTRATOR').box.disabled).toBe(false);
+  });
+
+  it('every bit (the owner): nothing disabled', () => {
+    viewer.bits = ALL_PERMISSIONS;
+    render(holderOf(0n));
+    expect([...container.querySelectorAll('input[type="checkbox"]')].some((box) => (box as HTMLInputElement).disabled)).toBe(false);
+  });
+
+  it('bits not known yet: nothing disabled (the server still decides)', () => {
+    viewer.bits = null;
+    render(holderOf(0n));
+    expect([...container.querySelectorAll('input[type="checkbox"]')].some((box) => (box as HTMLInputElement).disabled)).toBe(false);
   });
 });
