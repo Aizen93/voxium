@@ -508,6 +508,9 @@ export const WS_EVENTS = {
   SERVER_JOIN_REQUEST_RESOLVED: 'server:join_request_resolved',
   SERVER_JOIN_APPROVED: 'server:join_approved',
   SERVER_JOIN_DECLINED: 'server:join_declined',
+  // The ban list of a space changed (unban, kick, heir unban). Moderator
+  // audience only, and carries no ban data: the client refetches the list.
+  SERVER_BANS_CHANGED: 'server:bans_changed',
   VOICE_SERVER_MUTE: 'voice:server_mute',
   VOICE_SERVER_DEAFEN: 'voice:server_deafen',
   VOICE_FORCE_MOVE: 'voice:force_move',

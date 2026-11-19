@@ -8,8 +8,9 @@ import { Avatar } from '../common/Avatar';
 
 /**
  * Server settings → Members → Banned (KICK_MEMBERS). Every removal is a ban;
- * this is the undo. No socket event carries bans (the plan defines none), so
- * the list is fetched on open and edited locally on unban.
+ * this is the undo. The list is fetched on open and edited locally on unban;
+ * `server:bans_changed` (moderators only, no ban data) makes the store fetch
+ * it again when another moderator, or an admin, changed it.
  */
 export function BannedSection({ serverId }: { serverId: string }) {
   const { t } = useTranslation();

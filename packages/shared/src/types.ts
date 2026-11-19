@@ -572,6 +572,8 @@ export interface ServerToClientEvents {
   // Server discovery join requests (moderator audience only — never server:{id})
   'server:join_request': (data: { serverId: string; request: ServerJoinRequest }) => void;
   'server:join_request_resolved': (data: { serverId: string; userId: string; outcome: ServerJoinRequestOutcome }) => void;
+  // Moderator audience only, no ban data: the client fetches the list again
+  'server:bans_changed': (data: { serverId: string }) => void;
   // To the requester's user:{id} room
   'server:join_approved': (data: { server: Server }) => void;
   'server:join_declined': (data: { serverId: string; serverName: string }) => void;
