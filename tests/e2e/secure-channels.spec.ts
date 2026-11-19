@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
-import { registerUser, createServer, createInvite, joinServerViaInvite } from './helpers/api';
+import { registerUser, createServer, createInvite, joinServerViaInvite, API_URL } from './helpers/api';
 import { getChannelMessagesServerState, getSecureChannelServerState, findSecureChannelId } from './helpers/db';
 import { clearRateLimits } from './helpers/rateLimits';
 
@@ -159,7 +159,7 @@ test.describe('Secure channels — invite-only E2E-encrypted', () => {
     const data = await registerUser(request, owner);
     const server = await createServer(request, data.accessToken, 'Envelope Proof');
 
-    const createRes = await request.post(`http://localhost:3001/api/v1/servers/${server.id}/secure-channels`, {
+    const createRes = await request.post(`${API_URL}/servers/${server.id}/secure-channels`, {
       headers: { Authorization: `Bearer ${data.accessToken}` },
       data: { name: 'sealed', memberIds: [] },
     });
@@ -172,7 +172,7 @@ test.describe('Secure channels — invite-only E2E-encrypted', () => {
     expect(dbChannel?.members).toEqual([{ userId: data.user.id, isCreator: true }]);
 
     // A plaintext send is a hard 400 — no silent downgrade
-    const plainRes = await request.post(`http://localhost:3001/api/v1/channels/${channel.id}/messages`, {
+    const plainRes = await request.post(`${API_URL}/channels/${channel.id}/messages`, {
       headers: { Authorization: `Bearer ${data.accessToken}` },
       data: { content: 'plaintext should be refused' },
     });
@@ -180,7 +180,7 @@ test.describe('Secure channels — invite-only E2E-encrypted', () => {
 
     // A structurally valid envelope is stored VERBATIM with encrypted: true
     const envelope = '{"v":1,"e":"megolm1","sid":"c2Vzc2lvbklk","b":"Y2lwaGVydGV4dA"}';
-    const cipherRes = await request.post(`http://localhost:3001/api/v1/channels/${channel.id}/messages`, {
+    const cipherRes = await request.post(`${API_URL}/channels/${channel.id}/messages`, {
       headers: { Authorization: `Bearer ${data.accessToken}` },
       data: { content: envelope, encrypted: true },
     });

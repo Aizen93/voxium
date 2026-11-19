@@ -45,7 +45,11 @@ export default defineConfig({
   webServer: [
     {
       command: 'pnpm dev:server',
-      url: 'http://localhost:3001/health',
+      // The API listens on IPv4 only: probed by its IPv4 address, because
+      // `localhost` can resolve to ::1 first (see API_URL in
+      // tests/e2e/helpers/api.ts). The pages stay on localhost: that origin is
+      // what the server's CORS list and the object store's CORS rule name.
+      url: 'http://127.0.0.1:3001/health',
       // Locally, attach to whatever dev stack is already running. In CI there
       // is nothing to reuse, and silently attaching to a stale process would
       // test the wrong build.
