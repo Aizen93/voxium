@@ -2120,7 +2120,9 @@ starts, that member stays on its member list and is keyed only once a vet of
 theirs passes, which their unaccepted change refuses. The same holds when a
 vet reads the list again for a participant it did not name yet: a change of
 the participant's own excludes them, another member's is flagged and the vet
-goes on.
+goes on, unless that member is a participant the session has keyed: then the
+vet keys nobody, and the membership check it starts (§21.4) excludes that
+participant and rotates before it retries the vet.
 
 Both sides' session epochs bind a sealed key to the exact pair of sessions that
 are talking. Each participant announces its epoch alongside its `deviceId` at

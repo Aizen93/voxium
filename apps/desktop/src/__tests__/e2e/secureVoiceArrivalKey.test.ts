@@ -615,6 +615,45 @@ describe('one member\'s unaccepted identity change does not hold back the others
     expect(warn.mock.calls.some((args) => String(args[0]).includes('Vetting x failed transiently'))).toBe(false);
   });
 
+  it('a refetch that names a participant already keyed: the check that follows excludes them and rotates before the joiner is keyed', async () => {
+    // Our join's list does not name `x` yet
+    fetchChannelDeviceLists.mockResolvedValueOnce({
+      ...ALL_MEMBERS,
+      members: ALL_MEMBERS.members.filter((m) => m.userId !== 'x'),
+    });
+    await callWithOccupant();
+    onParticipantJoined(CH, user('y'), { initialReplay: false });
+    await until(() => sealedTo('y').length === 1);
+    const heldByY = sealedTo('y');
+
+    // From here on, one frame of ours is sealed under every generation the moment it is installed
+    const recorded: Array<{ keyId: number; frame: Promise<ArrayBuffer | null> }> = [];
+    frameSession.setLocalKey.mockImplementation((keyId: number, raw: Uint8Array) => {
+      const key = raw.slice();
+      installs.push({ keyId, key });
+      let resolveFrame!: (frame: ArrayBuffer | null) => void;
+      recorded.push({ keyId, frame: new Promise((resolve) => { resolveFrame = resolve; }) });
+      senderReady = senderReady
+        .then(() => sender.setKey(keyId, key))
+        .then(async () => resolveFrame(await sender.encrypt(new Uint8Array([9, keyId, 9]).buffer)));
+    });
+
+    fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('y'));
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1 && markExcluded.mock.calls.some((call) => call[1] === 'y'));
+    await settle();
+
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'y', 'identity-changed');
+    expect(recorded.map((generation) => generation.keyId)).toEqual([2]);
+    for (const generation of recorded) {
+      const frame = await generation.frame;
+      expect(frame).not.toBeNull();
+      expect(await opens(heldByY, frame!)).toBe(false);
+    }
+    const last = await recorded[recorded.length - 1].frame;
+    expect(await opens(sealedTo('x'), last!)).toBe(true);
+  });
+
   it('a session starts while that change is not accepted, and keys everyone else', async () => {
     fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('z'));
     await callWithOccupant();

@@ -36,7 +36,9 @@
 //    pinned device no longer published), and takes their one rotation, before
 //    it keys anyone; a participant whose retried vet it refuses is excluded
 //    without ever having been keyed. So nothing it seals derives from a key
-//    an excluded device holds.
+//    an excluded device holds. A vet whose own list read names a keyed
+//    participant's identity change keys nobody: the membership check it
+//    queues excludes that participant first, then retries the vet.
 //  - A participant excluded during a session is not keyed again in it: the
 //    epoch they were excluded under is recorded, and only an announcement
 //    with a new epoch is vetted again.
@@ -260,6 +262,13 @@ async function vetParticipant(state: SecureVoiceSessionState, userId: string, de
     if (identityChangedUserIds.includes(userId)) throw new E2EIdentityChangedError(userId);
     if (!state.members.has(userId)) {
       throw new SecureVoiceError('binding-mismatch', `${userId} is not a member of channel ${state.channelId}`);
+    }
+    // A participant this session keyed whose identity change the answer names
+    // is excluded by a membership check before anyone else is keyed: this
+    // participant waits for it, and that check retries their vet right after.
+    if (identityChangedUserIds.some((changed) => state.peers.get(changed)?.vetted)) {
+      confirmMembership(state.channelId);
+      throw new Error(`${userId} is vetted by the membership check that follows: a keyed participant's identity changed`);
     }
   }
 
