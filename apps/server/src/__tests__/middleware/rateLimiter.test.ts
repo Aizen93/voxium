@@ -209,6 +209,13 @@ describe('incoming-webhook limiters', () => {
     });
   });
 
+  it('registers supportRead apart from support: 60 per minute per user, no block, tunable like every row', () => {
+    expect(byName('supportRead')).toMatchObject({
+      keyPrefix: 'rl:supportread', points: 60, duration: 60, blockDuration: 0, keyType: 'userId', label: 'Support Read', isCustom: false,
+    });
+    expect(byName('supportRead')!.keyPrefix).not.toBe(byName('support')!.keyPrefix);
+  });
+
   it('lists both unverified-delivery buckets in the admin table (rl:, tunable like every row)', () => {
     expect(byName('webhookSigFail')).toMatchObject({
       keyPrefix: 'rl:whsigfail', points: 10, duration: 60, blockDuration: 0, keyType: 'webhook',
@@ -358,6 +365,18 @@ describe('incoming-webhook limiters — the bucket each one charges, and its KEY
       { prefix: 'rl:whread', key: 'user-9' },
     ]);
     expect(JSON.stringify(seen)).not.toContain(TOKEN);
+  });
+
+  it('rateLimitSupportRead charges rl:supportread keyed on the user id, and never the posting bucket rl:support', async () => {
+    const req = executeRequest({ user: { userId: 'user-9' } });
+
+    await charge(rl.rateLimitSupportRead, req);
+    await charge(rl.rateLimitSupport, req);
+
+    expect(seen).toEqual([
+      { prefix: 'rl:supportread', key: 'user-9' },
+      { prefix: 'rl:support', key: 'user-9' },
+    ]);
   });
 
   it('rateLimitWebhookSignature charges rl:whsigfail on the webhook id AND the sender network, then rl:whsigfailip on the network: never the token', async () => {
