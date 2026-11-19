@@ -1071,7 +1071,7 @@ describe('serverStore — discovery, join requests and bans', () => {
     expect(useServerStore.getState().joinRequestsTruncated).toBe(false);
   });
 
-  it('fetchBans loads the list (scoped to its server); unbanMember DELETEs and drops the row locally (no socket event carries bans)', async () => {
+  it('fetchBans loads the list (scoped to its server); unbanMember DELETEs and drops the row locally (a 404 is handled the same way)', async () => {
     const ban: ServerBan = { serverId: 'srv-1', userId: 'u-2', reason: 'spam', createdAt: '2026-10-09T10:00:00.000Z', user: bob, bannedBy: null };
     mockGet.mockResolvedValue({ data: { data: [ban], total: 1, hasMore: false } });
     await useServerStore.getState().fetchBans('srv-1');
@@ -1092,6 +1092,62 @@ describe('serverStore — discovery, join requests and bans', () => {
     // an unban on a server whose list is not the loaded one touches nothing
     await useServerStore.getState().unbanMember('srv-1', 'u-5');
     expect(useServerStore.getState().bans).toEqual([other]);
+  });
+
+  describe('handleBansChanged (server:bans_changed)', () => {
+    const ban: ServerBan = { serverId: 'srv-1', userId: 'u-2', reason: null, createdAt: '2026-10-09T10:00:00.000Z', user: bob, bannedBy: null };
+    const page = (rows: ServerBan[]) => ({ data: { data: rows, total: rows.length, hasMore: false } });
+
+    it('fetches again when the list of THAT space is loaded, and does nothing otherwise', async () => {
+      useServerStore.setState({ bans: [], bansServerId: null });
+      useServerStore.getState().handleBansChanged({ serverId: 'srv-1' });
+      useServerStore.setState({ bans: [], bansServerId: 'srv-9' });
+      useServerStore.getState().handleBansChanged({ serverId: 'srv-1' });
+      expect(mockGet).not.toHaveBeenCalled();
+
+      mockGet.mockResolvedValue(page([ban]));
+      useServerStore.setState({ bans: [], bansServerId: 'srv-1' });
+      useServerStore.getState().handleBansChanged({ serverId: 'srv-1' });
+      await vi.waitFor(() => expect(useServerStore.getState().bans).toEqual([ban]));
+      expect(mockGet).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores a malformed payload', () => {
+      useServerStore.setState({ bans: [], bansServerId: 'srv-1' });
+      for (const bad of [null, undefined, 'srv-1', 5, {}, { serverId: 7 }, { serverId: '' }, { serverId: { a: 1 } }]) {
+        useServerStore.getState().handleBansChanged(bad);
+      }
+      expect(mockGet).not.toHaveBeenCalled();
+    });
+
+    it('a burst of five events causes at most two fetches (one in flight, one queued)', async () => {
+      const first = deferred();
+      mockGet.mockReturnValueOnce(first.promise).mockResolvedValue(page([ban]));
+      useServerStore.setState({ bans: [], bansServerId: 'srv-1' });
+      for (let i = 0; i < 5; i++) useServerStore.getState().handleBansChanged({ serverId: 'srv-1' });
+      expect(mockGet).toHaveBeenCalledTimes(1);
+      first.resolve(page([]));
+      await vi.waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(useServerStore.getState().bans).toEqual([ban]));
+      expect(mockGet).toHaveBeenCalledTimes(2);
+
+      // idle again: the next event starts a new fetch
+      useServerStore.getState().handleBansChanged({ serverId: 'srv-1' });
+      await vi.waitFor(() => expect(mockGet).toHaveBeenCalledTimes(3));
+    });
+
+    it('a failed refetch is logged, keeps the list, and the next event fetches again', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      useServerStore.setState({ bans: [ban], bansServerId: 'srv-1' });
+      mockGet.mockRejectedValueOnce(new Error('net'));
+      useServerStore.getState().handleBansChanged({ serverId: 'srv-1' });
+      await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+      expect(useServerStore.getState().bans).toEqual([ban]);
+      mockGet.mockResolvedValue(page([]));
+      useServerStore.getState().handleBansChanged({ serverId: 'srv-1' });
+      await vi.waitFor(() => expect(useServerStore.getState().bans).toEqual([]));
+      warn.mockRestore();
+    });
   });
 
   it('a bans fetch that resolves after another server was asked for is dropped', async () => {

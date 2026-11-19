@@ -852,6 +852,8 @@ export function MainLayout() {
       ['server:join_declined', discoverySocketHandlers.joinDeclined],
       ['server:join_request', discoverySocketHandlers.joinRequest],
       ['server:join_request_resolved', discoverySocketHandlers.joinRequestResolved],
+      // Moderator audience: the ban list changed, refetch it if it is open
+      ['server:bans_changed', (payload: unknown) => useServerStore.getState().handleBansChanged(payload)],
     ];
 
     /**

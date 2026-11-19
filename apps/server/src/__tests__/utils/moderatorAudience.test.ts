@@ -99,6 +99,18 @@ describe('emitToModerators', () => {
     error.mockRestore();
   });
 
+  it('server:bans_changed goes to the user rooms of the audience only, never server:{id}, and a failure is swallowed', async () => {
+    await emitToModerators('s-1', 'server:bans_changed', { serverId: 's-1' });
+    expect(io.to).toHaveBeenCalledWith(['user:owner']);
+    expect(io.emit).toHaveBeenCalledWith('server:bans_changed', { serverId: 's-1' });
+    expect(io.to).not.toHaveBeenCalledWith('server:s-1');
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    prismaMock.role.findMany.mockRejectedValue(new Error('db gone'));
+    await expect(emitToModerators('s-1', 'server:bans_changed', { serverId: 's-1' })).resolves.toBeUndefined();
+    error.mockRestore();
+  });
+
   it('emits nothing for an unknown server', async () => {
     prismaMock.server.findUnique.mockResolvedValue(null);
     await emitToModerators('gone', 'server:join_request_resolved', { serverId: 'gone', userId: 'x', outcome: 'cancelled' });
