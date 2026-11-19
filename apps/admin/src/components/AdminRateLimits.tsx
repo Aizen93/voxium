@@ -1,6 +1,6 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
-import { createPortal } from 'react-dom';
-import { Gauge, RotateCcw, Trash2, Save, HelpCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Gauge, RotateCcw, Trash2, Save } from 'lucide-react';
+import { Tip } from './Tip';
 import { useAdminStore } from '../stores/adminStore';
 import { toast } from '../stores/toastStore';
 
@@ -50,34 +50,6 @@ const RULE_DESCRIPTIONS: Record<string, string> = {
   general: 'Per-IP budget for requests without a valid sign-in, charged on every route under /api/v1 except webhook deliveries (mounted outside it), on top of any route-specific limit.',
   generalUser: 'Per-user budget for signed-in requests, charged on every route under /api/v1 except webhook deliveries (mounted outside it), on top of any route-specific limit.',
 };
-
-function Tip({ text }: { text: string }) {
-  const iconRef = useRef<HTMLSpanElement>(null);
-  const [show, setShow] = useState(false);
-  const [pos, setPos] = useState({ top: 0, left: 0 });
-
-  const handleEnter = useCallback(() => {
-    if (!iconRef.current) return;
-    const rect = iconRef.current.getBoundingClientRect();
-    setPos({ top: rect.bottom + 6, left: rect.left + rect.width / 2 });
-    setShow(true);
-  }, []);
-
-  return (
-    <span ref={iconRef} className="inline-flex ml-1 cursor-help" onMouseEnter={handleEnter} onMouseLeave={() => setShow(false)}>
-      <HelpCircle size={12} className="text-vox-text-muted" />
-      {show && createPortal(
-        <div
-          style={{ position: 'fixed', top: pos.top, left: pos.left, transform: 'translateX(-50%)' }}
-          className="w-48 px-2 py-1.5 text-[10px] leading-tight text-vox-text-primary bg-vox-bg-primary border border-vox-border rounded shadow-lg z-[9999] normal-case font-normal tracking-normal whitespace-normal"
-        >
-          {text}
-        </div>,
-        document.body
-      )}
-    </span>
-  );
-}
 
 export function AdminRateLimits() {
   const { rateLimits, fetchRateLimits, updateRateLimit, resetRateLimit, clearUserRateLimits } = useAdminStore();
