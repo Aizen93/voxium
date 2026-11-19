@@ -76,6 +76,7 @@ import {
   SecureVoiceError,
   E2EIdentityChangedError,
   secureVoiceKeyChain,
+  getSecureVoiceSession,
 } from '../../services/e2e/secureVoiceKeys';
 
 const CH = 'chan-1';
@@ -204,6 +205,22 @@ describe('beginSecureVoiceSession', () => {
       expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
       expect(frameSession.setLocalKey).toHaveBeenCalledWith(0, expect.any(Uint8Array));
       expect(encryptToDevice).not.toHaveBeenCalled();
+    });
+
+    it('the start flags the member before it asks whether it is still current, and registers its session with no wait after that answer', async () => {
+      fetchChannelDeviceLists.mockImplementation(answerWithIdentityChanges(['peer'], lists));
+      // Whatever runs right after isCurrent answers already finds the session registered
+      let registeredBeforeAnyOtherTask: boolean | undefined;
+      const isCurrent = vi.fn(() => {
+        queueMicrotask(() => { registeredBeforeAnyOtherTask = getSecureVoiceSession(CH) !== null; });
+        return true;
+      });
+
+      await beginSecureVoiceSession(CH, { isCurrent });
+
+      expect(isCurrent).toHaveBeenCalledTimes(1);
+      expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
+      expect(registeredBeforeAnyOtherTask).toBe(true);
     });
 
     it('that member in the call is excluded by their vet and never keyed; the others are keyed', async () => {
