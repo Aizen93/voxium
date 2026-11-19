@@ -45,7 +45,7 @@ vi.mock('../../stores/voiceStore', () => ({
 }));
 vi.mock('../../services/powSolver', () => ({ solveRegistrationPowOffThread: vi.fn() }));
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
-const imageProcessing = vi.hoisted(() => ({ processImage: vi.fn() }));
+const imageProcessing = vi.hoisted(() => ({ processImage: vi.fn(), ASSET_UPLOAD_CONTENT_TYPE: 'image/webp' }));
 vi.mock('../../utils/imageProcessing', () => imageProcessing);
 
 import {
@@ -776,6 +776,25 @@ describe('authStore.uploadAvatar — the presign is signed for the processed ima
     });
     expect(api.patch).toHaveBeenCalledWith('/users/me/profile', { avatarUrl: KEY });
     expect(useAuthStore.getState().user?.avatarUrl).toBe(KEY);
+  });
+
+  it('declares the size of the PNG an engine without a WebP encoder produced; the PUT keeps the type the presign signed', async () => {
+    const png = new Blob([new Uint8Array(23_456)], { type: 'image/png' });
+    imageProcessing.processImage.mockResolvedValue(png);
+    api.post.mockResolvedValue({ data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } });
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    api.patch.mockResolvedValue({ data: { data: { avatarUrl: KEY } } });
+    useAuthStore.setState({ user: { ...me, avatarUrl: null } as never });
+
+    await useAuthStore.getState().uploadAvatar(original);
+
+    expect(api.post).toHaveBeenCalledWith('/uploads/presign/avatar', { fileSize: 23_456 });
+    expect(fetchMock).toHaveBeenCalledWith('https://store.example/put', {
+      method: 'PUT',
+      body: png,
+      headers: { 'Content-Type': 'image/webp' },
+    });
   });
 
   it('shows the key the server stored (its verified copy), not the uploaded one', async () => {

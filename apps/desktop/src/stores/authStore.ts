@@ -11,7 +11,7 @@ import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
 import { useVoiceStore } from './voiceStore';
 import { resetAccountStores } from './resetStores';
-import { processImage } from '../utils/imageProcessing';
+import { processImage, ASSET_UPLOAD_CONTENT_TYPE } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
 import type { User, RegistrationConsent } from '@voxium/shared';
@@ -644,7 +644,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const uploadRes = await fetch(uploadUrl, {
       method: 'PUT',
       body: blob,
-      headers: { 'Content-Type': 'image/webp' },
+      headers: { 'Content-Type': ASSET_UPLOAD_CONTENT_TYPE },
     });
     if (!uploadRes.ok) {
       throw new Error(`S3 upload failed: ${uploadRes.status}`);
