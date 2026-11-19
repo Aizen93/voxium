@@ -2,7 +2,22 @@ import { solveRegistrationPow } from '@voxium/shared';
 import type { APIRequestContext } from '@playwright/test';
 import { createClient } from 'redis';
 
-export const API_URL = 'http://localhost:3001/api/v1';
+/**
+ * The API as the test runner reaches it. The server listens on 0.0.0.0 (IPv4
+ * only), and Node resolves `localhost` in the operating system's order, which
+ * is ::1 first on some machines (Windows): the runner's own calls would then
+ * be refused. So this is the IPv4 loopback address. Every spec and helper
+ * imports it; none spells the address out.
+ */
+export const API_URL = 'http://127.0.0.1:3001/api/v1';
+
+/**
+ * The API as the PAGE reaches it: the client composes its addresses from
+ * VITE_API_URL (default http://localhost:3001/api/v1), and the browser, unlike
+ * Node, falls back from ::1 to IPv4 by itself. Use it only to compare with
+ * what the page shows (a webhook's execute URL); never to make a request.
+ */
+export const PAGE_API_URL = 'http://localhost:3001/api/v1';
 
 /** Clear all rate limit keys in Redis. Call before tests that register many users. */
 export async function clearRateLimits() {

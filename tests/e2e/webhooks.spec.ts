@@ -4,7 +4,7 @@ import { createHmac, randomBytes } from 'crypto';
 import type { APIRequestContext, APIResponse, BrowserContext, Locator, Page } from '@playwright/test';
 import { test, expect } from './helpers/fixtures';
 import { testUser, injectAuth } from './helpers/auth';
-import { API_URL, registerUser, createServer, createChannel, deleteServer } from './helpers/api';
+import { API_URL, PAGE_API_URL, registerUser, createServer, createChannel, deleteServer } from './helpers/api';
 import { deleteSeededUsers, deleteServersNamed } from './helpers/db';
 
 // Live test of incoming webhooks (docs/local/webhooks-plan.html, step 4):
@@ -76,8 +76,8 @@ async function readReveal(page: Page): Promise<RevealedWebhook> {
   const reveal = page.getByTestId('webhook-reveal');
   await expect(reveal).toBeVisible({ timeout: 15_000 });
   const url = ((await reveal.getByTestId('webhook-reveal-url').textContent()) ?? '').trim();
-  expect(url.startsWith(`${API_URL}/webhooks/`), `execute URL: ${url}`).toBe(true);
-  const [id, token, ...rest] = url.slice(`${API_URL}/webhooks/`.length).split('/');
+  expect(url.startsWith(`${PAGE_API_URL}/webhooks/`), `execute URL: ${url}`).toBe(true);
+  const [id, token, ...rest] = url.slice(`${PAGE_API_URL}/webhooks/`.length).split('/');
   expect(id, 'webhook id in the URL').toBeTruthy();
   expect(token, 'token in the URL').toBeTruthy();
   expect(rest, 'nothing after the token').toEqual([]);

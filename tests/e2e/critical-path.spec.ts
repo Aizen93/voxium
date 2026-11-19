@@ -1,6 +1,6 @@
 import { test, expect } from './helpers/fixtures';
 import { testUser, registerViaUI, injectAuth } from './helpers/auth';
-import { registerUser, createInvite } from './helpers/api';
+import { registerUser, createInvite, API_URL } from './helpers/api';
 import { dmHeading } from './helpers/selectors';
 
 test.describe('Critical path: register -> create space -> invite -> message', () => {
@@ -41,7 +41,7 @@ test.describe('Critical path: register -> create space -> invite -> message', ()
     const tokenA = await page.evaluate(() => localStorage.getItem('voxium_access_token'));
     expect(tokenA).toBeTruthy();
 
-    const serversRes = await request.get('http://localhost:3001/api/v1/servers', {
+    const serversRes = await request.get(`${API_URL}/servers`, {
       headers: { Authorization: `Bearer ${tokenA}` },
     });
     const { data: servers } = await serversRes.json();
