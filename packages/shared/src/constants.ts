@@ -164,6 +164,14 @@ export function isDeletedMessagePlaceholder(row: { type?: unknown; encrypted?: u
  */
 export const DM_SIGNAL_MAX = 65_536;
 
+/**
+ * At most this many floors of the caller's REMOVED conversations (hidden, with
+ * a cleared history) are answered beside the list (`GET /dm`, `cleared`),
+ * newest floor first: each device of theirs learns them every session, so a
+ * device that missed the removal purges its cache too.
+ */
+export const DM_CLEARED_LIST_MAX = 200;
+
 // ─── Screen-share annotations (sharer-drawn overlays, session-only) ──────────
 // Serialized-length caps use UTF-16 char counts (JSON.stringify().length),
 // matching the DM_SIGNAL_MAX convention. All must stay well under the 1MB

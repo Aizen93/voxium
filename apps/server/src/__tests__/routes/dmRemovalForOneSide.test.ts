@@ -99,6 +99,7 @@ import { prisma } from '../../utils/prisma';
 import { dmRouter } from '../../routes/dm';
 import { errorHandler } from '../../middleware/errorHandler';
 import { NotFoundError } from '../../utils/errors';
+import { DM_CLEARED_LIST_MAX } from '@voxium/shared';
 
 function createApp() {
   const app = express();
@@ -219,6 +220,28 @@ describe('DELETE /dm/:id — removal for the caller only', () => {
     expect(dmRoomEmits('dm:conversation:deleted')[0].payload).toStrictEqual({ conversationId: 'conv-1', clearedUntil: '2026-11-10T10:00:00.000Z' });
   });
 
+  it('the answer carries the floor too (data.clearedUntil, the event\'s value), beside the success and message it always had', async () => {
+    for (const deleted of [false, true]) {
+      lifecycle.removeConversationForUser.mockResolvedValueOnce({ deleted, clearedUntil: FLOOR, attachmentKeys: [] });
+
+      const res = await request(createApp()).delete('/api/v1/dm/conv-1?clearHistory=true');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toStrictEqual({ success: true, message: 'Conversation deleted', data: { clearedUntil: '2026-11-10T10:00:00.000Z' } });
+    }
+  });
+
+  it('a removal that set no floor (no flag, or an empty conversation never cleared) answers exactly what the route always did: no data key', async () => {
+    for (const query of ['', '?clearHistory=true', '?clearHistory=false']) {
+      lifecycle.removeConversationForUser.mockResolvedValueOnce({ deleted: false, clearedUntil: null, attachmentKeys: [] });
+
+      const res = await request(createApp()).delete(`/api/v1/dm/conv-1${query}`);
+
+      expect(res.body, query).toStrictEqual({ success: true, message: 'Conversation deleted' });
+      expect(Object.keys(res.body)).toEqual(['success', 'message']);
+    }
+  });
+
   it('the remover\'s sockets stay in dm:{id} (a later message brings it back), no file is deleted, and the route never writes the conversation row', async () => {
     await request(createApp()).delete('/api/v1/dm/conv-1?clearHistory=true');
 
@@ -290,7 +313,8 @@ describe('DELETE /dm/:id — removal for the caller only', () => {
       const res = await request(createApp()).delete('/api/v1/dm/conv-1?clearHistory=true');
 
       expect(res.status).toBe(200);
-      expect(res.body).toStrictEqual({ success: true, message: 'Conversation deleted' });
+      // the floor this removal set, as for one that kept the conversation
+      expect(res.body).toStrictEqual({ success: true, message: 'Conversation deleted', data: { clearedUntil: '2026-11-10T10:00:00.000Z' } });
       expect(mockDeleteFromS3).toHaveBeenCalledWith(keys);
       expect(io.order).toEqual(['removal', 'delete files', 'end call', 'emit dm:conversation:deleted', 'local leave', 'cluster leave']);
       // a deleted conversation ends whatever call is left in it, the other person's ring included
@@ -367,7 +391,8 @@ describe('DELETE /dm/:id — removal for the caller only', () => {
 
 describe('POST /dm — opening a conversation the caller removed', () => {
   const target = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null };
-  const existing = { id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2', encryptedAt: new Date('2026-08-01T14:00:00Z'), createdAt: new Date('2024-01-01'), updatedAt: new Date('2024-01-01') };
+  // `reads`: the caller's read row, loaded with the pair (their floor)
+  const existing = { id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2', encryptedAt: new Date('2026-08-01T14:00:00Z'), createdAt: new Date('2024-01-01'), updatedAt: new Date('2024-01-01'), reads: [] as Array<{ clearedAt: Date | null }> };
 
   beforeEach(() => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(target as any);
@@ -408,6 +433,53 @@ describe('POST /dm — opening a conversation the caller removed', () => {
 
     expect((await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' })).status).toBe(201);
     expect(lifecycle.reopenConversationForUser).not.toHaveBeenCalled();
+  });
+
+  it('the caller\'s floor is read with the pair, in the same statement, for the caller only', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(existing as any);
+
+    await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+    expect(prisma.conversation.findUnique).toHaveBeenCalledTimes(1);
+    expect(prisma.conversation.findUnique).toHaveBeenCalledWith({
+      where: { user1Id_user2Id: { user1Id: 'user-1', user2Id: 'user-2' } },
+      include: { reads: { where: { userId: 'user-1' }, select: { clearedAt: true } } },
+    });
+    expect(prisma.conversationRead.findMany).not.toHaveBeenCalled();
+  });
+
+  it('reopening a conversation whose history the caller cleared answers their floor (clearedUntil), after the fields it always had', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...existing, reads: [{ clearedAt: FLOOR }] } as any);
+
+    const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.clearedUntil).toBe('2026-11-10T10:00:00.000Z');
+    expect(Object.keys(res.body.data)).toEqual(['id', 'user1Id', 'user2Id', 'participant', 'lastMessage', 'encryptedAt', 'createdAt', 'clearedUntil']);
+  });
+
+  it('no floor (no read row, or one that never cleared): no clearedUntil key at all', async () => {
+    for (const reads of [[], [{ clearedAt: null }]]) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...existing, reads } as any);
+
+      const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).not.toHaveProperty('clearedUntil');
+    }
+  });
+
+  it('a pair whose conversation a removal deleted meanwhile: the new conversation has no floor, whatever the old one had', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...existing, reads: [{ clearedAt: FLOOR }] } as any);
+    lifecycle.reopenConversationForUser.mockResolvedValueOnce(false);
+    vi.mocked(prisma.conversation.create).mockResolvedValueOnce({ ...existing, id: 'conv-2' } as any);
+    vi.mocked(prisma.conversationRead.createMany).mockResolvedValueOnce({ count: 2 } as any);
+
+    const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.id).toBe('conv-2');
+    expect(res.body.data).not.toHaveProperty('clearedUntil');
   });
 });
 
@@ -450,6 +522,94 @@ describe('GET /dm — the caller\'s list', () => {
       '2026-11-10T10:00:00.000Z',
       '2026-11-10T10:00:00.000Z',
     ]);
+  });
+
+  it('each conversation carries the caller\'s floor (clearedUntil, read with the list: no query of its own) only when there is one', async () => {
+    const newest = { id: 'm-1', content: validEnvelope, encrypted: true, type: 'user', createdAt: ABOVE, authorId: 'user-2' };
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([
+      listed([newest], FLOOR),
+      // a cleared conversation with nothing above the floor: no preview, the floor still sent
+      { ...listed([{ ...newest, createdAt: FLOOR }], FLOOR), id: 'conv-2' },
+      { ...listed([newest], null), id: 'conv-3' },
+      { ...listed([newest], null), id: 'conv-4', reads: [] },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.body.data.map((c: any) => c.clearedUntil)).toEqual(['2026-11-10T10:00:00.000Z', '2026-11-10T10:00:00.000Z', undefined, undefined]);
+    expect(res.body.data[1].lastMessage).toBeNull();
+    expect(Object.keys(res.body.data[0])).toEqual(['id', 'user1Id', 'user2Id', 'participant', 'lastMessage', 'encryptedAt', 'createdAt', 'clearedUntil']);
+    expect(Object.keys(res.body.data[2])).toEqual(['id', 'user1Id', 'user2Id', 'participant', 'lastMessage', 'encryptedAt', 'createdAt']);
+    // the listed floors come with the list itself; the one read-row query is the hidden ones' (below)
+    expect(prisma.conversation.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.conversationRead.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('the floors of the conversations the caller removed (hidden, cleared) come beside the list as `cleared`, newest floor first, from one bounded query on the caller\'s read rows', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([]);
+    vi.mocked(prisma.conversationRead.findMany).mockResolvedValueOnce([
+      { conversationId: 'conv-8', clearedAt: ABOVE },
+      { conversationId: 'conv-9', clearedAt: FLOOR },
+    ] as any);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toStrictEqual({
+      success: true,
+      data: [],
+      cleared: [
+        { conversationId: 'conv-8', clearedUntil: '2026-11-11T10:00:00.000Z' },
+        { conversationId: 'conv-9', clearedUntil: '2026-11-10T10:00:00.000Z' },
+      ],
+    });
+    expect(prisma.conversationRead.findMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1', hiddenAt: { not: null }, clearedAt: { not: null } },
+      orderBy: { clearedAt: 'desc' },
+      take: DM_CLEARED_LIST_MAX,
+      select: { conversationId: true, clearedAt: true },
+    });
+    expect(DM_CLEARED_LIST_MAX).toBe(200);
+  });
+
+  it('no removed conversation with a floor: no `cleared` key, the body a 2.1.x client reads today', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([listed([], null)] as any);
+    vi.mocked(prisma.conversationRead.findMany).mockResolvedValueOnce([]);
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(Object.keys(res.body)).toEqual(['success', 'data']);
+  });
+
+  it('a failing floor query never fails the list: it is answered without `cleared`, with one warning that names the error\'s type and code only', async () => {
+    vi.mocked(prisma.conversation.findMany).mockResolvedValueOnce([listed([], null)] as any);
+    const failure = Object.assign(new Error('connection to db-host:5432 lost for user-1'), { name: 'PrismaClientKnownRequestError', code: 'P1001' });
+    vi.mocked(prisma.conversationRead.findMany).mockRejectedValueOnce(failure);
+    const warnLog = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body)).toEqual(['success', 'data']);
+    expect(res.body.data).toHaveLength(1);
+    expect(warnLog).toHaveBeenCalledTimes(1);
+    expect(warnLog.mock.calls[0]).toEqual([
+      '[DM] The conversation list is answered without the floors of removed conversations:',
+      'PrismaClientKnownRequestError',
+      'P1001',
+    ]);
+    warnLog.mockRestore();
+  });
+
+  it('a failing list query still answers the error', async () => {
+    vi.mocked(prisma.conversation.findMany).mockRejectedValueOnce(new Error('db gone'));
+    vi.mocked(prisma.conversationRead.findMany).mockResolvedValueOnce([]);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await request(createApp()).get('/api/v1/dm');
+
+    expect(res.status).toBe(500);
+    errorLog.mockRestore();
   });
 });
 
