@@ -13,7 +13,7 @@ vi.mock('../../services/api', () => ({
   },
 }));
 
-const imageProcessing = vi.hoisted(() => ({ processImage: vi.fn() }));
+const imageProcessing = vi.hoisted(() => ({ processImage: vi.fn(), ASSET_UPLOAD_CONTENT_TYPE: 'image/webp' }));
 vi.mock('../../utils/imageProcessing', () => imageProcessing);
 
 import { useServerStore, EMPTY_PEOPLE, EMPTY_DIRECTORY, resetMemberLookupState, retireDirectory, MEMBER_LOOKUP_DEBOUNCE_MS } from '../../stores/serverStore';
@@ -1224,6 +1224,24 @@ describe('serverStore.uploadServerIcon — the presign is signed for the process
       headers: { 'Content-Type': 'image/webp' },
     });
     expect(mockPatch).toHaveBeenCalledWith('/servers/srv-1', { iconUrl: KEY });
+  });
+
+  it('declares the size of the PNG an engine without a WebP encoder produced; the PUT keeps the type the presign signed', async () => {
+    const png = new Blob([new Uint8Array(23_456)], { type: 'image/png' });
+    imageProcessing.processImage.mockResolvedValue(png);
+    mockPost.mockResolvedValue({ data: { data: { uploadUrl: 'https://store.example/put', key: KEY } } });
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    mockPatch.mockResolvedValue({ data: { data: {} } });
+
+    await useServerStore.getState().uploadServerIcon('srv-1', original);
+
+    expect(mockPost).toHaveBeenCalledWith('/uploads/presign/server-icon/srv-1', { fileSize: 23_456 });
+    expect(fetchMock).toHaveBeenCalledWith('https://store.example/put', {
+      method: 'PUT',
+      body: png,
+      headers: { 'Content-Type': 'image/webp' },
+    });
   });
 
   it('asks for no presign when the image cannot be processed', async () => {
