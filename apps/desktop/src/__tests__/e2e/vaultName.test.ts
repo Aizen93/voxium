@@ -73,7 +73,7 @@ describe('the vault name of the running build', () => {
   // (`__TAURI_INTERNALS__`) and the API it is compiled for (VITE_API_URL)
   type TauriWindow = { __TAURI_INTERNALS__?: unknown };
   const key = btoa(String.fromCharCode(...new Uint8Array(32).fill(9)));
-  const provider: PickleKeyProvider = { load: async () => key, save: async () => {} };
+  const provider: PickleKeyProvider = { load: async () => key, save: async () => {}, remove: async () => {} };
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -114,8 +114,9 @@ describe('the vault name of the running build', () => {
 
     const { forgetLocalE2EState } = await import('../../services/e2e/e2eService');
     const drop = vi.spyOn(indexedDB, 'deleteDatabase');
-    forgetLocalE2EState('user-9');
+    const forgotten = forgetLocalE2EState('user-9', provider);
     expect(drop).toHaveBeenCalledWith(expected);
     expect(drop).not.toHaveBeenCalledWith('voxium-e2e-v2-user-9');
+    await forgotten;
   });
 });

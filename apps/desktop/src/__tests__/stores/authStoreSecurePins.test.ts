@@ -26,6 +26,7 @@ vi.mock('../../services/tokenStorage', () => ({
   getTrustedDeviceToken: vi.fn(() => null),
   setTrustedDeviceToken: vi.fn(),
   clearTrustedDeviceToken: vi.fn(),
+  flushTokenStorage: vi.fn(async () => {}),
 }));
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
 const e2e = vi.hoisted(() => ({ forgetLocalE2EState: vi.fn() }));
@@ -72,5 +73,42 @@ describe('authStore — secure-channel pin lifecycle', () => {
     expect(localStorage.getItem(securePinStorageKey('alice'))).toBeNull();
     useAuthStore.setState({ user: alice });
     expect(isPinnedSecure('ch-1')).toBe(false);
+  });
+});
+
+describe('authStore — the local E2E state of a deleted account', () => {
+  it('a logout keeps the vault and its key', () => {
+    useAuthStore.setState({ user: alice, isAuthenticated: true });
+    useAuthStore.getState().logout();
+    expect(e2e.forgetLocalE2EState).not.toHaveBeenCalled();
+  });
+
+  it('the deletion resolves once the vault and its key are gone', async () => {
+    useAuthStore.setState({ user: alice, isAuthenticated: true });
+    api.delete.mockResolvedValueOnce({ data: {} });
+    let forgotten!: () => void;
+    e2e.forgetLocalE2EState.mockReturnValueOnce(new Promise<void>((resolve) => (forgotten = resolve)));
+
+    let settled = false;
+    const deletion = useAuthStore
+      .getState()
+      .deleteAccount('password123')
+      .then(() => (settled = true));
+    await vi.waitFor(() => expect(e2e.forgetLocalE2EState).toHaveBeenCalledWith('alice'));
+    // the rest of the cleanup does not wait for it
+    expect(useAuthStore.getState().user).toBeNull();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    forgotten();
+    await deletion;
+    expect(settled).toBe(true);
+  });
+
+  it('a refused deletion forgets nothing', async () => {
+    useAuthStore.setState({ user: alice, isAuthenticated: true });
+    api.delete.mockRejectedValueOnce(new Error('403'));
+    await expect(useAuthStore.getState().deleteAccount('wrong')).rejects.toThrow('403');
+    expect(e2e.forgetLocalE2EState).not.toHaveBeenCalled();
   });
 });

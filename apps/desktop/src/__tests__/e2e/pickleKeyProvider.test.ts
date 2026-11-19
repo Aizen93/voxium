@@ -26,6 +26,11 @@ function fakeKeychain(initial: Record<string, string> = {}) {
       entries.set(userId, args?.keyB64 as string);
       return undefined as T;
     }
+    if (cmd === 'e2e_pickle_key_delete') {
+      // like the Rust command: a missing entry is already deleted
+      entries.delete(userId);
+      return undefined as T;
+    }
     throw new Error(`unknown command ${cmd}`);
   };
   return { entries, calls, invoke };
@@ -123,6 +128,41 @@ describe('keychain pickle key provider', () => {
     expect(keychain.entries.get('user-1')).toBe(KEY_B64);
     expect(storage.size).toBe(0); // no plaintext copy written
   });
+
+  describe('remove (account deletion only)', () => {
+    it("removes that account's keychain entry and its localStorage copy, and no other account's", async () => {
+      storage.set('voxium_e2e_pk_user-1', 'fallback-copy');
+      storage.set('voxium_e2e_pk_user-2', KEY_B64);
+      const keychain = fakeKeychain({ 'user-1': KEY_B64, 'user-2': KEY_B64 });
+      const provider = createKeychainPickleKeys(keychain.invoke);
+
+      await provider.remove('user-1');
+
+      expect(keychain.calls).toEqual([{ cmd: 'e2e_pickle_key_delete', args: { userId: 'user-1' } }]);
+      expect(keychain.entries.has('user-1')).toBe(false);
+      expect(storage.has('voxium_e2e_pk_user-1')).toBe(false);
+      expect(keychain.entries.get('user-2')).toBe(KEY_B64);
+      expect(storage.get('voxium_e2e_pk_user-2')).toBe(KEY_B64);
+      expect(await provider.load('user-1')).toBeNull();
+    });
+
+    it('takes an account with no key anywhere as removed', async () => {
+      const keychain = fakeKeychain();
+      const provider = createKeychainPickleKeys(keychain.invoke);
+      await expect(provider.remove('user-1')).resolves.toBeUndefined();
+      expect(keychain.calls.map((c) => c.cmd)).toEqual(['e2e_pickle_key_delete']);
+    });
+
+    it('still removes the localStorage copy when the keychain refuses, and reports the refusal', async () => {
+      storage.set('voxium_e2e_pk_user-1', KEY_B64);
+      const provider = createKeychainPickleKeys(async () => {
+        throw new Error('keychain locked');
+      });
+
+      await expect(provider.remove('user-1')).rejects.toThrow('keychain locked');
+      expect(storage.has('voxium_e2e_pk_user-1')).toBe(false);
+    });
+  });
 });
 
 describe('localStorage pickle key provider (browser dev fallback)', () => {
@@ -130,5 +170,15 @@ describe('localStorage pickle key provider (browser dev fallback)', () => {
     expect(await localStoragePickleKeys.load('u1')).toBeNull();
     await localStoragePickleKeys.save('u1', KEY_B64);
     expect(await localStoragePickleKeys.load('u1')).toBe(KEY_B64);
+  });
+
+  it("removes that account's key and no other, and takes a missing key as removed", async () => {
+    await localStoragePickleKeys.save('u1', KEY_B64);
+    await localStoragePickleKeys.save('u2', KEY_B64);
+
+    await localStoragePickleKeys.remove('u1');
+    expect(await localStoragePickleKeys.load('u1')).toBeNull();
+    expect(await localStoragePickleKeys.load('u2')).toBe(KEY_B64);
+    await expect(localStoragePickleKeys.remove('u1')).resolves.toBeUndefined();
   });
 });

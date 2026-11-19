@@ -83,7 +83,7 @@ const ENCRYPTION_ROWS: StorageRow[] = withFrenchSpacing([
     item: 'Clé du coffre',
     purpose: 'Chiffre les clés conservées dans le coffre',
     where: 'Application de bureau : le gestionnaire d’identifiants. Navigateur : stockage local',
-    duration: 'Conservée lorsque vous vous déconnectez ; non supprimée automatiquement, même lorsque le compte est supprimé (elle ne déverrouille plus rien une fois son coffre supprimé)',
+    duration: 'Conservée lorsque vous vous déconnectez, avec son coffre ; supprimée de cet appareil avec le coffre lorsque vous y supprimez votre compte',
   },
 ]);
 
@@ -136,7 +136,7 @@ export function CookiePolicyContentFr() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Politique de cookies</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 12 novembre 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 18 novembre 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -191,8 +191,8 @@ export function CookiePolicyContentFr() {
             session n’est jamais écrite sur le disque&nbsp;: elle reste en mémoire et prend fin lorsque vous fermez
             l’application. La déconnexion conserve votre jeton d’appareil de confiance, votre coffre de chiffrement et
             vos préférences, afin que votre historique chiffré reste lisible lorsque vous vous reconnectez&nbsp;; la
-            suppression de votre compte supprime le coffre et le jeton d’appareil de confiance de l’appareil sur
-            lequel vous le supprimez. Pour tout supprimer d’un ordinateur, supprimez les dossiers de données de
+            suppression de votre compte supprime le coffre, sa clé et le jeton d’appareil de confiance de l’appareil
+            sur lequel vous le supprimez. Pour tout supprimer d’un ordinateur, supprimez les dossiers de données de
             l’application (nommés com.voxium.app) après l’avoir désinstallée, ainsi que les entrées Voxium (leur nom
             contient app.voxium) du gestionnaire d’identifiants de votre système d’exploitation.
           </p>

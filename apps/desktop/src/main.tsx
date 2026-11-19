@@ -11,6 +11,12 @@ import '@fontsource/inter/600.css';
 import '@fontsource/inter/700.css';
 import './styles/globals.css';
 import './i18n';
+import { installExternalLinkHandler } from './utils/externalLinks';
+
+// ─── External links ─────────────────────────────────────────────────────────
+// In the Tauri app a target="_blank" http(s) or mailto link opens in the system
+// browser or mail client (utils/externalLinks.ts); a browser opens a new tab
+installExternalLinkHandler();
 
 // ─── Global error handlers ──────────────────────────────────────────────────
 // Catch unhandled promise rejections (e.g., forgotten .catch())
