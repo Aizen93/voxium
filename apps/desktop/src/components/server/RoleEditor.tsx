@@ -158,7 +158,12 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
 
   const [name, setName] = useState(role.name);
   const [color, setColor] = useState(role.color || '#99aab5');
-  const [permissions, setPermissions] = useState(() => permissionsFromString(role.permissions));
+  // The editor holds the bits this build knows (permissionsFromString masks
+  // with ALL_PERMISSIONS): a stored bit added after this build is not shown,
+  // not compared and never sent, so the server keeps it (the store names the
+  // bits this build knows with every permission value it sends)
+  const storedPermissions = useMemo(() => permissionsFromString(role.permissions), [role.permissions]);
+  const [permissions, setPermissions] = useState(storedPermissions);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -166,9 +171,9 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
   const hasChanges = useMemo(() => {
     const nameChanged = !role.isDefault && name.trim() !== role.name;
     const colorChanged = color !== (role.color || '#99aab5');
-    const permsChanged = permissionsToString(permissions) !== role.permissions;
+    const permsChanged = permissions !== storedPermissions;
     return nameChanged || colorChanged || permsChanged;
-  }, [name, color, permissions, role]);
+  }, [name, color, permissions, storedPermissions, role]);
 
   const handleTogglePermission = useCallback((flag: bigint) => {
     setPermissions((prev) => {
@@ -193,9 +198,10 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
         fields.color = newColor;
       }
 
-      const permsStr = permissionsToString(permissions);
-      if (permsStr !== role.permissions) {
-        fields.permissions = permsStr;
+      // Only when the user changed a permission: a rename or a colour change
+      // sends none
+      if (permissions !== storedPermissions) {
+        fields.permissions = permissionsToString(permissions);
       }
 
       if (Object.keys(fields).length > 0) {
@@ -225,7 +231,7 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
   const handleReset = () => {
     setName(role.name);
     setColor(role.color || '#99aab5');
-    setPermissions(permissionsFromString(role.permissions));
+    setPermissions(storedPermissions);
   };
 
   // Group permissions by category
