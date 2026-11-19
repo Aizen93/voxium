@@ -42,6 +42,7 @@ import { decryptMessagesForDisplay, decryptMessageForDisplay, DECRYPT_FAILED_CON
 import { decryptChannelMessagesForDisplay } from '../../services/e2e/channelCrypto';
 import { E2EServiceDisposedError, type E2ESessionsAvailable } from '../../services/e2e/e2eService';
 import { registerE2ESessionUser } from '../../services/e2e/session';
+import { raiseClearedFloor, resetClearedFloors } from '../../services/e2e/clearedFloors';
 import { useChatStore } from '../../stores/chatStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
@@ -197,6 +198,30 @@ describe('a row that could not be decrypted is tried again when its key arrives'
       expect.objectContaining({ id: 'm1', conversationId: 'ch:ch1' }),
       { claimMissing: false, storageFailureRejects: true },
     );
+  });
+
+  it('a cleared history\'s floor landing mid-pass does not strand the other rows: the covered row settles as nothing, the next one opens', async () => {
+    registerE2ESessionUser(() => 'me');
+    try {
+      useChatStore.setState({ messages: await decryptMessagesForDisplay([
+        dmRow('m1', SID_A, { createdAt: '2026-11-01T09:00:00.000Z' }),
+        dmRow('m2', SID_A, { createdAt: '2026-11-01T11:00:00.000Z' }),
+      ]) });
+      const closed = rowById('m1');
+      decryptMessage.mockImplementation(async (message: { id: string; content: string; conversationId: string; authorId: string }) => {
+        // the removal (on another device) lands while the pass tries m1
+        if (message.id === 'm1') raiseClearedFloor('me', 'c1', Date.parse('2026-11-01T10:00:00.000Z'));
+        return decryptsFromSessionsHere(message);
+      });
+
+      arrive('c1', [SID_A]);
+      await redecryptPassesSettled();
+
+      expect(rowById('m1')).toBe(closed);
+      expect(rowById('m2')?.content).toBe('text of m2');
+    } finally {
+      resetClearedFloors();
+    }
   });
 
   it('a row that still fails stays as it is, tried once for the session that arrived', async () => {

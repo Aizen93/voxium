@@ -8,6 +8,15 @@ import type { Conversation, DMUnreadCount, UserStatus } from '@voxium/shared';
 import { deletedParticipantAuthor } from '../services/e2e/displayGate';
 import { isParticipantDeleted, isHeldReadOnly } from '../utils/dmParticipant';
 import { currentE2ESessionUser } from '../services/e2e/session';
+import { clearedFloorOf, isAtOrBelowClearedFloor, parseServerTime } from '../services/e2e/clearedFloors';
+import {
+  applyClearedFloor,
+  applyClearedList,
+  applyConversationFloors,
+  removalAnswerFloor,
+  retryOwedClearedPurges,
+  withoutClearedPreview,
+} from '../services/dmClearedHistory';
 
 /**
  * The purge of a read-only conversation's cache, this session
@@ -54,6 +63,17 @@ interface DMState {
    * the next list that has them (reconcileReadOnly). Reset at logout.
    */
   readOnlyPending: Record<string, true>;
+  /**
+   * Removals of this account applied this session, per conversation: the
+   * value of `removalSeq` that each one took. A list whose request started
+   * before it does not bring that conversation back (fetchConversations), nor
+   * does a call set up before it join (voiceStore.joinDMCall); a later open
+   * of the conversation or a new message in it forgets it (forgetRemoval).
+   * Reset at logout.
+   */
+  removedAt: Record<string, number>;
+  /** Counts the removals applied this session: a list fetch or a call setup takes it as its mark (wasRemovedSince). */
+  removalSeq: number;
 
   fetchConversations: () => Promise<void>;
   setActiveConversation: (conversationId: string) => void;
@@ -65,7 +85,26 @@ interface DMState {
   clearDMUnread: (conversationId: string) => void;
   initDMUnreadCounts: (unreads: DMUnreadCount[]) => void;
   markConversationRead: (conversationId: string) => void;
-  deleteConversation: (conversationId: string) => Promise<void>;
+  /**
+   * Remove a conversation for this account only, its history cleared
+   * (`DELETE /dm/:id?clearHistory=true`: what this client sends, always after
+   * its confirmation). Rejects when the server refused or could not be
+   * reached (nothing changed here then); resolves once the answer is applied
+   * (applyConversationRemoval).
+   */
+  removeConversation: (conversationId: string) => Promise<void>;
+  /**
+   * A removal of this account's, from the answer or from
+   * `dm:conversation:deleted` (every device of the remover): the floor it
+   * carries applied first (services/dmClearedHistory.ts, also for a
+   * conversation the store no longer holds), then the conversation dropped,
+   * and a call of it on this device ended locally (the server ended it
+   * already; nothing is emitted back). `askedBy`: the account that sent the
+   * request whose answer this is (see applyClearedFloor).
+   */
+  applyConversationRemoval: (conversationId: string, clearedUntil: unknown, source: string, askedBy?: string | null) => void;
+  /** The conversation came back (opened again, or a new message in it): no list or call setup counts its earlier removal against it any more. */
+  forgetRemoval: (conversationId: string) => void;
   handleConversationDeleted: (conversationId: string) => void;
   totalDMUnread: () => number;
   updateParticipantStatus: (userId: string, status: UserStatus) => void;
@@ -99,6 +138,15 @@ export function isConversationReadOnly(conversationId: string | null | undefined
   return isHeldReadOnly(useDMStore.getState(), conversationId);
 }
 
+/**
+ * Whether a removal of `conversationId` was applied after `mark` (a value of
+ * `removalSeq` taken earlier) and not forgotten since (an open of it, a new
+ * message in it).
+ */
+export function wasRemovedSince(conversationId: string, mark: number): boolean {
+  return (useDMStore.getState().removedAt[conversationId] ?? -1) > mark;
+}
+
 // Dedup: prevent redundant mark-as-read API calls (same pattern as serverStore)
 let _lastMarkedConv = '';
 let _lastMarkedConvAt = 0;
@@ -120,6 +168,64 @@ function withLockedPreview(conversation: Conversation): Conversation {
     return last.content || last.encrypted ? { ...conversation, lastMessage: { ...last, content: '', encrypted: false } } : conversation;
   }
   return last?.encrypted && last.content ? { ...conversation, lastMessage: { ...last, content: '' } } : conversation;
+}
+
+/**
+ * The conversations a server answer or a list carries, with their floors
+ * applied first (services/dmClearedHistory.ts: nothing at or below one is
+ * cached or shown from now on) and a preview at or below one dropped. Rows of
+ * them the chat view still holds at or below their floor go as well (a view
+ * loaded before the floor was known: the server serves none of them again).
+ * `askedBy`: the account that sent the request, read before it (an answer
+ * landing after a switch of account applies no floor).
+ */
+function withClearedFloors(conversations: Conversation[], askedBy: string | null | undefined): Conversation[] {
+  applyConversationFloors(conversations, askedBy);
+  dropClearedRows(conversations.filter((c) => c.clearedUntil !== undefined).map((c) => c.id));
+  return conversations.map(withoutClearedPreview);
+}
+
+/**
+ * A list whose request began before a removal does not bring the removed
+ * conversation back. Left out of `conversations` (with its floors already
+ * applied, withClearedFloors):
+ *  - one whose removal was applied after the list request started (`mark`, a
+ *    value of removalSeq), with or without a floor (a removal from a 2.1.x
+ *    device of this account carries none), unless an open of it or a new
+ *    message in it came since (forgetRemoval);
+ *  - one whose floor known this session is higher than the floor the row
+ *    carries (or it carries none) and that shows no message above it (its
+ *    preview at or below the floor is gone already): a list computed before
+ *    the floor was set, whichever way the floor reached this device.
+ * One that legitimately came back stays: a newer message shows above the
+ * floor, and a reopened one carries the floor this device knows.
+ */
+function withoutStaleRemovals(conversations: Conversation[], mark: number, removedAt: Readonly<Record<string, number>>): Conversation[] {
+  const account = currentE2ESessionUser();
+  return conversations.filter((c) => {
+    if ((removedAt[c.id] ?? -1) > mark) return false;
+    const known = clearedFloorOf(account, c.id);
+    if (known === null || c.lastMessage) return true;
+    const served = parseServerTime(c.clearedUntil);
+    return served !== null && served >= known;
+  });
+}
+
+/**
+ * The rows of these conversations the chat view holds at or below their
+ * floor, removed (server channel rows carry no conversation id and are never
+ * touched). dmStore owns the chat store's DM transitions.
+ */
+function dropClearedRows(conversationIds: readonly string[]): void {
+  if (conversationIds.length === 0) return;
+  const account = currentE2ESessionUser();
+  const chat = useChatStore.getState();
+  for (const row of chat.messages ?? []) {
+    if (row.conversationId && conversationIds.includes(row.conversationId)
+      && isAtOrBelowClearedFloor(account, row.conversationId, row.createdAt)) {
+      chat.deleteMessage(row.id);
+    }
+  }
 }
 
 /**
@@ -198,9 +304,20 @@ export const useDMStore = create<DMState>((set, get) => ({
   readOnlyPurges: {},
   readOnlyConfirmed: {},
   readOnlyPending: {},
+  removedAt: {},
+  removalSeq: 0,
 
   fetchConversations: async () => {
     set({ isLoading: true });
+    // a purge of a cleared history that failed, or waited for the encryption
+    // to start, is tried again at every list fetch (listed or not: a removed
+    // conversation is off the list)
+    retryOwedClearedPurges();
+    // the account the list is fetched for (its floors are applied for it only)
+    const askedBy = currentE2ESessionUser();
+    // the removals applied before the request: one applied after it is not undone by its answer
+    const removalMark = get().removalSeq;
+    let clearedList: unknown;
     let conversations: Conversation[];
     let transitions: ReadOnlyTransition[];
     let applied: string[];
@@ -213,6 +330,8 @@ export const useDMStore = create<DMState>((set, get) => ({
     // had loaded perfectly well and was already on screen.
     try {
       const { data } = await api.get('/dm');
+      // the floors of this account's removed conversations, beside the list
+      clearedList = (data as { cleared?: unknown }).cleared;
       const fetched = (data.data as Conversation[]).map(withLockedPreview);
       // what the list itself says, before this session's own knowledge joins it
       served = fetched.filter(isParticipantDeleted).map((c) => c.id);
@@ -231,6 +350,14 @@ export const useDMStore = create<DMState>((set, get) => ({
       set({ isLoading: false });
       return;
     }
+
+    // The reader's floors, before anything of the list reaches the store:
+    // those of the removed conversations it leaves out (`cleared`), then those
+    // it carries (clearedUntil); applied outside the try above, which only the
+    // fetch may fail. Then what a list begun before a removal must not bring
+    // back is left out.
+    applyClearedList(clearedList, askedBy);
+    conversations = withoutStaleRemovals(withClearedFloors(conversations, askedBy), removalMark, get().removedAt);
 
     // Initialize participant statuses from the conversation data.
     //
@@ -334,9 +461,11 @@ export const useDMStore = create<DMState>((set, get) => ({
             // only over the very row it read: still that encrypted message.
             // A conversation that turned read-only meanwhile has the other
             // person's preview standing as deleted (asReadOnly), and no text
-            // is written into it
+            // is written into it; nor into a preview at or below a floor
+            // learnt during the read
             c.id === conv.id && c.lastMessage?.id === conv.lastMessage!.id
               && c.lastMessage.encrypted === true && c.lastMessage.type !== DELETED_MESSAGE_TYPE
+              && !isAtOrBelowClearedFloor(currentE2ESessionUser(), c.id, c.lastMessage.createdAt)
               ? { ...c, lastMessage: { ...c.lastMessage, content: text } }
               : c
           ),
@@ -379,9 +508,13 @@ export const useDMStore = create<DMState>((set, get) => ({
   openDM: async (userId: string) => {
     // the deleted-account placeholder names nobody: no POST /dm for it
     if (isDeletedParticipantId(userId)) throw new Error('A deleted account cannot be messaged');
+    const askedBy = currentE2ESessionUser();
     try {
       const { data } = await api.post('/dm', { userId });
-      const conversation: Conversation = withLockedPreview(data.data);
+      // reopened after a removal that cleared the history: its floor first
+      const [conversation] = withClearedFloors([withLockedPreview(data.data)], askedBy);
+      // opened again: its earlier removal no longer keeps a list from showing it
+      get().forgetRemoval(conversation.id);
 
       // Add to list if not already present
       set((state) => {
@@ -397,7 +530,7 @@ export const useDMStore = create<DMState>((set, get) => ({
   },
 
   addConversation: (incoming: Conversation) => {
-    const conversation = withLockedPreview(incoming);
+    const [conversation] = withClearedFloors([withLockedPreview(incoming)], currentE2ESessionUser());
     set((state) => {
       if (state.conversations.some((c) => c.id === conversation.id)) return state;
       return { conversations: [conversation, ...state.conversations] };
@@ -406,6 +539,10 @@ export const useDMStore = create<DMState>((set, get) => ({
 
 
   updateLastMessage: (conversationId: string, message: NonNullable<Conversation['lastMessage']>) => {
+    // a row at or below a cleared floor is no preview (the gate shows none of them)
+    if (isAtOrBelowClearedFloor(currentE2ESessionUser(), conversationId, message.createdAt)) return;
+    // a new message in it: an earlier removal no longer keeps a list from showing it
+    get().forgetRemoval(conversationId);
     set((state) => {
       const updated = state.conversations.map((c) =>
         c.id === conversationId ? { ...c, lastMessage: message } : c
@@ -458,14 +595,61 @@ export const useDMStore = create<DMState>((set, get) => ({
     });
   },
 
-  deleteConversation: async (conversationId: string) => {
+  removeConversation: async (conversationId: string) => {
+    // the account that removes it, read before the request
+    const askedBy = currentE2ESessionUser();
+    let answer: unknown;
     try {
-      await api.delete(`/dm/${conversationId}`);
-      get().handleConversationDeleted(conversationId);
+      // always the confirmed removal: the 2.2.0 client asks first
+      ({ data: answer } = await api.delete(`/dm/${conversationId}`, { params: { clearHistory: true } }));
     } catch (err) {
-      console.error('Failed to delete conversation:', err);
+      console.error('Failed to remove conversation:', err);
       throw err;
     }
+    // Signed out (and maybe someone else signed in) while the request ran:
+    // nothing of the answer is the store's to apply now. The server did it;
+    // the next session of that account learns the floor from its list.
+    if (currentE2ESessionUser() !== askedBy) return;
+    // the answer's floor (data.clearedUntil): this device purges even when
+    // its socket misses the event
+    get().applyConversationRemoval(conversationId, removalAnswerFloor(answer), 'removal answer', askedBy);
+  },
+
+  applyConversationRemoval: (conversationId: string, clearedUntil: unknown, source: string, askedBy?: string | null) => {
+    // the floor FIRST, synchronously: from here on nothing at or below it is
+    // cached or shown, a decrypt or a page already on its way included
+    applyClearedFloor(conversationId, clearedUntil, source, askedBy);
+    dropClearedRows([conversationId]);
+    // the removal's mark, floor or none: a list already on its way, or a call
+    // being set up, does not bring it back (withoutStaleRemovals, joinDMCall)
+    set((state) => ({
+      removalSeq: state.removalSeq + 1,
+      removedAt: { ...state.removedAt, [conversationId]: state.removalSeq + 1 },
+    }));
+    get().handleConversationDeleted(conversationId);
+    // A call of that conversation on this device: the server ended the
+    // remover's call before it answered and announced (dm:voice:ended, which
+    // a socket that was down meanwhile never got: the panel would stay up and
+    // the reconnect would join the call again). Ended locally, nothing
+    // emitted. A ring from the other person is left alone, as the server
+    // leaves it.
+    void import('./voiceStore')
+      .then(({ useVoiceStore }) => {
+        const voice = useVoiceStore.getState();
+        if (voice.dmCallConversationId === conversationId) voice.handleDMCallEnded();
+      })
+      .catch((err: unknown) => {
+        console.warn('[DM] Could not end the call of a removed conversation:', err instanceof Error ? err.message : err);
+      });
+  },
+
+  forgetRemoval: (conversationId: string) => {
+    if (get().removedAt[conversationId] === undefined) return;
+    set((state) => {
+      const removedAt = { ...state.removedAt };
+      delete removedAt[conversationId];
+      return { removedAt };
+    });
   },
 
   handleConversationDeleted: (conversationId: string) => {

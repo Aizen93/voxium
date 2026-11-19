@@ -45,6 +45,7 @@ import { handleMessageBulkDeleted } from '../../services/webhookSocketHandlers';
 import { handleAppResume } from '../../services/resume';
 import { isSecureChannelMessage as isSecureChannelMessageIn } from '../../utils/secureChannelGate';
 import { handleConversationReadOnly, standsAsDeletedNow } from '../../services/dmReadOnly';
+import { readConversationRemovedNotice } from '../../services/dmClearedHistory';
 import { isDeletedMessageRow } from '../../services/e2e/displayGate';
 import { isParticipantDeleted, participantDisplayName } from '../../utils/dmParticipant';
 import { WS_EVENTS, isDeletedParticipantId } from '@voxium/shared';
@@ -428,6 +429,9 @@ export function MainLayout() {
           // If conversation isn't in the local store yet (e.g. brand-new DM), fetch it
           const exists = dmStore.conversations.some((c) => c.id === message.conversationId);
           if (!exists) {
+            // a new message in a conversation this account removed brings it
+            // back: an earlier removal no longer keeps a list from showing it
+            dmStore.forgetRemoval(message.conversationId);
             await dmStore.fetchConversations();
             // another await: the session may have ended during it too
             if (signedInUser() !== session) return;
@@ -567,8 +571,14 @@ export function MainLayout() {
           voiceState.setIncomingCall(null);
         }
       },
-      dmConversationDeleted: ({ conversationId }: { conversationId: string }) => {
-        useDMStore.getState().handleConversationDeleted(conversationId);
+      // A removal of this account's, on any of its devices: the floor it
+      // carries (`clearedUntil`) purges this device's cache too
+      // (services/dmClearedHistory.ts validates the payload; a malformed
+      // floor is ignored there, the conversation still goes)
+      dmConversationDeleted: (data: unknown) => {
+        const notice = readConversationRemovedNotice(data);
+        if (!notice) return;
+        useDMStore.getState().applyConversationRemoval(notice.conversationId, notice.clearedUntil, 'dm:conversation:deleted');
       },
       // The other side's account was deleted: the conversation stays, read-only
       // (services/dmReadOnly.ts validates the payload and ignores an unknown id)

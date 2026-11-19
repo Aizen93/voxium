@@ -30,6 +30,7 @@ import { decryptChannelMessageForDisplay, quotedChannelTextFromCache } from './c
 import { isRefusedShape } from './displayGate';
 import { scopeMarkedPurged, type E2ESessionsAvailable } from './e2eService';
 import { currentE2ESessionUser } from './session';
+import { isAtOrBelowClearedFloor } from './clearedFloors';
 import { isHeldReadOnly } from '../../utils/dmParticipant';
 import {
   countViewChange,
@@ -201,9 +202,16 @@ async function retryDueRows(scope: string, live: () => boolean): Promise<void> {
       }
       continue;
     }
-    // null: the E2E session ended during the decrypt. A logout, an account
-    // switch or a view that moved on applies nothing of this pass
-    if (!opened || !live() || scopeOnScreen() !== scope) return;
+    // null: the row lies at or below a cleared history's floor (nothing of it
+    // is shown: the other rows of the pass are still tried), or the E2E
+    // session ended during the decrypt (a logout, an account switch: nothing
+    // more of this pass is tried). A view that moved on applies nothing of it
+    if (!opened) {
+      if (!live() || scopeOnScreen() !== scope) return;
+      if (isAtOrBelowClearedFloor(currentE2ESessionUser(), scope, heldRow.createdAt)) continue;
+      return;
+    }
+    if (!live() || scopeOnScreen() !== scope) return;
     // still closed: the row stays as it is (its new failure is held at the next view change)
     if (isRefusedShape(opened)) continue;
     // the conversation turned read-only during the try: nothing of it is shown

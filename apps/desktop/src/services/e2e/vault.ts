@@ -20,7 +20,8 @@
 //   pka:{shareId}                    an acknowledgement of a claimed share still owed to the server (§12.3)
 //   history_pull                     where an unfinished history pull stands (§16.3)
 //   pt:{messageId}                   decrypted-plaintext cache entry
-//   ptpurge:{mark}:{scope}           a purge of the `pt:` entries of a scope that ended (purgeCachedPlaintexts)
+//   ptpurge:{mark}:{scope}           a purge of the `pt:` entries of a scope that ended (purgeCachedPlaintexts);
+//                                    under `cleared`, with the floor it purged up to
 //
 // `master_secret` holds the Ed25519 master private key that cross-signs this
 // account's devices. Like every other secret it is stored SEALED (AES-256-GCM
@@ -268,6 +269,16 @@ export interface PlaintextPurgeEntry {
   authorId?: string;
   createdAt?: string;
   editedAt: string | null;
+}
+
+/**
+ * A purge that ended for one scope (`ptpurge:{mark}:{scope}`): when, and for
+ * a levelled mark the level its walk purged up to (a cleared history's floor,
+ * ms since the epoch). Nothing else: no text, no ids but the scope's.
+ */
+interface PurgeRecord {
+  at: number;
+  level?: number;
 }
 
 /** One Megolm ratchet position: the session and the index within it. */
@@ -881,15 +892,27 @@ export class E2EVault {
 
   // ── Purges that ended, per scope (ptpurge:{mark}:{scope}) ──
   // `mark` names what the purge removed, so a later session skips the walk
-  // for a scope already done; nothing but the time is stored.
+  // for a scope already done; nothing but the time is stored, and for a
+  // LEVELLED mark (`levels`: a cleared history's floor) the level the walk
+  // purged up to as well.
 
-  /** The scopes among `scopes` a purge under `mark` has not ended for yet, in one transaction. */
-  scopesNotPurged(mark: string, scopes: readonly string[]): Promise<string[]> {
+  /**
+   * The scopes among `scopes` a purge under `mark` has not ended for yet, in
+   * one transaction. With `levels`, a scope whose record holds no level, or a
+   * level below the one asked, has not.
+   */
+  scopesNotPurged(mark: string, scopes: readonly string[], levels?: ReadonlyMap<string, number>): Promise<string[]> {
     if (scopes.length === 0) return Promise.resolve([]);
     return this.withStore('readonly', async (s) => {
       // every request issued in this tick: one transaction
       const done = await Promise.all(scopes.map((scope) => requestToPromise(s.get(`ptpurge:${mark}:${scope}`))));
-      return scopes.filter((_scope, i) => done[i] === undefined);
+      return scopes.filter((scope, i) => {
+        const record = done[i] as PurgeRecord | undefined;
+        if (record === undefined) return true;
+        if (!levels) return false;
+        const asked = levels.get(scope);
+        return typeof record.level !== 'number' || asked === undefined || record.level < asked;
+      });
     });
   }
 
@@ -904,12 +927,42 @@ export class E2EVault {
     return this.delete(`ptpurge:${mark}:${scope}`);
   }
 
-  /** Record that a purge under `mark` ended for `scopes`, in one transaction. */
-  putScopesPurged(mark: string, scopes: readonly string[]): Promise<void> {
+  /**
+   * Record that a purge under `mark` ended for `scopes`, in one transaction.
+   * With `levels`, each record holds its scope's level, and a record already
+   * holding a higher one keeps it (a level never moves back).
+   */
+  putScopesPurged(mark: string, scopes: readonly string[], levels?: ReadonlyMap<string, number>): Promise<void> {
     if (scopes.length === 0) return Promise.resolve();
     const at = Date.now();
+    if (!levels) {
+      return this.withStore('readwrite', (s) =>
+        Promise.all(scopes.map((scope) => requestToPromise(s.put({ at }, `ptpurge:${mark}:${scope}`)))).then(() => undefined)
+      );
+    }
+    const asked = scopes.map((scope) => levels.get(scope));
+    if (asked.some((level) => level === undefined || !Number.isFinite(level))) {
+      return Promise.reject(new Error('a levelled purge record needs a level for every scope'));
+    }
+    // ONE transaction: each write is issued from its read's success callback,
+    // while the transaction is still active (never after an await, where it
+    // may already have committed); a failed request aborts it whole
     return this.withStore('readwrite', (s) =>
-      Promise.all(scopes.map((scope) => requestToPromise(s.put({ at }, `ptpurge:${mark}:${scope}`)))).then(() => undefined)
+      new Promise<void>((resolve, reject) => {
+        const tx = s.transaction;
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error ?? new Error('IndexedDB purge record transaction aborted'));
+        scopes.forEach((scope, i) => {
+          const key = `ptpurge:${mark}:${scope}`;
+          const level = asked[i] as number;
+          const read = s.get(key);
+          read.onsuccess = () => {
+            const record = read.result as PurgeRecord | undefined;
+            const kept = typeof record?.level === 'number' && record.level > level ? record.level : level;
+            s.put({ at, level: kept } satisfies PurgeRecord, key);
+          };
+        });
+      })
     );
   }
 
