@@ -1102,6 +1102,23 @@ describe('socketServer — unread:init / dm:unread:init count authorless rows', 
 
     httpServer.close();
   });
+
+  it('dm:unread:init never counts a deleted account’s placeholder row (#131): the type is left out, passed as a value', async () => {
+    // A placeholder has no author, so the author test alone counts it: a
+    // conversation kept for the other person would light a badge of every
+    // message the deleted account ever wrote there
+    const { socket } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    const call = (mockPrisma.$queryRawUnsafe.mock.calls as unknown[][]).find((c) => (c[0] as string).includes('m.conversation_id = conv.id'))!;
+    expect(call[0]).toMatch(/AND m\.type <> \$3\s+LIMIT 100/);
+    expect(call.slice(1)).toEqual(['user-1', ['conv-1'], 'deleted']);
+
+    httpServer.close();
+  });
 });
 
 // ─── Which address the socket surface believes it is talking to ─────────────
