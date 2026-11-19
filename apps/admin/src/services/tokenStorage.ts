@@ -1,5 +1,23 @@
-const ACCESS_KEY = 'voxium_access_token';
-const REFRESH_KEY = 'voxium_refresh_token';
+// Every key the admin dashboard keeps in browser storage lives here, under a
+// name of its own: the web client uses `voxium_access_token` and
+// `voxium_refresh_token`, and where both apps are served from one origin a
+// shared name makes each read, overwrite and clear the other's session. The old
+// names are never read, moved or removed (on a shared origin they may hold the
+// web client's session): an administrator signs in once more.
+const ACCESS_KEY = 'voxium_admin_access_token';
+const REFRESH_KEY = 'voxium_admin_refresh_token';
+const TRUSTED_DEVICE_KEY = 'voxium_admin_trusted_device';
+
+/** Every storage key the admin app uses (pinned apart from the client's by a test). */
+export const ADMIN_STORAGE_KEYS: readonly string[] = [ACCESS_KEY, REFRESH_KEY, TRUSTED_DEVICE_KEY];
+
+export function getTrustedDeviceToken(): string | undefined {
+  return localStorage.getItem(TRUSTED_DEVICE_KEY) || undefined;
+}
+
+export function setTrustedDeviceToken(token: string): void {
+  localStorage.setItem(TRUSTED_DEVICE_KEY, token);
+}
 
 export function getAccessToken(): string | null {
   return localStorage.getItem(ACCESS_KEY) ?? sessionStorage.getItem(ACCESS_KEY);
