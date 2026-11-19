@@ -10,7 +10,9 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { toast } from '../../stores/toastStore';
 import { getTranslatedError } from '../../utils/serverErrors';
 import { Avatar } from '../common/Avatar';
-import { APP_VERSION } from '@voxium/shared';
+import { APP_VERSION, Permissions } from '@voxium/shared';
+import { useServerPermissions } from '../../hooks/useServerPermissions';
+import { hasEffective } from '../../utils/memberActions';
 
 /**
  * The signed-in user card at the bottom of the unified sidebar (2026 redesign).
@@ -28,6 +30,10 @@ export function UserCard() {
   const currentMember = useServerStore((s) =>
     s.activeServerId ? s.members.find((m) => m.userId === useAuthStore.getState().user?.id) : undefined,
   );
+  // Setting a nickname needs CHANGE_NICKNAME, which the default @everyone
+  // permissions do not include; clearing an existing one is always allowed
+  const permissions = useServerPermissions(activeServerId, user?.id);
+  const canSetNickname = hasEffective(permissions, Permissions.CHANGE_NICKNAME);
   const selfMute = useVoiceStore((s) => s.selfMute);
   const selfDeaf = useVoiceStore((s) => s.selfDeaf);
   const toggleMute = useVoiceStore((s) => s.toggleMute);
@@ -71,6 +77,16 @@ export function UserCard() {
     }
   };
 
+  const clearNickname = async () => {
+    if (!activeServerId) return;
+    try {
+      await useServerStore.getState().setNickname(activeServerId, null);
+      toast.success(t('channel.nicknameCleared'));
+    } catch (err) {
+      toast.error(getTranslatedError(err, t, 'channel.failedToSetNickname'));
+    }
+  };
+
   // Your OWN presence is connection-driven: the server marks you online when
   // this socket connects. authStore's user.status is the DB snapshot from the
   // login fetch — taken BEFORE the socket connected and never updated since —
@@ -101,7 +117,21 @@ export function UserCard() {
           <p className="truncate text-[13px] font-semibold leading-tight text-vox-text-primary">
             {user?.displayName || t('channel.user')}
           </p>
-          {activeServerId && !editingNickname && (
+          {activeServerId && !canSetNickname && currentMember?.nickname && (
+            <div className="flex max-w-full items-center gap-1 text-[11px] leading-tight text-vox-text-muted">
+              <span className="truncate">{currentMember.nickname}</span>
+              <button
+                onClick={() => { void clearNickname(); }}
+                className="shrink-0 hover:text-vox-text-secondary transition-colors"
+                title={t('contextMenu.clearNickname')}
+                aria-label={t('contextMenu.clearNickname')}
+                data-testid="clear-nickname"
+              >
+                ×
+              </button>
+            </div>
+          )}
+          {activeServerId && canSetNickname && !editingNickname && (
             <button
               onClick={() => {
                 nicknameCancelled.current = false;
@@ -116,7 +146,7 @@ export function UserCard() {
               {currentMember?.nickname ? currentMember.nickname : t('channel.setNickname')}
             </button>
           )}
-          {activeServerId && editingNickname && (
+          {activeServerId && canSetNickname && editingNickname && (
             <input
               type="text"
               value={nicknameInput}

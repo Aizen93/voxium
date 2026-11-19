@@ -39,9 +39,10 @@ import {
   useSortable,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { Permissions, hasPermission, permissionsFromString } from '@voxium/shared';
+import { Permissions } from '@voxium/shared';
 import { canOpenServerSettings } from '../../utils/serverSettingsAccess';
-import { permissionsFingerprint } from '../../hooks/useServerPermissions';
+import { useServerPermissions } from '../../hooks/useServerPermissions';
+import { hasEffective } from '../../utils/memberActions';
 import type { Channel, Category } from '@voxium/shared';
 import { isSecureVoiceSupported } from '../../services/e2e/voiceFrameTransform';
 
@@ -66,7 +67,7 @@ function saveCollapsed(collapsed: Set<string>) {
 
 function SortableChannelItem({
   channel,
-  isAdmin,
+  canManage,
   isActive,
   isVoiceActive,
   unread,
@@ -79,7 +80,8 @@ function SortableChannelItem({
   onVoiceUserContextMenu,
 }: {
   channel: Channel;
-  isAdmin: boolean;
+  /** MANAGE_CHANNELS: reorder and delete (the server checks the same bit). */
+  canManage: boolean;
   isActive: boolean;
   isVoiceActive: boolean;
   unread: number;
@@ -100,7 +102,7 @@ function SortableChannelItem({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: CH_PREFIX + channel.id, disabled: !isAdmin });
+  } = useSortable({ id: CH_PREFIX + channel.id, disabled: !canManage });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -126,7 +128,7 @@ function SortableChannelItem({
           )}
         >
           <div className="flex h-[34px] w-full items-center gap-1 px-2">
-            {isAdmin && (
+            {canManage && (
               <button
                 {...attributes}
                 {...listeners}
@@ -146,7 +148,7 @@ function SortableChannelItem({
             <span className="shrink-0 text-[11px] font-medium tabular-nums text-vox-text-muted">
               {voiceUsers.length}
             </span>
-            {isAdmin && (
+            {canManage && (
               <button
                 onClick={() => onDelete(channel.id)}
                 className="shrink-0 opacity-0 group-hover:opacity-100 text-vox-text-muted hover:text-vox-accent-danger transition-all"
@@ -190,7 +192,7 @@ function SortableChannelItem({
               : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-secondary'
         )}
       >
-        {isAdmin && (
+        {canManage && (
           <button
             {...attributes}
             {...listeners}
@@ -225,7 +227,7 @@ function SortableChannelItem({
             {unread > 99 ? '99+' : unread}
           </span>
         )}
-        {isAdmin && (
+        {canManage && (
           <button
             onClick={() => onDelete(channel.id)}
             className="shrink-0 opacity-0 group-hover:opacity-100 text-vox-text-muted hover:text-vox-accent-danger transition-all"
@@ -313,7 +315,8 @@ function VoiceUserList({ voiceUsers, currentUserId, onContextMenu }: {
 
 function SortableCategoryHeader({
   category,
-  isAdmin,
+  canManageCategories,
+  canManageChannels,
   isCollapsed,
   onToggle,
   onCreateChannel,
@@ -321,7 +324,10 @@ function SortableCategoryHeader({
   children,
 }: {
   category: Category;
-  isAdmin: boolean;
+  /** MANAGE_CATEGORIES: reorder and delete the category. */
+  canManageCategories: boolean;
+  /** MANAGE_CHANNELS: create a channel inside it. */
+  canManageChannels: boolean;
   isCollapsed: boolean;
   onToggle: () => void;
   onCreateChannel: (catId: string) => void;
@@ -336,7 +342,7 @@ function SortableCategoryHeader({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: CAT_PREFIX + category.id, disabled: !isAdmin });
+  } = useSortable({ id: CAT_PREFIX + category.id, disabled: !canManageCategories });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -347,7 +353,7 @@ function SortableCategoryHeader({
   return (
     <div ref={setNodeRef} style={style} className="mt-4 first:mt-0">
       <div className="mb-1 flex items-center justify-between px-1 group/cat">
-        {isAdmin && (
+        {canManageCategories && (
           <button
             {...attributes}
             {...listeners}
@@ -368,24 +374,28 @@ function SortableCategoryHeader({
           />
           <span className="truncate">{category.name}</span>
         </button>
-        {isAdmin && (
+        {(canManageChannels || canManageCategories) && (
           <div className="flex items-center gap-0.5 opacity-0 group-hover/cat:opacity-100 transition-opacity">
-            <button
-              onClick={() => onCreateChannel(category.id)}
-              className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
-              title={t('channel.createChannel')}
-              aria-label={t('channel.createChannel')}
-            >
-              <Plus size={14} />
-            </button>
-            <button
-              onClick={() => onDelete(category.id)}
-              className="text-vox-text-muted hover:text-vox-accent-danger transition-colors"
-              title={t('channel.deleteCategory')}
-              aria-label={t('channel.deleteCategory')}
-            >
-              <Trash2 size={12} />
-            </button>
+            {canManageChannels && (
+              <button
+                onClick={() => onCreateChannel(category.id)}
+                className="text-vox-text-muted hover:text-vox-text-primary transition-colors"
+                title={t('channel.createChannel')}
+                aria-label={t('channel.createChannel')}
+              >
+                <Plus size={14} />
+              </button>
+            )}
+            {canManageCategories && (
+              <button
+                onClick={() => onDelete(category.id)}
+                className="text-vox-text-muted hover:text-vox-accent-danger transition-colors"
+                title={t('channel.deleteCategory')}
+                aria-label={t('channel.deleteCategory')}
+              >
+                <Trash2 size={12} />
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -428,7 +438,7 @@ function CategoryOverlay({ category }: { category: Category }) {
 
 export function ChannelSidebar() {
   const { t } = useTranslation();
-  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, people, unreadCounts, reorderCategories, reorderChannels, fetchEffectivePermissions, leaveSecureChannel } = useServerStore();
+  const { channels, categories, activeChannelId, setActiveChannel, activeServerId, servers, createChannel, deleteChannel, createCategory, deleteCategory, members, people, unreadCounts, reorderCategories, reorderChannels, leaveSecureChannel } = useServerStore();
   const { joinChannel, activeChannelId: voiceChannelId, channelUsers } = useVoiceStore();
   const { clearMessages, fetchMessages } = useChatStore();
   const { user } = useAuthStore();
@@ -448,47 +458,25 @@ export function ChannelSidebar() {
   const [permissionsEditorChannel, setPermissionsEditorChannel] = useState<{ id: string; name: string; type: 'text' | 'voice' } | null>(null);
   const [showSecureCreate, setShowSecureCreate] = useState(false);
   const [secureMembersChannel, setSecureMembersChannel] = useState<{ id: string; name: string } | null>(null);
-  const [canCreateSecure, setCanCreateSecure] = useState(false);
-  // Server settings opens for anyone with something to do inside: owner and
-  // legacy admin at once, and a role-only moderator (KICK_MEMBERS: join
-  // requests + bans; MANAGE_SERVER: discovery; MANAGE_ROLES) once the
-  // effective permissions are known.
-  const [roleOpensSettings, setRoleOpensSettings] = useState(false);
   const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeServer = servers.find((s) => s.id === activeServerId);
-  const currentMember = members.find((m) => m.userId === user?.id);
-  const isAdmin = currentMember?.role === 'owner' || currentMember?.role === 'admin';
+  // Every management control follows the viewer's EFFECTIVE permission bits
+  // (hooks/useServerPermissions), the ones the server checks per action —
+  // never the legacy member.role string, which a custom role does not move.
+  // A role edit that grants or takes away a bit changes this at once (the
+  // hook refetches when the roles in the store change).
+  const serverPerms = useServerPermissions(activeServerId, user?.id);
+  const canManageChannels = hasEffective(serverPerms, Permissions.MANAGE_CHANNELS);
+  const canManageCategories = hasEffective(serverPerms, Permissions.MANAGE_CATEGORIES);
+  // Channel permission overrides are written by the roles routes (MANAGE_ROLES)
+  const canEditChannelPermissions = hasEffective(serverPerms, Permissions.MANAGE_ROLES);
+  const canCreateSecure = hasEffective(serverPerms, Permissions.CREATE_SECURE_CHANNELS);
+  // Server settings opens for anyone with something to do inside it
+  const canOpenSettings = serverPerms !== null && canOpenServerSettings(serverPerms);
   // Encoded-transform support decides whether secure VOICE channels are
   // joinable on this runtime at all (spec §21) — stable per session
   const secureVoiceSupported = useMemo(() => isSecureVoiceSupported(), []);
-
-  // Fingerprint of everything that can change THIS user's effective server
-  // permissions: legacy role, assigned role ids, and those roles' bitmasks.
-  // Live role edits update the store, which re-runs the permission fetch below
-  // — without it, a freshly granted CREATE_SECURE_CHANNELS would not show the
-  // create control until the next server switch.
-  const roles = useServerStore((s) => s.roles);
-  const myPermsKey = useMemo(() => permissionsFingerprint(currentMember, roles), [currentMember, roles]);
-
-  // Secure-channel creation is gated on the PERMISSION BIT, not the legacy
-  // member.role field — a custom role can carry CREATE_SECURE_CHANNELS.
-  useEffect(() => {
-    setCanCreateSecure(false);
-    setRoleOpensSettings(false);
-    if (!activeServerId) return;
-    let cancelled = false;
-    fetchEffectivePermissions(activeServerId)
-      .then((bits) => {
-        if (!cancelled) {
-          const perms = permissionsFromString(bits);
-          setCanCreateSecure(hasPermission(perms, Permissions.CREATE_SECURE_CHANNELS));
-          setRoleOpensSettings(canOpenServerSettings(perms));
-        }
-      })
-      .catch((err) => console.warn('[SecureChannel] Failed to fetch effective permissions:', err));
-    return () => { cancelled = true; };
-  }, [activeServerId, myPermsKey, fetchEffectivePermissions]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -552,9 +540,9 @@ export function ChannelSidebar() {
   const handleChannelContextMenu = useCallback((e: React.MouseEvent, channel: Channel) => {
     // Secure channels: every member gets a menu (members/leave; the creator
     // manage items). Plaintext channels keep the admin-only menu.
-    if (!channel.secure && !isAdmin) return;
+    if (!channel.secure && !canManageChannels && !canEditChannelPermissions) return;
     setChannelContextMenu({ channel, position: { x: e.clientX, y: e.clientY } });
-  }, [isAdmin]);
+  }, [canManageChannels, canEditChannelPermissions]);
 
   // Secure channels render in their own section — visible at all only because
   // the server listed them for us (membership); never draggable/categorized
@@ -843,7 +831,7 @@ export function ChannelSidebar() {
           >
             <UserPlus size={15} />
           </button>
-          {(isAdmin || roleOpensSettings) && (
+          {canOpenSettings && (
             <button
               onClick={() => setShowServerSettings(true)}
               className="flex h-[26px] w-[26px] items-center justify-center rounded-md text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary transition-colors"
@@ -874,7 +862,7 @@ export function ChannelSidebar() {
                   <SortableChannelItem
                     key={ch.id}
                     channel={ch}
-                    isAdmin={isAdmin}
+                    canManage={canManageChannels}
                     isActive={activeChannelId === ch.id}
                     isVoiceActive={voiceChannelId === ch.id}
                     unread={ch.type === 'text' && activeChannelId !== ch.id ? (unreadCounts[ch.id] || 0) : 0}
@@ -901,7 +889,8 @@ export function ChannelSidebar() {
                 <SortableCategoryHeader
                   key={cat.id}
                   category={cat}
-                  isAdmin={isAdmin}
+                  canManageCategories={canManageCategories}
+                  canManageChannels={canManageChannels}
                   isCollapsed={collapsed.has(cat.id)}
                   onToggle={() => toggleCollapsed(cat.id)}
                   onCreateChannel={(catId) => openCreateChannel(catId, 'text')}
@@ -912,7 +901,7 @@ export function ChannelSidebar() {
                       <SortableChannelItem
                         key={ch.id}
                         channel={ch}
-                        isAdmin={isAdmin}
+                        canManage={canManageChannels}
                         isActive={activeChannelId === ch.id}
                         isVoiceActive={voiceChannelId === ch.id}
                         unread={ch.type === 'text' && activeChannelId !== ch.id ? (unreadCounts[ch.id] || 0) : 0}
@@ -1085,8 +1074,8 @@ export function ChannelSidebar() {
           </div>
         )}
 
-        {/* Admin: Create Category button */}
-        {isAdmin && !showCreateCategory && (
+        {/* Create Category button (MANAGE_CATEGORIES) */}
+        {canManageCategories && !showCreateCategory && (
           <button
             onClick={() => setShowCreateCategory(true)}
             className="mt-3 flex w-full items-center gap-2 rounded-md border border-dashed border-vox-border px-2 py-1.5 text-[13px] font-medium text-vox-accent-primary transition-colors hover:border-vox-accent-primary hover:bg-vox-accent-tint"
@@ -1169,13 +1158,13 @@ export function ChannelSidebar() {
         </div>,
         document.body
       )}
-      {channelContextMenu && !channelContextMenu.channel.secure && isAdmin && createPortal(
+      {channelContextMenu && !channelContextMenu.channel.secure && (canManageChannels || canEditChannelPermissions) && createPortal(
         <div
           ref={ctxRef}
           className="fixed z-[9999] min-w-44 rounded-lg border border-vox-border bg-vox-bg-floating p-1.5 shadow-xl animate-fade-in"
           style={{ left: channelContextMenu.position.x, top: channelContextMenu.position.y }}
         >
-          <button
+          {canEditChannelPermissions && <button
             onClick={() => {
               setPermissionsEditorChannel({ id: channelContextMenu.channel.id, name: channelContextMenu.channel.name, type: channelContextMenu.channel.type as 'text' | 'voice' });
               setChannelContextMenu(null);
@@ -1184,8 +1173,8 @@ export function ChannelSidebar() {
           >
             <Shield size={16} className="text-vox-accent-primary" />
             {t('channel.editPermissions')}
-          </button>
-          <button
+          </button>}
+          {canManageChannels && <button
             onClick={() => {
               handleDeleteChannel(channelContextMenu.channel.id);
               setChannelContextMenu(null);
@@ -1194,7 +1183,7 @@ export function ChannelSidebar() {
           >
             <Trash2 size={16} />
             {t('channel.deleteChannel')}
-          </button>
+          </button>}
         </div>,
         document.body
       )}

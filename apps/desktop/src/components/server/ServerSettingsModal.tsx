@@ -204,10 +204,13 @@ export function ServerSettingsModal({ serverId, onClose }: Props) {
 
 function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => void }) {
   const { t } = useTranslation();
-  const { servers, members, uploadServerIcon, updateServer, deleteServer, toggleInvitesLock } = useServerStore();
+  const { servers, uploadServerIcon, updateServer, deleteServer, toggleInvitesLock } = useServerStore();
   const currentUser = useAuthStore((s) => s.user);
   const server = servers.find((s) => s.id === serverId);
-  const currentMember = members.find((m) => m.userId === currentUser?.id);
+  // Both the invites lock and the secure-channel count answer to MANAGE_SERVER
+  // on the server, so the sections follow that bit (the owner holds every one)
+  const perms = useServerPermissions(serverId, currentUser?.id);
+  const canManageServer = perms !== null && hasPermission(perms, Permissions.MANAGE_SERVER);
 
   const [name, setName] = useState(server?.name || '');
   const [iconFile, setIconFile] = useState<File | null>(null);
@@ -221,7 +224,6 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
   if (!server) return null;
 
   const isOwner = server.ownerId === currentUser?.id;
-  const isAdminOrOwner = currentMember?.role === 'owner' || currentMember?.role === 'admin';
 
   const handleToggleInvitesLock = async () => {
     setTogglingLock(true);
@@ -315,8 +317,8 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
         {saving ? t('settings.profile.saving') : t('settings.profile.saveChanges')}
       </button>
 
-      {/* Invites Lock — owner or admin */}
-      {isAdminOrOwner && (
+      {/* Invites Lock — MANAGE_SERVER */}
+      {canManageServer && (
         <div className="mt-6 border-t border-vox-border pt-6">
           <div className="flex items-center justify-between">
             <div>
@@ -348,7 +350,11 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
       {/* Secure channels — the opaque moderation surface: a count, and a
           delete-by-id lever fed by abuse reports. Deliberately NO listing —
           non-members (owner included) must learn nothing beyond the number. */}
-      {isAdminOrOwner && <SecureChannelsSection serverId={serverId} />}
+      {/* The count answers to MANAGE_SERVER; the delete-by-id lever to the owner
+          or ADMINISTRATOR alone (a secure channel is membership-governed) */}
+      {canManageServer && (
+        <SecureChannelsSection serverId={serverId} canDelete={perms !== null && hasPermission(perms, Permissions.ADMINISTRATOR)} />
+      )}
 
       {/* Danger Zone — owner only */}
       {isOwner && (
@@ -402,7 +408,7 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
   );
 }
 
-function SecureChannelsSection({ serverId }: { serverId: string }) {
+function SecureChannelsSection({ serverId, canDelete }: { serverId: string; canDelete: boolean }) {
   const { t } = useTranslation();
   const { fetchSecureChannelCount, deleteChannel } = useServerStore();
   const [count, setCount] = useState<number | null>(null);
@@ -453,8 +459,8 @@ function SecureChannelsSection({ serverId }: { serverId: string }) {
           ? t('secureChannel.moderationLoading')
           : t('secureChannel.moderationCount', { count })}
       </p>
-      <p className="mt-2 text-xs text-vox-text-muted">{t('secureChannel.moderationHint')}</p>
-      <div className="mt-2 flex gap-2">
+      {canDelete && <p className="mt-2 text-xs text-vox-text-muted">{t('secureChannel.moderationHint')}</p>}
+      {canDelete && <div className="mt-2 flex gap-2">
         <input
           type="text"
           value={deleteId}
@@ -471,7 +477,7 @@ function SecureChannelsSection({ serverId }: { serverId: string }) {
         >
           {deleting ? t('serverSettings.general.deleting') : t('secureChannel.moderationDelete')}
         </button>
-      </div>
+      </div>}
     </div>
   );
 }

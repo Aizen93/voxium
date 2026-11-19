@@ -132,6 +132,33 @@ describe('ServerSettingsModal — gating and the Members badge', () => {
     expect(q('[data-testid="join-requests"]')).not.toBeNull();
   });
 
+  it('MANAGE_SERVER holds the invites lock and the secure-channel count of General; a legacy admin label without the bit is never shown General', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    useServerStore.setState({ members: [member('owner-1', 'owner'), member('me', 'admin')] });
+    apiWith(Permissions.VIEW_CHANNEL | Permissions.KICK_MEMBERS, 0);
+    await render();
+    expect(container.textContent).not.toContain('serverSettings.general.serverInvites');
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    resetServerPermissionsCache();
+    useServerStore.setState({ members: [member('owner-1', 'owner'), member('me', 'member')] });
+    apiWith(Permissions.VIEW_CHANNEL | Permissions.MANAGE_SERVER, 0);
+    await render();
+    expect(container.textContent).toContain('serverSettings.general.serverInvites');
+    expect(container.textContent).toContain('secureChannel.moderationTitle');
+    // the delete-by-id lever is for the owner or an ADMINISTRATOR, which MANAGE_SERVER is not
+    expect(q('[data-testid="secure-moderation-delete-id"]')).toBeNull();
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    resetServerPermissionsCache();
+    apiWith(Permissions.ADMINISTRATOR, 0);
+    await render();
+    expect(q('[data-testid="secure-moderation-delete-id"]')).not.toBeNull();
+    warn.mockRestore();
+  });
+
   it('MANAGE_SERVER alone: the Discovery tab shows, nothing is fetched for the badge and none is rendered', async () => {
     apiWith(Permissions.VIEW_CHANNEL | Permissions.MANAGE_SERVER, 3);
     await render();
