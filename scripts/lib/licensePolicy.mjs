@@ -19,6 +19,24 @@
 //
 // No top-level await here: the .ts scripts load this file through require(esm).
 
+/**
+ * A package name as the registry writes one: an optional `@scope/`, then
+ * letters, digits and `. _ ~ -`, each part starting with a letter or a digit
+ * (never `-`, which a command line would read as an option), at most 214
+ * characters. Capitals are accepted because old packages carry them. No
+ * space, quote or character a shell interprets is in that set.
+ */
+const PACKAGE_NAME_RE = /^(?:@[A-Za-z0-9][A-Za-z0-9._~-]*\/)?[A-Za-z0-9][A-Za-z0-9._~-]*$/;
+
+/**
+ * Whether `name` may be handed to a command line as a package name. A name
+ * read from the installed tree is untrusted text (a package chooses its own
+ * `name` field), so the script asks before it passes one to pnpm.
+ */
+export function isPackageName(name) {
+  return typeof name === 'string' && name.length <= 214 && PACKAGE_NAME_RE.test(name);
+}
+
 /** Licences that are copyleft by name; they get their own message. */
 const COPYLEFT_RE = /(^|[^A-Za-z])(A|L)?GPL|^SSPL|^EUPL|^CPAL|^OSL|^RPL|^Sleepycat|^CC-BY-(NC|SA|ND)/i;
 /** What a missing or unreadable licence field looks like. */
