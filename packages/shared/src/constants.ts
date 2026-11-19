@@ -157,6 +157,15 @@ export function isDeletedMessagePlaceholder(row: { type?: unknown; encrypted?: u
 }
 
 /**
+ * The refusal of a write in a direct conversation whose other side's account
+ * was deleted (a send, an edit, a reaction, an attachment upload: 403 with
+ * this error; a call: `voice:error` with this message). One sentence for the
+ * server's answer and the client's own refusal, which the desktop translates
+ * (`serverErrors.conversationReadOnly`).
+ */
+export const CONVERSATION_READ_ONLY_MESSAGE = 'This conversation is read-only';
+
+/**
  * Max serialized dm:voice:signal payload the server will relay (UTF-16 chars,
  * matching the JSON.stringify length check). Signals are opaque olm1 envelopes
  * after the E2E cutover — the cap must fit a base64-inflated audio SDP with

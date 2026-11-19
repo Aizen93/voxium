@@ -1,4 +1,4 @@
-import { isDeletedParticipantId } from '@voxium/shared';
+import { CONVERSATION_READ_ONLY_MESSAGE, isDeletedParticipantId } from '@voxium/shared';
 import type { Conversation } from '@voxium/shared';
 
 /**
@@ -47,15 +47,10 @@ export function isHeldReadOnly(
 }
 
 /**
- * The English sentence of a refusal in a read-only conversation, the one the
- * server answers with too: `serverErrors.conversationReadOnly` translates
- * both (utils/serverErrors.ts).
- */
-export const CONVERSATION_READ_ONLY_MESSAGE = 'This conversation is read-only';
-
-/**
  * Refused on this client before anything is sent: an action a read-only
- * conversation does not allow (send, edit, react, reply, call).
+ * conversation does not allow (send, edit, react, reply, call). Its message
+ * is the server's own refusal (CONVERSATION_READ_ONLY_MESSAGE, @voxium/shared),
+ * so `serverErrors.conversationReadOnly` translates both (utils/serverErrors.ts).
  */
 export class DMConversationReadOnlyError extends Error {
   constructor(public readonly conversationId: string) {
