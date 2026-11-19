@@ -835,6 +835,19 @@
     "conversationStart": "这是你们私信记录的开始。",
     "welcomeMessage": "从侧边栏选择一个对话，或点击任意空间中的成员来开始新的对话。",
     "failedToLoadConversations": "无法加载对话",
+    "remove": {
+      "action": "移除对话",
+      "actionWith": "移除与{{name}}的对话",
+      "title": "移除此对话？",
+      "body": "与{{name}}的对话将从你的列表中消失，其历史记录将在你的所有设备上被清除。此操作无法撤销。",
+      "bodyOther": "对方会保留自己的副本，也不会收到通知。如果你们任何一方再次发消息，对话会重新出现，但只包含新消息。",
+      "bodyDeleted": "此对话将从你的列表中消失，其历史记录将在你的所有设备上被清除。对方账号已被删除，因此对话无法再恢复。",
+      "callEnds": "正在进行的通话将结束。",
+      "confirm": "移除",
+      "removing": "正在移除…",
+      "done": "对话已移除",
+      "failed": "无法移除对话"
+    },
     "deletedParticipant": {
       "name": "已删除的用户",
       "readOnlyNotice": "此对话为只读：对方的账号已被删除。",
