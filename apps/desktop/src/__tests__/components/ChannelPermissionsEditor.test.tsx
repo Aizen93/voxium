@@ -35,6 +35,14 @@ vi.mock('../../stores/toastStore', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));
 
+// The viewer's server permissions (null: not known yet, which restricts nothing)
+const viewer = vi.hoisted(() => ({ bits: null as bigint | null }));
+vi.mock('../../stores/authStore', () => ({ useAuthStore: () => undefined }));
+vi.mock('../../hooks/useViewerPermissions', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../hooks/useViewerPermissions')>()),
+  useViewerPermissions: () => viewer.bits,
+}));
+
 import { ChannelPermissionsEditor } from '../../components/server/ChannelPermissionsEditor';
 
 let container: HTMLDivElement;
@@ -61,6 +69,7 @@ async function render(channelType: 'text' | 'voice') {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  viewer.bits = null;
 });
 
 const offered = (key: string) => (container.textContent ?? '').includes(`permissions.${key}.name`);
@@ -146,5 +155,102 @@ describe('ChannelPermissionsEditor — what a save sends', () => {
     cycle('SEND_MESSAGES'); // deny → inherit
     expect(button('common.save').disabled).toBe(true);
     expect(serverState.setChannelPermissionOverride).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The editor shows what the server will refuse: a save that turns on, in
+ * allow or in deny, a bit its author does not hold. A bit the viewer lacks
+ * that the stored override leaves as inherit cannot move (disabled, with the
+ * refusal as its title); one stored as allow or deny moves between that state
+ * and inherit only.
+ */
+describe('ChannelPermissionsEditor — a toggle the server would refuse', () => {
+  const stored = (allow: bigint, deny: bigint) => [{ id: 'o1', channelId: 'ch-1', roleId: 'r-everyone', allow: String(allow), deny: String(deny) }];
+  const toggleOf = (key: string) => {
+    const name = [...container.querySelectorAll('p')].find((p) => p.textContent === `permissions.${key}.name`)!;
+    return (name.closest('.group') as HTMLElement).querySelector('button') as HTMLButtonElement;
+  };
+  /** The state a toggle shows, read from its title ("... <state>. ..."). */
+  const stateOf = (key: string) => /current (\w+)\./.exec(toggleOf(key).title)?.[1];
+  const click = (key: string) => act(() => toggleOf(key).click());
+  const save = () => act(async () => ([...container.querySelectorAll('button')].find((b) => b.textContent === 'common.save') as HTMLButtonElement).click());
+
+  afterEach(() => vi.clearAllMocks());
+
+  it('a bit the viewer lacks, stored as inherit: disabled, titled with the refusal, does not move', async () => {
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_ROLES;
+    await render('text');
+    const kick = toggleOf('KICK_MEMBERS');
+    expect(kick.disabled).toBe(true);
+    expect(kick.title).toBe('serverErrors.cannotOverrideUnheldPermissions');
+    click('KICK_MEMBERS');
+    expect(toggleOf('KICK_MEMBERS').title).toBe('serverErrors.cannotOverrideUnheldPermissions');
+    expect(container.textContent ?? '').toContain('roles.noUnsavedChanges');
+  });
+
+  it('a bit the viewer holds cycles inherit, allow, deny, inherit', async () => {
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_ROLES;
+    await render('text');
+    expect(toggleOf('SEND_MESSAGES').disabled).toBe(false);
+    expect(stateOf('SEND_MESSAGES')).toBe('inherit');
+    click('SEND_MESSAGES');
+    expect(stateOf('SEND_MESSAGES')).toBe('allow');
+    click('SEND_MESSAGES');
+    expect(stateOf('SEND_MESSAGES')).toBe('deny');
+    click('SEND_MESSAGES');
+    expect(stateOf('SEND_MESSAGES')).toBe('inherit');
+  });
+
+  it('a bit the viewer lacks, stored as allow: usable, moves between allow and inherit only (never to deny)', async () => {
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES;
+    serverState.fetchChannelPermissions.mockResolvedValueOnce(stored(Permissions.KICK_MEMBERS, 0n) as never);
+    await render('text');
+    expect(toggleOf('KICK_MEMBERS').disabled).toBe(false);
+    expect(stateOf('KICK_MEMBERS')).toBe('allow');
+    click('KICK_MEMBERS');
+    expect(stateOf('KICK_MEMBERS')).toBe('inherit');
+    click('KICK_MEMBERS');
+    expect(stateOf('KICK_MEMBERS')).toBe('allow');
+  });
+
+  it('a bit the viewer lacks, stored as deny: moves between deny and inherit only (never to allow), and the removal is saved', async () => {
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES;
+    serverState.fetchChannelPermissions.mockResolvedValueOnce(stored(0n, Permissions.KICK_MEMBERS) as never);
+    await render('text');
+    expect(stateOf('KICK_MEMBERS')).toBe('deny');
+    click('KICK_MEMBERS');
+    expect(stateOf('KICK_MEMBERS')).toBe('inherit');
+    click('KICK_MEMBERS');
+    expect(stateOf('KICK_MEMBERS')).toBe('deny');
+    click('KICK_MEMBERS');
+    await save();
+    expect(serverState.setChannelPermissionOverride).toHaveBeenCalledWith('s1', 'ch-1', 'r-everyone', '0', '0');
+  });
+
+  it('a bit moved before the viewer bits were known can still go back to inherit, and then cannot move', async () => {
+    viewer.bits = null;
+    await render('text');
+    click('KICK_MEMBERS');
+    expect(stateOf('KICK_MEMBERS')).toBe('allow');
+    // the bits arrive (any re-render reads them): KICK_MEMBERS is not held
+    viewer.bits = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_ROLES;
+    click('SEND_MESSAGES');
+    expect(toggleOf('KICK_MEMBERS').disabled).toBe(false);
+    click('KICK_MEMBERS');
+    expect(toggleOf('KICK_MEMBERS').disabled).toBe(true);
+    expect(toggleOf('KICK_MEMBERS').title).toBe('serverErrors.cannotOverrideUnheldPermissions');
+  });
+
+  it('bits not known yet: nothing disabled (the server still decides)', async () => {
+    viewer.bits = null;
+    await render('text');
+    expect([...container.querySelectorAll('.group button')].some((b) => (b as HTMLButtonElement).disabled)).toBe(false);
+  });
+
+  it('ADMINISTRATOR held: nothing disabled', async () => {
+    viewer.bits = Permissions.ADMINISTRATOR;
+    await render('text');
+    expect([...container.querySelectorAll('.group button')].some((b) => (b as HTMLButtonElement).disabled)).toBe(false);
   });
 });

@@ -10,6 +10,7 @@ import {
   hasPermission,
 } from '@voxium/shared';
 import type { ChannelPermissionOverride, PermissionInfo } from '@voxium/shared';
+import { useViewerPermissions, mayTurnOn } from '../../hooks/useViewerPermissions';
 
 interface ChannelPermissionsEditorProps {
   serverId: string;
@@ -47,6 +48,13 @@ function cycleTriState(current: TriState): TriState {
   if (current === 'inherit') return 'allow';
   if (current === 'allow') return 'deny';
   return 'inherit';
+}
+
+/** The next state in the cycle that `reachable` admits (the current one when none other is). */
+function nextReachableState(current: TriState, reachable: (state: TriState) => boolean): TriState {
+  let next = cycleTriState(current);
+  while (next !== current && !reachable(next)) next = cycleTriState(next);
+  return next;
 }
 
 function applyTriState(
@@ -98,6 +106,7 @@ export function ChannelPermissionsEditor({
   const roles = useServerStore((s) => s.roles);
   const fetchChannelPermissions = useServerStore((s) => s.fetchChannelPermissions);
   const setChannelPermissionOverride = useServerStore((s) => s.setChannelPermissionOverride);
+  const viewerPermissions = useViewerPermissions(serverId);
 
   const [overrides, setOverrides] = useState<Record<string, OverrideState>>({});
   const [originalOverrides, setOriginalOverrides] = useState<Record<string, OverrideState>>({});
@@ -165,17 +174,27 @@ export function ChannelPermissionsEditor({
     });
   }, []);
 
+  // The server refuses a save that turns on, in allow or in deny, a bit the
+  // viewer does not hold. For such a bit the cycle only reaches inherit and
+  // the stored state (turning it off is never refused, and back within this
+  // edit is no change), and a bit stored and shown as inherit cannot move at
+  // all (one moved before the viewer's bits were known can still go back)
+  const storedState = (roleId: string, flag: bigint): TriState =>
+    getTriState(flag, originalOverrides[roleId] || { allow: 0n, deny: 0n });
+
   const handleToggle = useCallback(
     (roleId: string, flag: bigint) => {
+      const holds = mayTurnOn(viewerPermissions, flag);
+      const stored = getTriState(flag, originalOverrides[roleId] || { allow: 0n, deny: 0n });
       setOverrides((prev) => {
         const current = prev[roleId] || { allow: 0n, deny: 0n };
         const currentState = getTriState(flag, current);
-        const nextState = cycleTriState(currentState);
+        const nextState = nextReachableState(currentState, (state) => holds || state === 'inherit' || state === stored);
         const updated = applyTriState(current, flag, nextState);
         return { ...prev, [roleId]: updated };
       });
     },
-    [],
+    [viewerPermissions, originalOverrides],
   );
 
   const handleSave = useCallback(async () => {
@@ -407,6 +426,11 @@ export function ChannelPermissionsEditor({
                                   rolePermissions={permissionsFromString(
                                     selectedRole.permissions,
                                   )}
+                                  locked={
+                                    !mayTurnOn(viewerPermissions, perm.flag) &&
+                                    storedState(selectedRole.id, perm.flag) === 'inherit' &&
+                                    getTriState(perm.flag, currentOverride) === 'inherit'
+                                  }
                                   onToggle={() =>
                                     handleToggle(selectedRole.id, perm.flag)
                                   }
@@ -487,11 +511,14 @@ function PermissionRow({
   permission,
   state,
   rolePermissions,
+  locked,
   onToggle,
 }: {
   permission: PermissionInfo;
   state: TriState;
   rolePermissions: bigint;
+  /** A bit the viewer does not hold, stored as inherit: any other state would be refused. */
+  locked: boolean;
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
@@ -523,8 +550,11 @@ function PermissionRow({
 
       <button
         onClick={onToggle}
-        className="shrink-0 rounded-md p-1 hover:bg-vox-bg-active transition-colors"
-        title={`${t('channelPermissions.current')} ${state}. ${t('channelPermissions.clickToCycle')}`}
+        disabled={locked}
+        className="shrink-0 rounded-md p-1 hover:bg-vox-bg-active transition-colors disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+        title={locked
+          ? t('serverErrors.cannotOverrideUnheldPermissions')
+          : `${t('channelPermissions.current')} ${state}. ${t('channelPermissions.clickToCycle')}`}
       >
         <TriStateIcon state={state} size={18} />
       </button>
