@@ -568,15 +568,10 @@ async function run() {
   }
 
   // Test 20: user3 (Restricted) CANNOT send messages
-  // user3 has "Restricted" role with VIEW_CHANNEL only. @everyone has SEND_MESSAGES, which means
-  // via OR, user3 still gets SEND_MESSAGES from @everyone. We need to test this differently.
-  // Instead, let's set up a channel where @everyone SEND_MESSAGES is denied.
-  // For now, test that user3 CAN send (because @everyone has SEND_MESSAGES) - adjust test expectation.
-  // The user instructions say "Restricted: no SEND_MESSAGES - @everyone doesn't have it either" but
-  // default @everyone HAS SEND_MESSAGES. We'll modify @everyone later for the full test.
-  // For now, skip to test 21.
-
-  // Actually, let's modify @everyone to remove SEND_MESSAGES for this test
+  // user3 has the "Restricted" role (VIEW_CHANNEL only), but permissions are the OR of every role
+  // the member holds and the default @everyone has SEND_MESSAGES, so Restricted alone would still
+  // send. The test therefore takes SEND_MESSAGES (and ADD_REACTIONS) away from @everyone first;
+  // test 23 gives it back for one check and takes it away again for the tests after it.
   try {
     // Set @everyone to only VIEW_CHANNEL + CONNECT + SPEAK (remove SEND_MESSAGES, ADD_REACTIONS)
     const minPerms = Permissions.VIEW_CHANNEL | Permissions.CONNECT | Permissions.SPEAK;
@@ -627,11 +622,11 @@ async function run() {
     }
   }
 
-  // Test 23: user1 (Moderator) CAN send messages (SEND_MESSAGES is not in Moderator or @everyone now)
-  // Actually, user1 has Moderator (MANAGE_MESSAGES | MUTE_MEMBERS | KICK_MEMBERS) and @everyone (VIEW_CHANNEL | CONNECT | SPEAK)
-  // Neither has SEND_MESSAGES. Let's test that user1 also CANNOT send.
-  // But the spec says "Regular member CAN send messages (SEND_MESSAGES is in @everyone)" - we already removed it.
-  // Let's restore @everyone for this test, and then remove it again.
+  // Test 23: a member whose roles add nothing to @everyone CAN send once @everyone has SEND_MESSAGES
+  // Test 20 left @everyone with VIEW_CHANNEL | CONNECT | SPEAK. Here @everyone gets the defaults
+  // (including SEND_MESSAGES) back for one check: user3, whose only extra role is Restricted
+  // (VIEW_CHANNEL), sends a message and must succeed. @everyone is then reduced to the minimal set
+  // again, below, for the tests that follow. (The Moderator, user1, is not exercised here.)
   try {
     // Temporarily restore @everyone SEND_MESSAGES
     await axios.patch(
