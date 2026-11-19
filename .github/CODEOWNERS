@@ -2,6 +2,7 @@
 /.github/                    @Aizen93
 /.github/workflows/          @Aizen93
 .gitleaks.toml               @Aizen93
+.gitleaksignore              @Aizen93
 docker-compose*.yml          @Aizen93
 Dockerfile                   @Aizen93
 docker-entrypoint.sh         @Aizen93

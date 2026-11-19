@@ -124,6 +124,17 @@ Closes #123
 
 GitHub accepts `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves` and `resolved`, followed by `#N` (or `owner/repo#N` for an issue in another repository). Put it in a commit, not only in the pull request description: pull requests here target `develop`, and GitHub acts on a description's keywords only when the pull request targets the default branch, `main`. A commit message travels: a merge into `develop` keeps your commit messages (a squash lists every one of them in its body by default), and the issue closes when the next release merges `develop` into `main`, not when your pull request is merged. Name the issue in the description as well (`Issue: #N`), so the reviewer sees it at once.
 
+### When the Secret Scan Fails
+
+The "Security Scan" check runs gitleaks over every commit your pull request adds, merge commits included (what a merge adds beyond merging its parents, such as a conflict's resolution), and a finding fails it. The job log lists each finding with its rule, file, line, commit and a `Fingerprint:` line, the value itself redacted. A real secret is revoked first, then removed from the branch.
+
+For a false positive (a test fixture, a placeholder) there are two ways:
+
+- **A `gitleaks:allow` comment at the end of the line.** It stays valid through rebases and squash merges.
+- **The log's `Fingerprint:` value in `.gitleaksignore`.** Only that form, which starts with the commit id. A fingerprint names its commit, so it suits a line already in history that will not be rewritten. A squash merge (or a rebase) gives the line a new commit, so a fingerprint added for a line your pull request introduces has to be made again from the merged commit's scan.
+
+`gitleaks dir .` is not what CI runs. It reports the false positives `.gitleaksignore` lists for the git scan, and that is expected.
+
 ### What Makes a Good PR
 
 - **Focused** — one feature or fix per PR

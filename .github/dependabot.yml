@@ -71,3 +71,16 @@ updates:
     groups:
       actions:
         update-types: [minor, patch]
+
+  # The containers CI starts itself (.github/ci/compose.yml: the end-to-end
+  # job's object store), each pinned by tag and digest. The github-actions
+  # entry above reads `uses:` lines only: an image named in a workflow's run:
+  # script would never be moved, which is why the pin lives in that file.
+  - package-ecosystem: docker-compose
+    directory: /.github/ci
+    target-branch: develop
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 2

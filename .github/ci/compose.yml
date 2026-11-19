@@ -1,0 +1,27 @@
+# Containers the CI jobs start themselves (`docker compose -f .github/ci/compose.yml
+# up -d <service>`), here rather than in the workflow so that Dependabot moves
+# their pins: its docker-compose entry reads this file, while nothing reads an
+# image named in a workflow's run: line. Every image is pinned by tag AND
+# digest, so a tag that moves cannot change what runs.
+
+name: voxium-ci
+
+services:
+  # The end-to-end job's object store (.github/workflows/ci.yml, "Start the
+  # object store and create the assets bucket"). RustFS, Apache-2.0, published
+  # by the project that develops it. Its entrypoint checks the credentials and
+  # starts the server once: no setup phase that stops and restarts it (the
+  # Bitnami MinIO image it replaces had one, #275). The job's S3_* variables
+  # are the credentials the server is started with and signs with.
+  object-store:
+    image: rustfs/rustfs:1.0.5@sha256:b81d16a90ee25bd9511280127ca1471788c6e874cf0f0da759645f46b2dc1d74
+    container_name: object-store
+    ports:
+      - "9000:9000"
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?the job sets S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?the job sets S3_SECRET_KEY}
+      # The server asks its vendor's version host for a newer release at every
+      # start unless told not to. The store makes no outbound call in CI: its
+      # version is the pin above, and Dependabot moves it.
+      RUSTFS_CHECK_UPDATE: "false"

@@ -12,10 +12,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check source branch
-        if: github.head_ref != 'develop'
+      # The develop branch of THIS repository, not a branch of that name: a
+      # fork's develop used to pass on its name alone (#108). The pull
+      # request's values reach the script through env only, and an empty head
+      # repository (a fork deleted since) fails like any other.
+      - name: Check source branch and repository
         env:
           HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
         run: |
-          echo "::error::PRs to main must come from the develop branch, not '${HEAD_REF}'"
+          if [ "$HEAD_REF" = "develop" ] && [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" = "$BASE_REPO" ]; then
+            echo "Source: develop of $BASE_REPO"
+            exit 0
+          fi
+          echo "::error::PRs to main must come from the develop branch of ${BASE_REPO}, not '${HEAD_REF}' of '${HEAD_REPO}'"
           exit 1
