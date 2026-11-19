@@ -275,6 +275,25 @@ describe('startRegistration — refusals', () => {
     expect(queryCalls()).toHaveLength(0);
     expect(h.sendCode).not.toHaveBeenCalled();
   });
+
+  it('the deleted-account placeholder\'s name is reserved in any case, answered exactly as a taken one, after the same lookup', async () => {
+    for (const name of ['deleted', 'Deleted', 'DELETED', 'dElEtEd']) {
+      vi.clearAllMocks();
+      users({ nameTaken: false });
+      await expect(startRegistration(name, 'brand-new@example.com', PASSWORD, undefined, undefined, CONSENT))
+        .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
+      // the same work as a name in use: one lookup, nothing hashed, stored or mailed
+      expect(prisma.user.findFirst).toHaveBeenCalledTimes(1);
+      expect(h.bcryptHash).not.toHaveBeenCalled();
+      expect(prisma.pendingRegistration.create).not.toHaveBeenCalled();
+      expect(h.sendCode).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a name that only contains it is not reserved', async () => {
+    users({ nameTaken: false });
+    await expect(startRegistration('deleted_user', 'brand-new@example.com', PASSWORD, undefined, undefined, CONSENT)).resolves.toHaveProperty('pendingId');
+  });
 });
 
 describe('startRegistration — the same answer after the same work on every branch', () => {
@@ -960,6 +979,20 @@ describe('completeRegistration', () => {
         .rejects.toMatchObject({ statusCode: 400, message: /Username/ });
       refund();
       expect(prisma.user.findFirst).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('the reserved name, as an override or as the name a pending registration stored before it was reserved, is a 409 that costs no attempt', async () => {
+      users({ nameTaken: false });
+      await expect(completeRegistration(ID, CODE, 'Deleted', undefined))
+        .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
+      refund();
+
+      vi.mocked(prisma.pendingRegistration.update).mockClear();
+      h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ username: 'deleted' })]);
+      await expect(completeRegistration(ID, CODE, undefined, undefined))
+        .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
+      refund();
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 

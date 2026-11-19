@@ -31,6 +31,17 @@ import { DELETED_PARTICIPANT_ID_PREFIX } from '@voxium/shared';
 export const DELETED_PARTICIPANT_USERNAME = 'deleted';
 export const DELETED_PARTICIPANT_DISPLAY_NAME = 'Deleted user';
 
+/**
+ * The placeholder's username is reserved for new accounts, in any case
+ * (registration answers it exactly like a name already in use, so the
+ * reservation is no oracle; services/signupService.ts). An account that held
+ * the name before it was reserved keeps it: no client may tell the
+ * placeholder by its name, only by `participantDeleted` or the id prefix.
+ */
+export function isReservedUsername(username: string): boolean {
+  return username.toLowerCase() === DELETED_PARTICIPANT_USERNAME;
+}
+
 export interface DeletedParticipant {
   id: string;
   username: string;
