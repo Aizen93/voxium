@@ -300,10 +300,11 @@ export function MainLayout() {
         if (useVoiceStore.getState().activeChannelId !== channelId) return;
         if (useSettingsStore.getState().enableNotificationSounds) playJoinSound();
       },
-      voiceUserLeft: ({ channelId, userId }: { channelId: string; userId: string }) => {
+      voiceUserLeft: ({ channelId, userId, epoch }: { channelId: string; userId: string; epoch?: string }) => {
         const currentUser = useAuthStore.getState().user;
         const voiceState = useVoiceStore.getState();
-        voiceState.removeUserFromChannel(channelId, userId);
+        // A late departure of a session already replaced changes nothing, and plays no sound
+        if (voiceState.removeUserFromChannel(channelId, userId, epoch) === false) return;
         if (userId === currentUser?.id) return;
         if (voiceState.activeChannelId !== channelId) return;
         if (useSettingsStore.getState().enableNotificationSounds) playLeaveSound();

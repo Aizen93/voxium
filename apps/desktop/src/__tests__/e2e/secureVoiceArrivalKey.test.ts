@@ -950,6 +950,82 @@ describe('a member excluded during a call stays excluded until they start a new 
   });
 });
 
+describe('a departure naming the epoch of the session that left', () => {
+  const keyOfX = (epoch: string, seq: number) => buildVoiceKeyPlaintext({
+    v: 1,
+    scope: e2eVoiceScope(CH),
+    senderUserId: 'x',
+    senderDeviceId: DEVICES.x[0],
+    epoch,
+    recipientEpoch: myEpoch,
+    seq,
+    keyId: 0,
+    keyB64: 'A'.repeat(43),
+    reason: 'initial',
+  });
+
+  /** `x` keyed in a first session, then announced again in a second one. */
+  async function xInSecondSession(): Promise<void> {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    onParticipantJoined(CH, user('x', 'epoch-x-2'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 2);
+    await settle();
+  }
+
+  it('a late departure of their previous session keeps the new one: no rotation, and their new keys still install', async () => {
+    await xInSecondSession();
+    const installed = installs.length;
+    const removals = frameSession.removeRemote.mock.calls.length;
+
+    onParticipantLeft(CH, 'x', 'epoch-x-1');
+    await settle();
+
+    expect(installs.length).toBe(installed);
+    expect(frameSession.removeRemote.mock.calls.length).toBe(removals);
+    decryptFromDevice.mockResolvedValueOnce(keyOfX('epoch-x-2', 0));
+    handleInboundKey(CH, 'x', DEVICES.x[0], ENV);
+    await until(() => frameSession.setRemoteKey.mock.calls.some((call) => call[0] === 'x'));
+    // ...and their key request is answered with the generation they hold
+    const seals = sealedTo('x').length;
+    handleKeyRequest(CH, 'x');
+    await until(() => sealedTo('x').length === seals + 1);
+    expect(sealedTo('x').at(-1)!.keyId).toBe(sealedTo('x')[1].keyId);
+  });
+
+  it('a departure queued behind the announcement of their new session is judged against the new one', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    const removals = frameSession.removeRemote.mock.calls.length;
+
+    // Both reach the session before either step runs
+    onParticipantJoined(CH, user('x', 'epoch-x-2'), { initialReplay: false });
+    onParticipantLeft(CH, 'x', 'epoch-x-1');
+    await until(() => sealedTo('x').length === 2);
+    await settle();
+
+    // The re-announcement's own departure of the first session only: x stays, in the new session
+    expect(frameSession.removeRemote.mock.calls.length).toBe(removals + 1);
+    decryptFromDevice.mockResolvedValueOnce(keyOfX('epoch-x-2', 0));
+    handleInboundKey(CH, 'x', DEVICES.x[0], ENV);
+    await until(() => frameSession.setRemoteKey.mock.calls.some((call) => call[0] === 'x'));
+  });
+
+  it('a departure of the session held removes them and rotates fresh, as one without an epoch does', async () => {
+    await xInSecondSession();
+    const installed = installs.length;
+
+    onParticipantLeft(CH, 'x', 'epoch-x-2');
+    await until(() => installs.length === installed + 1);
+    await settle();
+
+    expect(hex(installs.at(-1)!.key)).not.toBe(hex(await ratchetVoiceKey(installs.at(-2)!.key)));
+    expect(sealedTo('x').some((sealed) => sealed.keyId === installs.at(-1)!.keyId)).toBe(false);
+  });
+});
+
 describe('occupants present when we joined are not arrivals', () => {
   it('the occupants of the replay at our join are sealed our current key, with no ratchet', async () => {
     const session = await begin();

@@ -930,6 +930,36 @@ describe('cross-session and exclusion hardening', () => {
 
     expect(encryptToDevice).not.toHaveBeenCalled();
   });
+
+  it('a departure naming another session than the one held clears no badge and keeps them', async () => {
+    await begunSession();
+    fetchChannelDeviceLists.mockResolvedValue({
+      members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'other', isCreator: false }],
+      lists: new Map(),
+      unverifiableUserIds: [],
+    });
+    fetchDeviceList.mockImplementation(async (userId: string) =>
+      userId === 'other' ? deviceListFor('device-other001') : deviceListFor(PEER_DEVICE));
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001', epoch: PEER_EPOCH }, { initialReplay: true });
+    // peer is announced again in a new session
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: 'peerEpoch0002' }, { initialReplay: false });
+    await flush();
+    clearIssue.mockClear();
+    frameSession.removeRemote.mockClear();
+
+    // A late departure of peer's previous session, then a departure of other's current one
+    onParticipantLeft(CH, 'peer', PEER_EPOCH);
+    onParticipantLeft(CH, 'other', PEER_EPOCH);
+    // The badges are cleared by notices started without being waited for, in step order:
+    // once other's is cleared, one for peer would have been before it
+    await vi.waitFor(() => expect(clearIssue).toHaveBeenCalledWith(CH, 'other'));
+    await flush();
+
+    expect(clearIssue).not.toHaveBeenCalledWith(CH, 'peer');
+    expect(frameSession.removeRemote).not.toHaveBeenCalledWith('peer');
+    expect(frameSession.removeRemote).toHaveBeenCalledWith('other');
+  });
 });
 
 describe('decrypt watchdog (spec §21.4 lost-key healing)', () => {

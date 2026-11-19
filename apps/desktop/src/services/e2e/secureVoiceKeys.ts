@@ -630,11 +630,23 @@ async function keyVettedParticipantLocked(
   }
 }
 
-/** A participant left / was evicted: fresh key for everyone remaining. */
-export function onParticipantLeft(channelId: string, userId: string): void {
+/**
+ * A participant left / was evicted: fresh key for everyone remaining. `epoch`,
+ * when the departure carries one, is the epoch of the session that left: a
+ * departure naming another epoch than the one held for them (a late event of
+ * their previous session, after a new one was announced) changes nothing.
+ */
+export function onParticipantLeft(channelId: string, userId: string, epoch?: string): void {
   const state = sessions.get(channelId);
   if (!state) return;
   enqueue(state, async () => {
+    // Read in the step: the announcement of their new session may be queued
+    // ahead of this departure.
+    const held = state.peers.get(userId);
+    if (epoch && held && held.epoch !== epoch) {
+      console.warn(`[SecureVoice] Departure of a previous session of ${userId} ignored`);
+      return;
+    }
     // Clear the badge FIRST: an already-excluded peer is not in `peers`, so
     // the early return below would otherwise leave "N members can't be keyed"
     // on screen for the rest of the call after they have gone.
