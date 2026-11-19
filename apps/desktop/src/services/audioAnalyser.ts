@@ -1,4 +1,5 @@
 import { getSocket } from './socket';
+import { DEFAULT_NOISE_GATE_THRESHOLD } from './audioDefaults';
 import { NoiseSuppressorWorklet_Name } from '@timephy/rnnoise-wasm';
 import NoiseSuppressorWorkletUrl from '@timephy/rnnoise-wasm/NoiseSuppressorWorklet?worker&url';
 
@@ -291,7 +292,7 @@ let currentLevel = 0;
 const SILENCE_DELAY_MS = 300;
 const TICK_INTERVAL_MS = 20;
 const GAIN_RAMP_SEC = 0.03;
-let threshold = 0.008;
+let threshold = DEFAULT_NOISE_GATE_THRESHOLD;
 let speakingMode: 'server' | 'dm' = 'server';
 let speakingChangeCallback: ((speaking: boolean) => void) | null = null;
 
