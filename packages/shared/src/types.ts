@@ -496,7 +496,6 @@ export interface ServerToClientEvents {
   'voice:user_left': (data: { channelId: string; userId: string }) => void;
   'voice:state_update': (data: { channelId: string; userId: string; selfMute: boolean; selfDeaf: boolean; serverMuted: boolean; serverDeafened: boolean }) => void;
   'voice:speaking': (data: { channelId: string; userId: string; speaking: boolean }) => void;
-  'voice:signal': (data: { from: string; signal: unknown }) => void;
   // Secure voice channels (spec §21): an Olm-sealed media sender key relayed
   // between two participants. The server never parses `envelope`;
   // `fromDeviceId` is the sender's announced device (routing hint — the
@@ -614,7 +613,6 @@ export interface ClientToServerEvents {
   'voice:mute': (muted: boolean) => void;
   'voice:deaf': (deafened: boolean) => void;
   'voice:speaking': (speaking: boolean) => void;
-  'voice:signal': (data: { to: string; signal: unknown }) => void;
   // Secure voice channels: relay an Olm-sealed media key to one co-participant
   'voice:e2e:key': (data: { to: string; envelope: string }) => void;
   'voice:e2e:key_request': (data: { to: string }) => void;

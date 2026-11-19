@@ -1005,7 +1005,10 @@
       "mutedByModerator": "你已被管理员静音",
       "deafenedByModerator": "你已被管理员关闭声音",
       "screenShareFailed": "屏幕共享失败 — 请重试",
-      "micIssue": "检测到麦克风问题 — 请尝试重新加入语音"
+      "micIssue": "检测到麦克风问题 — 请尝试重新加入语音",
+      "noiseSuppressionUnavailable": "噪音抑制暂时不可用 — 麦克风会在没有噪音抑制的情况下继续工作。",
+      "micSwitchFailed": "无法切换到所选麦克风 — 仍在使用之前的麦克风",
+      "micDefaultInUse": "无法打开所选麦克风 — 正在使用系统默认麦克风"
     }
   },
   "attachment": {

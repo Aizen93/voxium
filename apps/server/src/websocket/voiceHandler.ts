@@ -4,6 +4,7 @@ import type { WebRtcTransport, Producer, Consumer, DtlsParameters, RtpParameters
 import { prisma } from '../utils/prisma';
 import { leaveCurrentDMVoiceChannel } from './dmVoiceHandler';
 import { socketRateLimit } from '../middleware/rateLimiter';
+import { applyLatestState, SPEAKING_EVENTS_PER_MINUTE, SPEAKING_INDICATOR_EVENTS_PER_MINUTE } from './latestStateLimit';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerRouters, getRouter } from '../mediasoup/mediasoupManager';
 import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
@@ -16,7 +17,7 @@ import {
   relayVoiceEvent, resolveOrClaimChannelOwner, dropShim,
 } from './voiceRelay';
 import { hasChannelPermission, hasServerPermission, getHighestRolePosition } from '../utils/permissionCalculator';
-import { Permissions, E2E_DEVICE_ID_RE, E2E_CALL_EPOCH_RE, VOICE_KEY_ENVELOPE_MAX } from '@voxium/shared';
+import { Permissions, E2E_DEVICE_ID_RE, E2E_CALL_EPOCH_RE, VOICE_KEY_ENVELOPE_MAX, VOICE_SPEAK_REFUSED_MESSAGE } from '@voxium/shared';
 
 // Re-exported for existing consumers (voiceCluster, tests)
 export { reapVoiceChannelMirror };
@@ -31,6 +32,17 @@ export const VOICE_SESSION_TAKEN_OVER = 'Your voice session moved to another dev
 /** Runtime type guard — returns false if value is not a non-empty string */
 function isString(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0;
+}
+
+/** Run a mediasoup producer pause/resume, logging a refusal (a producer closed
+ *  under the call) instead of leaving an unhandled rejection. */
+function runProducerOp(op: () => Promise<void> | void, what: string): void {
+  const reason = (err: unknown) => (err instanceof Error ? err.message : err);
+  try {
+    Promise.resolve(op()).catch((err) => console.warn(`[Voice] Mic producer ${what} failed:`, reason(err)));
+  } catch (err) {
+    console.warn(`[Voice] Mic producer ${what} failed:`, reason(err));
+  }
 }
 
 // ─── In-memory voice state ──────────────────────────────────────────────────
@@ -703,7 +715,7 @@ export function createVoiceHandlers(
       const serverId = channelServerMap.get(channelId);
       if (serverId) {
         const canSpeak = await hasChannelPermission(userId, channelId, serverId, Permissions.SPEAK);
-        if (!canSpeak) { ack({ error: 'You do not have permission to speak in this channel' }); return; }
+        if (!canSpeak) { ack({ error: VOICE_SPEAK_REFUSED_MESSAGE }); return; }
       }
     }
 
@@ -935,27 +947,42 @@ export function createVoiceHandlers(
   });
 
   // ── voice:speaking ────────────────────────────────────────────────────
+  // Two budgets, each latest-wins (applyLatestState) and counted apart: the
+  // producer state may never be lost to the indicator's limit, and an event
+  // over either budget is applied when its window ends instead of being
+  // dropped. The producer's sits well above what an honest client sends; the
+  // indicator's, which reaches every viewer of the channel, at that figure, so
+  // a choppy speaker's ring still follows them live.
   on('voice:speaking', (speaking: boolean) => {
-    if (!socketRateLimit(socket, 'voice:speaking', 120)) return;
     if (typeof speaking !== 'boolean') return;
     const channelId = socket.data.voiceChannelId as string;
     if (!channelId) return;
 
-    // Only control producers if not self-muted AND not server-muted
     const userMedia = voiceChannelUsers.get(channelId)?.get(userId);
-    if (userMedia && !userMedia.selfMute && !userMedia.serverMuted) {
+    // A held state belongs to the session it was sent in: a leave, or a
+    // rejoin (a new UserMediaState), drops it
+    const sameSession = () =>
+      socket.data.voiceChannelId === channelId && voiceChannelUsers.get(channelId)?.get(userId) === userMedia;
+
+    applyLatestState(socket, 'voice:speaking:producer', SPEAKING_EVENTS_PER_MINUTE, () => {
+      // Only control producers if not self-muted AND not server-muted (read
+      // when applied: a held state can run after a mute)
+      if (!userMedia || !sameSession() || userMedia.selfMute || userMedia.serverMuted) return;
       for (const producer of userMedia.producers.values()) {
         if (producer.kind === 'audio' && (producer.appData as Record<string, unknown>)?.type === 'audio') {
-          if (speaking) { producer.resume(); } else { producer.pause(); }
+          if (speaking) runProducerOp(() => producer.resume(), 'resume');
+          else runProducerOp(() => producer.pause(), 'pause');
         }
       }
-    }
+    });
 
-    // Don't broadcast speaking indicator if server-muted (prevents UI deception by modified clients)
-    if (userMedia?.serverMuted) return;
-
-    // Channel visibility room — private voice channels must not leak activity server-wide
-    io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId, speaking });
+    applyLatestState(socket, 'voice:speaking', SPEAKING_INDICATOR_EVENTS_PER_MINUTE, () => {
+      if (!sameSession()) return;
+      // Don't broadcast speaking indicator if server-muted (prevents UI deception by modified clients)
+      if (userMedia?.serverMuted) return;
+      // Channel visibility room — private voice channels must not leak activity server-wide
+      io.to(`channel:${channelId}`).emit('voice:speaking', { channelId, userId, speaking });
+    });
   });
 
   // ── voice:server_mute (force-mute another user) ────────────────────────
@@ -1141,11 +1168,10 @@ export function createVoiceHandlers(
     // the target client receives voice:force_moved, calls leaveChannel() then joinChannel(targetChannelId)
   });
 
-  // ── voice:signal (kept as no-op for backward compat) ──────────────────
-  // No-op: kept for backward compat (SFU replaced P2P). Rate-limited to prevent spam.
-  on('voice:signal', () => {
-    if (!socketRateLimit(socket, 'voice:signal', 10)) return;
-  });
+  // (The P2P `voice:signal` of voice channels went with the SFU and has no
+  // handler: no client release sends it, Socket.IO drops an event nothing
+  // listens for, and dispatchVoiceEvent drops one an older node relays.
+  // DM calls signal over dm:voice:signal, in dmVoiceHandler.)
 
   // ── voice:e2e:key / voice:e2e:key_request (spec §21) ──────────────────
   // Sealed media sender keys for secure voice channels, relayed between two
@@ -1274,7 +1300,7 @@ export function createVoiceHandlers(
 const ROUTED_VOICE_EVENTS = [
   'voice:leave', 'voice:transport:connect', 'voice:produce', 'voice:producer:close',
   'voice:rtp_capabilities', 'voice:consumer:resume', 'voice:mute', 'voice:deaf',
-  'voice:speaking', 'voice:server_mute', 'voice:server_deafen', 'voice:signal',
+  'voice:speaking', 'voice:server_mute', 'voice:server_deafen',
   'voice:screen_share:start', 'voice:screen_share:stop',
   'voice:e2e:key', 'voice:e2e:key_request',
 ] as const;
@@ -1388,6 +1414,17 @@ export function handleVoiceEvents(
 
       const session = getRemoteSession(socket.id);
       if (session) {
+        if (event === 'voice:speaking') {
+          // Its own latest-wins budget instead of the shared one below: a
+          // speaking state dropped here never reaches the owner, which then
+          // keeps the mic producer paused (#90), and a choppy speaker must not
+          // spend the budget the other voice events share
+          applyLatestState(socket, 'voice:relay:speaking', SPEAKING_EVENTS_PER_MINUTE, () => {
+            if (getRemoteSession(socket.id) !== session) return; // that session ended
+            void relayVoiceEvent(session.ownerNodeId, event, socket, args);
+          });
+          return;
+        }
         if (!socketRateLimit(socket, 'voice:relay', 600)) return;
         let ack: ((response: unknown) => void) | undefined;
         if (ACK_VOICE_EVENTS.has(event) && typeof args[args.length - 1] === 'function') {

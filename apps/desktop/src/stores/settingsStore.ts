@@ -78,6 +78,15 @@ interface SettingsState extends PersistedSettings {
    * last deep link pointed.
    */
   initialSettingsTab: SettingsTab | null;
+  /**
+   * RNNoise failed in this app session (set by voiceStore, never persisted):
+   * calls run on the raw mic, with the browser's own suppression asked for,
+   * until the next app start or a toggle of `enableNoiseSuppression`, which
+   * tries again. The saved preference itself is never changed by a failure;
+   * Settings shows that it is on but not active.
+   */
+  noiseSuppressionUnavailable: boolean;
+  setNoiseSuppressionUnavailable: (unavailable: boolean) => void;
   openSettings: (tab?: SettingsTab) => void;
   closeSettings: () => void;
   /** Called by the modal once it has honoured `initialSettingsTab`. */
@@ -236,6 +245,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   ...initial,
   isSettingsOpen: false,
   initialSettingsTab: null,
+  noiseSuppressionUnavailable: false,
+  setNoiseSuppressionUnavailable: (unavailable: boolean) => set({ noiseSuppressionUnavailable: unavailable }),
 
   // No argument keeps the old behaviour exactly: open on the default tab.
   openSettings: (tab?: SettingsTab) => set({ isSettingsOpen: true, initialSettingsTab: tab ?? null }),

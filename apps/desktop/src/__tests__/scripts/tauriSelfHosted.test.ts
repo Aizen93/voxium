@@ -505,6 +505,79 @@ describe('selfHostedConfig (the overlay `pnpm tauri:build` merges)', () => {
     });
   });
 
+  // macOS lets an app open the microphone only once its bundle declares why
+  // (NSMicrophoneUsageDescription, the text of the system prompt), and a
+  // code-signed build runs under the hardened runtime (Tauri's default), which
+  // also needs the audio-input entitlement. The Tauri CLI merges an Info.plist
+  // found next to tauri.conf.json into the bundle's own, and applies the file
+  // `bundle.macOS.entitlements` names when it signs; both live in the base
+  // configuration, so the official release and a self-hosted build both carry
+  // them, as long as no overlay names them.
+  describe('the macOS microphone declaration (every build)', () => {
+    const SRC_TAURI = join(DESKTOP, 'src-tauri');
+    type MacOS = { entitlements?: string; infoPlist?: string; hardenedRuntime?: boolean };
+    const macOS = (c: unknown) => (c as { bundle?: { macOS?: MacOS } }).bundle?.macOS;
+
+    /** A plist's top-level dict, as key → value ('true'/'false' for booleans, the text for strings). */
+    function readPlist(path: string): Record<string, string> {
+      const doc = new DOMParser().parseFromString(readFileSync(path, 'utf8'), 'application/xml');
+      expect(doc.getElementsByTagName('parsererror')).toHaveLength(0);
+      const root = doc.documentElement;
+      expect(root.tagName).toBe('plist');
+      const dicts = [...root.children];
+      expect(dicts.map((e) => e.tagName)).toEqual(['dict']);
+      const entries = [...dicts[0].children];
+      const out: Record<string, string> = {};
+      for (let i = 0; i < entries.length; i += 2) {
+        expect(entries[i].tagName).toBe('key');
+        const value = entries[i + 1];
+        out[entries[i].textContent!] = value.tagName === 'true' || value.tagName === 'false' ? value.tagName : `${value.tagName}:${value.textContent}`;
+      }
+      return out;
+    }
+
+    /** RFC 7386 JSON merge patch, the way the Tauri CLI applies `--config` over tauri.conf.json. */
+    function mergePatch(target: unknown, patch: unknown): unknown {
+      if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return patch;
+      const out: Record<string, unknown> = target && typeof target === 'object' && !Array.isArray(target) ? { ...(target as Record<string, unknown>) } : {};
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete out[key];
+        else out[key] = mergePatch(out[key], value);
+      }
+      return out;
+    }
+
+    it('an Info.plist next to tauri.conf.json (where the CLI looks) states why the app uses the microphone', () => {
+      const plist = readPlist(join(SRC_TAURI, 'Info.plist'));
+      expect(plist.NSMicrophoneUsageDescription).toMatch(/^string:\S/);
+      expect(plist.NSMicrophoneUsageDescription).toMatch(/microphone/i);
+    });
+
+    it('that Info.plist adds the description only: the identity keys stay those the CLI generates per build', () => {
+      expect(Object.keys(readPlist(join(SRC_TAURI, 'Info.plist')))).toEqual(['NSMicrophoneUsageDescription']);
+      // A second copy named in the config would be merged on top of the found one
+      expect(macOS(conf)?.infoPlist).toBeUndefined();
+    });
+
+    it('tauri.conf.json names an entitlements file that exists and grants audio input, and nothing else', () => {
+      expect(macOS(conf)?.entitlements).toBe('./Entitlements.plist');
+      expect(readPlist(join(SRC_TAURI, 'Entitlements.plist'))).toEqual({ 'com.apple.security.device.audio-input': 'true' });
+    });
+
+    it('the hardened runtime stays on (the entitlement is what lets it open the microphone)', () => {
+      expect(macOS(conf)?.hardenedRuntime).not.toBe(false);
+    });
+
+    it('neither overlay takes them away: the merged configuration keeps the entitlements file in both builds', () => {
+      const official = releaseConfig(conf, STORAGE);
+      const selfHosted = build({ apiUrl: API, wsUrl: WS, assetOrigin: STORAGE });
+      for (const overlay of [official, selfHosted]) {
+        expect(JSON.stringify(overlay)).not.toMatch(/macOS|infoPlist|entitlements|hardenedRuntime/);
+        expect(macOS(mergePatch(conf, overlay))).toEqual(macOS(conf));
+      }
+    });
+  });
+
   it('refuses malformed inputs instead of shipping a weaker or broken build', () => {
     expect(() => build({ wsUrl: WS })).toThrow(/VITE_API_URL is not set/);
     expect(() => build({ apiUrl: API })).toThrow(/VITE_WS_URL is not set/);

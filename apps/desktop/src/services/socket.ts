@@ -7,7 +7,7 @@ import { bumpRequestGeneration } from './requestGeneration';
 const NOISY_EVENTS = new Set([
   'pong:latency', 'ping:latency',
   'voice:speaking', 'dm:voice:speaking',
-  'voice:signal', 'dm:voice:signal',
+  'dm:voice:signal',
   'voice:annotation:ops', 'voice:annotation:live',
 ]);
 import { getFreshAccessToken, refreshAccessToken, isAccessTokenFresh, SessionLostError } from './session';
