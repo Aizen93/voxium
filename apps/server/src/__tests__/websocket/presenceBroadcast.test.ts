@@ -139,6 +139,7 @@ vi.mock('jsonwebtoken', () => ({
 }));
 
 import { initSocketServer, getSocketIp } from '../../websocket/socketServer';
+import { dmListedSql, dmUnreadSinceSql } from '../../utils/conversationVisibility';
 import jwt from 'jsonwebtoken';
 import http from 'http';
 
@@ -1076,6 +1077,28 @@ describe('socketServer — unread:init / dm:unread:init count authorless rows', 
     expect(emitFn).toHaveBeenCalledWith('dm:unread:init', {
       unreads: [{ conversationId: 'conv-1', count: 2 }],
     });
+
+    httpServer.close();
+  });
+
+  it('dm:unread:init counts only above the later of the last read and the user\'s floor, nothing for a conversation they removed, and its room is joined all the same (#47)', async () => {
+    // A removal hides the conversation and may clear history up to a floor
+    // (utils/conversationVisibility.ts): no badge may survive either, and a
+    // later message must still reach the user's sockets to bring it back.
+    const { socket } = createMockSocket('user-1');
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    const dmSql = (mockPrisma.$queryRawUnsafe.mock.calls as unknown[][]).map((c) => c[0] as string).find((q) => q.includes('m.conversation_id = conv.id'))!;
+    expect(dmSql).toContain(`AND m.created_at > ${dmUnreadSinceSql('cr')}`);
+    expect(dmSql).toMatch(/WHERE cnt\.val > 0\s+AND cr\.hidden_at IS NULL/);
+    expect(dmSql).toContain(dmListedSql('cr'));
+    expect(dmSql).not.toMatch(/m\.created_at > COALESCE\(cr\.last_read_at/);
+    // the room join reads no removal state
+    expect(socket.join).toHaveBeenCalledWith('dm:conv-1');
+    expect(mockPrisma.conversation.findMany).toHaveBeenCalledWith({ where: { OR: [{ user1Id: 'user-1' }, { user2Id: 'user-1' }] }, select: { id: true } });
 
     httpServer.close();
   });

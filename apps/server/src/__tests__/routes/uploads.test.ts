@@ -237,7 +237,7 @@ describe('uploads — GET /attachments/* (authorized proxy)', () => {
       message: { channelId: null, conversationId: 'conv-1', channel: null },
     } as any);
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
-      id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2',
+      id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2', reads: [],
     } as any);
     const dmData = Buffer.alloc(32, 0);
     const mockPipe = vi.fn((dest: any) => { dest.end(dmData); return dest; });
@@ -267,6 +267,57 @@ describe('uploads — GET /attachments/* (authorized proxy)', () => {
     const res = await request(app).get('/api/v1/uploads/attachments/dm-conv1/abc-image.png');
 
     expect(res.status).toBe(403);
+  });
+
+  describe('a file of a message the caller cleared from their history (#47)', () => {
+    const floor = new Date('2026-11-10T10:00:00.000Z');
+    const attachmentOf = (createdAt: Date) => ({
+      expired: false,
+      message: { channelId: null, conversationId: 'conv-1', createdAt, channel: null },
+    });
+    const conversationWith = (reads: unknown[]) => ({ id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2', reads });
+    const stored = () => vi.mocked(getS3Object).mockResolvedValueOnce({
+      Body: { pipe: vi.fn((dest: any) => { dest.end(Buffer.alloc(8, 0)); return dest; }) },
+      ContentType: 'application/octet-stream',
+      ContentLength: 8,
+    } as any);
+
+    it('reads the message time with the file, and the caller\'s floor with the conversation (one helper)', async () => {
+      vi.mocked(prisma.messageAttachment.findFirst).mockResolvedValueOnce(attachmentOf(new Date('2026-11-11T00:00:00Z')) as any);
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(conversationWith([]) as any);
+      stored();
+
+      await request(createApp()).get('/api/v1/uploads/attachments/dm-conv1/abc-encrypted.bin');
+
+      expect((vi.mocked(prisma.messageAttachment.findFirst).mock.calls[0][0] as any).select.message.select.createdAt).toBe(true);
+      expect(vi.mocked(prisma.conversation.findUnique).mock.calls[0][0]).toEqual({
+        where: { id: 'conv-1' },
+        select: { id: true, user1Id: true, user2Id: true, reads: { select: { userId: true, hiddenAt: true, clearedAt: true } } },
+      });
+    });
+
+    it('a message at or below the caller\'s floor: answered like a missing attachment, never read from the store', async () => {
+      for (const createdAt of [new Date('2026-11-09T00:00:00Z'), floor]) {
+        vi.mocked(prisma.messageAttachment.findFirst).mockResolvedValueOnce(attachmentOf(createdAt) as any);
+        vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(conversationWith([{ userId: 'user-1', hiddenAt: null, clearedAt: floor }]) as any);
+        const res = await request(createApp()).get('/api/v1/uploads/attachments/dm-conv1/abc-encrypted.bin');
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('Attachment not found');
+      }
+      expect(getS3Object).not.toHaveBeenCalled();
+    });
+
+    it('a message above the caller\'s floor is served; the other person\'s floor changes nothing for the caller', async () => {
+      vi.mocked(prisma.messageAttachment.findFirst).mockResolvedValueOnce(attachmentOf(new Date('2026-11-11T00:00:00Z')) as any);
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(conversationWith([{ userId: 'user-1', hiddenAt: null, clearedAt: floor }]) as any);
+      stored();
+      expect((await request(createApp()).get('/api/v1/uploads/attachments/dm-conv1/abc-encrypted.bin')).status).toBe(200);
+
+      vi.mocked(prisma.messageAttachment.findFirst).mockResolvedValueOnce(attachmentOf(new Date('2026-11-09T00:00:00Z')) as any);
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(conversationWith([{ userId: 'user-2', hiddenAt: null, clearedAt: floor }]) as any);
+      stored();
+      expect((await request(createApp()).get('/api/v1/uploads/attachments/dm-conv1/abc-encrypted.bin')).status).toBe(200);
+    });
   });
 });
 
@@ -637,7 +688,7 @@ describe('uploads — a conversation with a NULL side', () => {
       expired: false,
       message: { channelId: null, conversationId: 'conv-1', channel: null },
     } as any);
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', user1Id: null, user2Id: 'user-1' } as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', user1Id: null, user2Id: 'user-1', reads: [] } as any);
     const dmData = Buffer.alloc(16, 0);
     vi.mocked(getS3Object).mockResolvedValueOnce({
       Body: { pipe: vi.fn((dest: any) => { dest.end(dmData); return dest; }) },

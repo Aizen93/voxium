@@ -8,7 +8,9 @@ const {
   mockEmit, mockTo, mockFetchSockets, mockIn, mockLocalIn, mockSocketsJoin, mockSocketsLeave, mockLocalSocketsLeave,
 } = vi.hoisted(() => {
   const mockEmit = vi.fn();
-  const mockTo = vi.fn().mockReturnValue({ emit: mockEmit });
+  // `except`: a message event skips a side whose floor hides the row
+  // (routes/dm.ts roomOfViewers; its audiences are tested in dmRemovalForOneSide.test.ts)
+  const mockTo = vi.fn().mockReturnValue({ emit: mockEmit, except: vi.fn().mockReturnValue({ emit: mockEmit }) });
   // fetchSockets stays reachable on every operator so a regression to it is an
   // explicit assertion failure, not a TypeError
   const mockFetchSockets = vi.fn().mockResolvedValue([]);
@@ -58,7 +60,29 @@ vi.mock('../../websocket/socketServer', () => ({
 const mockEndDMCall = vi.hoisted(() => vi.fn().mockResolvedValue([]));
 vi.mock('../../websocket/dmVoiceHandler', () => ({
   endDMCall: (...args: unknown[]) => mockEndDMCall(...args),
+  endDMCallIfParticipant: vi.fn().mockResolvedValue([]),
 }));
+
+// The conversation-row-locked transactions (their own suite is
+// utils/conversationLifecycle.test.ts; the removal and reopen routes are in
+// dmRemovalForOneSide.test.ts). A message write runs `write` inside the
+// mocked `prisma.$transaction`, as the real one does inside its transaction,
+// with the context it would read under the lock.
+const SEND_AT = vi.hoisted(() => new Date('2026-11-16T12:00:00.000Z'));
+vi.mock('../../utils/conversationLifecycle', async () => {
+  const { prisma: client } = await import('../../utils/prisma');
+  return {
+    writeConversationMessage: vi.fn(async (_conversationId: string, _authorId: string, write: (tx: unknown, ctx: unknown) => Promise<unknown>, announce: (m: unknown, audience: unknown[]) => void) => {
+      const context = { createdAt: SEND_AT, sides: [], authorFloor: null };
+      const message = await client.$transaction((tx: unknown) => write(tx, context));
+      // the event, to the audience read after the commit (nobody cleared anything here)
+      announce(message, []);
+      return { message, context };
+    }),
+    removeConversationForUser: vi.fn(),
+    reopenConversationForUser: vi.fn().mockResolvedValue(true),
+  };
+});
 
 // Mock S3
 vi.mock('../../utils/s3', () => ({
@@ -82,6 +106,9 @@ const mockConversation = {
   encryptedAt: new Date('2026-08-01T14:00:00Z'),
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
+  // the read rows every view loads with the sides (utils/conversationVisibility.ts);
+  // none: nobody removed it, no floor
+  reads: [],
 };
 
 const mockMessage = {
@@ -132,6 +159,8 @@ vi.mock('../../utils/prisma', () => ({
     conversationRead: {
       createMany: vi.fn(),
       upsert: vi.fn(),
+      // the audience of an event, read after the write: nobody cleared anything
+      findMany: vi.fn().mockResolvedValue([]),
     },
     message: {
       findMany: vi.fn(),
@@ -310,6 +339,7 @@ describe('DM routes — GET /conversations participant status field', () => {
         encryptedAt: new Date('2026-08-01T14:00:00Z'),
         createdAt: new Date('2024-01-01'),
         updatedAt: new Date('2024-01-01'),
+        reads: [],
         user1: {
           id: 'user-0', username: 'eve', displayName: 'Eve', avatarUrl: null,
           status: 'online', role: 'user', isSupporter: false, supporterTier: null,
@@ -353,6 +383,7 @@ describe('DM routes — GET /conversations participant status field', () => {
         encryptedAt: new Date('2026-08-01T14:00:00Z'),
         createdAt: new Date('2024-02-01'),
         updatedAt: new Date('2024-02-01'),
+        reads: [],
         user1: {
           id: 'user-1', username: 'alice', displayName: 'Alice', avatarUrl: null,
           status: 'online', role: 'user', isSupporter: false, supporterTier: null,
@@ -499,7 +530,6 @@ describe('DM routes — POST /:conversationId/messages', () => {
   it('sends a message', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.$transaction).mockResolvedValueOnce(mockMessage as any);
-    vi.mocked(prisma.conversation.update).mockResolvedValueOnce(mockConversation as any);
 
     const app = createApp();
     const res = await request(app)
@@ -640,236 +670,9 @@ describe('DM routes — PUT /:conversationId/messages/:messageId/reactions/:emoj
   });
 });
 
-describe('DM routes — DELETE /:conversationId', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    resetPrismaMocks();
-  });
-
-  it('deletes conversation with cascade', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-    vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
-    vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
-
-    const app = createApp();
-    const res = await request(app).delete('/api/v1/dm/conv-1');
-
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(prisma.conversation.delete).toHaveBeenCalledWith({ where: { id: 'conv-1' } });
-    // Should emit dm:conversation:deleted event
-    expect(mockTo).toHaveBeenCalledWith('dm:conv-1');
-    expect(mockEmit).toHaveBeenCalledWith('dm:conversation:deleted', { conversationId: 'conv-1' });
-  });
-
-  it('reads the kept attachment keys in bounded batches before the row and deletes the files after it', async () => {
-    const { deleteMultipleFromS3 } = await import('../../utils/s3');
-    const keys = ['attachments/dm-conv-1/clmsg1-blob.bin', 'attachments/dm-conv-1/clmsg2-blob.bin'];
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-    vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([
-      { id: 'att-1', s3Key: keys[0] }, { id: 'att-2', s3Key: keys[1] },
-    ] as any);
-    vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
-
-    const res = await request(createApp()).delete('/api/v1/dm/conv-1');
-
-    expect(res.status).toBe(200);
-    expect(prisma.messageAttachment.findMany).toHaveBeenCalledWith({
-      where: { expired: false, message: { conversationId: 'conv-1' } },
-      select: { id: true, s3Key: true },
-      orderBy: { id: 'asc' },
-      take: 1000,
-    });
-    expect(deleteMultipleFromS3).toHaveBeenCalledWith(keys);
-    const deleteOrder = vi.mocked(prisma.conversation.delete).mock.invocationCallOrder[0];
-    expect(vi.mocked(prisma.messageAttachment.findMany).mock.invocationCallOrder[0]).toBeLessThan(deleteOrder);
-    expect(vi.mocked(deleteMultipleFromS3).mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);
-  });
-
-  it('returns 403 for non-participant', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
-      ...mockConversation,
-      user1Id: 'other-1',
-      user2Id: 'other-2',
-    } as any);
-
-    const app = createApp();
-    const res = await request(app).delete('/api/v1/dm/conv-1');
-
-    expect(res.status).toBe(403);
-  });
-
-  it('returns 404 when conversation not found', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(null);
-
-    const app = createApp();
-    const res = await request(app).delete('/api/v1/dm/conv-nonexistent');
-
-    expect(res.status).toBe(404);
-  });
-
-  describe('room cleanup', () => {
-    const deleteConversation = () => {
-      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-      vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
-      vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
-      return request(createApp()).delete('/api/v1/dm/conv-1');
-    };
-
-    it('makes every socket in the DM room leave it, on this node and then cluster-wide', async () => {
-      const res = await deleteConversation();
-
-      expect(res.status).toBe(200);
-      expect(mockLocalIn).toHaveBeenCalledTimes(1);
-      expect(mockLocalIn).toHaveBeenCalledWith(['dm:conv-1']);
-      expect(mockLocalSocketsLeave).toHaveBeenCalledTimes(1);
-      expect(mockLocalSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
-      expect(mockIn).toHaveBeenCalledTimes(1);
-      expect(mockIn).toHaveBeenCalledWith(['dm:conv-1']);
-      expect(mockSocketsLeave).toHaveBeenCalledTimes(1);
-      expect(mockSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
-      expect(mockSocketsJoin).not.toHaveBeenCalled();
-    });
-
-    it('applies the local form first: the Redis adapter applies the cluster form on this node only on its echo', async () => {
-      await deleteConversation();
-
-      expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
-    });
-
-    it('leaves the room after the dm:conversation:deleted notice', async () => {
-      await deleteConversation();
-
-      const noticeIndex = mockEmit.mock.calls.findIndex(([event]) => event === 'dm:conversation:deleted');
-      expect(noticeIndex).toBeGreaterThanOrEqual(0);
-      const noticeOrder = mockEmit.mock.invocationCallOrder[noticeIndex];
-      expect(mockLocalSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
-      expect(mockSocketsLeave.mock.invocationCallOrder[0]).toBeGreaterThan(noticeOrder);
-    });
-
-    it('never fetches the sockets: a fetch waits on every node and throws when one peer is unresponsive', async () => {
-      // The conversation is already deleted when the room is cleared: a fetch
-      // timing out there answered 500 for a delete that had happened
-      mockFetchSockets.mockRejectedValue(new Error('timeout reached while waiting for fetchSockets response'));
-      try {
-        const res = await deleteConversation();
-
-        expect(res.status).toBe(200);
-        expect(res.body).toEqual({ success: true, message: 'Conversation deleted' });
-        expect(mockFetchSockets).not.toHaveBeenCalled();
-      } finally {
-        mockFetchSockets.mockResolvedValue([]);
-      }
-    });
-  });
-
-  describe('a call in progress', () => {
-    const deleteConversation = () => {
-      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-      vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
-      vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
-      return request(createApp()).delete('/api/v1/dm/conv-1');
-    };
-
-    beforeEach(() => {
-      mockEndDMCall.mockReset().mockResolvedValue(['user-1', 'user-2']);
-    });
-
-    it('ends with the conversation, without a "call ended" notice the deleted conversation could not hold', async () => {
-      const res = await deleteConversation();
-
-      expect(res.status).toBe(200);
-      expect(mockEndDMCall).toHaveBeenCalledTimes(1);
-      expect(mockEndDMCall).toHaveBeenCalledWith(expect.anything(), 'conv-1', { notice: false });
-    });
-
-    it('ends after the row is deleted, and before dm:{id} is emptied (dm:voice:ended goes to that room)', async () => {
-      await deleteConversation();
-
-      const endOrder = mockEndDMCall.mock.invocationCallOrder[0];
-      expect(endOrder).toBeGreaterThan(vi.mocked(prisma.conversation.delete).mock.invocationCallOrder[0]);
-      expect(endOrder).toBeLessThan(mockLocalSocketsLeave.mock.invocationCallOrder[0]);
-      expect(endOrder).toBeLessThan(mockSocketsLeave.mock.invocationCallOrder[0]);
-      const noticeIndex = mockEmit.mock.calls.findIndex(([event]) => event === 'dm:conversation:deleted');
-      expect(endOrder).toBeLessThan(mockEmit.mock.invocationCallOrder[noticeIndex]);
-    });
-
-    it('a call teardown that rejects still answers the delete, notifies the other side and empties the room', async () => {
-      mockEndDMCall.mockRejectedValueOnce(new Error('redis gone'));
-      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        const res = await deleteConversation();
-
-        expect(res.status).toBe(200);
-        expect(res.body).toEqual({ success: true, message: 'Conversation deleted' });
-        expect(mockEmit).toHaveBeenCalledWith('dm:conversation:deleted', { conversationId: 'conv-1' });
-        expect(mockLocalSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
-        expect(mockSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
-        expect(errorLog).toHaveBeenCalledWith('[DM] Conversation conv-1 deleted, but ending its call failed:', 'redis gone');
-      } finally {
-        errorLog.mockRestore();
-      }
-    });
-  });
-
-  describe('the steps after the delete are best effort', () => {
-    let errorLog: ReturnType<typeof vi.spyOn>;
-
-    beforeEach(() => {
-      mockEndDMCall.mockReset().mockResolvedValue([]);
-      errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
-    });
-
-    afterEach(() => {
-      errorLog.mockRestore();
-      mockEmit.mockReset();
-      mockLocalSocketsLeave.mockReset();
-      mockSocketsLeave.mockReset();
-    });
-
-    const deleteConversation = () => {
-      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-      vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
-      vi.mocked(prisma.conversation.delete).mockResolvedValueOnce(mockConversation as any);
-      return request(createApp()).delete('/api/v1/dm/conv-1');
-    };
-
-    it('a notice that throws still empties the room and answers 200', async () => {
-      mockEmit.mockImplementationOnce(() => { throw new Error('adapter publish failed'); });
-
-      const res = await deleteConversation();
-
-      expect(res.status).toBe(200);
-      expect(mockSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
-      expect(errorLog).toHaveBeenCalledWith('[DM] Conversation conv-1 deleted, but the dm:conversation:deleted notice failed:', 'adapter publish failed');
-    });
-
-    it('a local room leave that throws still runs the cluster one and answers 200', async () => {
-      mockLocalSocketsLeave.mockImplementationOnce(() => { throw new Error('local adapter failed'); });
-      mockSocketsLeave.mockImplementationOnce(() => { throw new Error('cluster adapter failed'); });
-
-      const res = await deleteConversation();
-
-      expect(res.status).toBe(200);
-      expect(mockSocketsLeave).toHaveBeenCalledWith(['dm:conv-1']);
-      expect(errorLog).toHaveBeenCalledWith('[DM] Conversation conv-1 deleted, but the local room leave failed:', 'local adapter failed');
-      expect(errorLog).toHaveBeenCalledWith('[DM] Conversation conv-1 deleted, but the cluster room leave failed:', 'cluster adapter failed');
-    });
-
-    it('a row delete that fails ends no call and announces nothing', async () => {
-      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-      vi.mocked(prisma.messageAttachment.findMany).mockResolvedValueOnce([]);
-      vi.mocked(prisma.conversation.delete).mockRejectedValueOnce(new Error('db gone'));
-
-      const res = await request(createApp()).delete('/api/v1/dm/conv-1');
-
-      expect(res.status).toBe(500);
-      expect(mockEndDMCall).not.toHaveBeenCalled();
-      expect(mockEmit).not.toHaveBeenCalled();
-      expect(mockSocketsLeave).not.toHaveBeenCalled();
-    });
-  });
-});
+// DELETE /:conversationId removes the conversation for the caller only (#47):
+// its tests (hide, clear, the event's audience, the real deletion, the call,
+// the best-effort steps) are in dmRemovalForOneSide.test.ts.
 
 // ─── E2E encryption ─────────────────────────────────────────────────────────
 
@@ -980,7 +783,6 @@ describe('DM routes — encrypted conversation message enforcement', () => {
         messageAttachment: { createMany: vi.fn() },
       });
     });
-    vi.mocked(prisma.conversation.update).mockResolvedValueOnce(mockConversation as any);
 
     const app = createApp();
     const res = await request(app)
@@ -1008,7 +810,6 @@ describe('DM routes — encrypted conversation message enforcement', () => {
         messageAttachment: { createMany: vi.fn() },
       });
     });
-    vi.mocked(prisma.conversation.update).mockResolvedValueOnce(mockConversation as any);
 
     const app = createApp();
     const res = await request(app)
@@ -1116,7 +917,6 @@ describe('DM routes — encrypted conversation message enforcement', () => {
         },
       })
     );
-    vi.mocked(prisma.conversation.update).mockResolvedValueOnce(mockConversation as any);
 
     const app = createApp();
     const res = await request(app)
@@ -1382,16 +1182,17 @@ describe('DM routes — the wire for live conversations is unchanged', () => {
     expect(prisma.conversation.findUnique).toHaveBeenCalledWith({ where: { user1Id_user2Id: { user1Id: 'user-1', user2Id: 'user-2' } } });
   });
 
-  it('GET /:id/messages: a live row and its live quote pass through as they are', async () => {
+  it('GET /:id/messages: a live row and its live quote pass through as they are (the quote\'s time, read for the floor, is never sent)', async () => {
     const quoted = { id: 'msg-0', content: validEnvelope, encrypted: true, webhookId: null, webhookName: null, author: { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null } };
     const row = { ...mockMessage, encrypted: true, content: validEnvelope, webhookId: null, webhookName: null, mentionsEveryone: false, replyToId: 'msg-0', replyTo: quoted };
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
-    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([row] as any);
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([{ ...row, replyTo: { ...quoted, createdAt: new Date('2023-12-31') } }] as any);
 
     const res = await request(createApp()).get('/api/v1/dm/conv-1/messages');
 
     expect(res.status).toBe(200);
     expect(res.body.data).toStrictEqual([JSON.parse(JSON.stringify({ ...row, reactions: [] }))]);
+    expect(Object.keys(res.body.data[0])).toEqual(Object.keys({ ...row, reactions: [] }));
   });
 });
 
@@ -1542,5 +1343,152 @@ describe('DM routes — a conversation whose other side was deleted (NULL side)'
     const res = await request(createApp()).get('/api/v1/dm/conv-1/messages');
 
     expect(res.body.data[0].author).toStrictEqual(placeholder('conv-1'));
+  });
+});
+
+// ─── A row deleted while the request ran ────────────────────────────────────
+// Each of these windows answered 500. The errors are shaped as Prisma 7 and
+// its pg adapter raise them (checked against PostgreSQL 16): a refused
+// foreign key is P2003 naming its constraint, a row gone before an update or
+// a delete is P2025.
+
+/** A refused foreign key, as the adapter reports it. */
+const foreignKeyRefused = (modelName: string, constraint: string) => Object.assign(new Error(`Foreign key constraint violated on the constraint: \`${constraint}\``), {
+  code: 'P2003',
+  meta: {
+    modelName,
+    driverAdapterError: { name: 'DriverAdapterError', cause: { originalCode: '23503', kind: 'ForeignKeyConstraintViolation', constraint: { index: constraint } } },
+  },
+});
+/** No row to update or delete. */
+const rowGone = (operation: string) => Object.assign(new Error('An operation failed because it depends on one or more records that were required but not found.'), {
+  code: 'P2025',
+  meta: { modelName: 'Message', operation },
+});
+
+describe('DM routes — a row deleted while the request ran is answered as missing', () => {
+  const EMOJI = '👍';
+  const reactionUrl = `/api/v1/dm/conv-1/messages/msg-1/reactions/${encodeURIComponent(EMOJI)}`;
+  const editEnvelope = JSON.stringify({ v: 1, e: 'olm1', t: 1, b: 'ZWRpdGVkY2lwaGVydGV4dA' });
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(mockConversation as any);
+    errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => errorLog.mockRestore());
+
+  const stageReaction = () => {
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1', createdAt: new Date('2024-01-01') } as any);
+    vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
+  };
+
+  it('a reaction on a message deleted after the read: 404 Message, nothing announced', async () => {
+    stageReaction();
+    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce(foreignKeyRefused('MessageReaction', 'message_reactions_message_id_fkey'));
+
+    const res = await request(createApp()).put(reactionUrl);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Message not found');
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('a reaction refused by another key (the account) is not taken for a missing message: it surfaces as itself', async () => {
+    stageReaction();
+    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce(foreignKeyRefused('MessageReaction', 'message_reactions_user_id_fkey'));
+
+    expect((await request(createApp()).put(reactionUrl)).status).toBe(500);
+  });
+
+  it('a reply whose parent was deleted after the check: the answer a missing parent always gets (400 Invalid replyToId), and nothing is sent', async () => {
+    const parent = { conversationId: 'conv-1', createdAt: new Date('2024-01-01') };
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce(parent as any);
+    const tx = {
+      message: {
+        findUnique: vi.fn().mockResolvedValue(parent),
+        create: vi.fn().mockRejectedValue(foreignKeyRefused('Message', 'messages_reply_to_id_fkey')),
+        findUniqueOrThrow: vi.fn(),
+      },
+      messageAttachment: { createMany: vi.fn() },
+    };
+    vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: (client: unknown) => unknown) => fn(tx)) as any);
+
+    const res = await request(createApp()).post('/api/v1/dm/conv-1/messages').send({ content: validEnvelope, encrypted: true, replyToId: 'msg-0' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid replyToId');
+    expect(tx.message.findUniqueOrThrow).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('a send refused by another key surfaces as itself, a reply\'s included', async () => {
+    for (const replyToId of [undefined, 'msg-0']) {
+      if (replyToId) vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ conversationId: 'conv-1', createdAt: new Date('2024-01-01') } as any);
+      const tx = {
+        message: {
+          findUnique: vi.fn().mockResolvedValue({ conversationId: 'conv-1', createdAt: new Date('2024-01-01') }),
+          create: vi.fn().mockRejectedValue(foreignKeyRefused('Message', 'messages_author_id_fkey')),
+          findUniqueOrThrow: vi.fn(),
+        },
+        messageAttachment: { createMany: vi.fn() },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: (client: unknown) => unknown) => fn(tx)) as any);
+      const res = await request(createApp()).post('/api/v1/dm/conv-1/messages').send({ content: validEnvelope, encrypted: true, ...(replyToId && { replyToId }) });
+      expect(res.status, String(replyToId)).toBe(500);
+    }
+  });
+
+  it('an edit that lost the race with a delete: 404 Message, nothing announced', async () => {
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, encrypted: true, content: validEnvelope } as any);
+    vi.mocked(prisma.message.update).mockRejectedValueOnce(rowGone('an update'));
+
+    const res = await request(createApp()).patch('/api/v1/dm/conv-1/messages/msg-1').send({ content: editEnvelope, encrypted: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Message not found');
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('a delete that lost the race with another delete: 404 Message, no file deleted, nothing announced', async () => {
+    const { deleteMultipleFromS3 } = await import('../../utils/s3');
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, attachments: [{ s3Key: 'attachments/dm-conv-1/abc123-encrypted.bin' }] } as any);
+    vi.mocked(prisma.message.delete).mockRejectedValueOnce(rowGone('a delete'));
+
+    const res = await request(createApp()).delete('/api/v1/dm/conv-1/messages/msg-1');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Message not found');
+    expect(deleteMultipleFromS3).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('an edit or a delete failing otherwise surfaces as itself', async () => {
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, encrypted: true, content: validEnvelope } as any);
+    vi.mocked(prisma.message.update).mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: 'P2034' }));
+    expect((await request(createApp()).patch('/api/v1/dm/conv-1/messages/msg-1').send({ content: editEnvelope, encrypted: true })).status).toBe(500);
+
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, attachments: [] } as any);
+    vi.mocked(prisma.message.delete).mockRejectedValueOnce(new Error('connection lost'));
+    expect((await request(createApp()).delete('/api/v1/dm/conv-1/messages/msg-1')).status).toBe(500);
+  });
+
+  it('a mark-read whose insert meets a conversation really deleted after the view: 404 Conversation', async () => {
+    vi.mocked(prisma.conversationRead.upsert).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_conversation_id_fkey'));
+
+    const res = await request(createApp()).post('/api/v1/dm/conv-1/read');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Conversation not found');
+  });
+
+  it('a mark-read refused by the account\'s key is not taken for a missing conversation: it surfaces as itself', async () => {
+    vi.mocked(prisma.conversationRead.upsert).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_user_id_fkey'));
+
+    expect((await request(createApp()).post('/api/v1/dm/conv-1/read')).status).toBe(500);
   });
 });

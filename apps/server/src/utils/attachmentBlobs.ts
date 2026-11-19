@@ -32,8 +32,16 @@ export const ATTACHMENT_KEY_BATCH = 1000;
  * tables starts from none (accountDeletion.ts makes one call per column).
  * Only keys of the attachment shape are returned, so a row can never steer
  * the delete onto an avatar, an icon or anything else in the bucket.
+ *
+ * `db` is the shared client, or a transaction's own client when the delete
+ * is decided inside that transaction (a conversation nobody can reach any
+ * more, utils/conversationLifecycle.ts): the keys are then read under the
+ * same locks, right before the delete. The reads run one after the other.
  */
-export async function collectAttachmentKeys(messages: Prisma.MessageWhereInput): Promise<string[]> {
+export async function collectAttachmentKeys(
+  messages: Prisma.MessageWhereInput,
+  db: Pick<Prisma.TransactionClient, 'messageAttachment'> = prisma,
+): Promise<string[]> {
   const keys: string[] = [];
   const keep = (rows: { s3Key: string }[]) => {
     for (const row of rows) {
@@ -42,7 +50,7 @@ export async function collectAttachmentKeys(messages: Prisma.MessageWhereInput):
     }
   };
 
-  const first = await prisma.messageAttachment.findMany({
+  const first = await db.messageAttachment.findMany({
     where: { expired: false, message: messages },
     select: { id: true, s3Key: true },
     orderBy: { id: 'asc' },
@@ -53,14 +61,14 @@ export async function collectAttachmentKeys(messages: Prisma.MessageWhereInput):
 
   let after = first[first.length - 1].id;
   for (;;) {
-    const live = await prisma.messageAttachment.findMany({
+    const live = await db.messageAttachment.findMany({
       where: { expired: false, id: { gt: after } },
       select: { id: true },
       orderBy: { id: 'asc' },
       take: ATTACHMENT_KEY_BATCH,
     });
     if (live.length === 0) return keys;
-    keep(await prisma.messageAttachment.findMany({
+    keep(await db.messageAttachment.findMany({
       where: { id: { in: live.map((row) => row.id) }, expired: false, message: messages },
       select: { s3Key: true },
     }));

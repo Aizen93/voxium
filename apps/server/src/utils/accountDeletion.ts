@@ -198,6 +198,15 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * side runs again whole: every transaction named here is retried
  * (retryOnTransactionConflict), and a retry of this one after a transfer to
  * the account committed answers OwnedServersError (below).
+ * The direct conversations: the user delete in step 4 cascades into every
+ * conversation the account is a side of (both of their read rows and all of
+ * their messages) and into the account's own read rows and messages, in the
+ * order the cascade triggers fire. A message write, a removal or a reopen of
+ * one of those conversations (utils/conversationLifecycle.ts) takes the
+ * conversation row first and can then need a row this cascade already
+ * holds, while the cascade waits for that conversation row; the lock order
+ * there documents the cycle. Both sides are retried, and the conversation
+ * transaction retried after this one committed answers 404 `Conversation`.
  */
 export async function deleteAccountRows(userId: string): Promise<AccountRowsDeleted> {
   let committed: { removal: SecureMembershipRemoval; serverIds: string[] };
