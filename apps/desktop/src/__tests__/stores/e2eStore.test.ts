@@ -419,6 +419,24 @@ describe('e2eStore peer actions', () => {
     expect(useE2EStore.getState().identityWarnings[PEER]).toBe(true);
   });
 
+  it('flagging a member already flagged leaves the state as it is and notifies nobody', () => {
+    useE2EStore.getState().flagIdentityChanged(PEER);
+    const flagged = useE2EStore.getState();
+    const listener = vi.fn();
+    const unsubscribe = useE2EStore.subscribe(listener);
+    try {
+      useE2EStore.getState().flagIdentityChanged(PEER);
+      expect(useE2EStore.getState()).toBe(flagged);
+      expect(listener).not.toHaveBeenCalled();
+      // A member not flagged yet still is
+      useE2EStore.getState().flagIdentityChanged('another-peer');
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(useE2EStore.getState().identityWarnings).toEqual({ [PEER]: true, 'another-peer': true });
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('swallows an ordinary refresh failure without flagging an identity change', async () => {
     // A network blip must not be rendered as "this contact's identity changed"
     // — that is the one prompt users have to take seriously.
