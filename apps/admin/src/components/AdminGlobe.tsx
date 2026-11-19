@@ -122,6 +122,44 @@ export function AdminGlobe({ geoStats, infraServers, fullPage }: AdminGlobeProps
   const maxCount = Math.max(...geoStats.map((g) => g.count), 1);
   const globeSize = fullPage ? 600 : 420;
 
+  // Small markers at each country (tiny dots), and GitHub-style arcs from the
+  // top country (hub) to all others. Derived from the stats alone: a change
+  // is pushed to the live globe with update(), never by creating a new one.
+  const { markers, arcs } = useMemo(() => {
+    const userMarkers = statsWithCoords.map((g) => ({
+      location: [g.lat, g.lng] as [number, number],
+      size: 0.02 + (g.count / maxCount) * 0.04,
+    }));
+    const hub = statsWithCoords.length > 0
+      ? statsWithCoords.reduce((a, b) => (a.count > b.count ? a : b))
+      : null;
+    const hubArcs = hub
+      ? statsWithCoords
+          .filter((g) => g.countryCode !== hub.countryCode)
+          .map((g) => ({
+            from: [hub.lat, hub.lng] as [number, number],
+            to: [g.lat, g.lng] as [number, number],
+            color: [0.36, 0.36, 0.97] as [number, number, number],
+          }))
+      : [];
+    return { markers: userMarkers, arcs: hubArcs };
+  }, [statsWithCoords, maxCount]);
+
+  // Read by the per-frame loop and by the creation of a globe, so a new list
+  // never re-runs the creation effect below
+  const globeRef = useRef<ReturnType<typeof createGlobe> | null>(null);
+  const sceneRef = useRef({ markers, arcs });
+  const infraRef = useRef(infraServers);
+
+  useEffect(() => {
+    infraRef.current = infraServers;
+  }, [infraServers]);
+
+  useEffect(() => {
+    sceneRef.current = { markers, arcs };
+    globeRef.current?.update({ markers, arcs });
+  }, [markers, arcs]);
+
   const handleCanvasMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas || statsWithCoords.length === 0 || dragRef.current.active) {
@@ -198,28 +236,6 @@ export function AdminGlobe({ geoStats, infraServers, fullPage }: AdminGlobeProps
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointermove', onPointerMove);
 
-    // Small markers at each country (tiny dots)
-    const userMarkers = statsWithCoords.map((g) => ({
-      location: [g.lat, g.lng] as [number, number],
-      size: 0.02 + (g.count / maxCount) * 0.04,
-    }));
-
-    const markers = userMarkers;
-
-    // GitHub-style arcs: lines from the top country (hub) to all others
-    const hub = statsWithCoords.length > 0
-      ? statsWithCoords.reduce((a, b) => (a.count > b.count ? a : b))
-      : null;
-    const arcs = hub
-      ? statsWithCoords
-          .filter((g) => g.countryCode !== hub.countryCode)
-          .map((g) => ({
-            from: [hub.lat, hub.lng] as [number, number],
-            to: [g.lat, g.lng] as [number, number],
-            color: [0.36, 0.36, 0.97] as [number, number, number],
-          }))
-      : [];
-
     const dpr = Math.min(window.devicePixelRatio, 2);
 
     // Defer globe creation to the next frame so the canvas is fully
@@ -249,8 +265,9 @@ export function AdminGlobe({ geoStats, infraServers, fullPage }: AdminGlobeProps
         const cy = globeSize / 2;
         const radius = globeSize / 2;
         const children = overlay.children;
-        for (let i = 0; i < infraServers.length; i++) {
-          const s = infraServers[i];
+        const infra = infraRef.current;
+        for (let i = 0; i < infra.length; i++) {
+          const s = infra[i];
           const el = children[i] as HTMLElement | undefined;
           if (!el) continue;
           const p = project(s.latitude, s.longitude, phiRef.current, thetaRef.current, scaleRef.current, cx, cy, radius);
@@ -289,19 +306,21 @@ export function AdminGlobe({ geoStats, infraServers, fullPage }: AdminGlobeProps
         baseColor: [0.18, 0.18, 0.32],
         markerColor: [0.36, 0.36, 0.97],
         glowColor: [0.2, 0.18, 0.4],
-        markers,
+        markers: sceneRef.current.markers,
         markerElevation: 0,
-        arcs,
+        arcs: sceneRef.current.arcs,
         arcColor: [0.36, 0.36, 0.97],
         arcWidth: 0.3,
         arcHeight: 0.15,
         scale: 1,
       });
+      globeRef.current = globe;
       animFrame = requestAnimationFrame(animate);
     });
 
     return () => {
       destroyed = true;
+      globeRef.current = null;
       cancelAnimationFrame(initFrame);
       if (globe) {
         cancelAnimationFrame(animFrame);
@@ -312,7 +331,7 @@ export function AdminGlobe({ geoStats, infraServers, fullPage }: AdminGlobeProps
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointermove', onPointerMove);
     };
-  }, [statsWithCoords, maxCount, fullPage, globeSize, infraServers]);
+  }, [fullPage, globeSize]);
 
   const sorted = [...geoStats].sort((a, b) => b.count - a.count);
   const totalUsers = geoStats.reduce((sum, g) => sum + g.count, 0);
