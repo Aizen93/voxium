@@ -92,6 +92,9 @@ import { useAnnotationLiveStore } from '../../stores/annotationLiveStore';
 import { useDiscoveryStore } from '../../stores/discoveryStore';
 import { api } from '../../services/api';
 import { arrivalMark, hasDueRows, noteSessionsAvailable, noteUndecrypted, syncWithView } from '../../services/e2e/undecryptedRows';
+import { registerE2ESessionUser } from '../../services/e2e/session';
+import { clearedFloorOf, isAtOrBelowClearedFloor } from '../../services/e2e/clearedFloors';
+import { applyClearedFloor, clearedHistoryPurgesSettled } from '../../services/dmClearedHistory';
 import type { Server, ServerMember, Conversation, Friendship, Message } from '@voxium/shared';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -286,6 +289,23 @@ describe('resetAccountStores (HIGH-14b)', () => {
     noteUndecrypted(row('m-3'), 'conv-1', mark);
     syncWithView('conv-1', [shown('m-3')]);
     expect(hasDueRows('conv-1')).toBe(false);
+  });
+
+  it('drops the floors of the histories the leaving account cleared, which live outside the stores too', async () => {
+    registerE2ESessionUser(() => 'leaving-user');
+    try {
+      applyClearedFloor('conv-1', '2026-11-10T10:00:00.000Z', 'test');
+      expect(clearedFloorOf('leaving-user', 'conv-1')).not.toBeNull();
+
+      resetAccountStores();
+
+      expect(clearedFloorOf('leaving-user', 'conv-1')).toBeNull();
+      expect(isAtOrBelowClearedFloor('leaving-user', 'conv-1', '2026-11-10T10:00:00.000Z')).toBe(false);
+      // the purge it had asked for applies nothing for the next account
+      await clearedHistoryPurgesSettled();
+    } finally {
+      registerE2ESessionUser(null);
+    }
   });
 
   it('store actions still work after a replace-reset', () => {

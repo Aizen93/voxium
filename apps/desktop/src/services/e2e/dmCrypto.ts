@@ -31,8 +31,22 @@ import {
 import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 import { arrivalMark, noteQuoteAwaiting, noteUndecrypted } from './undecryptedRows';
 import { isParticipantDeleted, isHeldReadOnly, DMConversationReadOnlyError } from '../../utils/dmParticipant';
+import { isAtOrBelowClearedFloor } from './clearedFloors';
 
 export { E2EIdentityChangedError, DECRYPT_FAILED_CONTENT };
+
+/**
+ * Whether a DM row lies at or below the floor the signed-in account cleared
+ * the history of the conversation it is shown in (or the one it names) to
+ * (clearedFloors.ts): such a row is nothing to show. The server serves none
+ * of them after the removal; this catches a page or an event already on its
+ * way, before any cache read or decrypt and again once the gate is done.
+ */
+function isClearedRow(row: Pick<Message, 'conversationId' | 'createdAt'>, shownIn?: string | null): boolean {
+  const account = currentE2ESessionUser();
+  return isAtOrBelowClearedFloor(account, shownIn, row.createdAt)
+    || isAtOrBelowClearedFloor(account, row.conversationId, row.createdAt);
+}
 
 async function currentUserId(): Promise<string | null> {
   const { useAuthStore } = await import('../../stores/authStore');
@@ -201,13 +215,20 @@ export async function quotedTextFromCache(message: Message): Promise<string | nu
  * a key-share claim, a session that is not on the device being a failure,
  * and rejects on a failure of the vault instead of answering the refused
  * shape: such a try says nothing about the message.
+ *
+ * A row at or below a cleared history's floor (isClearedRow) settles as
+ * `null` too, before anything reads the cache or decrypts, and when the floor
+ * becomes known while the row is gated: nothing of it is shown, counted,
+ * notified, cached or noted for a retry.
  */
 export async function decryptMessageForDisplay(
   input: Message,
   opts: { retry?: boolean; conversationId?: string } = {},
 ): Promise<Message | null> {
   try {
-    return await decryptOneForDisplay(input, opts.retry === true, opts.conversationId);
+    if (isClearedRow(input, opts.conversationId)) return null;
+    const shown = await decryptOneForDisplay(input, opts.retry === true, opts.conversationId);
+    return shown === null || isClearedRow(input, opts.conversationId) ? null : shown;
   } catch (err) {
     if (!isE2ESessionEnded(err)) throw err;
     console.debug(`e2e: decrypt of ${input.id} ended with the session:`, err instanceof Error ? err.message : err);
@@ -215,7 +236,7 @@ export async function decryptMessageForDisplay(
   }
 }
 
-async function decryptOneForDisplay(input: Message, retry: boolean, pageConversationId?: string): Promise<Message> {
+async function decryptOneForDisplay(input: Message, retry: boolean, pageConversationId?: string): Promise<Message | null> {
   // The conversation a row is shown in: the page's when a page was fetched
   // for one (the row's own id is the server's word), the row's own otherwise
   const shownIn = pageConversationId ?? input.conversationId ?? null;
@@ -274,13 +295,18 @@ interface GatedRow {
  * another conversation's id costs that conversation nothing). An own row
  * keeps its text, and its quote is judged again under the fresh flag (one the
  * conversation turned under while its cache read ran).
+ *
+ * Before that, the cleared floor: a row the floor came to cover while it was
+ * gated is nothing (null), with no retry note (the service wrote no cache
+ * entry for it once the floor was known).
  */
 async function settleReadOnly(
   input: Message,
   message: Message,
   shownIn: string | null,
   { row, userId, decrypted, noteRetry }: GatedRow,
-): Promise<Message> {
+): Promise<Message | null> {
+  if (isClearedRow(input, shownIn)) return null;
   if (!shownIn || isListedNotice(message) || !(await heldReadOnlyNow(shownIn, message.conversationId))) {
     noteRetry?.();
     return row;
@@ -415,21 +441,28 @@ export async function decryptMessagesForDisplay(messages: Message[], opts: { con
   if (messages.length === 0) return messages;
   // Sequential on purpose: decryption mutates ratchet state through a serial
   // queue anyway, and order here matches timeline order for skipped-key bookkeeping.
-  const out: Message[] = [];
+  const out: Array<{ input: Message; shown: Message }> = [];
   for (const m of messages) {
+    // a row at or below a cleared floor is left out of the page, unopened
+    // (a page fetched before the removal and answered after it)
+    if (isClearedRow(m, opts.conversationId)) continue;
     try {
-      // a row the session's end overtook keeps the page's shape as a refused row
-      out.push((await decryptMessageForDisplay(m, { conversationId: opts.conversationId })) ?? refusedRow(withoutServerAssertions(m)));
+      const shown = await decryptMessageForDisplay(m, { conversationId: opts.conversationId });
+      // a row the session's end overtook keeps the page's shape as a refused
+      // row; one a floor came to cover meanwhile is left out
+      if (shown) out.push({ input: m, shown });
+      else if (!isClearedRow(m, opts.conversationId)) out.push({ input: m, shown: refusedRow(withoutServerAssertions(m)) });
     } catch (err) {
       // One message whose decrypt PIPELINE fails (vault IO, engine state —
       // not mere bad ciphertext, which degrades inside) must not abort the
       // whole page into a "Failed to load messages" toast. Show the one
       // failure, keep the conversation.
       console.error(`e2e: decrypt pipeline failed for message ${m.id}:`, err);
-      out.push(refusedRow(m));
+      out.push({ input: m, shown: refusedRow(m) });
     }
   }
-  return out;
+  // a floor learnt while later rows were gated covers the earlier ones too
+  return out.filter(({ input }) => !isClearedRow(input, opts.conversationId)).map(({ shown }) => shown);
 }
 
 /**

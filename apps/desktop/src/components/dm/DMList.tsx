@@ -17,7 +17,7 @@ import { isDeletedPreview } from '../../utils/dmPreview';
 
 export function DMList() {
   const { t } = useTranslation();
-  const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, deleteConversation } = useDMStore();
+  const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, removeConversation } = useDMStore();
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const pendingIncoming = useFriendStore((s) => s.pendingIncoming);
   const [showSupportConfirm, setShowSupportConfirm] = useState(false);
@@ -187,7 +187,10 @@ export function DMList() {
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  deleteConversation(conv.id);
+                  // the store logged the failure; nothing changed on screen
+                  removeConversation(conv.id).catch((err: unknown) => {
+                    console.warn('[DM] The conversation was not removed:', err instanceof Error ? err.message : err);
+                  });
                 }}
                 className="opacity-0 group-hover:opacity-100 shrink-0 rounded p-0.5 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-active transition-all"
                 title={t('common.delete')}
