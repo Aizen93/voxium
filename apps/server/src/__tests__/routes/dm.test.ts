@@ -1178,8 +1178,13 @@ describe('DM routes — the wire for live conversations is unchanged', () => {
         createdAt: '2024-01-01T00:00:00.000Z',
       },
     });
-    // the pair lookup is by both live ids, sorted (Prisma's compound input takes no null)
-    expect(prisma.conversation.findUnique).toHaveBeenCalledWith({ where: { user1Id_user2Id: { user1Id: 'user-1', user2Id: 'user-2' } } });
+    // the pair lookup is by both live ids, sorted (Prisma's compound input
+    // takes no null), with the caller's read row for their floor (none here:
+    // no clearedUntil key above)
+    expect(prisma.conversation.findUnique).toHaveBeenCalledWith({
+      where: { user1Id_user2Id: { user1Id: 'user-1', user2Id: 'user-2' } },
+      include: { reads: { where: { userId: 'user-1' }, select: { clearedAt: true } } },
+    });
   });
 
   it('GET /:id/messages: a live row and its live quote pass through as they are (the quote\'s time, read for the floor, is never sent)', async () => {

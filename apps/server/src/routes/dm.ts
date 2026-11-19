@@ -4,7 +4,7 @@ import { rateLimitMessageSend, rateLimitInteract, rateLimitMarkRead, rateLimitDm
 import { prisma } from '../utils/prisma';
 import type { Prisma } from '../generated/prisma/client';
 import { BadRequestError, ForbiddenError, NotFoundError, parseDateParam, prismaErrorCode, violatesForeignKey } from '../utils/errors';
-import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
+import { validateEmoji, LIMITS, parseE2EEnvelope, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, DM_CLEARED_LIST_MAX } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { aggregateReactions, reactionInclude } from '../utils/reactions';
 import { VALID_ATTACHMENT_KEY_RE, deleteMultipleFromS3 } from '../utils/s3';
@@ -74,6 +74,16 @@ const replyToSelect = {
   },
 };
 
+/**
+ * The caller's floor on what is answered to them about a conversation (the
+ * list, an open, a removal): `clearedUntil`, present only when they cleared
+ * their history there, so a 2.1.x client, which never cleared one, reads the
+ * body it always read. A 2.2.0 client purges its local cache up to it.
+ */
+function clearedFloorField(floor: Date | null): { clearedUntil?: string } {
+  return floor ? { clearedUntil: floor.toISOString() } : {};
+}
+
 /** Ensure user1Id < user2Id for uniqueness constraint */
 function sortUserIds(a: string, b: string): [string, string] {
   return a < b ? [a, b] : [b, a];
@@ -91,35 +101,61 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId;
 
-    const conversations = await prisma.conversation.findMany({
-      where: {
-        OR: [{ user1Id: userId }, { user2Id: userId }],
-        // removed by the caller: off their list until a message newer than
-        // their floor or their own reopening brings it back
-        reads: { none: { userId, hiddenAt: { not: null } } },
-      },
-      include: {
-        user1: authorSelect,
-        user2: authorSelect,
-        messages: {
-          orderBy: { createdAt: 'desc' },
-          take: 1,
-          select: { id: true, content: true, encrypted: true, type: true, createdAt: true, authorId: true },
+    const [conversations, clearedReads] = await Promise.all([
+      prisma.conversation.findMany({
+        where: {
+          OR: [{ user1Id: userId }, { user2Id: userId }],
+          // removed by the caller: off their list until a message newer than
+          // their floor or their own reopening brings it back
+          reads: { none: { userId, hiddenAt: { not: null } } },
         },
-        // the caller's floor, for the preview
-        reads: { where: { userId }, select: { clearedAt: true } },
-      },
-      orderBy: { updatedAt: 'desc' },
-      // Bounded: most-recently-active first. Each row costs a lastMessage
-      // subquery — an unbounded list grows without limit over an account's life.
-      take: 200,
-    });
+        include: {
+          user1: authorSelect,
+          user2: authorSelect,
+          messages: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { id: true, content: true, encrypted: true, type: true, createdAt: true, authorId: true },
+          },
+          // the caller's floor, for the preview
+          reads: { where: { userId }, select: { clearedAt: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+        // Bounded: most-recently-active first. Each row costs a lastMessage
+        // subquery — an unbounded list grows without limit over an account's life.
+        take: 200,
+      }),
+      // The floors of the conversations the caller removed with their
+      // history cleared, which the list above leaves out (hidden): every
+      // device of theirs learns them each session, a device that missed the
+      // removal included. The caller's own read rows only, no join: a range
+      // of the primary key (user_id, conversation_id), newest floor first,
+      // bounded. A conversation really deleted since has no read row left.
+      // Every list answers them again, so a failure here never fails the
+      // list: it is answered without them, and the next one teaches them.
+      prisma.conversationRead.findMany({
+        where: { userId, hiddenAt: { not: null }, clearedAt: { not: null } },
+        orderBy: { clearedAt: 'desc' },
+        take: DM_CLEARED_LIST_MAX,
+        select: { conversationId: true, clearedAt: true },
+      }).catch((err: unknown) => {
+        console.warn(
+          '[DM] The conversation list is answered without the floors of removed conversations:',
+          err instanceof Error ? err.name : typeof err,
+          prismaErrorCode(err) ?? 'no code',
+        );
+        return [] as Array<{ conversationId: string; clearedAt: Date | null }>;
+      }),
+    ]);
+    const cleared = clearedReads.flatMap((r) =>
+      r.clearedAt ? [{ conversationId: r.conversationId, clearedUntil: r.clearedAt.toISOString() }] : []);
 
     const data = conversations.map((c) => {
       // the newest row, unless the caller cleared it (then every row is at
       // or below their floor, and there is no preview)
       const newest = c.messages[0];
-      const last = newest && isAboveFloor(newest.createdAt, c.reads[0]?.clearedAt ?? null) ? newest : null;
+      const floor = c.reads[0]?.clearedAt ?? null;
+      const last = newest && isAboveFloor(newest.createdAt, floor) ? newest : null;
       return {
         id: c.id,
         user1Id: c.user1Id,
@@ -143,10 +179,15 @@ dmRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
         // always set — conversations are born encrypted (plan §4.2)
         encryptedAt: c.encryptedAt.toISOString(),
         createdAt: c.createdAt.toISOString(),
+        // the caller's floor (clearedFloorField): their device purges what
+        // it cached up to it
+        ...clearedFloorField(floor),
       };
     });
 
-    res.json({ success: true, data });
+    // `cleared` only when there is one: otherwise the body a 2.1.x client
+    // reads today (it ignores the field either way)
+    res.json({ success: true, data, ...(cleared.length > 0 && { cleared }) });
   } catch (err) {
     next(err);
   }
@@ -178,11 +219,19 @@ dmRouter.post('/', rateLimitDmOpen, async (req: Request, res: Response, next: Ne
     // Atomic upsert — eliminates TOCTOU race when two users create the same conversation concurrently
     const found = await prisma.conversation.findUnique({
       where: { user1Id_user2Id: { user1Id, user2Id } },
+      // the caller's floor, in the same statement (a relation load is one
+      // query, schema `relationJoins`). Read before the reopen's lock, so a
+      // removal of the caller's own committing meanwhile can leave it lower
+      // than the one that removal set: a floor only rises, and that removal
+      // tells every device of the caller its own (dm:conversation:deleted).
+      include: { reads: { where: { userId: currentUserId }, select: { clearedAt: true } } },
     });
     // Opening a conversation the caller removed puts it back on their list
     // (their floor stays: only what lies above it shows). A removal that
     // deleted it meanwhile leaves the pair free for a new one.
     const existing = found && await reopenConversationForUser(found.id, currentUserId) ? found : null;
+    // a new conversation (the pair free, or a removal deleted it) has none
+    const floor = existing?.reads[0]?.clearedAt ?? null;
 
     const isNew = !existing;
     // encryptedAt is filled by the column default — a conversation is born
@@ -228,6 +277,8 @@ dmRouter.post('/', rateLimitDmOpen, async (req: Request, res: Response, next: Ne
         lastMessage: null,
         encryptedAt: conversation.encryptedAt.toISOString(),
         createdAt: conversation.createdAt.toISOString(),
+        // reopened after a removal that cleared the caller's history
+        ...clearedFloorField(floor),
       },
     });
   } catch (err) {
@@ -645,7 +696,7 @@ dmRouter.put('/:conversationId/messages/:messageId/reactions/:emoji', rateLimitI
 // confirmation) everything up to now is gone for the caller for good; a
 // later message brings the conversation back with only what is newer. Once
 // nobody can reach anything of it any more, its rows are deleted. The answer
-// is the one this route always gave.
+// is the one this route always gave, with the floor added when there is one.
 dmRouter.delete('/:conversationId', rateLimitInteract, async (req: Request<{ conversationId: string }>, res: Response, next: NextFunction) => {
   try {
     const { conversationId } = req.params;
@@ -718,7 +769,15 @@ dmRouter.delete('/:conversationId', rateLimitInteract, async (req: Request<{ con
       }
     }
 
-    res.json({ success: true, message: 'Conversation deleted' });
+    // `data.clearedUntil` when this removal set the remover's floor or kept a
+    // higher one (the same value as the event's): the device that asked
+    // purges its cache from the answer, whatever its socket missed. A
+    // removal that cleared nothing answers exactly what the route always did.
+    res.json({
+      success: true,
+      message: 'Conversation deleted',
+      ...(removal.clearedUntil && { data: clearedFloorField(removal.clearedUntil) }),
+    });
   } catch (err) {
     next(err);
   }
