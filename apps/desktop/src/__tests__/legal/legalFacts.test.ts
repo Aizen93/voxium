@@ -14,9 +14,11 @@ import {
   E2E_LIMITS,
   MINIMUM_AGE,
   SIGNUP,
+  APP_VERSION,
 } from '@voxium/shared';
 import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/legalLanguage';
-import { LEGAL_OPERATOR } from '../../components/legal/operator';
+import { LEGAL_OPERATOR, PRIVACY_POLICY_DATES } from '../../components/legal/operator';
+import { formatLegalDate, daysBetween } from '../../components/legal/legalDates';
 import { PRIVACY_CONTENT } from '../../components/legal/PrivacyContent';
 import { TERMS_CONTENT } from '../../components/legal/TermsContent';
 import { COOKIE_POLICY_CONTENT } from '../../components/legal/CookiePolicyContent';
@@ -147,8 +149,9 @@ const cases = pageNames.flatMap((name) => LEGAL_LANGUAGES.map((lang) => [name, l
 /** Each document's own revision date: a document changes alone. */
 const LAST_UPDATED: Record<PageName, PerLanguage> = {
   privacy: {
-    en: 'Last updated: November 19, 2026',
-    fr: 'Dernière mise à jour : 19 novembre 2026',
+    // read from the constant through the formatter; the format itself is pinned in the formatLegalDate tests
+    en: `Last updated: ${formatLegalDate(PRIVACY_POLICY_DATES.lastUpdated, 'en')}`,
+    fr: `Dernière mise à jour : ${formatLegalDate(PRIVACY_POLICY_DATES.lastUpdated, 'fr')}`,
   },
   terms: {
     en: 'Last updated: October 25, 2026',
@@ -281,6 +284,8 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'notices of changes to these documents',
     // verify-first sign-up: the account e-mails are no longer only these two
     'account emails (address verification and password reset)',
+    // an account deletion no longer deletes the other participant's side of a conversation outright
+    'your direct conversations (including the other participant\'s messages in them)',
   ],
   // The same statements, as a French translation would make them
   fr: [
@@ -300,6 +305,7 @@ const KNOWN_FALSE: Record<LegalLanguage, string[]> = {
     'par e-mail à l’adresse de votre compte',
     'avis de modification des présents documents',
     'les e-mails liés au compte (vérification de l’adresse et réinitialisation du mot de passe)',
+    'vos conversations privées (y compris les messages que l’autre participant y a envoyés)',
   ],
 };
 
@@ -344,6 +350,109 @@ describe('the Privacy Policy tells what removing a direct conversation does', ()
   });
 });
 
+describe('the Privacy Policy tells what an account deletion keeps of a direct conversation', () => {
+  const TITLE: PerLanguage = {
+    en: 'Your direct conversations when you delete your account.',
+    fr: 'Vos conversations privées lorsque vous supprimez votre compte.',
+  };
+  const EVERYTHING_ELSE_ITEM: PerLanguage = {
+    en: 'Everything else is kept for as long as your account exists. Deleting your account (Settings → Security) deletes with it your profile, your messages and reactions, their attachments, your devices\' keys and key backups, your connection data, your support conversations and your consent records',
+    fr: 'Tout le reste est conservé tant que votre compte existe. La suppression de votre compte (Paramètres → Sécurité) supprime avec lui votre profil, vos messages et vos réactions, leurs pièces jointes, les clés et les sauvegardes de clés de vos appareils, vos données de connexion, vos conversations de support et les traces de votre consentement',
+  };
+  const kept = (lang: LegalLanguage) => formatLegalDate(PRIVACY_POLICY_DATES.conversationsKeptFrom, lang);
+  const keySentences = (lang: LegalLanguage): string[] => lang === 'en'
+    ? [
+        `Until ${kept('en')}, deleting your account deletes each of your direct conversations entirely, the other participant's messages included.`,
+        `From ${kept('en')}, it deletes your messages in them, with their attachments and the reactions on them, and the other participant keeps the conversation: it becomes read-only for them, it shows a deleted account in your place, and each of your messages is replaced by an empty placeholder that keeps only the time it was sent; the notices that a call started or ended stay, no longer linked to you.`,
+        'A conversation the other participant has already removed with its history, or whose other participant\'s account is already deleted, is deleted entirely',
+      ]
+    : [
+        `Jusqu’au ${kept('fr')}, la suppression de votre compte supprime entièrement chacune de vos conversations privées, y compris les messages de l’autre participant.`,
+        `À partir du ${kept('fr')}, elle supprime vos messages dans ces conversations, avec leurs pièces jointes et les réactions qu’ils ont reçues, et l’autre participant conserve la conversation : elle devient en lecture seule pour lui, un compte supprimé y apparaît à votre place, et chacun de vos messages est remplacé par un emplacement vide qui ne conserve que l’heure de son envoi ; les mentions de début et de fin d’appel restent, sans lien avec vous.`,
+        'Une conversation que l’autre participant a déjà retirée avec son historique, ou dont l’autre participant a déjà supprimé son compte, est supprimée entièrement',
+      ];
+
+  it.each(LEGAL_LANGUAGES)('holds the reworded "everything else" item, then the new item right after it (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    const at = text.indexOf(EVERYTHING_ELSE_ITEM[lang]);
+    expect(at, EVERYTHING_ELSE_ITEM[lang]).toBeGreaterThan(-1);
+    expect(text.indexOf(TITLE[lang])).toBe(at + EVERYTHING_ELSE_ITEM[lang].length + 1);
+  });
+
+  it.each(LEGAL_LANGUAGES)('holds the new item\'s title and its key sentences (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    expect(text).toContain(TITLE[lang]);
+    for (const sentence of keySentences(lang)) expect(text, sentence).toContain(sentence);
+  });
+
+  it.each(LEGAL_LANGUAGES)('prints the date from which the conversation is kept, formatted, exactly twice (%s)', (lang) => {
+    const text = pages.privacy[lang].text;
+    expect(text.split(kept(lang))).toHaveLength(3);
+    expect(text).not.toContain(PRIVACY_POLICY_DATES.conversationsKeptFrom);
+  });
+
+  it('allows at least the notice period between the last update and the day the rule starts', () => {
+    expect(
+      daysBetween(PRIVACY_POLICY_DATES.lastUpdated, PRIVACY_POLICY_DATES.conversationsKeptFrom),
+      'conversationsKeptFrom must be at least LEGAL_OPERATOR.changeNoticeDays after lastUpdated',
+    ).toBeGreaterThanOrEqual(LEGAL_OPERATOR.changeNoticeDays);
+  });
+
+  it('has had its two dates looked at again for the current version', () => {
+    expect(
+      PRIVACY_POLICY_DATES.confirmedForVersion,
+      `The app is at ${APP_VERSION}, the Privacy Policy dates were confirmed for ${PRIVACY_POLICY_DATES.confirmedForVersion}. ` +
+        'In operator.ts (PRIVACY_POLICY_DATES): set lastUpdated to the release day, conversationsKeptFrom to that day plus at least ' +
+        'LEGAL_OPERATOR.changeNoticeDays, then set confirmedForVersion to the released version.',
+    ).toBe(APP_VERSION);
+  });
+});
+
+describe('formatLegalDate', () => {
+  const EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const FR = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+
+  it('writes the dates the policy prints (the format itself is pinned here)', () => {
+    expect(formatLegalDate('2026-12-04', 'en')).toBe('December 4, 2026');
+    expect(formatLegalDate('2026-12-04', 'fr')).toBe('4 décembre 2026');
+    expect(formatLegalDate('2026-11-20', 'en')).toBe('November 20, 2026');
+    expect(formatLegalDate('2026-11-20', 'fr')).toBe('20 novembre 2026');
+  });
+
+  it.each(EN.map((name, i) => [i + 1, name, FR[i]] as const))('names month %i in both languages', (month, en, fr) => {
+    const iso = `2026-${String(month).padStart(2, '0')}-15`;
+    expect(formatLegalDate(iso, 'en')).toBe(`${en} 15, 2026`);
+    expect(formatLegalDate(iso, 'fr')).toBe(`15 ${fr} 2026`);
+  });
+
+  it('writes 1er for the first of a month in French only, and no leading zero on the day', () => {
+    expect(formatLegalDate('2026-12-01', 'fr')).toBe('1er décembre 2026');
+    expect(formatLegalDate('2026-12-01', 'en')).toBe('December 1, 2026');
+    expect(formatLegalDate('2026-03-09', 'fr')).toBe('9 mars 2026');
+    expect(formatLegalDate('2026-03-09', 'en')).toBe('March 9, 2026');
+  });
+
+  it('accepts a leap day only in a leap year', () => {
+    expect(formatLegalDate('2028-02-29', 'en')).toBe('February 29, 2028');
+    expect(() => formatLegalDate('2027-02-29', 'en')).toThrow();
+    expect(() => formatLegalDate('2100-02-29', 'en')).toThrow();
+  });
+
+  it.each(['2026-02-30', '2026-13-01', '2026-00-10', '2026-04-31', '2026-12-00', '20261204', '2026-1-4', ''])(
+    'refuses "%s"',
+    (iso) => {
+      expect(() => formatLegalDate(iso, 'en')).toThrow();
+      expect(() => formatLegalDate(iso, 'fr')).toThrow();
+    },
+  );
+
+  it('counts whole days between two dates', () => {
+    expect(daysBetween('2026-11-20', '2026-12-04')).toBe(14);
+    expect(daysBetween('2026-12-04', '2026-11-20')).toBe(-14);
+    expect(daysBetween('2026-12-31', '2027-01-01')).toBe(1);
+  });
+});
+
 describe('legal pages state the numbers the code implements', () => {
   it('reads every server-side value as a whole number', () => {
     for (const value of [UNVERIFIED_ACCOUNT_TTL_DAYS, ANNOTATION_TTL_HOURS, ACCESS_TOKEN_MINUTES, REFRESH_REMEMBERED_DAYS, REFRESH_SESSION_HOURS, KEYSHARE_MAX_AGE_DAYS, MINIMUM_AGE, LEGAL_OPERATOR.changeNoticeDays]) {
@@ -364,6 +473,8 @@ describe('legal pages state the numbers the code implements', () => {
       rest = rest.replace(heading, heading.replace(/^\d+\. /, ''));
     }
     for (const pin of PINS[name]) rest = rest.split(pin[lang]).join(' ');
+    // the Privacy Policy's second date, pinned to its constant (PRIVACY_POLICY_DATES)
+    if (name === 'privacy') rest = rest.split(formatLegalDate(PRIVACY_POLICY_DATES.conversationsKeptFrom, lang)).join(' ');
     const stray = rest.match(/\S*\d\S*/g) ?? [];
     expect(stray, `${name} (${lang}): every number must be pinned to the constant it describes (add it to PINS)`).toEqual([]);
   });

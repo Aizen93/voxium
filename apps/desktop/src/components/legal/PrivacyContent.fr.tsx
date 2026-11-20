@@ -1,5 +1,6 @@
 import { MINIMUM_AGE, SIGNUP } from '@voxium/shared';
-import { LEGAL_OPERATOR, publisherOf } from './operator';
+import { LEGAL_OPERATOR, PRIVACY_POLICY_DATES, publisherOf } from './operator';
+import { formatLegalDate } from './legalDates';
 import { MailLink } from './MailLink';
 
 /**
@@ -21,7 +22,7 @@ export function PrivacyContentFr() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Politique de confidentialité</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 19 novembre 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: {formatLegalDate(PRIVACY_POLICY_DATES.lastUpdated, 'fr')}</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -261,9 +262,20 @@ export function PrivacyContentFr() {
             <li>
               <strong className="text-vox-text-primary">Tout le reste</strong> est conservé tant que votre compte
               existe. La suppression de votre compte (Paramètres → Sécurité) supprime avec lui votre profil, vos
-              messages et vos réactions, vos conversations privées (y compris les messages que l’autre participant y a
-              envoyés), les clés et les sauvegardes de clés de vos appareils, vos données de connexion, vos
-              conversations de support et les traces de votre consentement
+              messages et vos réactions, leurs pièces jointes, les clés et les sauvegardes de clés de vos appareils,
+              vos données de connexion, vos conversations de support et les traces de votre consentement
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Vos conversations privées lorsque vous supprimez votre compte.</strong>{' '}
+              Jusqu’au {formatLegalDate(PRIVACY_POLICY_DATES.conversationsKeptFrom, 'fr')}, la suppression de votre
+              compte supprime entièrement chacune de vos conversations privées, y compris les messages de l’autre
+              participant. À partir du {formatLegalDate(PRIVACY_POLICY_DATES.conversationsKeptFrom, 'fr')}, elle
+              supprime vos messages dans ces conversations, avec leurs pièces jointes et les réactions qu’ils ont
+              reçues, et l’autre participant conserve la conversation&nbsp;: elle devient en lecture seule pour lui, un
+              compte supprimé y apparaît à votre place, et chacun de vos messages est remplacé par un emplacement vide
+              qui ne conserve que l’heure de son envoi&nbsp;; les mentions de début et de fin d’appel restent, sans lien
+              avec vous. Une conversation que l’autre participant a déjà retirée avec son historique, ou dont l’autre
+              participant a déjà supprimé son compte, est supprimée entièrement
             </li>
             <li>
               <strong className="text-vox-text-primary">Après la suppression de votre compte</strong>, certaines

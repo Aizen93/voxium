@@ -3,6 +3,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { PRIVACY_CONTENT } from '../../components/legal/PrivacyContent';
 import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/legalLanguage';
+import { PRIVACY_POLICY_DATES } from '../../components/legal/operator';
+import { formatLegalDate } from '../../components/legal/legalDates';
 
 /**
  * The Privacy Policy is part of what a user consents to at signup, so its
@@ -17,7 +19,12 @@ import { LEGAL_LANGUAGES, type LegalLanguage } from '../../components/legal/lega
 type PerLanguage = Record<LegalLanguage, string>;
 
 const PHRASES = {
-  lastUpdated: { en: 'Last updated: November 19, 2026', fr: 'Dernière mise à jour : 19 novembre 2026' },
+  // The day itself is a constant set at release (components/legal/operator.ts); its written form in each
+  // language is pinned in legal/legalFacts.test.ts
+  lastUpdated: {
+    en: `Last updated: ${formatLegalDate(PRIVACY_POLICY_DATES.lastUpdated, 'en')}`,
+    fr: `Dernière mise à jour : ${formatLegalDate(PRIVACY_POLICY_DATES.lastUpdated, 'fr')}`,
+  },
   retentionHeading: { en: 'Retention', fr: 'Conservation' },
   webhooksItem: { en: 'Incoming webhooks', fr: 'Les webhooks entrants' },
   everythingElseItem: { en: 'Everything else', fr: 'Tout le reste' },
@@ -112,7 +119,7 @@ describe.each(LEGAL_LANGUAGES)('PrivacyContent (%s)', (lang) => {
     return Array.from(list!.querySelectorAll('li')).map((li) => clean(li.textContent));
   }
 
-  it('shows the date of the last change (2026-11-19: a removed direct conversation in the retention list)', () => {
+  it('shows the date of the last change, read from the date constant of the policy', () => {
     expect(clean(container.textContent)).toContain(phrase('lastUpdated'));
   });
 
