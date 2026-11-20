@@ -47,7 +47,7 @@
 import { BUILD_API_ORIGIN, isOfficialOrigin } from './sessionOrigin';
 import { accountDeletionSettled } from './accountDeletion';
 import { currentE2ESessionUser } from './e2e/session';
-import { isSameSession, userIdOf } from './tokenClaims';
+import { isSameSession, readTokenClaims, sessionIdOf, userIdOf } from './tokenClaims';
 
 const ACCESS_KEY = 'voxium_access_token';
 const REFRESH_KEY = 'voxium_refresh_token';
@@ -513,9 +513,156 @@ export function isRemembered(): boolean {
  */
 export function setTokens(accessToken: string, refreshToken: string, rememberMe?: boolean): void {
   const remembered = rememberMe ?? memory.remembered;
+  storePair(accessToken, refreshToken, remembered);
+  // The not-remembered tabs of the same session (a duplicated, restored or
+  // opener tab) hold copies nothing else keeps current
+  if (!remembered) announceRotation(accessToken, refreshToken);
+}
+
+function storePair(accessToken: string, refreshToken: string, remembered: boolean): void {
   memory = { ...memory, accessToken, refreshToken, remembered };
   tokensWritten = true;
   enqueueTokenWrite('Could not persist the session', (s) => s.saveTokens(accessToken, refreshToken, remembered));
+}
+
+// ─── The not-remembered tabs of one session (the browser build) ──────────────
+//
+// "Remember me" off keeps the pair in sessionStorage, which belongs to one
+// tab. A duplicated, restored or opener tab starts with a COPY of it: two
+// tabs on one session, and nothing kept them in step. Every renewal now
+// replaces the refresh token, so the tab that did not renew would present a
+// replaced one, which the server treats as reused once its grace window has
+// passed. So every pair stored for a not-remembered session is posted on a
+// BroadcastChannel ('rotated': a renewal, a password change, the answer of
+// "sign out of all other sessions"), and a tab whose own pair names the same
+// session (`sid`) at a lower generation (`gen`), both decoded for routing
+// only, takes it. A sign-out posts 'ended' with the sid, and such a tab
+// forgets its pair and reloads, signed out. A tab whose pair is remembered
+// ignores the channel: it follows the `storage` events. A pair that names no
+// session is never touched.
+//
+// The messages carry tokens. A BroadcastChannel reaches only the browsing
+// contexts of this same origin (and the same storage partition): exactly
+// those that can read this origin's localStorage, where any remembered
+// session of this browser sits in full. They are never logged; a message is
+// checked field by field and anything else in it is ignored.
+
+/** The channel's name: one per origin, like the page's storage. */
+export const SESSION_CHANNEL_NAME = 'voxium-session';
+/** A token longer than this is no token of ours (the keychain caps the whole pair at 1280 characters). */
+const CHANNEL_TOKEN_MAX_CHARS = 4096;
+
+/** The part of BroadcastChannel used here (injectable for tests). */
+export interface SessionChannel {
+  postMessage(message: unknown): void;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  close(): void;
+}
+
+type SessionMessage =
+  | { type: 'rotated'; sid: string; accessToken: string; refreshToken: string }
+  | { type: 'ended'; sid: string };
+
+// The page's BroadcastChannel unless a test installed its own (null: none)
+let channelFactory: (() => SessionChannel) | null | undefined;
+let channel: SessionChannel | null = null;
+let channelTried = false;
+
+function openChannel(): (() => SessionChannel) | null {
+  if (channelFactory !== undefined) return channelFactory;
+  const Channel = typeof window !== 'undefined' ? window.BroadcastChannel : undefined;
+  return typeof Channel === 'function' ? () => new Channel(SESSION_CHANNEL_NAME) as unknown as SessionChannel : null;
+}
+
+/** The channel, opened on first use, in the browser build only (the desktop app has one webview). */
+function sessionChannel(): SessionChannel | null {
+  if (!isWebStore(store)) return null;
+  if (channel || channelTried) return channel;
+  channelTried = true;
+  const open = openChannel();
+  if (!open) return null;
+  try {
+    channel = open();
+    channel.onmessage = (event) => onSessionMessage(event.data);
+  } catch (err) {
+    console.warn('[Session] The channel between the tabs of a session could not be opened:', describe(err));
+    channel = null;
+  }
+  return channel;
+}
+
+function post(message: SessionMessage): void {
+  const target = sessionChannel();
+  if (!target) return;
+  try {
+    target.postMessage(message);
+  } catch (err) {
+    console.warn('[Session] Could not tell the other tabs of this session:', describe(err));
+  }
+}
+
+function announceRotation(accessToken: string, refreshToken: string): void {
+  const sid = sessionIdOf(refreshToken);
+  if (sid === null || sessionIdOf(accessToken) !== sid) return;
+  post({ type: 'rotated', sid, accessToken, refreshToken });
+}
+
+/**
+ * A sign-out of this tab: the not-remembered tabs of the same session (named
+ * by `sessionToken`, any token of it) forget their copy of its pair. Nothing
+ * outside the browser build, nothing for a token that names no session.
+ */
+export function announceSessionEnded(sessionToken: string | null): void {
+  const sid = sessionIdOf(sessionToken);
+  if (sid === null) return;
+  post({ type: 'ended', sid });
+}
+
+function isTokenString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= CHANNEL_TOKEN_MAX_CHARS;
+}
+
+function sessionMessageOf(data: unknown): SessionMessage | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const { type, sid, accessToken, refreshToken } = data as Record<string, unknown>;
+  if (!isTokenString(sid)) return null;
+  if (type === 'ended') return { type, sid };
+  if (type === 'rotated' && isTokenString(accessToken) && isTokenString(refreshToken)) return { type, sid, accessToken, refreshToken };
+  return null;
+}
+
+function onSessionMessage(data: unknown): void {
+  if (!isWebStore(store) || reloading) return;
+  const message = sessionMessageOf(data);
+  // A remembered pair follows the storage events; a tab without a pair has no session to keep current
+  if (!message || memory.remembered || memory.accessToken === null || memory.refreshToken === null) return;
+  const own = readTokenClaims(memory.refreshToken);
+  if (!own?.sid || own.sid !== message.sid) return;
+  if (message.type === 'ended') {
+    // The other tab signed this session out: this copy goes with it
+    clearSessionTokens(memory.refreshToken);
+    console.info('[Session] Another tab signed this session out — reloading');
+    reloadAfterSessionChange();
+    return;
+  }
+  const theirs = readTokenClaims(message.refreshToken);
+  if (theirs?.sid !== message.sid || sessionIdOf(message.accessToken) !== message.sid) return;
+  if (own.gen === undefined || theirs.gen === undefined || theirs.gen <= own.gen) return;
+  // Taken as this tab's own pair, without posting it again
+  storePair(message.accessToken, message.refreshToken, false);
+}
+
+/** Open the channel when this tab holds a not-remembered pair, so it hears its twins from its start. */
+function listenWhenNotRemembered(): void {
+  if (memory.refreshToken !== null && !memory.remembered) sessionChannel();
+}
+
+/** @internal tests: the channel factory (undefined: the page's BroadcastChannel, null: none). */
+export function _setSessionChannelForTests(factory: (() => SessionChannel) | null | undefined): void {
+  channel?.close();
+  channel = null;
+  channelTried = false;
+  channelFactory = factory;
 }
 
 /**
@@ -648,6 +795,7 @@ export function hydrateTokens(): Promise<boolean> {
         if (!trustedWritten) {
           memory = { ...memory, trustedDeviceToken: loaded.trustedDeviceToken };
         }
+        listenWhenNotRemembered();
         reachable = loaded.reachable;
         if (reachable) await resyncWrittenSlots(s);
       } catch (err) {
@@ -814,4 +962,5 @@ export function _resetTokenStorageForTests(backend?: SessionStore): void {
   trustedWritten = false;
   pendingTokenWrites = 0;
   reloading = false;
+  _setSessionChannelForTests(undefined);
 }
