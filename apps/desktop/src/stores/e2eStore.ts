@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { getE2EService, E2EIdentityChangedError, type E2EOwnDevices } from '../services/e2e/e2eService';
 import { watchKeyArrivals } from '../services/e2e/redecryptOnKeyArrival';
+import { isE2ESessionEnded } from '../services/e2e/session';
 
 // UI-facing E2E state. The crypto itself lives in services/e2e — this store
 // only tracks readiness and per-peer identity warnings so components can
@@ -297,6 +298,14 @@ export const useE2EStore = create<E2EState>((set, get) => ({
         // Usually E2EServiceDisposedError: the logout disposed the service this
         // run was starting. Not the next session's failure to record.
         console.warn('e2e: initialization ended with the session that started it:', message);
+        return;
+      }
+      if (isE2ESessionEnded(err)) {
+        // This tab gave the vault up to another one (or never owned it): the
+        // screen says so instead of the app, and a reload starts again here
+        console.warn('e2e: initialization ended: this tab does not own the vault:', message);
+        unsubscribeDeviceList();
+        set({ ready: false, initializing: false });
         return;
       }
       console.warn('e2e: initialization failed:', message);

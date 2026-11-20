@@ -70,6 +70,12 @@ import {
   vaultDbName,
 } from './vault';
 import { defaultPickleKeyProvider } from './pickleKeyProvider';
+import {
+  noteVaultTeardown,
+  releaseVaultOwnershipNotInUse,
+  vaultOwnershipFor,
+  type VaultOwnershipHandle,
+} from './vaultOwnership';
 import { pinSecure, securePinGeneration } from '../../utils/securePins';
 import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 import { isAtOrBelowClearedFloor } from './clearedFloors';
@@ -366,6 +372,8 @@ export interface E2EServiceOptions {
   deviceListCacheMs?: number;
   /** Test hook: how long dispose() waits for a key-share claim in flight (ms). */
   teardownDeadlineMs?: number;
+  /** Test hook: the page-level ownership of the vault; by default this page's (vaultOwnership.ts). */
+  ownership?: VaultOwnershipHandle;
 }
 
 /** Re-poll the key-share inbox for a still-unknown session at most this often. */
@@ -643,7 +651,15 @@ export class E2EService {
   /** The account's secure-pin generation when this service began (securePinGeneration). */
   private readonly pinGeneration: number;
   /** The vault's database name: the key of pendingTeardowns. */
-  private readonly vaultName: string;
+  readonly vaultName: string;
+  /**
+   * The page's ownership of the vault (vaultOwnership.ts): only the page that
+   * owns it starts a service on it, every write of the vault is checked
+   * against it (the fence), and when the page gives it up this service ends
+   * as if disposed.
+   */
+  private readonly ownership: VaultOwnershipHandle;
+  private readonly stopOwnershipWatch: () => void;
   /** This service's deferred teardown, while a claim holds it back (see dispose()). */
   private teardownDone: Promise<void> | null = null;
   private readonly wasmInput?: BufferSource;
@@ -768,10 +784,29 @@ export class E2EService {
     this.vaultName = vaultDbName(userId, opts.vaultNamespace);
     // an account deleted later: what this service still imports pins nothing for it
     this.pinGeneration = securePinGeneration(userId);
-    this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace, () => {
-      // an earlier service's teardown on this vault, never this one's own
-      const pending = pendingTeardowns.get(this.vaultName);
-      return pending && pending !== this.teardownDone ? pending : undefined;
+    this.ownership = opts.ownership ?? vaultOwnershipFor(userId, this.vaultName);
+    const ownership = this.ownership;
+    this.vault = new E2EVault(
+      userId,
+      opts.keyProvider,
+      opts.vaultNamespace,
+      () => {
+        // an earlier service's teardown on this vault, never this one's own
+        const pending = pendingTeardowns.get(this.vaultName);
+        return pending && pending !== this.teardownDone ? pending : undefined;
+      },
+      {
+        ensure: () => ownership.ensure(),
+        token: () => ownership.token(),
+        fenced: () => ownership.fenced(),
+        serializeKeyCreation: (create) => ownership.serializeKeyCreation(create),
+      }
+    );
+    // Another tab took the vault over (or this page gave it up): this service
+    // ends like a disposed one, and the page lets the lock go once it is done
+    this.stopOwnershipWatch = ownership.onLost(() => {
+      if (!this.disposed) console.warn('e2e: this tab gave the vault up — its E2E service stops');
+      return this.disposeAndSettle();
     });
     this.liveVault = this.guardedVault(this.vault);
     this.wasmInput = opts.wasmInput;
@@ -797,9 +832,15 @@ export class E2EService {
    * client attaches whatever bearer is current, which after a new sign-in is
    * the next account's. The share it was for is kept, and the acknowledgement
    * owed, for the next start.
+   *
+   * Nor does a request leave a page that no longer owns the vault: the owner
+   * token is read before each one (assertOwner), since what a task asks the
+   * server before its first write is not covered by the fence on the vault.
    */
   private guardedApi(client: typeof defaultApi): typeof defaultApi {
     const guard = async <R>(call: () => Promise<R>): Promise<R> => {
+      this.assertLive();
+      await this.vault.assertOwner();
       this.assertLive();
       const res = await call();
       this.assertLive();
@@ -849,9 +890,14 @@ export class E2EService {
   /** Serialize all crypto-state mutations (ratchet advance ⇒ pickle persist). */
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue
-      .then(() => {
+      .then(async () => {
         // Queued before a dispose, started after it: refused, whether or not the
         // teardown has freed what it would touch yet (a claim can hold it back)
+        this.assertLive();
+        // Still this page's vault (vaultOwnership.ts): a page another tab took
+        // the vault from has its service ended here, before the task asks
+        // the server anything
+        await this.vault.assertOwner();
         this.assertLive();
         return fn();
       })
@@ -907,6 +953,12 @@ export class E2EService {
 
   private async initializeOnce(): Promise<void> {
     await initEngine(this.wasmInput);
+    this.assertLive();
+    // Only the page that owns the vault starts a service on it: refused
+    // (E2EVaultNotOwnedError) while another tab of this account owns it, or
+    // once this page gave it up; acquired here when nothing did (a start
+    // outside the gate). Before anything of the vault is read.
+    await this.ownership.ensure();
     this.assertLive();
     // A dispose during open() closes the vault, and open() then drops the
     // connection it was making and throws (E2EVaultClosedError).
@@ -1058,6 +1110,18 @@ export class E2EService {
   }
 
   /**
+   * dispose(), resolving only once nothing of this service can touch the
+   * vault any more: its teardown has run, and a key-share claim it kept a
+   * connection for (an answer that comes after the teardown deadline) has
+   * settled, within that request's own deadline. What the page waits for
+   * before it lets another tab have the vault (vaultOwnership.ts).
+   */
+  disposeAndSettle(): Promise<void> {
+    const claim = this.claimInFlight;
+    return this.dispose().then(() => claim?.then(noop, noop));
+  }
+
+  /**
    * teardown(), logging a failure: dispose() runs from logout and account
    * switches, which must not fail on it, and the deferred path has nobody
    * awaiting it to report one.
@@ -1073,6 +1137,7 @@ export class E2EService {
   private teardown(): void {
     if (this.tornDown) return;
     this.tornDown = true;
+    this.stopOwnershipWatch();
     this.account?.free();
     this.account = null;
     this.masterKey?.free();
@@ -3605,6 +3670,10 @@ export class E2EService {
           // Disposed meanwhile: this page is imported (dispose() waits for it),
           // the next one stays on the server.
           if (this.disposed) break;
+          // Still this page's vault: a claim leases its page on the server, and
+          // a page another tab took the vault from could not keep it
+          await this.vault.assertOwner();
+          if (this.disposed) break;
           // The unguarded client: an answer that comes back after the teardown
           // (the dispose deadline passed) still holds shares this device has not
           // stored, and must reach the vault rather than be thrown away.
@@ -4969,10 +5038,20 @@ export function getE2EService(userId: string): E2EService {
   if (activeService && activeUserId === userId) return activeService;
   const signedIn = currentE2ESessionUser();
   if (signedIn !== undefined && signedIn !== userId) throw new E2EServiceDisposedError();
-  void activeService?.dispose();
+  if (activeService) letGo(activeService);
   activeService = new E2EService(userId);
   activeUserId = userId;
   return activeService;
+}
+
+/**
+ * Dispose a service the page no longer uses, and let its vault go once its
+ * teardown is done, unless the page is signed in to that account again by
+ * then (vaultOwnership.ts).
+ */
+function letGo(service: E2EService): void {
+  noteVaultTeardown(service.vaultName, service.disposeAndSettle());
+  releaseVaultOwnershipNotInUse();
 }
 
 /**
@@ -4987,10 +5066,20 @@ export function scopeMarkedPurged(userId: string | null | undefined, scope: stri
   return activeService.scopePurged(READ_ONLY_PURGE_MARK, scope);
 }
 
+/**
+ * Logout, account switch, account deletion: the signed-in account's service
+ * is disposed, and the page lets that account's vault go once the teardown is
+ * done (a vault it acquired without ever starting a service too). A page that
+ * gave its vault up to another tab keeps its disposed service instead
+ * (onLost): getE2EService then answers that one, which refuses everything,
+ * and never makes a new one in that page.
+ */
 export function disposeE2EService(): void {
-  void activeService?.dispose();
+  const service = activeService;
   activeService = null;
   activeUserId = null;
+  if (service) letGo(service);
+  else releaseVaultOwnershipNotInUse();
 }
 
 /**

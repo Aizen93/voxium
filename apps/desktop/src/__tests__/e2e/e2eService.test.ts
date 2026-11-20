@@ -61,7 +61,20 @@ import { useServerStore } from '../../stores/serverStore';
 import type { Message } from '@voxium/shared';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
-import { E2EVault, E2EVaultClosedError, type PickleKeyProvider } from '../../services/e2e/vault';
+import { E2EVault, E2EVaultClosedError, VAULT_OWNER_KEY, stampVaultOwner, vaultDbName, type PickleKeyProvider } from '../../services/e2e/vault';
+import {
+  acquireVaultOwnership,
+  getVaultOwnershipState,
+  noteVaultTeardown,
+  releaseVaultOwnershipNotInUse,
+  vaultOwnershipFor,
+  VAULT_LOCK_PREFIX,
+  _resetVaultOwnershipForTests,
+  _setVaultOwnershipEnvironmentForTests,
+  _vaultKeyForTests,
+} from '../../services/e2e/vaultOwnership';
+import { isE2ESessionEnded, registerE2ESessionUser } from '../../services/e2e/session';
+import { Bus, FakeChannel, FakeLocks } from '../helpers/fakeVaultOwnership';
 
 const require = createRequire(import.meta.url);
 const wasmBytes = readFileSync(require.resolve('@voxium/crypto-engine/wasm'));
@@ -6770,8 +6783,10 @@ describe('E2EService — lifecycle', () => {
       vault.close();
 
       const internals = internalsOf(alice.service);
-      let unblock!: () => void;
+      let unblock: (() => void) | undefined;
       const blocker = internals.enqueue(() => new Promise<void>((resolve) => (unblock = resolve)));
+      // the blocker is running (its start read the owner token): only the pass is counted below
+      await vi.waitFor(() => expect(unblock).toBeDefined());
       const db = (internals.vault as unknown as { db: IDBDatabase }).db;
       const transaction = vi.spyOn(db, 'transaction');
       try {
@@ -6781,7 +6796,7 @@ describe('E2EService — lifecycle', () => {
         expect(transaction.mock.calls.length).toBeLessThanOrEqual(2);
       } finally {
         transaction.mockRestore();
-        unblock();
+        unblock?.();
         await blocker;
       }
     });
@@ -7642,5 +7657,343 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
     }
     // nothing about the message changed: it opens once the vault takes the write
     expect(await bob.service.decryptMessage(message, { storageFailureRejects: true })).toEqual({ text: 'stored once the disk has room' });
+  });
+});
+
+// ─── One page owns the vault (services/e2e/vaultOwnership.ts) ────────────────
+//
+// Each test models TWO PAGES of one account inside ONE test process: this
+// module is one page, and "another page" is played by writing its owner token
+// into the vault (what that page's acquisition does) or by a fake lock manager
+// in which another tab holds the vault's lock. Two services of this file share
+// module state (the ownership records, pendingTeardowns, the secure pins), so a
+// test with two services on one vault models two services of ONE page, never
+// two tabs.
+describe('E2EService — one page owns the vault', () => {
+  afterEach(() => {
+    _resetVaultOwnershipForTests();
+    registerE2ESessionUser(null);
+  });
+
+  const vaultNameOf = (device: { userId: string; vaultNamespace: string }) => vaultDbName(device.userId, device.vaultNamespace);
+  const vaultOf = (service: E2EService) => (service as unknown as { vault: E2EVault }).vault;
+
+  /** Every key the vault holds, read raw. */
+  function rawKeys(name: string): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const all = db.transaction('kv', 'readonly').objectStore('kv').getAllKeys();
+        all.onsuccess = () => {
+          db.close();
+          resolve(all.result.map(String));
+        };
+        all.onerror = () => {
+          db.close();
+          reject(all.error);
+        };
+      };
+    });
+  }
+
+  /** What the vault holds under `key`, read raw (no fence). */
+  function rawRead(name: string, key: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const get = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+        get.onsuccess = () => {
+          db.close();
+          resolve(get.result);
+        };
+        get.onerror = () => {
+          db.close();
+          reject(get.error);
+        };
+      };
+    });
+  }
+
+  it('refuses to start while another tab owns the vault, opens nothing of it, and starts once that tab let go', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const locks = new FakeLocks();
+    const otherTab = locks.otherTab(`${VAULT_LOCK_PREFIX}${vaultNameOf(alice)}`);
+    await otherTab.granted;
+    _setVaultOwnershipEnvironmentForTests({ locks, openChannel: null });
+    const open = vi.spyOn(indexedDB, 'open');
+    try {
+      await expect(alice.service.initialize()).rejects.toMatchObject({ name: 'E2EVaultNotOwnedError' });
+      expect(open.mock.calls.filter(([name]) => name === vaultNameOf(alice))).toEqual([]);
+    } finally {
+      open.mockRestore();
+    }
+    expect(server.users.get(alice.userId)?.devices.size ?? 0).toBe(0);
+
+    // the other tab closes: this page waited in the queue, and starts now
+    otherTab.release();
+    await vi.waitFor(() => expect(getVaultOwnershipState(alice.userId, vaultNameOf(alice))).toBe('owned'));
+    await alice.service.initialize();
+    expect(server.deviceOf(alice.userId, alice.service.deviceId)).toBeTruthy();
+  });
+
+  it('a write that finds another page’s token ends the service like a dispose, and hands out no ciphertext', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await alice.service.encryptMessage('c1', bob.userId, 'before');
+
+    // another page takes the vault over between this encrypt's ratchet step and its write
+    const vault = vaultOf(alice.service);
+    const write = vault.putOutboundGroupSession.bind(vault);
+    vi.spyOn(vault, 'putOutboundGroupSession').mockImplementation(async (scope, record) => {
+      await stampVaultOwner(vaultNameOf(alice), 'another-page', 'claim');
+      return write(scope, record);
+    });
+    const sharesBefore = server.shares.length;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(alice.service.encryptMessage('c1', bob.userId, 'after')).rejects.toSatisfy(isE2ESessionEnded);
+      expect(getVaultOwnershipState(alice.userId, vaultNameOf(alice))).toBe('lost');
+      // ended like a disposed service: refused from now on, quietly
+      await expect(alice.service.initialize()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      await expect(alice.service.encryptMessage('c1', bob.userId, 'later')).rejects.toSatisfy(isE2ESessionEnded);
+      await expect(alice.service.decryptMessage({ id: 'x', conversationId: 'c1', authorId: bob.userId, content: buildMegolmEnvelope('c2lk', 'Ym9keQ') }))
+        .rejects.toSatisfy(isE2ESessionEnded);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(server.shares.length).toBe(sharesBefore);
+    expect(await rawRead(vaultNameOf(alice), VAULT_OWNER_KEY)).toBe('another-page');
+  });
+
+  it('a decrypt in flight when another page takes over rejects as an ending: no marker, no cache entry', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    const first = await alice.service.encryptMessage('c1', bob.userId, 'one');
+    expect((await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: first.envelope })).text).toBe('one');
+    const second = await alice.service.encryptMessage('c1', bob.userId, 'two');
+
+    // the decrypt has stepped the inbound session; its write finds another page's token
+    const vault = vaultOf(bob.service);
+    const write = vault.putInboundGroupSession.bind(vault);
+    vi.spyOn(vault, 'putInboundGroupSession').mockImplementation(async (sessionId, record) => {
+      await stampVaultOwner(vaultNameOf(bob), 'another-page', 'claim');
+      return write(sessionId, record);
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: second.envelope }))
+        .rejects.toSatisfy(isE2ESessionEnded);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await rawRead(vaultNameOf(bob), 'pt:m2')).toBeUndefined();
+
+    // through the display gate: nothing to show, never the failed marker
+    display.service = bob.service;
+    display.userId = bob.userId;
+    try {
+      const shown = await decryptMessageForDisplay({
+        id: 'm3', type: 'user', content: second.envelope, channelId: null, conversationId: 'c1', encrypted: true,
+        author: { id: alice.userId, username: 'alice', displayName: 'Alice' },
+        createdAt: '2026-11-20T10:00:00.000Z', editedAt: null, reactions: [], attachments: [],
+      } as unknown as Message);
+      expect(shown).toBeNull();
+    } finally {
+      display.service = null;
+      display.userId = null;
+    }
+    expect(await rawRead(vaultNameOf(bob), 'pt:m3')).toBeUndefined();
+  });
+
+  it('a task that starts after another page took over asks the server nothing: no claim, no acknowledgement', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const sent = await alice.service.encryptMessage('c1', bob.userId, 'waiting in the inbox');
+    const pending = server.shares.filter((s) => s.recipientUserId === bob.userId);
+    expect(pending.length).toBeGreaterThan(0);
+
+    await stampVaultOwner(vaultNameOf(bob), 'another-page', 'claim');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // a decrypt miss would claim the inbox: the task's start finds the other token first
+      await expect(bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: sent.envelope }))
+        .rejects.toSatisfy(isE2ESessionEnded);
+    } finally {
+      warn.mockRestore();
+    }
+    // nothing leased, nothing acknowledged: the shares wait for the page that owns the vault
+    expect(server.shares.filter((s) => s.recipientUserId === bob.userId).map((s) => s.leasedUntil)).toEqual(pending.map(() => null));
+    expect(server.shareAcks.filter((a) => a.userId === bob.userId)).toEqual([]);
+    expect(getVaultOwnershipState(bob.userId, vaultNameOf(bob))).toBe('lost');
+  });
+
+  it('the same page signing out and back in to the account keeps the vault, and never reads as another tab', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    let signedIn: string | null = alice.userId;
+    registerE2ESessionUser(() => signedIn);
+    await alice.service.initialize();
+    const token = await rawRead(vaultNameOf(alice), VAULT_OWNER_KEY);
+
+    // a sign-out: the service is disposed and the page lets the vault go once
+    // that teardown ends, unless it is signed in to the account again by then
+    signedIn = null;
+    noteVaultTeardown(vaultNameOf(alice), alice.service.disposeAndSettle());
+    releaseVaultOwnershipNotInUse();
+    signedIn = alice.userId; // signed in again before the teardown ended
+    const again = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await again.service.initialize();
+    await flushQueue();
+    expect(getVaultOwnershipState(alice.userId, vaultNameOf(alice))).toBe('owned');
+    expect(await rawRead(vaultNameOf(alice), VAULT_OWNER_KEY)).toBe(token);
+
+    // signed out for good this time: let go, and a later sign-in acquires it again
+    signedIn = null;
+    noteVaultTeardown(vaultNameOf(alice), again.service.disposeAndSettle());
+    releaseVaultOwnershipNotInUse();
+    await vi.waitFor(() => expect(getVaultOwnershipState(alice.userId, vaultNameOf(alice))).toBe('none'));
+    signedIn = alice.userId;
+    const third = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await third.service.initialize();
+    expect(third.service.deviceId).toBe(alice.service.deviceId);
+  });
+
+  it('a token write that fails at the acquisition is made at the service start, over the token of this tab’s previous page load', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const vaultName = vaultNameOf(alice);
+    await stampVaultOwner(vaultName, 'previous-page-load', 'claim');
+    let failNext = true;
+    const stamps: string[] = [];
+    _setVaultOwnershipEnvironmentForTests({
+      locks: new FakeLocks(),
+      openChannel: null,
+      stamp: async (name, token, mode) => {
+        stamps.push(mode);
+        if (failNext) {
+          failNext = false;
+          throw new DOMException('the disk is busy', 'UnknownError');
+        }
+        return stampVaultOwner(name, token, mode);
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // what the gate does before the app mounts, then the app's start
+      await expect(acquireVaultOwnership(alice.userId, { vaultName })).resolves.toBe('owned');
+      await alice.service.initialize();
+    } finally {
+      warn.mockRestore();
+    }
+    expect(getVaultOwnershipState(alice.userId, vaultName)).toBe('owned');
+    expect(stamps).toEqual(['claim', 'claim']);
+    expect(await rawRead(vaultName, VAULT_OWNER_KEY)).toBe(vaultOwnershipFor(alice.userId, vaultName).token());
+    expect(server.deviceOf(alice.userId, alice.service.deviceId)).toBeTruthy();
+  });
+
+  it('a key-share claim in flight when the page hands the vault over is written; nothing new starts once the release was accepted', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const bob = makeParty(server, 'bob');
+    const locks = new FakeLocks();
+    const bus = new Bus();
+    const otherTab = new FakeChannel(bus);
+    _setVaultOwnershipEnvironmentForTests({ locks, openChannel: () => new FakeChannel(bus) });
+
+    // Alice's client: the next claim of her inbox is held until the test lets it answer
+    const base = server.apiFor(aliceId);
+    let holdClaim = false;
+    let claimOut!: () => void;
+    const claimReached = new Promise<void>((resolve) => (claimOut = resolve));
+    let answerClaim!: () => void;
+    const claimAnswered = new Promise<void>((resolve) => (answerClaim = resolve));
+    const api = {
+      ...base,
+      async get(url: string) {
+        if (holdClaim && url.startsWith('/e2e/keyshares')) {
+          holdClaim = false;
+          claimOut();
+          await claimAnswered;
+        }
+        return base.get(url);
+      },
+    };
+    const vaultNamespace = `v${++vaultSeq}`;
+    const alice = new E2EService(aliceId, {
+      api: api as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace,
+      deviceListCacheMs: 0,
+    });
+    liveServices.add(alice);
+    const vaultName = vaultDbName(aliceId, vaultNamespace);
+    await alice.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    // Bob is known: his share imports without asking the server anything
+    await alice.fetchDeviceList(bob.userId, true);
+    const sent = await bob.service.encryptMessage('c1', aliceId, 'in flight at the hand-over');
+
+    // a decrypt miss claims the inbox; the answer is on its way
+    holdClaim = true;
+    const decrypt = alice
+      .decryptMessage({ id: 'm1', conversationId: 'c1', authorId: bob.userId, content: sent.envelope })
+      .catch((err: unknown) => err);
+    await claimReached;
+
+    // another tab of the account asks for the vault: this page agrees at once
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      otherTab.postMessage({ v: 1, type: 'release', vault: _vaultKeyForTests(vaultName), from: 'asker', nonce: 'n1' });
+      await vi.waitFor(() => expect(otherTab.received.map((m) => m.type)).toContain('releasing'));
+      expect(getVaultOwnershipState(aliceId, vaultName)).toBe('lost');
+      // nothing new starts here from now on: no service start, and a task
+      // queued behind the claim is refused when its turn comes
+      await expect(vaultOwnershipFor(aliceId, vaultName).ensure()).rejects.toMatchObject({ name: 'E2EVaultNotOwnedError' });
+      const sharesBefore = server.shares.length;
+      const newWork = alice.encryptMessage('c2', bob.userId, 'new work').then(
+        () => 'sent',
+        (err: unknown) => err
+      );
+      expect(otherTab.received.map((m) => m.type)).not.toContain('released');
+
+      // the claim's answer arrives: what it was handed reaches the vault
+      answerClaim();
+      await vi.waitFor(() => expect(otherTab.received.map((m) => m.type)).toContain('released'));
+      await decrypt;
+      expect(isE2ESessionEnded(await newWork)).toBe(true);
+      expect(server.shares.length).toBe(sharesBefore);
+    } finally {
+      warn.mockRestore();
+    }
+    const sid = sidOf(sent.envelope);
+    const imported = await rawRead(vaultName, `igs:${sid}`);
+    const kept = (await rawKeys(vaultName)).filter((key) => key.startsWith('pks:'));
+    expect(imported !== undefined || kept.length > 0).toBe(true);
+    // and once `released` is out, the vault refuses this page
+    expect(vaultOwnershipFor(aliceId, vaultName).token()).toBeNull();
   });
 });
