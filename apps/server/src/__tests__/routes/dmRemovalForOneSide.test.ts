@@ -80,7 +80,7 @@ vi.mock('../../utils/prisma', () => ({
     // findMany: the audience of an event, read after the write (utils/conversationAudience.ts)
     conversationRead: { createMany: vi.fn(), upsert: vi.fn(), findMany: vi.fn() },
     message: { findMany: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
-    messageReaction: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), deleteMany: vi.fn(), groupBy: vi.fn() },
+    messageReaction: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), createMany: vi.fn(), deleteMany: vi.fn(), groupBy: vi.fn() },
     messageAttachment: { createMany: vi.fn() },
     user: { findUnique: vi.fn() },
     $transaction: vi.fn(),
@@ -92,6 +92,7 @@ const lifecycle = vi.hoisted(() => ({
   writeConversationMessage: vi.fn(),
   removeConversationForUser: vi.fn(),
   reopenConversationForUser: vi.fn(),
+  changeConversationMessage: vi.fn(),
 }));
 vi.mock('../../utils/conversationLifecycle', () => lifecycle);
 
@@ -152,8 +153,14 @@ beforeEach(() => {
     io.order.push('removal');
     return { deleted: false, clearedUntil: null, attachmentKeys: [] };
   });
-  lifecycle.reopenConversationForUser.mockReset().mockResolvedValue(true);
+  lifecycle.reopenConversationForUser.mockReset().mockResolvedValue('reopened');
   lifecycle.writeConversationMessage.mockReset().mockImplementation(writeAs());
+  // An edit, a reaction, a delete: the write on the transaction's client,
+  // under the conversation row lock (its checks are tested in
+  // utils/conversationLifecycle.test.ts)
+  lifecycle.changeConversationMessage.mockReset().mockImplementation(
+    async (_conversationId: string, _userId: string, _opts: unknown, act: (tx: unknown, view: unknown) => unknown) => act(prisma, {}),
+  );
 });
 
 /**
@@ -405,7 +412,7 @@ describe('POST /dm — opening a conversation the caller removed', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.id).toBe('conv-1');
-    expect(lifecycle.reopenConversationForUser).toHaveBeenCalledWith('conv-1', 'user-1');
+    expect(lifecycle.reopenConversationForUser).toHaveBeenCalledWith('conv-1', 'user-1', 'user-2');
     expect(prisma.conversation.create).not.toHaveBeenCalled();
     // nothing about it reaches the other person
     expect(io.emits).toEqual([]);
@@ -413,7 +420,7 @@ describe('POST /dm — opening a conversation the caller removed', () => {
 
   it('a pair whose conversation a removal deleted meanwhile gets a new conversation, created as any new one', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(existing as any);
-    lifecycle.reopenConversationForUser.mockResolvedValueOnce(false);
+    lifecycle.reopenConversationForUser.mockResolvedValueOnce('missing');
     vi.mocked(prisma.conversation.create).mockResolvedValueOnce({ ...existing, id: 'conv-2' } as any);
     vi.mocked(prisma.conversationRead.createMany).mockResolvedValueOnce({ count: 2 } as any);
 
@@ -424,6 +431,19 @@ describe('POST /dm — opening a conversation the caller removed', () => {
     expect(prisma.conversation.create).toHaveBeenCalledWith({ data: { user1Id: 'user-1', user2Id: 'user-2' } });
     expect(prisma.conversationRead.createMany).toHaveBeenCalled();
     expect(io.mockSocketsJoin).toHaveBeenCalledWith('dm:conv-2');
+  });
+
+  it("the target's account deleted while the reopen waited (the conversation kept read-only): 404 User, never that account's profile, nothing created", async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(existing as any);
+    lifecycle.reopenConversationForUser.mockResolvedValueOnce('other-side-gone');
+
+    const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ success: false, error: 'User not found' });
+    expect(JSON.stringify(res.body)).not.toContain('bob');
+    expect(prisma.conversation.create).not.toHaveBeenCalled();
+    expect(io.mockSocketsJoin).not.toHaveBeenCalled();
   });
 
   it('a new pair is created without a reopen', async () => {
@@ -471,7 +491,7 @@ describe('POST /dm — opening a conversation the caller removed', () => {
 
   it('a pair whose conversation a removal deleted meanwhile: the new conversation has no floor, whatever the old one had', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...existing, reads: [{ clearedAt: FLOOR }] } as any);
-    lifecycle.reopenConversationForUser.mockResolvedValueOnce(false);
+    lifecycle.reopenConversationForUser.mockResolvedValueOnce('missing');
     vi.mocked(prisma.conversation.create).mockResolvedValueOnce({ ...existing, id: 'conv-2' } as any);
     vi.mocked(prisma.conversationRead.createMany).mockResolvedValueOnce({ count: 2 } as any);
 
@@ -840,7 +860,7 @@ describe('edit, delete, reaction — a row the caller cleared answers like a mis
 
     expect(res.status).toBe(404);
     expect(prisma.messageReaction.findUnique).not.toHaveBeenCalled();
-    expect(prisma.messageReaction.create).not.toHaveBeenCalled();
+    expect(prisma.messageReaction.createMany).not.toHaveBeenCalled();
     expect((vi.mocked(prisma.message.findUnique).mock.calls[0][0] as any).select).toEqual({ id: true, conversationId: true, createdAt: true });
   });
 });
@@ -906,7 +926,7 @@ describe('edit, delete, reaction — the events skip a side that cleared the row
     vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1', createdAt: BELOW } as any);
     vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
     vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
-    vi.mocked(prisma.messageReaction.create).mockResolvedValueOnce({} as any);
+    vi.mocked(prisma.messageReaction.createMany).mockResolvedValueOnce({ count: 1 } as any);
     vi.mocked(prisma.messageReaction.findMany).mockResolvedValueOnce([] as any);
     await request(createApp()).put(`/api/v1/dm/conv-1/messages/msg-1/reactions/${encodeURIComponent('👍')}`);
 

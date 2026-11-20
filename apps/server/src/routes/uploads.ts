@@ -4,11 +4,11 @@ import { rateLimitUpload, rateLimitAttachmentRead } from '../middleware/rateLimi
 import { prisma } from '../utils/prisma';
 import { generatePresignedPutUrl, generatePresignedGetUrl, getS3Object, describeStoreError, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { AppError, BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
-import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, LIMITS, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES } from '@voxium/shared';
+import { ALLOWED_ATTACHMENT_TYPES, getMaxAttachmentSize, Permissions, LIMITS, E2E_ATTACHMENT_MIME, E2E_ATTACHMENT_NAME, E2E_GCM_TAG_BYTES, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
 import crypto from 'crypto';
 import { Readable } from 'stream';
 import { hasServerPermission, hasChannelPermission } from '../utils/permissionCalculator';
-import { isAboveFloor, readConversationView } from '../utils/conversationVisibility';
+import { isAboveFloor, isReadOnlyConversation, readConversationView } from '../utils/conversationVisibility';
 
 export const uploadRouter = Router();
 
@@ -176,6 +176,10 @@ uploadRouter.post(
         if (conv.user1Id !== req.user!.userId && conv.user2Id !== req.user!.userId) {
           throw new ForbiddenError('Not a participant of this conversation');
         }
+        // The other side's account is gone: nothing can be sent there, so no
+        // file is signed for it (#131). The send repeats the refusal under the
+        // conversation row lock (utils/conversationLifecycle.ts)
+        if (isReadOnlyConversation(conv)) throw new ForbiddenError(CONVERSATION_READ_ONLY_MESSAGE);
       }
 
       const contextPrefix = channelId ? `ch-${channelId}` : `dm-${conversationId}`;

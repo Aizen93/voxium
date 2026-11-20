@@ -7,6 +7,7 @@ import {
   deletedQuoteAuthor,
   deletedParticipantId,
   otherParticipant,
+  isReservedUsername,
   DELETED_PARTICIPANT_DISPLAY_NAME,
   DELETED_PARTICIPANT_USERNAME,
 } from '../../utils/deletedParticipant';
@@ -143,5 +144,15 @@ describe('otherParticipant', () => {
     for (const value of [alice.id, alice.username, alice.displayName, alice.avatarUrl]) {
       expect(wire).not.toContain(value);
     }
+  });
+});
+
+describe('isReservedUsername', () => {
+  it('the placeholder\'s name, in any case', () => {
+    for (const name of ['deleted', 'Deleted', 'DELETED']) expect(isReservedUsername(name), name).toBe(true);
+  });
+
+  it('no other name, a name containing it included', () => {
+    for (const name of ['deleted_user', 'undeleted', 'delete', 'alice']) expect(isReservedUsername(name), name).toBe(false);
   });
 });

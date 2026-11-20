@@ -7,7 +7,10 @@
 //     and usernames/emails squatted with breached-list addresses return to
 //     their real owners automatically. Legitimate users are unaffected — the
 //     app is unusable unverified (requireVerifiedEmail gates every functional
-//     route), so a real person verifies within minutes, not days.
+//     route), so a real person verifies within minutes, not days. A verified
+//     person can still open a direct conversation with such an account: its
+//     conversations are settled as an account deletion settles them, before
+//     the row goes (deleteStaleUnverifiedAccounts).
 //
 //  2. IP-RECORD RETENTION — IpRecord rows unseen for IP_RETENTION_DAYS are
 //     deleted. IPs are personal data (GDPR/CNIL): we keep them exactly as
@@ -19,6 +22,11 @@ import { sendAdminAlert, describeEmailError } from './email';
 import { logAuditEvent } from './auditLog';
 import { msUntilDailySlot, releaseLockIfOwned, lockToken } from './dailySchedule';
 import { purgeExpiredSignupState } from '../services/signupService';
+import { isFeatureEnabled } from './featureFlags';
+import { retryOnTransactionConflict } from './transactionRetry';
+import { settleConversationsOfDeletedAccount, type DeletedAccountConversations } from './conversationLifecycle';
+import { announceConversationsOfDeletedAccount } from './accountDeletion';
+import { deleteAttachmentBlobs } from './attachmentBlobs';
 import { IP_RECORD_RETENTION_DAYS } from '@voxium/shared';
 
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -47,10 +55,16 @@ const HYGIENE_HISTORY_MAX = 20;
 export interface HygieneResult {
   deletedUsers: number;
   deletedIpRecords: number;
-  /** Avatar objects handed to S3. Zero when the guard counts disagreed. */
+  /** Avatar objects handed to S3: those of the accounts actually deleted. */
   deletedAvatars: number;
   /** True ⇒ nothing was deleted; the counts are what WOULD have gone. */
   dryRun: boolean;
+  /**
+   * Present when a batch of the account deletion failed: the sweep stopped
+   * taking batches there, kept what had committed (deletedUsers counts it)
+   * and finished the rest of its work. The error's name and code only.
+   */
+  failedBatch?: { name: string; code: string | null };
 }
 
 export interface HygieneRun extends HygieneResult {
@@ -144,31 +158,29 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
     select: { id: true, avatarUrl: true },
   });
 
-  // The guards are REPEATED on the delete, not just on the select above: a
-  // user who verifies their email between the two statements must survive, and
-  // only Postgres can decide that atomically.
-  const { count: deletedUsers } = dryRun
-    ? { count: staleUnverified.length }
-    : staleUnverified.length > 0
-      ? await prisma.user.deleteMany({
-          where: {
-            id: { in: staleUnverified.map((u) => u.id) },
-            emailVerified: false,
-            createdAt: { lt: userCutoff },
-            role: 'user',
-            ownedServers: { none: {} },
-          },
-        })
-      : { count: 0 };
+  // The guards are REPEATED under the lock and on the delete, not just on the
+  // select above: a user who verifies their email (or comes to own a space)
+  // between the two must survive, and only Postgres can decide that
+  // atomically (deleteStaleUnverifiedAccounts). It answers which accounts it
+  // deleted, by id, and stops at a failed batch, keeping what committed.
+  const swept = dryRun || staleUnverified.length === 0
+    ? { deletedIds: [] as string[], failedBatch: null }
+    : await deleteStaleUnverifiedAccounts(staleUnverified.map((u) => u.id), userCutoff);
+  const deletedIds = new Set(swept.deletedIds);
+  const deletedUsers = dryRun ? staleUnverified.length : deletedIds.size;
+  if (!dryRun && deletedIds.size < staleUnverified.length && !swept.failedBatch) {
+    console.log(`[RegHygiene] ${staleUnverified.length - deletedIds.size} account(s) no longer qualified when the sweep reached them (verified, or owning a space, since the select) and were spared`);
+  }
 
   // AFTER the rows are gone: a failed delete must not strand a live avatar.
-  // If the counts disagree, someone in the batch was spared by the guards and
-  // we cannot tell WHICH — so delete nothing and let the nightly orphan sweep
-  // reclaim them in a week. Losing a live user's avatar is much worse than
-  // holding a few dead blobs a little longer.
-  const avatarKeys = staleUnverified.map((u) => u.avatarUrl).filter((k): k is string => !!k);
+  // Exactly the accounts the committed batches deleted, by id: an account
+  // the guards spared, or one in a batch that failed, keeps its avatar.
+  const avatarKeys = staleUnverified
+    .filter((u) => dryRun || deletedIds.has(u.id))
+    .map((u) => u.avatarUrl)
+    .filter((k): k is string => !!k);
   let deletedAvatars = 0;
-  if (avatarKeys.length > 0 && deletedUsers === staleUnverified.length) {
+  if (avatarKeys.length > 0) {
     if (dryRun) {
       deletedAvatars = avatarKeys.length;
     } else {
@@ -185,15 +197,164 @@ export async function runRegistrationHygiene(opts: { dryRun?: boolean } = {}): P
         console.error(`[RegHygiene] S3 refused ${avatarKeys.length - deletedAvatars} avatar deletion(s) — check the bucket policy / IAM permissions`);
       }
     }
-  } else if (avatarKeys.length > 0) {
-    console.warn(`[RegHygiene] ${staleUnverified.length - deletedUsers} account(s) were spared by the delete guards — leaving their avatars to the orphan sweep`);
   }
 
   const { count: deletedIpRecords } = dryRun
     ? { count: await prisma.ipRecord.count({ where: { lastSeenAt: { lt: ipCutoff } } }) }
     : await prisma.ipRecord.deleteMany({ where: { lastSeenAt: { lt: ipCutoff } } });
 
-  return { deletedUsers, deletedIpRecords, deletedAvatars, dryRun };
+  return { deletedUsers, deletedIpRecords, deletedAvatars, dryRun, ...(swept.failedBatch && { failedBatch: swept.failedBatch }) };
+}
+
+/** Accounts per transaction: the account step and the conversation step run under one lock each. */
+export const SWEEP_ACCOUNTS_PER_TRANSACTION = 1000;
+
+/** A batch whose final delete removed another number of accounts than the step settled: rolled back whole. */
+export class SweepDeleteMismatchError extends Error {
+  readonly code = 'SWEEP_DELETE_MISMATCH';
+  constructor(settled: number, deleted: number) {
+    super(`The sweep settled the conversations of ${settled} account(s) but its delete removed ${deleted}`);
+    this.name = 'SweepDeleteMismatchError';
+  }
+}
+
+/** An error as the sweep may record it: its name and code, never its message. */
+function describeBatchError(err: unknown): { name: string; code: string | null } {
+  const name = err instanceof Error ? err.name : typeof err;
+  const code = (err as { code?: unknown } | null)?.code;
+  return { name, code: typeof code === 'string' ? code : null };
+}
+
+/**
+ * Delete the stale unverified accounts `ids` (the select's candidates), and
+ * settle their direct conversations the way an account deletion does
+ * (settleConversationsOfDeletedAccount, utils/conversationLifecycle.ts), so
+ * that nothing rests on the foreign keys from a conversation's sides to the
+ * account: what happens to the other person's conversation is the same
+ * whatever those keys say. The flag that decides it
+ * (account_deletion_keeps_conversations) is read once for the whole sweep.
+ *
+ * THE GUARDS, and what each reads: unverified (`users.email_verified`), older
+ * than the cutoff (`users.created_at`), role `user` (`users.role`), owning no
+ * space (`servers.owner_id`). A row lock re-checks, after a wait, only the
+ * guards on the locked row's own columns; the one that reads another table
+ * is judged on the statement's snapshot, so an ownership write the lock
+ * waited for (it key-shares the account row, it does not update it) would
+ * not be seen. So, per SWEEP_ACCOUNTS_PER_TRANSACTION accounts, in one
+ * transaction run again whole after a deadlock:
+ *  1. the account rows that still satisfy the `users` guards, FOR UPDATE in
+ *     id order: an account verified (or promoted, or made younger) since the
+ *     select is left out after the wait, and none of these can be verified,
+ *     start a conversation or come to own a space until the commit (each of
+ *     those writes takes or key-shares the account row);
+ *  2. in a statement of its own, so on a snapshot taken after the lock was
+ *     granted: the locked accounts that own a space NOW are dropped;
+ *  3. every conversation of the accounts left, FOR UPDATE in id order, in one
+ *     statement (one order for all of them, as an account deletion takes its
+ *     own), then the conversation step for each account that is a side of
+ *     one: flag off, each conversation deleted with its rows; flag on, kept
+ *     for the other person read-only (an account that never wrote leaves
+ *     only its side, set NULL, and the other person's hidden side unhidden)
+ *     or deleted when nobody can reach it;
+ *  4. the accounts deleted by id, every guard repeated once more; a count
+ *     other than the number of accounts the step settled throws
+ *     (SweepDeleteMismatchError) and rolls the whole batch back, so no guard
+ *     added later can commit a settlement without its delete.
+ * After each commit, each step on its own and never failing the sweep: the
+ * files of the conversations deleted, and the notices an account deletion
+ * sends (dm:conversation:read_only, the calls ended, the rooms emptied).
+ * A batch that fails ends the deletion there: the batches before it stay
+ * committed and announced, no further batch is taken, and the failure is
+ * answered (its name and code) for the run record. Resolves the ids of the
+ * accounts deleted.
+ */
+async function deleteStaleUnverifiedAccounts(
+  ids: string[],
+  cutoff: Date,
+): Promise<{ deletedIds: string[]; failedBatch: { name: string; code: string | null } | null }> {
+  const keepConversations = isFeatureEnabled('account_deletion_keeps_conversations');
+  const deletedIds: string[] = [];
+  for (let at = 0; at < ids.length; at += SWEEP_ACCOUNTS_PER_TRANSACTION) {
+    const batch = ids.slice(at, at + SWEEP_ACCOUNTS_PER_TRANSACTION);
+    let committed: { ids: string[]; conversations: DeletedAccountConversations };
+    try {
+      committed = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+        const locked = (await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT u.id FROM users u
+          WHERE u.id = ANY(${batch}::text[])
+            AND u.email_verified = false
+            AND u.created_at < ${cutoff}
+            AND u.role = 'user'
+            AND NOT EXISTS (SELECT 1 FROM servers s WHERE s.owner_id = u.id)
+          ORDER BY u.id
+          FOR UPDATE OF u`).map((r) => r.id);
+        const conversations: DeletedAccountConversations = { kept: [], deleted: [], attachmentKeys: [] };
+        if (locked.length === 0) return { ids: [], conversations };
+
+        // The guard on another table, read again now that the rows are held
+        const owners = new Set((await tx.$queryRaw<Array<{ ownerId: string }>>`
+          SELECT DISTINCT owner_id AS "ownerId" FROM servers WHERE owner_id = ANY(${locked}::text[])`).map((r) => r.ownerId));
+        const eligible = locked.filter((id) => !owners.has(id));
+        if (eligible.length === 0) return { ids: [], conversations };
+
+        const sides = await tx.$queryRaw<Array<{ user1Id: string | null; user2Id: string | null }>>`
+          SELECT user1_id AS "user1Id", user2_id AS "user2Id"
+          FROM conversations
+          WHERE user1_id = ANY(${eligible}::text[]) OR user2_id = ANY(${eligible}::text[])
+          ORDER BY id
+          FOR UPDATE`;
+        const sideIds = new Set(sides.flatMap((c) => [c.user1Id, c.user2Id]));
+        for (const userId of eligible) {
+          if (!sideIds.has(userId)) continue;
+          const settled = await settleConversationsOfDeletedAccount(tx, userId, { keep: keepConversations });
+          // a conversation kept for one swept account and then deleted for the
+          // other (both its sides swept) is deleted
+          conversations.kept = conversations.kept.filter((id) => !settled.deleted.includes(id)).concat(settled.kept);
+          conversations.deleted.push(...settled.deleted);
+          conversations.attachmentKeys.push(...settled.attachmentKeys);
+        }
+
+        const { count } = await tx.user.deleteMany({
+          where: {
+            id: { in: eligible },
+            emailVerified: false,
+            createdAt: { lt: cutoff },
+            role: 'user',
+            ownedServers: { none: {} },
+          },
+        });
+        if (count !== eligible.length) throw new SweepDeleteMismatchError(eligible.length, count);
+        return { ids: eligible, conversations };
+      }, { timeout: 60_000, maxWait: 10_000 }), '[RegHygiene] The deletion of stale unverified accounts');
+    } catch (err) {
+      const failedBatch = describeBatchError(err);
+      console.error(`[RegHygiene] A batch of the unverified-account deletion failed (${failedBatch.name}${failedBatch.code ? ` ${failedBatch.code}` : ''}); ${deletedIds.length} account(s) deleted before it are kept deleted, the rest wait for the next sweep`);
+      return { deletedIds, failedBatch };
+    }
+    deletedIds.push(...committed.ids);
+    // What follows the commit never undoes it: each step on its own, a failure
+    // logged, the batch still counted and the next one still taken (the nightly
+    // orphan sweep takes the files a failed step left)
+    try {
+      deleteAttachmentBlobs([...new Set(committed.conversations.attachmentKeys)], '[RegHygiene]', 'the conversations of swept accounts');
+    } catch (err) {
+      console.warn('[RegHygiene] After a batch of the unverified-account deletion, the attachment file cleanup failed:', err instanceof Error ? err.message : err);
+    }
+    try {
+      await announceConversationsOfDeletedAccount(committed.conversations, '[RegHygiene]');
+    } catch (err) {
+      console.warn('[RegHygiene] After a batch of the unverified-account deletion, the notices of its direct conversations failed:', err instanceof Error ? err.message : err);
+    }
+  }
+  return { deletedIds, failedBatch: null };
+}
+
+/** A sweep that stopped at a failed batch, after recording what it did: the error's name and code only. */
+export class HygieneBatchFailedError extends Error {
+  constructor(public readonly failedBatch: { name: string; code: string | null }, public readonly deletedUsers: number) {
+    super(`The hygiene sweep stopped at a failed batch (${failedBatch.name}${failedBatch.code ? ` ${failedBatch.code}` : ''}) after deleting ${deletedUsers} account(s)`);
+    this.name = 'HygieneBatchFailedError';
+  }
 }
 
 /**
@@ -243,7 +404,7 @@ export async function runRegistrationHygieneLocked(
 
     // Unconditional: "it ran and found nothing" is the answer an operator most
     // often needs, and the old log only spoke when it deleted something.
-    console.log(`[RegHygiene] Sweep complete in ${run.durationMs}ms — deleted ${result.deletedUsers} unverified account(s) older than ${UNVERIFIED_ACCOUNT_TTL_DAYS}d, ${result.deletedAvatars} avatar(s), ${result.deletedIpRecords} IP record(s) unseen for ${IP_RETENTION_DAYS}d`);
+    console.log(`[RegHygiene] Sweep ${result.failedBatch ? 'stopped at a failed batch' : 'complete'} in ${run.durationMs}ms — deleted ${result.deletedUsers} unverified account(s) older than ${UNVERIFIED_ACCOUNT_TTL_DAYS}d, ${result.deletedAvatars} avatar(s), ${result.deletedIpRecords} IP record(s) unseen for ${IP_RETENTION_DAYS}d`);
 
     await recordHygieneRun(run);
     // Durable trail, unlike the Redis history: survives a flush and shows up in
@@ -259,8 +420,16 @@ export async function runRegistrationHygieneLocked(
         deletedAvatars: run.deletedAvatars,
         deletedIpRecords: run.deletedIpRecords,
         durationMs: run.durationMs,
+        ...(run.failedBatch && { failedBatch: run.failedBatch }),
       },
     });
+    // A run that stopped at a failed batch is recorded above with what it
+    // did, and then reported as the failure it is: the scheduler logs it and
+    // takes the next nightly slot as usual (the accounts left are still
+    // stale then), and the admin trigger answers it as an error.
+    if (run.failedBatch) {
+      throw new HygieneBatchFailedError(run.failedBatch, run.deletedUsers);
+    }
     return run;
   } finally {
     // Only if we still own it: a large backlog can outrun the 15-minute TTL,

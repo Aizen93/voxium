@@ -8,7 +8,7 @@ import {
   validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain,
   emailDomain, isCommonEmailProvider,
 } from '@voxium/shared';
-import { BadRequestError, ConflictError, ForbiddenError } from '../utils/errors';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { sanitizeLabel } from '../utils/sanitize';
 import {
   sendSignupCodeEmail, sendSignupExistingAccountEmail, describeEmailError, MailSuppressedError,
@@ -16,6 +16,7 @@ import {
 import { isMailSuppressed, mailboxDigest } from '../utils/mailSuppression';
 import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, normalizeIp } from '../middleware/rateLimiter';
 import { deleteUserAccount } from '../utils/accountDeletion';
+import { isReservedUsername } from '../utils/deletedParticipant';
 import { generateTokens, CONSENT_SELECT, withConsentFlag } from './authService';
 
 /*
@@ -131,12 +132,14 @@ export async function startRegistration(
   }
 
   // Usernames are public (profiles, mentions), so a taken one may say so. It is
-  // the ONLY synchronous conflict: nothing here may depend on the e-mail.
+  // the ONLY synchronous conflict: nothing here may depend on the e-mail. The
+  // name the deleted-account placeholder shows is reserved, and answered
+  // exactly as a taken one, after the same lookup (utils/deletedParticipant.ts).
   const nameTaken = await prisma.user.findFirst({
     where: { username: { equals: username, mode: 'insensitive' } },
     select: { id: true },
   });
-  if (nameTaken) throw new ConflictError(USERNAME_TAKEN_MESSAGE);
+  if (nameTaken || isReservedUsername(username)) throw new ConflictError(USERNAME_TAKEN_MESSAGE);
 
   // From here every branch pays bcrypt, the lookups and one row.
   const passwordHash = await bcrypt.hash(password, 12);
@@ -343,11 +346,13 @@ export async function completeRegistration(
     const usernameErr = validateUsername(username);
     if (usernameErr) { await refundAttempt(); throw new BadRequestError(usernameErr); }
   }
+  // The stored name or a new one alike: a pending registration started before
+  // the placeholder's name was reserved is refused it here
   const nameTaken = await prisma.user.findFirst({
     where: { username: { equals: username, mode: 'insensitive' } },
     select: { id: true },
   });
-  if (nameTaken) { await refundAttempt(); throw new ConflictError(USERNAME_TAKEN_MESSAGE); }
+  if (nameTaken || isReservedUsername(username)) { await refundAttempt(); throw new ConflictError(USERNAME_TAKEN_MESSAGE); }
 
   const holders = await prisma.user.findMany({
     where: { OR: [{ email: row.email }, { emailCanonical: row.email_canonical }] },
@@ -375,8 +380,9 @@ export async function completeRegistration(
     try {
       await deleteUserAccount(legacy.id, { reason: 'superseded by a verified sign-up', logPrefix: '[Signup]' });
     } catch (err) {
-      // A parallel completion with the same code deleted it first: already gone.
-      if ((err as { code?: string })?.code !== 'P2025') throw err;
+      // A parallel completion with the same code deleted it first: already
+      // gone (the deletion answers it as an unknown account)
+      if (!(err instanceof NotFoundError) && (err as { code?: string })?.code !== 'P2025') throw err;
       console.warn('[Signup] Legacy account already deleted by a parallel completion');
     }
   }

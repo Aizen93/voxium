@@ -275,6 +275,25 @@ describe('startRegistration — refusals', () => {
     expect(queryCalls()).toHaveLength(0);
     expect(h.sendCode).not.toHaveBeenCalled();
   });
+
+  it('the deleted-account placeholder\'s name is reserved in any case, answered exactly as a taken one, after the same lookup', async () => {
+    for (const name of ['deleted', 'Deleted', 'DELETED', 'dElEtEd']) {
+      vi.clearAllMocks();
+      users({ nameTaken: false });
+      await expect(startRegistration(name, 'brand-new@example.com', PASSWORD, undefined, undefined, CONSENT))
+        .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
+      // the same work as a name in use: one lookup, nothing hashed, stored or mailed
+      expect(prisma.user.findFirst).toHaveBeenCalledTimes(1);
+      expect(h.bcryptHash).not.toHaveBeenCalled();
+      expect(prisma.pendingRegistration.create).not.toHaveBeenCalled();
+      expect(h.sendCode).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a name that only contains it is not reserved', async () => {
+    users({ nameTaken: false });
+    await expect(startRegistration('deleted_user', 'brand-new@example.com', PASSWORD, undefined, undefined, CONSENT)).resolves.toHaveProperty('pendingId');
+  });
 });
 
 describe('startRegistration — the same answer after the same work on every branch', () => {
@@ -963,6 +982,20 @@ describe('completeRegistration', () => {
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
+    it('the reserved name, as an override or as the name a pending registration stored before it was reserved, is a 409 that costs no attempt', async () => {
+      users({ nameTaken: false });
+      await expect(completeRegistration(ID, CODE, 'Deleted', undefined))
+        .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
+      refund();
+
+      vi.mocked(prisma.pendingRegistration.update).mockClear();
+      h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ username: 'deleted' })]);
+      await expect(completeRegistration(ID, CODE, undefined, undefined))
+        .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
+      refund();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
     it('a failed refund is logged and the 409 still answers', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       users({ nameTaken: true });
@@ -1045,6 +1078,16 @@ describe('completeRegistration', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
       h.deleteUserAccount.mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
+      const result = await completeRegistration(ID, CODE, undefined, undefined);
+      expect(result.user.id).toBe('user-1');
+      expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');
+    });
+
+    it("a legacy holder the deletion finds gone under its lock (404 User) counts as gone too", async () => {
+      const { NotFoundError } = await import('../../utils/errors');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
+      h.deleteUserAccount.mockRejectedValueOnce(new NotFoundError('User'));
       const result = await completeRegistration(ID, CODE, undefined, undefined);
       expect(result.user.id).toBe('user-1');
       expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');

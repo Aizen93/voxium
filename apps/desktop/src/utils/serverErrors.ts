@@ -1,7 +1,7 @@
 import type { TFunction } from 'i18next';
 import { DMConversationReadOnlyError } from './dmParticipant';
 import axios from 'axios';
-import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE, VOICE_SPEAK_REFUSED_MESSAGE } from '@voxium/shared';
+import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE, VOICE_SPEAK_REFUSED_MESSAGE, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
 
 /**
  * Maps known server error strings → i18n keys under "serverErrors.*".
@@ -89,7 +89,7 @@ const ERROR_MAP: Record<string, string> = {
   'Not a participant of this conversation': 'notAParticipant',
   // the other side's account was deleted (the server's refusal, and the
   // client's own DMConversationReadOnlyError, utils/dmParticipant.ts)
-  'This conversation is read-only': 'conversationReadOnly',
+  [CONVERSATION_READ_ONLY_MESSAGE]: 'conversationReadOnly',
 
   // ─── Voice ─────────────────────────────────────────────────────────────
   'Voice channels are currently disabled': 'voiceDisabled',

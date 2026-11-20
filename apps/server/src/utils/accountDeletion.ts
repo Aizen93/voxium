@@ -7,12 +7,17 @@ import {
   type SecureMembershipRemoval,
 } from './secureChannelLifecycle';
 import { retryOnTransactionConflict } from './transactionRetry';
-import { OwnedServersError } from './errors';
+import { NotFoundError, OwnedServersError } from './errors';
 import { broadcastMemberLeft } from './memberBroadcast';
 import { deleteFromS3 } from './s3';
 import { collectAttachmentKeys, deleteAttachmentBlobs } from './attachmentBlobs';
 import { revokeUserSessions } from './sessionRevocation';
 import { emitToModerators } from './moderatorAudience';
+import { isFeatureEnabled } from './featureFlags';
+import { settleConversationsOfDeletedAccount, type DeletedAccountConversations } from './conversationLifecycle';
+import { getIO } from '../websocket/socketServer';
+import { endDMCall } from '../websocket/dmVoiceHandler';
+import { deletedParticipantId } from './deletedParticipant';
 import { WS_EVENTS } from '@voxium/shared';
 
 /**
@@ -63,18 +68,28 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
   // after the delete commits is the guarantee (below).
   revokeUserSessions(userId, { forceLogoutReason: opts.reason });
 
-  // The user delete cascades every message the account wrote, in every
-  // channel, and both sides of every conversation it was in (Message.author
-  // and both Conversation users are onDelete: Cascade), attachment rows
-  // included, and the transaction below deletes the secure channels the
-  // account created with every message in them. Their keys are read now and
-  // the files deleted once the delete has committed. One read per indexed
-  // column, merged: an OR across messages and conversations starts from no
-  // index and walked the attachments of every message ever sent. A message
-  // the account wrote in its own conversation (or in its own secure channel)
-  // is found twice, hence the Set. A read that fails must not stop the
-  // erasure: the sessions are already revoked, so it is logged, those files
-  // are left to the nightly orphan sweep, and the deletion goes on.
+  // What becomes of the account's direct conversations (#131), read ONCE for
+  // the whole deletion, before its transaction, so a retried attempt and the
+  // steps after the commit follow the same rule: off, each is deleted for
+  // both people (as an account deletion always did); on, one the other
+  // person can still reach outlives the account for them, read-only.
+  const keepConversations = isFeatureEnabled('account_deletion_keeps_conversations');
+
+  // The user delete cascades every message the account wrote in every
+  // channel (Message.author is onDelete: Cascade), attachment rows included,
+  // and the transaction below deletes the secure channels the account
+  // created with every message in them. Their keys are read now and the
+  // files deleted once the delete has committed. One read per indexed
+  // column, merged: an OR across tables starts from no index and walked the
+  // attachments of every message ever sent. The account's messages in its
+  // direct conversations are among the first read (its own files go in every
+  // case); the other person's files there are NOT read here: the
+  // transaction decides, conversation by conversation, which are deleted,
+  // and reads the keys of those under their locks (the files of a
+  // conversation that survives stay with it). A read that fails must not
+  // stop the erasure: the sessions are already revoked, so it is logged,
+  // those files are left to the nightly orphan sweep, and the deletion goes
+  // on.
   const readKeys = async (messages: Prisma.MessageWhereInput, what: string): Promise<string[]> => {
     try {
       return await collectAttachmentKeys(messages);
@@ -83,47 +98,61 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
       return [];
     }
   };
-  const attachmentKeys = [...new Set([
+  const ownKeys = [
     ...await readKeys({ authorId: userId }, "the account's messages"),
-    ...await readKeys({ conversation: { user1Id: userId } }, "the account's conversations (first side)"),
-    ...await readKeys({ conversation: { user2Id: userId } }, "the account's conversations (second side)"),
     ...await readKeys({ channel: { createdById: userId, secure: true } }, 'the secure channels the account created'),
-  ])];
+  ];
 
-  const { secure, removedFrom } = await deleteAccountRows(userId);
+  const { secure, removedFrom, conversations } = await deleteAccountRows(userId, { keepConversations });
+
+  // Everything below follows the commit: each step on its own, a failure
+  // logged and never thrown, so a deletion that has committed is answered as
+  // done whatever a notice or a file does (and the steps after a failed one
+  // still run). The second revocation first, as for every committing write.
+  const afterCommit = async (step: string, run: () => unknown): Promise<void> => {
+    try {
+      await run();
+    } catch (err) {
+      console.warn(`${opts.logPrefix} After the deletion of account ${userId}, ${step} failed:`, err instanceof Error ? err.message : err);
+    }
+  };
 
   // Again, now that the row is gone: a socket whose handshake landed while
   // the row still existed joined user:{id} after the first pass and passed
   // the connection handler's re-check. Any later handshake finds no row.
-  revokeUserSessions(userId, { forceLogoutReason: opts.reason });
+  await afterCommit('the second session revocation', () => revokeUserSessions(userId, { forceLogoutReason: opts.reason }));
 
-  deleteAttachmentBlobs(attachmentKeys, opts.logPrefix, 'a deleted account');
+  // The account's own files, and those of the conversations the committed
+  // attempt deleted (read under their locks). A message the account wrote in
+  // a deleted conversation (or in its own secure channel) is found twice,
+  // hence the Set.
+  await afterCommit('the attachment file cleanup', () =>
+    deleteAttachmentBlobs([...new Set([...ownKeys, ...conversations.attachmentKeys])], opts.logPrefix, 'a deleted account'));
+
+  // The people of its conversations hear what became of them.
+  await afterCommit('the notices of its direct conversations', () => announceConversationsOfDeletedAccount(conversations, opts.logPrefix));
 
   // Every space the committed deletion removed a membership from that the
   // notices above did not name (a membership that committed after the read
-  // above): its members hear the departure too. Each its own step, logged,
-  // never failing a deletion that has committed.
+  // above): its members hear the departure too, each space on its own.
   const announced = new Set(memberships.map((m) => m.serverId));
   for (const serverId of new Set(removedFrom)) {
     if (announced.has(serverId)) continue;
-    try {
-      await broadcastMemberLeft(userId, serverId);
-    } catch (err) {
-      console.warn(`${opts.logPrefix} The departure notice of deleted account ${userId} in space ${serverId} failed:`, err instanceof Error ? err.message : err);
-    }
+    await afterCommit(`the departure notice in space ${serverId}`, () => broadcastMemberLeft(userId, serverId));
   }
 
   // The members of its secure channels hear it (created channels vanish
-  // from their sidebars, member lists refresh, live voice ends). Never throws.
-  await announceSecureMembershipsRemoved(secure);
+  // from their sidebars, member lists refresh, live voice ends).
+  await afterCommit('the secure-channel notices', () => announceSecureMembershipsRemoved(secure));
 
   for (const { serverId } of pendingRequests) {
-    await emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'cancelled' });
+    await afterCommit(`the withdrawn join request notice in space ${serverId}`, () =>
+      emitToModerators(serverId, WS_EVENTS.SERVER_JOIN_REQUEST_RESOLVED, { serverId, userId, outcome: 'cancelled' }));
   }
 
   if (target.avatarUrl) {
-    await deleteFromS3(target.avatarUrl).catch((err) =>
-      console.warn(`${opts.logPrefix} Avatar cleanup failed (the orphan sweep will reclaim it):`, err instanceof Error ? err.message : err));
+    const avatar = target.avatarUrl;
+    await afterCommit('the avatar cleanup (the orphan sweep will reclaim it)', () => deleteFromS3(avatar));
   }
 }
 
@@ -143,10 +172,18 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  *  3. the key shares and the rest of the account's E2E material;
  *  4. the account row (FOR UPDATE), then the member rows committed since
  *     step 1 (a second DELETE), then the account's device-registry row a
- *     second time, then the user delete and every row it cascades to or sets
- *     null (messages, reactions, reads, invites it created, join requests it
- *     decided, bans it issued, webhooks it created or rotated, its E2E
- *     devices with their one-time keys, …): the long part.
+ *     second time;
+ *  5. the account's direct conversations, every row FOR UPDATE in id order,
+ *     then what becomes of each: kept for the other person (the account's
+ *     messages there rewritten to placeholders, each row before its
+ *     reactions and attachments, the other read row unhidden, the side set
+ *     NULL) or deleted with its cascade
+ *     (settleConversationsOfDeletedAccount, utils/conversationLifecycle.ts,
+ *     which documents this step against every writer of a conversation);
+ *  6. the user delete and every row it cascades to or sets null (messages,
+ *     reactions, reads, invites it created, join requests it decided, bans
+ *     it issued, webhooks it created or rotated, its E2E devices with their
+ *     one-time keys, …): the long part.
  * It takes NO space row. Why each comes where it does:
  *  - in 4, the account row before the second member-row delete: a
  *    membership's key to the account waits for that lock, so every
@@ -228,20 +265,24 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  * side runs again whole: every transaction named here is retried
  * (retryOnTransactionConflict), and a retry of this one after a transfer to
  * the account committed answers OwnedServersError (below).
- * The direct conversations: the user delete in step 4 cascades into every
- * conversation the account is a side of (both of their read rows and all of
- * their messages) and into the account's own read rows and messages, in the
- * order the cascade triggers fire. A message write, a removal or a reopen of
- * one of those conversations (utils/conversationLifecycle.ts) takes the
- * conversation row first and can then need a row this cascade already
- * holds, while the cascade waits for that conversation row; the lock order
- * there documents the cycle. Both sides are retried, and the conversation
- * transaction retried after this one committed answers 404 `Conversation`.
+ * The direct conversations: step 5 takes every conversation row of the
+ * account before it touches anything in them, after the account row (which
+ * holds back every new conversation with the account), so the user delete
+ * in step 6 finds none left to cascade into (each is deleted, or its side set
+ * NULL, explicitly: nothing rests on the foreign keys' CASCADE). Every writer
+ * of a conversation (a message, an edit, a reaction or a delete of one, a
+ * removal, a reopen; utils/conversationLifecycle.ts) takes the conversation
+ * row first: by the other person, it then needs nothing this transaction
+ * holds before its own lock on that row, so one of the two simply waits for
+ * the other; by the deleted account itself, an insert key-shares the
+ * account row this transaction holds while this transaction waits for the
+ * conversation row, a cycle PostgreSQL breaks (both are retried, and the
+ * account's write retried after this one committed answers 404 or 403).
  */
-export async function deleteAccountRows(userId: string): Promise<AccountRowsDeleted> {
-  let committed: { removal: SecureMembershipRemoval; serverIds: string[] };
+export async function deleteAccountRows(userId: string, opts: { keepConversations: boolean }): Promise<AccountRowsDeleted> {
+  let committed: { removal: SecureMembershipRemoval; serverIds: string[]; conversations: DeletedAccountConversations };
   try {
-    committed = await runAccountDeletionTransaction(userId);
+    committed = await runAccountDeletionTransaction(userId, opts.keepConversations);
   } catch (err) {
     // `Server.owner` is onDelete: Restrict: the account came to own a space
     // after `deleteUserAccount` checked it owned none (a transfer to it, which
@@ -266,7 +307,7 @@ export async function deleteAccountRows(userId: string): Promise<AccountRowsDele
   // what follows the commit (the second session revocation first of all)
   // must not wait with it. It never rejects.
   void lowerMemberCounts(committed.serverIds, userId);
-  return { secure: committed.removal, removedFrom: committed.serverIds };
+  return { secure: committed.removal, removedFrom: committed.serverIds, conversations: committed.conversations };
 }
 
 /** What a committed `deleteAccountRows` leaves its caller to announce. */
@@ -279,6 +320,78 @@ export interface AccountRowsDeleted {
    * not announced it in yet.
    */
   removedFrom: string[];
+  /**
+   * The account's direct conversations as the committed attempt left them:
+   * kept for the other person (read-only) or deleted, and the files to
+   * delete after the commit (settleConversationsOfDeletedAccount).
+   */
+  conversations: DeletedAccountConversations;
+}
+
+/**
+ * After a committed account deletion (or the registration hygiene sweep's,
+ * utils/registrationHygiene.ts), its direct conversations' people are told
+ * (#131), each step on its own, logged, never failing the deletion (which
+ * has committed):
+ *  - a conversation kept for the other person: `dm:conversation:read_only`
+ *    to its room, only now that its rows are rewritten (a client that
+ *    decrypted a row still holding the account's ciphertext after the event
+ *    could refill the cache it purges on it);
+ *  - a conversation deleted: its room is emptied, the local form first, then
+ *    the cluster-wide one (utils/memberBroadcast.ts says why), never a
+ *    `fetchSockets()`. No `dm:conversation:deleted` goes out: that is the
+ *    remover's notice, and here the one who would get it is the deleted
+ *    account, whose sessions are ended; the other person had removed the
+ *    conversation (or is gone too) and is told nothing, as for any removal;
+ *  - a call left in any of them ends (dm:voice:left / dm:voice:ended to its
+ *    room, before a deleted one's room is emptied), with no "call ended"
+ *    notice: a deleted conversation cannot hold one, and a kept one is
+ *    read-only.
+ */
+export async function announceConversationsOfDeletedAccount(conversations: DeletedAccountConversations, logPrefix: string): Promise<void> {
+  const { kept, deleted } = conversations;
+  if (kept.length === 0 && deleted.length === 0) return;
+  let io: ReturnType<typeof getIO>;
+  try {
+    io = getIO();
+  } catch (err) {
+    console.warn(`${logPrefix} The notices about ${kept.length + deleted.length} direct conversation(s) of a deleted account were not sent:`, err instanceof Error ? err.message : err);
+    return;
+  }
+
+  for (const conversationId of kept) {
+    try {
+      io.to(`dm:${conversationId}`).emit(WS_EVENTS.DM_CONVERSATION_READ_ONLY, { conversationId });
+    } catch (err) {
+      console.warn(`${logPrefix} The read-only notice of conversation ${conversationId} failed:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  // dm:voice:left names the conversation's placeholder, never the deleted
+  // account (still in the call's registry when it was in the call)
+  const calls = await Promise.allSettled([...kept, ...deleted].map((conversationId) =>
+    endDMCall(io, conversationId, { notice: false, leftUserId: deletedParticipantId(conversationId) })));
+  const failedCalls = calls.filter((c): c is PromiseRejectedResult => c.status === 'rejected');
+  if (failedCalls.length > 0) {
+    console.warn(
+      `${logPrefix} Ending the calls of ${failedCalls.length} direct conversation(s) of a deleted account failed:`,
+      failedCalls[0].reason instanceof Error ? failedCalls[0].reason.message : failedCalls[0].reason,
+    );
+  }
+
+  if (deleted.length > 0) {
+    const rooms = deleted.map((conversationId) => `dm:${conversationId}`);
+    try {
+      io.local.in(rooms).socketsLeave(rooms);
+    } catch (err) {
+      console.warn(`${logPrefix} The local room leave of ${rooms.length} deleted conversation(s) failed:`, err instanceof Error ? err.message : err);
+    }
+    try {
+      io.in(rooms).socketsLeave(rooms);
+    } catch (err) {
+      console.warn(`${logPrefix} The cluster room leave of ${rooms.length} deleted conversation(s) failed:`, err instanceof Error ? err.message : err);
+    }
+  }
 }
 
 function ownsASpaceNow(err: unknown): boolean {
@@ -331,7 +444,10 @@ async function lowerMemberCounts(serverIds: string[], userId: string): Promise<v
   }
 }
 
-function runAccountDeletionTransaction(userId: string): Promise<{ removal: SecureMembershipRemoval; serverIds: string[] }> {
+function runAccountDeletionTransaction(
+  userId: string,
+  keepConversations: boolean,
+): Promise<{ removal: SecureMembershipRemoval; serverIds: string[]; conversations: DeletedAccountConversations }> {
   // Most E2E material has no key to the account (the key shares, master
   // transfers, master key and device registry; the devices and the two
   // backups do, and cascade, and the one-time keys cascade from their device),
@@ -360,7 +476,11 @@ function runAccountDeletionTransaction(userId: string): Promise<{ removal: Secur
     // membership's key to the account waits for this transaction, so the
     // user delete below removes no membership that this transaction does not
     // count and announce.
-    await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+    // Gone already (another deletion, or the registration hygiene sweep,
+    // deleted it first): the answer an unknown account gets, everything this
+    // attempt did rolled back
+    const account = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+    if (account.length === 0) throw new NotFoundError('User');
     const joinedSince = (await tx.$queryRaw<Array<{ server_id: string }>>`
       DELETE FROM server_members WHERE user_id = ${userId} RETURNING server_id`).map((r) => r.server_id);
     // The registry row a device registration committed since step 3 (the
@@ -368,10 +488,15 @@ function runAccountDeletionTransaction(userId: string): Promise<{ removal: Secur
     // Its device rows go with the user delete; this row has no key to the
     // account. Under the account row lock, no registration can write it again.
     await tx.e2EDeviceRegistry.deleteMany({ where: { userId } });
+    // The direct conversations, under the account row lock (no new one can
+    // start with this account meanwhile): each locked in id order, then kept
+    // for the other person read-only or deleted, explicitly, whatever the
+    // foreign keys from the sides say (see the lock order above).
+    const conversations = await settleConversationsOfDeletedAccount(tx, userId, { keep: keepConversations });
     // The row, and with it the long cascade. The last statement: nothing in
     // this transaction touches a space row (see the lock order above).
     await tx.user.delete({ where: { id: userId } });
-    return { removal, serverIds: [...serverIds, ...joinedSince] };
+    return { removal, serverIds: [...serverIds, ...joinedSince], conversations };
   }, {
     // Deleting a user cascades across ~36 relations (messages, reactions,
     // reads, conversations, reports, tickets, themes…) plus six E2E deletes.

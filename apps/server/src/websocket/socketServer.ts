@@ -14,7 +14,7 @@ import { registerAdminSubscriptionHandlers } from './adminSubscriptions';
 import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
 import { trustsProxy, forwardedClientAddress } from '../utils/trustProxy';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
-import { Permissions } from '@voxium/shared';
+import { Permissions, DELETED_MESSAGE_TYPE } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 import { visibilityRequestMark, resyncAfterJoins } from '../utils/channelVisibilityRooms';
 import { dmListedSql, dmUnreadSinceSql } from '../utils/conversationVisibility';
@@ -590,6 +590,8 @@ export function initSocketServer(httpServer: HttpServer) {
     // (utils/conversationVisibility.ts), and none for a conversation the user
     // removed (it is off their list; a newer message unhides it first). The
     // rooms above are joined for those too: a later message must reach them.
+    // A deleted account's message is a placeholder with no author ($3, #131):
+    // never unread.
     try {
       if (conversations.length > 0) {
         const convIds = conversations.map((c) => c.id);
@@ -605,13 +607,15 @@ export function initSocketServer(httpServer: HttpServer) {
                WHERE m.conversation_id = conv.id
                  AND m.created_at > ${dmUnreadSinceSql('cr')}
                  AND m.author_id IS DISTINCT FROM $1
+                 AND m.type <> $3
                LIMIT 100
              ) sub
            ) cnt
            WHERE cnt.val > 0
              AND ${dmListedSql('cr')}`,
           userId,
-          convIds
+          convIds,
+          DELETED_MESSAGE_TYPE,
         );
 
         if (dmUnreads.length > 0) {

@@ -80,7 +80,11 @@ vi.mock('../../utils/conversationLifecycle', async () => {
       return { message, context };
     }),
     removeConversationForUser: vi.fn(),
-    reopenConversationForUser: vi.fn().mockResolvedValue(true),
+    reopenConversationForUser: vi.fn().mockResolvedValue('reopened'),
+    // An edit, a reaction, a delete: the write on the transaction's client
+    // (here the mocked one), under the conversation row lock whose checks
+    // are tested in utils/conversationLifecycle.test.ts
+    changeConversationMessage: vi.fn(async (_conversationId: string, _userId: string, _opts: unknown, act: (tx: unknown, view: unknown) => unknown) => act(client, {})),
   };
 });
 
@@ -174,6 +178,7 @@ vi.mock('../../utils/prisma', () => ({
       findUnique: vi.fn(),
       findMany: vi.fn(),
       create: vi.fn(),
+      createMany: vi.fn(),
       delete: vi.fn(),
       deleteMany: vi.fn(),
       groupBy: vi.fn(),
@@ -223,6 +228,7 @@ function resetPrismaMocks() {
   vi.mocked(prisma.messageReaction.findUnique).mockReset();
   vi.mocked(prisma.messageReaction.findMany).mockReset();
   vi.mocked(prisma.messageReaction.create).mockReset();
+  vi.mocked(prisma.messageReaction.createMany).mockReset();
   vi.mocked(prisma.messageReaction.delete).mockReset();
   vi.mocked(prisma.messageReaction.deleteMany).mockReset();
   vi.mocked(prisma.messageReaction.groupBy).mockReset();
@@ -596,7 +602,7 @@ describe('DM routes — PUT /:conversationId/messages/:messageId/reactions/:emoj
     vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1' } as any);
     vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
     vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
-    vi.mocked(prisma.messageReaction.create).mockResolvedValueOnce({} as any);
+    vi.mocked(prisma.messageReaction.createMany).mockResolvedValueOnce({ count: 1 } as any);
     vi.mocked(prisma.messageReaction.findMany).mockResolvedValueOnce([{ emoji: EMOJI, userId: 'user-1' }] as any);
 
     const app = createApp();
@@ -604,17 +610,20 @@ describe('DM routes — PUT /:conversationId/messages/:messageId/reactions/:emoj
 
     expect(res.status).toBe(200);
     expect(res.body.data.action).toBe('add');
+    // ON CONFLICT DO NOTHING: inside the transaction, a duplicate must not be a failed statement
+    expect(prisma.messageReaction.createMany).toHaveBeenCalledWith({ data: [{ messageId: 'msg-1', userId: 'user-1', emoji: EMOJI }], skipDuplicates: true });
+    expect(prisma.messageReaction.create).not.toHaveBeenCalled();
     expect(mockTo).toHaveBeenCalledWith('dm:conv-1');
     expect(mockEmit).toHaveBeenCalledWith('dm:message:reaction_update', expect.objectContaining({ action: 'add' }));
   });
 
-  it('race idempotency: responds 200 with action "add" when create rejects with P2002 (concurrent duplicate)', async () => {
+  it('race idempotency: responds 200 with action "add" when the concurrent duplicate already holds the row (the insert skips it)', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1' } as any);
     vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
     vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
-    // The losing half of a double-click race: unique constraint violation
-    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce({ code: 'P2002' });
+    // The losing half of a double-click race: the unique row is there, nothing inserted
+    vi.mocked(prisma.messageReaction.createMany).mockResolvedValueOnce({ count: 0 } as any);
     vi.mocked(prisma.messageReaction.findMany).mockResolvedValueOnce([{ emoji: EMOJI, userId: 'user-1' }] as any);
 
     const app = createApp();
@@ -625,12 +634,12 @@ describe('DM routes — PUT /:conversationId/messages/:messageId/reactions/:emoj
     expect(res.body.data.action).toBe('add');
   });
 
-  it('non-P2002 create errors still fail the request', async () => {
+  it('other insert errors still fail the request', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
     vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1' } as any);
     vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
     vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
-    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce(new Error('connection lost'));
+    vi.mocked(prisma.messageReaction.createMany).mockRejectedValueOnce(new Error('connection lost'));
 
     const app = createApp();
     const res = await request(app).put(reactionUrl);
@@ -1283,7 +1292,7 @@ describe('DM routes — a conversation whose other side was deleted (NULL side)'
     });
   });
 
-  it('the participant check: the remaining person passes, as before (read-only refusals are not part of this change)', async () => {
+  it('the participant check: the remaining person passes, and may read (a read-only conversation is still read)', async () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ ...mockConversation, user1Id: null, user2Id: 'user-1' } as any);
     vi.mocked(prisma.message.findMany).mockResolvedValueOnce([] as any);
 
@@ -1394,7 +1403,7 @@ describe('DM routes — a row deleted while the request ran is answered as missi
 
   it('a reaction on a message deleted after the read: 404 Message, nothing announced', async () => {
     stageReaction();
-    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce(foreignKeyRefused('MessageReaction', 'message_reactions_message_id_fkey'));
+    vi.mocked(prisma.messageReaction.createMany).mockRejectedValueOnce(foreignKeyRefused('MessageReaction', 'message_reactions_message_id_fkey'));
 
     const res = await request(createApp()).put(reactionUrl);
 
@@ -1405,7 +1414,7 @@ describe('DM routes — a row deleted while the request ran is answered as missi
 
   it('a reaction refused by another key (the account) is not taken for a missing message: it surfaces as itself', async () => {
     stageReaction();
-    vi.mocked(prisma.messageReaction.create).mockRejectedValueOnce(foreignKeyRefused('MessageReaction', 'message_reactions_user_id_fkey'));
+    vi.mocked(prisma.messageReaction.createMany).mockRejectedValueOnce(foreignKeyRefused('MessageReaction', 'message_reactions_user_id_fkey'));
 
     expect((await request(createApp()).put(reactionUrl)).status).toBe(500);
   });
@@ -1495,5 +1504,163 @@ describe('DM routes — a row deleted while the request ran is answered as missi
     vi.mocked(prisma.conversationRead.upsert).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_user_id_fkey'));
 
     expect((await request(createApp()).post('/api/v1/dm/conv-1/read')).status).toBe(500);
+  });
+});
+
+// ─── A conversation whose other side's account is gone: read-only (#131) ────
+
+describe('DM routes — a read-only conversation (the other side is gone)', () => {
+  const EMOJI = '👍';
+  const editEnvelope = JSON.stringify({ v: 1, e: 'olm1', t: 1, b: 'ZWRpdGVkY2lwaGVydGV4dA' });
+  const READ_ONLY = { status: 403, error: 'This conversation is read-only' };
+  // the caller (user-1) is the side that is left, either way round
+  const readOnly = [
+    { ...mockConversation, user1Id: 'user-1', user2Id: null },
+    { ...mockConversation, user1Id: null, user2Id: 'user-1' },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
+  });
+
+  it('a send is refused before anything is checked, uploaded or written (403, the shared sentence)', async () => {
+    const { writeConversationMessage } = await import('../../utils/conversationLifecycle');
+    for (const conversation of readOnly) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(conversation as any);
+      const res = await request(createApp()).post('/api/v1/dm/conv-1/messages').send({ content: validEnvelope, encrypted: true, attachments: [{ s3Key: 'attachments/dm-conv-1/abc123-encrypted.bin', fileSize: 10, mimeType: 'application/octet-stream' }] });
+      expect({ status: res.status, error: res.body.error }).toEqual(READ_ONLY);
+    }
+    expect(mockVerifyAttachmentUploads).not.toHaveBeenCalled();
+    expect(writeConversationMessage).not.toHaveBeenCalled();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('an edit is refused before the message is read', async () => {
+    for (const conversation of readOnly) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(conversation as any);
+      const res = await request(createApp()).patch('/api/v1/dm/conv-1/messages/msg-1').send({ content: editEnvelope, encrypted: true });
+      expect({ status: res.status, error: res.body.error }).toEqual(READ_ONLY);
+    }
+    expect(prisma.message.findUnique).not.toHaveBeenCalled();
+    expect(prisma.message.update).not.toHaveBeenCalled();
+  });
+
+  it('a reaction, added or taken back, is refused before the message is read', async () => {
+    for (const conversation of readOnly) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(conversation as any);
+      const res = await request(createApp()).put(`/api/v1/dm/conv-1/messages/msg-1/reactions/${encodeURIComponent(EMOJI)}`);
+      expect({ status: res.status, error: res.body.error }).toEqual(READ_ONLY);
+    }
+    expect(prisma.message.findUnique).not.toHaveBeenCalled();
+    expect(prisma.messageReaction.createMany).not.toHaveBeenCalled();
+    expect(prisma.messageReaction.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("a delete of one's own message, a mark-read and a page still go through", async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(readOnly[0] as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, attachments: [] } as any);
+    vi.mocked(prisma.message.delete).mockResolvedValueOnce({} as any);
+    expect((await request(createApp()).delete('/api/v1/dm/conv-1/messages/msg-1')).status).toBe(200);
+    expect(prisma.message.delete).toHaveBeenCalledWith({ where: { id: 'msg-1' } });
+
+    vi.mocked(prisma.conversationRead.upsert).mockResolvedValueOnce({} as any);
+    expect((await request(createApp()).post('/api/v1/dm/conv-1/read')).status).toBe(200);
+
+    vi.mocked(prisma.message.findMany).mockResolvedValueOnce([] as any);
+    expect((await request(createApp()).get('/api/v1/dm/conv-1/messages')).status).toBe(200);
+  });
+
+  it('the writes repeat the check under the conversation row lock: an edit and a reaction refuse a read-only conversation there, a delete does not', async () => {
+    const { changeConversationMessage } = await import('../../utils/conversationLifecycle');
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(mockConversation as any);
+
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, encrypted: true, content: validEnvelope } as any);
+    vi.mocked(prisma.message.update).mockResolvedValueOnce({ ...mockMessage, encrypted: true, content: editEnvelope, editedAt: new Date() } as any);
+    expect((await request(createApp()).patch('/api/v1/dm/conv-1/messages/msg-1').send({ content: editEnvelope, encrypted: true })).status).toBe(200);
+
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ id: 'msg-1', conversationId: 'conv-1', createdAt: new Date('2024-01-01') } as any);
+    vi.mocked(prisma.messageReaction.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.messageReaction.groupBy).mockResolvedValueOnce([] as any);
+    vi.mocked(prisma.messageReaction.createMany).mockResolvedValueOnce({ count: 1 } as any);
+    vi.mocked(prisma.messageReaction.findMany).mockResolvedValueOnce([] as any);
+    expect((await request(createApp()).put(`/api/v1/dm/conv-1/messages/msg-1/reactions/${encodeURIComponent(EMOJI)}`)).status).toBe(200);
+
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, attachments: [] } as any);
+    vi.mocked(prisma.message.delete).mockResolvedValueOnce({} as any);
+    expect((await request(createApp()).delete('/api/v1/dm/conv-1/messages/msg-1')).status).toBe(200);
+
+    expect(vi.mocked(changeConversationMessage).mock.calls.map((c) => [c[0], c[1], c[2]])).toEqual([
+      ['conv-1', 'user-1', { refuseReadOnly: true }],
+      ['conv-1', 'user-1', { refuseReadOnly: true }],
+      ['conv-1', 'user-1', { refuseReadOnly: false }],
+    ]);
+  });
+
+  it('the refusal the lock makes reaches the caller as it is (an account deletion committed while the edit waited)', async () => {
+    const { changeConversationMessage } = await import('../../utils/conversationLifecycle');
+    const { ForbiddenError } = await import('../../utils/errors');
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(mockConversation as any);
+    vi.mocked(prisma.message.findUnique).mockResolvedValueOnce({ ...mockMessage, encrypted: true, content: validEnvelope } as any);
+    vi.mocked(changeConversationMessage).mockRejectedValueOnce(new ForbiddenError('This conversation is read-only'));
+
+    const res = await request(createApp()).patch('/api/v1/dm/conv-1/messages/msg-1').send({ content: editEnvelope, encrypted: true });
+
+    expect({ status: res.status, error: res.body.error }).toEqual(READ_ONLY);
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
+  it('POST /dm toward a placeholder id answers what an unknown account always got (404 User), and opens nothing', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
+
+    const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'deleted:conv-1' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('User not found');
+    expect(prisma.conversation.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('DM routes — POST /dm toward an account deleted while the request ran', () => {
+  const bob = { id: 'user-2', username: 'bob', displayName: 'Bob', avatarUrl: null, role: 'user', isSupporter: false, supporterTier: null };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetPrismaMocks();
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(bob as any);
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValue(null);
+  });
+
+  it('the new conversation\'s key to the account refused (either side): 404 User, as for an unknown account, and nobody joins a room', async () => {
+    for (const constraint of ['conversations_user1_id_fkey', 'conversations_user2_id_fkey']) {
+      vi.mocked(prisma.conversation.create).mockRejectedValueOnce(foreignKeyRefused('Conversation', constraint));
+
+      const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+      expect(res.status, constraint).toBe(404);
+      expect(res.body.error).toBe('User not found');
+    }
+    expect(prisma.conversationRead.createMany).not.toHaveBeenCalled();
+    expect(mockSocketsJoin).not.toHaveBeenCalled();
+  });
+
+  it('its read rows refused because the account went in between: 404 User, nobody joins a room', async () => {
+    vi.mocked(prisma.conversation.create).mockResolvedValueOnce({ ...mockConversation } as any);
+    vi.mocked(prisma.conversationRead.createMany).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_user_id_fkey'));
+
+    const res = await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('User not found');
+    expect(mockSocketsJoin).not.toHaveBeenCalled();
+  });
+
+  it('any other refusal surfaces as itself', async () => {
+    vi.mocked(prisma.conversation.create).mockRejectedValueOnce(foreignKeyRefused('Conversation', 'some_other_fkey'));
+    expect((await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' })).status).toBe(500);
+
+    vi.mocked(prisma.conversation.create).mockResolvedValueOnce({ ...mockConversation } as any);
+    vi.mocked(prisma.conversationRead.createMany).mockRejectedValueOnce(foreignKeyRefused('ConversationRead', 'conversation_reads_conversation_id_fkey'));
+    expect((await request(createApp()).post('/api/v1/dm').send({ userId: 'user-2' })).status).toBe(500);
   });
 });

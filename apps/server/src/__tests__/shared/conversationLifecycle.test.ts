@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  CONVERSATION_READ_ONLY_MESSAGE,
   DELETED_MESSAGE_TYPE,
   DELETED_PARTICIPANT_ID_PREFIX,
   OPAQUE_ID_RE,
@@ -75,6 +76,16 @@ describe('DELETED_MESSAGE_TYPE and isDeletedMessagePlaceholder', () => {
 
   it('is never a call notice, so the display gate can never pass one as plaintext', () => {
     expect(isDMSystemNotice('')).toBe(false);
+  });
+});
+
+describe('CONVERSATION_READ_ONLY_MESSAGE', () => {
+  // The server's refusal (403, voice:error) and the desktop's own refusal
+  // (DMConversationReadOnlyError) are this one sentence, which the desktop
+  // maps to serverErrors.conversationReadOnly: a second spelling of it would
+  // reach the user untranslated.
+  it('is the one sentence both sides use', () => {
+    expect(CONVERSATION_READ_ONLY_MESSAGE).toBe('This conversation is read-only');
   });
 });
 

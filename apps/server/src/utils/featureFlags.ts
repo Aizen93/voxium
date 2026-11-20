@@ -34,6 +34,14 @@ const DEFAULTS = {
   // webhook execute route answer 403 for every webhook at once (and hides the
   // Integrations tab). Webhook rows and their posted messages are kept.
   webhooks:        { name: 'webhooks',        label: 'Incoming Webhooks',   description: 'Let servers receive messages from incoming webhooks (the public execute endpoint and the Integrations tab)', enabled: true },
+  // What an account deletion does with the account's direct conversations
+  // (utils/accountDeletion.ts, read once per deletion before its
+  // transaction). OFF: each is deleted for both people, every message and
+  // file in it, as before. ON: one the other person can still reach outlives
+  // the account for them, read-only, with the deleted account's messages
+  // reduced to placeholders. OFF until the Privacy Policy has given its
+  // notice of the change.
+  account_deletion_keeps_conversations: { name: 'account_deletion_keeps_conversations', label: 'Conversations Outlive Deleted Accounts', description: 'When an account is deleted, the other person keeps each direct conversation read-only, with the deleted account\'s messages reduced to placeholders (off: the conversation is deleted for both)', enabled: false },
 } satisfies Record<string, FeatureFlagDef>;
 
 /** A registered flag name: a misspelled one in isFeatureEnabled or requireFeature is a type error. */

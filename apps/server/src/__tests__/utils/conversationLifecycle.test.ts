@@ -12,6 +12,13 @@ const h = vi.hoisted(() => ({
 
 /** A name for a raw statement, from its SQL. */
 function rawName(sql: string): string {
+  // the account deletion's statements (settleConversationsOfDeletedAccount)
+  if (/SELECT id, user1_id/.test(sql)) return 'lock: the account\'s conversations FOR UPDATE';
+  if (/unnest\(/.test(sql)) return 'read: the other sides under the locks';
+  if (/UPDATE messages SET/.test(sql)) return 'rewrite: the account\'s messages';
+  if (/DELETE FROM message_reactions/.test(sql)) return 'delete: their reactions';
+  if (/DELETE FROM message_attachments/.test(sql)) return 'delete: their attachment rows';
+  if (/UPDATE conversations SET/.test(sql)) return 'update: the account\'s side set NULL';
   if (/FOR KEY SHARE/.test(sql)) return 'lock: conversation FOR KEY SHARE';
   if (/FOR UPDATE/.test(sql)) return 'lock: conversation FOR UPDATE';
   if (/INSERT INTO conversation_reads/.test(sql)) return 'upsert: remover read row';
@@ -37,9 +44,16 @@ const tx = {
     const result = h.results.has(name) ? h.results.get(name) : [];
     return lazyStatement(h.ran, name, typeof result === 'function' ? (result as () => unknown)() : result);
   }),
+  $executeRaw: vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join('?');
+    rawCalls.push({ sql, values });
+    return lazyStatement(h.ran, rawName(sql), 0);
+  }),
   conversation: {
     findUnique: vi.fn(statement('read: conversation sides', null)),
     delete: vi.fn(statement('delete: conversation', {})),
+    deleteMany: vi.fn(statement('delete: conversations', { count: 0 })),
+    update: vi.fn(statement('update: conversation (never)', {})),
   },
   conversationRead: {
     updateMany: vi.fn(statement('update: unhide read rows', { count: 0 })),
@@ -72,9 +86,12 @@ vi.mock('../../utils/attachmentBlobs', () => ({
 import { prisma } from '../../utils/prisma';
 import { collectAttachmentKeys } from '../../utils/attachmentBlobs';
 import { LOCK_WAIT_TRANSACTION_OPTIONS } from '../../utils/transactionRetry';
+import { DM_SYSTEM_NOTICES } from '@voxium/shared';
 import {
+  changeConversationMessage,
   reopenConversationForUser,
   removeConversationForUser,
+  settleConversationsOfDeletedAccount,
   writeConversationMessage,
 } from '../../utils/conversationLifecycle';
 
@@ -319,6 +336,22 @@ describe('writeConversationMessage', () => {
     expect(announce).not.toHaveBeenCalled();
   });
 
+  it('a conversation whose other side is gone (read-only) is refused under the lock, a write that waited for an account deletion included: 403, nothing written', async () => {
+    for (const other of [{ user1Id: 'user-1', user2Id: null }, { user1Id: null, user2Id: 'user-1' }]) {
+      h.ran.length = 0;
+      h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+      // the sides as the lock finds them: the deletion committed while the write waited
+      h.results.set('read: conversation sides', sides([{ userId: 'user-1', hiddenAt: null, clearedAt: null }], other));
+
+      await expect(write()).rejects.toMatchObject({ statusCode: 403, message: 'This conversation is read-only' });
+      expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'read: conversation sides']);
+    }
+    expect(insert).not.toHaveBeenCalled();
+    expect(announce).not.toHaveBeenCalled();
+    expect(sharedUpdateMany).not.toHaveBeenCalled();
+    expect(sharedAudience).not.toHaveBeenCalled();
+  });
+
   it('refuses a row written with any other time: the guarantee rests on it', async () => {
     stage([]);
 
@@ -506,12 +539,13 @@ describe('removeConversationForUser', () => {
 // ─── A reopen ───────────────────────────────────────────────────────────────
 
 describe('reopenConversationForUser', () => {
-  it('locks the conversation row first (key share), then clears the opener\'s hidden mark only, keeping the floor', async () => {
+  it("locks the conversation row first (key share), reads its sides under it, then clears the opener's hidden mark only, keeping the floor", async () => {
     h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', { user1Id: 'user-1', user2Id: 'user-2' });
 
-    expect(await reopenConversationForUser('conv-1', 'user-1')).toBe(true);
+    expect(await reopenConversationForUser('conv-1', 'user-1', 'user-2')).toBe('reopened');
 
-    expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'update: unhide read rows']);
+    expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'read: conversation sides', 'update: unhide read rows']);
     expect(tx.conversationRead.updateMany).toHaveBeenCalledWith({
       where: { userId: 'user-1', conversationId: 'conv-1', hiddenAt: { not: null } },
       data: { hiddenAt: null },
@@ -522,7 +556,263 @@ describe('reopenConversationForUser', () => {
   it('a conversation a removal deleted while it waited: false, nothing written (the route creates a new one)', async () => {
     h.results.set('lock: conversation FOR KEY SHARE', []);
 
-    expect(await reopenConversationForUser('conv-1', 'user-1')).toBe(false);
+    expect(await reopenConversationForUser('conv-1', 'user-1', 'user-2')).toBe('missing');
     expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE']);
+  });
+
+  it("the other person's account deleted while it waited (the side NULL under the lock, either side): 'other-side-gone', nothing written", async () => {
+    for (const sides of [{ user1Id: 'user-1', user2Id: null }, { user1Id: null, user2Id: 'user-1' }]) {
+      h.ran.length = 0;
+      h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+      h.results.set('read: conversation sides', sides);
+
+      expect(await reopenConversationForUser('conv-1', 'user-1', 'user-2')).toBe('other-side-gone');
+      expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'read: conversation sides']);
+    }
+    expect(tx.conversationRead.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── An edit, a reaction, a delete ──────────────────────────────────────────
+
+describe('changeConversationMessage', () => {
+  const act = vi.fn(async (_tx: unknown, _view: unknown) => {
+    h.ran.push('act: the write');
+    return 'done';
+  });
+
+  beforeEach(() => act.mockClear());
+
+  it("locks the conversation row FIRST (key share), re-reads the view under it, then runs the write on the transaction's own client", async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([{ userId: 'user-1', hiddenAt: null, clearedAt: new Date('2026-11-16T10:00:00Z') }]));
+
+    expect(await changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: true }, act)).toBe('done');
+
+    expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE', 'read: conversation sides', 'act: the write']);
+    expect(act).toHaveBeenCalledWith(tx, expect.objectContaining({ id: 'conv-1', floor: new Date('2026-11-16T10:00:00Z') }));
+    expect(h.options).toEqual([LOCK_WAIT_TRANSACTION_OPTIONS]);
+  });
+
+  it('an edit or a reaction in a conversation found read-only under the lock is refused: 403, nothing written', async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([], { user1Id: 'user-1', user2Id: null }));
+
+    await expect(changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: true }, act))
+      .rejects.toMatchObject({ statusCode: 403, message: 'This conversation is read-only' });
+    expect(act).not.toHaveBeenCalled();
+  });
+
+  it("a delete of one's own message goes on in a read-only conversation", async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([], { user1Id: null, user2Id: 'user-1' }));
+
+    expect(await changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: false }, act)).toBe('done');
+    expect(act).toHaveBeenCalledTimes(1);
+  });
+
+  it('a conversation deleted while it waited: 404 Conversation; a caller no longer a participant: 403; nothing written', async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', []);
+    await expect(changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: false }, act)).rejects.toMatchObject({ statusCode: 404, message: 'Conversation not found' });
+    expect(h.ran).toEqual(['lock: conversation FOR KEY SHARE']);
+
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([], { user1Id: null, user2Id: 'user-2' }));
+    await expect(changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: false }, act)).rejects.toMatchObject({ statusCode: 403, message: 'Not a participant of this conversation' });
+    expect(act).not.toHaveBeenCalled();
+  });
+
+  it('runs again whole after a deadlock (an account deletion of the caller holds its account row)', async () => {
+    h.results.set('lock: conversation FOR KEY SHARE', [{ id: 'conv-1' }]);
+    h.results.set('read: conversation sides', sides([]));
+    vi.mocked(prisma.$transaction).mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: 'P2034' }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useRealTimers();
+
+    expect(await changeConversationMessage('conv-1', 'user-1', { refuseReadOnly: true }, act)).toBe('done');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[DM] A change of a message in conversation conv-1 was aborted by a deadlock'));
+    warn.mockRestore();
+  });
+});
+
+// ─── An account deletion's conversations ───────────────────────────────────
+
+describe('settleConversationsOfDeletedAccount', () => {
+  const A = 'user-a';
+  /** The account's conversations as the lock statement returns them (both positions of the account). */
+  const locked = [
+    { id: 'c-1', user1Id: A, user2Id: 'user-b1' },
+    { id: 'c-2', user1Id: 'user-0b2', user2Id: A },
+    { id: 'c-3', user1Id: A, user2Id: 'user-b3' },
+    { id: 'c-4', user1Id: A, user2Id: null },
+  ];
+  /** The other sides' states: b1 has it listed, b2 hid it with history, b3 removed it with nothing above the floor. */
+  const states = [
+    { conversationId: 'c-1', hidden: false, messageAboveFloor: true, hasMessages: true },
+    { conversationId: 'c-2', hidden: true, messageAboveFloor: true, hasMessages: true },
+    { conversationId: 'c-3', hidden: true, messageAboveFloor: false, hasMessages: true },
+  ];
+  const sql = (name: string) => rawCalls.find((c) => rawName(c.sql) === name)!;
+
+  function stage(opts: { conversations?: typeof locked; states?: typeof states; rewritten?: Array<{ id: string }>; files?: Array<{ s3Key: string; expired: boolean }> } = {}) {
+    h.results.set('lock: the account\'s conversations FOR UPDATE', opts.conversations ?? locked);
+    h.results.set('read: the other sides under the locks', opts.states ?? states);
+    h.results.set('rewrite: the account\'s messages', opts.rewritten ?? [{ id: 'm-1' }, { id: 'm-2' }]);
+    h.results.set('delete: their attachment rows', opts.files ?? [
+      { s3Key: 'attachments/dm-c-1/own1-encrypted.bin', expired: false },
+      { s3Key: 'attachments/dm-c-1/old1-encrypted.bin', expired: true },
+    ]);
+  }
+
+  it('locks every conversation of the account FIRST, in id order, in one statement that names both sides', async () => {
+    stage();
+    await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    expect(h.ran[0]).toBe('lock: the account\'s conversations FOR UPDATE');
+    const lock = sql('lock: the account\'s conversations FOR UPDATE');
+    expect(lock.sql.replace(/\s+/g, ' ')).toMatch(/FROM conversations WHERE user1_id = \? OR user2_id = \? ORDER BY id FOR UPDATE/);
+    expect(lock.values).toEqual([A, A]);
+  });
+
+  it('keep on: each decided under the locks; the kept ones rewritten (rows, then reactions and files), unhidden, side set NULL; the others deleted after their keys are read', async () => {
+    stage();
+
+    const result = await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    expect(result.kept).toEqual(['c-1', 'c-2']);
+    expect(result.deleted).toEqual(['c-3', 'c-4']);
+    expect(h.ran).toEqual([
+      'lock: the account\'s conversations FOR UPDATE',
+      'read: the other sides under the locks',
+      'rewrite: the account\'s messages',
+      'delete: their reactions',
+      'delete: their attachment rows',
+      'update: unhide read rows',
+      'update: the account\'s side set NULL',
+      'read: attachment keys',
+      'delete: conversations',
+    ]);
+    // the other sides only, where there is one (c-4 has none to read)
+    expect(sql('read: the other sides under the locks').values).toEqual([['c-1', 'c-2', 'c-3'], ['user-b1', 'user-0b2', 'user-b3']]);
+    // B2 hid it without clearing: back on their list
+    expect(tx.conversationRead.updateMany).toHaveBeenCalledWith({
+      where: { OR: [{ conversationId: 'c-2', userId: 'user-0b2' }], hiddenAt: { not: null } },
+      data: { hiddenAt: null },
+    });
+    expect(tx.conversation.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['c-3', 'c-4'] } } });
+    expect(collectAttachmentKeys).toHaveBeenCalledWith({ conversationId: { in: ['c-3', 'c-4'] } }, tx);
+  });
+
+  it('the rewrite: only the account\'s own rows of the kept conversations; a placeholder keeps its id, conversation and time; a listed call notice keeps its text', async () => {
+    stage();
+    await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    const rewrite = sql('rewrite: the account\'s messages');
+    const text = rewrite.sql.replace(/\s+/g, ' ');
+    expect(text).toMatch(/WHERE conversation_id = ANY\(\?::text\[\]\) AND author_id = \? RETURNING id$/);
+    for (const set of ['author_id = NULL', 'encrypted = false', 'reply_to_id = NULL', 'edited_at = NULL', 'mentions_everyone = false', 'webhook_id = NULL', 'webhook_name = NULL']) {
+      expect(text).toContain(set);
+    }
+    expect(text).toContain("type = CASE WHEN type = 'system' AND content = ANY(?::text[]) THEN type ELSE ? END");
+    expect(text).toContain("content = CASE WHEN type = 'system' AND content = ANY(?::text[]) THEN content ELSE '' END");
+    // never the row's id, conversation or time
+    expect(text).not.toMatch(/\b(id|conversation_id|created_at) = (?!ANY)/);
+    expect(rewrite.values).toEqual([[...DM_SYSTEM_NOTICES], 'deleted', [...DM_SYSTEM_NOTICES], ['c-1', 'c-2'], A]);
+    // the children of exactly the rows rewritten (the other person's reactions on them too)
+    expect(sql('delete: their reactions').values).toEqual([['m-1', 'm-2']]);
+    expect(sql('delete: their attachment rows').values).toEqual([['m-1', 'm-2']]);
+  });
+
+  it('the side set NULL is one raw statement over the kept conversations that never names updated_at (it orders the other person\'s list)', async () => {
+    stage();
+    await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    const sides = sql('update: the account\'s side set NULL');
+    const text = sides.sql.replace(/\s+/g, ' ');
+    expect(text).toContain('user1_id = CASE WHEN user1_id = ? THEN NULL ELSE user1_id END');
+    expect(text).toContain('user2_id = CASE WHEN user2_id = ? THEN NULL ELSE user2_id END');
+    expect(text).toMatch(/WHERE id = ANY\(\?::text\[\]\)$/);
+    expect(text).not.toMatch(/updated_at/);
+    expect(sides.values).toEqual([A, A, ['c-1', 'c-2']]);
+    expect(tx.conversation.update).not.toHaveBeenCalled();
+  });
+
+  it('the files: the account\'s live files of the kept ones (never an expired row, never a key of another shape) and every file of the deleted ones', async () => {
+    stage({ files: [
+      { s3Key: 'attachments/dm-c-1/own1-encrypted.bin', expired: false },
+      { s3Key: 'attachments/dm-c-1/old1-encrypted.bin', expired: true },
+      { s3Key: 'avatars/someone.webp', expired: false },
+    ] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    expect(result.attachmentKeys).toEqual(['attachments/dm-c-1/own1-encrypted.bin', 'attachments/dm-conv-1/abc-encrypted.bin']);
+    expect(warn).toHaveBeenCalledWith('[Attachments] Skipping a stored attachment key of an unexpected shape');
+    warn.mockRestore();
+  });
+
+  it('keep off: every conversation deleted, both people\'s files read first; nothing rewritten, no side written, no state read', async () => {
+    stage();
+
+    const result = await settleConversationsOfDeletedAccount(tx as any, A, { keep: false });
+
+    expect(result).toEqual({ kept: [], deleted: ['c-1', 'c-2', 'c-3', 'c-4'], attachmentKeys: ['attachments/dm-conv-1/abc-encrypted.bin'] });
+    expect(h.ran).toEqual(['lock: the account\'s conversations FOR UPDATE', 'read: attachment keys', 'delete: conversations']);
+    expect(collectAttachmentKeys).toHaveBeenCalledWith({ conversationId: { in: ['c-1', 'c-2', 'c-3', 'c-4'] } }, tx);
+  });
+
+  it('a conversation that holds no message at all is deleted, whatever the other read row says (listed, or none at all: an insert the deletion met halfway)', async () => {
+    stage({ conversations: [locked[0], locked[2]], states: [
+      { conversationId: 'c-1', hidden: false, messageAboveFloor: false, hasMessages: false },
+      { conversationId: 'c-3', hidden: false, messageAboveFloor: false, hasMessages: false },
+    ] });
+
+    const result = await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    expect(result).toMatchObject({ kept: [], deleted: ['c-1', 'c-3'] });
+    // whether it holds any message is read under the locks, with the other side's state
+    expect(sql('read: the other sides under the locks').sql.replace(/\s+/g, ' ')).toContain('EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = s.id) AS "hasMessages"');
+    expect(tx.conversation.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['c-1', 'c-3'] } } });
+  });
+
+  it('an other side with no read row has never hidden it: kept', async () => {
+    stage({ conversations: [locked[0]], states: [] });
+
+    const result = await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    expect(result.kept).toEqual(['c-1']);
+    expect(tx.conversationRead.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a conversation whose other side is already gone is deleted even when it is the only one (no state read at all)', async () => {
+    stage({ conversations: [locked[3]] });
+
+    const result = await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    expect(result).toMatchObject({ kept: [], deleted: ['c-4'] });
+    expect(h.ran).toEqual(['lock: the account\'s conversations FOR UPDATE', 'read: attachment keys', 'delete: conversations']);
+  });
+
+  it('a kept conversation where the account wrote nothing: no reaction or file statement, nobody to unhide', async () => {
+    stage({ conversations: [locked[0]], rewritten: [] });
+
+    await settleConversationsOfDeletedAccount(tx as any, A, { keep: true });
+
+    expect(h.ran).toEqual([
+      'lock: the account\'s conversations FOR UPDATE',
+      'read: the other sides under the locks',
+      'rewrite: the account\'s messages',
+      'update: the account\'s side set NULL',
+    ]);
+  });
+
+  it('no conversation: the lock statement only', async () => {
+    stage({ conversations: [] });
+
+    expect(await settleConversationsOfDeletedAccount(tx as any, A, { keep: true })).toEqual({ kept: [], deleted: [], attachmentKeys: [] });
+    expect(h.ran).toEqual(['lock: the account\'s conversations FOR UPDATE']);
   });
 });

@@ -5,7 +5,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TFunction } from 'i18next';
-import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE } from '@voxium/shared';
+import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
 import { translateServerError, ALL_ERROR_KEYS } from '../../utils/serverErrors';
 
 /**
@@ -110,8 +110,9 @@ const EXACT: Row[] = [
   { msg: 'User is not a member of this server', key: 'userNotServerMember' },
   { msg: 'Not a member', key: 'notAMember' },
   { msg: 'Not a participant', key: 'notAParticipant' },
-  // written by the client's own refusal today (utils/dmParticipant.ts), the server's sentence once it refuses too
-  { msg: 'This conversation is read-only', key: 'conversationReadOnly' },
+  // the server's refusal in a conversation whose other side is gone, and the
+  // client's own (utils/dmParticipant.ts): one shared sentence
+  { msg: CONVERSATION_READ_ONLY_MESSAGE, key: 'conversationReadOnly' },
   { msg: 'Not authorized', key: 'notAuthorized' },
   { msg: 'Invite not found', key: 'inviteNotFound', src: "NotFoundError('Invite')" },
 

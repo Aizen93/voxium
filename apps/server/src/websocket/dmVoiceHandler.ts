@@ -1,5 +1,5 @@
 import type { Server as SocketServer, Socket } from 'socket.io';
-import { DM_SIGNAL_MAX, E2E_DEVICE_ID_RE, DM_NOTICE_CALL_STARTED, DM_NOTICE_CALL_ENDED } from '@voxium/shared';
+import { DM_SIGNAL_MAX, E2E_DEVICE_ID_RE, DM_NOTICE_CALL_STARTED, DM_NOTICE_CALL_ENDED, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
 import type { ServerToClientEvents, ClientToServerEvents, Message, DMSystemNotice } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
 import { leaveCurrentVoiceChannel } from './voiceHandler';
@@ -10,6 +10,8 @@ import { getRedis, liveNodeCounts, socketExistsInCluster, liveClusterSocketIds, 
 import { shapeConversationMessageAuthor } from '../utils/messageAuthor';
 import { writeConversationMessage } from '../utils/conversationLifecycle';
 import { viewersRoom } from '../utils/conversationAudience';
+import { isReadOnlyConversation } from '../utils/conversationVisibility';
+import { ForbiddenError, NotFoundError } from '../utils/errors';
 
 const authorSelect = {
   select: { id: true, username: true, displayName: true, avatarUrl: true },
@@ -23,7 +25,11 @@ const authorSelect = {
  * right after the commit, to the audience read then, through the same helper
  * as every DM message event (utils/conversationAudience.ts): a side whose
  * floor a removal raised past it meanwhile is not told. A conversation
- * deleted meanwhile refuses it (logged, no notice).
+ * deleted meanwhile refuses it, and so does one whose other side's account
+ * is gone (#131: read-only, the writer refuses every message there under the
+ * row lock) and one the notice's author is no longer a side of (their account
+ * was deleted meanwhile): each a warning and no notice. Anything else the
+ * writer throws is a failure and is logged as an error.
  */
 async function createSystemMessage(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
@@ -58,6 +64,18 @@ async function createSystemMessage(
       viewersRoom(io, conversationId, audience, message.createdAt).emit('dm:message:new', payload);
     });
   } catch (err) {
+    if (err instanceof ForbiddenError && err.message === CONVERSATION_READ_ONLY_MESSAGE) {
+      console.warn(`[DMVoice] No call notice in conversation ${conversationId}: it is read-only`);
+      return;
+    }
+    // The writer's other refusals are answers too, not failures: the
+    // conversation was deleted while the notice waited for its row (404), or
+    // the notice's author is no longer one of its sides (403: their account
+    // was deleted meanwhile). The sentence is the writer's own, never a value.
+    if (err instanceof NotFoundError || err instanceof ForbiddenError) {
+      console.warn(`[DMVoice] No call notice in conversation ${conversationId}: ${err.message}`);
+      return;
+    }
     console.error('[DMVoice] Failed to create system message:', err);
   }
 }
@@ -419,12 +437,18 @@ export async function leaveCurrentDMVoiceChannel(
  * Without a participant there is no call and nothing is touched (a late
  * decline must not reach a call that starts in the same conversation).
  *
+ * `leftUserId` is the user `dm:voice:left` names (by default the call's
+ * first participant): an account deletion names the conversation's
+ * placeholder instead, never the deleted account (the client drops the user
+ * it names from the call, which a placeholder is not in, and `dm:voice:ended`
+ * ends the call either way).
+ *
  * Resolves the ids of the participants it removed (none: no call).
  */
 export async function endDMCall(
   io: SocketServer<ClientToServerEvents, ServerToClientEvents>,
   conversationId: string,
-  opts: { notice: boolean },
+  opts: { notice: boolean; leftUserId?: string },
 ): Promise<string[]> {
   const callUsers = await getDMVoiceUsers(conversationId);
   const participants = Array.from(callUsers.keys());
@@ -440,7 +464,7 @@ export async function endDMCall(
   clearCallTimeout(conversationId);
 
   const [first] = participants;
-  io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: first });
+  io.to(`dm:${conversationId}`).emit('dm:voice:left', { conversationId, userId: opts.leftUserId ?? first });
   io.to(`dm:${conversationId}`).emit('dm:voice:ended', { conversationId });
   if (opts.notice) createSystemMessage(io, conversationId, first, DM_NOTICE_CALL_ENDED);
   return participants;
@@ -515,6 +539,13 @@ export function handleDMVoiceEvents(
     });
     if (!conv || (conv.user1Id !== userId && conv.user2Id !== userId)) {
       console.log(`[DMVoice] User ${userId} not a participant of conversation ${conversationId}`);
+      return;
+    }
+    // The other side's account is gone (#131): there is nobody to call.
+    // Refused before anything is left, rung or written, a reconnect's re-join
+    // of a call there included
+    if (isReadOnlyConversation(conv)) {
+      socket.emit('voice:error', { message: CONVERSATION_READ_ONLY_MESSAGE });
       return;
     }
 

@@ -90,7 +90,7 @@ import { prisma } from '../../utils/prisma';
 import { socketRateLimit } from '../../middleware/rateLimiter';
 import { isFeatureEnabled } from '../../utils/featureFlags';
 import { leaveCurrentVoiceChannel } from '../../websocket/voiceHandler';
-import { NotFoundError } from '../../utils/errors';
+import { ForbiddenError, NotFoundError } from '../../utils/errors';
 
 beforeEach(() => {
   mockWriteConversationMessage.mockReset().mockImplementation(writeNoticeAs());
@@ -2012,6 +2012,17 @@ describe('dmVoiceHandler — endDMCall', () => {
     });
   });
 
+  it("names the user it is given in dm:voice:left (an account deletion names the conversation's placeholder, never the deleted account)", async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+
+    await endDMCall(io as any, 'conv-1', { notice: false, leftUserId: 'deleted:conv-1' });
+
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:left', { conversationId: 'conv-1', userId: 'deleted:conv-1' });
+    expect(io._emit).not.toHaveBeenCalledWith('dm:voice:left', expect.objectContaining({ userId: 'user-1' }));
+    expect(io._emit).toHaveBeenCalledWith('dm:voice:ended', { conversationId: 'conv-1' });
+  });
+
   it('makes every socket in the call room leave it with ONE adapter-wide operation, never a fetch', async () => {
     const io = createMockIO();
     mockRedis.hGetAll.mockResolvedValueOnce(inCall);
@@ -2187,17 +2198,69 @@ describe('dmVoiceHandler — call notices', () => {
     expect(except).toHaveBeenCalledWith(['user:user-2']);
   });
 
-  it('a notice the writer refuses (the conversation was deleted meanwhile) is logged and sends nothing', async () => {
+  it('a notice the writer refuses because the conversation was deleted meanwhile is a warning, not an error, and sends nothing', async () => {
     const io = createMockIO();
     mockRedis.hGetAll.mockResolvedValueOnce(inCall);
     mockWriteConversationMessage.mockRejectedValueOnce(new NotFoundError('Conversation'));
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await endDMCall(io as any, 'conv-1', { notice: true });
 
-    await vi.waitFor(() => expect(errorLog).toHaveBeenCalledWith('[DMVoice] Failed to create system message:', expect.any(NotFoundError)));
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('[DMVoice] No call notice in conversation conv-1: Conversation not found'));
+    expect(errorLog).not.toHaveBeenCalled();
     expect(io._emit).not.toHaveBeenCalledWith('dm:message:new', expect.anything());
     errorLog.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('a notice the writer refuses because the conversation is read-only (the other side was deleted) is a warning, not an error, and sends nothing', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+    mockWriteConversationMessage.mockRejectedValueOnce(new ForbiddenError('This conversation is read-only'));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await endDMCall(io as any, 'conv-1', { notice: true });
+
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('[DMVoice] No call notice in conversation conv-1: it is read-only'));
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalledWith('dm:message:new', expect.anything());
+    errorLog.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('a notice the writer refuses because its author is no longer a side of the conversation (their account was deleted meanwhile) is a warning too', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+    mockWriteConversationMessage.mockRejectedValueOnce(new ForbiddenError('Not a participant of this conversation'));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await endDMCall(io as any, 'conv-1', { notice: true });
+
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('[DMVoice] No call notice in conversation conv-1: Not a participant of this conversation'));
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalledWith('dm:message:new', expect.anything());
+    errorLog.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('a notice the writer could not write for any other reason (a failed statement) stays an error', async () => {
+    const io = createMockIO();
+    mockRedis.hGetAll.mockResolvedValueOnce(inCall);
+    const failure = Object.assign(new Error('the statement failed'), { code: 'P1017' });
+    mockWriteConversationMessage.mockRejectedValueOnce(failure);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await endDMCall(io as any, 'conv-1', { notice: true });
+
+    await vi.waitFor(() => expect(errorLog).toHaveBeenCalledWith('[DMVoice] Failed to create system message:', failure));
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('No call notice'));
+    expect(io._emit).not.toHaveBeenCalledWith('dm:message:new', expect.anything());
+    errorLog.mockRestore();
+    warn.mockRestore();
   });
 
   it('after a call was ended from elsewhere (a removal), the remover\'s socket leaving it writes no notice', async () => {
@@ -2306,10 +2369,10 @@ describe('dmVoiceHandler — endDMCallIfParticipant', () => {
 });
 
 // ─── A conversation whose other side was deleted (NULL side) ────────────────
-// Nothing writes a NULL side yet; the rows are constructed. The participant
-// checks compare a side with the caller (`null !== userId`): the remaining
-// person passes as before (refusing a call there is a later change), nobody
-// passes as the deleted side.
+// The rows are constructed (an account deletion that keeps the conversation
+// writes them). The participant checks compare a side with the caller
+// (`null !== userId`): the remaining person passes them but is refused a call
+// (the conversation is read-only), nobody passes as the deleted side.
 
 describe('dmVoiceHandler — a conversation whose other side was deleted (NULL side)', () => {
   let socket: ReturnType<typeof createMockSocket>['socket'];
@@ -2336,8 +2399,26 @@ describe('dmVoiceHandler — a conversation whose other side was deleted (NULL s
     expect(mockRedis.hGetAll).not.toHaveBeenCalled();
   });
 
-  it('dm:voice:join: the remaining person passes the participant check as before', async () => {
-    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ user1Id: 'user-1', user2Id: null } as any);
+  it('dm:voice:join: the remaining person is answered voice:error with the read-only sentence, before anything is left, rung or written', async () => {
+    for (const sides of [{ user1Id: 'user-1', user2Id: null }, { user1Id: null, user2Id: 'user-1' }]) {
+      vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce(sides as any);
+      await handlers.get('dm:voice:join')!('conv-1', { selfMute: false, selfDeaf: false });
+    }
+
+    expect(socket.emit.mock.calls).toEqual([
+      ['voice:error', { message: 'This conversation is read-only' }],
+      ['voice:error', { message: 'This conversation is read-only' }],
+    ]);
+    expect(leaveCurrentVoiceChannel).not.toHaveBeenCalled();
+    expect(socket.join).not.toHaveBeenCalled();
+    expect(mockRedis.get).not.toHaveBeenCalled();
+    expect(mockRedis.hGetAll).not.toHaveBeenCalled();
+    expect(io._emit).not.toHaveBeenCalled();
+    expect(mockWriteConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it('dm:voice:join: a live conversation is joined as before', async () => {
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ user1Id: 'user-1', user2Id: 'user-2' } as any);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(mockUser as any);
     mockRedis.hGetAll.mockResolvedValueOnce({});
     mockRedis.hGetAll.mockResolvedValueOnce({

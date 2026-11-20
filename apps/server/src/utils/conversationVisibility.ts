@@ -24,7 +24,10 @@ import { ForbiddenError, NotFoundError } from './errors';
  *
  * A side whose account is gone (a NULL `user1Id` / `user2Id`) is no
  * participant: it sees nothing, counts as hidden with an infinite floor in
- * the real-deletion rule (nobodyCanReach) and is never in an audience.
+ * the real-deletion rule (nobodyCanReach) and is never in an audience. The
+ * person left has the conversation read-only (isReadOnlyConversation); an
+ * account deletion decides whether it survives for them
+ * (conversationAfterAccountDeletion).
  *
  * The rule exists once, here, in three forms that must agree: the predicate
  * (isAboveFloor), the Prisma filter (aboveFloorWhere) and the SQL used by the
@@ -164,6 +167,49 @@ export function nobodyCanReach(sides: readonly [SideReach, SideReach]): boolean 
     const facesDeletedSide = sides[1 - i].userId === null;
     return side.hidden && (!side.messageAboveFloor || facesDeletedSide);
   });
+}
+
+/**
+ * What an account deletion does with one conversation of the deleted account
+ * (#131), decided under the conversation row lock (conversationLifecycle.ts
+ * settleConversationsOfDeletedAccount): THE rule, in one place.
+ *  - A conversation that holds no message at all is deleted, whatever the
+ *    read rows say (listed, hidden, or no read row at all, as an insert that
+ *    met the deletion halfway leaves it): there is nothing in it for the
+ *    other person to keep.
+ *  - Otherwise, the real-deletion rule above, with the deleted account
+ *    counted as a side that has removed the conversation and sees nothing in
+ *    it: the conversation is deleted when the other side is gone too, or
+ *    when the other person has it removed with nothing above their floor
+ *    (they cleared it); otherwise it survives for them, read-only.
+ *
+ * The deleted side is NOT passed as a NULL side here: nobodyCanReach counts a
+ * live side facing a deleted one as unable to reach anything once hidden (no
+ * message can come and nobody can reopen it with them), which would delete
+ * every conversation the other person had merely hidden. Those survive and
+ * come back to the other person's list (`unhide`): they hid it without
+ * clearing what is there, and the deletion is what made it read-only.
+ */
+export function conversationAfterAccountDeletion(
+  deletedUserId: string,
+  other: SideReach,
+  conversationHasMessages: boolean,
+): { survives: boolean; unhide: boolean } {
+  if (!conversationHasMessages) return { survives: false, unhide: false };
+  const deleted: SideReach = { userId: deletedUserId, hidden: true, messageAboveFloor: false };
+  const survives = !nobodyCanReach([deleted, other]);
+  return { survives, unhide: survives && other.hidden };
+}
+
+/**
+ * Whether a conversation is read-only: one side's account is gone (a NULL
+ * side, #131). The person left may read it, mark it read, delete their own
+ * messages and remove it; every write that adds to it (a message, an edit, a
+ * reaction, an upload, a call and its notices) is refused
+ * (CONVERSATION_READ_ONLY_MESSAGE).
+ */
+export function isReadOnlyConversation(sides: { user1Id: string | null; user2Id: string | null }): boolean {
+  return sides.user1Id === null || sides.user2Id === null;
 }
 
 /** A conversation as one participant sees it. */

@@ -13,7 +13,13 @@ import path from 'node:path';
 //     one writer of DM messages, the send route and the call notices alike),
 //     which is meant to move it up both lists;
 //   - the real deletion of a conversation nobody can reach any more
-//     (removeConversationForUser), which nobody sees.
+//     (removeConversationForUser), which nobody sees;
+//   - an account deletion's settlement of the account's conversations
+//     (settleConversationsOfDeletedAccount, #131): the delete of the ones
+//     nobody can reach, and ONE raw statement that sets the deleted
+//     account's side NULL in the ones kept for the other person. That
+//     statement names the two sides only, never `updated_at`, so the kept
+//     conversation stays where it was in the other person's list.
 // Every Prisma write to the model (on any client, a chain split over lines
 // included), every nested write that reaches a conversation row through a
 // relation (`message.update({ data: { conversation: { update: … } } })`,
@@ -71,7 +77,11 @@ const RAW_WRITE = /\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:"?public"?\s*\.
 
 const ALLOWED: Record<string, { count: number; reason: string }> = {
   'routes/dm.ts': { count: 1, reason: 'POST /dm creates a conversation for a new pair' },
-  'utils/conversationLifecycle.ts': { count: 2, reason: 'the list-order bump after a new message (writeConversationMessage), and the delete of a conversation nobody can reach (removeConversationForUser)' },
+  'utils/conversationLifecycle.ts': { count: 3, reason: 'the list-order bump after a new message (writeConversationMessage), the delete of a conversation nobody can reach (removeConversationForUser), and the delete of a deleted account\'s conversations nobody can reach (settleConversationsOfDeletedAccount)' },
+};
+
+const RAW_ALLOWED: Record<string, { count: number; reason: string }> = {
+  'utils/conversationLifecycle.ts': { count: 1, reason: 'the deleted account\'s side set NULL in the conversations kept for the other person (settleConversationsOfDeletedAccount): the two sides only, never updated_at' },
 };
 
 /** The body of one exported function of a file, up to the next top-level declaration. */
@@ -100,13 +110,34 @@ describe('writes to the conversations row', () => {
     expect(found, 'a write to a conversation row moves it up the other person\'s list: review it against #47, then count it here with its reason').toEqual(expected);
   });
 
-  it('no raw statement writes the table', () => {
+  it('counts every raw statement that writes the table against the reviewed list, file by file', () => {
     const found: Record<string, number> = {};
     for (const { rel, text } of files) {
       const n = countIn(text, RAW_WRITE);
       if (n > 0) found[rel] = n;
     }
-    expect(found).toEqual({});
+    const expected = Object.fromEntries(Object.entries(RAW_ALLOWED).map(([rel, { count }]) => [rel, count]));
+    expect(found).toEqual(expected);
+  });
+
+  it('an account deletion writes a conversation row only to set the deleted side NULL or to delete it, after deciding which, and never moves updated_at', () => {
+    const lifecycle = files.find((f) => f.rel === 'utils/conversationLifecycle.ts')!.text;
+    const settle = functionBody(lifecycle, 'settleConversationsOfDeletedAccount');
+    expect(countIn(settle, MODEL_WRITE)).toBe(1);
+    expect(countIn(settle, /\btx\.conversation\.deleteMany\(/g)).toBe(1);
+    expect(countIn(settle, RAW_WRITE)).toBe(1);
+    // both writes come after the decision
+    const decided = settle.indexOf('conversationAfterAccountDeletion(');
+    expect(decided).toBeGreaterThan(0);
+    expect(settle.indexOf('UPDATE conversations SET')).toBeGreaterThan(decided);
+    expect(settle.indexOf('tx.conversation.deleteMany(')).toBeGreaterThan(decided);
+    // the side statement names the two sides and nothing else of the row
+    const start = settle.indexOf('UPDATE conversations SET');
+    const statement = settle.slice(start, settle.indexOf('`', start));
+    expect(statement).toMatch(/user1_id = CASE WHEN user1_id = \$\{userId\} THEN NULL ELSE user1_id END/);
+    expect(statement).toMatch(/user2_id = CASE WHEN user2_id = \$\{userId\} THEN NULL ELSE user2_id END/);
+    expect(statement).not.toMatch(/updated_at|updatedAt/);
+    expect(countIn(settle, /prisma\.conversation\./g)).toBe(0);
   });
 
   it('no nested write reaches a conversation row through a relation', () => {

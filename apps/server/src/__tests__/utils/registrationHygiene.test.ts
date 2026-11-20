@@ -1,11 +1,36 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { lazyStatement } from '../helpers/lazyStatement';
 
-vi.mock('../../utils/prisma', () => ({
-  prisma: {
+// The order the deletion's statements RUN in (lazyStatement), across the suite
+const ran = vi.hoisted(() => [] as string[]);
+
+vi.mock('../../utils/prisma', () => {
+  const prisma: Record<string, unknown> = {
     user: { findMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn() },
     ipRecord: { deleteMany: vi.fn(), count: vi.fn() },
-  },
-}));
+  };
+  // The deletion's transaction runs on this same mocked client. Its raw
+  // statements: the account lock answers every id it is asked for (each
+  // still satisfies the guards), the conversation lock finds none.
+  prisma.$queryRaw = vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join('?');
+    if (/FROM users/.test(sql)) return Promise.resolve((values[0] as string[]).map((id) => ({ id })));
+    return Promise.resolve([]);
+  });
+  prisma.$transaction = vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma));
+  return { prisma };
+});
+
+// The conversation step (its own suites: conversationLifecycle.test.ts, and a
+// real database) and what follows its commit (accountDeletion.test.ts)
+const settle = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/conversationLifecycle', () => ({ settleConversationsOfDeletedAccount: (...a: unknown[]) => settle(...a) }));
+const announce = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/accountDeletion', () => ({ announceConversationsOfDeletedAccount: (...a: unknown[]) => announce(...a) }));
+const deleteBlobs = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/attachmentBlobs', () => ({ deleteAttachmentBlobs: (...a: unknown[]) => deleteBlobs(...a) }));
+const flag = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../../utils/featureFlags', () => ({ isFeatureEnabled: (...a: unknown[]) => flag(...(a as [])) }));
 
 const deleteMultipleFromS3 = vi.hoisted(() => vi.fn(async (keys: string[]) => keys.length));
 vi.mock('../../utils/s3', () => ({ deleteMultipleFromS3 }));
@@ -43,7 +68,7 @@ vi.mock('../../services/signupService', () => ({
 }));
 
 import { prisma } from '../../utils/prisma';
-import { runRegistrationHygiene, runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS, IP_RETENTION_DAYS } from '../../utils/registrationHygiene';
+import { runRegistrationHygiene, runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS, IP_RETENTION_DAYS, SWEEP_ACCOUNTS_PER_TRANSACTION, HygieneBatchFailedError } from '../../utils/registrationHygiene';
 import { subnetOf } from '../../middleware/rateLimiter';
 
 // The sweep is what makes bot registration harvests worthless: unverified
@@ -100,6 +125,328 @@ describe('subnetOf — the range key the slow-drip counters group by', () => {
 
   it('passes through unparseable input rather than grouping strangers together', () => {
     expect(subnetOf('unknown')).toBe('unknown');
+  });
+});
+
+// ─── The swept accounts' direct conversations (#131) ────────────────────────
+// The sweep deletes accounts without deleteUserAccount, so it settles their
+// conversations itself, by the rule and the flag an account deletion uses:
+// nothing it does rests on the foreign keys from a conversation's sides.
+
+describe('registration hygiene sweep — the swept accounts and their conversations', () => {
+  const EMPTY = { kept: [], deleted: [], attachmentKeys: [] };
+  // the mocked client's own behaviour, put back after each test here
+  const defaultQueryRaw = vi.mocked(prisma.$queryRaw).getMockImplementation()!;
+  const defaultTransaction = vi.mocked(prisma.$transaction).getMockImplementation()!;
+  afterEach(() => {
+    vi.mocked(prisma.$queryRaw).mockImplementation(defaultQueryRaw);
+    vi.mocked(prisma.$transaction).mockImplementation(defaultTransaction);
+    deleteBlobs.mockReset();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ran.length = 0;
+    vi.mocked(prisma.user.findMany).mockResolvedValue([
+      { id: 'u-1', avatarUrl: null }, { id: 'u-2', avatarUrl: null }, { id: 'u-3', avatarUrl: null },
+    ] as never);
+    vi.mocked(prisma.user.deleteMany).mockResolvedValue({ count: 3 } as never);
+    vi.mocked(prisma.ipRecord.deleteMany).mockResolvedValue({ count: 0 } as never);
+    settle.mockImplementation(async () => EMPTY);
+    announce.mockImplementation(async () => {});
+    flag.mockImplementation(() => false);
+  });
+
+  /**
+   * The raw statements recorded when they RUN: the account lock answers
+   * `locked`, the ownership re-read `owners`, the conversation lock `sides`.
+   */
+  function stage(locked: string[], sides: Array<{ user1Id: string | null; user2Id: string | null }> = [], owners: string[] = []) {
+    vi.mocked(prisma.$queryRaw).mockImplementation(((strings: TemplateStringsArray) => {
+      const sql = strings.join('?');
+      if (/FROM users/.test(sql)) return lazyStatement(ran, 'lock: the accounts that still qualify', locked.map((id) => ({ id })));
+      if (/FROM servers WHERE owner_id/.test(sql)) return lazyStatement(ran, 'read: which of them own a space now', owners.map((ownerId) => ({ ownerId })));
+      return lazyStatement(ran, 'lock: their conversations', sides);
+    }) as never);
+    settle.mockImplementation((_tx: unknown, userId: string) => { ran.push(`conversations of ${userId}`); return Promise.resolve(EMPTY); });
+    vi.mocked(prisma.user.deleteMany).mockImplementation(((args: { where: { id: { in: string[] } } }) =>
+      lazyStatement(ran, 'delete: the accounts', { count: args.where.id.in.length })) as never);
+  }
+
+  it('in one transaction: the accounts that STILL satisfy every guard first, then their conversations in one statement, then the step for each account that is a side of one, then the delete by id', async () => {
+    stage(['u-1', 'u-2', 'u-3'], [{ user1Id: 'u-1', user2Id: 'v-9' }, { user1Id: 'v-8', user2Id: 'u-3' }]);
+
+    const result = await runRegistrationHygiene();
+
+    expect(result.deletedUsers).toBe(3);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000, maxWait: 10_000 });
+    expect(ran).toEqual([
+      'lock: the accounts that still qualify',
+      'read: which of them own a space now',
+      'lock: their conversations',
+      'conversations of u-1',
+      'conversations of u-3',
+      'delete: the accounts',
+    ]);
+    // the step runs on the transaction's own client
+    expect(settle).toHaveBeenCalledWith(prisma, 'u-1', { keep: false });
+  });
+
+  it('the account lock repeats every guard and takes the rows in id order; the conversation lock takes every conversation of them in id order', async () => {
+    await runRegistrationHygiene();
+
+    const calls = vi.mocked(prisma.$queryRaw).mock.calls as unknown as Array<[string[], ...unknown[]]>;
+    const accounts = calls.find(([strings]) => /FROM users/.test(strings.join('?')))!;
+    const text = accounts[0].join('?').replace(/\s+/g, ' ');
+    for (const guard of ['u.email_verified = false', 'u.created_at < ?', "u.role = 'user'", 'NOT EXISTS (SELECT 1 FROM servers s WHERE s.owner_id = u.id)']) {
+      expect(text).toContain(guard);
+    }
+    expect(text).toMatch(/ORDER BY u\.id FOR UPDATE OF u$/);
+    expect(accounts[1]).toEqual(['u-1', 'u-2', 'u-3']);
+    const conversations = calls.find(([strings]) => /FROM conversations/.test(strings.join('?')))!;
+    expect(conversations[0].join('?').replace(/\s+/g, ' ')).toMatch(/WHERE user1_id = ANY\(\?::text\[\]\) OR user2_id = ANY\(\?::text\[\]\) ORDER BY id FOR UPDATE$/);
+  });
+
+  it('an account verified since the select is not locked, so it is neither settled nor deleted (the delete names the locked ids, the guards repeated)', async () => {
+    stage(['u-1', 'u-3'], [{ user1Id: 'u-2', user2Id: 'v-9' }]);
+
+    const result = await runRegistrationHygiene();
+
+    expect(result.deletedUsers).toBe(2);
+    expect(settle).not.toHaveBeenCalled();
+    const where = vi.mocked(prisma.user.deleteMany).mock.calls[0][0]!.where as Record<string, unknown>;
+    expect(where.id).toEqual({ in: ['u-1', 'u-3'] });
+    expect(where).toMatchObject({ emailVerified: false, role: 'user', ownedServers: { none: {} } });
+  });
+
+  it('nothing still qualifies: no conversation statement, no delete', async () => {
+    stage([]);
+
+    expect((await runRegistrationHygiene()).deletedUsers).toBe(0);
+    expect(ran).toEqual(['lock: the accounts that still qualify']);
+    expect(prisma.user.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('a locked account that owns a space NOW (an ownership write the lock waited for) is dropped before anything is settled or deleted', async () => {
+    // The lock re-checks only the account row's own columns after a wait; the
+    // ownership guard reads `servers`, so it is read again in a statement of
+    // its own, on a snapshot taken after the lock was granted
+    stage(['u-1', 'u-2', 'u-3'], [{ user1Id: 'u-2', user2Id: 'v-9' }, { user1Id: 'u-3', user2Id: 'v-8' }], ['u-2']);
+
+    const result = await runRegistrationHygiene();
+
+    expect(result.deletedUsers).toBe(2);
+    expect(ran.slice(0, 3)).toEqual(['lock: the accounts that still qualify', 'read: which of them own a space now', 'lock: their conversations']);
+    expect(settle.mock.calls.map((c) => c[1])).toEqual(['u-3']);
+    expect((vi.mocked(prisma.user.deleteMany).mock.calls[0][0]!.where as { id: { in: string[] } }).id.in).toEqual(['u-1', 'u-3']);
+    const calls = vi.mocked(prisma.$queryRaw).mock.calls as unknown as Array<[string[], ...unknown[]]>;
+    const owners = calls.find(([strings]) => /FROM servers WHERE owner_id/.test(strings.join('?')))!;
+    expect(owners[0].join('?').replace(/\s+/g, ' ').trim()).toBe('SELECT DISTINCT owner_id AS "ownerId" FROM servers WHERE owner_id = ANY(?::text[])');
+    expect(owners[1]).toEqual(['u-1', 'u-2', 'u-3']);
+    // the conversation lock names only the accounts left
+    const conversations = calls.find(([strings]) => /FROM conversations/.test(strings.join('?')))!;
+    expect(conversations.slice(1)).toEqual([['u-1', 'u-3'], ['u-1', 'u-3']]);
+  });
+
+  it('every locked account owns a space now: nothing settled, nothing deleted', async () => {
+    stage(['u-1'], [{ user1Id: 'u-1', user2Id: 'v-9' }], ['u-1']);
+
+    expect((await runRegistrationHygiene()).deletedUsers).toBe(0);
+    expect(ran).toEqual(['lock: the accounts that still qualify', 'read: which of them own a space now']);
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  it('a final delete that removes another number of accounts than were settled rolls the batch back whole (no settlement without its delete) and stops the sweep there', async () => {
+    stage(['u-1', 'u-2', 'u-3'], [{ user1Id: 'u-1', user2Id: 'v-9' }]);
+    vi.mocked(prisma.user.deleteMany).mockImplementation((() => lazyStatement(ran, 'delete: the accounts', { count: 2 })) as never);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await runRegistrationHygiene();
+
+      // thrown inside the transaction: it rolls back the settlement too
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(result.deletedUsers).toBe(0);
+      expect(result.failedBatch).toEqual({ name: 'SweepDeleteMismatchError', code: 'SWEEP_DELETE_MISMATCH' });
+      expect(announce).not.toHaveBeenCalled();
+      expect(deleteBlobs).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('the flag is read ONCE for the sweep and given to every step', async () => {
+    flag.mockImplementation(() => true);
+    stage(['u-1', 'u-2'], [{ user1Id: 'u-1', user2Id: 'v-9' }, { user1Id: 'u-2', user2Id: 'v-8' }]);
+
+    await runRegistrationHygiene();
+
+    expect(flag).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('account_deletion_keeps_conversations');
+    expect(settle.mock.calls.map((c) => c.slice(1))).toEqual([['u-1', { keep: true }], ['u-2', { keep: true }]]);
+  });
+
+  it('after the commit: the files of the conversations deleted, then the notices, with what every step settled', async () => {
+    stage(['u-1', 'u-2'], [{ user1Id: 'u-1', user2Id: 'v-9' }, { user1Id: 'u-2', user2Id: 'v-8' }]);
+    settle
+      .mockImplementationOnce(async () => ({ kept: ['c-1'], deleted: [], attachmentKeys: [] }))
+      .mockImplementationOnce(async () => ({ kept: [], deleted: ['c-2'], attachmentKeys: ['attachments/dm-c-2/f1-encrypted.bin'] }));
+    let committed = false;
+    vi.mocked(prisma.$transaction).mockImplementation((async (fn: (tx: unknown) => unknown) => {
+      const result = await fn(prisma);
+      committed = true;
+      return result;
+    }) as never);
+    // recorded, not asserted inside the step: a throw there is caught by the sweep
+    let committedAtCleanup: boolean | null = null;
+    deleteBlobs.mockImplementation(() => { committedAtCleanup = committed; });
+
+    await runRegistrationHygiene();
+
+    expect(committedAtCleanup).toBe(true);
+    expect(deleteBlobs).toHaveBeenCalledWith(['attachments/dm-c-2/f1-encrypted.bin'], '[RegHygiene]', 'the conversations of swept accounts');
+    expect(announce).toHaveBeenCalledWith({ kept: ['c-1'], deleted: ['c-2'], attachmentKeys: ['attachments/dm-c-2/f1-encrypted.bin'] }, '[RegHygiene]');
+    expect(vi.mocked(announce).mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(deleteBlobs).mock.invocationCallOrder[0]);
+  });
+
+  it('a step that throws after a batch committed is a warning: the batch stays counted, its other step still runs and the next batch is taken', async () => {
+    const many = Array.from({ length: SWEEP_ACCOUNTS_PER_TRANSACTION + 1 }, (_, i) => ({ id: `u-${String(i).padStart(5, '0')}`, avatarUrl: null }));
+    vi.mocked(prisma.user.findMany).mockResolvedValue(many as never);
+    vi.mocked(prisma.user.deleteMany).mockImplementation((async (args: { where: { id: { in: string[] } } }) => ({ count: args.where.id.in.length })) as never);
+    deleteBlobs.mockImplementationOnce(() => { throw new Error('the store is away'); });
+    announce.mockImplementationOnce(async () => { throw new Error('no socket server'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await runRegistrationHygiene();
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(result.deletedUsers).toBe(SWEEP_ACCOUNTS_PER_TRANSACTION + 1);
+      expect(result.failedBatch).toBeUndefined();
+      // the first batch's notices were still asked for after its file cleanup threw
+      expect(announce).toHaveBeenCalledTimes(2);
+      expect(deleteBlobs).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenCalledWith('[RegHygiene] After a batch of the unverified-account deletion, the attachment file cleanup failed:', 'the store is away');
+      expect(warn).toHaveBeenCalledWith('[RegHygiene] After a batch of the unverified-account deletion, the notices of its direct conversations failed:', 'no socket server');
+      // neither is reported as a failed batch
+      expect(JSON.stringify(error.mock.calls)).not.toContain('A batch of the unverified-account deletion failed');
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it('a conversation of two swept accounts, kept for the first and deleted for the second, ends deleted, never kept', async () => {
+    stage(['u-1', 'u-2'], [{ user1Id: 'u-1', user2Id: 'u-2' }]);
+    settle
+      .mockImplementationOnce(async () => ({ kept: ['c-12'], deleted: [], attachmentKeys: [] }))
+      .mockImplementationOnce(async () => ({ kept: [], deleted: ['c-12'], attachmentKeys: [] }));
+
+    await runRegistrationHygiene();
+
+    expect(announce).toHaveBeenCalledWith({ kept: [], deleted: ['c-12'], attachmentKeys: [] }, '[RegHygiene]');
+  });
+
+  it(`deletes ${SWEEP_ACCOUNTS_PER_TRANSACTION} accounts per transaction, the counts added up`, async () => {
+    const many = Array.from({ length: SWEEP_ACCOUNTS_PER_TRANSACTION + 1 }, (_, i) => ({ id: `u-${String(i).padStart(5, '0')}`, avatarUrl: null }));
+    vi.mocked(prisma.user.findMany).mockResolvedValue(many as never);
+    vi.mocked(prisma.user.deleteMany).mockImplementation((async (args: { where: { id: { in: string[] } } }) => ({ count: args.where.id.in.length })) as never);
+
+    const result = await runRegistrationHygiene();
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(result.deletedUsers).toBe(SWEEP_ACCOUNTS_PER_TRANSACTION + 1);
+    expect((vi.mocked(prisma.user.deleteMany).mock.calls[1][0]!.where as { id: { in: string[] } }).id.in).toEqual([many[SWEEP_ACCOUNTS_PER_TRANSACTION].id]);
+  });
+
+  it('a batch PostgreSQL aborted to break a deadlock runs again whole and is counted once', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const real = vi.mocked(prisma.$transaction).getMockImplementation()!;
+    vi.mocked(prisma.$transaction)
+      .mockImplementationOnce((async () => { throw Object.assign(new Error('deadlock'), { code: 'P2034' }); }) as never)
+      .mockImplementation(real);
+    try {
+      const result = await runRegistrationHygiene();
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(result.deletedUsers).toBe(3);
+      expect(announce).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a failed batch: nothing of it announced or deleted, the rest of the night\'s work done, the failure answered by name and code only', async () => {
+    vi.mocked(prisma.user.deleteMany).mockRejectedValue(Object.assign(new Error('connection to user@db.internal lost'), { code: 'P1017' }) as never);
+    vi.mocked(prisma.ipRecord.deleteMany).mockResolvedValue({ count: 4 } as never);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await runRegistrationHygiene();
+
+      expect(result).toMatchObject({ deletedUsers: 0, deletedIpRecords: 4, failedBatch: { name: 'Error', code: 'P1017' } });
+      expect(announce).not.toHaveBeenCalled();
+      expect(deleteBlobs).not.toHaveBeenCalled();
+      expect(JSON.stringify(error.mock.calls)).not.toContain('db.internal');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('a batch that fails after earlier ones committed: those stay deleted and announced, their avatars go, no further batch is taken', async () => {
+    const many = Array.from({ length: SWEEP_ACCOUNTS_PER_TRANSACTION * 2 + 1 }, (_, i) => ({ id: `u-${String(i).padStart(5, '0')}`, avatarUrl: `avatars/a${i}.webp` }));
+    vi.mocked(prisma.user.findMany).mockResolvedValue(many as never);
+    vi.mocked(prisma.user.deleteMany)
+      .mockImplementationOnce((async (args: { where: { id: { in: string[] } } }) => ({ count: args.where.id.in.length })) as never)
+      .mockRejectedValueOnce(Object.assign(new Error('deadlock... no, a lost connection'), { code: 'P1017' }) as never);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await runRegistrationHygiene();
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(result.deletedUsers).toBe(SWEEP_ACCOUNTS_PER_TRANSACTION);
+      expect(result.failedBatch).toEqual({ name: 'Error', code: 'P1017' });
+      expect(announce).toHaveBeenCalledTimes(1);
+      // exactly the first batch's avatars
+      const handed = deleteMultipleFromS3.mock.calls[0][0] as string[];
+      expect(handed).toHaveLength(SWEEP_ACCOUNTS_PER_TRANSACTION);
+      expect(handed[0]).toBe('avatars/a0.webp');
+      expect(handed).not.toContain(`avatars/a${SWEEP_ACCOUNTS_PER_TRANSACTION}.webp`);
+      expect(prisma.ipRecord.deleteMany).toHaveBeenCalledTimes(1);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('the locked run records a failed batch (partial count, name and code) in the run record and the audit row, releases its lock, then reports the failure', async () => {
+    vi.mocked(prisma.user.deleteMany).mockRejectedValue(Object.assign(new Error('secret detail'), { code: 'P1017' }) as never);
+    redisSet.mockResolvedValue('OK');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const refusal = await runRegistrationHygieneLocked({ trigger: 'scheduled' }).catch((e: unknown) => e);
+
+      expect(refusal).toBeInstanceOf(HygieneBatchFailedError);
+      expect((refusal as Error).message).not.toContain('secret detail');
+      const record = JSON.parse(redisLPush.mock.calls[0][1] as string);
+      expect(record).toMatchObject({ deletedUsers: 0, failedBatch: { name: 'Error', code: 'P1017' } });
+      expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'registration.hygiene_sweep',
+        metadata: expect.objectContaining({ deletedUsers: 0, failedBatch: { name: 'Error', code: 'P1017' } }),
+      }));
+      expect(JSON.stringify(logAuditEvent.mock.calls)).not.toContain('secret detail');
+      expect(redisEval).toHaveBeenCalled(); // the lock released
+    } finally {
+      error.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it('a dry run touches no conversation and opens no transaction', async () => {
+    await runRegistrationHygiene({ dryRun: true });
+
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(settle).not.toHaveBeenCalled();
+    expect(flag).not.toHaveBeenCalled();
   });
 });
 
@@ -311,7 +658,7 @@ describe('registration hygiene sweep — locking and observability', () => {
   });
 
   it('releases the lock even when the sweep throws', async () => {
-    vi.mocked(prisma.user.deleteMany).mockRejectedValue(new Error('db gone'));
+    vi.mocked(prisma.user.findMany).mockRejectedValue(new Error('db gone'));
 
     await expect(runRegistrationHygieneLocked({ trigger: 'scheduled' })).rejects.toThrow('db gone');
     expect(redisDel).not.toHaveBeenCalled();
@@ -455,7 +802,7 @@ describe('registration hygiene sweep — expired sign-up state', () => {
 
   it('runs BEFORE the account and IP steps: a failing step of the sweep cannot skip it', async () => {
     purgeExpiredSignupState.mockResolvedValueOnce({ pending: 3, ledger: 0 });
-    vi.mocked(prisma.user.deleteMany).mockRejectedValueOnce(new Error('users table locked'));
+    vi.mocked(prisma.user.findMany).mockRejectedValueOnce(new Error('users table locked'));
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     // The sweep's own failure still surfaces to its caller
