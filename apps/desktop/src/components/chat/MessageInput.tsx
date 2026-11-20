@@ -72,6 +72,14 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  // The list as it is NOW. Two drops or pastes in one tick both render with the
+  // same `pendingFiles`, so the per-message limit is counted on this ref, which
+  // every change goes through `updatePending` to keep ahead of the render.
+  const pendingRef = useRef<PendingFile[]>([]);
+  const updatePending = (change: (prev: PendingFile[]) => PendingFile[]) => {
+    pendingRef.current = change(pendingRef.current);
+    setPendingFiles(pendingRef.current);
+  };
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
   const emojiBtnRef = useRef<HTMLButtonElement>(null);
@@ -108,7 +116,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
 
   // Clear pending files on channel/conversation switch
   useEffect(() => {
-    setPendingFiles((prev) => {
+    updatePending((prev) => {
       for (const pf of prev) {
         if (pf.previewUrl) URL.revokeObjectURL(pf.previewUrl);
       }
@@ -222,12 +230,12 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
         throw new Error(`S3 attachment upload failed: ${uploadRes.status}`);
       }
 
-      setPendingFiles((prev) =>
+      updatePending((prev) =>
         prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'uploaded' as const, s3Key: key, e2e } : pf))
       );
     } catch (err) {
       console.error('[Upload] Attachment upload failed:', err);
-      setPendingFiles((prev) =>
+      updatePending((prev) =>
         prev.map((pf) => (pf.id === fileId ? { ...pf, status: 'error' as const } : pf))
       );
     }
@@ -236,14 +244,17 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   const processFiles = (files: FileList) => {
     if (files.length === 0) return;
 
-    const remaining = LIMITS.MAX_ATTACHMENTS_PER_MESSAGE - pendingFiles.length;
+    // What is attached now plus what this call adds, counted at this moment
+    // from the ref: a call right after another sees the first one's files.
+    const remaining = LIMITS.MAX_ATTACHMENTS_PER_MESSAGE - pendingRef.current.length;
     if (remaining <= 0) {
       toast.error(t('chat.maxAttachments', { max: LIMITS.MAX_ATTACHMENTS_PER_MESSAGE }));
       return;
     }
 
     const toAdd: PendingFile[] = [];
-    for (let i = 0; i < Math.min(files.length, remaining); i++) {
+    let overLimit = false;
+    for (let i = 0; i < files.length; i++) {
       const file = files[i];
       if (!ALLOWED_ATTACHMENT_TYPES.includes(file.type as typeof ALLOWED_ATTACHMENT_TYPES[number])) {
         toast.error(t('chat.fileTypeNotAllowed', { name: file.name }));
@@ -252,6 +263,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       const maxSize = getMaxAttachmentSize(file.type);
       if (file.size > maxSize) {
         toast.error(t('chat.fileTooLarge', { name: file.name, max: maxSize / 1024 / 1024 }));
+        continue;
+      }
+      if (toAdd.length >= remaining) {
+        overLimit = true;
         continue;
       }
       const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
@@ -266,9 +281,10 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       });
     }
 
+    if (overLimit) toast.error(t('chat.maxAttachments', { max: LIMITS.MAX_ATTACHMENTS_PER_MESSAGE }));
     if (toAdd.length === 0) return;
 
-    setPendingFiles((prev) => [...prev, ...toAdd]);
+    updatePending((prev) => [...prev, ...toAdd]);
     toAdd.forEach((pf) => uploadFile(pf.file, pf.id));
   };
 
@@ -280,7 +296,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
   };
 
   const removePendingFile = (fileId: string) => {
-    setPendingFiles((prev) => {
+    updatePending((prev) => {
       const removed = prev.find((pf) => pf.id === fileId);
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       return prev.filter((pf) => pf.id !== fileId);
@@ -346,7 +362,7 @@ export function MessageInput({ channelId, conversationId, channelName, placehold
       for (const pf of pendingFiles) {
         if (pf.previewUrl) URL.revokeObjectURL(pf.previewUrl);
       }
-      setPendingFiles([]);
+      updatePending(() => []);
       isTypingRef.current = false;
     } catch (err) {
       // the store logged it; a refusal of a read-only conversation reads like the server's 403
