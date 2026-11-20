@@ -1,11 +1,12 @@
 import { create } from 'zustand';
-import { api, type SessionRequestConfig } from '../services/api';
+import { api } from '../services/api';
 import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange, beginCredentialChange } from '../services/socket';
 import {
   getAccessToken, setTokens, clearTokens, isRemembered, hydrateTokens,
   getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage,
 } from '../services/tokenStorage';
-import { SessionLostError, endSessionRenewals } from '../services/session';
+import { endSessionRenewals } from '../services/session';
+import { isAuthRefusal } from '../services/authRefusal';
 import { accountDeletionInFlight, accountDeletionSettled, beginAccountDeletion } from '../services/accountDeletion';
 import { useServerStore } from './serverStore';
 import { useChatStore } from './chatStore';
@@ -264,20 +265,6 @@ async function solveWithRetry(onProgress: (fraction: number) => void, signal: Ab
  *  documents; connecting anyway only produces a reconnect loop. */
 function canConnect(user: { emailVerified: boolean; consentRequired?: boolean }): boolean {
   return user.emailVerified && !user.consentRequired;
-}
-
-/** The server REFUSED the session (401/403), or the renewal was refused for
- *  good (SessionLostError): as opposed to a request that never reached it.
- *  A 401 to a request that went out with a token the client KNEW was expired
- *  — its pre-send renewal had just failed transiently (`_renewalFailed`:
- *  a 429 from the refresh limiter, a 5xx, a timeout) — answers that stale
- *  token, not the session: the refresh token was never judged. */
-function isAuthRefusal(err: unknown): boolean {
-  if (err instanceof SessionLostError) return true;
-  const failed = err as { response?: { status?: unknown }; config?: SessionRequestConfig } | null;
-  const status = failed?.response?.status;
-  if (status === 401 && failed?.config?._renewalFailed) return false;
-  return status === 401 || status === 403;
 }
 
 /** The in-flight registration's abort handle. Module scope, not store state:

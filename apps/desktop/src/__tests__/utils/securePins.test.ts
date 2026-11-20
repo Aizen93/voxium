@@ -163,4 +163,33 @@ describe('securePins', () => {
     activateSecurePins('alice'); // a new login is a new session
     expect(claimDowngradeWarning('ch-1')).toBe(true);
   });
+
+  // Two tabs of one account each hold the pin set in memory and save it
+  // whole: a save must never drop a pin the other tab stored meanwhile
+  describe('a pin another tab of the account stored meanwhile', () => {
+    it('is kept when this tab saves, and holds here from then on', () => {
+      activateSecurePins('alice');
+      pinSecure('ch-1');
+      // the other tab, which read the list before ch-1, pins ch-2 and saves its whole set
+      localStorage.setItem(securePinStorageKey('alice'), JSON.stringify(['ch-2']));
+      expect(pinSecure('ch-3')).toBe(true);
+      expect((stored('alice') as string[]).sort()).toEqual(['ch-1', 'ch-2', 'ch-3']);
+      expect(isPinnedSecure('ch-2')).toBe(true);
+    });
+
+    it('is kept for an account that is not the active one (a late claim)', () => {
+      activateSecurePins('bob');
+      localStorage.setItem(securePinStorageKey('alice'), JSON.stringify(['ch-a']));
+      expect(pinSecure('ch-b', 'alice', securePinGeneration('alice'))).toBe(true);
+      expect((stored('alice') as string[]).sort()).toEqual(['ch-a', 'ch-b']);
+    });
+
+    it('a malformed stored list is not merged, and the save still goes through', () => {
+      activateSecurePins('alice');
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      localStorage.setItem(securePinStorageKey('alice'), '{not json');
+      expect(pinSecure('ch-1')).toBe(true);
+      expect(stored('alice')).toEqual(['ch-1']);
+    });
+  });
 });

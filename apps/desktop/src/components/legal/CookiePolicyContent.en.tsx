@@ -65,6 +65,12 @@ const ENCRYPTION_ROWS: StorageRow[] = [
     where: 'Desktop app: the credential store. Browser: local storage',
     duration: 'Kept when you sign out, with its vault; deleted from this device with the vault when you delete your account here',
   },
+  {
+    item: 'voxium_vault_takeover, voxium_vault_start_claim',
+    purpose: 'Which tab of this browser uses the encryption vault: the first remembers, across the reload that follows, that you chose to use Voxium in that tab; the second exists only when this browser cannot coordinate its tabs through a lock (on a server reached without HTTPS, for example), and makes the first start of a vault wait a moment while another tab creates its key',
+    where: 'Browser: session storage for the first, local storage for the second',
+    duration: 'The first: removed when the reloaded tab reads it, or when the tab is closed. The second: removed when the start that wrote it ends; one left behind by a start that was interrupted is removed, once it has gone stale, by a later start of Voxium for that account in this browser',
+  },
 ];
 
 const PREFERENCE_ROWS: StorageRow[] = [
@@ -116,7 +122,7 @@ export function CookiePolicyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Cookie Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 18, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 20, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>

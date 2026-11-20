@@ -2232,5 +2232,21 @@
   },
   "legal": {
     "englishVersionNotice": "Este documento está disponível em inglês e em francês. A versão em inglês é exibida abaixo."
+  },
+  "vaultOwnership": {
+    "blockedTitle": "O Voxium está aberto em outra aba",
+    "blockedBody": "Suas mensagens e chamadas criptografadas funcionam em uma aba de cada vez. Você pode continuar usando a outra aba ou usar o Voxium aqui.",
+    "waitingNote": "Esta aba abre o Voxium sozinha assim que a outra aba for fechada ou sair da conta.",
+    "lostTitle": "O Voxium agora está aberto em outra aba",
+    "lostBody": "Outra aba assumiu suas mensagens e chamadas criptografadas, então esta parou. Você pode fechá-la ou usar o Voxium aqui.",
+    "useHere": "Usar aqui",
+    "asking": "Perguntando à outra aba…",
+    "releasing": "Aguardando a outra aba liberar…",
+    "opening": "Abrindo o Voxium aqui…",
+    "callWarning": "Há uma chamada em andamento na outra aba; ela será encerrada.",
+    "noReply": "A outra aba não está respondendo.",
+    "callPossible": "Se houver uma chamada em andamento lá, ela será encerrada.",
+    "takeOverAnyway": "Assumir mesmo assim",
+    "cancel": "Cancelar"
   }
 }

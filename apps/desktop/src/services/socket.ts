@@ -166,10 +166,38 @@ function clearHandshakeRetry(): void {
 }
 
 /**
- * Connect to the WebSocket server.
- * Safe to call multiple times — deduplicates concurrent calls.
+ * Holds on the connection (holdSocketConnections): while one is active, no
+ * socket is open and connectSocket opens none.
  */
-export function connectSocket(token: string): VoxSocket {
+let connectionHolds = 0;
+
+/**
+ * Keep this page off the socket until the returned function is called: the
+ * socket is closed now, and connectSocket opens nothing meanwhile, whoever
+ * calls it (a sign-in step, the REST client's renewal after a 401). For a tab
+ * of an account whose encrypted vault another tab owns
+ * (components/layout/VaultOwnershipGate.tsx): it shows a screen instead of
+ * the app, and its socket would only receive what the other tab handles.
+ * Whoever lifts the last hold opens the socket again (connectSocket).
+ */
+export function holdSocketConnections(): () => void {
+  connectionHolds++;
+  if (socket) disconnectSocket();
+  let lifted = false;
+  return () => {
+    if (lifted) return;
+    lifted = true;
+    connectionHolds = Math.max(0, connectionHolds - 1);
+  };
+}
+
+/**
+ * Connect to the WebSocket server.
+ * Safe to call multiple times — deduplicates concurrent calls. Opens nothing
+ * (null) while the connection is held (holdSocketConnections).
+ */
+export function connectSocket(token: string): VoxSocket | null {
+  if (connectionHolds > 0) return null;
   // Already connected with a live socket
   if (socket?.connected) {
     setStatus('connected');

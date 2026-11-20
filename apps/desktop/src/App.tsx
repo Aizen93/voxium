@@ -15,6 +15,7 @@ import { TermsPage } from './pages/TermsPage';
 import { PrivacyPage } from './pages/PrivacyPage';
 import { CookiePolicyPage } from './pages/CookiePolicyPage';
 import { MainLayout } from './components/layout/MainLayout';
+import { VaultOwnershipGate } from './components/layout/VaultOwnershipGate';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { ToastContainer } from './components/layout/ToastContainer';
 import { UpdateChecker } from './components/updater/UpdateChecker';
@@ -54,6 +55,13 @@ export function App({ onReady }: { onReady?: () => void }) {
   /** The authenticated app, or whichever gate the account is still behind. */
   const gated = (app: ReactElement) =>
     consentRequired ? <ConsentPage /> : emailVerified ? app : <EmailVerificationPendingPage />;
+  // The app proper starts the account's E2E service and listens on the
+  // socket, so it mounts only in the tab that owns the account's encrypted
+  // vault (VaultOwnershipGate); every other route above stays open. An
+  // account is what names a vault: without its id there is none to own.
+  const mainApp = user?.id
+    ? <VaultOwnershipGate key={user.id} userId={user.id}><MainLayout /></VaultOwnershipGate>
+    : <MainLayout />;
 
   useEffect(() => {
     checkAuth();
@@ -127,7 +135,7 @@ export function App({ onReady }: { onReady?: () => void }) {
             path="/"
             element={
               isAuthenticated
-                ? gated(<MainLayout />)
+                ? gated(mainApp)
                 : isTauri
                   ? <Navigate to="/login" replace />
                   : <LandingPage />
@@ -137,7 +145,7 @@ export function App({ onReady }: { onReady?: () => void }) {
             path="/*"
             element={
               isAuthenticated
-                ? gated(<MainLayout />)
+                ? gated(mainApp)
                 : <Navigate to="/login" replace />
             }
           />

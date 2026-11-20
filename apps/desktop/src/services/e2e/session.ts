@@ -9,11 +9,21 @@
  * (logout, account switch, account deletion) fails what was still running
  * with E2EServiceDisposedError, or E2EVaultClosedError from the vault. That
  * is an ending, not a fault: callers settle quietly instead of reporting it.
- * Matched by name, so a copy of either class from another module instance
- * still counts.
+ * So is a page giving its vault up to another tab (vaultOwnership.ts): the
+ * vault refuses it with E2EVaultFencedError, or E2EVaultNotOwnedError for a
+ * page that does not own it, and its service ends as if it had been disposed.
+ * Matched by name, so a copy of any of these classes from another module
+ * instance still counts.
  */
+const SESSION_ENDINGS = new Set([
+  'E2EServiceDisposedError',
+  'E2EVaultClosedError',
+  'E2EVaultFencedError',
+  'E2EVaultNotOwnedError',
+]);
+
 export function isE2ESessionEnded(err: unknown): boolean {
-  return err instanceof Error && (err.name === 'E2EServiceDisposedError' || err.name === 'E2EVaultClosedError');
+  return err instanceof Error && SESSION_ENDINGS.has(err.name);
 }
 
 let sessionUser: (() => string | null) | null = null;

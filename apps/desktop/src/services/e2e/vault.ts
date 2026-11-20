@@ -22,6 +22,12 @@
 //   pt:{messageId}                   decrypted-plaintext cache entry
 //   ptpurge:{mark}:{scope}           a purge of the `pt:` entries of a scope that ended (purgeCachedPlaintexts);
 //                                    under `cleared`, with the floor it purged up to
+//   claim_sent                       when a claim of the key-share inbox last left (its page may still be leased)
+//   repair:{name}                    a repair that ran on this vault (E2EService), and when; `fallback-key-uploaded`:
+//                                    when this device last made a fallback key to be sent (written before the
+//                                    request that may send it, and again once the server took it)
+//   vault_owner                      the token of the page that owns the vault (vaultOwnership.ts):
+//                                    every write checks it in its own transaction (the fence)
 //
 // `master_secret` holds the Ed25519 master private key that cross-signs this
 // account's devices. Like every other secret it is stored SEALED (AES-256-GCM
@@ -47,6 +53,11 @@ export type { PickleKeyProvider };
 const KV_STORE = 'kv';
 /** Upper bound for prefix range scans (highest BMP code point). */
 const KEY_MAX = '￿';
+/**
+ * Where the token of the page that owns the vault is kept (vaultOwnership.ts).
+ * Outside every prefix the vault scans or deletes by range.
+ */
+export const VAULT_OWNER_KEY = 'vault_owner';
 
 export interface PinnedIdentity {
   curve25519Key: string;
@@ -327,10 +338,161 @@ function isConnectionGone(err: unknown): boolean {
  * its next access instead of bringing the database back.
  */
 export class E2EVaultClosedError extends Error {
-  constructor() {
-    super('E2E vault closed');
+  constructor(message = 'E2E vault closed') {
+    super(message);
     this.name = 'E2EVaultClosedError';
   }
+}
+
+/**
+ * Another page owns the vault now: a write found a token other than this
+ * page's (or none), or this page gave the vault up. The vault refuses every
+ * access from then on, like a closed one, and the service that used it ends
+ * as if it had been disposed. A kind of E2EVaultClosedError, so that every
+ * path that stops quietly at a dispose stops quietly here too.
+ */
+export class E2EVaultFencedError extends E2EVaultClosedError {
+  constructor() {
+    super('Another page owns this E2E vault');
+    this.name = 'E2EVaultFencedError';
+  }
+}
+
+/**
+ * This page does not own the vault (vaultOwnership.ts), so no service of it
+ * may open the vault. A kind of E2EVaultClosedError, for the same reason.
+ */
+export class E2EVaultNotOwnedError extends E2EVaultClosedError {
+  constructor() {
+    super('This page does not own the E2E vault');
+    this.name = 'E2EVaultNotOwnedError';
+  }
+}
+
+/**
+ * What the vault asks of the page-level ownership (vaultOwnership.ts) before
+ * it writes. One page owns a vault at a time; the fence is what makes a page
+ * that lost it (a takeover it has not heard of yet) unable to write.
+ */
+export interface VaultFence {
+  /**
+   * Make this page the vault's owner if nothing has yet (a first use outside
+   * the screen that acquires it before the app starts); rejects
+   * E2EVaultNotOwnedError when another page owns it or this one gave it up.
+   */
+  ensure(): Promise<void>;
+  /** This page's owner token while it owns the vault; null once it does not (every write refused). */
+  token(): string | null;
+  /** The vault found another owner's token, or none: this page no longer owns it. */
+  fenced(): void;
+  /** Runs the creation of a missing pickle key: one start at a time where the lock cannot order them. */
+  serializeKeyCreation<T>(create: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * How a stamp of the owner token ended (stampVaultOwner): written (`stamped`,
+ * a claim), or what a check found: the page's own token (`kept`), another
+ * page's (`other`), or none at all, the database included (`missing`).
+ */
+export type VaultOwnerStamp = 'stamped' | 'kept' | 'other' | 'missing';
+
+/**
+ * Write or check the owner token of the vault `name`, on a connection of its
+ * own, closed afterwards (an account deletion's delete request must not wait
+ * on it).
+ *
+ * - `claim`: an acquisition. The token is written whatever is there, in one
+ *   read-write transaction (the database is made when there is none): the
+ *   newest owner wins, and the page it replaced is fenced at its next write.
+ * - `keep`: a check, for a page that owns the vault already (a service start,
+ *   a takeover notice, the read-back of a claim). It never writes and never
+ *   makes the database: an open that would make it (or upgrade it) is
+ *   abandoned before anything is made, and the token is read in a read-only
+ *   transaction. The page keeps the vault only on `kept`; `other` and
+ *   `missing` are for the caller to give the vault up on. Rejects when the
+ *   database cannot be read.
+ */
+export function stampVaultOwner(name: string, token: string, mode: 'claim' | 'keep'): Promise<VaultOwnerStamp> {
+  return mode === 'claim' ? claimVaultOwner(name, token) : checkVaultOwner(name, token);
+}
+
+function claimVaultOwner(name: string, token: string): Promise<VaultOwnerStamp> {
+  return new Promise<VaultOwnerStamp>((resolve, reject) => {
+    const req = indexedDB.open(name, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(KV_STORE)) req.result.createObjectStore(KV_STORE);
+    };
+    req.onerror = () => reject(req.error ?? new Error('IndexedDB open failed'));
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => db.close();
+      let tx: IDBTransaction;
+      try {
+        tx = db.transaction(KV_STORE, 'readwrite');
+      } catch (err) {
+        db.close();
+        reject(err);
+        return;
+      }
+      tx.oncomplete = () => {
+        db.close();
+        resolve('stamped');
+      };
+      tx.onabort = () => {
+        db.close();
+        reject(tx.error ?? new Error('IndexedDB owner stamp aborted'));
+      };
+      tx.objectStore(KV_STORE).put(token, VAULT_OWNER_KEY);
+    };
+  });
+}
+
+function checkVaultOwner(name: string, token: string): Promise<VaultOwnerStamp> {
+  return new Promise<VaultOwnerStamp>((resolve, reject) => {
+    let wouldMake = false;
+    const req = indexedDB.open(name, 1);
+    req.onupgradeneeded = () => {
+      // No database at this version (deleted, or never made): the open is
+      // abandoned, which leaves nothing behind, and the check answers so
+      wouldMake = true;
+      try {
+        req.transaction?.abort();
+      } catch (err) {
+        // already finishing: the open then fails, and is answered below
+        console.debug('e2e: the open of an owner check could not be abandoned:', err instanceof Error ? err.message : err);
+      }
+    };
+    req.onerror = () => {
+      if (wouldMake) resolve('missing');
+      else reject(req.error ?? new Error('IndexedDB open failed'));
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => db.close();
+      if (wouldMake || !db.objectStoreNames.contains(KV_STORE)) {
+        db.close();
+        resolve('missing');
+        return;
+      }
+      let read: IDBRequest;
+      try {
+        read = db.transaction(KV_STORE, 'readonly').objectStore(KV_STORE).get(VAULT_OWNER_KEY);
+      } catch (err) {
+        db.close();
+        reject(err);
+        return;
+      }
+      read.onsuccess = () => {
+        db.close();
+        const stored: unknown = read.result;
+        resolve(stored === token ? 'kept' : stored === undefined ? 'missing' : 'other');
+      };
+      read.onerror = () => {
+        db.close();
+        reject(read.error ?? new Error('IndexedDB owner check failed'));
+      };
+    };
+  });
 }
 
 export class E2EVault {
@@ -346,6 +508,10 @@ export class E2EVault {
    * taken away by the browser.
    */
   private lateDb: IDBDatabase | null = null;
+  /** Set when the fence refused this page (trip), never cleared: every access fails from then on. */
+  private fencedForGood = false;
+  /** A connection was opened once: from then on a task start compares the stored owner token (assertOwner). */
+  private everOpened = false;
 
   constructor(
     private readonly userId: string,
@@ -356,16 +522,125 @@ export class E2EVault {
      * What a connection must wait for before it opens the database: the
      * teardown of an earlier service on the same vault (see E2EService).
      */
-    private readonly openAfter?: () => Promise<void> | undefined
+    private readonly openAfter?: () => Promise<void> | undefined,
+    /**
+     * The page-level ownership every write is checked against (VaultFence).
+     * The service always gives one; a vault made without it (a test of the
+     * vault alone) checks nothing.
+     */
+    private readonly fence?: VaultFence
   ) {}
 
-  /** Throw if close() ran: called before every access and after every await. */
+  /** Throw if close() ran or the fence refused this page: called before every access and after every await. */
   private assertNotClosed(): void {
+    if (this.fencedForGood) throw new E2EVaultFencedError();
     if (this.closedForGood) throw new E2EVaultClosedError();
+  }
+
+  /** Is `stored` this page's owner token? Never while this page owns nothing. */
+  private ownsStored(stored: unknown): boolean {
+    const mine = this.fence?.token() ?? null;
+    return mine !== null && stored === mine;
+  }
+
+  /**
+   * This page does not own the vault any more: refuse everything from now on,
+   * drop the connections, and tell the ownership (once). Returns the error the
+   * refused access throws.
+   */
+  private trip(): E2EVaultFencedError {
+    if (!this.fencedForGood) {
+      this.fencedForGood = true;
+      this.reopenRefused = true;
+      this.db?.close();
+      this.db = null;
+      this.lateDb?.close();
+      this.lateDb = null;
+      try {
+        this.fence?.fenced();
+      } catch (err) {
+        console.error('e2e: the vault ownership could not be told it was lost:', err instanceof Error ? err.message : err);
+      }
+    }
+    return new E2EVaultFencedError();
+  }
+
+  /**
+   * Run `run` in `store`'s read-write transaction only if the vault's owner
+   * token is this page's, judged in that same transaction: IndexedDB runs
+   * read-write transactions over the same store one at a time, so no other
+   * page's token can land between the check and the write. `run` is called
+   * from the check's success callback, while the transaction is still active,
+   * and nothing else is issued before it; on another token (or none) the
+   * transaction is aborted with nothing written, and the vault refuses this
+   * page from then on.
+   */
+  private runFenced<T>(store: IDBObjectStore, run: (store: IDBObjectStore) => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const check = store.get(VAULT_OWNER_KEY);
+      check.onsuccess = () => {
+        if (!this.ownsStored(check.result)) {
+          try {
+            store.transaction.abort();
+          } catch (err) {
+            // already finishing: it holds no request of ours either way
+            console.debug('e2e: a refused vault transaction could not be aborted:', err instanceof Error ? err.message : err);
+          }
+          reject(this.trip());
+          return;
+        }
+        let pending: Promise<T>;
+        try {
+          pending = run(store);
+        } catch (err) {
+          reject(err);
+          return;
+        }
+        pending.then(resolve, reject);
+      };
+      check.onerror = () => reject(check.error ?? new Error('IndexedDB owner check failed'));
+    });
+  }
+
+  /**
+   * Is the vault still this page's? A read of the owner token, for the start
+   * of every task of the service and before every request it sends: what a
+   * task asks the server before its first write is not covered by the fence.
+   * Before the first open nothing is read (open() checks it): only whether the
+   * page owns the vault at all.
+   */
+  async assertOwner(): Promise<void> {
+    this.assertNotClosed();
+    if (!this.fence) return;
+    if (!this.db && !this.everOpened) {
+      await this.ensureOwnedBeforeOpen();
+      return;
+    }
+    if (this.fence.token() === null) throw this.trip();
+    const stored = await this.withStore('readonly', (s) => requestToPromise(s.get(VAULT_OWNER_KEY)));
+    if (!this.ownsStored(stored)) throw this.trip();
+  }
+
+  /**
+   * Before a first open: the page owns the vault, acquired now if nothing
+   * acquired it yet; refused (E2EVaultNotOwnedError) when another page owns
+   * it or this one gave it up. A vault this page once had and lost is not
+   * acquired again here: its token went with it, and that trips the fence.
+   */
+  private async ensureOwnedBeforeOpen(): Promise<void> {
+    if (!this.fence || this.fence.token() !== null) return;
+    if (this.everOpened) throw this.trip();
+    await this.fence.ensure();
+    this.assertNotClosed();
+    if (this.fence.token() === null) throw this.trip();
   }
 
   async open(): Promise<void> {
     this.assertNotClosed();
+    if (this.db) return;
+    // A page that does not own the vault opens nothing: the open below can
+    // write (the pickle key, in open()), outside any transaction the fence sees
+    await this.ensureOwnedBeforeOpen();
     if (this.db) return;
     const before = this.openAfter?.();
     if (before) {
@@ -413,6 +688,15 @@ export class E2EVault {
       if (this.lateDb === db) this.lateDb = null;
     };
     this.db = db;
+    this.everOpened = true;
+    // Still this page's vault, before anything is read from it or the pickle
+    // key is made: a database made again under this page (deleted meanwhile)
+    // holds no token, and another page's token means it took the vault over
+    if (this.fence) {
+      const stored = await requestToPromise(db.transaction(KV_STORE, 'readonly').objectStore(KV_STORE).get(VAULT_OWNER_KEY));
+      this.assertNotClosed();
+      if (!this.ownsStored(stored)) throw this.trip();
+    }
     // Resolve the pickle key up-front (keychain access is async) so crypto
     // paths keep a synchronous accessor after open()
     if (!this.pickleKeyBytes) {
@@ -430,6 +714,16 @@ export class E2EVault {
   }
 
   private async loadOrCreatePickleKey(): Promise<Uint8Array> {
+    const found = await this.loadPickleKey();
+    if (found) return found;
+    // None yet (a first start): made one start at a time, and looked up again
+    // first, so that two starts never each make and save a key of their own
+    const create = async (): Promise<Uint8Array> => (await this.loadPickleKey()) ?? (await this.createPickleKey());
+    return this.fence ? this.fence.serializeKeyCreation(create) : create();
+  }
+
+  /** The stored pickle key, or null when there is none (or it is malformed). */
+  private async loadPickleKey(): Promise<Uint8Array | null> {
     // Deliberately NOT caught: PickleKeyUnavailableError means the store did
     // not answer, and open() failing is the correct outcome — the caller
     // retries, and the next launch finds the real key. Swallowing it here is
@@ -454,6 +748,13 @@ export class E2EVault {
       if (raw && raw.length === 32) return raw;
       console.warn('e2e: stored pickle key is malformed — generating a new one (existing pickles become unreadable)');
     }
+    return null;
+  }
+
+  /** A new pickle key, saved before it is used. */
+  private async createPickleKey(): Promise<Uint8Array> {
+    // Still this page's vault right before the save, which no transaction fences
+    if (this.fence) await this.assertOwner();
     const fresh = crypto.getRandomValues(new Uint8Array(32));
     await this.keyProvider.save(this.userId, btoa(String.fromCharCode(...fresh)));
     return fresh;
@@ -476,6 +777,11 @@ export class E2EVault {
    * A vault closed on purpose is never reopened, and an operation that was
    * running when close() came fails rather than returning: its caller holds
    * engine objects that were freed with the service, and must go no further.
+   *
+   * Every read-write transaction goes through the fence (runFenced) when the
+   * vault has one: it writes only while the stored owner token is this
+   * page's. Once the fence refused the page, every operation fails with
+   * E2EVaultFencedError, whatever the browser answered it.
    */
   private async withStore<T>(
     mode: IDBTransactionMode,
@@ -483,14 +789,21 @@ export class E2EVault {
   ): Promise<T> {
     this.assertNotClosed();
     if (!this.db) {
-      if (this.reopenRefused) throw new E2EVaultClosedError();
+      if (this.reopenRefused) throw this.fencedForGood ? new E2EVaultFencedError() : new E2EVaultClosedError();
       await this.open();
     }
+    const attempt = (): Promise<T> => {
+      const store = this.store(mode);
+      return mode === 'readwrite' && this.fence ? this.runFenced(store, run) : run(store);
+    };
     try {
-      const result = await run(this.store(mode));
+      const result = await attempt();
       this.assertNotClosed();
       return result;
     } catch (err) {
+      // the fence first: the connection it closed fails its siblings with an
+      // error that would otherwise read as one to reopen
+      if (this.fencedForGood) throw err instanceof E2EVaultFencedError ? err : new E2EVaultFencedError();
       if (this.closedForGood) throw err instanceof E2EVaultClosedError ? err : new E2EVaultClosedError();
       if (!isConnectionGone(err)) throw err;
       if (this.reopenRefused) throw new E2EVaultClosedError();
@@ -498,7 +811,7 @@ export class E2EVault {
       this.db?.close();
       this.db = null;
       await this.open();
-      const result = await run(this.store(mode));
+      const result = await attempt();
       this.assertNotClosed();
       return result;
     }
@@ -523,12 +836,9 @@ export class E2EVault {
   }
 
   private async deleteWithPrefix(prefix: string): Promise<void> {
-    const keys = await this.keysWithPrefix(prefix);
-    if (keys.length === 0) return;
-    // One transaction: every request is issued synchronously in this tick, so
-    // the transaction cannot auto-close between them.
-    const store = this.store('readwrite');
-    await Promise.all(keys.map((key) => requestToPromise(store.delete(key))));
+    // One request over the key range, in one fenced transaction
+    const range = IDBKeyRange.bound(prefix, prefix + KEY_MAX);
+    await this.withStore('readwrite', (s) => requestToPromise(s.delete(range)));
   }
 
   // ── This install's device id (spec §12, D2) ──
@@ -679,6 +989,22 @@ export class E2EVault {
     const known = new Set(await this.getBackedUpSessionIds());
     for (const id of sessionIds) known.add(id);
     await this.put('bku:sessions', [...known]);
+  }
+
+  // ── Repairs that ran on this vault (repair:{name}: when, nothing else) ──
+  getRepair(name: string): Promise<{ at: number } | undefined> {
+    return this.get(`repair:${name}`);
+  }
+  putRepair(name: string): Promise<void> {
+    return this.put(`repair:${name}`, { at: Date.now() });
+  }
+
+  // ── When a claim of the key-share inbox last left (claim_sent: when, nothing else) ──
+  getClaimSent(): Promise<{ at: number } | undefined> {
+    return this.get('claim_sent');
+  }
+  putClaimSent(): Promise<void> {
+    return this.put('claim_sent', { at: Date.now() });
   }
 
   // ── Where an unfinished message-key history pull stands (spec §16.3) ──
@@ -992,14 +1318,21 @@ export class E2EVault {
     this.close();
   }
 
-  /** The late write, on the kept connection; releases it either way. */
+  /**
+   * The late write, on the kept connection; releases it either way. Fenced
+   * like every other write: a page that gave the vault up meanwhile (another
+   * page took it over) writes nothing into it.
+   */
   async writePendingSharesLate(entries: Array<{ key: string; record: PendingKeyShare }>): Promise<void> {
+    if (this.fencedForGood) throw new E2EVaultFencedError();
     const db = this.lateDb;
     if (!db) throw new E2EVaultClosedError(); // released, or the browser took it
     try {
       if (entries.length === 0) return;
       const store = db.transaction(KV_STORE, 'readwrite').objectStore(KV_STORE);
-      await Promise.all(entries.map((e) => requestToPromise(store.put(e.record, e.key))));
+      const write = (s: IDBObjectStore) =>
+        Promise.all(entries.map((e) => requestToPromise(s.put(e.record, e.key)))).then(() => undefined);
+      await (this.fence ? this.runFenced(store, write) : write(store));
     } finally {
       this.releaseLateConnection();
     }

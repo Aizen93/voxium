@@ -70,6 +70,12 @@ import {
   vaultDbName,
 } from './vault';
 import { defaultPickleKeyProvider } from './pickleKeyProvider';
+import {
+  noteVaultTeardown,
+  releaseVaultOwnershipNotInUse,
+  vaultOwnershipFor,
+  type VaultOwnershipHandle,
+} from './vaultOwnership';
 import { pinSecure, securePinGeneration } from '../../utils/securePins';
 import { currentE2ESessionUser, isE2ESessionEnded } from './session';
 import { isAtOrBelowClearedFloor } from './clearedFloors';
@@ -366,6 +372,8 @@ export interface E2EServiceOptions {
   deviceListCacheMs?: number;
   /** Test hook: how long dispose() waits for a key-share claim in flight (ms). */
   teardownDeadlineMs?: number;
+  /** Test hook: the page-level ownership of the vault; by default this page's (vaultOwnership.ts). */
+  ownership?: VaultOwnershipHandle;
 }
 
 /** Re-poll the key-share inbox for a still-unknown session at most this often. */
@@ -427,6 +435,24 @@ const MAX_RESTORE_PAGES = Math.ceil(E2E_LIMITS.MESSAGE_KEY_STORE_CAP / E2E_LIMIT
 const MAX_PENDING_SHARE_ATTEMPTS = 5;
 /** How long a dispose waits for a key-share claim in flight before tearing down anyway. */
 const TEARDOWN_DEADLINE_MS = 10_000;
+/** The vault records it ran the one-time rotation of every outbound group session (rotateOutboundSessionsOnce). */
+export const OUTBOUND_ROTATION_REPAIR = 'outbound-sessions-rotated';
+/**
+ * The vault records when this device last made a fallback key to be sent
+ * (`repair:fallback-key-uploaded`, {at}): written BEFORE the request that may
+ * send a new one (every registration, ensureRegistered, and the upload of a
+ * rotated key, upkeepFallbackKey), so that a page closed after the server
+ * took it still leaves the record, and written again once the server took it.
+ */
+export const FALLBACK_KEY_UPLOAD_RECORD = 'fallback-key-uploaded';
+/** Why a rotation waits that is logged as a warning (once a start): a kept share can hold it back for several starts. */
+const KEPT_SHARES_HOLD_ROTATION = 'key shares kept in the vault wait to be imported';
+/**
+ * A new fallback key at most this often per vault. The engine keeps the
+ * private half of ONE key before the current one, so a share sealed to a key
+ * two rotations old can no longer be opened (and is discarded as unusable).
+ */
+export const FALLBACK_ROTATION_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /**
  * Deadline of the key-share claim's GET and of the acknowledgement POST, the
  * one the session refresh has (REFRESH_TIMEOUT_MS): the api sets none, and a
@@ -449,6 +475,14 @@ const LOST_CLAIM_RETRY_MARGIN_MS = 5_000;
  * before. Any claim the server answers starts the count again.
  */
 const LOST_CLAIM_RETRY_MAX = 3;
+/**
+ * After a claim request leaves, how long the page it leases may stay away
+ * from every other claim if its answer never comes back (the request's own
+ * deadline, then the lease, then the margin): a page that closed or reloaded
+ * during the request leaves its shares leased, unseen by the next start's
+ * claim until then.
+ */
+const CLAIM_LEASE_SETTLE_MS = KEYSHARE_REQUEST_TIMEOUT_MS + E2E_LIMITS.KEYSHARE_LEASE_MS + LOST_CLAIM_RETRY_MARGIN_MS;
 /**
  * Answers that refuse an acknowledgement for good: sent again it gets the
  * same answer, and kept it would go first in every later request, holding
@@ -494,6 +528,12 @@ function pendingShareKey(share: Record<string, unknown>): string {
   const createdAt = typeof share.createdAt === 'string' ? share.createdAt : '';
   const id = typeof share.id === 'string' ? share.id : generateDeviceId();
   return `pks:${createdAt}|${id}`;
+}
+
+/** What one run of the key-share claim did: the sessions it imported, and whether it emptied the inbox. */
+interface ClaimRun {
+  imported: number;
+  drained: boolean;
 }
 
 /**
@@ -643,7 +683,15 @@ export class E2EService {
   /** The account's secure-pin generation when this service began (securePinGeneration). */
   private readonly pinGeneration: number;
   /** The vault's database name: the key of pendingTeardowns. */
-  private readonly vaultName: string;
+  readonly vaultName: string;
+  /**
+   * The page's ownership of the vault (vaultOwnership.ts): only the page that
+   * owns it starts a service on it, every write of the vault is checked
+   * against it (the fence), and when the page gives it up this service ends
+   * as if disposed.
+   */
+  private readonly ownership: VaultOwnershipHandle;
+  private readonly stopOwnershipWatch: () => void;
   /** This service's deferred teardown, while a claim holds it back (see dispose()). */
   private teardownDone: Promise<void> | null = null;
   private readonly wasmInput?: BufferSource;
@@ -698,7 +746,26 @@ export class E2EService {
    * dispose(); later when a key-share claim is in flight (see dispose()).
    */
   private tornDown = false;
-  private claimInFlight: Promise<number> | null = null;
+  private claimInFlight: Promise<ClaimRun> | null = null;
+  /**
+   * The account pickle this service last read from the vault or wrote to it.
+   * The vault holding another one means another writer exists (a tab of a
+   * build from before one page owned the vault): no key is uploaded then
+   * (upkeepFallbackKey), since that writer can save over the private halves.
+   */
+  private accountPickleKnown: string | null = null;
+  /**
+   * When a claim of the key-share inbox last left this vault before this
+   * service started (`claim_sent`; undefined: none recorded): its page may
+   * still be leased, unseen by this start's claim (CLAIM_LEASE_SETTLE_MS).
+   */
+  private claimSentBeforeStart: number | undefined;
+  /**
+   * The last claim of the master-secret transfers failed before it went
+   * through the mailbox (or none ran yet): a transfer there is sealed to this
+   * device's keys, so the fallback key waits (claimMasterTransfersUnqueued).
+   */
+  private masterTransfersPending = true;
   /** A claim's GET is on its way: a teardown keeps one vault connection for its answer. */
   private claimPageInFlight = false;
   /** Claims again once the lease of a lost claim answer has passed (claimAgainAfterLease); cleared by dispose(). */
@@ -768,10 +835,29 @@ export class E2EService {
     this.vaultName = vaultDbName(userId, opts.vaultNamespace);
     // an account deleted later: what this service still imports pins nothing for it
     this.pinGeneration = securePinGeneration(userId);
-    this.vault = new E2EVault(userId, opts.keyProvider, opts.vaultNamespace, () => {
-      // an earlier service's teardown on this vault, never this one's own
-      const pending = pendingTeardowns.get(this.vaultName);
-      return pending && pending !== this.teardownDone ? pending : undefined;
+    this.ownership = opts.ownership ?? vaultOwnershipFor(userId, this.vaultName);
+    const ownership = this.ownership;
+    this.vault = new E2EVault(
+      userId,
+      opts.keyProvider,
+      opts.vaultNamespace,
+      () => {
+        // an earlier service's teardown on this vault, never this one's own
+        const pending = pendingTeardowns.get(this.vaultName);
+        return pending && pending !== this.teardownDone ? pending : undefined;
+      },
+      {
+        ensure: () => ownership.ensure(),
+        token: () => ownership.token(),
+        fenced: () => ownership.fenced(),
+        serializeKeyCreation: (create) => ownership.serializeKeyCreation(create),
+      }
+    );
+    // Another tab took the vault over (or this page gave it up): this service
+    // ends like a disposed one, and the page lets the lock go once it is done
+    this.stopOwnershipWatch = ownership.onLost(() => {
+      if (!this.disposed) console.warn('e2e: this tab gave the vault up — its E2E service stops');
+      return this.disposeAndSettle();
     });
     this.liveVault = this.guardedVault(this.vault);
     this.wasmInput = opts.wasmInput;
@@ -797,9 +883,15 @@ export class E2EService {
    * client attaches whatever bearer is current, which after a new sign-in is
    * the next account's. The share it was for is kept, and the acknowledgement
    * owed, for the next start.
+   *
+   * Nor does a request leave a page that no longer owns the vault: the owner
+   * token is read before each one (assertOwner), since what a task asks the
+   * server before its first write is not covered by the fence on the vault.
    */
   private guardedApi(client: typeof defaultApi): typeof defaultApi {
     const guard = async <R>(call: () => Promise<R>): Promise<R> => {
+      this.assertLive();
+      await this.vault.assertOwner();
       this.assertLive();
       const res = await call();
       this.assertLive();
@@ -849,9 +941,14 @@ export class E2EService {
   /** Serialize all crypto-state mutations (ratchet advance ⇒ pickle persist). */
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue
-      .then(() => {
+      .then(async () => {
         // Queued before a dispose, started after it: refused, whether or not the
         // teardown has freed what it would touch yet (a claim can hold it back)
+        this.assertLive();
+        // Still this page's vault (vaultOwnership.ts): a page another tab took
+        // the vault from has its service ended here, before the task asks
+        // the server anything
+        await this.vault.assertOwner();
         this.assertLive();
         return fn();
       })
@@ -908,9 +1005,27 @@ export class E2EService {
   private async initializeOnce(): Promise<void> {
     await initEngine(this.wasmInput);
     this.assertLive();
+    // Only the page that owns the vault starts a service on it: refused
+    // (E2EVaultNotOwnedError) while another tab of this account owns it, or
+    // once this page gave it up; acquired here when nothing did (a start
+    // outside the gate). Before anything of the vault is read.
+    await this.ownership.ensure();
+    this.assertLive();
     // A dispose during open() closes the vault, and open() then drops the
     // connection it was making and throws (E2EVaultClosedError).
     await this.vault.open();
+    this.assertLive();
+    // Before this service's own claims move it: when an earlier page load
+    // (or an earlier service of this page) last claimed the inbox
+    try {
+      const sent = await this.vault.getClaimSent();
+      this.claimSentBeforeStart = sent === undefined ? undefined : typeof sent.at === 'number' ? sent.at : Date.now();
+    } catch (err) {
+      if (isE2ESessionEnded(err)) throw err;
+      // unknown: counted as a claim made just now, so the fallback key waits
+      console.warn('e2e: the time of the last key-share claim could not be read:', errText(err));
+      this.claimSentBeforeStart = Date.now();
+    }
     this.assertLive();
     // the read-only marks, from the start: the display gate asks for them
     // before any list (scopePurged); a failed read is logged there
@@ -937,6 +1052,7 @@ export class E2EService {
     if (pickle) {
       try {
         this.account = EngineAccount.fromPickle(pickle, this.vault.pickleKey());
+        this.accountPickleKnown = pickle;
       } catch (err) {
         // Pickle key lost (e.g. localStorage cleared) — the old account is
         // unrecoverable. Start a fresh identity; peers will see a safety
@@ -951,7 +1067,10 @@ export class E2EService {
     }
     this.assertLive();
 
-    await this.ensureRegistered();
+    await this.rotateOutboundSessionsOnce();
+    this.assertLive();
+
+    const registeredNow = await this.ensureRegistered();
     this.assertLive();
     // Cross-signing bootstrap (spec §14, D5). Never fatal: a device that cannot
     // publish or hold a master key still encrypts — it is only "unsigned".
@@ -969,14 +1088,21 @@ export class E2EService {
     // None of these may block the UI: key shares are re-claimed lazily on a
     // decrypt miss, replenishment only matters for future peers, and the master
     // secret only arrives once another device approves this one.
-    this.enqueue(() => this.claimKeyShares()).catch((err) => {
+    // The order of the queue is what the key upkeep reads: the claim of the
+    // inbox and of the master transfers both run before it
+    const startClaim = this.enqueue(() => this.claimKeyShareRun());
+    startClaim.catch((err: unknown) => {
       this.logStartupTaskFailure('initial key-share claim', err);
     });
     this.claimMasterTransfers().catch((err) => {
       this.logStartupTaskFailure('initial master-transfer claim', err);
     });
-    this.replenishOneTimeKeys().catch((err) => {
-      this.logStartupTaskFailure('one-time key replenishment', err);
+    const startClaimDrained = startClaim.then(
+      (run) => run.drained,
+      () => false
+    );
+    this.refreshKeysAtStart(registeredNow, startClaimDrained).catch((err) => {
+      this.logStartupTaskFailure('fallback key rotation and one-time key replenishment', err);
     });
     // Catch up on sessions that arrived while this device was offline. Best
     // effort by design: history backup falling behind must never stop the
@@ -988,6 +1114,29 @@ export class E2EService {
     this.resumeHistoryPull().catch((err) => {
       this.logStartupTaskFailure('history pull resume', err);
     });
+  }
+
+  /**
+   * A repair, once per vault (recorded as `repair:{OUTBOUND_ROTATION_REPAIR}`):
+   * every outbound group session is dropped, so the next send of each
+   * conversation and secure channel starts a new one. Two tabs of one
+   * account used to send from their own copies of a session, so a session
+   * kept in the vault can sit behind positions another copy already used,
+   * and a message sent there is refused by every recipient as a replay. On
+   * the queue, before the start is done: no send uses an old session after
+   * it. A failure never fails the start: logged, and tried at the next one.
+   */
+  private async rotateOutboundSessionsOnce(): Promise<void> {
+    try {
+      await this.enqueue(async () => {
+        if (await this.vault.getRepair(OUTBOUND_ROTATION_REPAIR)) return;
+        await this.clearOutboundGroupSessions();
+        await this.vault.putRepair(OUTBOUND_ROTATION_REPAIR);
+      });
+    } catch (err) {
+      if (isE2ESessionEnded(err)) throw err;
+      console.warn('e2e: the one-time rotation of the outbound group sessions failed (tried again at the next start):', errText(err));
+    }
   }
 
   /** A start-up task a dispose stopped ended on purpose: not a warning. */
@@ -1058,6 +1207,18 @@ export class E2EService {
   }
 
   /**
+   * dispose(), resolving only once nothing of this service can touch the
+   * vault any more: its teardown has run, and a key-share claim it kept a
+   * connection for (an answer that comes after the teardown deadline) has
+   * settled, within that request's own deadline. What the page waits for
+   * before it lets another tab have the vault (vaultOwnership.ts).
+   */
+  disposeAndSettle(): Promise<void> {
+    const claim = this.claimInFlight;
+    return this.dispose().then(() => claim?.then(noop, noop));
+  }
+
+  /**
    * teardown(), logging a failure: dispose() runs from logout and account
    * switches, which must not fail on it, and the deferred path has nobody
    * awaiting it to report one.
@@ -1073,6 +1234,7 @@ export class E2EService {
   private teardown(): void {
     if (this.tornDown) return;
     this.tornDown = true;
+    this.stopOwnershipWatch();
     this.account?.free();
     this.account = null;
     this.masterKey?.free();
@@ -1107,7 +1269,9 @@ export class E2EService {
 
   private async persistAccount(): Promise<void> {
     if (!this.account) throw new Error('e2e account not initialized');
-    await this.vault.putAccountPickle(this.account.pickle(this.vault.pickleKey()));
+    const pickle = this.account.pickle(this.vault.pickleKey());
+    await this.vault.putAccountPickle(pickle);
+    this.accountPickleKnown = pickle;
   }
 
   private async persistOlmSession(userId: string, deviceId: string, session: EngineSession): Promise<void> {
@@ -1152,9 +1316,10 @@ export class E2EService {
   /**
    * Publish THIS device if the server doesn't have it (or has different keys
    * for it). Other devices of the account are untouched — the server keys the
-   * slot on (userId, deviceId).
+   * slot on (userId, deviceId). Answers whether it uploaded a registration
+   * (whose fallback key is then the one the server holds).
    */
-  private async ensureRegistered(): Promise<void> {
+  private async ensureRegistered(): Promise<boolean> {
     // `account` is held across the awaits below; assertLive() after each one is
     // what keeps a dispose landing meanwhile from reaching a freed handle.
     const account = this.requireAccount();
@@ -1170,13 +1335,26 @@ export class E2EService {
       // is right either way: a key the server has is published, and one it
       // never received can simply never be claimed. Left unmarked, they would
       // ride along with the next replenish batch, past OTK_UPLOAD_MAX.
+      // A fallback key left unpublished beside them came with them, in that
+      // same registration: no other path leaves both unpublished, since a
+      // fallback key is made only while no one-time key waits
+      // (upkeepFallbackKey) and one-time keys only once the fallback key is
+      // published (refreshKeysAtStart, replenishOneTimeKeys).
       if ((account.oneTimeKeys() as OneTimeKeyPair[]).length > 0) {
         account.markKeysAsPublished();
         await this.persistAccount();
         this.assertLive();
       }
-      return;
+      return false;
     }
+
+    // The record of a fallback key made to be sent comes first, before any
+    // key is made or sent (this registration's fallback key may be new): a
+    // page closed once the server took the key still leaves it, and the next
+    // start does not rotate at once. Not written, nothing is made or sent:
+    // the start fails as a vault failure, and the next one registers.
+    await this.vault.putRepair(FALLBACK_KEY_UPLOAD_RECORD);
+    this.assertLive();
 
     // Reuse unpublished keys if a previous registration attempt failed mid-way,
     // never more than one upload may carry (the server refuses the whole batch)
@@ -1218,6 +1396,9 @@ export class E2EService {
     await this.persistAccount();
     // our own list version just changed — force a refetch on the next send
     this.deviceListCache.delete(this.userId);
+    // the server took it: the record moves to now (upkeepFallbackKey)
+    await this.noteFallbackKeyUploaded();
+    return true;
   }
 
   async replenishOneTimeKeys(): Promise<void> {
@@ -1226,26 +1407,206 @@ export class E2EService {
       const res = await this.api.get(`/e2e/devices/me?deviceId=${encodeURIComponent(this.deviceId)}`);
       const status = res.data.data as { registered: boolean; oneTimeKeyCount?: number };
       if (!status.registered) return;
-      const count = status.oneTimeKeyCount ?? 0;
-      if (count >= E2E_LIMITS.OTK_LOW_WATER) return;
+      // A fallback key an earlier upload left unpublished goes first, alone:
+      // marking keys published marks it too, so it must never be marked by an
+      // upload that did not carry it. Not sent: no one-time key is made now.
+      if (account.fallbackKey() && !(await this.publishFallbackKey(account))) return;
+      await this.replenishUnqueued(account, status.oneTimeKeyCount ?? 0);
+    });
+  }
 
-      // A batch whose upload failed is still in the account, unpublished, and
-      // goes out with this one: generate only what it does not already cover,
-      // and never send more than one upload may carry, or the server refuses
-      // the batch on every attempt and the pool drains to the fallback key.
-      const wanted = Math.min(E2E_LIMITS.OTK_TARGET - count, E2E_LIMITS.OTK_UPLOAD_MAX);
-      const pending = (account.oneTimeKeys() as OneTimeKeyPair[]).length;
-      if (pending < wanted) account.generateOneTimeKeys(wanted - pending);
-      const fresh = (account.oneTimeKeys() as OneTimeKeyPair[]).slice(0, E2E_LIMITS.OTK_UPLOAD_MAX);
-      if (fresh.length === 0) return;
-      await this.persistAccount();
+  /** Top the server's one-time-key pool up from `count`. Callers hold the queue, and no fallback key is unpublished. */
+  private async replenishUnqueued(account: EngineAccount, count: number): Promise<void> {
+    if (count >= E2E_LIMITS.OTK_LOW_WATER) return;
+
+    // A batch whose upload failed is still in the account, unpublished, and
+    // goes out with this one: generate only what it does not already cover,
+    // and never send more than one upload may carry, or the server refuses
+    // the batch on every attempt and the pool drains to the fallback key.
+    const wanted = Math.min(E2E_LIMITS.OTK_TARGET - count, E2E_LIMITS.OTK_UPLOAD_MAX);
+    const pending = (account.oneTimeKeys() as OneTimeKeyPair[]).length;
+    if (pending < wanted) account.generateOneTimeKeys(wanted - pending);
+    const fresh = (account.oneTimeKeys() as OneTimeKeyPair[]).slice(0, E2E_LIMITS.OTK_UPLOAD_MAX);
+    if (fresh.length === 0) return;
+    await this.persistAccount();
+    await this.api.post('/e2e/devices/me/keys', {
+      deviceId: this.deviceId,
+      oneTimeKeys: fresh.map((k) => this.signedPreKey(account, k)),
+    });
+    account.markKeysAsPublished();
+    await this.persistAccount();
+  }
+
+  /**
+   * The key upkeep of a start, one task of the queue behind the start's
+   * key-share claim and its master-transfer claim (what they import may need
+   * the fallback key this replaces): the fallback key is looked after
+   * (upkeepFallbackKey), then the one-time key pool topped up. Not the
+   * fallback key in a start whose registration has just uploaded one.
+   *
+   * Within the key-upload budget (the server's e2eKeys bucket, 10 a minute
+   * for an account): one POST /e2e/devices/me/keys a start at most for the
+   * fallback key, one more when the pool is low. Never fails the start (its
+   * caller logs).
+   */
+  private refreshKeysAtStart(registeredNow: boolean, startClaimDrained: Promise<boolean>): Promise<void> {
+    return this.enqueue(async () => {
+      const account = this.requireAccount();
+      const res = await this.api.get(`/e2e/devices/me?deviceId=${encodeURIComponent(this.deviceId)}`);
+      const status = res.data.data as { registered: boolean; oneTimeKeyCount?: number };
+      if (!status.registered) return;
+      if (!registeredNow && !(await this.upkeepFallbackKey(account, await startClaimDrained))) return;
+      await this.replenishUnqueued(account, status.oneTimeKeyCount ?? 0);
+    });
+  }
+
+  /**
+   * The fallback key at a start, a repair: two tabs of one account used to
+   * save the account over each other, and the server can hold a fallback key
+   * whose private half no copy kept; every new contact claiming it then fails
+   * until it is replaced. The account cannot send its current key again (it
+   * answers only an unpublished one), so the repair is a new key, and the
+   * engine keeps the private half of the key before it, for a peer that
+   * claimed that one moments ago. It keeps ONE: a share sealed to a key two
+   * rotations old can no longer be opened, and is discarded. So a new key is
+   * made only when all of these hold (fallbackRotationBlocker):
+   *
+   * - no other writer: the account in the vault is the one this service last
+   *   read or wrote (checked here, inside the task, right before anything);
+   * - the start's key-share claim ran to its end without an error and emptied
+   *   the inbox (no page or request cap reached, no answer lost), no claim
+   *   made before this start may still hold a page leased, no kept share
+   *   (`pks:`) waits in the vault, and the start's claim of the master-secret
+   *   transfers went through their mailbox;
+   * - the last fallback key made to be sent, by the vault's record
+   *   (`repair:fallback-key-uploaded`), is at least
+   *   FALLBACK_ROTATION_MIN_INTERVAL_MS old, or there is none (the first
+   *   start of this build: the repair); a record dated after the clock's time
+   *   now (the clock was set back) is moved to now and the key waits a full
+   *   interval from there, never less, never for ever.
+   *
+   * The record is written BEFORE the key is made, and so before the upload
+   * that sends it: a page closed after the server took the key (or a write
+   * that fails then) still leaves it, and the next start does not rotate
+   * again at once, which would drop the key the server held until then. Not
+   * written, no key is made and nothing is sent at this start. Every path
+   * that makes a fallback key to be sent writes it first (this one and the
+   * registration, ensureRegistered), and it is written again once the server
+   * took the key.
+   *
+   * A key made at an earlier start whose upload did not land is sent again,
+   * the same key and no other (sending it makes nothing new: its private half
+   * and the one before it are both kept), at the next start with no other
+   * writer. A key is marked published only once the server took it; refused
+   * (429, 4xx) or unanswered, it stays unpublished in the vault. The one-time
+   * keys wait meanwhile: keys made beside an unpublished fallback key could
+   * later be marked with it by an upload that did not carry it. Answers
+   * whether the pool may be topped up now.
+   */
+  private async upkeepFallbackKey(account: EngineAccount, startClaimDrained: boolean): Promise<boolean> {
+    const stored = await this.vault.getAccountPickle();
+    if (stored !== this.accountPickleKnown) {
+      // Another writer saves the account too (a tab of an older build): what
+      // it saves last wins, so a key uploaded now could lose its private
+      // half. Nothing is uploaded at this start, one-time keys included
+      console.warn('e2e: the account in the vault is not the one this tab saved last: no key is uploaded at this start');
+      return false;
+    }
+    if (account.fallbackKey()) return this.publishFallbackKey(account);
+    const blocker = await this.fallbackRotationBlocker(startClaimDrained);
+    if (blocker) {
+      // A kept share can hold the rotation back for several starts: said
+      // once a start, as a warning (the upkeep runs once a start)
+      if (blocker === KEPT_SHARES_HOLD_ROTATION) console.warn(`e2e: the fallback key is not rotated at this start: ${blocker}`);
+      else console.debug(`e2e: the fallback key is not rotated at this start: ${blocker}`);
+      return true;
+    }
+    if ((account.oneTimeKeys() as OneTimeKeyPair[]).length > 0) {
+      // They go out with the pool's next upload, which marks them; a key
+      // made now would be marked by it too, without having been sent
+      console.warn('e2e: one-time keys wait to be uploaded: the fallback key is not rotated at this start');
+      return true;
+    }
+    try {
+      await this.vault.putRepair(FALLBACK_KEY_UPLOAD_RECORD);
+    } catch (err) {
+      if (isE2ESessionEnded(err)) throw err;
+      console.warn('e2e: the fallback key is not rotated at this start: its record could not be written:', errText(err));
+      return false;
+    }
+    account.generateFallbackKey();
+    // in the vault before the server can have it
+    await this.persistAccount();
+    return this.publishFallbackKey(account);
+  }
+
+  /** Why no new fallback key may be made at this start, or null when one may (see upkeepFallbackKey). */
+  private async fallbackRotationBlocker(startClaimDrained: boolean): Promise<string | null> {
+    if (!startClaimDrained) return 'the key-share claim of this start did not empty the inbox';
+    if (this.lostClaimTimer !== undefined) return 'a key-share claim lost its answer';
+    if (this.masterTransfersPending) return 'the master-secret transfers of this start were not read';
+    const before = this.claimSentBeforeStart;
+    if (before !== undefined && !(Date.now() - before >= CLAIM_LEASE_SETTLE_MS)) {
+      return 'a claim made before this start may still hold a page of key shares';
+    }
+    if ((await this.vault.listPendingShares()).length > 0) return KEPT_SHARES_HOLD_ROTATION;
+    const record = await this.vault.getRepair(FALLBACK_KEY_UPLOAD_RECORD);
+    if (record === undefined) return null;
+    const now = Date.now();
+    if (typeof record?.at !== 'number' || !Number.isFinite(record.at) || record.at > now) {
+      // The clock reads earlier than the last upload (set back since), or the
+      // record is unreadable: the time read now stands in for it, so the next
+      // rotation comes a full interval after this start by this clock
+      try {
+        await this.vault.putRepair(FALLBACK_KEY_UPLOAD_RECORD);
+      } catch (err) {
+        if (isE2ESessionEnded(err)) throw err;
+        console.warn('e2e: the time of the last fallback key upload could not be corrected:', errText(err));
+      }
+      return 'the clock reads earlier than the last upload';
+    }
+    if (now - record.at < FALLBACK_ROTATION_MIN_INTERVAL_MS) return 'the key the server holds is less than a day old';
+    return null;
+  }
+
+  /**
+   * Upload the account's unpublished fallback key alone, and mark it
+   * published once the server took it (the record of upkeepFallbackKey moves
+   * to that time). False when the upload was refused or not answered (the
+   * key stays unpublished, for the next attempt) or when one-time keys are
+   * unpublished beside it (the mark would cover them).
+   */
+  private async publishFallbackKey(account: EngineAccount): Promise<boolean> {
+    const fallback = account.fallbackKey() as OneTimeKeyPair | null;
+    if (!fallback) return true;
+    if ((account.oneTimeKeys() as OneTimeKeyPair[]).length > 0) {
+      console.warn('e2e: a fallback key and one-time keys are both unpublished: the fallback key waits');
+      return false;
+    }
+    try {
       await this.api.post('/e2e/devices/me/keys', {
         deviceId: this.deviceId,
-        oneTimeKeys: fresh.map((k) => this.signedPreKey(account, k)),
+        fallbackKey: this.signedPreKey(account, fallback),
       });
-      account.markKeysAsPublished();
-      await this.persistAccount();
-    });
+    } catch (err) {
+      if (isE2ESessionEnded(err)) throw err;
+      console.warn('e2e: the fallback key was not uploaded (sent again at a later start):', errText(err));
+      return false;
+    }
+    account.markKeysAsPublished();
+    await this.persistAccount();
+    await this.noteFallbackKeyUploaded();
+    return true;
+  }
+
+  /** Record that the server took a fallback key now; a failure is logged, and the record written before the key was made stands. */
+  private async noteFallbackKeyUploaded(): Promise<void> {
+    try {
+      await this.vault.putRepair(FALLBACK_KEY_UPLOAD_RECORD);
+    } catch (err) {
+      if (isE2ESessionEnded(err)) throw err;
+      console.warn('e2e: the time of the fallback key upload could not be recorded:', errText(err));
+    }
   }
 
   // ─── Cross-signing: the account master key (spec §14) ───────────────────────
@@ -1624,9 +1985,21 @@ export class E2EService {
     return imported;
   }
 
-  /** Callers must already hold the serial queue (this advances Olm state). */
+  /**
+   * Callers must already hold the serial queue (this advances Olm state).
+   * Leaves masterTransfersPending set when it fails before it has gone
+   * through the mailbox (the transfers there then wait, unread). A transfer
+   * it read and could not import stays on the server for the next claim, as
+   * it always did, and does not hold the fallback key back: one rotation
+   * keeps the key before it, and the next comes a day later at the soonest.
+   */
   private async claimMasterTransfersUnqueued(): Promise<boolean> {
-    if (this.masterKey) return false; // already approved — nothing to import
+    this.masterTransfersPending = true;
+    const settled = <T>(value: T): T => {
+      this.masterTransfersPending = false;
+      return value;
+    };
+    if (this.masterKey) return settled(false); // already approved — nothing to import
 
     // Learn the expected key BEFORE reading the mailbox. Reading is harmless
     // now that it no longer deletes, but a failure here would still waste the
@@ -1642,12 +2015,12 @@ export class E2EService {
     const published = this.servedOwnMasterKey ?? list.masterKey;
     if (!published) {
       console.warn('e2e: this account publishes no master key — leaving any transfer for later');
-      return false;
+      return settled(false);
     }
 
     const res = await this.api.get(`/e2e/master-transfers?deviceId=${encodeURIComponent(this.deviceId)}`);
     const transfers = (res.data.data as { transfers?: unknown[] }).transfers;
-    if (!Array.isArray(transfers) || transfers.length === 0) return false;
+    if (!Array.isArray(transfers) || transfers.length === 0) return settled(false);
 
     // Rows are deleted only once they have been dealt with. A read that
     // consumed them would make every transient failure permanent: the device
@@ -1684,6 +2057,7 @@ export class E2EService {
           console.warn('e2e: could not clear claimed master transfers:', errText(err));
         });
     }
+    this.masterTransfersPending = false;
     return imported;
   }
 
@@ -3577,6 +3951,15 @@ export class E2EService {
    * Callers must already hold the serial queue (this mutates Olm state).
    */
   private async claimKeyShares(): Promise<number> {
+    return (await this.claimKeyShareRun()).imported;
+  }
+
+  /**
+   * claimKeyShares, with whether the run emptied the inbox (`drained`): it
+   * reached a page shorter than a full one (or an empty answer) before any cap
+   * on pages or requests and before a dispose. A run that fails rejects.
+   */
+  private claimKeyShareRun(): Promise<ClaimRun> {
     if (this.claimInFlight) return this.claimInFlight;
     // No disposal check of its own: every caller runs on the queue, which
     // starts nothing for a disposed service, and a closed vault fails first.
@@ -3600,10 +3983,27 @@ export class E2EService {
       // in which a claim was answered and none lost its answer.
       let answeredInRun = false;
       let lostInRun = false;
+      let drained = false;
       try {
         for (let request = 0; request < MAX_CLAIM_REQUESTS && pages < MAX_CLAIM_PAGES; request++) {
           // Disposed meanwhile: this page is imported (dispose() waits for it),
           // the next one stays on the server.
+          if (this.disposed) break;
+          // Still this page's vault: a claim leases its page on the server, and
+          // a page another tab took the vault from could not keep it
+          await this.vault.assertOwner();
+          if (this.disposed) break;
+          // When a claim last left this vault: an answer that never comes back
+          // (this page closing included) leaves its page leased, unseen by the
+          // next start's claim for a while (claimSentBeforeStart). Advisory:
+          // a failed write costs no claim (a later start then may not see
+          // that lease; the fallback key's other conditions still hold)
+          try {
+            await this.vault.putClaimSent();
+          } catch (err) {
+            if (isE2ESessionEnded(err)) throw err;
+            console.warn('e2e: the time of this key-share claim could not be recorded:', errText(err));
+          }
           if (this.disposed) break;
           // The unguarded client: an answer that comes back after the teardown
           // (the dispose deadline passed) still holds shares this device has not
@@ -3645,7 +4045,10 @@ export class E2EService {
           }
           // Written before anything else is done
           const { served, entries } = claimedPageEntries(res);
-          if (served === 0) break;
+          if (served === 0) {
+            drained = true;
+            break;
+          }
           const fresh = this.notHeldYet(entries);
           // every element read, and every one held here already: not a page that counts
           if (fresh.length > 0 || entries.length < served) pages++;
@@ -3655,12 +4058,15 @@ export class E2EService {
           // Not once disposed: the next start sends what this page settled
           this.sendShareAcksDetached();
           // the server's count, malformed elements included, decides whether more pages wait
-          if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) break;
+          if (served < E2E_LIMITS.KEYSHARE_CLAIM_MAX) {
+            drained = true;
+            break;
+          }
         }
       } finally {
         if (answeredInRun && !lostInRun) this.lostClaimRetries = 0;
       }
-      return imported;
+      return { imported, drained };
     })().finally(() => {
       this.claimInFlight = null;
     });
@@ -4969,10 +5375,20 @@ export function getE2EService(userId: string): E2EService {
   if (activeService && activeUserId === userId) return activeService;
   const signedIn = currentE2ESessionUser();
   if (signedIn !== undefined && signedIn !== userId) throw new E2EServiceDisposedError();
-  void activeService?.dispose();
+  if (activeService) letGo(activeService);
   activeService = new E2EService(userId);
   activeUserId = userId;
   return activeService;
+}
+
+/**
+ * Dispose a service the page no longer uses, and let its vault go once its
+ * teardown is done, unless the page is signed in to that account again by
+ * then (vaultOwnership.ts).
+ */
+function letGo(service: E2EService): void {
+  noteVaultTeardown(service.vaultName, service.disposeAndSettle());
+  releaseVaultOwnershipNotInUse();
 }
 
 /**
@@ -4987,10 +5403,20 @@ export function scopeMarkedPurged(userId: string | null | undefined, scope: stri
   return activeService.scopePurged(READ_ONLY_PURGE_MARK, scope);
 }
 
+/**
+ * Logout, account switch, account deletion: the signed-in account's service
+ * is disposed, and the page lets that account's vault go once the teardown is
+ * done (a vault it acquired without ever starting a service too). A page that
+ * gave its vault up to another tab keeps its disposed service instead
+ * (onLost): getE2EService then answers that one, which refuses everything,
+ * and never makes a new one in that page.
+ */
 export function disposeE2EService(): void {
-  void activeService?.dispose();
+  const service = activeService;
   activeService = null;
   activeUserId = null;
+  if (service) letGo(service);
+  else releaseVaultOwnershipNotInUse();
 }
 
 /**

@@ -51,7 +51,14 @@ vi.mock('../../i18n', () => ({ default: { t: (key: string) => key } }));
 vi.mock('../../services/socket', () => ({ getSocket: () => null }));
 vi.mock('../../stores/toastStore', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 
-import { E2EService, E2EIdentityChangedError, type E2EServiceOptions } from '../../services/e2e/e2eService';
+import {
+  E2EService,
+  E2EIdentityChangedError,
+  FALLBACK_KEY_UPLOAD_RECORD,
+  FALLBACK_ROTATION_MIN_INTERVAL_MS,
+  OUTBOUND_ROTATION_REPAIR,
+  type E2EServiceOptions,
+} from '../../services/e2e/e2eService';
 import { watchKeyArrivals, redecryptPassesSettled } from '../../services/e2e/redecryptOnKeyArrival';
 import { RETRY_AFTER_VIEW_CHANGES } from '../../services/e2e/undecryptedRows';
 import { decryptMessageForDisplay, decryptMessagesForDisplay, DECRYPT_FAILED_CONTENT } from '../../services/e2e/dmCrypto';
@@ -61,7 +68,20 @@ import { useServerStore } from '../../stores/serverStore';
 import type { Message } from '@voxium/shared';
 import { generateRecoveryKey } from '../../services/e2e/engine';
 import { initEngine, EngineAccount, EngineMasterKey, EngineGroupSession } from '../../services/e2e/engine';
-import { E2EVault, E2EVaultClosedError, type PickleKeyProvider } from '../../services/e2e/vault';
+import { E2EVault, E2EVaultClosedError, VAULT_OWNER_KEY, stampVaultOwner, vaultDbName, type PickleKeyProvider } from '../../services/e2e/vault';
+import {
+  acquireVaultOwnership,
+  getVaultOwnershipState,
+  noteVaultTeardown,
+  releaseVaultOwnershipNotInUse,
+  vaultOwnershipFor,
+  VAULT_LOCK_PREFIX,
+  _resetVaultOwnershipForTests,
+  _setVaultOwnershipEnvironmentForTests,
+  _vaultKeyForTests,
+} from '../../services/e2e/vaultOwnership';
+import { isE2ESessionEnded, registerE2ESessionUser } from '../../services/e2e/session';
+import { Bus, FakeChannel, FakeLocks } from '../helpers/fakeVaultOwnership';
 
 const require = createRequire(import.meta.url);
 const wasmBytes = readFileSync(require.resolve('@voxium/crypto-engine/wasm'));
@@ -1823,6 +1843,8 @@ describe('E2EService (cross-signing)', () => {
     // the approved device can now approve a third one on its own
     const desktop = makeDevice(server, aliceId);
     await desktop.service.initialize();
+    // its start claims the mailbox too: done before the approval, so that the claim below is the one that imports
+    await flushQueue();
     await laptop.service.approveDevice(desktop.service.deviceId);
     expect(crossSignatureValid(server, aliceId, desktop.service.deviceId)).toBe(true);
     expect(await desktop.service.claimMasterTransfers()).toBe(true);
@@ -5476,7 +5498,8 @@ describe('E2EService — lifecycle', () => {
       await tornDown;
       await starting;
       await flushQueue();
-      expect(order).toEqual(['teardown', 'account read']);
+      // the second read is the key upkeep's, checking the vault still holds the account this service read
+      expect(order).toEqual(['teardown', 'account read', 'account read']);
       // the second service saves its account: the key the claim used stays spent
       await (second.service as unknown as { persistAccount(): Promise<void> }).persistAccount();
       await second.service.dispose();
@@ -6770,8 +6793,10 @@ describe('E2EService — lifecycle', () => {
       vault.close();
 
       const internals = internalsOf(alice.service);
-      let unblock!: () => void;
+      let unblock: (() => void) | undefined;
       const blocker = internals.enqueue(() => new Promise<void>((resolve) => (unblock = resolve)));
+      // the blocker is running (its start read the owner token): only the pass is counted below
+      await vi.waitFor(() => expect(unblock).toBeDefined());
       const db = (internals.vault as unknown as { db: IDBDatabase }).db;
       const transaction = vi.spyOn(db, 'transaction');
       try {
@@ -6781,7 +6806,7 @@ describe('E2EService — lifecycle', () => {
         expect(transaction.mock.calls.length).toBeLessThanOrEqual(2);
       } finally {
         transaction.mockRestore();
-        unblock();
+        unblock?.();
         await blocker;
       }
     });
@@ -7642,5 +7667,1142 @@ describe('E2EService — a row on screen that could not be decrypted opens when 
     }
     // nothing about the message changed: it opens once the vault takes the write
     expect(await bob.service.decryptMessage(message, { storageFailureRejects: true })).toEqual({ text: 'stored once the disk has room' });
+  });
+});
+
+// ─── One page owns the vault (services/e2e/vaultOwnership.ts) ────────────────
+//
+// Each test models TWO PAGES of one account inside ONE test process: this
+// module is one page, and "another page" is played by writing its owner token
+// into the vault (what that page's acquisition does) or by a fake lock manager
+// in which another tab holds the vault's lock. Two services of this file share
+// module state (the ownership records, pendingTeardowns, the secure pins), so a
+// test with two services on one vault models two services of ONE page, never
+// two tabs.
+describe('E2EService — one page owns the vault', () => {
+  afterEach(() => {
+    _resetVaultOwnershipForTests();
+    registerE2ESessionUser(null);
+  });
+
+  const vaultNameOf = (device: { userId: string; vaultNamespace: string }) => vaultDbName(device.userId, device.vaultNamespace);
+  const vaultOf = (service: E2EService) => (service as unknown as { vault: E2EVault }).vault;
+
+  /** Every key the vault holds, read raw. */
+  function rawKeys(name: string): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const all = db.transaction('kv', 'readonly').objectStore('kv').getAllKeys();
+        all.onsuccess = () => {
+          db.close();
+          resolve(all.result.map(String));
+        };
+        all.onerror = () => {
+          db.close();
+          reject(all.error);
+        };
+      };
+    });
+  }
+
+  /** What the vault holds under `key`, read raw (no fence). */
+  function rawRead(name: string, key: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const get = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+        get.onsuccess = () => {
+          db.close();
+          resolve(get.result);
+        };
+        get.onerror = () => {
+          db.close();
+          reject(get.error);
+        };
+      };
+    });
+  }
+
+  it('refuses to start while another tab owns the vault, opens nothing of it, and starts once that tab let go', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const locks = new FakeLocks();
+    const otherTab = locks.otherTab(`${VAULT_LOCK_PREFIX}${vaultNameOf(alice)}`);
+    await otherTab.granted;
+    _setVaultOwnershipEnvironmentForTests({ locks, openChannel: null });
+    const open = vi.spyOn(indexedDB, 'open');
+    try {
+      await expect(alice.service.initialize()).rejects.toMatchObject({ name: 'E2EVaultNotOwnedError' });
+      expect(open.mock.calls.filter(([name]) => name === vaultNameOf(alice))).toEqual([]);
+    } finally {
+      open.mockRestore();
+    }
+    expect(server.users.get(alice.userId)?.devices.size ?? 0).toBe(0);
+
+    // the other tab closes: this page waited in the queue, and starts now
+    otherTab.release();
+    await vi.waitFor(() => expect(getVaultOwnershipState(alice.userId, vaultNameOf(alice))).toBe('owned'));
+    await alice.service.initialize();
+    expect(server.deviceOf(alice.userId, alice.service.deviceId)).toBeTruthy();
+  });
+
+  it('a write that finds another page’s token ends the service like a dispose, and hands out no ciphertext', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await alice.service.encryptMessage('c1', bob.userId, 'before');
+
+    // another page takes the vault over between this encrypt's ratchet step and its write
+    const vault = vaultOf(alice.service);
+    const write = vault.putOutboundGroupSession.bind(vault);
+    vi.spyOn(vault, 'putOutboundGroupSession').mockImplementation(async (scope, record) => {
+      await stampVaultOwner(vaultNameOf(alice), 'another-page', 'claim');
+      return write(scope, record);
+    });
+    const sharesBefore = server.shares.length;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(alice.service.encryptMessage('c1', bob.userId, 'after')).rejects.toSatisfy(isE2ESessionEnded);
+      expect(getVaultOwnershipState(alice.userId, vaultNameOf(alice))).toBe('lost');
+      // ended like a disposed service: refused from now on, quietly
+      await expect(alice.service.initialize()).rejects.toMatchObject({ name: 'E2EServiceDisposedError' });
+      await expect(alice.service.encryptMessage('c1', bob.userId, 'later')).rejects.toSatisfy(isE2ESessionEnded);
+      await expect(alice.service.decryptMessage({ id: 'x', conversationId: 'c1', authorId: bob.userId, content: buildMegolmEnvelope('c2lk', 'Ym9keQ') }))
+        .rejects.toSatisfy(isE2ESessionEnded);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(server.shares.length).toBe(sharesBefore);
+    expect(await rawRead(vaultNameOf(alice), VAULT_OWNER_KEY)).toBe('another-page');
+  });
+
+  it('a decrypt in flight when another page takes over rejects as an ending: no marker, no cache entry', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    const first = await alice.service.encryptMessage('c1', bob.userId, 'one');
+    expect((await bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: first.envelope })).text).toBe('one');
+    const second = await alice.service.encryptMessage('c1', bob.userId, 'two');
+
+    // the decrypt has stepped the inbound session; its write finds another page's token
+    const vault = vaultOf(bob.service);
+    const write = vault.putInboundGroupSession.bind(vault);
+    vi.spyOn(vault, 'putInboundGroupSession').mockImplementation(async (sessionId, record) => {
+      await stampVaultOwner(vaultNameOf(bob), 'another-page', 'claim');
+      return write(sessionId, record);
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: second.envelope }))
+        .rejects.toSatisfy(isE2ESessionEnded);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await rawRead(vaultNameOf(bob), 'pt:m2')).toBeUndefined();
+
+    // through the display gate: nothing to show, never the failed marker
+    display.service = bob.service;
+    display.userId = bob.userId;
+    try {
+      const shown = await decryptMessageForDisplay({
+        id: 'm3', type: 'user', content: second.envelope, channelId: null, conversationId: 'c1', encrypted: true,
+        author: { id: alice.userId, username: 'alice', displayName: 'Alice' },
+        createdAt: '2026-11-20T10:00:00.000Z', editedAt: null, reactions: [], attachments: [],
+      } as unknown as Message);
+      expect(shown).toBeNull();
+    } finally {
+      display.service = null;
+      display.userId = null;
+    }
+    expect(await rawRead(vaultNameOf(bob), 'pt:m3')).toBeUndefined();
+  });
+
+  it('a task that starts after another page took over asks the server nothing: no claim, no acknowledgement', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const sent = await alice.service.encryptMessage('c1', bob.userId, 'waiting in the inbox');
+    const pending = server.shares.filter((s) => s.recipientUserId === bob.userId);
+    expect(pending.length).toBeGreaterThan(0);
+
+    await stampVaultOwner(vaultNameOf(bob), 'another-page', 'claim');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // a decrypt miss would claim the inbox: the task's start finds the other token first
+      await expect(bob.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: alice.userId, content: sent.envelope }))
+        .rejects.toSatisfy(isE2ESessionEnded);
+    } finally {
+      warn.mockRestore();
+    }
+    // nothing leased, nothing acknowledged: the shares wait for the page that owns the vault
+    expect(server.shares.filter((s) => s.recipientUserId === bob.userId).map((s) => s.leasedUntil)).toEqual(pending.map(() => null));
+    expect(server.shareAcks.filter((a) => a.userId === bob.userId)).toEqual([]);
+    expect(getVaultOwnershipState(bob.userId, vaultNameOf(bob))).toBe('lost');
+  });
+
+  it('the same page signing out and back in to the account keeps the vault, and never reads as another tab', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    let signedIn: string | null = alice.userId;
+    registerE2ESessionUser(() => signedIn);
+    await alice.service.initialize();
+    const token = await rawRead(vaultNameOf(alice), VAULT_OWNER_KEY);
+
+    // a sign-out: the service is disposed and the page lets the vault go once
+    // that teardown ends, unless it is signed in to the account again by then
+    signedIn = null;
+    noteVaultTeardown(vaultNameOf(alice), alice.service.disposeAndSettle());
+    releaseVaultOwnershipNotInUse();
+    signedIn = alice.userId; // signed in again before the teardown ended
+    const again = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await again.service.initialize();
+    await flushQueue();
+    expect(getVaultOwnershipState(alice.userId, vaultNameOf(alice))).toBe('owned');
+    expect(await rawRead(vaultNameOf(alice), VAULT_OWNER_KEY)).toBe(token);
+
+    // signed out for good this time: let go, and a later sign-in acquires it again
+    signedIn = null;
+    noteVaultTeardown(vaultNameOf(alice), again.service.disposeAndSettle());
+    releaseVaultOwnershipNotInUse();
+    await vi.waitFor(() => expect(getVaultOwnershipState(alice.userId, vaultNameOf(alice))).toBe('none'));
+    signedIn = alice.userId;
+    const third = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await third.service.initialize();
+    expect(third.service.deviceId).toBe(alice.service.deviceId);
+  });
+
+  it('a token write that fails at the acquisition is made at the service start, over the token of this tab’s previous page load', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const vaultName = vaultNameOf(alice);
+    await stampVaultOwner(vaultName, 'previous-page-load', 'claim');
+    let failNext = true;
+    const stamps: string[] = [];
+    _setVaultOwnershipEnvironmentForTests({
+      locks: new FakeLocks(),
+      openChannel: null,
+      stamp: async (name, token, mode) => {
+        stamps.push(mode);
+        if (failNext) {
+          failNext = false;
+          throw new DOMException('the disk is busy', 'UnknownError');
+        }
+        return stampVaultOwner(name, token, mode);
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // what the gate does before the app mounts, then the app's start
+      await expect(acquireVaultOwnership(alice.userId, { vaultName })).resolves.toBe('owned');
+      await alice.service.initialize();
+    } finally {
+      warn.mockRestore();
+    }
+    expect(getVaultOwnershipState(alice.userId, vaultName)).toBe('owned');
+    expect(stamps).toEqual(['claim', 'claim']);
+    expect(await rawRead(vaultName, VAULT_OWNER_KEY)).toBe(vaultOwnershipFor(alice.userId, vaultName).token());
+    expect(server.deviceOf(alice.userId, alice.service.deviceId)).toBeTruthy();
+  });
+
+  it('a key-share claim in flight when the page hands the vault over is written; nothing new starts once the release was accepted', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const bob = makeParty(server, 'bob');
+    const locks = new FakeLocks();
+    const bus = new Bus();
+    const otherTab = new FakeChannel(bus);
+    _setVaultOwnershipEnvironmentForTests({ locks, openChannel: () => new FakeChannel(bus) });
+
+    // Alice's client: the next claim of her inbox is held until the test lets it answer
+    const base = server.apiFor(aliceId);
+    let holdClaim = false;
+    let claimOut!: () => void;
+    const claimReached = new Promise<void>((resolve) => (claimOut = resolve));
+    let answerClaim!: () => void;
+    const claimAnswered = new Promise<void>((resolve) => (answerClaim = resolve));
+    const api = {
+      ...base,
+      async get(url: string) {
+        if (holdClaim && url.startsWith('/e2e/keyshares')) {
+          holdClaim = false;
+          claimOut();
+          await claimAnswered;
+        }
+        return base.get(url);
+      },
+    };
+    const vaultNamespace = `v${++vaultSeq}`;
+    const alice = new E2EService(aliceId, {
+      api: api as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace,
+      deviceListCacheMs: 0,
+    });
+    liveServices.add(alice);
+    const vaultName = vaultDbName(aliceId, vaultNamespace);
+    await alice.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    // Bob is known: his share imports without asking the server anything
+    await alice.fetchDeviceList(bob.userId, true);
+    const sent = await bob.service.encryptMessage('c1', aliceId, 'in flight at the hand-over');
+
+    // a decrypt miss claims the inbox; the answer is on its way
+    holdClaim = true;
+    const decrypt = alice
+      .decryptMessage({ id: 'm1', conversationId: 'c1', authorId: bob.userId, content: sent.envelope })
+      .catch((err: unknown) => err);
+    await claimReached;
+
+    // another tab of the account asks for the vault: this page agrees at once
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      otherTab.postMessage({ v: 1, type: 'release', vault: _vaultKeyForTests(vaultName), from: 'asker', nonce: 'n1' });
+      await vi.waitFor(() => expect(otherTab.received.map((m) => m.type)).toContain('releasing'));
+      expect(getVaultOwnershipState(aliceId, vaultName)).toBe('lost');
+      // nothing new starts here from now on: no service start, and a task
+      // queued behind the claim is refused when its turn comes
+      await expect(vaultOwnershipFor(aliceId, vaultName).ensure()).rejects.toMatchObject({ name: 'E2EVaultNotOwnedError' });
+      const sharesBefore = server.shares.length;
+      const newWork = alice.encryptMessage('c2', bob.userId, 'new work').then(
+        () => 'sent',
+        (err: unknown) => err
+      );
+      expect(otherTab.received.map((m) => m.type)).not.toContain('released');
+
+      // the claim's answer arrives: what it was handed reaches the vault
+      answerClaim();
+      await vi.waitFor(() => expect(otherTab.received.map((m) => m.type)).toContain('released'));
+      await decrypt;
+      expect(isE2ESessionEnded(await newWork)).toBe(true);
+      expect(server.shares.length).toBe(sharesBefore);
+    } finally {
+      warn.mockRestore();
+    }
+    const sid = sidOf(sent.envelope);
+    const imported = await rawRead(vaultName, `igs:${sid}`);
+    const kept = (await rawKeys(vaultName)).filter((key) => key.startsWith('pks:'));
+    expect(imported !== undefined || kept.length > 0).toBe(true);
+    // and once `released` is out, the vault refuses this page
+    expect(vaultOwnershipFor(aliceId, vaultName).token()).toBeNull();
+  });
+});
+
+// ─── The repairs that ship with one owner per vault ──────────────────────────
+//
+// Both run only in a service the page owns the vault for (initialize asks the
+// ownership first). Each restart below is a later start of the SAME device in
+// the same page (same vault, same key provider): what a reload does.
+describe('E2EService — the repairs that ship with one owner per vault', () => {
+  const vaultNameOf = (device: { userId: string; vaultNamespace: string }) => vaultDbName(device.userId, device.vaultNamespace);
+  const accountOf = (service: E2EService) =>
+    (service as unknown as { account: { fallbackKey(): { keyId: string; key: string } | null | undefined; oneTimeKeys(): unknown[] } }).account;
+
+  function rawDelete(name: string, key: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction('kv', 'readwrite');
+        tx.objectStore('kv').delete(key);
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => {
+          db.close();
+          reject(tx.error);
+        };
+      };
+    });
+  }
+
+  function rawRead(name: string, key: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const get = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+        get.onsuccess = () => {
+          db.close();
+          resolve(get.result);
+        };
+      };
+    });
+  }
+
+  /**
+   * The device's client, recording every POST, whose key uploads can be
+   * refused (429) on demand, and whose GETs a test may answer itself
+   * (`answerGets`: a hook answering undefined leaves the GET to the server).
+   */
+  function keyUploadRecorder(server: Server, userId: string) {
+    const base = server.apiFor(userId);
+    const posts: Array<{ url: string; body: { oneTimeKeys?: unknown[]; fallbackKey?: { key: string } } }> = [];
+    const puts: Array<{ url: string; body: { fallbackKey?: { key: string } } }> = [];
+    let refuseKeys = false;
+    let getHook: ((url: string) => Promise<unknown> | undefined) | null = null;
+    const api = {
+      ...base,
+      async get(url: string) {
+        const own = getHook?.(url);
+        return own ?? base.get(url);
+      },
+      async post(url: string, body?: unknown) {
+        posts.push({ url, body: (body ?? {}) as (typeof posts)[number]['body'] });
+        if (refuseKeys && url === '/e2e/devices/me/keys') {
+          throw Object.assign(new Error('429: Too many requests'), { response: { status: 429 } });
+        }
+        return base.post(url, body as never);
+      },
+      async put(url: string, body?: unknown) {
+        puts.push({ url, body: (body ?? {}) as (typeof puts)[number]['body'] });
+        return base.put(url, body as never);
+      },
+    };
+    const keyUploads = () => posts.filter((p) => p.url === '/e2e/devices/me/keys');
+    return {
+      api,
+      posts,
+      puts,
+      keyUploads,
+      refuse: (on: boolean) => {
+        refuseKeys = on;
+      },
+      answerGets: (hook: ((url: string) => Promise<unknown> | undefined) | null) => {
+        getHook = hook;
+      },
+    };
+  }
+
+  function deviceOver(userId: string, api: unknown, opts: { keyProvider?: PickleKeyProvider; vaultNamespace?: string } = {}) {
+    const keyProvider = opts.keyProvider ?? memoryKeyProvider();
+    const vaultNamespace = opts.vaultNamespace ?? `v${++vaultSeq}`;
+    const service = new E2EService(userId, {
+      api: api as E2EServiceOptions['api'],
+      keyProvider,
+      wasmInput: wasmBytes,
+      vaultNamespace,
+      deviceListCacheMs: 0,
+    });
+    liveServices.add(service);
+    return { userId, service, keyProvider, vaultNamespace };
+  }
+
+  it('drops every outbound group session once, at the first start that carries the repair, and never again', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    const first = await alice.service.encryptMessage('c1', bob.userId, 'one');
+    expect(await rawRead(vaultNameOf(alice), `repair:${OUTBOUND_ROTATION_REPAIR}`)).toMatchObject({ at: expect.any(Number) });
+
+    // a vault from before the repair: its record is not there
+    await alice.service.dispose();
+    await rawDelete(vaultNameOf(alice), `repair:${OUTBOUND_ROTATION_REPAIR}`);
+    const restarted = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await restarted.service.initialize();
+    const second = await restarted.service.encryptMessage('c1', bob.userId, 'two');
+    expect(sidOf(second.envelope)).not.toBe(sidOf(first.envelope));
+    expect((await bob.service.decryptMessage({ id: 'm2', conversationId: 'c1', authorId: alice.userId, content: second.envelope })).text).toBe('two');
+    expect(await rawRead(vaultNameOf(alice), `repair:${OUTBOUND_ROTATION_REPAIR}`)).toMatchObject({ at: expect.any(Number) });
+
+    // recorded: a later start keeps the session
+    await restarted.service.dispose();
+    const again = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await again.service.initialize();
+    const third = await again.service.encryptMessage('c1', bob.userId, 'three');
+    expect(sidOf(third.envelope)).toBe(sidOf(second.envelope));
+  });
+
+  it('a failed outbound repair never fails the start, records nothing, and runs at the next start', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    const first = await alice.service.encryptMessage('c1', bob.userId, 'one');
+    await alice.service.dispose();
+    await rawDelete(vaultNameOf(alice), `repair:${OUTBOUND_ROTATION_REPAIR}`);
+
+    const drop = vi.spyOn(E2EVault.prototype, 'deleteAllOutboundGroupSessions')
+      .mockRejectedValueOnce(new DOMException('the disk is full', 'QuotaExceededError'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const restarted = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    try {
+      await expect(restarted.service.initialize()).resolves.toBeUndefined();
+    } finally {
+      warn.mockRestore();
+      drop.mockRestore();
+    }
+    expect(await rawRead(vaultNameOf(alice), `repair:${OUTBOUND_ROTATION_REPAIR}`)).toBeUndefined();
+    const still = await restarted.service.encryptMessage('c1', bob.userId, 'still the old session');
+    expect(sidOf(still.envelope)).toBe(sidOf(first.envelope));
+
+    await restarted.service.dispose();
+    const again = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await again.service.initialize();
+    const rotated = await again.service.encryptMessage('c1', bob.userId, 'a new one');
+    expect(sidOf(rotated.envelope)).not.toBe(sidOf(first.envelope));
+  });
+
+  const DAY = FALLBACK_ROTATION_MIN_INTERVAL_MS;
+  const UPLOAD_RECORD = `repair:${FALLBACK_KEY_UPLOAD_RECORD}`;
+
+  function rawPut(name: string, key: string, value: unknown): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction('kv', 'readwrite');
+        tx.objectStore('kv').put(value, key);
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => {
+          db.close();
+          reject(tx.error);
+        };
+      };
+    });
+  }
+
+  /**
+   * As if the device had been away: its last fallback key upload a day ago
+   * and more (or none: `upload: null`, a vault from before this build), its
+   * last claim of the inbox long enough ago that no page of it is leased.
+   */
+  async function awayFor(vaultName: string, opts: { upload?: null } = {}) {
+    if (opts.upload === null) await rawDelete(vaultName, UPLOAD_RECORD);
+    else await rawPut(vaultName, UPLOAD_RECORD, { at: Date.now() - DAY - 60_000 });
+    await rawPut(vaultName, 'claim_sent', { at: Date.now() - 5 * 60_000 });
+  }
+
+  /** A later start of `device` in the same page (same vault, same key provider), over `api`. */
+  const restartOver = (device: { userId: string; keyProvider: PickleKeyProvider; vaultNamespace: string }, api: unknown) =>
+    deviceOver(device.userId, api, { keyProvider: device.keyProvider, vaultNamespace: device.vaultNamespace });
+
+  it('rotates the fallback key at the first start that may, once a day at most, and a message built on the key it replaced still opens', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const deviceId = alice.service.deviceId;
+    // the registration recorded its upload
+    expect(await rawRead(vaultNameOf(alice), UPLOAD_RECORD)).toMatchObject({ at: expect.any(Number) });
+    await alice.service.dispose();
+    // a vault from before this build: no record, the server's key possibly without its private half
+    await awayFor(vaultNameOf(alice), { upload: null });
+    const atRegistration = server.deviceOf(alice.userId, deviceId).fallbackKey!.key;
+
+    // the pool is empty: Bob's first message to the device rides the fallback key
+    server.deviceOf(alice.userId, deviceId).oneTimeKeys.length = 0;
+    const envelope = await bob.service.encryptToDevice(alice.userId, deviceId, 'over the fallback key');
+
+    const before = Date.now();
+    const restarted = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await restarted.service.initialize();
+    await flushQueue();
+    const rotated = server.deviceOf(alice.userId, deviceId).fallbackKey!.key;
+    expect(rotated).not.toBe(atRegistration);
+    expect(accountOf(restarted.service).fallbackKey()).toBeFalsy(); // published, and marked so
+    expect(((await rawRead(vaultNameOf(alice), UPLOAD_RECORD)) as { at: number }).at).toBeGreaterThanOrEqual(before);
+    // the message built on the key it replaced still opens: the engine keeps the key before
+    expect(await restarted.service.decryptFromDevice(bob.userId, bob.service.deviceId, envelope)).toBe('over the fallback key');
+
+    // the next start, within the day: the same key
+    await restarted.service.dispose();
+    await rawPut(vaultNameOf(alice), 'claim_sent', { at: Date.now() - 5 * 60_000 });
+    const again = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await again.service.initialize();
+    await flushQueue();
+    expect(server.deviceOf(alice.userId, deviceId).fallbackKey!.key).toBe(rotated);
+
+    // a day later: a new one
+    await again.service.dispose();
+    await awayFor(vaultNameOf(alice));
+    const later = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await later.service.initialize();
+    await flushQueue();
+    expect(server.deviceOf(alice.userId, deviceId).fallbackKey!.key).not.toBe(rotated);
+  });
+
+  it('the engine keeps ONE key before the current one: a message built on a key two rotations old no longer opens', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const deviceId = alice.service.deviceId;
+    await alice.service.dispose();
+    server.deviceOf(alice.userId, deviceId).oneTimeKeys.length = 0;
+    const envelope = await bob.service.encryptToDevice(alice.userId, deviceId, 'two keys ago');
+
+    // two rotations, a day apart (the record aged by hand, the clock left alone)
+    let current = alice;
+    for (let i = 0; i < 2; i++) {
+      await awayFor(vaultNameOf(alice));
+      const before = server.deviceOf(alice.userId, deviceId).fallbackKey!.key;
+      const next = makeDevice(server, alice.userId, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+      await next.service.initialize();
+      await flushQueue();
+      expect(server.deviceOf(alice.userId, deviceId).fallbackKey!.key).not.toBe(before);
+      if (i === 0) await next.service.dispose();
+      current = next;
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const opened = await current.service.decryptFromDevice(bob.userId, bob.service.deviceId, envelope).catch(() => null);
+      expect(opened).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * A device whose last fallback key upload is a day old and more, restarted
+   * over a client a case arranges; answers what the restart uploaded.
+   * `approved: false`: a second device of the account, without the account
+   * key (it claims master-secret transfers at its start).
+   */
+  async function restartAfterADay(
+    arrange: (ctx: {
+      vaultName: string;
+      answerGets: (hook: ((url: string) => Promise<unknown> | undefined) | null) => void;
+    }) => Promise<void> | void,
+    opts: { approved?: boolean } = {}
+  ) {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    if (opts.approved === false) {
+      const phone = makeDevice(server, userId);
+      await phone.service.initialize();
+      await flushQueue();
+    }
+    const recorder = keyUploadRecorder(server, userId);
+    const alice = deviceOver(userId, recorder.api);
+    await alice.service.initialize();
+    await flushQueue();
+    const deviceId = alice.service.deviceId;
+    const held = server.deviceOf(userId, deviceId).fallbackKey!.key;
+    await alice.service.dispose();
+    const vaultName = vaultDbName(userId, alice.vaultNamespace);
+    // on its own, this start would rotate
+    await awayFor(vaultName);
+    await arrange({ vaultName, answerGets: recorder.answerGets });
+    const uploadsBefore = recorder.keyUploads().length;
+    const next = restartOver(alice, recorder.api);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const debug = vi.spyOn(console, 'debug');
+    let notRotated: string[];
+    let warned: string[];
+    try {
+      await expect(next.service.initialize()).resolves.toBeUndefined();
+      await flushQueue();
+      const lines = (spy: typeof warn) =>
+        spy.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.startsWith('e2e: the fallback key is not rotated'));
+      warned = lines(warn);
+      notRotated = [...lines(debug), ...warned];
+    } finally {
+      warn.mockRestore();
+      debug.mockRestore();
+    }
+    recorder.answerGets(null);
+    return {
+      notRotated,
+      warned,
+      held,
+      now: server.deviceOf(userId, deviceId).fallbackKey!.key,
+      fallbackUploads: recorder.keyUploads().slice(uploadsBefore).filter((u) => u.body.fallbackKey),
+      unpublished: accountOf(next.service).fallbackKey(),
+      record: (await rawRead(vaultName, UPLOAD_RECORD)) as { at: number } | undefined,
+    };
+  }
+
+  it.each([true, false])('rotates a day after the last upload when nothing holds it back (approved: %s; the control of the cases below)', async (approved) => {
+    const after = await restartAfterADay(() => {}, { approved });
+    expect(after.now).not.toBe(after.held);
+    expect(after.fallbackUploads).toHaveLength(1);
+    expect(after.notRotated).toEqual([]);
+  });
+
+  const failOnce = (match: (url: string) => boolean) => {
+    let armed = true;
+    return (url: string) => {
+      if (!armed || !match(url)) return undefined;
+      armed = false;
+      return Promise.reject(Object.assign(new Error('503: service unavailable'), { response: { status: 503 } }));
+    };
+  };
+
+  type Arrange = Parameters<typeof restartAfterADay>[0];
+  it.each<{ label: string; arrange: Arrange; reason: string; approved?: boolean; warns?: boolean }>([
+    {
+      label: 'the key-share claim of the start failed',
+      reason: 'did not empty the inbox',
+      arrange: ({ answerGets }) =>
+        answerGets(failOnce((url) => url.startsWith('/e2e/keyshares'))),
+    },
+    {
+      label: 'the key-share claim stopped at its cap (the inbox not emptied)',
+      reason: 'did not empty the inbox',
+      arrange: ({ answerGets }) =>
+        // full pages of elements the claim cannot use: every one counts as a page
+        answerGets((url) =>
+          url.startsWith('/e2e/keyshares')
+            ? Promise.resolve({ data: { success: true, data: { shares: new Array(E2E_LIMITS.KEYSHARE_CLAIM_MAX).fill(null), leaseMs: E2E_LIMITS.KEYSHARE_LEASE_MS } } })
+            : undefined
+        ),
+    },
+    {
+      label: 'a kept share waits in the vault for a later start',
+      reason: 'key shares kept in the vault',
+      // it can hold the rotation back for several starts: a warning, once
+      warns: true,
+      arrange: async ({ vaultName, answerGets }) => {
+        const share = {
+          id: 'kept-share-1',
+          createdAt: '2026-11-20T00:00:00.000Z',
+          senderUserId: 'carol-unreachable',
+          senderDeviceId: 'carolDevice01',
+          conversationId: 'c1',
+          sessionId: 'kept-session',
+          body: buildE2EEnvelope(0, 'QUJD'),
+        };
+        await rawPut(vaultName, `pks:${share.createdAt}|${share.id}`, { share, attempts: 0, receivedAt: Date.now(), leased: true });
+        // its sender cannot be looked up now: kept for a later start
+        answerGets((url) =>
+          url.startsWith('/e2e/devices/carol-unreachable')
+            ? Promise.reject(Object.assign(new Error('503: service unavailable'), { response: { status: 503 } }))
+            : undefined
+        );
+      },
+    },
+    {
+      label: 'the master-secret transfers of the start could not be read',
+      reason: 'master-secret transfers of this start were not read',
+      arrange: ({ answerGets }) => answerGets(failOnce((url) => url.startsWith('/e2e/master-transfers'))),
+      approved: false,
+    },
+    {
+      label: 'a claim made moments before this start may still hold a page leased',
+      reason: 'may still hold a page',
+      arrange: ({ vaultName }) =>
+        rawPut(vaultName, 'claim_sent', { at: Date.now() - 10_000 }),
+    },
+    {
+      label: 'the last upload is less than a day old',
+      reason: 'less than a day old',
+      arrange: ({ vaultName }) =>
+        rawPut(vaultName, UPLOAD_RECORD, { at: Date.now() - 60_000 }),
+    },
+  ])('does not rotate when $label', async ({ arrange, reason, approved, warns }) => {
+    const after = await restartAfterADay(arrange, { approved });
+    expect(after.notRotated).toHaveLength(1);
+    expect(after.notRotated[0]).toContain(reason);
+    expect(after.warned).toHaveLength(warns ? 1 : 0);
+    // no id and no key material in the line
+    for (const material of ['kept-share-1', 'kept-session', 'carol', 'QUJD']) expect(after.notRotated[0]).not.toContain(material);
+    expect(after.now).toBe(after.held);
+    expect(after.fallbackUploads).toEqual([]);
+    expect(after.unpublished).toBeFalsy(); // no key made to be sent later either
+  });
+
+  it('a clock set back behind the last upload neither rotates now nor never: the record moves to the time read now', async () => {
+    let dated = 0;
+    const after = await restartAfterADay(async ({ vaultName }) => {
+      dated = Date.now() + 10 * DAY;
+      await rawPut(vaultName, UPLOAD_RECORD, { at: dated });
+    });
+    expect(after.now).toBe(after.held);
+    expect(after.fallbackUploads).toEqual([]);
+    expect(after.record!.at).toBeLessThanOrEqual(Date.now());
+    expect(after.record!.at).toBeLessThan(dated);
+    expect(after.notRotated[0]).toContain('the clock reads earlier than the last upload');
+  });
+
+  it('an account in the vault that is not the one the service read (another writer) uploads no key, and says so in one line', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = keyUploadRecorder(server, userId);
+    const alice = deviceOver(userId, recorder.api);
+    await alice.service.initialize();
+    await flushQueue();
+    const deviceId = alice.service.deviceId;
+    const held = server.deviceOf(userId, deviceId).fallbackKey!.key;
+    await alice.service.dispose();
+    const vaultName = vaultDbName(userId, alice.vaultNamespace);
+    await awayFor(vaultName);
+    server.deviceOf(userId, deviceId).oneTimeKeys.length = 0; // the pool is low too
+
+    // while the start's claim is out, a tab of an older build saves its own copy of the account
+    let reached!: () => void;
+    const claimOut = new Promise<void>((r) => (reached = r));
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    recorder.answerGets((url) => {
+      if (!url.startsWith('/e2e/keyshares')) return undefined;
+      recorder.answerGets(null);
+      reached();
+      return released.then(() => server.apiFor(userId).get(url));
+    });
+    const uploadsBefore = recorder.keyUploads().length;
+    const next = restartOver(alice, recorder.api);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await next.service.initialize();
+      await claimOut;
+      const stored = (await rawRead(vaultName, 'account')) as string;
+      await rawPut(vaultName, 'account', `${stored}-saved-by-another-writer`);
+      release();
+      await flushQueue();
+      expect(recorder.keyUploads().slice(uploadsBefore)).toEqual([]);
+      expect(server.deviceOf(userId, deviceId).fallbackKey!.key).toBe(held);
+      const lines = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('not the one this tab saved last'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).not.toContain(stored.slice(0, 16));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not rotate at the start that registered the device: that registration uploaded one', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = keyUploadRecorder(server, userId);
+    const alice = deviceOver(userId, recorder.api);
+    await alice.service.initialize();
+    await flushQueue();
+    expect(recorder.puts.filter((p) => p.url === '/e2e/devices')).toHaveLength(1);
+    expect(recorder.keyUploads().filter((p) => p.body.fallbackKey)).toEqual([]);
+    expect(await rawRead(vaultDbName(userId, alice.vaultNamespace), UPLOAD_RECORD)).toMatchObject({ at: expect.any(Number) });
+  });
+
+  it('a refused fallback upload never fails the start, is never marked published, holds the pool back, and goes again unchanged', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = keyUploadRecorder(server, userId);
+    const alice = deviceOver(userId, recorder.api);
+    await alice.service.initialize();
+    await flushQueue();
+    const deviceId = alice.service.deviceId;
+    const held = server.deviceOf(userId, deviceId).fallbackKey!.key;
+    const vaultName = vaultDbName(userId, alice.vaultNamespace);
+
+    // the next start may rotate (a vault from before this build), but the
+    // server refuses key uploads (429), and the pool is low
+    server.deviceOf(userId, deviceId).oneTimeKeys.length = 0;
+    recorder.refuse(true);
+    await alice.service.dispose();
+    await awayFor(vaultName, { upload: null });
+    const refused = deviceOver(userId, recorder.api, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const uploadsBefore = recorder.keyUploads().length;
+    const startedAt = Date.now();
+    try {
+      await expect(refused.service.initialize()).resolves.toBeUndefined();
+      await flushQueue();
+    } finally {
+      warn.mockRestore();
+    }
+    const attempts = recorder.keyUploads().slice(uploadsBefore);
+    expect(attempts).toHaveLength(1); // the fallback key alone: no one-time key was made beside it
+    expect(attempts[0].body.oneTimeKeys).toBeUndefined();
+    const attempted = attempts[0].body.fallbackKey!.key;
+    expect(attempted).not.toBe(held);
+    expect(server.deviceOf(userId, deviceId).fallbackKey!.key).toBe(held);
+    expect(accountOf(refused.service).fallbackKey()?.key).toBe(attempted); // not marked published
+    expect(accountOf(refused.service).oneTimeKeys()).toEqual([]);
+    // the record of a key made to be sent, written before the upload: it stays
+    expect(((await rawRead(vaultName, UPLOAD_RECORD)) as { at: number }).at).toBeGreaterThanOrEqual(startedAt);
+
+    // the start after: that same key goes again (none made in its place), then the pool
+    recorder.refuse(false);
+    await refused.service.dispose();
+    const next = deviceOver(userId, recorder.api, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    const uploadsAtNext = recorder.keyUploads().length;
+    const sentAt = Date.now();
+    await next.service.initialize();
+    await flushQueue();
+    const uploads = recorder.keyUploads().slice(uploadsAtNext);
+    expect(uploads.map((u) => (u.body.fallbackKey ? 'fallback' : 'one-time'))).toEqual(['fallback', 'one-time']);
+    expect(uploads[0].body.fallbackKey!.key).toBe(attempted);
+    expect(server.deviceOf(userId, deviceId).fallbackKey!.key).toBe(attempted);
+    expect(accountOf(next.service).fallbackKey()).toBeFalsy();
+    expect(((await rawRead(vaultName, UPLOAD_RECORD)) as { at: number }).at).toBeGreaterThanOrEqual(sentAt);
+  });
+
+  it('a re-registration carries the fallback key a refused upload left unpublished, and makes no other', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = keyUploadRecorder(server, userId);
+    const alice = deviceOver(userId, recorder.api);
+    await alice.service.initialize();
+    await flushQueue();
+    recorder.refuse(true);
+    await alice.service.dispose();
+    await awayFor(vaultDbName(userId, alice.vaultNamespace), { upload: null });
+    const refused = deviceOver(userId, recorder.api, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await refused.service.initialize();
+      await flushQueue();
+    } finally {
+      warn.mockRestore();
+    }
+    const pending = accountOf(refused.service).fallbackKey()!.key;
+
+    // the server lost the device: the next start registers it again
+    server.userOf(userId).devices.delete(refused.service.deviceId);
+    recorder.refuse(false);
+    await refused.service.dispose();
+    const next = deviceOver(userId, recorder.api, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    await next.service.initialize();
+    await flushQueue();
+    expect(recorder.puts.filter((p) => p.url === '/e2e/devices').at(-1)!.body.fallbackKey!.key).toBe(pending);
+    expect(server.deviceOf(userId, next.service.deviceId).fallbackKey!.key).toBe(pending);
+  });
+
+  it('replenishOneTimeKeys sends a fallback key left unpublished first, alone, and makes no one-time key while it is refused', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = keyUploadRecorder(server, userId);
+    const alice = deviceOver(userId, recorder.api);
+    await alice.service.initialize();
+    await flushQueue();
+    server.deviceOf(userId, alice.service.deviceId).oneTimeKeys.length = 0;
+    recorder.refuse(true);
+    await alice.service.dispose();
+    await awayFor(vaultDbName(userId, alice.vaultNamespace), { upload: null });
+    const refused = deviceOver(userId, recorder.api, { keyProvider: alice.keyProvider, vaultNamespace: alice.vaultNamespace });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await refused.service.initialize();
+      await flushQueue();
+      const before = recorder.keyUploads().length;
+      await refused.service.replenishOneTimeKeys();
+      expect(recorder.keyUploads().slice(before).map((u) => Object.keys(u.body).sort())).toEqual([['deviceId', 'fallbackKey']]);
+      expect(accountOf(refused.service).oneTimeKeys()).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+
+    recorder.refuse(false);
+    const before = recorder.keyUploads().length;
+    await refused.service.replenishOneTimeKeys();
+    expect(recorder.keyUploads().slice(before).map((u) => (u.body.fallbackKey ? 'fallback' : 'one-time'))).toEqual(['fallback', 'one-time']);
+    expect(accountOf(refused.service).fallbackKey()).toBeFalsy();
+    expect(server.deviceOf(userId, refused.service.deviceId).oneTimeKeys.length).toBeGreaterThan(0);
+  });
+
+  it('makes no fallback key and sends nothing when the record cannot be written first, and the start succeeds', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = keyUploadRecorder(server, userId);
+    const alice = deviceOver(userId, recorder.api);
+    await alice.service.initialize();
+    await flushQueue();
+    const deviceId = alice.service.deviceId;
+    const held = server.deviceOf(userId, deviceId).fallbackKey!.key;
+    await alice.service.dispose();
+    const vaultName = vaultDbName(userId, alice.vaultNamespace);
+    // on its own this start would rotate, and top the low pool up
+    await awayFor(vaultName, { upload: null });
+    server.deviceOf(userId, deviceId).oneTimeKeys.length = 0;
+
+    const putRepair = E2EVault.prototype.putRepair;
+    const put = vi.spyOn(E2EVault.prototype, 'putRepair').mockImplementation(function (this: E2EVault, name: string) {
+      if (name === FALLBACK_KEY_UPLOAD_RECORD) return Promise.reject(new DOMException('the disk is full', 'QuotaExceededError'));
+      return putRepair.call(this, name);
+    });
+    const uploadsBefore = recorder.keyUploads().length;
+    const next = restartOver(alice, recorder.api);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let lines: string[];
+    try {
+      await expect(next.service.initialize()).resolves.toBeUndefined();
+      await flushQueue();
+      lines = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('its record could not be written'));
+    } finally {
+      warn.mockRestore();
+      put.mockRestore();
+    }
+    expect(lines).toHaveLength(1);
+    expect(recorder.keyUploads().slice(uploadsBefore)).toEqual([]); // no fallback key, no one-time keys
+    expect(accountOf(next.service).fallbackKey()).toBeFalsy(); // none made to be sent later
+    expect(server.deviceOf(userId, deviceId).fallbackKey!.key).toBe(held);
+    expect(await rawRead(vaultName, UPLOAD_RECORD)).toBeUndefined();
+  });
+
+  it('the registration writes the record before it sends anything, and sends nothing when it cannot', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = keyUploadRecorder(server, userId);
+    const order: string[] = [];
+    const putRepair = E2EVault.prototype.putRepair;
+    let failRecord = true;
+    const put = vi.spyOn(E2EVault.prototype, 'putRepair').mockImplementation(function (this: E2EVault, name: string) {
+      if (name === FALLBACK_KEY_UPLOAD_RECORD) {
+        order.push('record');
+        if (failRecord) return Promise.reject(new DOMException('the disk is full', 'QuotaExceededError'));
+      }
+      return putRepair.call(this, name);
+    });
+    const api = {
+      ...recorder.api,
+      put: (url: string, body?: unknown) => {
+        order.push(`PUT ${url}`);
+        return recorder.api.put(url, body);
+      },
+    };
+    try {
+      const first = deviceOver(userId, api);
+      await expect(first.service.initialize()).rejects.toMatchObject({ name: 'QuotaExceededError' });
+      expect(order).toEqual(['record']); // nothing was sent
+      expect(server.users.get(userId)?.devices.size ?? 0).toBe(0);
+      await first.service.dispose();
+
+      failRecord = false;
+      order.length = 0;
+      const second = deviceOver(userId, api, { keyProvider: first.keyProvider, vaultNamespace: first.vaultNamespace });
+      await second.service.initialize();
+      await flushQueue();
+      expect(order.slice(0, 2)).toEqual(['record', 'PUT /e2e/devices']);
+      expect(order).toContain('record'); // and again once the server took it
+      expect(order.filter((o) => o === 'record')).toHaveLength(2);
+    } finally {
+      put.mockRestore();
+    }
+  });
+
+  it.each<{ when: string; closeAt: 'answer' | 'record' }>([
+    { when: 'before anything else is saved', closeAt: 'answer' },
+    { when: 'after the account was saved, before the record that follows', closeAt: 'record' },
+  ])('a page closed after the server took a rotated key ($when) leaves the record: the next start does not rotate again', async ({ closeAt }) => {
+    uniq++;
+    const server = createFakeServer();
+    const userId = `alice-${uniq}`;
+    const recorder = keyUploadRecorder(server, userId);
+    const alice = deviceOver(userId, recorder.api);
+    await alice.service.initialize();
+    await flushQueue();
+    const deviceId = alice.service.deviceId;
+    const held = server.deviceOf(userId, deviceId).fallbackKey!.key;
+    await alice.service.dispose();
+    const vaultName = vaultDbName(userId, alice.vaultNamespace);
+    await awayFor(vaultName, { upload: null }); // this start rotates
+
+    // the closing page: the server takes its upload, then the page goes
+    let answered = false;
+    let closing: E2EService | null = null;
+    const api = {
+      ...recorder.api,
+      post: async (url: string, body?: unknown) => {
+        const res = await recorder.api.post(url, body);
+        if (url === '/e2e/devices/me/keys' && (body as { fallbackKey?: unknown }).fallbackKey) {
+          answered = true;
+          if (closeAt === 'answer') void closing!.dispose();
+        }
+        return res;
+      },
+    };
+    const closed = restartOver(alice, api);
+    closing = closed.service;
+    const vault = (closed.service as unknown as { vault: E2EVault }).vault;
+    const putRepair = vault.putRepair.bind(vault);
+    vi.spyOn(vault, 'putRepair').mockImplementation((name: string) => {
+      if (closeAt === 'record' && answered && name === FALLBACK_KEY_UPLOAD_RECORD) {
+        void closed.service.dispose();
+        return Promise.reject(new E2EVaultClosedError());
+      }
+      return putRepair(name);
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await closed.service.initialize();
+      await flushQueue();
+    } finally {
+      warn.mockRestore();
+    }
+    expect(answered).toBe(true);
+    const rotated = server.deviceOf(userId, deviceId).fallbackKey!.key;
+    expect(rotated).not.toBe(held);
+    expect(await rawRead(vaultName, UPLOAD_RECORD)).toMatchObject({ at: expect.any(Number) });
+    await closed.service.dispose();
+
+    // the next start, moments later: no claim of an earlier page can hold anything leased
+    await rawPut(vaultName, 'claim_sent', { at: Date.now() - 5 * 60_000 });
+    const uploadsBefore = recorder.keyUploads().length;
+    const next = restartOver(alice, recorder.api);
+    await next.service.initialize();
+    await flushQueue();
+    const sent = recorder.keyUploads().slice(uploadsBefore).filter((u) => u.body.fallbackKey);
+    // at most the same key again (it was not marked published), never a new one
+    expect(sent.every((u) => u.body.fallbackKey!.key === rotated)).toBe(true);
+    expect(sent).toHaveLength(closeAt === 'answer' ? 1 : 0);
+    expect(server.deviceOf(userId, deviceId).fallbackKey!.key).toBe(rotated);
+    expect(accountOf(next.service).fallbackKey()).toBeFalsy();
+  });
+
+  it('a claim whose time cannot be recorded still claims: the record is advisory', async () => {
+    uniq++;
+    const server = createFakeServer();
+    const alice = makeParty(server, 'alice');
+    const bob = makeParty(server, 'bob');
+    await alice.service.initialize();
+    await bob.service.initialize();
+    await flushQueue();
+    const sent = await bob.service.encryptMessage('c1', alice.userId, 'claimed all the same');
+    const vault = (alice.service as unknown as { vault: E2EVault }).vault;
+    const put = vi.spyOn(vault, 'putClaimSent').mockRejectedValue(new DOMException('the disk is full', 'QuotaExceededError'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const shown = await alice.service.decryptMessage({ id: 'm1', conversationId: 'c1', authorId: bob.userId, content: sent.envelope });
+      expect(shown.text).toBe('claimed all the same');
+      expect(put).toHaveBeenCalled();
+    } finally {
+      put.mockRestore();
+      warn.mockRestore();
+    }
   });
 });

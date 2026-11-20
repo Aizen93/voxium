@@ -1361,4 +1361,42 @@ describe('services/socket — every inbound event bumps the request generation (
     for (const handler of handlers) handler('message:new', { id: 'm1' });
     expect(requestGeneration()).toBeGreaterThan(before);
   });
+
+  // A tab of an account whose vault another tab owns shows a screen instead of
+  // the app (components/layout/VaultOwnershipGate.tsx) and stays off the socket
+  describe('holdSocketConnections', () => {
+    beforeEach(() => {
+      vi.resetModules();
+      createdSockets.length = 0;
+    });
+
+    it('closes the open socket, and opens none while held, whoever asks', async () => {
+      const mod = await freshSocketModule();
+      mod.connectSocket('token-1');
+      const first = createdSockets[0];
+      first.fire('connect');
+
+      const lift = mod.holdSocketConnections();
+      expect(first.disconnect).toHaveBeenCalled();
+      expect(mod.getSocket()).toBeNull();
+      expect(mod.getConnectionStatus()).toBe('disconnected');
+      expect(mod.connectSocket('token-2')).toBeNull();
+      expect(createdSockets).toHaveLength(1);
+
+      lift();
+      lift(); // idempotent: a second call lifts nothing more
+      expect(mod.connectSocket('token-3')).not.toBeNull();
+      expect(createdSockets).toHaveLength(2);
+    });
+
+    it('opens only once the last of several holds is lifted', async () => {
+      const mod = await freshSocketModule();
+      const liftA = mod.holdSocketConnections();
+      const liftB = mod.holdSocketConnections();
+      liftA();
+      expect(mod.connectSocket('token-1')).toBeNull();
+      liftB();
+      expect(mod.connectSocket('token-1')).not.toBeNull();
+    });
+  });
 });

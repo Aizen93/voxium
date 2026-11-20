@@ -2221,5 +2221,21 @@
   },
   "legal": {
     "englishVersionNotice": "本文档提供英文和法文版本。下方显示的是英文版本。"
+  },
+  "vaultOwnership": {
+    "blockedTitle": "Voxium 已在另一个标签页中打开",
+    "blockedBody": "加密消息和通话一次只能在一个标签页中使用。你可以继续使用另一个标签页，或改为在这里使用 Voxium。",
+    "waitingNote": "另一个标签页关闭或退出登录后，此标签页会自动打开 Voxium。",
+    "lostTitle": "Voxium 现已在另一个标签页中打开",
+    "lostBody": "另一个标签页接管了你的加密消息和通话，因此此标签页已停止。你可以关闭它，或改为在这里使用 Voxium。",
+    "useHere": "在这里使用",
+    "asking": "正在询问另一个标签页…",
+    "releasing": "正在等待另一个标签页…",
+    "opening": "正在这里打开 Voxium…",
+    "callWarning": "另一个标签页中有正在进行的通话；通话将结束。",
+    "noReply": "另一个标签页没有响应。",
+    "callPossible": "如果那里有正在进行的通话，通话将结束。",
+    "takeOverAnyway": "仍然接管",
+    "cancel": "取消"
   }
 }
