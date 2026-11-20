@@ -234,41 +234,78 @@ describe('sessionStore — refresh tokens issued before sessions', () => {
 
 describe('sessionStore — the sweep\'s statements', () => {
   const EXPIRED = `expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3) - make_interval(secs => ?::float8)`;
+  const esc = (t: string) => t.replace(/[()*+?.^$|[\]\\]/g, '\\$&');
 
   it('the margin is an hour and a batch 5000', () => {
     expect(store.SWEEP_MARGIN_SECONDS).toBe(3600);
     expect(store.SWEEP_BATCH_SIZE).toBe(5000);
   });
 
-  it('countSweepableSessions: the two predicates, over every session', async () => {
-    results.push([{ doomed: 3, total: 10 }]);
-    await expect(store.countSweepableSessions(db())).resolves.toEqual({ doomed: 3, total: 10 });
-    expect(calls[0].sql).toContain(`s.${EXPIRED} OR s.token_version < u.token_version`);
-    expect(calls[0].values).toEqual([3600]);
+  it('countSweepableSessions: each predicate, either, and every session', async () => {
+    results.push([{ expired: 2, outdated: 1, due: 3, total: 10 }]);
+    await expect(store.countSweepableSessions(db())).resolves.toEqual({ expired: 2, outdated: 1, due: 3, total: 10 });
+    const { sql, values } = calls[0];
+    expect(sql).toContain(`count(*) FILTER ( WHERE s.${EXPIRED} )::float8 AS expired`);
+    expect(sql).toContain('count(*) FILTER ( WHERE s.token_version < u.token_version )::float8 AS outdated');
+    expect(sql).toContain(`count(*) FILTER ( WHERE s.${EXPIRED} OR s.token_version < u.token_version )::float8 AS due`);
+    expect(sql).toContain('FROM sessions s JOIN users u ON u.id = s.user_id');
+    expect(values).toEqual([3600, 3600]);
+    expectDatabaseClockOnly(sql);
   });
 
-  it('deleteSweepableSessions: the predicate chooses the batch AND guards the delete itself', async () => {
-    results.push(5000);
-    await expect(store.deleteSweepableSessions(db())).resolves.toBe(5000);
+  it('countSweepableSessions: no row is all zeros', async () => {
+    await expect(store.countSweepableSessions(db())).resolves.toEqual({ expired: 0, outdated: 0, due: 0, total: 0 });
+  });
+
+  it('deleteSweepableSessions: the predicates choose the batch AND guard the delete itself; the ids deleted', async () => {
+    results.push([{ id: 'a' }, { id: 'b' }]);
+    await expect(store.deleteSweepableSessions(db())).resolves.toEqual(['a', 'b']);
     const { sql, values } = calls[0];
     expect(sql).toContain(`WHERE s2.${EXPIRED} OR s2.token_version < u2.token_version LIMIT ?::integer`);
-    expect(sql).toMatch(new RegExp(`AND \\(s\\.${EXPIRED.replace(/[()*+?.^$|[\]\\]/g, '\\$&')} OR s\\.token_version < u\\.token_version\\)$`));
+    expect(sql).toMatch(new RegExp(`AND \\(s\\.${esc(EXPIRED)} OR s\\.token_version < u\\.token_version\\) RETURNING s\\.id$`));
     expect(values).toEqual([3600, 5000, 3600]);
     expectDatabaseClockOnly(sql);
   });
 
-  it('sampleExpiredSessions: only the rows the clock comparison picks (never filled by rows below their version), nearest first', async () => {
-    results.push([{ exp: 1 }, { exp: 2 }]);
+  it('sampleExpiredSessions: the expired predicate alone, the rows nearest the boundary first, or spread at random', async () => {
+    results.push([{ exp: 1 }, { exp: 2 }], [{ exp: 3 }]);
     await expect(store.sampleExpiredSessions(db(), 100)).resolves.toEqual([1, 2]);
+    await expect(store.sampleExpiredSessions(db(), 100, true)).resolves.toEqual([3]);
     expect(calls[0].sql).toBe(`SELECT floor(extract(epoch FROM s.expires_at))::float8 AS exp FROM sessions s WHERE s.${EXPIRED} ORDER BY s.expires_at DESC LIMIT ?::integer`);
+    expect(calls[1].sql).toBe(`SELECT floor(extract(epoch FROM s.expires_at))::float8 AS exp FROM sessions s WHERE s.${EXPIRED} ORDER BY random() LIMIT ?::integer`);
     expect(calls[0].values).toEqual([3600, 100]);
+    expect(calls[1].values).toEqual([3600, 100]);
   });
 
-  it('deleteExpiredLegacyRedemptions: past the token\'s expiry by the same margin, in the choice and in the delete', async () => {
-    results.push(2);
+  it('sampleOutdatedSessions: the outdated predicate alone, the rows nearest their account\'s version first, or spread at random', async () => {
+    results.push([{ id: 'a' }], [{ id: 'b' }]);
+    await expect(store.sampleOutdatedSessions(db(), 100)).resolves.toEqual(['a']);
+    await expect(store.sampleOutdatedSessions(db(), 100, true)).resolves.toEqual(['b']);
+    expect(calls[0].sql).toBe('SELECT s.id FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_version < u.token_version ORDER BY u.token_version - s.token_version, s.id LIMIT ?::integer');
+    expect(calls[1].sql).toBe('SELECT s.id FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_version < u.token_version ORDER BY random() LIMIT ?::integer');
+  });
+
+  it('the samples read the very predicates the delete applies (one text each)', async () => {
+    results.push([], [], [], [], []);
+    await store.deleteSweepableSessions(db());
+    await store.sampleExpiredSessions(db(), 1);
+    await store.sampleExpiredSessions(db(), 1, true);
+    await store.sampleOutdatedSessions(db(), 1);
+    await store.sampleOutdatedSessions(db(), 1, true);
+    const del = calls[0].sql;
+    expect(del).toContain(`s.${EXPIRED}`);
+    expect(del).toContain('s.token_version < u.token_version');
+    for (const c of calls.slice(1, 3)) expect(c.sql).toContain(`WHERE s.${EXPIRED} ORDER BY`);
+    for (const c of calls.slice(3)) expect(c.sql).toContain('WHERE s.token_version < u.token_version ORDER BY');
+  });
+
+  it('sampleExpiredLegacyRedemptions and deleteExpiredLegacyRedemptions: past the token\'s expiry by the same margin, in the sample, the choice and the delete', async () => {
+    results.push([{ exp: 5 }], 2);
+    await expect(store.sampleExpiredLegacyRedemptions(db(), 100)).resolves.toEqual([5]);
     await store.deleteExpiredLegacyRedemptions(db());
-    const { sql, values } = calls[0];
-    expect(sql.match(new RegExp(EXPIRED.replace(/[()*+?.^$|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(2);
+    expect(calls[0].sql).toBe(`SELECT floor(extract(epoch FROM expires_at))::float8 AS exp FROM legacy_refresh_redemptions WHERE ${EXPIRED} ORDER BY expires_at DESC LIMIT ?::integer`);
+    const { sql, values } = calls[1];
+    expect(sql.match(new RegExp(esc(EXPIRED), 'g'))).toHaveLength(2);
     expect(values).toEqual([3600, 5000, 3600]);
   });
 });

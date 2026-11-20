@@ -82,3 +82,26 @@ export function revokeSessionSockets(userId: string, sids: string | readonly str
   }
 }
 
+/** Rooms per disconnect call: the cluster-wide form carries the list in one adapter message. */
+export const SESSION_ROOMS_PER_CALL = 500;
+
+/**
+ * Disconnect the sockets of sessions deleted in bulk (the sweep: sessions
+ * that had expired or were below their account's version), on every node,
+ * by their `session:{sid}` rooms, at most SESSION_ROOMS_PER_CALL rooms per
+ * call. No force:logout: an honest client reconnects and the handshake
+ * tells it its session is gone. Best effort: logged without any id, never
+ * throws.
+ */
+export function disconnectSessionRooms(sids: readonly string[]): void {
+  for (let i = 0; i < sids.length; i += SESSION_ROOMS_PER_CALL) {
+    const rooms = sids.slice(i, i + SESSION_ROOMS_PER_CALL).map(sessionRoom);
+    try {
+      const io = getIO();
+      io.local.in(rooms).disconnectSockets(true);
+      io.in(rooms).disconnectSockets(true);
+    } catch (err) {
+      console.error(`[Sessions] Could not disconnect the sockets of ${rooms.length} swept session(s):`, err instanceof Error ? err.message : err);
+    }
+  }
+}

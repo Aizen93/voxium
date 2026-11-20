@@ -292,44 +292,102 @@ export async function spendLegacyRedemption(db: SessionDb, digest: string, expSe
 }
 
 // ─── The expiry sweep (utils/sessionSweep.ts) ────────────────────────────────
+// Two predicates choose what the sweep deletes, each written the same way in
+// the count, in the samples the sweep checks before it deletes anything and
+// in the delete itself (sessionStore.test.ts holds the texts equal):
+//   expired  s.expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3)
+//                           - make_interval(secs => SWEEP_MARGIN_SECONDS)
+//   outdated s.token_version < u.token_version   (u the session's account)
 
 /** How far past its expiry a row must be before the sweep deletes it (a margin, never the authority). */
 export const SWEEP_MARGIN_SECONDS = 3600;
 export const SWEEP_BATCH_SIZE = 5000;
 
-/** Rows the sweep would delete, and all rows: for the fraction guard. */
-export async function countSweepableSessions(db: SessionDb): Promise<{ doomed: number; total: number }> {
-  const rows = await db.$queryRaw<Array<{ doomed: number; total: number }>>`
+export interface SweepCounts {
+  /** Rows past their expiry by the margin. */
+  expired: number;
+  /** Rows below their account's token version. */
+  outdated: number;
+  /** Rows either predicate picks (what the sweep would delete). */
+  due: number;
+  total: number;
+}
+
+/** What the sweep would delete, by predicate, and all rows. */
+export async function countSweepableSessions(db: SessionDb): Promise<SweepCounts> {
+  const rows = await db.$queryRaw<Array<SweepCounts>>`
     SELECT count(*) FILTER (
              WHERE s.expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3) - make_interval(secs => ${SWEEP_MARGIN_SECONDS}::float8)
+           )::float8 AS expired,
+           count(*) FILTER (
+             WHERE s.token_version < u.token_version
+           )::float8 AS outdated,
+           count(*) FILTER (
+             WHERE s.expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3) - make_interval(secs => ${SWEEP_MARGIN_SECONDS}::float8)
                 OR s.token_version < u.token_version
-           )::float8 AS doomed,
+           )::float8 AS due,
            count(*)::float8 AS total
     FROM sessions s
     JOIN users u ON u.id = s.user_id`;
-  return { doomed: rows[0]?.doomed ?? 0, total: rows[0]?.total ?? 0 };
+  const r = rows[0];
+  return { expired: r?.expired ?? 0, outdated: r?.outdated ?? 0, due: r?.due ?? 0, total: r?.total ?? 0 };
 }
 
 /**
- * The expiries of the rows the sweep's clock comparison picks, nearest to
- * the boundary first, for the sweep's own check of that comparison on the
- * node's clock. Only that predicate: a row below its account's version is a
- * comparison of two integers, and a password change leaves many of them
- * with an expiry far ahead, which would fill the sample.
+ * The expiries (epoch seconds) of rows the expired predicate picks, for the
+ * sweep's check of that comparison on the node's own clock: the ones nearest
+ * the boundary first (`spread` false: a comparison off by any amount shows
+ * there first), or drawn at random over every candidate (`spread` true).
  */
-export async function sampleExpiredSessions(db: SessionDb, limit: number): Promise<number[]> {
-  const rows = await db.$queryRaw<Array<{ exp: number }>>`
-    SELECT floor(extract(epoch FROM s.expires_at))::float8 AS exp
-    FROM sessions s
-    WHERE s.expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3) - make_interval(secs => ${SWEEP_MARGIN_SECONDS}::float8)
-    ORDER BY s.expires_at DESC
-    LIMIT ${limit}::integer`;
+export async function sampleExpiredSessions(db: SessionDb, limit: number, spread = false): Promise<number[]> {
+  const rows = spread
+    ? await db.$queryRaw<Array<{ exp: number }>>`
+        SELECT floor(extract(epoch FROM s.expires_at))::float8 AS exp
+        FROM sessions s
+        WHERE s.expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3) - make_interval(secs => ${SWEEP_MARGIN_SECONDS}::float8)
+        ORDER BY random()
+        LIMIT ${limit}::integer`
+    : await db.$queryRaw<Array<{ exp: number }>>`
+        SELECT floor(extract(epoch FROM s.expires_at))::float8 AS exp
+        FROM sessions s
+        WHERE s.expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3) - make_interval(secs => ${SWEEP_MARGIN_SECONDS}::float8)
+        ORDER BY s.expires_at DESC
+        LIMIT ${limit}::integer`;
   return rows.map((r) => r.exp);
 }
 
-/** One batch of the sweep: the predicate in the batch's choice AND in the delete itself. Rows deleted. */
-export async function deleteSweepableSessions(db: SessionDb): Promise<number> {
-  return db.$executeRaw`
+/**
+ * The ids of rows the outdated predicate picks, for the sweep's check of
+ * that comparison by a separate read (the typed client, compared in
+ * JavaScript): the ones nearest to their account's version first (`spread`
+ * false: a comparison that also takes equal versions shows there first), or
+ * drawn at random over every candidate (`spread` true).
+ */
+export async function sampleOutdatedSessions(db: SessionDb, limit: number, spread = false): Promise<string[]> {
+  const rows = spread
+    ? await db.$queryRaw<Array<{ id: string }>>`
+        SELECT s.id
+        FROM sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.token_version < u.token_version
+        ORDER BY random()
+        LIMIT ${limit}::integer`
+    : await db.$queryRaw<Array<{ id: string }>>`
+        SELECT s.id
+        FROM sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.token_version < u.token_version
+        ORDER BY u.token_version - s.token_version, s.id
+        LIMIT ${limit}::integer`;
+  return rows.map((r) => r.id);
+}
+
+/**
+ * One batch of the sweep: the predicates in the batch's choice AND in the
+ * delete itself. The ids deleted (their sockets are ended after the batch).
+ */
+export async function deleteSweepableSessions(db: SessionDb): Promise<string[]> {
+  const rows = await db.$queryRaw<Array<{ id: string }>>`
     DELETE FROM sessions s
     USING users u
     WHERE u.id = s.user_id
@@ -341,7 +399,25 @@ export async function deleteSweepableSessions(db: SessionDb): Promise<number> {
         LIMIT ${SWEEP_BATCH_SIZE}::integer
       )
       AND (s.expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3) - make_interval(secs => ${SWEEP_MARGIN_SECONDS}::float8)
-           OR s.token_version < u.token_version)`;
+           OR s.token_version < u.token_version)
+    RETURNING s.id`;
+  return rows.map((r) => r.id);
+}
+
+/**
+ * The expiries (epoch seconds) of the redemption records the sweep would
+ * delete, nearest the boundary first: checked on the node's clock before
+ * any is deleted (a record deleted while a node still accepts the token it
+ * names would let a token signed out with be upgraded again).
+ */
+export async function sampleExpiredLegacyRedemptions(db: SessionDb, limit: number): Promise<number[]> {
+  const rows = await db.$queryRaw<Array<{ exp: number }>>`
+    SELECT floor(extract(epoch FROM expires_at))::float8 AS exp
+    FROM legacy_refresh_redemptions
+    WHERE expires_at < (now() AT TIME ZONE 'UTC')::timestamp(3) - make_interval(secs => ${SWEEP_MARGIN_SECONDS}::float8)
+    ORDER BY expires_at DESC
+    LIMIT ${limit}::integer`;
+  return rows.map((r) => r.exp);
 }
 
 /** One batch of redemption records past their token's expiry, with the same margin. Rows deleted. */

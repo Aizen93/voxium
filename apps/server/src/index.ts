@@ -47,6 +47,7 @@ import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/a
 import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/registrationHygiene';
 import { startKeyShareCleanup, stopKeyShareCleanup } from './utils/keyShareCleanup';
+import { startSessionSweep, stopSessionSweep } from './utils/sessionSweep';
 import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
 import { startDiscoveryStats, stopDiscoveryStats } from './utils/discoveryStats';
 import { prisma } from './utils/prisma';
@@ -233,6 +234,10 @@ async function main() {
   // Sweep undeliverable E2E key shares (30-day retention) — leader-locked via withClusterLock
   startKeyShareCleanup();
 
+  // Retention of ended sign-in sessions (6-hourly), never their authority —
+  // leader-locked via withClusterLock, see utils/sessionSweep.ts
+  startSessionSweep();
+
   // Registration hygiene: unverified-account TTL + IP-record retention (GDPR)
   startRegistrationHygiene();
 
@@ -261,6 +266,7 @@ async function main() {
     stopAdminMetricsEmitter();
     stopAttachmentCleanup();
     stopKeyShareCleanup();
+    stopSessionSweep();
     stopRegistrationHygiene();
     stopOrphanCleanup();
     stopDiscoveryStats();

@@ -20,7 +20,7 @@ const io = vi.hoisted(() => {
 const getIO = vi.hoisted(() => vi.fn(() => io));
 vi.mock('../../websocket/socketServer', () => ({ getIO: () => getIO() }));
 
-import { revokeUserSessions, revokeSessionSockets } from '../../utils/sessionRevocation';
+import { revokeUserSessions, revokeSessionSockets, disconnectSessionRooms, SESSION_ROOMS_PER_CALL } from '../../utils/sessionRevocation';
 import { sessionRoom, legacySocketsRoom } from '../../utils/sessionRooms';
 
 beforeEach(() => {
@@ -142,3 +142,41 @@ describe('revokeSessionSockets: one sign-in session, never the other sessions of
   });
 });
 
+describe('disconnectSessionRooms: the sockets of sessions the sweep deleted', () => {
+  it('by their session rooms, local then cluster-wide, at most SESSION_ROOMS_PER_CALL rooms a call, no force:logout', () => {
+    const sids = Array.from({ length: SESSION_ROOMS_PER_CALL * 2 + 3 }, (_, i) => `s${i}`);
+    disconnectSessionRooms(sids);
+
+    expect(io.to).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(6);
+    const sizes = calls.map((c) => (c[1] as string[]).length);
+    expect(sizes).toEqual([SESSION_ROOMS_PER_CALL, SESSION_ROOMS_PER_CALL, SESSION_ROOMS_PER_CALL, SESSION_ROOMS_PER_CALL, 3, 3]);
+    expect(calls.map((c) => c[0])).toEqual([
+      'local.disconnectSockets', 'cluster.disconnectSockets',
+      'local.disconnectSockets', 'cluster.disconnectSockets',
+      'local.disconnectSockets', 'cluster.disconnectSockets',
+    ]);
+    // Every room once, each a session room
+    const rooms = calls.filter((c) => c[0] === 'cluster.disconnectSockets').flatMap((c) => c[1] as string[]);
+    expect(rooms).toEqual(sids.map((s) => `session:${s}`));
+    expect(SESSION_ROOMS_PER_CALL).toBe(500);
+  });
+
+  it('nothing deleted: no call', () => {
+    disconnectSessionRooms([]);
+    expect(calls).toEqual([]);
+  });
+
+  it('a failing call is logged without any id, and the next chunk is still sent', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    io.local.in.mockImplementationOnce(() => { throw new Error('adapter gone'); });
+    const sids = Array.from({ length: SESSION_ROOMS_PER_CALL + 1 }, (_, i) => `secret-sid-${i}`);
+    expect(() => disconnectSessionRooms(sids)).not.toThrow();
+    expect(err).toHaveBeenCalledTimes(1);
+    expect(err.mock.calls[0][0]).toBe(`[Sessions] Could not disconnect the sockets of ${SESSION_ROOMS_PER_CALL} swept session(s):`);
+    expect(JSON.stringify(err.mock.calls)).not.toContain('secret-sid');
+    // The second chunk still went out
+    expect(calls.map((c) => (c[1] as string[]).length)).toEqual([1, 1]);
+    err.mockRestore();
+  });
+});
