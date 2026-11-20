@@ -42,6 +42,7 @@ if (totpKeyCheck.warning) {
 import http from 'http';
 import { app } from './app';
 import { initSocketServer } from './websocket/socketServer';
+import { tokenSecretsWarning } from './services/sessionService';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/registrationHygiene';
@@ -68,6 +69,11 @@ import { initChannelVisibilitySync, stopChannelVisibilitySync } from './utils/ch
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
 async function main() {
+  // Two token secrets that are one value: said once, the start goes on
+  // (a self-hosted install keeps booting; services/sessionService.ts)
+  const secretsWarning = tokenSecretsWarning();
+  if (secretsWarning) console.warn(`\nWARNING: ${secretsWarning}\n`);
+
   // Connect to database
   await prisma.$connect();
   console.log('[DB] Connected to PostgreSQL');
