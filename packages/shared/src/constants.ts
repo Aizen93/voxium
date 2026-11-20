@@ -369,6 +369,38 @@ export const IP_RECORD_RETENTION_DAYS = 180;
 export const ORPHAN_GRACE_DAYS = 7;
 /** Lifetime of the trusted-device token a successful TOTP sign-in issues (skips TOTP on that device). */
 export const TRUSTED_DEVICE_TTL_DAYS = 30;
+
+// ─── Sign-in sessions ────────────────────────────────────────────────────────
+// One record per signed-in device or browser (the server's `sessions` table).
+// A refresh token names its session and the generation it was issued as; the
+// record holds a coarse label from the closed lists below, never an address,
+// a user agent or a name someone typed.
+
+export const SESSIONS = {
+  /** A session ends this long after its sign-in, however often it renews. */
+  MAX_AGE_DAYS: 365,
+  /** Live sessions per account; a sign-in past it ends the least recently renewed ones, it is never refused. */
+  MAX_PER_ACCOUNT: 25,
+  /** The refresh token a renewal just replaced is answered again for this long (the database's clock). */
+  REUSE_GRACE_SECONDS: 120,
+} as const;
+
+/** What a session is labelled as: the kind of app that signed in. */
+export const SESSION_CLIENT_KINDS = ['desktop', 'web', 'admin', 'android', 'ios', 'unknown'] as const;
+export type SessionClientKind = (typeof SESSION_CLIENT_KINDS)[number];
+
+/** The `client` value a sign-in or a refresh body may carry. Anything else is ignored. */
+export const SESSION_CLIENT_HINTS = ['desktop', 'web', 'admin', 'android', 'ios'] as const;
+export type SessionClientHint = (typeof SESSION_CLIENT_HINTS)[number];
+
+/** The operating system of a session, derived once at sign-in from the user agent, which is not kept. */
+export const SESSION_CLIENT_OSES = ['windows', 'macos', 'linux', 'android', 'ios', 'other'] as const;
+export type SessionClientOs = (typeof SESSION_CLIENT_OSES)[number];
+
+/** `force:logout` reason when the server ended this session (a sign-out sent with its refresh token, a reused refresh token, too many sessions). */
+export const SESSION_ENDED_REASON = 'Your session has ended';
+/** `force:logout` reason when the account signed this session out from another of its sessions. */
+export const SIGNED_OUT_ELSEWHERE_REASON = 'You were signed out from another device';
 /** Minimum age to use the Service: France's age of digital consent; the Terms and the Privacy Policy read it. */
 export const MINIMUM_AGE = 15;
 

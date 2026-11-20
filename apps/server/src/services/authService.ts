@@ -3,17 +3,21 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
-import type { AuthPayload } from '../middleware/auth';
-import type { UserRole, RegistrationConsent } from '@voxium/shared';
-import { AppError, BadRequestError, ForbiddenError, OwnedServersError, ServiceUnavailableError, UnauthorizedError } from '../utils/errors';
+import type { RegistrationConsent } from '@voxium/shared';
+import { BadRequestError, ForbiddenError, OwnedServersError, ServiceUnavailableError, UnauthorizedError, prismaErrorCode } from '../utils/errors';
 import { validateEmail, validatePassword, canonicalizeEmail, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError, failedBeforeAnyRecipient, MailSuppressedError } from '../utils/email';
 import { isMailSuppressed } from '../utils/mailSuppression';
-import { isJwtVerifyError } from '../utils/jwtErrors';
 import { consumeMailCap, refundRateLimit, normalizeIp } from '../middleware/rateLimiter';
 import { consentIsRequired } from '../middleware/auth';
 import { verifyTOTP } from './totpService';
 import { deleteUserAccount } from '../utils/accountDeletion';
+import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import { lockAccountAtVersion } from '../utils/accountRowLocks';
+import {
+  createSession, openSession, rekeySession, trimSessions, readCarriedLabel, carriedLabel,
+  type SessionLabel, type SessionTokens,
+} from './sessionService';
 
 /**
  * The consent SELECT fragment every user payload includes, and the mapping
@@ -51,7 +55,14 @@ async function getTimingEqualizerHash(): Promise<string> {
   return timingEqualizerHash;
 }
 
-export async function loginUser(email: string, password: string, rememberMe = true, rawIp?: string, trustedDeviceToken?: string) {
+/**
+ * `label` is what the session this sign-in opens is labelled as (derived by
+ * the route from the request, sessionService.deriveSessionLabel); a sign-in
+ * that needs its two-factor step carries it in the challenge token, so the
+ * session opened by that step is labelled from the request that typed the
+ * password.
+ */
+export async function loginUser(email: string, password: string, rememberMe: boolean, rawIp: string | undefined, trustedDeviceToken: string | undefined, label: SessionLabel) {
   email = email.toLowerCase().trim();
 
   // The SAME normalization startRegistration and every limiter use. This was the
@@ -135,7 +146,7 @@ export async function loginUser(email: string, password: string, rememberMe = tr
 
     if (!deviceTrusted) {
       const totpToken = jwt.sign(
-        { userId: user.id, purpose: 'totp-verify', rememberMe },
+        { userId: user.id, purpose: 'totp-verify', rememberMe, cl: carriedLabel(label) },
         process.env.JWT_SECRET!,
         { expiresIn: '5m' } as jwt.SignOptions,
       );
@@ -143,15 +154,25 @@ export async function loginUser(email: string, password: string, rememberMe = tr
     }
   }
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
+  // An account deleted while this ran answers what a wrong password does
+  const tokens = await createSession(
+    { userId: user.id, username: user.username, role: user.role, tokenVersion: user.tokenVersion },
+    { rememberMe, label, accountGoneMessage: 'Invalid credentials' },
+  );
 
   const { password: _, tokenVersion: _tv, bannedAt: _ba, banReason: _br, ...safeUser } = user;
 
   return { user: withConsentFlag(safeUser), ...tokens };
 }
 
-export async function verifyLoginTOTP(totpToken: string, code: string) {
-  let payload: { userId: string; purpose: string; rememberMe: boolean };
+/**
+ * The two-factor step of a sign-in. The session it opens is labelled with
+ * the label the challenge token carries (the password step's request), else
+ * `fallbackLabel` (this request's: a challenge issued before the label was
+ * carried).
+ */
+export async function verifyLoginTOTP(totpToken: string, code: string, fallbackLabel: SessionLabel) {
+  let payload: { userId: string; purpose: string; rememberMe: boolean; cl?: unknown };
   try {
     payload = jwt.verify(totpToken, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as typeof payload;
   } catch {
@@ -185,7 +206,17 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
   });
   if (!user) throw new UnauthorizedError('User not found');
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, payload.rememberMe);
+  const tokens = await createSession(
+    { userId: user.id, username: user.username, role: user.role, tokenVersion: user.tokenVersion },
+    {
+      // As before sessions: a challenge without the claim signs in
+      // remembered, otherwise its truthiness (a challenge issued before the
+      // deploy carries whatever the sign-in body held)
+      rememberMe: payload.rememberMe === undefined ? true : Boolean(payload.rememberMe),
+      label: readCarriedLabel(payload.cl) ?? fallbackLabel,
+      accountGoneMessage: 'User not found',
+    },
+  );
   const { tokenVersion: _tv, ...safeUser } = user;
 
   // Issue a trusted device token (TRUSTED_DEVICE_TTL_DAYS, the figure the
@@ -197,58 +228,6 @@ export async function verifyLoginTOTP(totpToken: string, code: string) {
   );
 
   return { user: withConsentFlag(safeUser), ...tokens, trustedDeviceToken };
-}
-
-export function generateTokens(payload: AuthPayload, rememberMe = true) {
-  // Strip rememberMe from access token — it's only relevant for refresh
-  const { rememberMe: _, ...accessPayload } = payload;
-  const accessToken = jwt.sign(accessPayload, process.env.JWT_SECRET!, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '15m',
-  } as jwt.SignOptions);
-
-  const refreshExpiry = rememberMe
-    ? (process.env.JWT_REFRESH_EXPIRES_IN || '30d')
-    : '24h';
-  const refreshToken = jwt.sign({ ...accessPayload, rememberMe }, process.env.JWT_REFRESH_SECRET!, {
-    expiresIn: refreshExpiry,
-  } as jwt.SignOptions);
-
-  return { accessToken, refreshToken };
-}
-
-export async function refreshTokens(token: string) {
-  try {
-    const payload = jwt.verify(token, process.env.JWT_REFRESH_SECRET!, { algorithms: ['HS256'] }) as AuthPayload;
-
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-      select: { id: true, username: true, role: true, tokenVersion: true, bannedAt: true },
-    });
-
-    if (!user) throw new UnauthorizedError('User not found');
-
-    // Block banned users from refreshing tokens
-    if (user.bannedAt) throw new ForbiddenError('Your account has been banned');
-
-    // Tokens issued before the tokenVersion migration have no tokenVersion field;
-    // treat undefined/missing as version 0 so pre-existing refresh tokens remain valid.
-    const payloadVersion = payload.tokenVersion ?? 0;
-    if (user.tokenVersion !== payloadVersion) {
-      throw new UnauthorizedError('Token has been revoked');
-    }
-
-    const rememberMe = payload.rememberMe ?? true;
-    return generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion }, rememberMe);
-  } catch (err) {
-    // Every refusal of this function's own (account gone, revoked, banned)
-    // and every token jsonwebtoken refused answer the one 401, as they always
-    // did. A failing user lookup (database down, pool exhausted) is neither:
-    // it used to answer 401 too, and the client ends the session on a 401 to
-    // the refresh — a database blip signed everyone out. It surfaces as the
-    // 500 it is; the client keeps the tokens and tries again later.
-    if (err instanceof AppError || isJwtVerifyError(err)) throw new UnauthorizedError('Invalid refresh token');
-    throw err;
-  }
 }
 
 export async function requestPasswordReset(email: string) {
@@ -379,7 +358,27 @@ export async function resetPassword(token: string, newPassword: string): Promise
   return { userId: user.id };
 }
 
-export async function changePassword(userId: string, currentPassword: string, newPassword: string, rememberMe = true) {
+/**
+ * Change the password of a signed-in account, keeping the CALLER signed in:
+ * the version bump ends every other session (and every token of the old
+ * version), and in the same transaction the caller's own session (`sid`, the
+ * access token's) moves to the new version and a new generation, whose pair
+ * is the answer. A caller whose access token names no session (issued before
+ * sessions) gets a new one, labelled `label`, with `rememberMe`.
+ * `admittedVersion` is the token version the caller's access token was
+ * admitted with: a caller whose session ended meanwhile, or whose account
+ * moved to another version meanwhile (a reset, a ban, another change), is
+ * refused (401 'Session invalidated') and nothing is written.
+ */
+export async function changePassword(
+  userId: string,
+  sid: string | undefined,
+  admittedVersion: number,
+  currentPassword: string,
+  newPassword: string,
+  rememberMe: boolean,
+  label: SessionLabel,
+): Promise<SessionTokens> {
   const passwordErr = validatePassword(newPassword);
   if (passwordErr) throw new BadRequestError(passwordErr);
 
@@ -392,17 +391,41 @@ export async function changePassword(userId: string, currentPassword: string, ne
 
   const hashedPassword = await bcrypt.hash(newPassword, 12);
 
-  const updated = await prisma.user.update({
-    where: { id: user.id },
-    data: {
-      password: hashedPassword,
-      tokenVersion: { increment: 1 },
-    },
-    select: { id: true, username: true, role: true, tokenVersion: true },
-  });
-
-  // Return fresh tokens so the current session survives the version bump
-  return generateTokens({ userId: updated.id, username: updated.username, role: updated.role as UserRole, tokenVersion: updated.tokenVersion }, rememberMe);
+  // The account row first, locked and still at the caller's admitted
+  // version (lockAccountAtVersion: a reset or a ban that committed while
+  // the hash ran refuses this change), then the bump, then the caller's
+  // session row: the order an account deletion takes them in (its cascade
+  // reaches the sessions after its account-row lock) and a ban takes the
+  // account row in; a renewal takes only the session row. The account row
+  // may be held for long (a ban, a deletion): the lock-wait budget, and a
+  // deadlock victim is run again whole, every check with it.
+  const outcome = await retryOnTransactionConflict(
+    () => prisma.$transaction(async (tx) => {
+      await lockAccountAtVersion(tx, user.id, admittedVersion);
+      let updated: { id: string; username: string; role: string; tokenVersion: number };
+      try {
+        updated = await tx.user.update({
+          where: { id: user.id },
+          data: {
+            password: hashedPassword,
+            tokenVersion: { increment: 1 },
+          },
+          select: { id: true, username: true, role: true, tokenVersion: true },
+        });
+      } catch (err) {
+        if (prismaErrorCode(err) === 'P2025') throw new UnauthorizedError('User not found');
+        throw err;
+      }
+      const account = { userId: updated.id, username: updated.username, role: updated.role, tokenVersion: updated.tokenVersion };
+      // Fresh tokens so the current session survives the version bump
+      if (sid !== undefined) return { tokens: await rekeySession(tx, account, sid, admittedVersion), openedId: null };
+      const opened = await openSession(tx, account, { rememberMe, label, accountGoneMessage: 'User not found' });
+      return { tokens: opened.tokens, openedId: opened.sessionId };
+    }, LOCK_WAIT_TRANSACTION_OPTIONS),
+    '[Auth] A password change',
+  );
+  if (outcome.openedId !== null) await trimSessions(userId, outcome.openedId);
+  return outcome.tokens;
 }
 
 export async function verifyEmail(token: string) {

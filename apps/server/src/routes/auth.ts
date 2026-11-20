@@ -1,10 +1,11 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { logAuditEvent } from '../utils/auditLog';
-import { loginUser, verifyLoginTOTP, refreshTokens, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
+import { loginUser, verifyLoginTOTP, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { startRegistration, completeRegistration, resendRegistrationCode } from '../services/signupService';
+import { refreshSession, endSessionWithRefreshToken, deriveSessionLabel, readClientHint, type SessionLabel } from '../services/sessionService';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, rateLimitRegisterComplete, rateLimitRegisterResend, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitMailBlock, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, rateLimitRegisterComplete, rateLimitRegisterResend, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitLogout, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitMailBlock, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { readMailBlockToken, isDigestSuppressed, suppressDigest, unsuppressDigest } from '../utils/mailSuppression';
 import { prisma } from '../utils/prisma';
@@ -14,6 +15,23 @@ import { sanitizeLabel } from '../utils/sanitize';
 import { validateDisplayName } from '@voxium/shared';
 
 export const authRouter = Router();
+
+/**
+ * The label of a session this request opens: the body's `client` hint, else
+ * the request's Origin; the system from its User-Agent. Neither header is
+ * kept or logged (sessionService.deriveSessionLabel).
+ */
+function sessionLabelOf(req: Request): SessionLabel {
+  return deriveSessionLabel({ hint: req.body?.client, origin: req.get('origin'), userAgent: req.get('user-agent') });
+}
+
+/** "Remember me" as every sign-in read it: absent means yes, otherwise its truthiness. */
+function rememberMeOf(value: unknown): boolean {
+  return Boolean(value ?? true);
+}
+
+/** A refresh token is a JWT of a few hundred characters; anything far longer is not one. */
+const REFRESH_TOKEN_MAX_CHARS = 4096;
 
 // Proof-of-work challenge for registration (anti-bot Phase 3). Stateless:
 // the challenge is HMAC-signed, so nothing is stored until redemption.
@@ -90,7 +108,7 @@ authRouter.post('/register/complete', rateLimitRegisterComplete, chargeRegistrat
       return;
     }
     const { pendingId, code, username } = req.body;
-    const result = await completeRegistration(pendingId, code, username, req.ip || req.socket.remoteAddress);
+    const result = await completeRegistration(pendingId, code, username, req.ip || req.socket.remoteAddress, sessionLabelOf(req));
     res.status(201).json({ success: true, data: result });
   } catch (err) {
     next(err);
@@ -119,7 +137,7 @@ authRouter.post('/login', rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAc
     const { email, password, rememberMe, trustedDeviceToken } = req.body;
     if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
     if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
-    const result = await loginUser(email, password, rememberMe ?? true, req.ip || req.socket.remoteAddress, trustedDeviceToken);
+    const result = await loginUser(email, password, rememberMeOf(rememberMe), req.ip || req.socket.remoteAddress, trustedDeviceToken, sessionLabelOf(req));
 
     res.json({
       success: true,
@@ -130,19 +148,53 @@ authRouter.post('/login', rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAc
   }
 });
 
+// Renew a session (services/sessionService.ts: the token's own session is
+// rotated, a token issued before sessions is upgraded into one). Every
+// refusal is the one 401 'Invalid refresh token'; a failure of the server
+// is a 500, which the client answers by keeping its tokens. The body's
+// `client` field labels nothing: it is only written into the reuse log line.
 authRouter.post('/refresh', rateLimitRefresh, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { refreshToken } = req.body;
+    const { refreshToken, client } = req.body ?? {};
     if (!refreshToken || typeof refreshToken !== 'string') {
       res.status(400).json({ success: false, error: 'Refresh token is required' });
       return;
     }
-    const tokens = await refreshTokens(refreshToken);
+    const tokens = await refreshSession(refreshToken, {
+      // The connection closed (the client gave up waiting): nothing is
+      // rotated behind it, so its next attempt with the same token works
+      isClientGone: () => req.socket.destroyed,
+      hinted: readClientHint(client) !== null,
+      label: sessionLabelOf(req),
+    });
+    // Gone before anything was written: there is nobody to answer
+    if (tokens === null) return;
 
     res.json({
       success: true,
       data: tokens,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Sign-out on the server: ends the session the refresh token names, whatever
+// its generation (the token a client holds when it signs out may already
+// have been replaced by a renewal whose answer it dropped). Outside
+// `authenticate`: the access token may have expired. Every request whose body
+// holds a token-shaped string gets the same empty 204, whether that token was
+// valid, forged, expired or for a session already gone; a 500 means the
+// session was not ended.
+authRouter.post('/logout', rateLimitLogout, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const refreshToken: unknown = req.body?.refreshToken;
+    if (typeof refreshToken !== 'string' || refreshToken.length === 0 || refreshToken.length > REFRESH_TOKEN_MAX_CHARS) {
+      res.status(400).json({ success: false, error: 'Refresh token is required' });
+      return;
+    }
+    await endSessionWithRefreshToken(refreshToken);
+    res.status(204).end();
   } catch (err) {
     next(err);
   }
@@ -274,9 +326,15 @@ authRouter.post('/change-password', authenticate, rateLimitChangePassword, async
       res.status(400).json({ success: false, error: 'New password is required' });
       return;
     }
-    const tokens = await changePassword(req.user!.userId, currentPassword, newPassword, rememberMe ?? true);
+    // The version the caller was admitted with: a reset or a ban that
+    // commits while the password is hashed refuses this change
+    const tokens = await changePassword(
+      req.user!.userId, req.user!.sid, req.user!.tokenVersion,
+      currentPassword, newPassword, rememberMeOf(rememberMe), sessionLabelOf(req),
+    );
     // Every socket opened with the old tokens goes, the caller's included:
-    // its client reopens with the fresh pair this response carries
+    // its client reopens with the fresh pair this response carries (the
+    // caller's session was re-keyed in the same transaction)
     revokeUserSessions(req.user!.userId);
     res.json({ success: true, message: 'Password changed successfully.', data: tokens });
   } catch (err) {
@@ -379,7 +437,7 @@ authRouter.post('/totp/verify', rateLimitLogin, rateLimitLoginSubnet, rateLimitT
       res.status(400).json({ success: false, error: 'Verification code is required' });
       return;
     }
-    const result = await verifyLoginTOTP(totpToken, code);
+    const result = await verifyLoginTOTP(totpToken, code, sessionLabelOf(req));
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);

@@ -3,12 +3,16 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import http from 'http';
+import type { AddressInfo } from 'net';
 import { Router } from 'express';
+import { TEST_JWT_SECRET, TEST_JWT_REFRESH_SECRET } from '../helpers/testSecrets';
 
 // ─── Environment variables (must be set before any app import) ───────────────
 
-const JWT_SECRET = 'test-jwt-secret-for-unit-tests';
-const JWT_REFRESH_SECRET = 'test-jwt-refresh-secret-for-unit-tests';
+// The suite's own test-only secrets (setup.ts assigns the same)
+const JWT_SECRET = TEST_JWT_SECRET;
+const JWT_REFRESH_SECRET = TEST_JWT_REFRESH_SECRET;
 
 process.env.JWT_SECRET = JWT_SECRET;
 process.env.JWT_REFRESH_SECRET = JWT_REFRESH_SECRET;
@@ -63,16 +67,43 @@ const { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockPrismaMailSuppr
   return { mockPrismaUser, mockPrismaIpBan, mockPrismaIpRecord, mockPrismaMailSuppression, mockRedisClient, passthroughMiddleware };
 });
 
-// Mock Prisma — must be declared before app import
-vi.mock('../../utils/prisma', () => ({
-  prisma: {
+// Mock Prisma — must be declared before app import. A transaction runs its
+// callback on the same mocks (a password change bumps the version in one).
+vi.mock('../../utils/prisma', () => {
+  const prisma = {
     user: mockPrismaUser,
     ipBan: mockPrismaIpBan,
     ipRecord: mockPrismaIpRecord,
     mailSuppression: mockPrismaMailSuppression,
     $queryRaw: vi.fn().mockResolvedValue([{ result: 1 }]),
-  },
-}));
+    $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+  };
+  return { prisma };
+});
+
+// The sessions' statements (utils/sessionStore.ts, proven against a real
+// PostgreSQL elsewhere): the routes and the real session service are under
+// test here. Defaults: a sign-in writes generation 1, nothing else is found.
+const { sessionStore } = vi.hoisted(() => {
+  const exp = () => Math.floor(Date.now() / 1000) + 30 * 86400;
+  return {
+    sessionStore: {
+      insertSession: vi.fn(async (_db: unknown, row: { id: string; rememberMe: boolean }) => ({ id: row.id, generation: 1, rememberMe: row.rememberMe, exp: exp() })),
+      readSessionForRefresh: vi.fn().mockResolvedValue(null),
+      rotateSession: vi.fn(async (_db: unknown, a: { sid: string; toGeneration: number }) => ({ id: a.sid, generation: a.toGeneration, rememberMe: true, exp: exp() })),
+      rekeySession: vi.fn(async (_db: unknown, a: { sid: string }) => ({ id: a.sid, generation: 2, rememberMe: true, exp: exp() })),
+      deleteSession: vi.fn().mockResolvedValue(1),
+      deleteStaleSession: vi.fn().mockResolvedValue(1),
+      deleteExpiredSession: vi.fn().mockResolvedValue(1),
+      evictSessionsBeyond: vi.fn().mockResolvedValue([]),
+      readLegacyRedemption: vi.fn().mockResolvedValue(null),
+      claimLegacyRedemption: vi.fn().mockResolvedValue(true),
+      linkLegacyRedemption: vi.fn().mockResolvedValue(1),
+      spendLegacyRedemption: vi.fn().mockResolvedValue([]),
+    },
+  };
+});
+vi.mock('../../utils/sessionStore', () => sessionStore);
 
 // Mock Redis — rate limiter and other utils need this
 vi.mock('../../utils/redis', () => ({
@@ -138,7 +169,11 @@ vi.mock('../../services/totpService', async (importOriginal) => {
 });
 vi.mock('../../utils/auditLog', () => ({ logAuditEvent: (...a: unknown[]) => logAuditEventMock(...a) }));
 const revokeUserSessionsMock = vi.hoisted(() => vi.fn());
-vi.mock('../../utils/sessionRevocation', () => ({ revokeUserSessions: (...a: unknown[]) => revokeUserSessionsMock(...a) }));
+const revokeSessionSocketsMock = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/sessionRevocation', () => ({
+  revokeUserSessions: (...a: unknown[]) => revokeUserSessionsMock(...a),
+  revokeSessionSockets: (...a: unknown[]) => revokeSessionSocketsMock(...a),
+}));
 vi.mock('../../routes/admin', () => ({ adminRouter: Router() }));
 vi.mock('../../routes/support', () => ({ supportRouter: Router() }));
 vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
@@ -147,10 +182,11 @@ vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 // The registration limiters are spies, so each route's chain can be observed.
 const {
   rateLimitRegisterMock, rateLimitRegisterAttemptMock, rateLimitRegisterAttemptSubnetMock,
-  rateLimitRegisterCompleteMock, rateLimitRegisterResendMock, chargeRegistrationBudgetsMock,
+  rateLimitRegisterCompleteMock, rateLimitRegisterResendMock, chargeRegistrationBudgetsMock, rateLimitLogoutMock,
 } = vi.hoisted(() => {
   const spy = () => vi.fn((_req: unknown, _res: unknown, next: () => void) => next());
   return {
+    rateLimitLogoutMock: spy(),
     rateLimitRegisterMock: spy(),
     rateLimitRegisterAttemptMock: spy(),
     rateLimitRegisterAttemptSubnetMock: spy(),
@@ -182,6 +218,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitForgotPassword: passthroughMiddleware,
   rateLimitResetPassword: passthroughMiddleware,
   rateLimitRefresh: passthroughMiddleware,
+  rateLimitLogout: rateLimitLogoutMock,
   rateLimitChangePassword: passthroughMiddleware,
   rateLimitTOTP: passthroughMiddleware,
   rateLimitVerifyEmail: passthroughMiddleware,
@@ -552,19 +589,20 @@ describe('POST /api/v1/auth/register/complete', () => {
 
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ success: true, data: COMPLETE_RESULT });
-    expect(completeRegistrationMock).toHaveBeenCalledWith('p'.repeat(22), '123456', undefined, expect.any(String));
+    // The session it opens is labelled from the request (no Origin, no user agent here)
+    expect(completeRegistrationMock).toHaveBeenCalledWith('p'.repeat(22), '123456', undefined, expect.any(String), { kind: 'unknown', os: 'other' });
   });
 
   it('forwards a new username with the same code, and the raw values for the service to check', async () => {
     await request(app)
       .post('/api/v1/auth/register/complete')
       .send({ pendingId: 'p'.repeat(22), code: '123456', username: 'other_name' });
-    expect(completeRegistrationMock).toHaveBeenLastCalledWith('p'.repeat(22), '123456', 'other_name', expect.any(String));
+    expect(completeRegistrationMock).toHaveBeenLastCalledWith('p'.repeat(22), '123456', 'other_name', expect.any(String), expect.objectContaining({ kind: expect.any(String) }));
 
     await request(app)
       .post('/api/v1/auth/register/complete')
       .send({ pendingId: 7, code: 123456 });
-    expect(completeRegistrationMock).toHaveBeenLastCalledWith(7, 123456, undefined, expect.any(String));
+    expect(completeRegistrationMock).toHaveBeenLastCalledWith(7, 123456, undefined, expect.any(String), expect.objectContaining({ kind: expect.any(String) }));
   });
 
   it.each([
@@ -858,6 +896,8 @@ describe('POST /api/v1/auth/refresh', () => {
   });
 
   it('returns new tokens with valid refresh token', async () => {
+    // A token of the shape issued before sessions (generateRefreshToken
+    // above): upgraded into a new session at its first presentation
     const refreshToken = generateRefreshToken({
       userId: MOCK_USER.id,
       username: MOCK_USER.username,
@@ -880,6 +920,11 @@ describe('POST /api/v1/auth/refresh', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data).toHaveProperty('accessToken');
     expect(res.body.data).toHaveProperty('refreshToken');
+    const renewed = jwt.verify(res.body.data.refreshToken, JWT_REFRESH_SECRET, { algorithms: ['HS256'] }) as Record<string, unknown>;
+    expect(renewed).toMatchObject({ userId: MOCK_USER.id, tokenVersion: 0, rememberMe: true, gen: 1 });
+    expect(sessionStore.claimLegacyRedemption).toHaveBeenCalledTimes(1);
+    expect(sessionStore.insertSession).toHaveBeenCalledTimes(1);
+    expect(sessionStore.linkLegacyRedemption).toHaveBeenCalledWith(expect.anything(), expect.any(String), renewed.sid);
   });
 
   it('returns 401 with invalid refresh token', async () => {
@@ -976,9 +1021,10 @@ describe('POST /api/v1/auth/refresh', () => {
       .post('/api/v1/auth/refresh')
       .send({ refreshToken });
 
-    // The refreshTokens catch block converts ForbiddenError to UnauthorizedError,
-    // so banned users get 401 on refresh (not 403)
+    // A banned account renews nothing, answered like every refusal of the
+    // refresh: 401 (never 403)
     expect(res.status).toBe(401);
+    expect(res.body.error).toBe('Invalid refresh token');
     expect(res.body.success).toBe(false);
   });
 
@@ -1101,7 +1147,9 @@ describe('POST /api/v1/auth/change-password', () => {
       .mockResolvedValueOnce({
         ...MOCK_USER,
         password: hashedCurrent,
-      });
+      })
+      // changePassword — the account under the transaction's lock, at the admitted version
+      .mockResolvedValueOnce({ id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 0 });
 
     // changePassword — update user
     mockPrismaUser.update.mockResolvedValue({
@@ -1136,7 +1184,8 @@ describe('POST /api/v1/auth/change-password', () => {
     const order: string[] = [];
     mockPrismaUser.findUnique
       .mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false })
-      .mockResolvedValueOnce({ ...MOCK_USER, password: hashedCurrent });
+      .mockResolvedValueOnce({ ...MOCK_USER, password: hashedCurrent })
+      .mockResolvedValueOnce({ id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 0 });
     mockPrismaUser.update.mockImplementation(async () => {
       order.push('update');
       return { id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 1 };
@@ -1150,6 +1199,28 @@ describe('POST /api/v1/auth/change-password', () => {
 
     expect(res.status).toBe(200);
     expect(order).toEqual(['update', 'revoke']);
+  });
+
+  it('a reset or a ban that committed while the password was hashed: 401 Session invalidated, nothing written, no socket touched', async () => {
+    const hashedCurrent = await bcrypt.hash('currentpassword', 4);
+    const token = generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username, tokenVersion: 0 });
+    mockPrismaUser.update.mockClear();
+    mockPrismaUser.findUnique
+      .mockResolvedValueOnce({ bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false })
+      .mockResolvedValueOnce({ ...MOCK_USER, password: hashedCurrent })
+      // Under the lock the account is at version 1: the caller was admitted at 0
+      .mockResolvedValueOnce({ id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 1 });
+
+    const res = await request(app)
+      .post('/api/v1/auth/change-password')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ currentPassword: 'currentpassword', newPassword: 'newpassword123' });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Session invalidated' });
+    expect(mockPrismaUser.update).not.toHaveBeenCalled();
+    expect(sessionStore.rekeySession).not.toHaveBeenCalled();
+    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
   });
 
   it('revokes nothing when the password change is refused', async () => {
@@ -1818,5 +1889,248 @@ describe('POST /api/v1/auth/resend-verification', () => {
     } finally {
       errorLog.mockRestore();
     }
+  });
+});
+
+// ─── Sign-in sessions: the renewal of a session, and the sign-out ───────────
+
+describe('POST /api/v1/auth/refresh — a token that names its session', () => {
+  const SID = 'Qm9vdHN0cmFwU2Vzc2lvbg';
+  const sessionToken = (gen: number) => jwt.sign(
+    { userId: MOCK_USER.id, tokenVersion: 0, rememberMe: true, sid: SID, gen, exp: Math.floor(Date.now() / 1000) + 30 * 86400 },
+    JWT_REFRESH_SECRET,
+    { algorithm: 'HS256' },
+  );
+  const sessionRow = (over: Record<string, unknown> = {}) => ({
+    generation: 3, rowVersion: 0, rememberMe: true, clientKind: 'desktop', expired: false, withinGrace: false,
+    secondsSinceRotation: 600, exp: Math.floor(Date.now() / 1000) + 29 * 86400, username: MOCK_USER.username, role: 'user',
+    accountVersion: 0, banned: false, ...over,
+  });
+  /** The reuse flag, set explicitly by every test that reaches it (this file's flag mock answers true for any name). */
+  const reuseMode = (enforce: boolean) =>
+    vi.mocked(isFeatureEnabled).mockImplementation((name: string) => (name === 'refresh_reuse_revocation' ? enforce : true));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(isFeatureEnabled).mockImplementation(() => true);
+  });
+
+  it('rotates the current generation and answers the next one', async () => {
+    sessionStore.readSessionForRefresh.mockResolvedValueOnce(sessionRow());
+
+    const res = await request(app).post('/api/v1/auth/refresh').send({ refreshToken: sessionToken(3), client: 'desktop' });
+
+    expect(res.status).toBe(200);
+    expect(jwt.verify(res.body.data.refreshToken, JWT_REFRESH_SECRET, { algorithms: ['HS256'] })).toMatchObject({ sid: SID, gen: 4 });
+    expect(jwt.verify(res.body.data.accessToken, JWT_SECRET, { algorithms: ['HS256'] })).toMatchObject({ userId: MOCK_USER.id, sid: SID });
+    expect(sessionStore.rotateSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('the body\'s `client` field is only written into the reuse line (present / absent); a bad one is ignored', async () => {
+    reuseMode(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sessionStore.readSessionForRefresh.mockResolvedValueOnce(sessionRow({ generation: 5 })).mockResolvedValueOnce(sessionRow({ generation: 5 }));
+
+    const hinted = await request(app).post('/api/v1/auth/refresh').send({ refreshToken: sessionToken(2), client: 'web' });
+    const bad = await request(app).post('/api/v1/auth/refresh').send({ refreshToken: sessionToken(2), client: 'toaster' });
+
+    expect(hinted.status).toBe(200);
+    expect(bad.status).toBe(200);
+    expect(warn.mock.calls[0][0]).toContain('client field present');
+    expect(warn.mock.calls[1][0]).toContain('client field absent');
+    // The label of the session is never changed by a renewal
+    expect(sessionStore.insertSession).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('reuse in enforce mode: the session ended, its sockets with it, then 401 Invalid refresh token', async () => {
+    reuseMode(true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sessionStore.readSessionForRefresh.mockResolvedValueOnce(sessionRow({ generation: 5 }));
+
+    const res = await request(app).post('/api/v1/auth/refresh').send({ refreshToken: sessionToken(2) });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ success: false, error: 'Invalid refresh token' });
+    expect(sessionStore.deleteSession).toHaveBeenCalledWith(expect.anything(), SID, MOCK_USER.id);
+    expect(revokeSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, SID, 'Your session has ended');
+    warn.mockRestore();
+  });
+
+  it('a failure of the server answers 500, never 401: the client keeps its tokens', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    sessionStore.readSessionForRefresh.mockRejectedValueOnce(new Error('connection terminated unexpectedly'));
+
+    const res = await request(app).post('/api/v1/auth/refresh').send({ refreshToken: sessionToken(3) });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ success: false, error: 'Internal server error' });
+    error.mockRestore();
+  });
+
+  describe('a client that has gone before the rotation (a real HTTP connection)', () => {
+    /** Posts a refresh on a real socket; the read waits until it is released. */
+    async function refreshOverTheWire(destroyBeforeRelease: boolean) {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let readDone!: () => void;
+      const readFinished = new Promise<void>((resolve) => { readDone = resolve; });
+      sessionStore.readSessionForRefresh.mockImplementationOnce(async () => {
+        await gate;
+        readDone();
+        return sessionRow();
+      });
+      const server = http.createServer(app).listen(0, '127.0.0.1');
+      // The server's side of the connection: its close is what the route reads
+      let serverSide: import('net').Socket | undefined;
+      server.on('connection', (socket) => { serverSide = socket; });
+      await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+      const { port } = server.address() as AddressInfo;
+      const body = JSON.stringify({ refreshToken: sessionToken(3) });
+      let status: number | undefined;
+      const req = http.request({
+        host: '127.0.0.1', port, path: '/api/v1/auth/refresh', method: 'POST', agent: false,
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      }, (res) => {
+        status = res.statusCode;
+        res.resume();
+      });
+      req.on('error', () => { /* the destroyed request reports its own reset */ });
+      req.end(body);
+      // The route is inside the read: the body has been parsed
+      await vi.waitFor(() => expect(sessionStore.readSessionForRefresh).toHaveBeenCalled());
+      if (destroyBeforeRelease) {
+        const closed = new Promise<void>((resolve) => {
+          if (serverSide!.destroyed) resolve();
+          else serverSide!.once('close', () => resolve());
+        });
+        req.destroy();
+        // Until the server has seen the connection close
+        await closed;
+        expect(serverSide!.destroyed).toBe(true);
+      }
+      release();
+      await readFinished;
+      // Until the route has done what it does after the read: the answer
+      // arrived, or (the client gone) the route returned without one
+      if (destroyBeforeRelease) {
+        // Everything after the read is promise continuations: two turns of
+        // the event loop run them all (no timer, nothing to race)
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+      } else {
+        await vi.waitFor(() => expect(status).toBeDefined(), { timeout: 5000 });
+      }
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      return status;
+    }
+
+    it('the body read by the parser does not count as gone: the rotation happens and the answer arrives', async () => {
+      const status = await refreshOverTheWire(false);
+      expect(status).toBe(200);
+      expect(sessionStore.rotateSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('a connection closed by the client: nothing rotated behind it, so its next attempt with the same token works', async () => {
+      await refreshOverTheWire(true);
+      expect(sessionStore.rotateSession).not.toHaveBeenCalled();
+      expect(sessionStore.deleteSession).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('POST /api/v1/auth/logout', () => {
+  const SID = 'Qm9vdHN0cmFwU2Vzc2lvbg';
+  const sessionToken = (over: Record<string, unknown> = {}, secret = JWT_REFRESH_SECRET) => jwt.sign(
+    { userId: MOCK_USER.id, tokenVersion: 0, rememberMe: true, sid: SID, gen: 7, exp: Math.floor(Date.now() / 1000) + 30 * 86400, ...over },
+    secret,
+    { algorithm: 'HS256' },
+  );
+  /** What a caller can observe of an answer: everything but the headers that differ per request. */
+  const observable = (res: request.Response) => {
+    const { date: _d, 'x-request-id': _r, ...headers } = res.headers;
+    return { status: res.status, text: res.text, headers };
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sessionStore.deleteSession.mockResolvedValue(1);
+    sessionStore.spendLegacyRedemption.mockResolvedValue([]);
+  });
+
+  it('ends the session the token names (any generation), its sockets told and closed: 204, nothing in the body', async () => {
+    const res = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken({ gen: 2 }) });
+
+    expect(res.status).toBe(204);
+    expect(res.text).toBe('');
+    expect(sessionStore.deleteSession).toHaveBeenCalledWith(expect.anything(), SID, MOCK_USER.id);
+    expect(revokeSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, SID, 'Your session has ended');
+    expect(rateLimitLogoutMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('needs no access token: it is authenticated by the refresh token alone (the access token may have expired)', async () => {
+    const res = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken() });
+    expect(res.status).toBe(204);
+    expect(mockPrismaUser.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('answers the SAME 204 for a valid, forged, expired, garbage, unknown or already-ended token, and one issued before sessions', async () => {
+    const valid = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken() });
+    sessionStore.deleteSession.mockResolvedValueOnce(0);
+    const gone = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken({ sid: 'unknownSessionId000000' }) });
+    const forged = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken({}, 'not-the-secret') });
+    const expired = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken({ exp: Math.floor(Date.now() / 1000) - 60 }) });
+    const garbage = await request(app).post('/api/v1/auth/logout').send({ refreshToken: 'garbage' });
+    const access = await request(app).post('/api/v1/auth/logout').send({ refreshToken: generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username }) });
+    const legacy = await request(app).post('/api/v1/auth/logout').send({ refreshToken: generateRefreshToken({ userId: MOCK_USER.id, username: MOCK_USER.username }) });
+
+    const answers = [valid, gone, forged, expired, garbage, access, legacy].map(observable);
+    for (const answer of answers) expect(answer).toEqual(answers[0]);
+    expect(answers[0].status).toBe(204);
+    // Only the parseable ones reached a statement: one delete each, the legacy one spent
+    expect(sessionStore.deleteSession).toHaveBeenCalledTimes(2);
+    expect(sessionStore.spendLegacyRedemption).toHaveBeenCalledTimes(1);
+    // A socket is ended only for a session that was there
+    expect(revokeSessionSocketsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a token issued before sessions is spent (its digest recorded), and the session it became, if any, ended', async () => {
+    const legacy = generateRefreshToken({ userId: MOCK_USER.id, username: MOCK_USER.username });
+    sessionStore.spendLegacyRedemption.mockResolvedValueOnce([SID]);
+
+    const res = await request(app).post('/api/v1/auth/logout').send({ refreshToken: legacy });
+
+    expect(res.status).toBe(204);
+    expect(sessionStore.spendLegacyRedemption).toHaveBeenCalledWith(
+      expect.anything(), crypto.createHash('sha256').update(legacy).digest('hex'), (jwt.decode(legacy) as { exp: number }).exp, MOCK_USER.id,
+    );
+    expect(revokeSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, [SID], 'Your session has ended');
+  });
+
+  it.each([
+    ['missing', {}],
+    ['not a string', { refreshToken: 42 }],
+    ['empty', { refreshToken: '' }],
+    ['longer than any refresh token', { refreshToken: 'x'.repeat(4097) }],
+  ])('a body whose token is %s: 400 Refresh token is required, nothing read', async (_what, body) => {
+    const res = await request(app).post('/api/v1/auth/logout').send(body);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Refresh token is required' });
+    expect(sessionStore.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('a database failure answers 500: the client knows the session was not ended, and the token is never logged', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const token = sessionToken();
+    sessionStore.deleteSession.mockRejectedValueOnce(new Error('connection terminated unexpectedly'));
+
+    const res = await request(app).post('/api/v1/auth/logout').send({ refreshToken: token });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ success: false, error: 'Internal server error' });
+    expect(revokeSessionSocketsMock).not.toHaveBeenCalled();
+    for (const call of error.mock.calls) expect(JSON.stringify(call)).not.toContain(token.split('.')[2]);
+    error.mockRestore();
   });
 });

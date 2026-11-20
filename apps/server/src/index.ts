@@ -42,10 +42,12 @@ if (totpKeyCheck.warning) {
 import http from 'http';
 import { app } from './app';
 import { initSocketServer } from './websocket/socketServer';
+import { tokenSecretsWarning } from './services/sessionService';
 import { startAdminMetricsEmitter, stopAdminMetricsEmitter } from './websocket/adminMetrics';
 import { startAttachmentCleanup, stopAttachmentCleanup } from './utils/attachmentCleanup';
 import { startRegistrationHygiene, stopRegistrationHygiene } from './utils/registrationHygiene';
 import { startKeyShareCleanup, stopKeyShareCleanup } from './utils/keyShareCleanup';
+import { startSessionSweep, stopSessionSweep } from './utils/sessionSweep';
 import { startOrphanCleanup, stopOrphanCleanup } from './utils/orphanCleanup';
 import { startDiscoveryStats, stopDiscoveryStats } from './utils/discoveryStats';
 import { prisma } from './utils/prisma';
@@ -68,6 +70,11 @@ import { initChannelVisibilitySync, stopChannelVisibilitySync } from './utils/ch
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
 async function main() {
+  // Two token secrets that are one value: said once, the start goes on
+  // (a self-hosted install keeps booting; services/sessionService.ts)
+  const secretsWarning = tokenSecretsWarning();
+  if (secretsWarning) console.warn(`\nWARNING: ${secretsWarning}\n`);
+
   // Connect to database
   await prisma.$connect();
   console.log('[DB] Connected to PostgreSQL');
@@ -227,6 +234,10 @@ async function main() {
   // Sweep undeliverable E2E key shares (30-day retention) — leader-locked via withClusterLock
   startKeyShareCleanup();
 
+  // Retention of ended sign-in sessions (6-hourly), never their authority —
+  // leader-locked via withClusterLock, see utils/sessionSweep.ts
+  startSessionSweep();
+
   // Registration hygiene: unverified-account TTL + IP-record retention (GDPR)
   startRegistrationHygiene();
 
@@ -255,6 +266,7 @@ async function main() {
     stopAdminMetricsEmitter();
     stopAttachmentCleanup();
     stopKeyShareCleanup();
+    stopSessionSweep();
     stopRegistrationHygiene();
     stopOrphanCleanup();
     stopDiscoveryStats();

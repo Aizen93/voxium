@@ -125,7 +125,7 @@ apps/server/
 │   ├── index.ts            # Entry point, server bootstrap
 │   ├── app.ts              # Express app configuration, middleware, routes
 │   ├── routes/
-│   │   ├── auth.ts         # Register, login, refresh, me, forgot/reset/change password
+│   │   ├── auth.ts         # Register, login, refresh, logout, me, forgot/reset/change password
 │   │   ├── servers.ts      # CRUD servers, join/leave, settings, members (online People slice, signed-keyset directory, batched lookup), member search
 │   │   ├── secureChannels.ts # Invite-only E2E channels: create, rename, members, moderation count
 │   │   ├── e2e.ts          # E2E device keys, key shares, master-key transfers, backup, message keys
@@ -149,6 +149,7 @@ apps/server/
 │   │   └── stats.ts        # Public stats endpoint
 │   ├── services/
 │   │   ├── authService.ts  # Auth business logic
+│   │   ├── sessionService.ts # Sign-in sessions: the one minter of access and refresh tokens, renewal with rotation, sign-out, the access check
 │   │   ├── signupService.ts # Verify-first registration: start (pending row + mailed code), resend, complete (creates the account), expired-state purge
 │   │   └── totpService.ts  # TOTP 2FA (encrypted secrets, backup codes, replay protection)
 │   ├── middleware/
@@ -183,6 +184,10 @@ apps/server/
 │       ├── memberBroadcast.ts   # Server room join + member event broadcast
 │       ├── auditLog.ts         # Fire-and-forget audit event logger
 │       ├── featureFlags.ts     # Redis-backed feature flag registry
+│       ├── sessionStore.ts     # The SQL of the sign-in sessions (database clock, conditional rotation, sweep statements)
+│       ├── sessionSweep.ts     # Scheduled job (6-hourly, leader-locked) — deletes ended sign-in sessions, guarded against a wrong comparison
+│       ├── tokenShapes.ts      # The claims that tell an access token from a refresh token, before sessions and since
+│       ├── sessionRooms.ts     # The socket room names of sign-in sessions (`session:{id}`, `nosid:{userId}`)
 │       ├── permissionCalculator.ts # Server/channel permission bitmask calculation
 │       ├── channelVisibilityRooms.ts # Re-syncs channel:{id} rooms after a VIEW_CHANNEL change
 │       ├── serverJoin.ts       # joinServerMember(): ban check, limits, memberCount, room join
@@ -988,6 +993,8 @@ sequenceDiagram
 | `dm:{id}` | DM messages, typing, reactions | Auto-joined on socket connect for all conversations; `dm:join` emitted for new conversations. Authorization verified via DB query before joining. |
 | `dm:voice:{id}` | DM call signaling | Joined on `dm:voice:join`, left on call end |
 | `user:{id}` | Every socket of one user: targeted events (join approvals, secure channel membership), moderator fan-out, `socketsJoin`/`socketsLeave` by user | On socket connect |
+| `session:{id}` | Every socket of one sign-in session (the `sid` of its access token): a sign-out, a reused refresh token or the session cap ends that session's sockets on every node, and no other session's; the sweep disconnects the rooms of the sessions it deletes | On socket connect, beside `user:{id}`, when the access token names a session |
+| `nosid:{userId}` | Every socket of one user opened with an access token issued before sign-in sessions (it names none). Transitional, like those tokens: every revocation of one session of the account disconnects this room too, without `force:logout` (an honest device reconnects with the token it holds now; one whose session ended is then refused) | On socket connect, beside `user:{id}`, when the access token names no session |
 | `support:{id}` | A support ticket thread (requester and claiming admin) | Joined via their `user:{id}` room when the ticket is opened or claimed, and on connect while the ticket is open or claimed |
 | `admin:support` | The support queue for platform staff: `support:ticket:new`, `support:message:new` and `support:status_change`, emitted by `routes/support.ts` (a user opens a ticket or writes) and `routes/admin.ts` (an admin claims, replies or closes). Sibling rooms `admin:reports` (`report:new`) and `admin:metrics` (the live dashboard snapshot) work the same way | On the `admin:subscribe_support` socket event, accepted only when the socket's platform role is `admin` or `superadmin`; left on `admin:unsubscribe_support` or disconnect |
 
@@ -1233,8 +1240,9 @@ sequenceDiagram
     participant DB as Database
 
     Client->>Server: Register / Login
-    Server->>Server: Generate Access Token (15min, JWT_SECRET)
-    Server->>Server: Generate Refresh Token (7d, JWT_REFRESH_SECRET)
+    Server->>DB: New session row (generation 1)
+    Server->>Server: Access Token (15min, JWT_SECRET, sid)
+    Server->>Server: Refresh Token (JWT_REFRESH_SECRET, sid + gen, exp = the row's expiry)
     Note over Server: Both embed tokenVersion from User model
     Server-->>Client: { accessToken, refreshToken }
     Client->>Client: Store (OS credential store in the desktop app, browser storage on the web)
@@ -1246,14 +1254,21 @@ sequenceDiagram
     Server-->>Client: 401 Unauthorized
 
     Client->>Server: POST /auth/refresh { refreshToken }
-    Server->>DB: Check tokenVersion matches
-    alt Token version matches
+    Server->>DB: Read the session row with its account
+    alt Current generation, versions match
+        Server->>DB: Rotate (one conditional UPDATE on the generation)
         Server-->>Client: New { accessToken, refreshToken }
         Client->>Server: Retry original request
-    else Token revoked
+    else Session ended, token revoked
         Server-->>Client: 401 — Redirect to login
     end
+
+    Client->>Server: POST /auth/logout { refreshToken }
+    Server->>DB: Delete the session row (any generation)
+    Server-->>Client: 204
 ```
+
+**Sign-in sessions.** Every sign-in (password, the two-factor step, registration completion, and a password change for a caller whose token names none) writes one row of `sessions` (`services/sessionService.ts`, the only code that signs an access or a refresh token; its statements in `utils/sessionStore.ts`): the account, a generation counter, when the session was created, last renewed and expires, "Remember me", the account's `tokenVersion` it was issued under, and a coarse label from two closed lists (the kind of app, from the client's own hint or the request's origin, and the operating system, from the user agent, which is then discarded). It holds no address, no user agent and no name anyone typed. The access token carries the row's id (`sid`); the refresh token carries it and the generation it was issued as (`gen`), and its `exp` is the row's expiry: the idle window of `JWT_REFRESH_EXPIRES_IN` (24 hours without "Remember me") from the last renewal, never past 365 days after the sign-in. An account keeps at most 25 live sessions: a sign-in past that ends the least recently renewed ones and is never refused; the trim deletes a row only while it still holds the generation and the version it was ranked with, and never waits on a row another transaction holds, so a session renewed or re-keyed meanwhile is kept and an account may stay one over the cap until its next sign-in. Every renewal rotates the row with one conditional UPDATE on the generation, so two renewals racing on one token never mint two generations. The token a renewal just replaced is answered again for 120 seconds, measured on the database's clock (a lost answer retried, two tabs); presented after that, or an older one, it is reuse: with the `refresh_reuse_revocation` flag on, the session is deleted and its sockets ended; with it off (the default, while the logs are watched), the reuse is logged without the token, the user agent or the address, and the session renews as usual. `tokenVersion` stays the account-wide switch (a password change or reset, a ban): a row below the account's version is dead, refused and deleted. A password change re-keys the caller's own row to the new version in the same transaction, so the caller stays signed in; that transaction locks the account row first and goes on only while the account is still at the version the caller's access token was admitted with (a reset or a ban that committed while the password was hashed refuses the change with `Session invalidated`), and re-keys the row only while it holds that version. A token is accepted only as the kind it was issued as, whatever the two secrets are: `authenticate`, the socket handshake and the per-user limiter refuse a refresh token's claims (`rememberMe`, `gen`), the renewal refuses an access token's (a token without `rememberMe`, or a session's token carrying `username` or `role`) and any `purpose`, and a generation above the 32-bit maximum (`utils/tokenShapes.ts`); the server logs one warning at start when `JWT_SECRET` and `JWT_REFRESH_SECRET` are equal, and starts. `POST /auth/logout` (the refresh token in the body, outside `authenticate`) deletes the row the token names whatever its generation, ends the sockets of that session (`session:{id}`, and the account's sockets that name no session, `nosid:{userId}`), and answers the same empty 204 to every token it can parse; a token issued before sessions is recorded as spent, the session it was upgraded into deleted first (the order every other session delete takes the two rows in). `authenticate` and the socket handshake read the session row with the account in one statement and refuse an access token whose session ended with `Session invalidated`, the answer every client renews on (there the row's expiry is judged on the node's clock, which only bounds an access token's last minutes: every renewal decides on the database's); the handshake's re-check after joining the rooms reads it again. Only an explicit refusal answers 401: a failing statement is a 500 (`Authentication unavailable` on the socket), so a fault in this path is an outage, never a mass sign-out. A refresh token issued before sessions (no `sid`) is upgraded on its first use into a new session (its SHA-256 recorded in `legacy_refresh_redemptions`, in one transaction with the row, which keeps the default budget and waits only behind an account deletion: a deletion that commits is the refusal of a gone account, a 401 whenever it lands, and the transaction expiring while it waits is a 500, never a 401); none is issued any more, and every one expires by itself. A 6-hourly sweep (`utils/sessionSweep.ts`, one node at a time, the first run a few minutes after start) deletes rows more than an hour past their expiry and rows below their account's version, then the redemption records more than an hour past their token's expiry, and disconnects the `session:{id}` rooms of each batch it deleted; it is retention, never the authority. Before it deletes anything it checks samples of what each comparison picks by an independent path: expired sessions and records nearest the boundary against the node's own clock, outdated sessions, the nearest to their account's version and as many drawn at random in every run, read again through the typed client and compared in JavaScript; one that disagrees refuses the whole run with an error line naming the kind and the counts. More than half of all sessions due is said in one warning, and the expired ones are then also checked with a sample spread over every candidate; the proportion alone refuses nothing, so a backlog is always cleared. The rows go with the account through the foreign key's cascade.
 
 The client renews in one place (`services/session.ts`): a single-flight refresh shared by the REST client and the socket, a token renewed before it is sent when its own `exp` (read on the server's clock, learnt from each renewed token's `iat`) says it has expired (a window restored after a long minimize), and a session that ends only on a 401 or 403 answer to the refresh or with no refresh token to send — a network error, a server error or a rate limit fails that one request and keeps the tokens, and a renewal that lands after a logout stores nothing. The socket handshake answers an expired access token with `Token expired` (any other token failure stays `Invalid token`; a failing database lookup answers `Authentication unavailable` instead, and on REST surfaces as a 500, never a 401, so a database blip cannot sign anyone out). A refusal by the server closes the socket.io manager for good, so the client reopens the socket itself: with the stored token when a REST request renewed it meanwhile, after one renewal otherwise, and after a growing wait for `Authentication unavailable`; transport failures are left to the manager, which retries without limit. The resume handler (`services/resume.ts`, on the window becoming visible or the network coming back) reopens a dropped socket at once with a live token, unless a handshake is already on the wire.
 
@@ -1373,7 +1388,7 @@ sequenceDiagram
 |-------|-----------|
 | Transport | HTTPS in production |
 | Headers | Helmet.js (CSP, HSTS, X-Frame, etc.) + Tauri CSP (restrictive `connect-src`, `script-src`, etc.; the release build merges the deployment's object-store origin into `img-src` / `connect-src` from `TAURI_ASSET_ORIGIN` through a `tauri build --config` overlay, `apps/desktop/scripts/tauriCsp.mjs`, so avatars and space icons load and upload while the origin never enters the repository; no policy names localhost (the desktop dev build is not under one); a self-hosted build, `pnpm tauri:build`, replaces the project's hosts with the origins of its own `VITE_API_URL` / `VITE_WS_URL` and storage, `apps/desktop/scripts/tauriSelfHosted.mjs`) |
-| Auth | JWT with short expiry + refresh rotation + tokenVersion invalidation + `algorithms: ['HS256']` pinning + purpose field rejection (prevents token type confusion) |
+| Auth | JWT with short expiry + one server-side row per sign-in session (sign-out ends it on the server) + refresh rotation with reuse detection + tokenVersion invalidation + `algorithms: ['HS256']` pinning + purpose field rejection (prevents token type confusion) |
 | Passwords | bcrypt with 12 salt rounds, PASSWORD_MAX=72 (matches bcrypt's actual input limit) |
 | Password Reset | SHA-256 hashed tokens, 1hr expiry, single-use, anti-enumeration |
 | Email Verification | SHA-256 hashed tokens, 24hr expiry, single-use, format validation (64 hex chars, lowercase normalized), `requireVerifiedEmail` on all functional routes + attachment proxy + Socket.IO, StrictMode double-POST guard, migration preflight duplicate check |

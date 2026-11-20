@@ -1,4 +1,5 @@
 import { getIO } from '../websocket/socketServer';
+import { sessionRoom, legacySocketsRoom } from './sessionRooms';
 
 export interface RevokeSessionOptions {
   /**
@@ -40,5 +41,67 @@ export function revokeUserSessions(userId: string, opts: RevokeSessionOptions = 
     io.in(room).disconnectSockets(true);
   } catch (err) {
     console.error(`[Sessions] Could not disconnect the sockets of user ${userId}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * End every live socket of one sign-in session of `userId` (or of each of
+ * `sids`), on every node: the sockets whose access token names a session
+ * joined `session:{sid}` at connect (socketServer.ts). For a session that
+ * ended while the account keeps its others (a sign-out, a reused refresh
+ * token, the cap, a sign-out from another of its sessions): the other
+ * sessions' sockets are untouched. Same pattern and same rules as revokeUserSessions: the local
+ * form then the cluster-wide form, never the empty filter, never
+ * fetchSockets(), best effort after the commit, never throws.
+ *
+ * Part of the acceptance of access tokens issued before sessions, which a
+ * later release removes: a socket admitted with such a token names no
+ * session and sits in `nosid:{userId}` instead (a device that has renewed
+ * since keeps the socket it opened before). Those sockets are disconnected
+ * too, WITHOUT force:logout: an honest device reconnects by itself, with
+ * the token it holds now, and a device whose session ended is then refused
+ * by the handshake or by its first request.
+ */
+export function revokeSessionSockets(userId: string, sids: string | readonly string[], forceLogoutReason?: string): void {
+  const sessionRooms = (typeof sids === 'string' ? [sids] : [...sids]).map(sessionRoom);
+  if (sessionRooms.length === 0) return;
+  try {
+    const io = getIO();
+    if (forceLogoutReason !== undefined) {
+      io.to(sessionRooms).emit('force:logout', { reason: forceLogoutReason });
+    }
+    const rooms = [...sessionRooms, legacySocketsRoom(userId)];
+    io.local.in(rooms).disconnectSockets(true);
+    io.in(rooms).disconnectSockets(true);
+  } catch (err) {
+    const first = sessionRooms[0].slice('session:'.length, 'session:'.length + 6);
+    console.error(
+      `[Sessions] Could not disconnect the sockets of ${sessionRooms.length} session(s) (${first}…):`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/** Rooms per disconnect call: the cluster-wide form carries the list in one adapter message. */
+export const SESSION_ROOMS_PER_CALL = 500;
+
+/**
+ * Disconnect the sockets of sessions deleted in bulk (the sweep: sessions
+ * that had expired or were below their account's version), on every node,
+ * by their `session:{sid}` rooms, at most SESSION_ROOMS_PER_CALL rooms per
+ * call. No force:logout: an honest client reconnects and the handshake
+ * tells it its session is gone. Best effort: logged without any id, never
+ * throws.
+ */
+export function disconnectSessionRooms(sids: readonly string[]): void {
+  for (let i = 0; i < sids.length; i += SESSION_ROOMS_PER_CALL) {
+    const rooms = sids.slice(i, i + SESSION_ROOMS_PER_CALL).map(sessionRoom);
+    try {
+      const io = getIO();
+      io.local.in(rooms).disconnectSockets(true);
+      io.in(rooms).disconnectSockets(true);
+    } catch (err) {
+      console.error(`[Sessions] Could not disconnect the sockets of ${rooms.length} swept session(s):`, err instanceof Error ? err.message : err);
+    }
   }
 }

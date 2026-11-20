@@ -1362,6 +1362,15 @@ describe('verifiedBearerUserId — who a request is from, before authenticate ru
     expect(verifiedBearerUserId(authedReq('203.0.113.1', jwt.sign({ userId: 'has spaces' }, TEST_SECRET)) as never)).toBeNull();
   });
 
+  it('names nobody for a refresh token, whatever the secrets (the rule authenticate applies: utils/tokenShapes.ts)', () => {
+    const session = jwt.sign({ userId: 'clxalice', tokenVersion: 0, rememberMe: true, sid: 'Qm9vdHN0cmFwU2Vzc2lvbg', gen: 2 }, TEST_SECRET, { expiresIn: '1h' });
+    const before = jwt.sign({ userId: 'clxalice', username: 'alice', role: 'user', tokenVersion: 0, rememberMe: true }, TEST_SECRET, { expiresIn: '1h' });
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', session) as never)).toBeNull();
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', before) as never)).toBeNull();
+    // An access token of either era still names its user
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', jwt.sign({ userId: 'clxbob', username: 'bob', role: 'user', tokenVersion: 0 }, TEST_SECRET, { expiresIn: '1h' })) as never)).toBe('clxbob');
+  });
+
   it('is memoised per request (the key function and the chooser both ask)', () => {
     const req = authedReq('203.0.113.1', accessToken('clxalice'));
     const verify = vi.spyOn(jwt, 'verify');
@@ -1546,4 +1555,49 @@ describe("GitHub's webhook source ranges — the static list and the CIDR match"
       expect(() => parseCidr(cidr)).toThrow(`Invalid CIDR: ${cidr}`);
     },
   );
+});
+
+describe('the sign-out bucket (POST /auth/logout)', () => {
+  let mod: RateLimiterModule;
+  beforeEach(async () => {
+    vi.mocked(getRedis).mockReturnValue(brokenRedis as never);
+    mod = await freshRateLimiter();
+  });
+
+  it('is per address, sized like the refresh for everyone behind one NAT, and never blocks', () => {
+    const rows = Object.fromEntries(getAllRateLimits().map((l) => [l.name, l]));
+    expect(rows.logout).toMatchObject({ keyPrefix: 'rl:logout', keyType: 'ip', points: 60, duration: 60, blockDuration: 0 });
+  });
+
+  it('the route carries it, outside `authenticate` (the access token may have expired)', () => {
+    const line = readFileSync(resolve(__dirname, '../../routes/auth.ts'), 'utf8')
+      .split(/\r?\n/).find((l) => l.startsWith("authRouter.post('/logout'")) ?? '';
+    expect(line).toMatch(/^authRouter\.post\('\/logout', rateLimitLogout, async/);
+    expect(line).not.toContain('authenticate');
+  });
+
+  it('60 sign-outs from one address in a minute pass; the 61st gets the one 429 every limiter answers, and only for its window', async () => {
+    for (let i = 0; i < 60; i++) {
+      const { passed } = await hitAndAnswer(mod.rateLimitLogout as Middleware, fakeReq('203.0.113.60'), 204);
+      expect(passed, `sign-out #${i + 1}`).toBe(true);
+    }
+    const refused = await hit(mod.rateLimitLogout as Middleware, fakeReq('203.0.113.60'));
+    expect(refused.passed).toBe(false);
+    expect(refused.res.statusCode).toBe(429);
+    expect(Number(refused.res.headers['Retry-After'])).toBeLessThanOrEqual(60);
+    expect(refused.res.body).toEqual({ success: false, error: 'Too many requests. Please try again later.' });
+    // Another address is untouched
+    expect((await hit(mod.rateLimitLogout as Middleware, fakeReq('203.0.113.61'))).passed).toBe(true);
+  });
+
+  it('an access token that names its session (sid) still names its user to the general budget', () => {
+    const secretBefore = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = TEST_SECRET;
+    try {
+      const withSid = accessToken('clxalice', { sid: 'Qm9vdHN0cmFwU2Vzc2lvbg' });
+      expect(verifiedBearerUserId(authedReq('203.0.113.1', withSid) as never)).toBe('clxalice');
+    } finally {
+      process.env.JWT_SECRET = secretBefore;
+    }
+  });
 });

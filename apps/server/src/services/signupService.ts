@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
-import type { RegistrationConsent, UserRole } from '@voxium/shared';
+import type { RegistrationConsent } from '@voxium/shared';
 import {
   SIGNUP, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE,
   validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain,
@@ -17,7 +17,8 @@ import { isMailSuppressed, mailboxDigest } from '../utils/mailSuppression';
 import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, normalizeIp } from '../middleware/rateLimiter';
 import { deleteUserAccount } from '../utils/accountDeletion';
 import { isReservedUsername } from '../utils/deletedParticipant';
-import { generateTokens, CONSENT_SELECT, withConsentFlag } from './authService';
+import { CONSENT_SELECT, withConsentFlag } from './authService';
+import { openSession, type SessionLabel, type SessionTokens } from './sessionService';
 
 /*
  * Verify-first registration.
@@ -309,6 +310,7 @@ export async function completeRegistration(
   code: unknown,
   usernameOverride: unknown,
   rawIp: string | undefined,
+  label: SessionLabel,
 ) {
   if (typeof pendingId !== 'string' || pendingId.length === 0 || pendingId.length > 64
     || typeof code !== 'string' || !new RegExp(`^\\d{${SIGNUP.CODE_LENGTH}}$`).test(code)) {
@@ -387,9 +389,13 @@ export async function completeRegistration(
     }
   }
 
+  // The account and its first session in ONE transaction: a session write
+  // that fails leaves no account behind, so the code is still unused and the
+  // completion can be tried again.
   let user;
+  let tokens: SessionTokens;
   try {
-    user = await prisma.$transaction(async (tx) => {
+    ({ user, tokens } = await prisma.$transaction(async (tx) => {
       const created = await tx.user.create({
         data: {
           username,
@@ -405,8 +411,14 @@ export async function completeRegistration(
         select: USER_RESULT_SELECT,
       });
       await tx.pendingRegistration.delete({ where: { id: row.id } });
-      return created;
-    });
+      // A new account has no other session to trim
+      const opened = await openSession(
+        tx,
+        { userId: created.id, username: created.username, role: created.role, tokenVersion: created.tokenVersion },
+        { rememberMe: true, label, accountGoneMessage: 'User not found' },
+      );
+      return { user: created, tokens: opened.tokens };
+    }));
   } catch (err) {
     // The unique indexes are the real enforcement (two completions racing).
     if ((err as { code?: string })?.code === 'P2002') {
@@ -436,7 +448,6 @@ export async function completeRegistration(
     }).catch((err) => console.warn('[Signup] Registration IP record failed:', err instanceof Error ? err.message : err));
   }
 
-  const tokens = generateTokens({ userId: user.id, username: user.username, role: user.role as UserRole, tokenVersion: user.tokenVersion });
   const { tokenVersion: _, ...safeUser } = user;
   return { user: withConsentFlag(safeUser), ...tokens };
 }

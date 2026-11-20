@@ -5,6 +5,7 @@ import { OPAQUE_ID_RE } from '@voxium/shared';
 import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis, getRedisPubSub, getRedisConfigSub } from '../utils/redis';
+import { hasAccessTokenShape } from '../utils/tokenShapes';
 
 // ─── Rate limit configuration registry ──────────────────────────────────────
 
@@ -135,6 +136,12 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // handler is a signature check and one indexed query; a refresh JWT cannot
   // be guessed at any rate the limiter would matter for.
   refresh:        { keyPrefix: 'rl:refresh',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
+  // A sign-out that ends the session on the server (POST /auth/logout, the
+  // refresh token in the body). Sized like `refresh`, for everyone behind one
+  // address signing out at the end of the day, and no block: the handler is a
+  // signature check and at most one indexed delete, and a refresh token
+  // cannot be guessed at any rate the limiter would matter for.
+  logout:         { keyPrefix: 'rl:logout',   points: 60,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Sign-out' },
   changePassword: { keyPrefix: 'rl:chgpwd',   points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Change Password' },
   consent:        { keyPrefix: 'rl:consent',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId',   label: 'Accept legal documents' },
   deleteAccount:  { keyPrefix: 'rl:delacct',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Delete own account' },
@@ -606,10 +613,11 @@ const verifiedBearers = new WeakMap<Request, string | null>();
 
 /** The userId a request's bearer carries, if the signature verifies, the
  *  token is not expired and it is an ACCESS token (one with a `purpose` —
- *  TOTP challenge, trusted device — is not a session); null otherwise. The
- *  bearer is the Authorization header, the only place `authenticate` reads
- *  one: a token anywhere else in the request names nobody. Memoised per
- *  request. */
+ *  TOTP challenge, trusted device — is not a session, nor is a refresh
+ *  token: utils/tokenShapes.ts, the rule `authenticate` applies); null
+ *  otherwise. The bearer is the Authorization header, the only place
+ *  `authenticate` reads one: a token anywhere else in the request names
+ *  nobody. Memoised per request. */
 export function verifiedBearerUserId(req: Request): string | null {
   if (verifiedBearers.has(req)) return verifiedBearers.get(req) ?? null;
   let userId: string | null = null;
@@ -619,8 +627,8 @@ export function verifiedBearerUserId(req: Request): string | null {
     : null;
   if (token !== null && token.length > 0 && token.length <= 4096) {
     try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown; purpose?: unknown };
-      if (payload?.purpose === undefined && typeof payload?.userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(payload.userId)) {
+      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown };
+      if (hasAccessTokenShape(payload) && typeof payload?.userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(payload.userId)) {
         userId = payload.userId;
       }
     } catch {
@@ -954,6 +962,7 @@ export const rateLimitPowChallenge = createMiddleware('powChallenge', byIp);
 export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
 export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);
 export const rateLimitRefresh = createMiddleware('refresh', byIp);
+export const rateLimitLogout = createMiddleware('logout', byIp);
 export const rateLimitChangePassword = createMiddleware('changePassword', byIp);
 export const rateLimitConsent = createMiddleware('consent', byUserId);
 // Password guesses against the deletion endpoint are password guesses; keep

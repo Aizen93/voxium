@@ -13,6 +13,9 @@ const h = vi.hoisted(() => {
   const tx = {
     user: { create: vi.fn() },
     pendingRegistration: { delete: vi.fn() },
+    // The account's first session is written in the same transaction
+    // (sessionService.openSession: one raw INSERT … RETURNING)
+    $queryRaw: vi.fn(),
   };
   return {
     tx,
@@ -127,6 +130,9 @@ const createdRow = () => h.prisma.pendingRegistration.create.mock.calls[0][0].da
 
 const flush = () => new Promise((r) => setImmediate(r));
 
+/** What the route derives from the completing request (sessionService.deriveSessionLabel). */
+const LABEL = { kind: 'web', os: 'linux' } as const;
+
 beforeEach(() => {
   vi.resetAllMocks();
   h.prisma.ipBan.findUnique.mockResolvedValue(null);
@@ -140,6 +146,9 @@ beforeEach(() => {
   h.prisma.$queryRaw.mockResolvedValue([{ sent: 1 }]);
   h.prisma.$transaction.mockImplementation(async (cb: (tx: typeof h.tx) => unknown) => cb(h.tx));
   h.tx.pendingRegistration.delete.mockResolvedValue({});
+  h.tx.$queryRaw.mockImplementation(async (_strings: TemplateStringsArray, id: string) => [
+    { id, generation: 1, remember_me: true, exp: Math.floor(Date.now() / 1000) + 30 * 86400 },
+  ]);
   h.sendCode.mockResolvedValue(undefined);
   h.sendExisting.mockResolvedValue(undefined);
   h.mailSuppressed.mockResolvedValue(false);
@@ -789,13 +798,13 @@ describe('completeRegistration', () => {
       ['a padded code', ID, ' 48291'],
       ['no code', ID, undefined],
     ])('refuses %s with the one code answer, charging no attempt', async (_label, id, code) => {
-      await expect(completeRegistration(id, code, undefined, undefined))
+      await expect(completeRegistration(id, code, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 400, message: SIGNUP_CODE_INVALID_MESSAGE });
       expect(queryCalls()).toHaveLength(0);
     });
 
     it('refuses a non-string username override before charging an attempt', async () => {
-      await expect(completeRegistration(ID, CODE, 42, undefined))
+      await expect(completeRegistration(ID, CODE, 42, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 400, message: 'Username must be a string' });
       expect(queryCalls()).toHaveLength(0);
     });
@@ -803,7 +812,7 @@ describe('completeRegistration', () => {
 
   describe('the code', () => {
     it('counts the guess atomically, only on a live row under its cap', async () => {
-      await completeRegistration(ID, CODE, undefined, undefined);
+      await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(queryCalls()).toHaveLength(1);
       const [strings, ...values] = queryCalls()[0];
       const sql = strings.join('?');
@@ -817,14 +826,14 @@ describe('completeRegistration', () => {
 
     it('an unknown, expired or used-up row is the same 400', async () => {
       h.prisma.$queryRaw.mockResolvedValueOnce([]);
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 400, message: SIGNUP_CODE_INVALID_MESSAGE });
       expect(prisma.user.findFirst).not.toHaveBeenCalled();
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
     it('a wrong code is the same 400, and the attempt stays charged', async () => {
-      await expect(completeRegistration(ID, '000000', undefined, undefined))
+      await expect(completeRegistration(ID, '000000', undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 400, message: SIGNUP_CODE_INVALID_MESSAGE });
       expect(prisma.pendingRegistration.update).not.toHaveBeenCalled();
       expect(prisma.user.findFirst).not.toHaveBeenCalled();
@@ -843,21 +852,21 @@ describe('completeRegistration', () => {
         await expect(completeRegistration(ID, String(100000 + i), undefined, undefined))
           .rejects.toMatchObject({ statusCode: 400, message: SIGNUP_CODE_INVALID_MESSAGE });
       }
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 400, message: SIGNUP_CODE_INVALID_MESSAGE });
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
     it('a hash bound to another pending id does not match', async () => {
       h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ code_hash: signupCodeHash('other-id', CODE) })]);
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 400, message: SIGNUP_CODE_INVALID_MESSAGE });
     });
   });
 
   describe('success', () => {
     it('creates a VERIFIED account carrying the consent of the start, and deletes the pending row in the same transaction', async () => {
-      const result = await completeRegistration(ID, CODE, undefined, undefined);
+      const result = await completeRegistration(ID, CODE, undefined, undefined, LABEL);
 
       expect(prisma.$transaction).toHaveBeenCalledTimes(1);
       const create = h.tx.user.create.mock.calls[0][0];
@@ -888,11 +897,46 @@ describe('completeRegistration', () => {
       const access = jwt.verify(result.accessToken, process.env.JWT_SECRET!) as Record<string, unknown>;
       expect(access).toMatchObject({ userId: 'user-1', username: 'newuser', role: 'user', tokenVersion: 3 });
       const refresh = jwt.verify(result.refreshToken, process.env.JWT_REFRESH_SECRET!) as Record<string, unknown>;
-      expect(refresh).toMatchObject({ userId: 'user-1', tokenVersion: 3 });
+      expect(refresh).toMatchObject({ userId: 'user-1', tokenVersion: 3, rememberMe: true, gen: 1 });
+      // Both tokens name the session written in the account's own transaction
+      expect(access.sid).toEqual(expect.any(String));
+      expect(refresh.sid).toBe(access.sid);
+    });
+
+    it('writes the first session INSIDE the account\'s transaction, after the account, labelled from the request', async () => {
+      const order: string[] = [];
+      h.tx.user.create.mockImplementationOnce(async ({ data }: { data: Record<string, unknown> }) => {
+        order.push('account');
+        return {
+          id: 'user-1', username: data.username, displayName: data.displayName, email: data.email, avatarUrl: null, bio: null,
+          status: 'offline', role: 'user', totpEnabled: false, emailVerified: true, isSupporter: false, supporterTier: null,
+          tokenVersion: 0, createdAt: new Date(), termsAcceptedAt: data.termsAcceptedAt, privacyAcceptedAt: data.privacyAcceptedAt,
+        };
+      });
+      h.tx.$queryRaw.mockImplementationOnce(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        order.push('session');
+        expect(strings.join('?')).toMatch(/INSERT INTO sessions/);
+        // id, account, then the label's two values of the closed lists (never a user agent)
+        expect(values).toEqual(expect.arrayContaining(['user-1', 'web', 'linux']));
+        return [{ id: values[0], generation: 1, remember_me: true, exp: Math.floor(Date.now() / 1000) + 30 * 86400 }];
+      });
+
+      await completeRegistration(ID, CODE, undefined, undefined, LABEL);
+
+      expect(order).toEqual(['account', 'session']);
+      expect(prisma.$queryRaw.mock.calls.some((c) => (c[0] as unknown as string[]).join('?').includes('INSERT INTO sessions'))).toBe(false);
+    });
+
+    it('a session write that fails rolls the account back with it: nothing is created, the error surfaces as itself', async () => {
+      h.tx.$queryRaw.mockRejectedValueOnce(new Error('connection reset'));
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL)).rejects.toThrow('connection reset');
+      // The domain and the address are counted only for an account that exists
+      expect(h.domainConsume).not.toHaveBeenCalled();
+      expect(prisma.ipRecord.create).not.toHaveBeenCalled();
     });
 
     it('looks the username up case-insensitively and the holders up by both spellings', async () => {
-      await completeRegistration(ID, CODE, undefined, undefined);
+      await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(prisma.user.findFirst).toHaveBeenCalledWith({
         where: { username: { equals: 'newuser', mode: 'insensitive' } },
         select: { id: true },
@@ -904,19 +948,19 @@ describe('completeRegistration', () => {
     });
 
     it('counts a novel domain only once the account exists; a common provider never', async () => {
-      await completeRegistration(ID, CODE, undefined, undefined);
+      await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(h.domainConsume).toHaveBeenCalledWith('smallcorp.example');
 
       vi.clearAllMocks();
       h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ email: 'human@gmail.com', email_canonical: 'human@gmail.com' })]);
-      await completeRegistration(ID, CODE, undefined, undefined);
+      await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(h.domainConsume).not.toHaveBeenCalled();
     });
 
     it('records the address the START came from, not the completing one, and reads it from the guess update', async () => {
       h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ ip: '198.51.100.7' })]);
       h.geoLookup.mockReturnValueOnce({ country: 'DE' });
-      await completeRegistration(ID, CODE, undefined, '203.0.113.5');
+      await completeRegistration(ID, CODE, undefined, '203.0.113.5', LABEL);
       expect(queryCalls()[0][0].join('?')).toMatch(/RETURNING[\s\S]*\bip\b/);
       expect(h.geoLookup).toHaveBeenCalledWith('198.51.100.7');
       expect(prisma.ipRecord.create).toHaveBeenCalledTimes(1);
@@ -927,7 +971,7 @@ describe('completeRegistration', () => {
 
     it('a start address is recorded even when the completing one is unknown', async () => {
       h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ ip: '198.51.100.7' })]);
-      await completeRegistration(ID, CODE, undefined, undefined);
+      await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(prisma.ipRecord.create).toHaveBeenCalledWith({
         data: { userId: 'user-1', ip: '198.51.100.7', kind: 'register' },
       });
@@ -936,7 +980,7 @@ describe('completeRegistration', () => {
     it('falls back to the completing address (normalized) with its country when the start had none', async () => {
       h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ ip: null })]);
       h.geoLookup.mockReturnValueOnce({ country: 'FR' });
-      await completeRegistration(ID, CODE, undefined, '::ffff:203.0.113.5');
+      await completeRegistration(ID, CODE, undefined, '::ffff:203.0.113.5', LABEL);
       expect(h.geoLookup).toHaveBeenCalledWith('203.0.113.5');
       expect(prisma.ipRecord.create).toHaveBeenCalledWith({
         data: { userId: 'user-1', ip: '203.0.113.5', kind: 'register', countryCode: 'FR', country: 'France' },
@@ -944,12 +988,12 @@ describe('completeRegistration', () => {
     });
 
     it('records no address when none is known, and a failed record never fails the registration', async () => {
-      await completeRegistration(ID, CODE, undefined, undefined);
+      await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(prisma.ipRecord.create).not.toHaveBeenCalled();
 
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       h.prisma.ipRecord.create.mockRejectedValueOnce(new Error('db gone'));
-      await expect(completeRegistration(ID, CODE, undefined, '203.0.113.5')).resolves.toHaveProperty('accessToken');
+      await expect(completeRegistration(ID, CODE, undefined, '203.0.113.5', LABEL)).resolves.toHaveProperty('accessToken');
       expect(warn).toHaveBeenCalledWith('[Signup] Registration IP record failed:', 'db gone');
     });
   });
@@ -957,7 +1001,7 @@ describe('completeRegistration', () => {
   describe('the username', () => {
     it('a taken username is a 409 that costs no attempt', async () => {
       users({ nameTaken: true });
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
       refund();
       expect(prisma.$transaction).not.toHaveBeenCalled();
@@ -965,7 +1009,7 @@ describe('completeRegistration', () => {
     });
 
     it('the same code then completes with a new username', async () => {
-      const result = await completeRegistration(ID, CODE, 'other_name', undefined);
+      const result = await completeRegistration(ID, CODE, 'other_name', undefined, LABEL);
       expect(prisma.user.findFirst).toHaveBeenCalledWith({
         where: { username: { equals: 'other_name', mode: 'insensitive' } },
         select: { id: true },
@@ -975,7 +1019,7 @@ describe('completeRegistration', () => {
     });
 
     it('an invalid override is a 400 that costs no attempt', async () => {
-      await expect(completeRegistration(ID, CODE, 'ab', undefined))
+      await expect(completeRegistration(ID, CODE, 'ab', undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 400, message: /Username/ });
       refund();
       expect(prisma.user.findFirst).not.toHaveBeenCalled();
@@ -984,13 +1028,13 @@ describe('completeRegistration', () => {
 
     it('the reserved name, as an override or as the name a pending registration stored before it was reserved, is a 409 that costs no attempt', async () => {
       users({ nameTaken: false });
-      await expect(completeRegistration(ID, CODE, 'Deleted', undefined))
+      await expect(completeRegistration(ID, CODE, 'Deleted', undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
       refund();
 
       vi.mocked(prisma.pendingRegistration.update).mockClear();
       h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ username: 'deleted' })]);
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
       refund();
       expect(prisma.$transaction).not.toHaveBeenCalled();
@@ -1000,7 +1044,7 @@ describe('completeRegistration', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       users({ nameTaken: true });
       h.prisma.pendingRegistration.update.mockRejectedValueOnce(new Error('db gone'));
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message: USERNAME_TAKEN_MESSAGE });
       expect(warn).toHaveBeenCalledWith('[Signup] Attempt refund failed:', 'db gone');
     });
@@ -1013,7 +1057,7 @@ describe('completeRegistration', () => {
 
     it('a verified holder (completed meanwhile) is a 409 that says sign in, and the pending row goes', async () => {
       h.prisma.user.findMany.mockResolvedValueOnce([{ id: 'u-verified', emailVerified: true }]);
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message: SIGNUP_EMAIL_REGISTERED_MESSAGE });
       expect(prisma.pendingRegistration.delete).toHaveBeenCalledWith({ where: { id: ID } });
       expect(h.deleteUserAccount).not.toHaveBeenCalled();
@@ -1024,7 +1068,7 @@ describe('completeRegistration', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       h.prisma.user.findMany.mockResolvedValueOnce([{ id: 'u-verified', emailVerified: true }]);
       h.prisma.pendingRegistration.delete.mockRejectedValueOnce(new Error('db gone'));
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message: SIGNUP_EMAIL_REGISTERED_MESSAGE });
       expect(warn).toHaveBeenCalledWith('[Signup] Pending registration cleanup failed:', 'db gone');
     });
@@ -1034,7 +1078,7 @@ describe('completeRegistration', () => {
         { id: 'u-legacy', emailVerified: false, role: 'user', ownedServers: [] },
         { id: 'u-verified', emailVerified: true, role: 'user', ownedServers: [] },
       ]);
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message: SIGNUP_EMAIL_REGISTERED_MESSAGE });
       expect(h.deleteUserAccount).not.toHaveBeenCalled();
     });
@@ -1044,7 +1088,7 @@ describe('completeRegistration', () => {
         { id: 'u-legacy-1', emailVerified: false, role: 'user', ownedServers: [] },
         { id: 'u-legacy-2', emailVerified: false, role: 'user', ownedServers: [] },
       ]);
-      await completeRegistration(ID, CODE, undefined, undefined);
+      await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(h.deleteUserAccount).toHaveBeenCalledTimes(2);
       expect(h.deleteUserAccount).toHaveBeenNthCalledWith(1, 'u-legacy-1', { reason: 'superseded by a verified sign-up', logPrefix: '[Signup]' });
       expect(h.deleteUserAccount).toHaveBeenNthCalledWith(2, 'u-legacy-2', { reason: 'superseded by a verified sign-up', logPrefix: '[Signup]' });
@@ -1055,7 +1099,7 @@ describe('completeRegistration', () => {
     it('a failing legacy deletion stops the registration (no account next to the old row)', async () => {
       h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
       h.deleteUserAccount.mockRejectedValueOnce(new Error('db gone'));
-      await expect(completeRegistration(ID, CODE, undefined, undefined)).rejects.toThrow('db gone');
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL)).rejects.toThrow('db gone');
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
@@ -1065,7 +1109,7 @@ describe('completeRegistration', () => {
       ['is a superadmin', legacy('u-super', { role: 'superadmin' })],
     ])('an unverified holder that %s is never deleted from here: 409, attempt refunded, nothing created', async (_label, holder) => {
       h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-plain'), holder]);
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message: SIGNUP_EMAIL_REGISTERED_MESSAGE });
       refund();
       expect(h.deleteUserAccount).not.toHaveBeenCalled();
@@ -1078,7 +1122,7 @@ describe('completeRegistration', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
       h.deleteUserAccount.mockRejectedValueOnce(Object.assign(new Error('Record to delete does not exist.'), { code: 'P2025' }));
-      const result = await completeRegistration(ID, CODE, undefined, undefined);
+      const result = await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(result.user.id).toBe('user-1');
       expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');
     });
@@ -1088,7 +1132,7 @@ describe('completeRegistration', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
       h.deleteUserAccount.mockRejectedValueOnce(new NotFoundError('User'));
-      const result = await completeRegistration(ID, CODE, undefined, undefined);
+      const result = await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(result.user.id).toBe('user-1');
       expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');
     });
@@ -1105,8 +1149,8 @@ describe('completeRegistration', () => {
         code: 'P2002', meta: { target: ['email'] },
       }));
       const results = await Promise.allSettled([
-        completeRegistration(ID, CODE, undefined, undefined),
-        completeRegistration(ID, CODE, undefined, undefined),
+        completeRegistration(ID, CODE, undefined, undefined, LABEL),
+        completeRegistration(ID, CODE, undefined, undefined, LABEL),
       ]);
       const fulfilled = results.filter((r) => r.status === 'fulfilled');
       const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
@@ -1146,7 +1190,7 @@ describe('completeRegistration', () => {
       ['adapter fields (username)', adapterP2002({ fields: ['username'] }), USERNAME_TAKEN_MESSAGE],
     ])('%s maps to its 409, refunds the attempt, counts nothing', async (_label, err, message) => {
       h.tx.user.create.mockRejectedValueOnce(err);
-      await expect(completeRegistration(ID, CODE, undefined, undefined))
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message });
       refund();
       expect(h.domainConsume).not.toHaveBeenCalled();
@@ -1155,7 +1199,7 @@ describe('completeRegistration', () => {
 
     it('any other database error surfaces as itself, with no refund', async () => {
       h.tx.user.create.mockRejectedValueOnce(new Error('connection reset'));
-      await expect(completeRegistration(ID, CODE, undefined, undefined)).rejects.toThrow('connection reset');
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL)).rejects.toThrow('connection reset');
       expect(prisma.pendingRegistration.update).not.toHaveBeenCalled();
       expect(h.domainConsume).not.toHaveBeenCalled();
     });

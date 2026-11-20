@@ -42,6 +42,14 @@ const DEFAULTS = {
   // reduced to placeholders. OFF until the Privacy Policy has given its
   // notice of the change.
   account_deletion_keeps_conversations: { name: 'account_deletion_keeps_conversations', label: 'Conversations Outlive Deleted Accounts', description: 'When an account is deleted, the other person keeps each direct conversation read-only, with the deleted account\'s messages reduced to placeholders (off: the conversation is deleted for both)', enabled: false },
+  // What a renewal does with a refresh token that a renewal already replaced,
+  // presented after the grace window, or an older one (services/
+  // sessionService.ts, read at each such presentation). OFF (observe): the
+  // reuse is logged and the session renewed as usual. ON (enforce): the
+  // session is ended, its sockets with it, and the refresh refused. Sign-out,
+  // expiry, the cap and token versions work the same either way. OFF until the
+  // reuse logs show it would sign out almost no one.
+  refresh_reuse_revocation: { name: 'refresh_reuse_revocation', label: 'Refresh Token Reuse Revocation', description: 'End a sign-in session when a refresh token it already replaced is presented again after the grace window (off: log the reuse and keep the session)', enabled: false },
 } satisfies Record<string, FeatureFlagDef>;
 
 /** A registered flag name: a misspelled one in isFeatureEnabled or requireFeature is a type error. */

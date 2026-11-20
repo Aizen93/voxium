@@ -13,8 +13,31 @@ vi.mock('../../utils/prisma', () => ({
     },
     ipBan: { findUnique: vi.fn() },
     ipRecord: { upsert: vi.fn(), create: vi.fn() },
+    // The account-row lock a password change takes first (accountRowLocks.ts)
+    $queryRaw: vi.fn(),
+    $transaction: vi.fn(),
   },
 }));
+
+// The sessions the sign-ins open: the session service has its own suite
+// (sessionService.test.ts); here, what each sign-in hands it.
+const sessions = vi.hoisted(() => ({
+  createSession: vi.fn(),
+  openSession: vi.fn(),
+  rekeySession: vi.fn(),
+  trimSessions: vi.fn(),
+}));
+vi.mock('../../services/sessionService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/sessionService')>()),
+  createSession: (...a: unknown[]) => sessions.createSession(...a),
+  openSession: (...a: unknown[]) => sessions.openSession(...a),
+  rekeySession: (...a: unknown[]) => sessions.rekeySession(...a),
+  trimSessions: (...a: unknown[]) => sessions.trimSessions(...a),
+}));
+
+// The two-factor step's code check (totpService has its own suite)
+const { totpVerify } = vi.hoisted(() => ({ totpVerify: vi.fn() }));
+vi.mock('../../services/totpService', () => ({ verifyTOTP: (...a: unknown[]) => totpVerify(...a) }));
 
 vi.mock('../../utils/email', async (importOriginal) => ({
   sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
@@ -60,10 +83,14 @@ vi.mock('../../utils/sanitize', () => ({
   sanitizeText: vi.fn((str: unknown) => typeof str === 'string' ? str.replace(/<[^>]*>/g, '').trim() : ''),
 }));
 
+import jwt from 'jsonwebtoken';
 import { prisma } from '../../utils/prisma';
+import { LOCK_WAIT_TRANSACTION_OPTIONS } from '../../utils/transactionRetry';
+import { UnauthorizedError } from '../../utils/errors';
+import { TEST_JWT_SECRET } from '../helpers/testSecrets';
 import {
   loginUser,
-  generateTokens,
+  verifyLoginTOTP,
   verifyEmail,
   resendVerificationEmail,
   requestPasswordReset,
@@ -75,8 +102,15 @@ import {
 
 const savedEnv: Record<string, string | undefined> = {};
 
+const LABEL = { kind: 'desktop', os: 'windows' } as const;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  sessions.createSession.mockResolvedValue({ accessToken: 'access-1', refreshToken: 'refresh-1' });
+  sessions.openSession.mockResolvedValue({ sessionId: 'sid-new', tokens: { accessToken: 'access-2', refreshToken: 'refresh-2' } });
+  sessions.rekeySession.mockResolvedValue({ accessToken: 'access-3', refreshToken: 'refresh-3' });
+  sessions.trimSessions.mockResolvedValue(undefined);
+  vi.mocked(prisma.$transaction).mockImplementation(((fn: (tx: unknown) => unknown) => fn(prisma)) as never);
   // Ensure JWT secrets are set
   savedEnv.JWT_SECRET = process.env.JWT_SECRET;
   savedEnv.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
@@ -383,11 +417,11 @@ describe('authService — loginUser', () => {
     const password = await bcrypt.hash('ValidPass123', 4);
     vi.mocked(prisma.ipBan.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...mockUser, password, termsAcceptedAt: null, privacyAcceptedAt: null } as any);
-    const legacy = await loginUser('test@example.com', 'ValidPass123');
+    const legacy = await loginUser('test@example.com', 'ValidPass123', true, undefined, undefined, LABEL);
     expect((legacy as { user: { consentRequired: boolean } }).user.consentRequired).toBe(true);
 
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...mockUser, password, termsAcceptedAt: new Date(), privacyAcceptedAt: new Date() } as any);
-    const fresh = await loginUser('test@example.com', 'ValidPass123');
+    const fresh = await loginUser('test@example.com', 'ValidPass123', true, undefined, undefined, LABEL);
     const user = (fresh as { user: Record<string, unknown> }).user;
     expect(user.consentRequired).toBe(false);
     // The timestamps are an accountability record, not a client field
@@ -429,7 +463,7 @@ describe('authService — loginUser', () => {
       password: hash,
     } as any);
 
-    const result = await loginUser('test@example.com', 'ValidPass123');
+    const result = await loginUser('test@example.com', 'ValidPass123', true, undefined, undefined, LABEL);
     expect(result).toHaveProperty('accessToken');
     expect(result).toHaveProperty('refreshToken');
     expect(result).toHaveProperty('user');
@@ -445,7 +479,7 @@ describe('authService — loginUser', () => {
       password: hash,
     } as any);
 
-    await loginUser('TEST@EXAMPLE.COM', 'ValidPass123');
+    await loginUser('TEST@EXAMPLE.COM', 'ValidPass123', true, undefined, undefined, LABEL);
     expect(prisma.user.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: { email: 'test@example.com' } }),
     );
@@ -463,7 +497,7 @@ describe('authService — loginUser', () => {
     for (const raw of ['::ffff:203.0.113.7', '::FFFF:203.0.113.7', '203.0.113.7']) {
       vi.mocked(prisma.ipBan.findUnique).mockResolvedValueOnce(null);
       vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...mockUser, password: hash } as any);
-      await loginUser('test@example.com', 'ValidPass123', true, raw);
+      await loginUser('test@example.com', 'ValidPass123', true, raw, undefined, LABEL);
       expect(prisma.ipBan.findUnique, raw).toHaveBeenCalledWith({ where: { ip: '203.0.113.7' } });
       vi.mocked(prisma.ipBan.findUnique).mockClear();
     }
@@ -477,14 +511,14 @@ describe('authService — loginUser', () => {
       password: hash,
     } as any);
 
-    await expect(loginUser('test@example.com', 'WrongPassword1'))
+    await expect(loginUser('test@example.com', 'WrongPassword1', true, undefined, undefined, LABEL))
       .rejects.toThrow(/Invalid credentials/);
   });
 
   it('rejects non-existent user', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
 
-    await expect(loginUser('nobody@example.com', 'ValidPass123'))
+    await expect(loginUser('nobody@example.com', 'ValidPass123', true, undefined, undefined, LABEL))
       .rejects.toThrow(/Invalid credentials/);
   });
 
@@ -497,7 +531,7 @@ describe('authService — loginUser', () => {
       totpEnabled: true,
     } as any);
 
-    const result = await loginUser('test@example.com', 'ValidPass123');
+    const result = await loginUser('test@example.com', 'ValidPass123', true, undefined, undefined, LABEL);
     expect(result).toHaveProperty('totpRequired', true);
     expect(result).toHaveProperty('totpToken');
     // Should NOT return user/accessToken
@@ -514,7 +548,7 @@ describe('authService — loginUser', () => {
       banReason: 'TOS violation',
     } as any);
 
-    await expect(loginUser('test@example.com', 'ValidPass123'))
+    await expect(loginUser('test@example.com', 'ValidPass123', true, undefined, undefined, LABEL))
       .rejects.toThrow(/banned/i);
   });
 
@@ -524,24 +558,219 @@ describe('authService — loginUser', () => {
       reason: 'Spam',
     } as any);
 
-    await expect(loginUser('test@example.com', 'ValidPass123', true, '1.2.3.4'))
+    await expect(loginUser('test@example.com', 'ValidPass123', true, '1.2.3.4', undefined, LABEL))
       .rejects.toThrow(/banned/i);
   });
 });
 
-describe('authService — generateTokens', () => {
-  it('returns access and refresh tokens', () => {
-    const tokens = generateTokens({
-      userId: 'user-1',
-      username: 'testuser',
-      role: 'user',
-      tokenVersion: 0,
+describe('authService — every sign-in opens a session through the session service', () => {
+  const account = {
+    id: 'user-1', username: 'testuser', displayName: 'testuser', email: 'test@example.com', avatarUrl: null, bio: null,
+    status: 'online', role: 'admin', totpEnabled: false, emailVerified: true, isSupporter: false, supporterTier: null,
+    tokenVersion: 4, bannedAt: null, banReason: null, createdAt: new Date(), termsAcceptedAt: new Date(), privacyAcceptedAt: new Date(),
+  };
+
+  beforeEach(() => {
+    vi.mocked(prisma.ipBan.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.ipRecord.upsert).mockResolvedValue({} as any);
+  });
+
+  it('a password sign-in: the account read, its "Remember me" and the label; the answer carries the session pair', async () => {
+    const bcrypt = await import('bcryptjs');
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...account, password: await bcrypt.hash('ValidPass123', 4) } as any);
+
+    const result = await loginUser('test@example.com', 'ValidPass123', false, undefined, undefined, LABEL);
+
+    expect(sessions.createSession).toHaveBeenCalledWith(
+      { userId: 'user-1', username: 'testuser', role: 'admin', tokenVersion: 4 },
+      { rememberMe: false, label: LABEL, accountGoneMessage: 'Invalid credentials' },
+    );
+    expect(result).toMatchObject({ accessToken: 'access-1', refreshToken: 'refresh-1' });
+  });
+
+  it('a sign-in whose account is deleted while it runs answers what a wrong password does', async () => {
+    const bcrypt = await import('bcryptjs');
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...account, password: await bcrypt.hash('ValidPass123', 4) } as any);
+    sessions.createSession.mockRejectedValueOnce(new UnauthorizedError('Invalid credentials'));
+
+    await expect(loginUser('test@example.com', 'ValidPass123', true, undefined, undefined, LABEL))
+      .rejects.toMatchObject({ statusCode: 401, message: 'Invalid credentials' });
+  });
+
+  it('a sign-in that needs its two-factor step opens no session and carries the label in the challenge', async () => {
+    const bcrypt = await import('bcryptjs');
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ ...account, totpEnabled: true, password: await bcrypt.hash('ValidPass123', 4) } as any);
+
+    const result = await loginUser('test@example.com', 'ValidPass123', true, undefined, undefined, LABEL) as { totpToken: string };
+
+    expect(sessions.createSession).not.toHaveBeenCalled();
+    const challenge = jwt.verify(result.totpToken, TEST_JWT_SECRET, { algorithms: ['HS256'] }) as Record<string, unknown>;
+    expect(challenge).toMatchObject({ userId: 'user-1', purpose: 'totp-verify', rememberMe: true, cl: { k: 'desktop', o: 'windows' } });
+  });
+
+  describe('the two-factor step', () => {
+    const challenge = (extra: Record<string, unknown> = {}) =>
+      jwt.sign({ userId: 'user-1', purpose: 'totp-verify', rememberMe: false, ...extra }, TEST_JWT_SECRET, { expiresIn: '5m' });
+
+    beforeEach(() => {
+      totpVerify.mockReset().mockResolvedValue(true);
+      vi.mocked(prisma.user.findUnique).mockResolvedValue({ ...account, totpEnabled: true } as any);
     });
 
-    expect(tokens.accessToken).toBeDefined();
-    expect(tokens.refreshToken).toBeDefined();
-    expect(typeof tokens.accessToken).toBe('string');
-    expect(typeof tokens.refreshToken).toBe('string');
+    it('opens the session with the label the challenge carries (the password step\'s request)', async () => {
+      const result = await verifyLoginTOTP(challenge({ cl: { k: 'web', o: 'macos' } }), '123456', { kind: 'unknown', os: 'other' });
+
+      expect(sessions.createSession).toHaveBeenCalledWith(
+        { userId: 'user-1', username: 'testuser', role: 'admin', tokenVersion: 4 },
+        { rememberMe: false, label: { kind: 'web', os: 'macos' }, accountGoneMessage: 'User not found' },
+      );
+      expect(result).toMatchObject({ accessToken: 'access-1', refreshToken: 'refresh-1' });
+      expect(result.trustedDeviceToken).toEqual(expect.any(String));
+    });
+
+    it('a challenge without a label (issued before it was carried), or with one off the lists, takes this request\'s', async () => {
+      for (const cl of [undefined, { k: 'phone', o: 'windows' }, { k: 'web', o: 'Windows 11' }, 'desktop']) {
+        sessions.createSession.mockClear();
+        await verifyLoginTOTP(challenge(cl === undefined ? {} : { cl }), '123456', LABEL);
+        expect(sessions.createSession.mock.calls[0][1], JSON.stringify(cl)).toMatchObject({ label: LABEL });
+      }
+    });
+
+    it('reads "Remember me" from the challenge as before: absent means yes, otherwise its truthiness', async () => {
+      const cases: Array<[Record<string, unknown>, boolean]> = [
+        [{ rememberMe: undefined }, true], [{ rememberMe: true }, true], [{ rememberMe: 'yes' }, true],
+        [{ rememberMe: false }, false], [{ rememberMe: 0 }, false], [{ rememberMe: null }, false],
+      ];
+      for (const [extra, remembered] of cases) {
+        sessions.createSession.mockClear();
+        const token = jwt.sign({ userId: 'user-1', purpose: 'totp-verify', ...extra }, TEST_JWT_SECRET, { expiresIn: '5m' });
+        await verifyLoginTOTP(token, '123456', LABEL);
+        expect(sessions.createSession.mock.calls[0][1].rememberMe, JSON.stringify(extra)).toBe(remembered);
+      }
+    });
+
+    it('a wrong code opens nothing', async () => {
+      totpVerify.mockResolvedValueOnce(false);
+      await expect(verifyLoginTOTP(challenge(), '000000', LABEL)).rejects.toThrow('Invalid verification code');
+      expect(sessions.createSession).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('authService — a password change keeps its caller signed in', () => {
+  const ran: string[] = [];
+  /** The account as the transaction reads it under its lock (version 7: the caller was admitted at 7). */
+  let lockedVersion: number;
+
+  beforeEach(async () => {
+    ran.length = 0;
+    lockedVersion = 7;
+    const bcrypt = await import('bcryptjs');
+    const hash = await bcrypt.hash('OldPassword123', 4);
+    vi.mocked(prisma.user.findUnique).mockImplementation((async (args: { select: Record<string, unknown> }) => {
+      // The hash read before the transaction; the account read under the lock inside it
+      if (args.select.password) return { id: 'u-1', password: hash };
+      ran.push('read');
+      return { id: 'u-1', username: 'alice', role: 'user', tokenVersion: lockedVersion };
+    }) as never);
+    vi.mocked(prisma.$queryRaw).mockImplementation((async (strings: TemplateStringsArray) => {
+      ran.push(strings.join('?').includes('FOR NO KEY UPDATE') ? 'lock' : 'other');
+      return [{ id: 'u-1' }];
+    }) as never);
+    vi.mocked(prisma.user.update).mockImplementation((async () => {
+      ran.push('bump');
+      return { id: 'u-1', username: 'alice', role: 'user', tokenVersion: 8 };
+    }) as never);
+    sessions.rekeySession.mockImplementation(async () => { ran.push('rekey'); return { accessToken: 'access-3', refreshToken: 'refresh-3' }; });
+    sessions.openSession.mockImplementation(async () => { ran.push('open'); return { sessionId: 'sid-new', tokens: { accessToken: 'access-2', refreshToken: 'refresh-2' } }; });
+  });
+
+  it('locks the account row and checks the admitted version, then bumps and re-keys the caller\'s own session, in ONE transaction with the lock-wait budget', async () => {
+    const tokens = await changePassword('u-1', 'sid-mine', 7, 'OldPassword123', 'NewPassword123', true, LABEL);
+
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), LOCK_WAIT_TRANSACTION_OPTIONS);
+    expect(ran).toEqual(['lock', 'read', 'bump', 'rekey']);
+    expect(prisma.user.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'u-1' },
+      data: expect.objectContaining({ tokenVersion: { increment: 1 } }),
+      select: { id: true, username: true, role: true, tokenVersion: true },
+    }));
+    // The account at its NEW version, on the transaction's client, from the admitted version
+    expect(sessions.rekeySession).toHaveBeenCalledWith(prisma, { userId: 'u-1', username: 'alice', role: 'user', tokenVersion: 8 }, 'sid-mine', 7);
+    expect(sessions.openSession).not.toHaveBeenCalled();
+    expect(sessions.trimSessions).not.toHaveBeenCalled();
+    expect(tokens).toEqual({ accessToken: 'access-3', refreshToken: 'refresh-3' });
+  });
+
+  it('a reset, a ban or another change that committed while the hash ran (the version moved): 401 Session invalidated, no password written, no session touched', async () => {
+    lockedVersion = 8;
+    await expect(changePassword('u-1', 'sid-mine', 7, 'OldPassword123', 'NewPassword123', true, LABEL))
+      .rejects.toMatchObject({ statusCode: 401, message: 'Session invalidated' });
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(sessions.rekeySession).not.toHaveBeenCalled();
+    expect(ran).toEqual(['lock', 'read']);
+  });
+
+  it('the same for a caller whose token names no session: no session opened for it', async () => {
+    lockedVersion = 9;
+    await expect(changePassword('u-1', undefined, 7, 'OldPassword123', 'NewPassword123', true, LABEL))
+      .rejects.toMatchObject({ statusCode: 401, message: 'Session invalidated' });
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(sessions.openSession).not.toHaveBeenCalled();
+    expect(sessions.trimSessions).not.toHaveBeenCalled();
+  });
+
+  it('an account deleted before the lock (nothing locked): 401 User not found, nothing written', async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValueOnce([] as never);
+    await expect(changePassword('u-1', 'sid-mine', 7, 'OldPassword123', 'NewPassword123', true, LABEL))
+      .rejects.toMatchObject({ statusCode: 401, message: 'User not found' });
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('a caller whose access token names no session gets a new one in the same transaction, then the cap is kept', async () => {
+    const tokens = await changePassword('u-1', undefined, 7, 'OldPassword123', 'NewPassword123', false, LABEL);
+
+    expect(ran).toEqual(['lock', 'read', 'bump', 'open']);
+    expect(sessions.openSession).toHaveBeenCalledWith(
+      prisma,
+      { userId: 'u-1', username: 'alice', role: 'user', tokenVersion: 8 },
+      { rememberMe: false, label: LABEL, accountGoneMessage: 'User not found' },
+    );
+    expect(sessions.trimSessions).toHaveBeenCalledWith('u-1', 'sid-new');
+    expect(tokens).toEqual({ accessToken: 'access-2', refreshToken: 'refresh-2' });
+  });
+
+  it('a caller whose session ended meanwhile is refused, and the transaction (the new password with it) rolls back', async () => {
+    sessions.rekeySession.mockRejectedValueOnce(new UnauthorizedError('Session invalidated'));
+    await expect(changePassword('u-1', 'sid-gone', 7, 'OldPassword123', 'NewPassword123', true, LABEL))
+      .rejects.toMatchObject({ statusCode: 401, message: 'Session invalidated' });
+    // The refusal is thrown inside the transaction's callback: Prisma rolls back on it
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('an account deleted between the check and the bump (P2025) answers User not found', async () => {
+    vi.mocked(prisma.user.update).mockRejectedValueOnce(Object.assign(new Error('gone'), { code: 'P2025' }));
+    await expect(changePassword('u-1', 'sid-mine', 7, 'OldPassword123', 'NewPassword123', true, LABEL))
+      .rejects.toMatchObject({ statusCode: 401, message: 'User not found' });
+    expect(sessions.rekeySession).not.toHaveBeenCalled();
+  });
+
+  it('a deadlock victim runs again whole, the lock and the version check with it; a failed statement is thrown as it is (500)', async () => {
+    vi.mocked(prisma.$transaction)
+      .mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: 'P2034' }))
+      .mockImplementationOnce(((fn: (tx: unknown) => unknown) => fn(prisma)) as never);
+    await expect(changePassword('u-1', 'sid-mine', 7, 'OldPassword123', 'NewPassword123', true, LABEL)).resolves.toEqual({ accessToken: 'access-3', refreshToken: 'refresh-3' });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(ran).toEqual(['lock', 'read', 'bump', 'rekey']);
+
+    vi.mocked(prisma.$transaction).mockRejectedValueOnce(new Error('connection lost'));
+    await expect(changePassword('u-1', 'sid-mine', 7, 'OldPassword123', 'NewPassword123', true, LABEL)).rejects.toThrow('connection lost');
+  });
+
+  it('a wrong current password changes nothing and touches no session', async () => {
+    await expect(changePassword('u-1', 'sid-mine', 7, 'WrongPassword1', 'NewPassword123', true, LABEL)).rejects.toThrow('Current password is incorrect');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(sessions.rekeySession).not.toHaveBeenCalled();
   });
 });
 
@@ -860,11 +1089,16 @@ describe('authService — no reset, password or verification query loads a whole
 
   it('changePassword reads the hash it compares and nothing else of the row', async () => {
     const bcrypt = await import('bcryptjs');
-    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce({ id: 'u-1', password: await bcrypt.hash('OldPassword123', 4) } as any);
+    vi.mocked(prisma.user.findUnique)
+      .mockResolvedValueOnce({ id: 'u-1', password: await bcrypt.hash('OldPassword123', 4) } as any)
+      // The account under the transaction's lock, at the admitted version
+      .mockResolvedValueOnce({ id: 'u-1', username: 'u', role: 'user', tokenVersion: 0 } as any);
+    vi.mocked(prisma.$queryRaw).mockResolvedValueOnce([{ id: 'u-1' }] as never);
 
-    await changePassword('u-1', 'OldPassword123', 'NewPassword123');
+    await changePassword('u-1', 'sid-1', 0, 'OldPassword123', 'NewPassword123', true, LABEL);
 
     expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { id: 'u-1' }, select: { id: true, password: true } });
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { id: 'u-1' }, select: { id: true, username: true, role: true, tokenVersion: true } });
     expectNarrow(['password']);
   });
 
