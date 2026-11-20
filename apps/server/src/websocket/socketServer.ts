@@ -18,6 +18,9 @@ import { Permissions, DELETED_MESSAGE_TYPE } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 import { visibilityRequestMark, resyncAfterJoins } from '../utils/channelVisibilityRooms';
 import { dmListedSql, dmUnreadSinceSql } from '../utils/conversationVisibility';
+import { loadAccessState, readAccessSessionId } from '../services/sessionService';
+import { hasAccessTokenShape } from '../utils/tokenShapes';
+import { sessionRoom, legacySocketsRoom } from '../utils/sessionRooms';
 
 let io: SocketServer<ClientToServerEvents, ServerToClientEvents>;
 
@@ -80,19 +83,27 @@ export function initSocketServer(httpServer: HttpServer) {
     if (!token) return next(new Error('Authentication required'));
 
     try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as AuthPayload & { purpose?: string };
+      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as AuthPayload & { purpose?: string; sid?: unknown };
 
-      // Reject non-access tokens (e.g. trusted-device, totp-verify)
-      if (payload.purpose) return next(new Error('Invalid token type'));
+      // Reject non-access tokens (a trusted-device or a two-factor token, a
+      // refresh token: utils/tokenShapes.ts), whatever the secrets are
+      if (!hasAccessTokenShape(payload)) return next(new Error('Invalid token type'));
 
-      // Check account ban, token version, verification and consent
-      const user = await prisma.user.findUnique({
-        where: { id: payload.userId },
-        select: { bannedAt: true, tokenVersion: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
-      });
+      // The session the token names; a value no signer of ours writes is
+      // answered like any token the server cannot use
+      const sid = readAccessSessionId(payload);
+      if (sid === null) return next(new Error('Invalid token'));
+
+      // Check account ban, token version, verification, consent and, for a
+      // token naming a session, that session's row: one statement
+      const user = await loadAccessState(payload.userId, sid);
       if (!user) return next(new Error('User not found'));
       if (user.bannedAt) return next(new Error('Account banned'));
       if (user.tokenVersion !== payload.tokenVersion) return next(new Error('Session invalidated'));
+      // A session that ended (signed out, a reused refresh token, the cap):
+      // the answer every client renews on, and the refused renewal signs it
+      // out there
+      if (user.sessionLive === false) return next(new Error('Session invalidated'));
       if (!user.emailVerified) return next(new Error('Email not verified'));
       // Same gate as requireConsent on REST: an account that has not accepted
       // the legal documents gets no live session either.
@@ -110,6 +121,10 @@ export function initSocketServer(httpServer: HttpServer) {
       // The version this handshake was admitted with: the connection handler
       // compares it once more after joining `user:{id}` (see below)
       socket.data.tokenVersion = payload.tokenVersion;
+      // The sign-in session (absent for a token issued before sessions): the
+      // connection handler joins `session:{sid}`, the room a revocation of
+      // that one session disconnects (sessionRevocation.ts)
+      socket.data.sessionId = sid;
       // No copy of the role: it would go stale on a role change. The staff
       // subscriptions read it from the database (adminSubscriptions.ts).
       next();
@@ -146,6 +161,15 @@ export function initSocketServer(httpServer: HttpServer) {
 
     // Join per-user room for targeted operations (e.g., support room joins)
     socket.join(`user:${userId}`);
+    // And the sign-in session's room, synchronously too: a revocation of the
+    // session (revokeSessionSockets) reaches every socket opened with it
+    const sessionId = socket.data.sessionId as string | undefined;
+    if (sessionId !== undefined) socket.join(sessionRoom(sessionId));
+    // A socket admitted with an access token issued before sessions names
+    // none: it joins `nosid:{userId}`, which every revocation of one session
+    // of the account disconnects as well (revokeSessionSockets). Part of the
+    // acceptance of such tokens, which a later release removes.
+    else socket.join(legacySocketsRoom(userId));
 
     // Settled once this socket is registered as online (Redis + the DB
     // column), or once that attempt failed. The disconnect handler WAITS for
@@ -406,22 +430,20 @@ export function initSocketServer(httpServer: HttpServer) {
     // before every later step, the same way.
     if (socket.disconnected) return;
 
-    // Session check, once more, now that the socket is in `user:{id}`: the
-    // token version and ban state must still match what the handshake
-    // admitted (session revocation targets that room, sessionRevocation.ts).
-    // A deleted or banned account is signed out (force:logout, with the
-    // reason the revocation itself sends, before the disconnect: the client
-    // must not reopen into a refusal it treats as final). A token-version
-    // mismatch only disconnects: the client renews, and a refused renewal
-    // ends the session there. A failing lookup keeps the socket: the
-    // handshake has just read the same row, and a database blip ends no
-    // session.
+    // Session check, once more, now that the socket is in `user:{id}` and
+    // `session:{sid}`: the token version, the ban state and the session row
+    // must still match what the handshake admitted (session revocation
+    // targets those rooms, sessionRevocation.ts, so a revocation that landed
+    // before the joins is caught here). A deleted or banned account is
+    // signed out (force:logout, with the reason the revocation itself sends,
+    // before the disconnect: the client must not reopen into a refusal it
+    // treats as final). A token-version mismatch or an ended session only
+    // disconnects: the client renews, and a refused renewal ends the session
+    // there. A failing lookup keeps the socket: the handshake has just read
+    // the same rows, and a database blip ends no session.
     try {
-      const current = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { tokenVersion: true, bannedAt: true },
-      });
-      if (!current || current.bannedAt || current.tokenVersion !== socket.data.tokenVersion) {
+      const current = await loadAccessState(userId, sessionId);
+      if (!current || current.bannedAt || current.tokenVersion !== socket.data.tokenVersion || current.sessionLive === false) {
         console.warn(`[WS] Session of ${userId} (${socket.id}) was revoked during the handshake; disconnecting`);
         if (!current || current.bannedAt) {
           socket.emit('force:logout', { reason: current ? 'Your account has been banned' : 'Your account has been deleted' });

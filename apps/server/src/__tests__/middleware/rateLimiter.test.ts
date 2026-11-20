@@ -1362,6 +1362,15 @@ describe('verifiedBearerUserId — who a request is from, before authenticate ru
     expect(verifiedBearerUserId(authedReq('203.0.113.1', jwt.sign({ userId: 'has spaces' }, TEST_SECRET)) as never)).toBeNull();
   });
 
+  it('names nobody for a refresh token, whatever the secrets (the rule authenticate applies: utils/tokenShapes.ts)', () => {
+    const session = jwt.sign({ userId: 'clxalice', tokenVersion: 0, rememberMe: true, sid: 'Qm9vdHN0cmFwU2Vzc2lvbg', gen: 2 }, TEST_SECRET, { expiresIn: '1h' });
+    const before = jwt.sign({ userId: 'clxalice', username: 'alice', role: 'user', tokenVersion: 0, rememberMe: true }, TEST_SECRET, { expiresIn: '1h' });
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', session) as never)).toBeNull();
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', before) as never)).toBeNull();
+    // An access token of either era still names its user
+    expect(verifiedBearerUserId(authedReq('203.0.113.1', jwt.sign({ userId: 'clxbob', username: 'bob', role: 'user', tokenVersion: 0 }, TEST_SECRET, { expiresIn: '1h' })) as never)).toBe('clxbob');
+  });
+
   it('is memoised per request (the key function and the chooser both ask)', () => {
     const req = authedReq('203.0.113.1', accessToken('clxalice'));
     const verify = vi.spyOn(jwt, 'verify');

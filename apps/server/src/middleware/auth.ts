@@ -2,7 +2,8 @@ import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { ForbiddenError, UnauthorizedError } from '../utils/errors';
 import { isJwtVerifyError } from '../utils/jwtErrors';
-import { prisma } from '../utils/prisma';
+import { loadAccessState, readAccessSessionId } from '../services/sessionService';
+import { hasAccessTokenShape } from '../utils/tokenShapes';
 import type { UserRole } from '@voxium/shared';
 
 export interface AuthPayload {
@@ -10,6 +11,8 @@ export interface AuthPayload {
   username: string;
   role: UserRole;
   tokenVersion: number;
+  /** The sign-in session the access token belongs to (its `sid`); absent on a token issued before sessions. */
+  sid?: string;
   rememberMe?: boolean;
   emailVerified?: boolean;
   /** Resolved from the DB on every request, like emailVerified: true until
@@ -38,28 +41,40 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   const token = authHeader.slice(7);
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as AuthPayload & { purpose?: string };
+    const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as AuthPayload & { purpose?: string; sid?: unknown };
 
-    // Reject non-access tokens (e.g. trusted-device, totp-verify)
-    if (payload.purpose) {
+    // Reject non-access tokens (a trusted-device or a two-factor token, a
+    // refresh token: utils/tokenShapes.ts), whatever the secrets are
+    if (!hasAccessTokenShape(payload)) {
       return next(new UnauthorizedError('Invalid token type'));
     }
 
-    // Check account ban, token version, and current role against DB
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-      select: { bannedAt: true, tokenVersion: true, role: true, emailVerified: true, termsAcceptedAt: true, privacyAcceptedAt: true },
-    });
+    // The session the token names (services/sessionService.ts); a value no
+    // signer of ours writes is no session at all
+    const sid = readAccessSessionId(payload);
+    if (sid === null) return next(new UnauthorizedError('Invalid or expired token'));
+
+    // Account ban, token version, current role and, for a token naming a
+    // session, that session's row: one statement
+    const user = await loadAccessState(payload.userId, sid);
 
     if (!user) return next(new UnauthorizedError('User not found'));
     if (user.bannedAt) return next(new ForbiddenError('Your account has been banned'));
     if (user.tokenVersion !== payload.tokenVersion) {
       return next(new UnauthorizedError('Session invalidated'));
     }
+    // Signed out, ended or evicted: the access token dies with its session
+    // instead of living out its minutes (the client renews, is refused, and
+    // signs out). A token issued before sessions carries no `sid` and keeps
+    // the account checks alone.
+    if (user.sessionLive === false) {
+      return next(new UnauthorizedError('Session invalidated'));
+    }
 
     // Use DB role (not JWT role) so role changes take effect immediately
     req.user = {
       ...payload,
+      sid,
       role: user.role as UserRole,
       emailVerified: user.emailVerified,
       consentRequired: consentIsRequired(user),

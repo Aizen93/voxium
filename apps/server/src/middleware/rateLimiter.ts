@@ -5,6 +5,7 @@ import { OPAQUE_ID_RE } from '@voxium/shared';
 import type { Request, Response, NextFunction } from 'express';
 import { RateLimiterRedis, RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getRedis, getRedisPubSub, getRedisConfigSub } from '../utils/redis';
+import { hasAccessTokenShape } from '../utils/tokenShapes';
 
 // ─── Rate limit configuration registry ──────────────────────────────────────
 
@@ -606,10 +607,11 @@ const verifiedBearers = new WeakMap<Request, string | null>();
 
 /** The userId a request's bearer carries, if the signature verifies, the
  *  token is not expired and it is an ACCESS token (one with a `purpose` —
- *  TOTP challenge, trusted device — is not a session); null otherwise. The
- *  bearer is the Authorization header, the only place `authenticate` reads
- *  one: a token anywhere else in the request names nobody. Memoised per
- *  request. */
+ *  TOTP challenge, trusted device — is not a session, nor is a refresh
+ *  token: utils/tokenShapes.ts, the rule `authenticate` applies); null
+ *  otherwise. The bearer is the Authorization header, the only place
+ *  `authenticate` reads one: a token anywhere else in the request names
+ *  nobody. Memoised per request. */
 export function verifiedBearerUserId(req: Request): string | null {
   if (verifiedBearers.has(req)) return verifiedBearers.get(req) ?? null;
   let userId: string | null = null;
@@ -619,8 +621,8 @@ export function verifiedBearerUserId(req: Request): string | null {
     : null;
   if (token !== null && token.length > 0 && token.length <= 4096) {
     try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown; purpose?: unknown };
-      if (payload?.purpose === undefined && typeof payload?.userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(payload.userId)) {
+      const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'], clockTolerance: TOKEN_KEY_CLOCK_TOLERANCE_S }) as { userId?: unknown };
+      if (hasAccessTokenShape(payload) && typeof payload?.userId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(payload.userId)) {
         userId = payload.userId;
       }
     } catch {
