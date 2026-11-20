@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { logMessage } from '../utils/apiError';
+import { TypedConfirmInput, typedTextMatches } from './TypedConfirmInput';
 
 interface AdminConfirmModalProps {
   title: string;
@@ -13,12 +14,18 @@ interface AdminConfirmModalProps {
    * the user typed or ticked passes false: only the Cancel button and the close X cancel it then.
    */
   dismissible?: boolean;
+  /**
+   * When defined, the confirm button works only after this text is typed (trimmed, case-sensitive).
+   * An empty string can never be confirmed. A dialog that asks for it should pass dismissible={false}.
+   */
+  requireTypedText?: string;
   onConfirm: () => Promise<void> | void;
   onCancel: () => void;
 }
 
-export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', danger = true, variant, dismissible = true, onConfirm, onCancel }: AdminConfirmModalProps) {
+export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', danger = true, variant, dismissible = true, requireTypedText, onConfirm, onCancel }: AdminConfirmModalProps) {
   const [loading, setLoading] = useState(false);
+  const [typed, setTyped] = useState('');
   const titleId = useId();
   const cancelRef = useRef<HTMLButtonElement>(null);
   // Where the last press went down and came up: a backdrop click counts only when both were the backdrop
@@ -45,7 +52,10 @@ export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', da
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [loading, dismissible, onCancel]);
 
+  const typedOk = requireTypedText === undefined || typedTextMatches(typed, requireTypedText);
+
   const handleConfirm = async () => {
+    if (!typedOk || loading) return;
     setLoading(true);
     try {
       await onConfirm();
@@ -84,7 +94,12 @@ export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', da
             <X size={20} />
           </button>
         </div>
-        <div className="text-sm text-vox-text-secondary mb-6">{message}</div>
+        <div className={`text-sm text-vox-text-secondary ${requireTypedText === undefined ? 'mb-6' : ''}`}>{message}</div>
+        {requireTypedText !== undefined && (
+          <div className="mb-6">
+            <TypedConfirmInput expected={requireTypedText} value={typed} onChange={setTyped} onSubmit={handleConfirm} disabled={loading} />
+          </div>
+        )}
         <div className="flex justify-end gap-3">
           <button
             ref={cancelRef}
@@ -95,7 +110,7 @@ export function AdminConfirmModal({ title, message, confirmLabel = 'Confirm', da
           </button>
           <button
             onClick={handleConfirm}
-            disabled={loading}
+            disabled={loading || !typedOk}
             className={`px-4 py-2 text-sm rounded-md text-white transition-colors disabled:opacity-50 ${
               (variant === 'danger' || (variant === undefined && danger)) ? 'bg-vox-accent-danger hover:bg-red-600' : 'bg-vox-accent-primary hover:bg-vox-accent-hover'
             }`}

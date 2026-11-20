@@ -185,3 +185,40 @@ describe('AdminUserDetail — ban and delete only where the server allows them',
     expect(buttonTexts()).toContain('Delete User');
   });
 });
+
+describe('AdminUserDetail — deleting an account asks for its username', () => {
+  const press = async (label: string) => {
+    const b = qa('button').find((x) => x.textContent?.trim() === label)!;
+    await act(async () => { b.click(); });
+  };
+  const typeInto = async (value: string) => {
+    const input = q('input[type="text"]') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setter.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  const confirmButton = () => qa('[role="dialog"] button').find((x) => x.textContent?.trim() === 'Delete') as HTMLButtonElement;
+
+  beforeEach(() => {
+    store.fetchUserOwnedServers.mockResolvedValue([]);
+    store.deleteUser.mockResolvedValue(undefined);
+    store.selectedUser = { ...USER, _count: { messages: 0, memberships: 2, ownedServers: 0 } };
+  });
+
+  it('keeps Delete disabled until the username is typed, then deletes once with the account id', async () => {
+    await render();
+    await press('Delete User');
+    expect(confirmButton().disabled).toBe(true);
+    await act(async () => { confirmButton().click(); });
+    expect(store.deleteUser).not.toHaveBeenCalled();
+    await typeInto('Owner1');
+    expect(confirmButton().disabled).toBe(true);
+    await typeInto('owner1');
+    expect(confirmButton().disabled).toBe(false);
+    await act(async () => { confirmButton().click(); });
+    expect(store.deleteUser).toHaveBeenCalledTimes(1);
+    expect(store.deleteUser).toHaveBeenCalledWith('u-1');
+  });
+});
