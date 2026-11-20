@@ -7,6 +7,8 @@ import http from 'http';
 import type { AddressInfo } from 'net';
 import { Router } from 'express';
 import { TEST_JWT_SECRET, TEST_JWT_REFRESH_SECRET } from '../helpers/testSecrets';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 // ─── Environment variables (must be set before any app import) ───────────────
 
@@ -100,6 +102,8 @@ const { sessionStore } = vi.hoisted(() => {
       claimLegacyRedemption: vi.fn().mockResolvedValue(true),
       linkLegacyRedemption: vi.fn().mockResolvedValue(1),
       spendLegacyRedemption: vi.fn().mockResolvedValue([]),
+      listLiveSessions: vi.fn().mockResolvedValue([]),
+      deleteOtherSessions: vi.fn().mockResolvedValue([]),
     },
   };
 });
@@ -170,9 +174,11 @@ vi.mock('../../services/totpService', async (importOriginal) => {
 vi.mock('../../utils/auditLog', () => ({ logAuditEvent: (...a: unknown[]) => logAuditEventMock(...a) }));
 const revokeUserSessionsMock = vi.hoisted(() => vi.fn());
 const revokeSessionSocketsMock = vi.hoisted(() => vi.fn());
+const revokeOtherSessionSocketsMock = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/sessionRevocation', () => ({
   revokeUserSessions: (...a: unknown[]) => revokeUserSessionsMock(...a),
   revokeSessionSockets: (...a: unknown[]) => revokeSessionSocketsMock(...a),
+  revokeOtherSessionSockets: (...a: unknown[]) => revokeOtherSessionSocketsMock(...a),
 }));
 vi.mock('../../routes/admin', () => ({ adminRouter: Router() }));
 vi.mock('../../routes/support', () => ({ supportRouter: Router() }));
@@ -183,10 +189,13 @@ vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 const {
   rateLimitRegisterMock, rateLimitRegisterAttemptMock, rateLimitRegisterAttemptSubnetMock,
   rateLimitRegisterCompleteMock, rateLimitRegisterResendMock, chargeRegistrationBudgetsMock, rateLimitLogoutMock,
+  rateLimitSessionsReadMock, rateLimitSessionRevokeMock,
 } = vi.hoisted(() => {
   const spy = () => vi.fn((_req: unknown, _res: unknown, next: () => void) => next());
   return {
     rateLimitLogoutMock: spy(),
+    rateLimitSessionsReadMock: spy(),
+    rateLimitSessionRevokeMock: spy(),
     rateLimitRegisterMock: spy(),
     rateLimitRegisterAttemptMock: spy(),
     rateLimitRegisterAttemptSubnetMock: spy(),
@@ -219,6 +228,9 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitResetPassword: passthroughMiddleware,
   rateLimitRefresh: passthroughMiddleware,
   rateLimitLogout: rateLimitLogoutMock,
+  rateLimitSessionsRead: rateLimitSessionsReadMock,
+  rateLimitSessionRevoke: rateLimitSessionRevokeMock,
+  STEP_UP_REFUSED_LOCAL: 'stepUpRefused',
   rateLimitChangePassword: passthroughMiddleware,
   rateLimitTOTP: passthroughMiddleware,
   rateLimitVerifyEmail: passthroughMiddleware,
@@ -2132,5 +2144,272 @@ describe('POST /api/v1/auth/logout', () => {
     expect(revokeSessionSocketsMock).not.toHaveBeenCalled();
     for (const call of error.mock.calls) expect(JSON.stringify(call)).not.toContain(token.split('.')[2]);
     error.mockRestore();
+  });
+});
+
+// ─── The account's own sign-in sessions ─────────────────────────────────────
+
+describe('the account\'s own sign-in sessions: GET /auth/sessions, DELETE /auth/sessions/:sessionId, POST /auth/sessions/revoke-others', () => {
+  const SID = 'Qm9vdHN0cmFwU2Vzc2lvbg';
+  const OTHER = 'T3RoZXJTZXNzaW9uMDAwMA';
+  const FUTURE = () => new Date(Date.now() + 3_600_000);
+  let hash: string;
+  let lockedVersion: number;
+  /** What the route's step-up left on the response (the bucket keeps the charge only when it is true). */
+  let stepUpRefused: unknown;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    hash = hash || await bcrypt.hash('RightPassword1', 4);
+    lockedVersion = 0;
+    stepUpRefused = undefined;
+    rateLimitSessionRevokeMock.mockImplementation((_req: unknown, res: { on: (e: string, f: () => void) => void; locals: Record<string, unknown> }, next: () => void) => {
+      res.on('finish', () => { stepUpRefused = res.locals.stepUpRefused; });
+      next();
+    });
+    // authenticate's read of the account (and of the session, for a token naming one); the
+    // step-up's read of the hash; the transaction's read of the account under its lock
+    mockPrismaUser.findUnique.mockImplementation(async (args: { select: Record<string, unknown> }) => {
+      if (args.select.password) return { password: hash };
+      if (args.select.username) return { id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: lockedVersion };
+      return {
+        bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0),
+        ...(args.select.sessions ? { sessions: [{ tokenVersion: 0, expiresAt: FUTURE() }] } : {}),
+      };
+    });
+    mockPrismaUser.update.mockResolvedValue({ id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 1 });
+    sessionStore.deleteSession.mockResolvedValue(1);
+    sessionStore.deleteOtherSessions.mockResolvedValue([{ id: OTHER, live: true }, { id: 'dead', live: false }]);
+    sessionStore.listLiveSessions.mockResolvedValue([]);
+  });
+
+  const withSid = () => jwt.sign({ userId: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 0, sid: SID }, JWT_SECRET, { expiresIn: '15m', algorithm: 'HS256' });
+  const legacy = () => generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username, tokenVersion: 0 });
+  const observable = (res: request.Response) => ({ status: res.status, body: res.body });
+
+  describe('GET /auth/sessions', () => {
+    it('the caller\'s live sessions as the list shows them, the caller\'s marked; authenticate before the list\'s own bucket', async () => {
+      const h = (n: number) => Date.UTC(2026, 10, 20, n) / 1000;
+      sessionStore.listLiveSessions.mockResolvedValueOnce([
+        { id: SID, clientKind: 'desktop', clientOs: 'windows', signedInAt: h(0), lastActiveAt: h(14) },
+        { id: OTHER, clientKind: 'web', clientOs: 'macos', signedInAt: h(0), lastActiveAt: h(3) },
+      ]);
+      const res = await request(app).get('/api/v1/auth/sessions').set('Authorization', `Bearer ${withSid()}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        success: true,
+        data: {
+          sessions: [
+            { id: SID, clientKind: 'desktop', clientOs: 'windows', signedInAt: '2026-11-20T00:00:00.000Z', lastActiveAt: '2026-11-20T14:00:00.000Z', current: true },
+            { id: OTHER, clientKind: 'web', clientOs: 'macos', signedInAt: '2026-11-20T00:00:00.000Z', lastActiveAt: '2026-11-20T03:00:00.000Z', current: false },
+          ],
+        },
+      });
+      expect(sessionStore.listLiveSessions).toHaveBeenCalledWith(expect.anything(), MOCK_USER.id, SID, 50);
+      expect(rateLimitSessionsReadMock).toHaveBeenCalledTimes(1);
+      expect(rateLimitSessionRevokeMock).not.toHaveBeenCalled();
+    });
+
+    it('a token that names no session: the list with none marked', async () => {
+      sessionStore.listLiveSessions.mockResolvedValueOnce([{ id: SID, clientKind: 'web', clientOs: 'linux', signedInAt: 0, lastActiveAt: 0 }]);
+      const res = await request(app).get('/api/v1/auth/sessions').set('Authorization', `Bearer ${legacy()}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.sessions[0].current).toBe(false);
+      expect(sessionStore.listLiveSessions).toHaveBeenCalledWith(expect.anything(), MOCK_USER.id, null, 50);
+    });
+
+    it('unauthenticated: 401 before the bucket; a failing statement: 500, never 401', async () => {
+      const anon = await request(app).get('/api/v1/auth/sessions');
+      expect(anon.status).toBe(401);
+      expect(rateLimitSessionsReadMock).not.toHaveBeenCalled();
+
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      sessionStore.listLiveSessions.mockRejectedValueOnce(new Error('connection lost'));
+      const failed = await request(app).get('/api/v1/auth/sessions').set('Authorization', `Bearer ${withSid()}`);
+      expect(failed.status).toBe(500);
+      err.mockRestore();
+    });
+
+    it('the session check of authenticate applies: a caller whose own session ended gets 401 Session invalidated', async () => {
+      mockPrismaUser.findUnique.mockImplementationOnce(async () => ({
+        bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: true, termsAcceptedAt: new Date(0), privacyAcceptedAt: new Date(0), sessions: [],
+      }));
+      const res = await request(app).get('/api/v1/auth/sessions').set('Authorization', `Bearer ${withSid()}`);
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('Session invalidated');
+    });
+  });
+
+  describe('DELETE /auth/sessions/:sessionId', () => {
+    const del = (id: string, body: Record<string, unknown> = { password: 'RightPassword1' }, token = withSid()) =>
+      request(app).delete(`/api/v1/auth/sessions/${encodeURIComponent(id)}`).set('Authorization', `Bearer ${token}`).send(body);
+
+    it('ends one other session of the account: 200 { revoked: 1 }, its sockets told and closed; the step-up bucket gives the point back', async () => {
+      const res = await del(OTHER);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true, data: { revoked: 1 } });
+      expect(sessionStore.deleteSession).toHaveBeenCalledWith(expect.anything(), OTHER, MOCK_USER.id);
+      expect(revokeSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, OTHER, 'You were signed out from another device');
+      expect(rateLimitSessionRevokeMock).toHaveBeenCalledTimes(1);
+      expect(stepUpRefused).toBeUndefined();
+    });
+
+    it('a wrong password: 400 Password is incorrect, nothing deleted, the charge kept; the same answer whatever the id', async () => {
+      const answers = [];
+      for (const id of [OTHER, 'unknownSession000000000', SID, 'has:colon']) {
+        const res = await del(id, { password: 'WrongPassword1' });
+        answers.push(observable(res));
+        expect(stepUpRefused).toBe(true);
+      }
+      for (const a of answers) expect(a).toEqual({ status: 400, body: { success: false, error: 'Password is incorrect' } });
+      expect(sessionStore.deleteSession).not.toHaveBeenCalled();
+      expect(revokeSessionSocketsMock).not.toHaveBeenCalled();
+    });
+
+    it('a missing or non-string password: 400 Password is required, nothing checked, the charge given back', async () => {
+      for (const body of [{}, { password: '' }, { password: 42 }, { password: ['x'] }]) {
+        const res = await del(OTHER, body as Record<string, unknown>);
+        expect(observable(res)).toEqual({ status: 400, body: { success: false, error: 'Password is required' } });
+        expect(stepUpRefused).toBeUndefined();
+      }
+      expect(sessionStore.deleteSession).not.toHaveBeenCalled();
+    });
+
+    it('an unknown id, another account\'s id and an id no session can carry answer the same 404 Session not found, after the password', async () => {
+      sessionStore.deleteSession.mockResolvedValueOnce(0).mockResolvedValueOnce(0);
+      const unknown = await del('unknownSession000000000');
+      // Another account's session: the delete is bound to the caller's account, so it finds nothing
+      const foreign = await del('U29tZW9uZUVsc2VzU2Vzcw');
+      const malformed = await del('has:colon');
+      for (const res of [unknown, foreign, malformed]) {
+        expect(observable(res)).toEqual({ status: 404, body: { success: false, error: 'Session not found' } });
+      }
+      expect(sessionStore.deleteSession).toHaveBeenCalledTimes(2);
+      for (const call of sessionStore.deleteSession.mock.calls) expect(call[2]).toBe(MOCK_USER.id);
+      expect(revokeSessionSocketsMock).not.toHaveBeenCalled();
+      expect(stepUpRefused).toBeUndefined();
+    });
+
+    it('the caller\'s own session: 400 (signing out ends it), nothing deleted', async () => {
+      const res = await del(SID);
+      expect(observable(res)).toEqual({ status: 400, body: { success: false, error: 'This is the session you are using: sign out to end it' } });
+      expect(sessionStore.deleteSession).not.toHaveBeenCalled();
+    });
+
+    it('unauthenticated: 401, the step-up bucket never reached', async () => {
+      const res = await request(app).delete(`/api/v1/auth/sessions/${OTHER}`).send({ password: 'RightPassword1' });
+      expect(res.status).toBe(401);
+      expect(rateLimitSessionRevokeMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /auth/sessions/revoke-others', () => {
+    const post = (body: Record<string, unknown> = { password: 'RightPassword1' }, token = withSid()) =>
+      request(app).post('/api/v1/auth/sessions/revoke-others').set('Authorization', `Bearer ${token}`).send(body);
+
+    it('bumps the version, re-keys the caller\'s session from its admitted version, deletes the others; answers the live count and the fresh pair; the other sockets ended after the commit', async () => {
+      const order: string[] = [];
+      mockPrismaUser.update.mockImplementationOnce(async () => { order.push('bump'); return { id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 1 }; });
+      revokeOtherSessionSocketsMock.mockImplementationOnce(() => { order.push('sockets'); });
+
+      const res = await post();
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.revoked).toBe(1);
+      const access = jwt.verify(res.body.data.accessToken, JWT_SECRET, { algorithms: ['HS256'] }) as Record<string, unknown>;
+      const refresh = jwt.verify(res.body.data.refreshToken, JWT_REFRESH_SECRET, { algorithms: ['HS256'] }) as Record<string, unknown>;
+      expect(access).toMatchObject({ sid: SID, tokenVersion: 1 });
+      expect(refresh).toMatchObject({ sid: SID, tokenVersion: 1 });
+      expect(res.body.data).not.toHaveProperty('trustedDeviceToken');
+      expect(sessionStore.rekeySession).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sid: SID, userId: MOCK_USER.id, fromTokenVersion: 0, tokenVersion: 1 }));
+      expect(sessionStore.deleteOtherSessions).toHaveBeenCalledWith(expect.anything(), MOCK_USER.id, SID, 0);
+      expect(revokeOtherSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, SID, 'You were signed out from another device');
+      expect(order).toEqual(['bump', 'sockets']);
+      expect(stepUpRefused).toBeUndefined();
+    });
+
+    it('a wrong password: 400 Password is incorrect, the charge kept, nothing written, no socket touched', async () => {
+      const res = await post({ password: 'WrongPassword1' });
+      expect(observable(res)).toEqual({ status: 400, body: { success: false, error: 'Password is incorrect' } });
+      expect(stepUpRefused).toBe(true);
+      expect(mockPrismaUser.update).not.toHaveBeenCalled();
+      expect(revokeOtherSessionSocketsMock).not.toHaveBeenCalled();
+    });
+
+    it('the version moved since the caller was admitted: 401 Session invalidated, nothing written, the charge given back', async () => {
+      lockedVersion = 1;
+      const res = await post();
+      expect(observable(res)).toEqual({ status: 401, body: { success: false, error: 'Session invalidated' } });
+      expect(mockPrismaUser.update).not.toHaveBeenCalled();
+      expect(sessionStore.deleteOtherSessions).not.toHaveBeenCalled();
+      expect(revokeOtherSessionSocketsMock).not.toHaveBeenCalled();
+      expect(stepUpRefused).toBeUndefined();
+    });
+
+    it('a caller whose token names no session: a new session at the new version, kept while the others go', async () => {
+      const res = await post({ password: 'RightPassword1', rememberMe: false, client: 'web' }, legacy());
+      expect(res.status).toBe(200);
+      const access = jwt.decode(res.body.data.accessToken) as { sid: string; tokenVersion: number };
+      expect(access.tokenVersion).toBe(1);
+      expect(sessionStore.insertSession).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: access.sid, tokenVersion: 1, rememberMe: false, clientKind: 'web' }));
+      expect(sessionStore.deleteOtherSessions).toHaveBeenCalledWith(expect.anything(), MOCK_USER.id, access.sid, 0);
+      expect(revokeOtherSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, undefined, 'You were signed out from another device');
+    });
+
+    it('a valid trusted-device token of the old version comes back re-issued under the new one; any other is ignored', async () => {
+      const old = jwt.sign({ userId: MOCK_USER.id, purpose: 'trusted-device', tokenVersion: 0 }, JWT_SECRET, { expiresIn: '30d' });
+      const res = await post({ password: 'RightPassword1', trustedDeviceToken: old });
+      const fresh = jwt.verify(res.body.data.trustedDeviceToken, JWT_SECRET, { algorithms: ['HS256'] }) as Record<string, unknown>;
+      expect(fresh).toMatchObject({ userId: MOCK_USER.id, purpose: 'trusted-device', tokenVersion: 1, exp: (jwt.decode(old) as { exp: number }).exp });
+
+      const stale = jwt.sign({ userId: MOCK_USER.id, purpose: 'trusted-device', tokenVersion: 5 }, JWT_SECRET, { expiresIn: '30d' });
+      const ignored = await post({ password: 'RightPassword1', trustedDeviceToken: stale });
+      expect(ignored.status).toBe(200);
+      expect(ignored.body.data).not.toHaveProperty('trustedDeviceToken');
+    });
+
+    it.each([
+      ['a trusted-device token that is not a string', { password: 'RightPassword1', trustedDeviceToken: 42 }, 'Invalid trusted device token'],
+      ['a trusted-device token far longer than one', { password: 'RightPassword1', trustedDeviceToken: 'x'.repeat(4097) }, 'Invalid trusted device token'],
+      ['a rememberMe that is not a boolean', { password: 'RightPassword1', rememberMe: 'yes' }, 'rememberMe must be true or false'],
+      ['no password', { trustedDeviceToken: 'x' }, 'Password is required'],
+    ])('%s: 400, nothing checked or written, the charge given back', async (_what, body, error) => {
+      const res = await post(body as Record<string, unknown>);
+      expect(observable(res)).toEqual({ status: 400, body: { success: false, error } });
+      expect(mockPrismaUser.update).not.toHaveBeenCalled();
+      expect(stepUpRefused).toBeUndefined();
+    });
+
+    it('a failing statement: 500 (never 401), no socket touched', async () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      sessionStore.deleteOtherSessions.mockRejectedValueOnce(new Error('connection lost'));
+      const res = await post();
+      expect(res.status).toBe(500);
+      expect(revokeOtherSessionSocketsMock).not.toHaveBeenCalled();
+      err.mockRestore();
+    });
+
+    it('unauthenticated: 401, the bucket never reached', async () => {
+      const res = await request(app).post('/api/v1/auth/sessions/revoke-others').send({ password: 'RightPassword1' });
+      expect(res.status).toBe(401);
+      expect(rateLimitSessionRevokeMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it('the sentences clients map by their exact text come from the shared constants, written once: the route and the service build none of their own', async () => {
+    const shared = await import('@voxium/shared');
+    const { SessionNotFoundError } = await import('../../utils/errors');
+    expect(shared.SESSION_NOT_FOUND_MESSAGE).toBe('Session not found');
+    expect(shared.TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE).toBe('Invalid trusted device token');
+    expect(shared.REMEMBER_ME_INVALID_MESSAGE).toBe('rememberMe must be true or false');
+    expect(new SessionNotFoundError()).toMatchObject({ statusCode: 404, message: shared.SESSION_NOT_FOUND_MESSAGE });
+    const route = readFileSync(resolve(__dirname, '../../routes/auth.ts'), 'utf8');
+    const service = readFileSync(resolve(__dirname, '../../services/authService.ts'), 'utf8');
+    for (const text of [shared.TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE, shared.REMEMBER_ME_INVALID_MESSAGE]) expect(route).not.toContain(`'${text}'`);
+    expect(route).toContain('error: TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE');
+    expect(route).toContain('error: REMEMBER_ME_INVALID_MESSAGE');
+    expect(service).not.toMatch(/NotFoundError\('Session'\)/);
+    expect(service.match(/new SessionNotFoundError\(\)/g)).toHaveLength(2);
   });
 });

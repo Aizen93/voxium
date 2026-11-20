@@ -82,6 +82,35 @@ export function revokeSessionSockets(userId: string, sids: string | readonly str
   }
 }
 
+/**
+ * Signing out of every other session (POST /auth/sessions/revoke-others),
+ * after the commit that bumped the account's version: every socket of
+ * `userId` is disconnected on every node, by its `user:{id}` room, never
+ * fetchSockets(). Before that, `force:logout` with `reason` goes to every
+ * one of them except the caller's own session's (`session:{callerSid}`) and
+ * the sockets that name no session (opened with an access token issued
+ * before sessions, `nosid:{userId}`, where the caller's own device may sit:
+ * its client would sign out on the word). The caller's sockets are
+ * disconnected too, as after a password change: a socket is checked only
+ * when it connects, and one opened with the session's tokens of the old
+ * version must not stay open on them; its client reopens with the fresh
+ * pair it was answered. Any other socket reconnects with the token its
+ * client holds, which is refused when it is of the old version. Best effort
+ * after the commit, never throws.
+ */
+export function revokeOtherSessionSockets(userId: string, callerSid: string | undefined, reason: string): void {
+  const room = `user:${userId}`;
+  const untold = [...(callerSid !== undefined ? [sessionRoom(callerSid)] : []), legacySocketsRoom(userId)];
+  try {
+    const io = getIO();
+    io.to(room).except(untold).emit('force:logout', { reason });
+    io.local.in(room).disconnectSockets(true);
+    io.in(room).disconnectSockets(true);
+  } catch (err) {
+    console.error(`[Sessions] Could not disconnect the other sessions' sockets of user ${userId}:`, err instanceof Error ? err.message : err);
+  }
+}
+
 /** Rooms per disconnect call: the cluster-wide form carries the list in one adapter message. */
 export const SESSION_ROOMS_PER_CALL = 500;
 

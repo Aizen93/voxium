@@ -22,6 +22,8 @@ const store = vi.hoisted(() => ({
   claimLegacyRedemption: vi.fn(),
   linkLegacyRedemption: vi.fn(),
   spendLegacyRedemption: vi.fn(),
+  listLiveSessions: vi.fn(),
+  deleteOtherSessions: vi.fn(),
 }));
 vi.mock('../../utils/sessionStore', () => store);
 
@@ -932,5 +934,53 @@ describe('sessionService — the access check', () => {
     expect(svc.readAccessSessionId({})).toBeUndefined();
     expect(svc.readAccessSessionId({ sid: SID })).toBe(SID);
     for (const sid of ['', 'a:b', 'x'.repeat(65), 5, null, {}]) expect(svc.readAccessSessionId({ sid }), String(sid)).toBeNull();
+  });
+});
+
+// ─── The list and the other sessions ────────────────────────────────────────
+
+describe('sessionService — the list of the account\'s sessions', () => {
+  const hour = (h: number) => Date.UTC(2026, 10, 20, h) / 1000;
+
+  it('each live session as its label, the day it was signed in and the hour it last renewed (ISO, UTC), and whether it is the caller\'s', async () => {
+    store.listLiveSessions.mockResolvedValueOnce([
+      { id: SID, clientKind: 'desktop', clientOs: 'windows', signedInAt: hour(0), lastActiveAt: hour(14) },
+      { id: 'other-session-0000000', clientKind: 'web', clientOs: 'linux', signedInAt: hour(0) - 86_400, lastActiveAt: hour(2) },
+    ]);
+    const list = await svc.listSessions('user-1', SID);
+    expect(store.listLiveSessions).toHaveBeenCalledWith(db.prisma, 'user-1', SID, SESSIONS.MAX_PER_ACCOUNT * 2);
+    expect(list).toEqual([
+      { id: SID, clientKind: 'desktop', clientOs: 'windows', signedInAt: '2026-11-20T00:00:00.000Z', lastActiveAt: '2026-11-20T14:00:00.000Z', current: true },
+      { id: 'other-session-0000000', clientKind: 'web', clientOs: 'linux', signedInAt: '2026-11-19T00:00:00.000Z', lastActiveAt: '2026-11-20T02:00:00.000Z', current: false },
+    ]);
+    expect(svc.SESSION_LIST_MAX).toBe(50);
+  });
+
+  it('a caller whose token names no session: none is marked, and the statement is told so', async () => {
+    store.listLiveSessions.mockResolvedValueOnce([{ id: SID, clientKind: 'web', clientOs: 'other', signedInAt: hour(1), lastActiveAt: hour(1) }]);
+    const list = await svc.listSessions('user-1', undefined);
+    expect(store.listLiveSessions).toHaveBeenCalledWith(db.prisma, 'user-1', null, 50);
+    expect(list[0].current).toBe(false);
+  });
+
+  it('a label outside the closed lists is shown as unknown / other, never as stored', async () => {
+    store.listLiveSessions.mockResolvedValueOnce([{ id: SID, clientKind: '<b>tv</b>', clientOs: 'plan9', signedInAt: hour(1), lastActiveAt: hour(1) }]);
+    const [row] = await svc.listSessions('user-1', SID);
+    expect(row).toMatchObject({ clientKind: 'unknown', clientOs: 'other' });
+  });
+
+  it('a failing statement is thrown as it is (500), never an empty list', async () => {
+    store.listLiveSessions.mockRejectedValueOnce(new Error('connection lost'));
+    await expect(svc.listSessions('user-1', SID)).rejects.toThrow('connection lost');
+  });
+});
+
+describe('sessionService — ending the other sessions in the bump\'s transaction', () => {
+  it('deletes every session but the kept one on the transaction\'s client; the ids, and how many were live at the version before', async () => {
+    store.deleteOtherSessions.mockResolvedValueOnce([{ id: 'a', live: true }, { id: 'b', live: false }, { id: 'c', live: true }]);
+    await expect(svc.endOtherSessions(db.tx as never, 'user-1', SID, 3)).resolves.toEqual({ ended: ['a', 'b', 'c'], live: 2 });
+    expect(store.deleteOtherSessions).toHaveBeenCalledWith(db.tx, 'user-1', SID, 3);
+    // Their sockets are the caller's to end, after the commit
+    expect(revoke).not.toHaveBeenCalled();
   });
 });

@@ -401,6 +401,31 @@ export type SessionClientOs = (typeof SESSION_CLIENT_OSES)[number];
 export const SESSION_ENDED_REASON = 'Your session has ended';
 /** `force:logout` reason when the account signed this session out from another of its sessions. */
 export const SIGNED_OUT_ELSEWHERE_REASON = 'You were signed out from another device';
+/**
+ * The 404 of a per-session sign-out: an unknown session id and another
+ * account's one answer the same.
+ */
+export const SESSION_NOT_FOUND_MESSAGE = 'Session not found';
+/**
+ * The 400 of a per-session sign-out aimed at the caller's own session: signing
+ * out is what ends that one.
+ */
+export const SESSION_REVOKE_CURRENT_MESSAGE = 'This is the session you are using: sign out to end it';
+/**
+ * The 400 of a session sign-out whose step-up password is wrong (the one answer
+ * its bucket keeps charged).
+ */
+export const STEP_UP_PASSWORD_INCORRECT_MESSAGE = 'Password is incorrect';
+/**
+ * The 400 of a sign-out of the other sessions whose `trustedDeviceToken` is
+ * not a string of a token's size.
+ */
+export const TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE = 'Invalid trusted device token';
+/**
+ * The 400 of a sign-out of the other sessions whose `rememberMe` is present
+ * and not a boolean.
+ */
+export const REMEMBER_ME_INVALID_MESSAGE = 'rememberMe must be true or false';
 /** Minimum age to use the Service: France's age of digital consent; the Terms and the Privacy Policy read it. */
 export const MINIMUM_AGE = 15;
 

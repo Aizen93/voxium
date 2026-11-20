@@ -1,5 +1,5 @@
 import type { AnnotationOp, AnnotationScene, AnnotationLiveEvent } from './annotations.js';
-import type { ServerJoinMode, DiscoveryTier, WebhookType } from './constants.js';
+import type { ServerJoinMode, DiscoveryTier, WebhookType, SessionClientHint, SessionClientKind, SessionClientOs } from './constants.js';
 
 // ─── User ────────────────────────────────────────────────────────────────────
 
@@ -45,9 +45,195 @@ export interface AuthTokens {
   refreshToken: string;
 }
 
-export interface LoginRequest {
+/**
+ * One sign-in session of the account, as `GET /auth/sessions` lists it (live
+ * sessions only: of the account's current token version and not expired).
+ * Both times are ISO 8601 in UTC, rounded down by the server: nothing finer
+ * is sent. No address, no user agent, no device name.
+ */
+export interface SessionSummary {
+  /**
+   * The session's id: what `DELETE /auth/sessions/:sessionId` takes. Not a
+   * credential.
+   */
+  id: string;
+  clientKind: SessionClientKind;
+  clientOs: SessionClientOs;
+  /**
+   * The day it was signed in: UTC midnight of that day (show it as a date in
+   * UTC).
+   */
+  signedInAt: string;
+  /** When it last renewed itself, rounded down to the hour. */
+  lastActiveAt: string;
+  /**
+   * The session of the access token that asked ("This device"); false for all
+   * of them when that token names none.
+   */
+  current: boolean;
+}
+
+/**
+ * `GET /auth/sessions`: the caller's own session first, then the others, most
+ * recently renewed first.
+ */
+export interface SessionListResponse {
+  sessions: SessionSummary[];
+}
+
+/**
+ * `POST /auth/sessions/revoke-others`. `revoked` counts the OTHER sessions
+ * that were live and are now ended; a refresh token issued before sessions
+ * and never used since has no session to count, and the version bump ends it
+ * all the same. The client stores the pair (and the trusted-device token)
+ * when they are present, and must not count on their presence: a later
+ * server may end the others without moving the caller to a new pair.
+ *
+ * The request moves the account to a new token version, as a password change
+ * does (`POST /auth/change-password`, ChangePasswordRequest), and a client
+ * MUST, around either of them:
+ *  - before sending, await any renewal in flight, then hold renewals until
+ *    the answer is stored: once the change commits, a refresh token of the
+ *    old version is refused;
+ *  - never store a renewal answer that arrives after the change (its pair is
+ *    of the old version);
+ *  - send it once at a time (single-flight): a second submit made with the
+ *    old access token loses with 401 'Session invalidated' (the version it
+ *    was admitted with has moved);
+ *  - reopen its socket with the new access token: the server closes every
+ *    socket of the account after the commit, the caller's too.
+ * An answer lost after the commit cannot be asked for again: the pair the
+ * device still holds is of the old version, so it signs in again, and its
+ * trusted-device token, of the old version too, no longer skips the
+ * two-factor step. A sign-out of one session (`DELETE
+ * /auth/sessions/:sessionId`) moves no version, so the trusted-device token
+ * of the device signed out stays valid: only this request and a password
+ * change end it.
+ */
+export interface RevokeOtherSessionsResponse {
+  revoked: number;
+  accessToken?: string;
+  refreshToken?: string;
+  /**
+   * Present only when the request carried a valid trusted-device token of this
+   * account: the same trust, re-issued under the new token version, with the
+   * same expiry.
+   */
+  trustedDeviceToken?: string;
+}
+
+/**
+ * `DELETE /auth/sessions/:sessionId`: that session and its sockets are ended.
+ * The account's token version does not move, so the caller keeps its pair,
+ * and the trusted-device token of the device signed out stays valid (see
+ * RevokeOtherSessionsResponse).
+ */
+export interface RevokeSessionResponse {
+  revoked: 1;
+}
+
+// ─── Auth request bodies ─────────────────────────────────────────────────────
+// What the server reads from each body. Every field is checked on arrival:
+// the types say what a client sends, the server trusts none of it.
+
+/**
+ * The kind of app a request comes from: one of SESSION_CLIENT_HINTS.
+ * Optional; a value outside the list is ignored, never refused. It labels
+ * the session the request opens (a sign-in, the two-factor step, a
+ * registration's completion, and a password change or a sign-out of the
+ * other sessions only for a caller whose access token names no session); on
+ * a refresh it labels nothing.
+ */
+export interface SessionClientField {
+  client?: SessionClientHint;
+}
+
+/** `POST /auth/login`. */
+export interface LoginRequest extends SessionClientField {
   email: string;
   password: string;
+  /** Absent means yes. */
+  rememberMe?: boolean;
+  /**
+   * The trusted-device token a two-factor sign-in answered: no code is
+   * asked while it is valid.
+   */
+  trustedDeviceToken?: string;
+}
+
+/**
+ * `POST /auth/totp/verify`: the challenge a sign-in answered and the code.
+ * `client` labels the session only when the challenge carries no label of
+ * the sign-in that asked for it.
+ */
+export interface TotpVerifyRequest extends SessionClientField {
+  totpToken: string;
+  code: string;
+}
+
+/**
+ * `POST /auth/register/complete`: the pending registration and its mailed
+ * code.
+ */
+export interface RegisterCompleteRequest extends SessionClientField {
+  pendingId: string;
+  code: string;
+  /**
+   * Another username, after a 409 for a taken one (the same code still
+   * holds).
+   */
+  username?: string;
+}
+
+/**
+ * `POST /auth/refresh`: the session's refresh token; the answer is a new
+ * pair (AuthTokens), to be stored whole: the token sent is replaced.
+ */
+export interface RefreshRequest extends SessionClientField {
+  refreshToken: string;
+}
+
+/**
+ * `POST /auth/logout`: ends the session the token names on the server,
+ * whatever its generation. No bearer needed; the answer is an empty 204.
+ */
+export interface LogoutRequest {
+  refreshToken: string;
+}
+
+/**
+ * `POST /auth/change-password`: answered with the caller's new pair
+ * (AuthTokens). What a client must do around it is written on
+ * RevokeOtherSessionsResponse.
+ */
+export interface ChangePasswordRequest extends SessionClientField {
+  currentPassword: string;
+  newPassword: string;
+  /**
+   * For a caller whose access token names no session: its new session's
+   * "Remember me" (absent means yes).
+   */
+  rememberMe?: boolean;
+}
+
+/** `DELETE /auth/sessions/:sessionId`: the account password. */
+export interface RevokeSessionRequest {
+  password: string;
+}
+
+/** `POST /auth/sessions/revoke-others` (RevokeOtherSessionsResponse). */
+export interface RevokeOtherSessionsRequest extends SessionClientField {
+  /** The account password. */
+  password: string;
+  /**
+   * This device's trusted-device token, when it holds one: re-issued under
+   * the new version.
+   */
+  trustedDeviceToken?: string;
+  /**
+   * For a caller whose access token names no session: its new session's
+   * "Remember me". A boolean; absent means yes.
+   */
   rememberMe?: boolean;
 }
 

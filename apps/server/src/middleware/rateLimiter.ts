@@ -143,6 +143,19 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // cannot be guessed at any rate the limiter would matter for.
   logout:         { keyPrefix: 'rl:logout',   points: 60,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Sign-out' },
   changePassword: { keyPrefix: 'rl:chgpwd',   points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Change Password' },
+  // The account's own sign-in sessions (GET /auth/sessions): a settings page
+  // opened and refreshed. A bucket of its own, so reading never spends the
+  // step-up's below. Per account AND session (byUserSession), no block.
+  sessionsRead:   { keyPrefix: 'rl:sessread', points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Sign-in sessions: list (per session)' },
+  // The account password that signs sessions out (DELETE
+  // /auth/sessions/:sessionId, POST /auth/sessions/revoke-others), per
+  // account AND session (byUserSession): charged before the check and given
+  // back unless the password was wrong, so it counts wrong passwords only.
+  // 5 in 15 minutes, then the two routes answer 429 for 15 minutes to that
+  // session (signing in and changing the password are not affected). Never
+  // the account alone: a bucket any one session can fill is a lock that
+  // session holds on every other session of the account.
+  sessionRevoke:  { keyPrefix: 'rl:sessrvk',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Sign-in sessions: sign out (wrong passwords, per session)' },
   consent:        { keyPrefix: 'rl:consent',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId',   label: 'Accept legal documents' },
   deleteAccount:  { keyPrefix: 'rl:delacct',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Delete own account' },
   totp:           { keyPrefix: 'rl:totp',     points: 10,  duration: 60,  blockDuration: 300, keyType: 'userId', label: 'TOTP Management' },
@@ -405,13 +418,21 @@ export async function resetRateLimit(name: string): Promise<void> {
 }
 
 /**
+ * The buckets keyed by byUserSession: a user id clears them by scan
+ * (clearUserRateLimits).
+ */
+const SESSION_KEYED_BUCKETS = ['sessionsRead', 'sessionRevoke'] as const;
+
+/**
  * Delete all rate limit keys for a specific user id, address or e-mail (the
  * admin "clear rate limits" tool). A user id also clears the user's TOTP
  * account bucket (`t:<id>`); an e-mail clears the password account buckets
  * of that address on every network (`e:<digest>|*`, found by scan); a webhook
  * id clears its unverified-delivery buckets on every network (`<id>|*`, found
- * by scan; only an id `OPAQUE_ID_RE` accepts, so no glob character from the
- * admin's input reaches the SCAN pattern).
+ * by scan); a user id clears the buckets of its sign-in sessions, every
+ * session's (`<id>|*`, found by scan, SESSION_KEYED_BUCKETS). Only an id
+ * `OPAQUE_ID_RE` accepts is scanned for, so no glob character from the
+ * admin's input reaches a SCAN pattern.
  */
 export async function clearUserRateLimits(key: string): Promise<number> {
   const redis = getRedis();
@@ -433,8 +454,12 @@ export async function clearUserRateLimits(key: string): Promise<number> {
   if (digest !== null) patterns.push(`${DEFAULTS.loginAccount.keyPrefix}:e:${digest}|*`);
   // An address also owns its network's per-webhook unverified-delivery buckets
   if (net.isIP(key)) patterns.push(`${DEFAULTS.webhookSigFail.keyPrefix}:*|${subnetOf(key)}`);
-  // A webhook id owns its per-network unverified-delivery buckets
-  if (OPAQUE_ID_RE.test(key)) patterns.push(`${DEFAULTS.webhookSigFail.keyPrefix}:${key}|*`);
+  if (OPAQUE_ID_RE.test(key)) {
+    // A webhook id owns its per-network unverified-delivery buckets
+    patterns.push(`${DEFAULTS.webhookSigFail.keyPrefix}:${key}|*`);
+    // A user id owns the per-session buckets of its sign-in sessions
+    for (const name of SESSION_KEYED_BUCKETS) patterns.push(`${DEFAULTS[name].keyPrefix}:${key}|*`);
+  }
   for (const pattern of patterns) {
     for await (const batch of redis.scanIterator({ MATCH: pattern, COUNT: 100 })) {
       for (const found of batch as unknown as string[]) exact.push(found);
@@ -458,6 +483,11 @@ interface MiddlewareOptions {
    *  right password is not a guess, and a team signing in from one address
    *  must not spend the budget meant for the wrong ones. */
   refundOnSuccess?: boolean;
+  /** Count only the requests this says were counted failures: the point is
+   *  given back when the response finishes unless it returns true (a step-up
+   *  whose password was wrong). An aborted request keeps its charge, as for
+   *  refundOnSuccess. */
+  refundUnless?: (res: Response) => boolean;
 }
 
 /** The one 429 every limiter answers: `Retry-After` in whole seconds and the
@@ -486,6 +516,12 @@ function createMiddleware(
       console.warn(`[RateLimit] ${name} limiter error, allowing request:`, err instanceof Error ? err.message : err);
       next();
       return;
+    }
+    const keepCharge = options.refundUnless;
+    if (keepCharge) {
+      res.on('finish', () => {
+        if (!keepCharge(res)) void refundRateLimit(name, key);
+      });
     }
     if (options.refundOnSuccess) {
       // 'finish' fires for every terminal outcome; an aborted request keeps
@@ -550,6 +586,29 @@ function canonicalIPv6(h: number[]): string {
 
 const byIp = (req: Request) => normalizeIp(req.ip || req.socket.remoteAddress || 'unknown');
 const byUserId = (req: Request) => req.user?.userId || req.ip || 'unknown';
+
+/**
+ * The session part of a per-session key for an access token that names no
+ * session (one issued before sessions).
+ */
+const NO_SESSION_KEY_PART = 'nosid';
+
+/**
+ * The account AND the caller's session, `<userId>|<sid>`, for the buckets of
+ * the account's own sign-in sessions: never the account alone, which one
+ * session could fill for every other session of the account. A caller whose
+ * access token names no session (one issued before sessions) is keyed
+ * `<userId>|nosid`: every session id the server mints is 22 characters of
+ * base64url, so no session is ever keyed that way. Neither part can hold
+ * `|`: a user id and a session id are both opaque ids (OPAQUE_ID_RE), so the
+ * two never run together. Mounted after `authenticate`; with no user it
+ * falls back as byUserId does.
+ */
+export function byUserSession(req: Request): string {
+  const user = req.user;
+  if (!user?.userId) return byUserId(req);
+  return `${user.userId}|${user.sid ?? NO_SESSION_KEY_PART}`;
+}
 
 /** The e-mail part of a login-account key: the address the way the service
  *  looks it up (lowercase, trimmed), under an HMAC keyed off `JWT_SECRET`
@@ -964,6 +1023,15 @@ export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);
 export const rateLimitRefresh = createMiddleware('refresh', byIp);
 export const rateLimitLogout = createMiddleware('logout', byIp);
 export const rateLimitChangePassword = createMiddleware('changePassword', byIp);
+export const rateLimitSessionsRead = createMiddleware('sessionsRead', byUserSession);
+/**
+ * Set by a session sign-out whose step-up password was wrong: the one outcome
+ * its bucket keeps charged.
+ */
+export const STEP_UP_REFUSED_LOCAL = 'stepUpRefused';
+export const rateLimitSessionRevoke = createMiddleware('sessionRevoke', byUserSession, {
+  refundUnless: (res) => res.locals[STEP_UP_REFUSED_LOCAL] === true,
+});
 export const rateLimitConsent = createMiddleware('consent', byUserId);
 // Password guesses against the deletion endpoint are password guesses; keep
 // the budget as tight as the TOTP one.

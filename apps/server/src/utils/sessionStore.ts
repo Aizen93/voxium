@@ -233,6 +233,64 @@ export async function evictSessionsBeyond(db: SessionDb, userId: string, keepId:
   return rows.map((r) => r.id);
 }
 
+// ─── The list, and signing out of the other sessions ─────────────────────────
+
+/**
+ * A live session as the list shows it: the times rounded down, as epoch
+ * seconds.
+ */
+export interface ListedSessionRow {
+  id: string;
+  clientKind: string;
+  clientOs: string;
+  /** created_at rounded down to its day (UTC midnight). */
+  signedInAt: number;
+  /** rotated_at rounded down to its hour. */
+  lastActiveAt: number;
+}
+
+/**
+ * The live sessions of `userId` (of the account's current token version and
+ * not expired, on the database's clock), at most `limit`: `currentId`'s
+ * first when it is among them (so the bound never leaves it out), then the
+ * most recently renewed. The two times are rounded down here, in SQL (the
+ * stored UTC wall clock, which no connection TimeZone moves): the sign-in to
+ * its day, the last renewal to its hour. Nothing finer leaves the database.
+ */
+export async function listLiveSessions(db: SessionDb, userId: string, currentId: string | null, limit: number): Promise<ListedSessionRow[]> {
+  const rows = await db.$queryRaw<Array<{ id: string; client_kind: string; client_os: string; signed_in: number; last_active: number }>>`
+    SELECT s.id, s.client_kind, s.client_os,
+           extract(epoch FROM date_trunc('day', s.created_at))::float8 AS signed_in,
+           extract(epoch FROM date_trunc('hour', s.rotated_at))::float8 AS last_active
+    FROM sessions s
+    JOIN users u ON u.id = s.user_id
+    CROSS JOIN (SELECT (now() AT TIME ZONE 'UTC')::timestamp(3) AS now) t
+    WHERE s.user_id = ${userId} AND s.token_version = u.token_version AND s.expires_at > t.now
+    ORDER BY (s.id = ${currentId}) IS TRUE DESC, s.rotated_at DESC, s.id DESC
+    LIMIT ${limit}::integer`;
+  return rows.map((r) => ({ id: r.id, clientKind: r.client_kind, clientOs: r.client_os, signedInAt: r.signed_in, lastActiveAt: r.last_active }));
+}
+
+/**
+ * Signing out of every other session, in the transaction that bumped the
+ * account's version (the account row is held): every session of `userId`
+ * but `keepId`, whatever its state. Each id deleted, with whether it was
+ * live at `liveVersion` (the version before the bump) on the database's
+ * clock: what the caller is told it ended.
+ */
+export async function deleteOtherSessions(
+  db: SessionDb,
+  userId: string,
+  keepId: string,
+  liveVersion: number,
+): Promise<Array<{ id: string; live: boolean }>> {
+  return db.$queryRaw<Array<{ id: string; live: boolean }>>`
+    DELETE FROM sessions s
+    USING (SELECT (now() AT TIME ZONE 'UTC')::timestamp(3) AS now) t
+    WHERE s.user_id = ${userId} AND s.id <> ${keepId}
+    RETURNING s.id, (s.token_version = ${liveVersion}::integer AND s.expires_at > t.now) AS live`;
+}
+
 // ─── Refresh tokens issued before sessions ───────────────────────────────────
 
 /** The redemption record of a token without `sid`, or null when it was never presented. */

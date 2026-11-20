@@ -1,3 +1,5 @@
+import { SESSION_NOT_FOUND_MESSAGE, STEP_UP_PASSWORD_INCORRECT_MESSAGE } from '@voxium/shared';
+
 export class AppError extends Error {
   public statusCode: number;
   public isOperational: boolean;
@@ -55,6 +57,30 @@ export class OwnedServersError extends ConflictError {
   constructor(public readonly servers: Array<{ id: string; name: string }>) {
     super('Transfer or delete the servers you own before deleting your account');
     this.name = 'OwnedServersError';
+  }
+}
+
+/**
+ * 400 for a step-up whose account password is wrong (the session sign-outs,
+ * routes/auth.ts): told apart from every other 400 so that their bucket
+ * keeps the charge for this outcome alone.
+ */
+export class PasswordStepUpError extends BadRequestError {
+  constructor() {
+    super(STEP_UP_PASSWORD_INCORRECT_MESSAGE);
+    this.name = 'PasswordStepUpError';
+  }
+}
+
+/**
+ * 404 of a per-session sign-out (DELETE /auth/sessions/:sessionId): an
+ * unknown session id, another account's and one no session can carry all
+ * answer SESSION_NOT_FOUND_MESSAGE, the sentence clients map.
+ */
+export class SessionNotFoundError extends AppError {
+  constructor() {
+    super(SESSION_NOT_FOUND_MESSAGE, 404);
+    this.name = 'SessionNotFoundError';
   }
 }
 

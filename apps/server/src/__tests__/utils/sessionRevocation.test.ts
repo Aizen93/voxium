@@ -4,23 +4,31 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const calls = vi.hoisted(() => [] as Array<[string, ...unknown[]]>);
 
 const io = vi.hoisted(() => {
+  // A room operation, with `except` recorded as part of what it ran on
+  const operator = (scope: string, room: string | string[], except: string[] = []) => ({
+    except: vi.fn((rooms: string | string[]) => operator(scope, room, [...except, ...(Array.isArray(rooms) ? rooms : [rooms])])),
+    disconnectSockets: vi.fn((close: boolean) => {
+      calls.push(except.length > 0 || scope.endsWith('!') ? [`${scope.replace('!', '')}.disconnectSockets`, room, close, { except }] : [`${scope}.disconnectSockets`, room, close]);
+    }),
+    emit: vi.fn((ev: string, data: unknown) => {
+      calls.push(except.length > 0 || scope.endsWith('!') ? ['emit', room, ev, data, { except }] : ['emit', room, ev, data]);
+    }),
+  });
   const scoped = (scope: string) => ({
-    in: vi.fn((room: string | string[]) => ({
-      disconnectSockets: vi.fn((close: boolean) => { calls.push([`${scope}.disconnectSockets`, room, close]); }),
-    })),
+    in: vi.fn((room: string | string[]) => operator(scope, room)),
   });
   const cluster = scoped('cluster');
   return {
     in: cluster.in,
     local: scoped('local'),
-    to: vi.fn((room: string | string[]) => ({ emit: vi.fn((ev: string, data: unknown) => { calls.push(['emit', room, ev, data]); }) })),
+    to: vi.fn((room: string | string[]) => operator('emit', room)),
     fetchSockets: vi.fn(),
   };
 });
 const getIO = vi.hoisted(() => vi.fn(() => io));
 vi.mock('../../websocket/socketServer', () => ({ getIO: () => getIO() }));
 
-import { revokeUserSessions, revokeSessionSockets, disconnectSessionRooms, SESSION_ROOMS_PER_CALL } from '../../utils/sessionRevocation';
+import { revokeUserSessions, revokeSessionSockets, disconnectSessionRooms, SESSION_ROOMS_PER_CALL, revokeOtherSessionSockets } from '../../utils/sessionRevocation';
 import { sessionRoom, legacySocketsRoom } from '../../utils/sessionRooms';
 
 beforeEach(() => {
@@ -177,6 +185,38 @@ describe('disconnectSessionRooms: the sockets of sessions the sweep deleted', ()
     expect(JSON.stringify(err.mock.calls)).not.toContain('secret-sid');
     // The second chunk still went out
     expect(calls.map((c) => (c[1] as string[]).length)).toEqual([1, 1]);
+    err.mockRestore();
+  });
+});
+
+describe('revokeOtherSessionSockets: signing out of every other session', () => {
+  it('a caller with a session: every other socket of the account told force:logout (not the caller\'s session, not the sockets that name no session), then EVERY socket of the account disconnected, the caller\'s too (opened on its old-version tokens), local then cluster-wide', () => {
+    revokeOtherSessionSockets('u-1', 'sid-me', 'You were signed out from another device');
+
+    expect(calls).toEqual([
+      ['emit', 'user:u-1', 'force:logout', { reason: 'You were signed out from another device' }, { except: ['session:sid-me', 'nosid:u-1'] }],
+      ['local.disconnectSockets', 'user:u-1', true],
+      ['cluster.disconnectSockets', 'user:u-1', true],
+    ]);
+    expect(io.fetchSockets).not.toHaveBeenCalled();
+  });
+
+  it('a caller whose token names no session: the same disconnect, and no socket naming no session is told', () => {
+    revokeOtherSessionSockets('u-1', undefined, 'You were signed out from another device');
+
+    expect(calls).toEqual([
+      ['emit', 'user:u-1', 'force:logout', { reason: 'You were signed out from another device' }, { except: ['nosid:u-1'] }],
+      ['local.disconnectSockets', 'user:u-1', true],
+      ['cluster.disconnectSockets', 'user:u-1', true],
+    ]);
+  });
+
+  it('logs and does not throw when the socket server is unavailable', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    getIO.mockImplementationOnce(() => { throw new Error('Socket.IO not initialized'); });
+    expect(() => revokeOtherSessionSockets('u-1', 'sid-me', 'x')).not.toThrow();
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("other sessions' sockets"), 'Socket.IO not initialized');
+    expect(err.mock.calls[0][0]).not.toContain('sid-me');
     err.mockRestore();
   });
 });
