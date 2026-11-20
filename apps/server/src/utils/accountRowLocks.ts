@@ -1,4 +1,5 @@
 import type { Prisma } from '../generated/prisma/client';
+import { UnauthorizedError } from './errors';
 
 /**
  * Lock the account rows a ban or a report resolution depends on, FIRST in
@@ -54,4 +55,40 @@ export async function lockAccountRows(
     if (found.length > 0) locked.add(id);
   }
   return locked;
+}
+
+/** The account a credential change acts for, as its own transaction holds it. */
+export interface LockedAccount {
+  id: string;
+  username: string;
+  role: string;
+  tokenVersion: number;
+}
+
+/**
+ * The FIRST statement of a transaction that bumps a signed-in caller's token
+ * version while keeping the caller signed in (a password change, signing
+ * out of every other session): the caller's account row in 'update' mode,
+ * then its version compared with the one the caller's access token was
+ * admitted with. The caller was admitted before the slow part of the request
+ * (a password hash); a password reset, a ban or another such change that
+ * committed meanwhile has moved the version, and this caller's session is
+ * then one that change ended: refused with the answer `authenticate` gives
+ * a token of an old version (401 'Session invalidated'), so the transaction
+ * writes nothing. An account deleted meanwhile is 401 'User not found'.
+ */
+export async function lockAccountAtVersion(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  admittedVersion: number,
+): Promise<LockedAccount> {
+  const locked = await lockAccountRows(tx, [{ id: userId, mode: 'update' }]);
+  if (!locked.has(userId)) throw new UnauthorizedError('User not found');
+  const account = await tx.user.findUnique({
+    where: { id: userId },
+    select: { id: true, username: true, role: true, tokenVersion: true },
+  });
+  if (!account) throw new UnauthorizedError('User not found');
+  if (account.tokenVersion !== admittedVersion) throw new UnauthorizedError('Session invalidated');
+  return account;
 }

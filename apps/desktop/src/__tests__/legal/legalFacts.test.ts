@@ -80,11 +80,12 @@ const ANNOTATION_TTL_SECONDS = capture(
 const ANNOTATION_TTL_HOURS = ANNOTATION_TTL_SECONDS / 3600;
 
 const authService = readServer('services/authService.ts');
-/** generateTokens(): the defaults when JWT_EXPIRES_IN / JWT_REFRESH_EXPIRES_IN are unset. */
-const ACCESS_TOKEN_MINUTES = capture(authService, /JWT_EXPIRES_IN \|\| '(\d+)m'/, 'the access-token default lifetime');
-const REFRESH_REMEMBERED_DAYS = capture(authService, /JWT_REFRESH_EXPIRES_IN \|\| '(\d+)d'/, 'the "Remember me" refresh-token default lifetime');
+/** The session service (the one minter of tokens): the defaults when JWT_EXPIRES_IN / JWT_REFRESH_EXPIRES_IN are unset. */
+const sessionService = readServer('services/sessionService.ts');
+const ACCESS_TOKEN_MINUTES = capture(sessionService, /JWT_EXPIRES_IN \|\| '(\d+)m'/, 'the access-token default lifetime');
+const REFRESH_REMEMBERED_DAYS = capture(sessionService, /JWT_REFRESH_EXPIRES_IN \|\| '(\d+)d'/, 'the "Remember me" refresh-token default lifetime');
 const REFRESH_SESSION_HOURS = capture(
-  authService,
+  sessionService,
   /JWT_REFRESH_EXPIRES_IN \|\| '\d+d'\)\s*:\s*'(\d+)h'/,
   'the refresh-token lifetime without "Remember me"',
 );
@@ -239,17 +240,17 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
   ],
   cookies: [
     {
-      source: 'generateTokens() JWT_EXPIRES_IN default',
+      source: 'sessionService accessTokenLifetime() JWT_EXPIRES_IN default',
       en: `${ACCESS_TOKEN_MINUTES} minutes, renewed automatically`,
       fr: `${ACCESS_TOKEN_MINUTES} minutes, renouvelé automatiquement`,
     },
     {
-      source: 'generateTokens() JWT_REFRESH_EXPIRES_IN default',
+      source: 'sessionService refreshIdleLifetime() JWT_REFRESH_EXPIRES_IN default',
       en: `Up to ${REFRESH_REMEMBERED_DAYS} days with “Remember me”`,
       fr: `Jusqu’à ${REFRESH_REMEMBERED_DAYS} jours avec « Se souvenir de moi »`,
     },
     {
-      source: 'generateTokens() refresh lifetime without "Remember me"',
+      source: 'sessionService refreshIdleLifetime() without "Remember me"',
       en: `${REFRESH_SESSION_HOURS} hours without`,
       fr: `${REFRESH_SESSION_HOURS} heures sans`,
     },

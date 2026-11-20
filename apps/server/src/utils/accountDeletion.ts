@@ -183,8 +183,15 @@ export async function deleteUserAccount(userId: string, opts: { reason: string; 
  *  6. the user delete and every row it cascades to or sets null (messages,
  *     reactions, reads, invites it created, join requests it decided, bans
  *     it issued, webhooks it created or rotated, its E2E devices with their
- *     one-time keys, …): the long part.
+ *     one-time keys, its sign-in sessions and, through them, the session of
+ *     each refresh-token redemption record, set null, …): the long part.
  * It takes NO space row. Why each comes where it does:
+ *  - the sign-in sessions go in 6, with no statement of their own: a renewal
+ *    (services/sessionService.ts) takes only its own session row and reads
+ *    the account without a lock, so it waits for this transaction at most on
+ *    that row and closes no cycle; a sign-in's session insert key-shares the
+ *    account row, waits for step 4, then fails on sessions_user_id_fkey,
+ *    which the sign-in answers as its own 401.
  *  - in 4, the account row before the second member-row delete: a
  *    membership's key to the account waits for that lock, so every
  *    membership within reach of the user delete's cascade has been deleted
