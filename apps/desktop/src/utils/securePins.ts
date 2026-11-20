@@ -66,7 +66,14 @@ function loadPins(userId: string): Set<string> {
   return pins;
 }
 
+/**
+ * Write `pins` for `userId`, merged with what is stored: pins only grow, and
+ * another tab of the same account may have pinned a channel since this one
+ * read the list. Its pins are kept, and hold here too from now on (they join
+ * `pins`, the set this tab answers from).
+ */
 function savePins(userId: string, pins: Set<string>): void {
+  for (const id of loadPins(userId)) pins.add(id);
   try {
     localStorage.setItem(securePinStorageKey(userId), JSON.stringify([...pins]));
   } catch (err) {
