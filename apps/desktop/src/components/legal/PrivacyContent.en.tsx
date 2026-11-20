@@ -1,5 +1,6 @@
 import { MINIMUM_AGE, SIGNUP } from '@voxium/shared';
-import { LEGAL_OPERATOR, publisherOf } from './operator';
+import { LEGAL_OPERATOR, PRIVACY_POLICY_DATES, publisherOf } from './operator';
+import { formatLegalDate } from './legalDates';
 import { MailLink } from './MailLink';
 
 /**
@@ -30,7 +31,7 @@ export function PrivacyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Privacy Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 19, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: {formatLegalDate(PRIVACY_POLICY_DATES.lastUpdated, 'en')}</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -248,9 +249,19 @@ export function PrivacyContentEn() {
             <li>
               <strong className="text-vox-text-primary">Everything else</strong> is kept for as long as your account
               exists. Deleting your account (Settings → Security) deletes with it your profile, your messages and
-              reactions, your direct conversations (including the other participant&apos;s messages in them), your
-              devices&apos; keys and key backups, your connection data, your support conversations and your consent
-              records
+              reactions, their attachments, your devices&apos; keys and key backups, your connection data, your support
+              conversations and your consent records
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Your direct conversations when you delete your account.</strong>{' '}
+              Until {formatLegalDate(PRIVACY_POLICY_DATES.conversationsKeptFrom, 'en')}, deleting your account deletes
+              each of your direct conversations entirely, the other participant&apos;s messages included. From{' '}
+              {formatLegalDate(PRIVACY_POLICY_DATES.conversationsKeptFrom, 'en')}, it deletes your messages in them, with
+              their attachments and the reactions on them, and the other participant keeps the conversation: it becomes
+              read-only for them, it shows a deleted account in your place, and each of your messages is replaced by an
+              empty placeholder that keeps only the time it was sent; the notices that a call started or ended stay, no
+              longer linked to you. A conversation the other participant has already removed with its history, or whose
+              other participant&apos;s account is already deleted, is deleted entirely
             </li>
             <li>
               <strong className="text-vox-text-primary">After you delete your account</strong>, some data remains:

@@ -36,6 +36,26 @@ export const LEGAL_OPERATOR: LegalOperator = {
   changeNoticeDays: 14,
 };
 
+/**
+ * The Privacy Policy's own dates, `YYYY-MM-DD`, read by both languages.
+ *
+ * Both are set in the release commit: `lastUpdated` is the release day (the
+ * date printed as "Last updated"), `conversationsKeptFrom` is the release day
+ * plus at least `LEGAL_OPERATOR.changeNoticeDays` (the day from which an
+ * account deletion keeps the other person's conversation). `confirmedForVersion`
+ * is then set to the released version: the test that compares it with
+ * `APP_VERSION` fails after a version bump until both dates have been looked at
+ * again. It is a literal on purpose, so that it goes stale with the version.
+ *
+ * Once `conversationsKeptFrom` has passed, this constant and its test go away
+ * together with the transitional "Until … / From …" sentence of the policy.
+ */
+export const PRIVACY_POLICY_DATES = {
+  lastUpdated: '2026-11-20',
+  conversationsKeptFrom: '2026-12-04',
+  confirmedForVersion: '2.1.1',
+} as const;
+
 /** The publisher's identity when both its name and its address are filled in, else null (legal notice on request). */
 export function publisherOf(operator: LegalOperator): { name: string; address: string } | null {
   return operator.publisherName && operator.publisherAddress
