@@ -31,7 +31,7 @@ vi.mock('../../stores/voiceStore', () => ({
 }));
 vi.mock('../../services/powSolver', () => ({ solveRegistrationPowOffThread: vi.fn() }));
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
-vi.mock('../../utils/imageProcessing', () => ({ processImage: vi.fn() }));
+vi.mock('../../utils/imageProcessing', () => ({ processImage: vi.fn(), ASSET_UPLOAD_CONTENT_TYPE: 'image/webp' }));
 
 import { useAuthStore, _resetSessionRestoreForTests } from '../../stores/authStore';
 import { createKeychainSessionStore, getRefreshToken, getTrustedDeviceToken, _resetTokenStorageForTests } from '../../services/tokenStorage';

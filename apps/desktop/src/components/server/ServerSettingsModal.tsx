@@ -14,7 +14,7 @@ import { JoinRequestsSection } from './JoinRequestsSection';
 import { BannedSection } from './BannedSection';
 import { MembersDirectory } from './MembersDirectory';
 import { api } from '../../services/api';
-import { getTranslatedError } from '../../utils/serverErrors';
+import { getTranslatedError, getTranslatedActionError } from '../../utils/serverErrors';
 import { useServerPermissions } from '../../hooks/useServerPermissions';
 
 interface Props {
@@ -246,7 +246,7 @@ function GeneralTab({ serverId, onClose }: { serverId: string; onClose: () => vo
           await uploadServerIcon(serverId, iconFile);
           setIconFile(null);
         } catch (err) {
-          toast.error(getTranslatedError(err, t, 'serverSettings.general.failedToUploadIcon'));
+          toast.error(getTranslatedActionError(err, t, 'serverSettings.general.failedToUploadIcon'));
           setSaving(false);
           setUploading(false);
           return;

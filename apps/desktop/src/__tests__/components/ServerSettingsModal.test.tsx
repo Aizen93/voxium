@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Permissions } from '@voxium/shared';
 import type { Server, ServerMember } from '@voxium/shared';
+import { ImageEncodeError } from '../../utils/imageProcessing';
 
 /**
  * Server settings: which tabs a viewer gets is decided by their EFFECTIVE
@@ -28,7 +29,10 @@ vi.mock('../../stores/authStore', () => {
 vi.mock('../../stores/toastStore', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 // Children with their own fetches or heavy deps are stubbed: this test is
 // about the modal's gating and badge.
-vi.mock('../../components/common/ImageUploadButton', () => ({ ImageUploadButton: () => null }));
+const picker = vi.hoisted(() => ({ onFileChange: null as ((f: File | null) => void) | null }));
+vi.mock('../../components/common/ImageUploadButton', () => ({
+  ImageUploadButton: (props: { onFileChange: (f: File | null) => void }) => { picker.onFileChange = props.onFileChange; return null; },
+}));
 vi.mock('../../components/server/RoleEditor', () => ({ RoleEditor: () => null }));
 vi.mock('../../components/server/DiscoveryTab', () => ({ DiscoveryTab: () => <div data-testid="discovery-tab" /> }));
 // The Integrations tab counts its mounts: the copy-once token lives in its
@@ -49,6 +53,7 @@ vi.mock('../../components/server/MembersDirectory', () => ({ MembersDirectory: (
 
 import { api } from '../../services/api';
 import { useServerStore } from '../../stores/serverStore';
+import { toast } from '../../stores/toastStore';
 import { resetServerPermissionsCache } from '../../hooks/useServerPermissions';
 import { ServerSettingsModal } from '../../components/server/ServerSettingsModal';
 
@@ -465,5 +470,30 @@ describe('ServerSettingsModal — a live permission edit never remounts the open
     expect(q('[data-testid="integrations-tab"]')).toBeNull();
     expect(q('[data-testid="members-directory"]')).not.toBeNull();
     expect(tabCounts).toEqual({ mount: 1, unmount: 1 });
+  });
+});
+
+describe('ServerSettingsModal — an icon upload that fails', () => {
+  async function saveIcon(failure: unknown) {
+    apiWith(Permissions.VIEW_CHANNEL | Permissions.MANAGE_SERVER);
+    useServerStore.setState({ uploadServerIcon: vi.fn().mockRejectedValue(failure) } as never);
+    await render();
+    await act(async () => { picker.onFileChange?.(new File([new Uint8Array(4)], 'i.png', { type: 'image/png' })); });
+    const save = [...container.querySelectorAll('button')].find((b) => b.textContent === 'settings.profile.saveChanges')!;
+    await act(async () => { save.click(); });
+  }
+
+  it('an ImageEncodeError shows the icon sentence, never the helper text', async () => {
+    await saveIcon(new ImageEncodeError('OffscreenCanvas has no 2D context'));
+    expect(toast.error).toHaveBeenCalledWith('serverSettings.general.failedToUploadIcon');
+  });
+
+  it('a server refusal still shows the server reason', async () => {
+    const refusal = Object.assign(new Error('Request failed'), {
+      isAxiosError: true,
+      response: { status: 429, data: { success: false, error: 'Too many requests. Please try again later.' } },
+    });
+    await saveIcon(refusal);
+    expect(toast.error).toHaveBeenCalledWith('serverErrors.tooManyRequests');
   });
 });

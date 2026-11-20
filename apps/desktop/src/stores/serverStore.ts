@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import axios from 'axios';
 import { api } from '../services/api';
-import { processImage } from '../utils/imageProcessing';
+import { processImage, ASSET_UPLOAD_CONTENT_TYPE } from '../utils/imageProcessing';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { pinSecure, isPinnedSecure, claimDowngradeWarning } from '../utils/securePins';
@@ -929,7 +929,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     const uploadRes = await fetch(uploadUrl, {
       method: 'PUT',
       body: blob,
-      headers: { 'Content-Type': 'image/webp' },
+      headers: { 'Content-Type': ASSET_UPLOAD_CONTENT_TYPE },
     });
     if (!uploadRes.ok) {
       throw new Error(`S3 upload failed: ${uploadRes.status}`);

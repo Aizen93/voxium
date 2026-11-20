@@ -16,7 +16,7 @@ import { E2EDevicesSection } from './E2EDevicesSection';
 import { DeleteAccountSection } from './DeleteAccountSection';
 import { api } from '../../services/api';
 import { SUPPORTED_LANGUAGES } from '../../i18n';
-import { getTranslatedError } from '../../utils/serverErrors';
+import { getTranslatedError, getTranslatedActionError } from '../../utils/serverErrors';
 
 interface DeviceInfo {
   deviceId: string;
@@ -237,7 +237,7 @@ function ProfileTab() {
       await uploadAvatar(file);
       toast.success(t('settings.profile.avatarUpdated'));
     } catch (err) {
-      toast.error(getTranslatedError(err, t, 'settings.profile.failedToUploadAvatar'));
+      toast.error(getTranslatedActionError(err, t, 'settings.profile.failedToUploadAvatar'));
     } finally {
       setUploading(false);
     }
