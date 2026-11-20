@@ -41,3 +41,13 @@ if (typeof window === 'undefined') {
     if (Object.getOwnPropertyDescriptor(globalThis, key)) Reflect.deleteProperty(globalThis, key);
   }
 }
+
+// BroadcastChannel: Node's, which the jsdom suites see on `window` too. It
+// reaches every other channel of the same name in the process, so two suites
+// (or two module copies) would talk to each other through the vault
+// ownership's channel (services/e2e/vaultOwnership.ts). The suites that test
+// the channel inject one of their own; every other suite runs without it,
+// as a page with no other tab.
+if (Object.getOwnPropertyDescriptor(globalThis, 'BroadcastChannel')) {
+  Reflect.deleteProperty(globalThis, 'BroadcastChannel');
+}

@@ -41,7 +41,7 @@ function keyProvider(): PickleKeyProvider & { saves: number; stored: string | nu
 
 interface Page {
   vault: E2EVault;
-  fence: VaultFence & { owned: string | null; fencedCalls: number; serialized: number };
+  fence: VaultFence & { owned: string | null; fencedCalls: number; serialized: number; ensured: number };
 }
 
 function page(userId: string, namespace: string, token: string | null, provider: PickleKeyProvider = keyProvider()): Page {
@@ -49,6 +49,12 @@ function page(userId: string, namespace: string, token: string | null, provider:
     owned: token,
     fencedCalls: 0,
     serialized: 0,
+    ensured: 0,
+    // a page that owns nothing cannot acquire it here: another one owns it
+    ensure: async () => {
+      fence.ensured++;
+      if (fence.owned === null) throw new E2EVaultNotOwnedError();
+    },
     token: () => fence.owned,
     fenced: () => {
       fence.fencedCalls++;
@@ -243,9 +249,29 @@ describe('the vault fence', () => {
     const open = vi.spyOn(indexedDB, 'open');
     await expect(owner.vault.assertOwner()).resolves.toBeUndefined();
     expect(open).not.toHaveBeenCalled();
+    expect(owner.fence.ensured).toBe(0);
     open.mockRestore();
+    // a page that owns nothing yet asks the ownership, which refuses it here
     const stranger = page(`fence-user-${n}`, `fence-${n}`, null);
-    await expect(stranger.vault.assertOwner()).rejects.toBeInstanceOf(E2EVaultFencedError);
+    await expect(stranger.vault.assertOwner()).rejects.toBeInstanceOf(E2EVaultNotOwnedError);
+    expect(stranger.fence.ensured).toBe(1);
+  });
+
+  it('acquires the vault through the ownership at a first use when nothing acquired it yet', async () => {
+    n++;
+    const userId = `fence-user-${n}`;
+    const namespace = `fence-${n}`;
+    const name = vaultDbName(userId, namespace);
+    const late = page(userId, namespace, null);
+    late.fence.ensure = async () => {
+      late.fence.ensured++;
+      await stampVaultOwner(name, 'token-late', 'claim');
+      late.fence.owned = 'token-late';
+    };
+    await late.vault.putDeviceId('device-late');
+    expect(late.fence.ensured).toBe(1);
+    expect(await rawGet(name, 'device_id')).toBe('device-late');
+    late.vault.close();
   });
 
   it('opens nothing for a page that does not own the vault, and makes no pickle key for a replaced one', async () => {
@@ -256,7 +282,7 @@ describe('the vault fence', () => {
     const noKey = keyProvider();
     noKey.stored = null;
     const stranger = page(userId, namespace, null, noKey);
-    await expect(stranger.vault.open()).rejects.toBeInstanceOf(E2EVaultFencedError);
+    await expect(stranger.vault.open()).rejects.toBeInstanceOf(E2EVaultNotOwnedError);
 
     // replaced between its acquisition and its open: refused before the key is made
     await stampVaultOwner(name, 'token-b', 'claim');

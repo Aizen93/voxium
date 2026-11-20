@@ -371,6 +371,12 @@ export class E2EVaultNotOwnedError extends E2EVaultClosedError {
  * that lost it (a takeover it has not heard of yet) unable to write.
  */
 export interface VaultFence {
+  /**
+   * Make this page the vault's owner if nothing has yet (a first use outside
+   * the screen that acquires it before the app starts); rejects
+   * E2EVaultNotOwnedError when another page owns it or this one gave it up.
+   */
+  ensure(): Promise<void>;
   /** This page's owner token while it owns the vault; null once it does not (every write refused). */
   token(): string | null;
   /** The vault found another owner's token, or none: this page no longer owns it. */
@@ -602,10 +608,27 @@ export class E2EVault {
   async assertOwner(): Promise<void> {
     this.assertNotClosed();
     if (!this.fence) return;
+    if (!this.db && !this.everOpened) {
+      await this.ensureOwnedBeforeOpen();
+      return;
+    }
     if (this.fence.token() === null) throw this.trip();
-    if (!this.db && !this.everOpened) return;
     const stored = await this.withStore('readonly', (s) => requestToPromise(s.get(VAULT_OWNER_KEY)));
     if (!this.ownsStored(stored)) throw this.trip();
+  }
+
+  /**
+   * Before a first open: the page owns the vault, acquired now if nothing
+   * acquired it yet; refused (E2EVaultNotOwnedError) when another page owns
+   * it or this one gave it up. A vault this page once had and lost is not
+   * acquired again here: its token went with it, and that trips the fence.
+   */
+  private async ensureOwnedBeforeOpen(): Promise<void> {
+    if (!this.fence || this.fence.token() !== null) return;
+    if (this.everOpened) throw this.trip();
+    await this.fence.ensure();
+    this.assertNotClosed();
+    if (this.fence.token() === null) throw this.trip();
   }
 
   async open(): Promise<void> {
@@ -613,7 +636,8 @@ export class E2EVault {
     if (this.db) return;
     // A page that does not own the vault opens nothing: the open below can
     // write (the pickle key, in open()), outside any transaction the fence sees
-    if (this.fence && this.fence.token() === null) throw this.trip();
+    await this.ensureOwnedBeforeOpen();
+    if (this.db) return;
     const before = this.openAfter?.();
     if (before) {
       await before;
