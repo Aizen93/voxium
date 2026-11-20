@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -14,6 +14,10 @@ vi.mock('axios', () => ({
 const storage = vi.hoisted(() => ({
   access: null as string | null,
   refresh: null as string | null,
+  /** The browser build: the store is the page's storage, which other tabs write too. */
+  shared: false,
+  /** What another tab left in the page's storage, which a re-read brings into memory (undefined: nothing new). */
+  page: undefined as { access: string | null; refresh: string | null } | undefined,
   getAccessToken: vi.fn(() => storage.access),
   getRefreshToken: vi.fn(() => storage.refresh),
   setTokens: vi.fn((a: string, r: string) => { storage.access = a; storage.refresh = r; }),
@@ -21,6 +25,12 @@ const storage = vi.hoisted(() => ({
   // The persisted clear a session-ending navigation waits for; resolved at
   // once unless a test holds it
   flushTokenStorage: vi.fn(async () => {}),
+  isSharedWithOtherTabs: vi.fn(() => storage.shared),
+  followSharedSession: vi.fn(() => {
+    if (!storage.shared || storage.page === undefined) return;
+    storage.access = storage.page.access;
+    storage.refresh = storage.page.refresh;
+  }),
 }));
 vi.mock('../../services/tokenStorage', () => ({
   getAccessToken: storage.getAccessToken,
@@ -28,12 +38,15 @@ vi.mock('../../services/tokenStorage', () => ({
   setTokens: storage.setTokens,
   clearTokens: storage.clearTokens,
   flushTokenStorage: storage.flushTokenStorage,
+  isSharedWithOtherTabs: storage.isSharedWithOtherTabs,
+  followSharedSession: storage.followSharedSession,
 }));
 
 import {
   accessTokenExpiresAt, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, getFreshAccessToken,
   endSessionRenewals, isDefinitiveRefreshFailure, SessionLostError, setSessionLostNavigation, _resetSessionForTests,
-  TOKEN_EXPIRY_SKEW_MS, REFRESH_TIMEOUT_MS, API_BASE,
+  _setRefreshLocksForTests, type RefreshLockManager,
+  TOKEN_EXPIRY_SKEW_MS, REFRESH_TIMEOUT_MS, REFRESH_RETRY_DELAY_MS, REFRESH_LOCK_NAME, REFRESH_LOCK_WAIT_MS, API_BASE,
 } from '../../services/session';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -61,12 +74,29 @@ function networkError(): unknown {
 
 const navigate = vi.fn();
 
+function axiosStatus(status: number): unknown {
+  return Object.assign(new Error(`Request failed with status code ${status}`), { isAxiosError: true, response: { status } });
+}
+function timeoutError(): unknown {
+  return Object.assign(new Error('timeout of 15000ms exceeded'), { isAxiosError: true, code: 'ECONNABORTED' });
+}
+const renewed = (access: string, refresh: string) => ({ data: { data: { accessToken: access, refreshToken: refresh } } });
+const freshToken = () => jwtWithExp(Math.floor(Date.now() / 1000) + 15 * 60);
+const expiredToken = () => jwtWithExp(Math.floor(Date.now() / 1000) - 60);
+
 beforeEach(() => {
   vi.clearAllMocks();
   _resetSessionForTests();
   setSessionLostNavigation(navigate);
   storage.access = 'access-old';
   storage.refresh = 'refresh-old';
+  storage.shared = false;
+  storage.page = undefined;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -160,20 +190,32 @@ describe('session — refreshAccessToken', () => {
 
   it('a TRANSIENT failure (no answer) fails this renewal only: tokens untouched, no login page', async () => {
     // A laptop that woke up before its network did used to be signed out here
-    http.post.mockRejectedValueOnce(networkError());
+    vi.useFakeTimers();
+    http.post.mockRejectedValueOnce(networkError()).mockRejectedValueOnce(networkError());
 
-    await expect(refreshAccessToken()).rejects.toMatchObject({ message: 'Network Error' });
+    const pending = refreshAccessToken();
+    const settled = expect(pending).rejects.toMatchObject({ message: 'Network Error' });
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await settled;
 
+    expect(http.post).toHaveBeenCalledTimes(2); // the one prompt retry, no more
     expect(storage.clearTokens).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
     expect(storage.access).toBe('access-old');
   });
 
   it('a server error (5xx) and a 429 are transient too', async () => {
+    vi.useFakeTimers();
     for (const status of [500, 503, 429]) {
-      http.post.mockRejectedValueOnce(Object.assign(new Error(`status ${status}`), { isAxiosError: true, response: { status } }));
-      await expect(refreshAccessToken()).rejects.toMatchObject({ message: `status ${status}` });
+      http.post.mockReset();
+      http.post.mockRejectedValue(Object.assign(new Error(`status ${status}`), { isAxiosError: true, response: { status } }));
+      const settled = expect(refreshAccessToken()).rejects.toMatchObject({ message: `status ${status}` });
+      await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+      await settled;
+      // a 5xx got one prompt retry; a 429 none (retrying into the limiter only spends it)
+      expect(http.post).toHaveBeenCalledTimes(status === 429 ? 1 : 2);
     }
+    http.post.mockReset();
     expect(storage.clearTokens).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
   });
@@ -424,5 +466,336 @@ describe('session — a device clock out of step with the server', () => {
     // and the offset would call it expired at the right moment, not 20 min late
     expect(shouldRenewBeforeSending(renewed!)).toBe(false);
     expect(isAccessTokenFresh(renewed!, Date.now() + AHEAD_MS + 15 * 60_000)).toBe(false);
+  });
+});
+
+describe('session — the prompt retry after a refresh that got no usable answer', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  it('a lost answer (timeout) is asked again ONCE, about 3 s later, inside the same renewal: callers share it', async () => {
+    http.post.mockRejectedValueOnce(timeoutError()).mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+
+    const a = refreshAccessToken();
+    const b = refreshAccessToken();
+    expect(b).toBe(a);
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS - 1);
+    expect(http.post).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(a).resolves.toBe('access-new');
+    expect(http.post).toHaveBeenCalledTimes(2);
+    // the same refresh token both times: within the grace window the server answers it again
+    expect(http.post.mock.calls[1][1]).toEqual({ refreshToken: 'refresh-old', client: 'web' });
+    expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
+  });
+
+  it('a 5xx gets the retry too; a 429, a 400 and a refusal never do', async () => {
+    http.post.mockRejectedValueOnce(axiosStatus(502)).mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const first = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await expect(first).resolves.toBe('access-new');
+    expect(http.post).toHaveBeenCalledTimes(2);
+
+    for (const status of [429, 400]) {
+      http.post.mockReset();
+      http.post.mockRejectedValueOnce(axiosStatus(status));
+      const settled = expect(refreshAccessToken()).rejects.toMatchObject({ response: { status } });
+      await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS * 2);
+      await settled;
+      expect(http.post).toHaveBeenCalledTimes(1);
+    }
+
+    http.post.mockReset();
+    http.post.mockRejectedValueOnce(axios401());
+    const refused = expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS * 2);
+    await refused;
+    expect(http.post).toHaveBeenCalledTimes(1);
+    http.post.mockReset();
+  });
+
+  it('nothing is retried while the page says it is offline, nor when it went offline during the wait', async () => {
+    vi.stubGlobal('navigator', { onLine: false });
+    http.post.mockRejectedValueOnce(networkError());
+    const settledOffline = expect(refreshAccessToken()).rejects.toMatchObject({ message: 'Network Error' });
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await settledOffline;
+    expect(http.post).toHaveBeenCalledTimes(1);
+
+    const nav = { onLine: true };
+    vi.stubGlobal('navigator', nav);
+    http.post.mockRejectedValueOnce(networkError());
+    const settled = expect(refreshAccessToken()).rejects.toMatchObject({ message: 'Network Error' });
+    await vi.advanceTimersByTimeAsync(1);
+    nav.onLine = false;
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await settled;
+    expect(http.post).toHaveBeenCalledTimes(2);
+  });
+
+  it('a logout during the wait ends it: no second request, nothing stored, no navigation', async () => {
+    http.post.mockRejectedValueOnce(networkError()).mockResolvedValueOnce(renewed('access-x', 'refresh-x'));
+    const settled = expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    await vi.advanceTimersByTimeAsync(1);
+    endSessionRenewals();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await settled;
+
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    http.post.mockReset();
+  });
+
+  it('a pair stored during the wait (another tab renewed) is the answer when fresh: no second request; an expired one fails the renewal', async () => {
+    const fresh = freshToken();
+    http.post.mockRejectedValueOnce(networkError());
+    const pending = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(1);
+    storage.access = fresh;
+    storage.refresh = 'refresh-from-other-tab';
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await expect(pending).resolves.toBe(fresh);
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(storage.setTokens).not.toHaveBeenCalled();
+
+    storage.access = 'access-old';
+    storage.refresh = 'refresh-old';
+    http.post.mockRejectedValueOnce(networkError());
+    const settled = expect(refreshAccessToken()).rejects.toMatchObject({ message: 'Network Error' });
+    await vi.advanceTimersByTimeAsync(1);
+    storage.access = expiredToken();
+    storage.refresh = 'refresh-from-other-tab-2';
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await settled;
+    expect(http.post).toHaveBeenCalledTimes(2);
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+  });
+
+  it('the retry refused with a newer pair stored meanwhile still adopts it: at most three requests in all', async () => {
+    http.post
+      .mockRejectedValueOnce(networkError())
+      .mockImplementationOnce(async () => {
+        storage.access = expiredToken();
+        storage.refresh = 'refresh-from-other-tab';
+        throw axios401();
+      })
+      .mockResolvedValueOnce(renewed('access-3', 'refresh-3'));
+
+    const pending = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await expect(pending).resolves.toBe('access-3');
+    expect(http.post).toHaveBeenCalledTimes(3);
+    expect(http.post.mock.calls[2][1]).toEqual({ refreshToken: 'refresh-from-other-tab', client: 'web' });
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — an answer is stored only while the token it answers is still the stored one', () => {
+  it('a pair stored while the request was out (another tab, a credential change) stands: the answer is dropped', async () => {
+    let finish!: (v: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    const pending = refreshAccessToken();
+    storage.access = 'access-from-other-tab';
+    storage.refresh = 'refresh-from-other-tab';
+    finish(renewed('access-late', 'refresh-late'));
+
+    await expect(pending).resolves.toBe('access-from-other-tab');
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(storage.refresh).toBe('refresh-from-other-tab');
+  });
+
+  it('a pair removed while the request was out (another tab signed out) is not brought back: SessionLostError, no navigation', async () => {
+    let finish!: (v: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    const pending = refreshAccessToken();
+    storage.access = null;
+    storage.refresh = null;
+    finish(renewed('access-late', 'refresh-late'));
+
+    await expect(pending).rejects.toBeInstanceOf(SessionLostError);
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('an answer without a token pair stores nothing and fails the renewal only', async () => {
+    http.post.mockResolvedValueOnce({ data: { data: {} } });
+
+    await expect(refreshAccessToken()).rejects.toThrow('The refresh answer carried no token pair');
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — the browser build reads the shared storage again before every refresh', () => {
+  beforeEach(() => {
+    storage.shared = true;
+    _setRefreshLocksForTests(null); // a page without Web Locks (an insecure origin): the re-read alone
+  });
+
+  it('a tab with stale memory adopts the pair another tab stored when its access token is fresh, and sends nothing', async () => {
+    const fresh = freshToken();
+    storage.page = { access: fresh, refresh: 'refresh-from-other-tab' };
+
+    await expect(refreshAccessToken()).resolves.toBe(fresh);
+
+    expect(http.post).not.toHaveBeenCalled();
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(storage.refresh).toBe('refresh-from-other-tab');
+  });
+
+  it('with an expired access token it sends the NEWER refresh token, never the replaced one', async () => {
+    storage.page = { access: expiredToken(), refresh: 'refresh-from-other-tab' };
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+
+    await expect(refreshAccessToken()).resolves.toBe('access-new');
+
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(http.post.mock.calls[0][1]).toEqual({ refreshToken: 'refresh-from-other-tab', client: 'web' });
+  });
+
+  it('reads again before acting on a refusal: a newer pair another tab stored is adopted instead of signing out', async () => {
+    const fresh = freshToken();
+    http.post.mockImplementationOnce(async () => {
+      storage.page = { access: fresh, refresh: 'refresh-from-other-tab' };
+      throw axios401();
+    });
+
+    await expect(refreshAccessToken()).resolves.toBe(fresh);
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('reads again before storing an answer: a pair another tab stored meanwhile stands', async () => {
+    http.post.mockImplementationOnce(async () => {
+      storage.page = { access: 'access-from-other-tab', refresh: 'refresh-from-other-tab' };
+      return renewed('access-late', 'refresh-late');
+    });
+
+    await expect(refreshAccessToken()).resolves.toBe('access-from-other-tab');
+    expect(storage.setTokens).not.toHaveBeenCalled();
+  });
+
+  it('the desktop app (a store shared with no tab) asks for no lock', async () => {
+    storage.shared = false;
+    const request = vi.fn();
+    _setRefreshLocksForTests({ request });
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+
+    await expect(refreshAccessToken()).resolves.toBe('access-new');
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — the browser build renews under one Web Lock', () => {
+  /** A lock manager of one exclusive lock: grants in order, honours the abort signal while waiting. */
+  function fakeLocks() {
+    const queue: Array<() => void> = [];
+    let held = false;
+    const options: unknown[] = [];
+    const manager: RefreshLockManager = {
+      request: (name, opts, callback) => {
+        options.push({ name, ...opts });
+        return new Promise((resolve, reject) => {
+          const grant = () => {
+            held = true;
+            Promise.resolve()
+              .then(callback)
+              .then(resolve, reject)
+              .finally(() => {
+                held = false;
+                queue.shift()?.();
+              });
+          };
+          opts.signal.addEventListener('abort', () => {
+            const at = queue.indexOf(grant);
+            if (at >= 0) {
+              queue.splice(at, 1);
+              reject(Object.assign(new Error('The request was aborted'), { name: 'AbortError' }));
+            }
+          });
+          if (held) queue.push(grant);
+          else grant();
+        });
+      },
+    };
+    return { manager, options, hold: () => { held = true; }, release: () => { held = false; queue.shift()?.(); } };
+  }
+
+  beforeEach(() => {
+    storage.shared = true;
+  });
+
+  it('runs the refresh under the named lock, exclusive, with a signal — never steal, never ifAvailable', async () => {
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+
+    await expect(refreshAccessToken()).resolves.toBe('access-new');
+
+    expect(locks.options).toHaveLength(1);
+    expect(locks.options[0]).toMatchObject({ name: REFRESH_LOCK_NAME, mode: 'exclusive' });
+    expect(Object.keys(locks.options[0] as object).sort()).toEqual(['mode', 'name', 'signal']);
+  });
+
+  it("a renewal that waited for another tab's finds that tab's pair after the lock and sends nothing", async () => {
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    locks.hold(); // another tab is renewing
+    const pending = refreshAccessToken();
+    await Promise.resolve();
+    expect(http.post).not.toHaveBeenCalled();
+
+    // the other tab stored its renewal, then let the lock go
+    const fresh = freshToken();
+    storage.page = { access: fresh, refresh: 'refresh-from-other-tab' };
+    locks.release();
+
+    await expect(pending).resolves.toBe(fresh);
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('the wait for the lock is bounded: past it the renewal goes on with the re-read alone', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    locks.hold(); // a frozen tab that never lets go
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+
+    const pending = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(REFRESH_LOCK_WAIT_MS - 1);
+    expect(http.post).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(pending).resolves.toBe('access-new');
+    expect(storage.followSharedSession).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('held the renewal lock too long'));
+    warn.mockRestore();
+  });
+
+  it('a lock manager that refuses leaves the renewal to the re-read alone', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    _setRefreshLocksForTests({ request: () => Promise.reject(new Error('SecurityError')) });
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+
+    await expect(refreshAccessToken()).resolves.toBe('access-new');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('lock is not available'), 'SecurityError');
+    warn.mockRestore();
+  });
+
+  it("an error of the renewal itself, inside the lock, is not mistaken for the lock's: no second run", async () => {
+    vi.useFakeTimers();
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    http.post.mockRejectedValueOnce(axiosStatus(429));
+
+    const settled = expect(refreshAccessToken()).rejects.toMatchObject({ response: { status: 429 } });
+    await vi.advanceTimersByTimeAsync(REFRESH_LOCK_WAIT_MS);
+    await settled;
+    expect(http.post).toHaveBeenCalledTimes(1);
   });
 });

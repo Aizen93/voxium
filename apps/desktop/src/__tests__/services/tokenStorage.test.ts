@@ -3,6 +3,7 @@ import {
   getAccessToken, getRefreshToken, setTokens, clearTokens, isRemembered,
   getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken,
   hydrateTokens, flushTokenStorage, createKeychainSessionStore, createWebSessionStore, webSessionStore,
+  followSharedSession, isSharedWithOtherTabs,
   TOKEN_STORAGE_FLUSH_TIMEOUT_MS, _resetTokenStorageForTests,
   type SessionStore,
 } from '../../services/tokenStorage';
@@ -857,6 +858,55 @@ describe('tokenStorage — the web store follows the other tabs (the read-throug
 
     expect(getAccessToken()).toBe('a-s');
     expect(isRemembered()).toBe(false);
+  });
+
+  it('followSharedSession brings a memory that missed the events up to date (a tab back from the back-forward cache)', async () => {
+    setTokens('a1', 'r1', true);
+    await flushTokenStorage();
+    // another tab renewed while this one was frozen: no event reached it
+    localStorage.setItem(ACCESS, 'a2');
+    localStorage.setItem(REFRESH, 'r2');
+    localStorage.setItem(TRUSTED, 't2');
+    expect(getRefreshToken()).toBe('r1');
+
+    followSharedSession();
+
+    expect(getAccessToken()).toBe('a2');
+    expect(getRefreshToken()).toBe('r2');
+    expect(getTrustedDeviceToken()).toBe('t2');
+    expect(isSharedWithOtherTabs()).toBe(true);
+
+    // and a sign-out it missed
+    localStorage.removeItem(ACCESS);
+    localStorage.removeItem(REFRESH);
+    followSharedSession();
+    expect(getRefreshToken()).toBeNull();
+  });
+
+  it('followSharedSession never puts the storage back over a write of this tab still queued', async () => {
+    setTokens('a1', 'r1', true);
+    await flushTokenStorage();
+    setTokens('a2', 'r2'); // queued, not on the page yet
+    followSharedSession();
+    expect(getRefreshToken()).toBe('r2');
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe('r2');
+  });
+
+  it('followSharedSession leaves a not-remembered session alone when no remembered one is stored, and reads nothing in the desktop app', async () => {
+    setTokens('a-s', 'r-s', false);
+    await flushTokenStorage();
+    followSharedSession();
+    expect(getRefreshToken()).toBe('r-s');
+
+    const keychain = fakeKeychain({ tokens: pair('a-kc', 'r-kc') });
+    _resetTokenStorageForTests(officialStore(keychain.invoke));
+    await hydrateTokens();
+    localStorage.setItem(ACCESS, 'a-x');
+    localStorage.setItem(REFRESH, 'r-x');
+    followSharedSession();
+    expect(getAccessToken()).toBe('a-kc');
+    expect(isSharedWithOtherTabs()).toBe(false);
   });
 
   it('the keychain store ignores storage events (the desktop app has one window)', async () => {

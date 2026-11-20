@@ -1,7 +1,10 @@
 import axios from 'axios';
 import type { RefreshRequest } from '@voxium/shared';
 import { API_BASE } from './apiBase';
-import { getAccessToken, getRefreshToken, setTokens, clearTokens, flushTokenStorage } from './tokenStorage';
+import {
+  getAccessToken, getRefreshToken, setTokens, clearTokens, flushTokenStorage,
+  followSharedSession, isSharedWithOtherTabs,
+} from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
 import { readTokenClaims } from './tokenClaims';
 import { sessionClientHint } from './sessionClient';
@@ -24,6 +27,27 @@ import { sessionClientHint } from './sessionClient';
  * token to send, ends the session — a transient failure is reported to the
  * caller and the tokens stay; a renewal that resolves after a logout stores
  * nothing.
+ *
+ * Every renewal REPLACES the refresh token: the server answers the one it
+ * just replaced again for a short grace window and treats it as reused after
+ * that, which ends the session once enforcement is on. So the renewal sends
+ * only the newest token this browser holds, and stores an answer only while
+ * the token it sent is still the stored one:
+ *
+ * - in the browser build every tab of one browser shares the stored pair
+ *   (tokenStorage.ts). Before each refresh request the tab reads the page's
+ *   storage again (a tab back from the back-forward cache, or frozen, missed
+ *   the `storage` events that kept its memory current), and where Web Locks
+ *   exist the renewal runs under one named lock, the re-read after taking it,
+ *   so two tabs never renew together: the second finds the first one's pair
+ *   and sends nothing. The wait for the lock is bounded; at the bound the
+ *   renewal goes on with the re-read alone;
+ * - a refresh that got no usable answer (a timeout, a transport error, a
+ *   5xx) is sent once more shortly after, inside the same renewal, while the
+ *   page is online and nothing else stored a pair meanwhile: an answer lost
+ *   on the way back is then recovered within the grace window.
+ *
+ * The desktop app has one webview: no other tab, no lock, nothing to re-read.
  */
 
 /** The REST base every request is relative to; also the root the incoming-webhook URL is composed on (services/webhooks.ts). */
@@ -38,9 +62,36 @@ export const TOKEN_EXPIRY_SKEW_MS = 30_000;
  *  connection after a wake used to hold them all until the browser gave up. */
 export const REFRESH_TIMEOUT_MS = 15_000;
 
-/** Refresh requests one renewal may send: the first, and one more with a
- *  newer pair stored while the first was out (see refreshAccessToken). */
-const MAX_REFRESH_ATTEMPTS = 2;
+/**
+ * After a refresh that got no usable answer (a timeout, a transport error, a
+ * 5xx; never a 429, never a refusal), the one prompt retry goes out this much
+ * later. The server answers the token it just replaced again for 120 s
+ * (shared `SESSIONS.REUSE_GRACE_SECONDS`): a retry within that recovers an
+ * answer that was lost after the server had already rotated the session.
+ */
+export const REFRESH_RETRY_DELAY_MS = 3_000;
+
+/**
+ * The Web Lock every renewal of this browser's tabs runs under (the browser
+ * build, where Web Locks exist: a secure origin). Never requested with
+ * `steal` or `ifAvailable`: a renewal must never take the lock from a tab
+ * that is in the middle of its request.
+ */
+export const REFRESH_LOCK_NAME = 'voxium-session-refresh';
+
+/**
+ * The longest a renewal waits for another tab's to release the lock: more
+ * than one renewal's own worst case (two requests of REFRESH_TIMEOUT_MS and
+ * the retry's wait), so only a tab that holds the lock without renewing (a
+ * frozen page) is outwaited. At the bound the renewal goes on without it,
+ * with the re-read of the storage alone (the grace window is the backstop).
+ */
+export const REFRESH_LOCK_WAIT_MS = 35_000;
+
+/** The part of the Web Locks API the renewal uses (injectable for tests). */
+export interface RefreshLockManager {
+  request(name: string, options: { mode: 'exclusive'; signal: AbortSignal }, callback: () => Promise<unknown>): Promise<unknown>;
+}
 
 /** The refresh token was refused for good (revoked, expired, banned), there
  *  was none to send, or the session was ended (logout) while a renewal was
@@ -165,47 +216,114 @@ export function handleSessionLost(): void {
  * 401 retry queue and the socket's expired handshake typically arrive
  * together on resume). Resolves the new access token, already stored.
  *
+ * In the browser build the renewal first reads the page's storage again,
+ * under the renewal lock where there is one: when another tab stored a newer
+ * pair than the one this renewal was about to send, and its access token is
+ * fresh, that pair is the answer and nothing is sent; with an expired access
+ * token, its newer refresh token is the one sent.
+ *
+ * A refresh that got no usable answer (timeout, transport error, 5xx) is
+ * sent once more after REFRESH_RETRY_DELAY_MS, only while the page is not
+ * offline, the session has not ended and the stored refresh token is still
+ * the one sent. Never after a 429 or a refusal.
+ *
+ * An answer is stored only while the stored refresh token is still the one
+ * this renewal sent: when another tab, or a credential change of this
+ * client, stored a pair while the request was out, the answer is dropped and
+ * the caller gets the access token stored now.
+ *
  * A refusal ends the session only while the refused refresh token is still
- * the stored one. When a newer pair was stored meanwhile (another tab, or a
- * password change of this client), its access token is answered if fresh,
- * else ONE more refresh goes out with its refresh token.
+ * the stored one. When a newer pair was stored meanwhile, its access token is
+ * answered if fresh, else ONE more refresh goes out with its refresh token.
+ * At most three requests in all: the first, the prompt retry and that one.
  *
  * Throws `SessionLostError` after a definitive refusal — and has already
  * ended the session (tokens cleared, login page) — or when the session was
- * ended (logout) while the request was out: nothing is stored then. Throws
- * the transport or server error otherwise, with the tokens untouched: the
- * caller's request fails, the next one tries again.
+ * ended (logout, another tab's sign-out) while the request was out: nothing
+ * is stored then. Throws the transport or server error otherwise, with the
+ * tokens untouched: the caller's request fails, the next one tries again.
  */
 export function refreshAccessToken(): Promise<string> {
   if (refreshInFlight) return refreshInFlight;
   const epoch = sessionEpoch;
-  const run = (async () => {
-    let refreshToken = getRefreshToken();
-    if (!refreshToken) {
-      handleSessionLost();
-      throw new SessionLostError('No refresh token');
-    }
-    let answer: { accessToken: string; refreshToken: string } | null = null;
-    for (let attempt = 1; answer === null; attempt++) {
-      try {
-        // Plain axios on purpose: the api instance's interceptors would try to
-        // refresh a refused refresh
-        const body: RefreshRequest = { refreshToken, client: sessionClientHint() };
-        const { data } = await axios.post(`${API_BASE}/auth/refresh`, body, { timeout: REFRESH_TIMEOUT_MS });
-        answer = data.data as { accessToken: string; refreshToken: string };
-      } catch (err) {
-        if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
-        if (!isDefinitiveRefreshFailure(err)) throw err;
+  // The token this renewal was asked for with: another tab's newer pair,
+  // found once the lock is held, makes the request unnecessary
+  const intended = getRefreshToken();
+  const run = (async () => underRefreshLock(() => renew(epoch, intended)))().finally(() => {
+    if (refreshInFlight === run) refreshInFlight = null;
+  });
+  refreshInFlight = run;
+  return run;
+}
+
+/** The answer of a refresh, checked: two strings, or a transient failure (the tokens stay). */
+function refreshAnswerOf(data: unknown): { accessToken: string; refreshToken: string } {
+  const answer = (data as { data?: { accessToken?: unknown; refreshToken?: unknown } } | null)?.data;
+  if (typeof answer?.accessToken !== 'string' || typeof answer.refreshToken !== 'string' || !answer.accessToken || !answer.refreshToken) {
+    throw new Error('The refresh answer carried no token pair');
+  }
+  return { accessToken: answer.accessToken, refreshToken: answer.refreshToken };
+}
+
+/** A refresh that got no answer the client can act on: no response at all (timeout, transport) or a 5xx. Never a 429. */
+function gotNoUsableAnswer(err: unknown): boolean {
+  if (!axios.isAxiosError(err)) return false;
+  const status = err.response?.status;
+  return status === undefined || status >= 500;
+}
+
+/** The page does not say it is offline (a node test process has no navigator). */
+function mayRetryNow(): boolean {
+  return typeof navigator === 'undefined' || navigator.onLine !== false;
+}
+
+/** The stored access token when it is fresh, else null. */
+function freshStoredAccessToken(): string | null {
+  const stored = getAccessToken();
+  return stored && isAccessTokenFresh(stored) ? stored : null;
+}
+
+/** The renewal itself, lock already handled. */
+async function renew(epoch: number, intended: string | null): Promise<string> {
+  if (epoch !== sessionEpoch) throw new SessionLostError('Session ended before the renewal');
+  // What other tabs stored since this tab's memory last followed them
+  followSharedSession();
+  let refreshToken = getRefreshToken();
+  if (!refreshToken) {
+    handleSessionLost();
+    throw new SessionLostError('No refresh token');
+  }
+  if (refreshToken !== intended) {
+    // Another tab renewed while this one waited (for the lock, or with its
+    // memory frozen): its pair is the answer when it is fresh
+    const adopted = freshStoredAccessToken();
+    if (adopted) return adopted;
+  }
+  let promptRetried = false;
+  let newerTried = false;
+  for (;;) {
+    let answer: { accessToken: string; refreshToken: string };
+    try {
+      // Plain axios on purpose: the api instance's interceptors would try to
+      // refresh a refused refresh
+      const body: RefreshRequest = { refreshToken, client: sessionClientHint() };
+      const { data } = await axios.post(`${API_BASE}/auth/refresh`, body, { timeout: REFRESH_TIMEOUT_MS });
+      answer = refreshAnswerOf(data);
+    } catch (err) {
+      if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
+      if (isDefinitiveRefreshFailure(err)) {
         // The refused token is no longer the stored one: another tab (they
         // share the page storage in the browser build) or this client's own
-        // password change stored a newer pair while the request was out.
+        // credential change stored a newer pair while the request was out.
         // Ending the session now would clear THAT pair — every tab follows
         // the removal — and sign out a session that is still valid.
+        followSharedSession();
         const stored = getRefreshToken();
         if (stored && stored !== refreshToken) {
-          const storedAccess = getAccessToken();
-          if (storedAccess && isAccessTokenFresh(storedAccess)) return storedAccess;
-          if (attempt < MAX_REFRESH_ATTEMPTS) {
+          const adopted = freshStoredAccessToken();
+          if (adopted) return adopted;
+          if (!newerTried) {
+            newerTried = true;
             refreshToken = stored;
             continue;
           }
@@ -216,17 +334,81 @@ export function refreshAccessToken(): Promise<string> {
         handleSessionLost();
         throw new SessionLostError(err instanceof Error ? err.message : 'Refresh refused');
       }
+      if (promptRetried || !gotNoUsableAnswer(err) || !mayRetryNow()) throw err;
+      promptRetried = true;
+      await new Promise<void>((resolve) => setTimeout(resolve, REFRESH_RETRY_DELAY_MS));
+      if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
+      followSharedSession();
+      if (getRefreshToken() !== refreshToken) {
+        // Another tab stored a pair during the wait: its answer is ours
+        const adopted = freshStoredAccessToken();
+        if (adopted) return adopted;
+        throw err;
+      }
+      if (!mayRetryNow()) throw err;
+      continue;
     }
     // Logged out while the request was out: this answer belongs to nobody
     if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
+    followSharedSession();
+    if (getRefreshToken() !== refreshToken) {
+      // Another tab (or a credential change of this client) stored a pair
+      // while the request was out: that pair stands, this answer is dropped
+      const current = getAccessToken();
+      if (current) return current;
+      throw new SessionLostError('The session was ended while the renewal was out');
+    }
     setTokens(answer.accessToken, answer.refreshToken);
     learnServerClock(answer.accessToken);
     return answer.accessToken;
-  })().finally(() => {
-    if (refreshInFlight === run) refreshInFlight = null;
-  });
-  refreshInFlight = run;
-  return run;
+  }
+}
+
+// The page's Web Locks, unless a test installed its own (null: none)
+let lockManagerOverride: RefreshLockManager | null | undefined;
+
+/** The lock manager the renewal runs under: none in the desktop app, nor where the page has none. */
+function refreshLocks(): RefreshLockManager | null {
+  if (!isSharedWithOtherTabs()) return null;
+  if (lockManagerOverride !== undefined) return lockManagerOverride;
+  const locks = typeof navigator !== 'undefined' ? (navigator as { locks?: RefreshLockManager }).locks : undefined;
+  return locks && typeof locks.request === 'function' ? locks : null;
+}
+
+/**
+ * Run `work` under the renewal lock where the browser has one, waiting for it
+ * at most REFRESH_LOCK_WAIT_MS: past that, or when the lock manager refuses,
+ * `work` runs without it. The wait is ended with an abort signal, which
+ * cannot touch a lock once granted: no tab ever loses the lock mid-request.
+ */
+async function underRefreshLock<T>(work: () => Promise<T>): Promise<T> {
+  const locks = refreshLocks();
+  if (!locks) return work();
+  const waited = new AbortController();
+  const timer = setTimeout(() => waited.abort(), REFRESH_LOCK_WAIT_MS);
+  let granted = false;
+  try {
+    return (await locks.request(REFRESH_LOCK_NAME, { mode: 'exclusive', signal: waited.signal }, () => {
+      granted = true;
+      clearTimeout(timer);
+      return work();
+    })) as T;
+  } catch (err) {
+    // An error of the renewal itself, thrown inside the lock
+    if (granted) throw err;
+    clearTimeout(timer);
+    if (waited.signal.aborted) {
+      console.warn('[Session] Another tab held the renewal lock too long — renewing without it');
+    } else {
+      console.warn('[Session] The renewal lock is not available — renewing without it:', err instanceof Error ? err.message : String(err));
+    }
+    return work();
+  }
+}
+
+/** @internal tests: the lock manager the renewal uses (undefined: the page's own). */
+export function _setRefreshLocksForTests(locks: RefreshLockManager | null | undefined): void {
+  lockManagerOverride = locks;
 }
 
 /** A renewed token's `iat` is the server's "now": the clock offset follows it. */
@@ -260,4 +442,5 @@ export function _resetSessionForTests(): void {
   sessionEpoch = 0;
   clockOffsetMs = 0;
   proactiveRenewalSuspended = false;
+  lockManagerOverride = undefined;
 }

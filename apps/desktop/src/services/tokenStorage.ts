@@ -457,6 +457,10 @@ let hydration: Promise<boolean> | null = null;
 // put the stored values back over them
 let tokensWritten = false;
 let trustedWritten = false;
+// Writes of the pair this tab queued and the store has not applied yet: the
+// memory is newer than the page's storage meanwhile, and a re-read of that
+// storage (followSharedSession) must not put the older pair back over it
+let pendingTokenWrites = 0;
 
 function enqueue(what: string, op: (target: SessionStore) => void | Promise<void>): void {
   const target = store;
@@ -469,6 +473,20 @@ function enqueue(what: string, op: (target: SessionStore) => void | Promise<void
     .catch((err) => {
       console.error(`[Session] ${what}:`, describe(err));
     });
+}
+
+/** A write of the pair: queued like any other, counted until the store has it (or refused it). */
+function enqueueTokenWrite(what: string, op: (target: SessionStore) => void | Promise<void>): void {
+  const queuedIn = generation;
+  pendingTokenWrites++;
+  enqueue(what, async (target) => {
+    try {
+      await op(target);
+    } finally {
+      // An operation of a store the test reset replaced settles nothing of today's count
+      if (queuedIn === generation) pendingTokenWrites = Math.max(0, pendingTokenWrites - 1);
+    }
+  });
 }
 
 export function getAccessToken(): string | null {
@@ -494,7 +512,7 @@ export function setTokens(accessToken: string, refreshToken: string, rememberMe?
   const remembered = rememberMe ?? memory.remembered;
   memory = { ...memory, accessToken, refreshToken, remembered };
   tokensWritten = true;
-  enqueue('Could not persist the session', (s) => s.saveTokens(accessToken, refreshToken, remembered));
+  enqueueTokenWrite('Could not persist the session', (s) => s.saveTokens(accessToken, refreshToken, remembered));
 }
 
 /** Forget the pair: in memory and in the page's storage now, in the store in turn. */
@@ -502,7 +520,7 @@ export function clearTokens(): void {
   memory = { ...memory, accessToken: null, refreshToken: null };
   tokensWritten = true;
   removeLegacyPairs();
-  enqueue('Could not clear the stored session', (s) => s.clearTokens());
+  enqueueTokenWrite('Could not clear the stored session', (s) => s.clearTokens());
 }
 
 export function getTrustedDeviceToken(): string | null {
@@ -600,30 +618,69 @@ function isWebStore(s: SessionStore): s is WebSessionStore {
   return 'apiOrigin' in s;
 }
 
-function followOtherTabs(event: StorageEvent): void {
-  if (!isWebStore(store) || event.storageArea !== localStorage) return;
-  const { apiOrigin } = store;
-  // An unmarked value is the page's own, as at load; one marked for another
-  // server is not this build's to send anywhere
-  const markedOwn = (originKey: string) => {
-    const mark = localStorage.getItem(originKey);
-    return mark === null || mark === apiOrigin;
-  };
-  const wholeStore = event.key === null;
-  if (wholeStore || event.key === TRUSTED_DEVICE_KEY || event.key === TRUSTED_DEVICE_ORIGIN_KEY) {
-    memory = { ...memory, trustedDeviceToken: markedOwn(TRUSTED_DEVICE_ORIGIN_KEY) ? localStorage.getItem(TRUSTED_DEVICE_KEY) : null };
-  }
-  if (wholeStore || event.key === ACCESS_KEY || event.key === REFRESH_KEY || event.key === SESSION_ORIGIN_KEY) {
-    const pair = markedOwn(SESSION_ORIGIN_KEY) ? readPair(localStorage) : null;
-    if (pair) {
-      memory = { ...memory, accessToken: pair.accessToken, refreshToken: pair.refreshToken, remembered: true };
-    } else if (memory.remembered) {
-      memory = { ...memory, accessToken: null, refreshToken: null };
-    }
+/**
+ * Whether the session store is shared with other tabs (the browser build:
+ * every tab of one browser reads and writes the same page storage). False in
+ * the desktop app, whose one webview holds the session alone: there the
+ * renewal takes no lock and reads nothing again.
+ */
+export function isSharedWithOtherTabs(): boolean {
+  return isWebStore(store);
+}
+
+/** An unmarked value is the page's own, as at load; one marked for another server is not this build's to send anywhere. */
+function markedOwn(originKey: string, apiOrigin: string): boolean {
+  const mark = localStorage.getItem(originKey);
+  return mark === null || mark === apiOrigin;
+}
+
+/** The memory follows the trusted-device token another tab stored (or removed). */
+function followTrustedDeviceToken(apiOrigin: string): void {
+  memory = { ...memory, trustedDeviceToken: markedOwn(TRUSTED_DEVICE_ORIGIN_KEY, apiOrigin) ? localStorage.getItem(TRUSTED_DEVICE_KEY) : null };
+}
+
+/** The memory follows the remembered pair another tab stored (any tab's sign-in takes over every tab), or its removal. */
+function followRememberedPair(apiOrigin: string): void {
+  const pair = markedOwn(SESSION_ORIGIN_KEY, apiOrigin) ? readPair(localStorage) : null;
+  if (pair) {
+    memory = { ...memory, accessToken: pair.accessToken, refreshToken: pair.refreshToken, remembered: true };
+  } else if (memory.remembered) {
+    memory = { ...memory, accessToken: null, refreshToken: null };
   }
 }
 
-if (typeof window !== 'undefined') {
+function followOtherTabs(event: StorageEvent): void {
+  if (!isWebStore(store) || event.storageArea !== localStorage) return;
+  const { apiOrigin } = store;
+  const wholeStore = event.key === null;
+  if (wholeStore || event.key === TRUSTED_DEVICE_KEY || event.key === TRUSTED_DEVICE_ORIGIN_KEY) {
+    followTrustedDeviceToken(apiOrigin);
+  }
+  if (wholeStore || event.key === ACCESS_KEY || event.key === REFRESH_KEY || event.key === SESSION_ORIGIN_KEY) {
+    followRememberedPair(apiOrigin);
+  }
+}
+
+/**
+ * Bring the memory up to date with what other tabs stored, as the `storage`
+ * events would have: the renewal calls it before every refresh request,
+ * before acting on a refusal and before storing an answer. A tab whose memory
+ * missed those events (it sat in the back-forward cache, or the browser froze
+ * it) would otherwise send a refresh token another tab has already replaced,
+ * which the server treats as reused once its grace window has passed, ending
+ * the session for every tab. Nothing is read while a write of this tab's own
+ * is still queued (its memory is newer than the storage then), and nothing at
+ * all outside the browser build.
+ */
+export function followSharedSession(): void {
+  if (!isWebStore(store) || pendingTokenWrites > 0) return;
+  const { apiOrigin } = store;
+  followTrustedDeviceToken(apiOrigin);
+  followRememberedPair(apiOrigin);
+}
+
+// The desktop app has one webview: nothing to follow there
+if (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) {
   window.addEventListener('storage', followOtherTabs);
 }
 
@@ -637,4 +694,5 @@ export function _resetTokenStorageForTests(backend?: SessionStore): void {
   hydration = null;
   tokensWritten = false;
   trustedWritten = false;
+  pendingTokenWrites = 0;
 }
