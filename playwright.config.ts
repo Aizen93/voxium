@@ -13,9 +13,9 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   workers: 1,
   reporter: process.env.CI ? 'github' : 'html',
-  // The first CI run measured the runner at ~2x local wall time (5.7m vs
-  // 2.8m for the suite), so a multi-step test that fits 30s locally is
-  // marginal there. Locally the tight budget stays — it catches slowness.
+  // Shared CI runners take about twice the local wall time for this suite, so
+  // a multi-step test that fits 30s locally is marginal there and gets 60s.
+  // Locally the tight budget stays — it catches slowness.
   timeout: process.env.CI ? 60_000 : 30_000,
   expect: { timeout: process.env.CI ? 15_000 : 10_000 },
 
@@ -45,7 +45,11 @@ export default defineConfig({
   webServer: [
     {
       command: 'pnpm dev:server',
-      url: 'http://localhost:3001/health',
+      // The API listens on IPv4 only: probed by its IPv4 address, because
+      // `localhost` can resolve to ::1 first (see API_URL in
+      // tests/e2e/helpers/api.ts). The pages stay on localhost: that origin is
+      // what the server's CORS list and the object store's CORS rule name.
+      url: 'http://127.0.0.1:3001/health',
       // Locally, attach to whatever dev stack is already running. In CI there
       // is nothing to reuse, and silently attaching to a stale process would
       // test the wrong build.

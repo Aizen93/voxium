@@ -57,9 +57,9 @@ const cachingJobs = WORKFLOWS.flatMap((file) =>
 );
 
 describe('the pnpm store cache', () => {
-  it('is in the three CI jobs that install with pnpm, and the integration-scripts job', () => {
+  it('is in the four CI jobs that install with pnpm, and the integration-scripts job', () => {
     expect(cachingJobs.map((j) => `${j.file}:${j.id}`).sort()).toEqual(
-      ['ci.yml:build', 'ci.yml:e2e', 'ci.yml:lint-typecheck', 'integration-scripts.yml:scripts'].sort(),
+      ['ci.yml:build', 'ci.yml:e2e', 'ci.yml:licenses', 'ci.yml:lint-typecheck', 'integration-scripts.yml:scripts'].sort(),
     );
   });
 

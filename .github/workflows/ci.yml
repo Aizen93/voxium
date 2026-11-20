@@ -553,6 +553,63 @@ jobs:
           AFTER_SHA: ${{ github.event.after }}
         run: bash .github/scripts/secret-scan.sh "$RUNNER_TEMP/gitleaks"
 
+  licenses:
+    name: Dependency licences
+    runs-on: ubuntu-latest
+    # Install plus a read of node_modules: about a minute; past 15 the run is hung
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read pnpm version from package.json
+        id: pnpm-ver
+        shell: bash
+        run: echo "version=$(sed -n 's/.*"packageManager".*"pnpm@\([^"]*\)".*/\1/p' package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node 26
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      - name: Install pnpm
+        env:
+          PNPM_VERSION: ${{ steps.pnpm-ver.outputs.version }}
+        run: |
+          [[ $PNPM_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::packageManager names no exact pnpm version: '$PNPM_VERSION'"; exit 1; }
+          npm install -g "pnpm@$PNPM_VERSION"
+
+      - name: Locate the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: |
+          dir=$(pnpm store path --silent)
+          [ -n "$dir" ] || { echo "::error::pnpm named no store path"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      # No install scripts: the licences are read from the installed manifests
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # The project is source-available and takes no copyleft or unknown-licence
+      # dependency (the Rust crypto tree has the same rule in
+      # crypto-deps-watch.yml). Offline: it reads `pnpm licenses list` of the
+      # installed tree. The allow-list and the reviewed exceptions are
+      # scripts/npm-license-policy.json; a failure names the package and its
+      # licence.
+      - name: Licence policy (npm dependencies)
+        run: node scripts/check-npm-licenses.mjs
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -632,7 +689,7 @@ jobs:
   ci-ok:
     name: CI OK
     runs-on: ubuntu-latest
-    needs: [lint-typecheck, e2e, security, build]
+    needs: [lint-typecheck, e2e, security, licenses, build]
     if: always()
     # Reads two variables; past 5 minutes the runner itself is stuck
     timeout-minutes: 5

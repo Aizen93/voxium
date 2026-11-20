@@ -1,0 +1,32 @@
+{
+  "$comment": "Licence policy for the npm dependency tree (scripts/check-npm-licenses.mjs, the 'Dependency licences' job of ci.yml). A package passes when its licence expression is satisfied by 'allowed' (OR: one allowed alternative is enough; AND: every part must be). 'allowedDevelopmentOnly' lists licences accepted for build and test tooling as a class: a package under one passes only when it is absent from the production tree. A package outside both lists is refused until it is reviewed: either the identifier joins a list, or an entry goes into 'exceptions' with the package, the exact licence string pnpm reports, and the reason; an exception with 'onlyRequiredBy' stops applying when a package it does not name depends on it directly. The project is source-available: no copyleft licence enters the tree without a decision.",
+  "allowed": [
+    "MIT",
+    "MIT-0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Apache-2.0",
+    "0BSD",
+    "Unlicense",
+    "CC0-1.0",
+    "BlueOak-1.0.0",
+    "Zlib"
+  ],
+  "allowedDevelopmentOnly": [
+    "MPL-2.0"
+  ],
+  "exceptions": [
+    {
+      "package": "@fontsource/inter",
+      "license": "OFL-1.1",
+      "reason": "The Inter font files, shipped unmodified with the desktop and admin apps. A font licence that asks for no source disclosure of the software around it."
+    },
+    {
+      "package": "elkjs",
+      "license": "EPL-2.0",
+      "onlyRequiredBy": ["@prisma/studio-core"],
+      "reason": "Reaches the tree only through the Prisma command-line tool's Studio (@prisma/studio-core, required by prisma). No code of this project imports it and it is in no client bundle; it sits unmodified in node_modules because the server image carries the Prisma CLI for migrate deploy."
+    }
+  ]
+}
