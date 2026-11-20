@@ -4,6 +4,7 @@ import { useAdminStore } from '../stores/adminStore';
 import type { OwnedServerInfo, ServerAction } from '../stores/adminStore';
 import { toast } from '../stores/toastStore';
 import { apiErrorMessage } from '../utils/apiError';
+import { TypedConfirmInput, typedTextMatches } from './TypedConfirmInput';
 
 interface Props {
   userId: string;
@@ -25,6 +26,7 @@ export function AdminDeleteUserModal({ userId, username, onSuccess, onCancel }: 
   const [submitting, setSubmitting] = useState(false);
   const [rows, setRows] = useState<ServerRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [typed, setTyped] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -66,8 +68,10 @@ export function AdminDeleteUserModal({ userId, username, onSuccess, onCancel }: 
     (r) => r.action === 'delete' || (r.action === 'transfer' && r.newOwnerId)
   );
 
+  const nameOk = typedTextMatches(typed, username);
+
   const handleSubmit = async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || !nameOk || submitting) return;
     setSubmitting(true);
     try {
       const serverActions: ServerAction[] = rows.map((r) => ({
@@ -173,6 +177,9 @@ export function AdminDeleteUserModal({ userId, username, onSuccess, onCancel }: 
                 {deleteCount > 0 && `delete ${deleteCount} server(s)`}
                 {' '} and permanently delete user "{username}".
               </p>
+              <div className="mb-4">
+                <TypedConfirmInput expected={username} value={typed} onChange={setTyped} onSubmit={handleSubmit} disabled={submitting} />
+              </div>
               <div className="flex justify-end gap-3">
                 <button
                   onClick={onCancel}
@@ -182,7 +189,7 @@ export function AdminDeleteUserModal({ userId, username, onSuccess, onCancel }: 
                 </button>
                 <button
                   onClick={handleSubmit}
-                  disabled={!canSubmit || submitting}
+                  disabled={!canSubmit || !nameOk || submitting}
                   className="px-4 py-2 text-sm rounded-md bg-vox-accent-danger text-white hover:bg-red-600 transition-colors disabled:opacity-50"
                 >
                   {submitting ? 'Deleting...' : 'Confirm & Delete User'}

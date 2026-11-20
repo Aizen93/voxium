@@ -175,6 +175,7 @@ export function AdminUserList({ onSelectUser }: { onSelectUser: (userId: string)
           title={confirmAction.type === 'ban' ? 'Ban User' : 'Delete User'}
           message={`Are you sure you want to ${confirmAction.type} "${confirmAction.username}"? ${confirmAction.type === 'delete' ? 'This action cannot be undone.' : 'They will be disconnected immediately.'}`}
           confirmLabel={confirmAction.type === 'ban' ? 'Ban' : 'Delete'}
+          {...(confirmAction.type === 'delete' ? { dismissible: false, requireTypedText: confirmAction.username ?? '' } : {})}
           onConfirm={async () => {
             try {
               if (confirmAction.type === 'ban') await banUser(confirmAction.userId);

@@ -1,7 +1,7 @@
 import { act } from 'react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AdminConfirmModal } from '../../components/AdminConfirmModal';
-import { mount, click, keyDown, deferred, getByRole, queryByRole, bodyText, flush, type Mounted } from '../helpers/dom';
+import { mount, click, keyDown, type, deferred, getByRole, queryByRole, bodyText, flush, type Mounted } from '../helpers/dom';
 
 /**
  * The shared confirmation dialog behind every destructive action of the
@@ -247,5 +247,95 @@ describe('AdminConfirmModal', () => {
     expect(document.body.querySelector('b')).toBeNull();
     expect(getByRole('heading').textContent).toBe(markup);
     expect(bodyText()).toContain(markup);
+  });
+});
+
+describe('AdminConfirmModal — requireTypedText', () => {
+  const render = (text: string | undefined = 'alice') =>
+    view.render(<AdminConfirmModal title="Delete User" message="m" confirmLabel="Delete" dismissible={false} requireTypedText={text} onConfirm={onConfirm} onCancel={onCancel} />);
+  const input = () => getByRole('textbox', /Type alice to confirm/) as HTMLInputElement;
+  const confirm = () => getByRole('button', 'Delete') as HTMLButtonElement;
+
+  it('shows no input and keeps the button enabled when the prop is not given', async () => {
+    await view.render(<AdminConfirmModal title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />);
+    expect(queryByRole('textbox')).toBeNull();
+    expect((getByRole('button', 'Confirm') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('starts disabled, with a labelled input showing the name in a code element', async () => {
+    await render();
+    expect(confirm().disabled).toBe(true);
+    expect(input().value).toBe('');
+    expect(input().getAttribute('autocomplete')).toBe('off');
+    expect(input().getAttribute('spellcheck')).toBe('false');
+    expect(document.querySelector('label code')?.textContent).toBe('alice');
+    expect(document.activeElement).toBe(getByRole('button', 'Cancel'));
+  });
+
+  it('a wrong name and a name differing only by case keep it disabled; the right name, trimmed, enables it', async () => {
+    await render();
+    await type(input(), 'alicia');
+    expect(confirm().disabled).toBe(true);
+    await type(input(), 'Alice');
+    expect(confirm().disabled).toBe(true);
+    expect(bodyText()).toContain('The name is case-sensitive.');
+    await click(confirm());
+    expect(onConfirm).not.toHaveBeenCalled();
+    await type(input(), '  alice  ');
+    expect(confirm().disabled).toBe(false);
+    await click(confirm());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('Enter confirms only while the name matches', async () => {
+    await render();
+    await type(input(), 'ali');
+    await keyDown(input(), 'Enter');
+    expect(onConfirm).not.toHaveBeenCalled();
+    await type(input(), 'alice');
+    await keyDown(input(), 'Enter');
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape and a backdrop click leave it open; Cancel and the close icon cancel', async () => {
+    await render();
+    await type(input(), 'ali');
+    await keyDown(document.body, 'Escape');
+    await press(document.querySelector('.fixed')!);
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(input().value).toBe('ali');
+    await click(getByRole('button', 'Cancel'));
+    await click(getByRole('button', 'Close'));
+    expect(onCancel).toHaveBeenCalledTimes(2);
+  });
+
+  it('a new dialog starts with an empty input', async () => {
+    await render();
+    await type(input(), 'alice');
+    view.unmount();
+    view = mount();
+    await render();
+    expect(input().value).toBe('');
+    expect(confirm().disabled).toBe(true);
+  });
+
+  it('disables the input while the confirm action is in flight, and keeps the value when it fails', async () => {
+    const pending = deferred();
+    onConfirm.mockReturnValue(pending.promise);
+    await render();
+    await type(input(), 'alice');
+    await click(confirm());
+    expect(input().disabled).toBe(true);
+    pending.reject(new Error('boom'));
+    await flush();
+    expect(input().disabled).toBe(false);
+    expect(input().value).toBe('alice');
+  });
+
+  it('an empty name can never be confirmed and says why', async () => {
+    await render('');
+    expect(queryByRole('textbox')).toBeNull();
+    expect(bodyText()).toContain('no username to type');
+    expect(confirm().disabled).toBe(true);
   });
 });

@@ -383,6 +383,8 @@ export function AdminUserDetail({ userId, onBack }: Props) {
           title="Delete User"
           message={`Permanently delete "${selectedUser.username}"? This action cannot be undone.`}
           confirmLabel="Delete"
+          dismissible={false}
+          requireTypedText={selectedUser.username ?? ''}
           onConfirm={async () => {
             try {
               await deleteUser(selectedUser!.id);

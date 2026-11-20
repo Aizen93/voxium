@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AxiosError, AxiosHeaders, type InternalAxiosRequestConfig } from 'axios';
 import type { OwnedServerInfo } from '../../stores/adminStore';
-import { mount, click, choose, deferred, getByRole, queryByRole, queryAllByRole, bodyText, flush, type Mounted } from '../helpers/dom';
+import { mount, click, choose, type, keyDown, deferred, getByRole, queryByRole, queryAllByRole, bodyText, flush, type Mounted } from '../helpers/dom';
 
 /**
  * The delete-account modal: it lists the spaces the account owns, makes the
  * admin pick transfer-to-an-heir or delete for each, and only then offers the
- * destructive button. It has no typed-name or checkbox confirmation: the
- * requirement it enforces is that every transfer names an heir.
+ * destructive button. The button works once every transfer names an heir and
+ * the admin has typed the account's username.
  */
 
 const store = vi.hoisted(() => ({
@@ -45,11 +45,14 @@ const onSuccess = vi.fn();
 const onCancel = vi.fn();
 let view: Mounted;
 
-async function renderModal(servers: OwnedServerInfo[] = [RAID]) {
+async function renderModal(servers: OwnedServerInfo[] = [RAID], typedName: string | null = 'alice') {
   store.fetchUserOwnedServers.mockResolvedValue(servers);
   await view.render(<AdminDeleteUserModal userId="u-9" username="alice" onSuccess={onSuccess} onCancel={onCancel} />);
   await flush();
+  if (typedName !== null) await typeName(typedName);
 }
+const nameInput = () => getByRole('textbox', /Type alice to confirm/) as HTMLInputElement;
+const typeName = (value: string) => type(nameInput(), value);
 const destructive = () => getByRole('button', /Confirm & Delete User|Deleting\.\.\./) as HTMLButtonElement;
 const heirSelects = () => queryAllByRole('combobox') as HTMLSelectElement[];
 const transferButtons = () => queryAllByRole('button', 'Transfer') as HTMLButtonElement[];
@@ -214,10 +217,9 @@ describe('AdminDeleteUserModal — what reaches the store', () => {
 });
 
 describe('AdminDeleteUserModal — the requirement before the destructive button works', () => {
-  it('has no typed-name or checkbox step: the button is enabled as soon as every transfer has an heir', async () => {
+  it('has no checkbox; the button is enabled once the name is typed and every transfer has an heir', async () => {
     await renderModal();
     expect(queryAllByRole('checkbox')).toHaveLength(0);
-    expect(queryAllByRole('textbox')).toHaveLength(0);
     expect(destructive().disabled).toBe(false);
   });
 
@@ -233,6 +235,82 @@ describe('AdminDeleteUserModal — the requirement before the destructive button
     await renderModal([owned({ id: 's-5', name: 'Broken', members: [member('', 'admin')] })]);
     await click(deleteButtons()[0]);
     expect(destructive().disabled).toBe(false);
+  });
+
+  it('needs the name on top of the heirs: either one missing keeps the button disabled', async () => {
+    await renderModal([owned({ id: 's-5', name: 'Broken', members: [member('', 'admin')] })]);
+    await click(deleteButtons()[0]);
+    expect(destructive().disabled).toBe(false);
+    await typeName('');
+    expect(destructive().disabled).toBe(true);
+    await typeName('alice');
+    await click(transferButtons()[0]);
+    expect(destructive().disabled).toBe(true);
+  });
+});
+
+describe('AdminDeleteUserModal — the typed username', () => {
+  it('starts with an empty, labelled input that is not autofilled, and a disabled button', async () => {
+    await renderModal([RAID], null);
+    expect(nameInput().value).toBe('');
+    expect(nameInput().getAttribute('autocomplete')).toBe('off');
+    expect(nameInput().getAttribute('spellcheck')).toBe('false');
+    expect(document.querySelector('label code')?.textContent).toBe('alice');
+    expect(destructive().disabled).toBe(true);
+  });
+
+  it('refuses a wrong name and a name differing only by case, and says it is case-sensitive for the latter', async () => {
+    await renderModal([RAID], null);
+    await typeName('bob');
+    expect(destructive().disabled).toBe(true);
+    expect(bodyText()).not.toContain('case-sensitive');
+    await typeName('ALICE');
+    expect(destructive().disabled).toBe(true);
+    expect(bodyText()).toContain('The name is case-sensitive.');
+    await click(destructive());
+    expect(store.deleteUserWithTransfers).not.toHaveBeenCalled();
+  });
+
+  it('accepts the right name with surrounding spaces', async () => {
+    await renderModal([RAID], '  alice ');
+    expect(destructive().disabled).toBe(false);
+    await click(destructive());
+    await flush();
+    expect(store.deleteUserWithTransfers).toHaveBeenCalledTimes(1);
+  });
+
+  it('Enter in the input deletes only while the name matches', async () => {
+    await renderModal([RAID], 'alic');
+    await keyDown(nameInput(), 'Enter');
+    expect(store.deleteUserWithTransfers).not.toHaveBeenCalled();
+    await typeName('alice');
+    await keyDown(nameInput(), 'Enter');
+    await flush();
+    expect(store.deleteUserWithTransfers).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables the input while the request is in flight and keeps the typed value after a refusal', async () => {
+    const pending = deferred();
+    store.deleteUserWithTransfers.mockReturnValue(pending.promise);
+    await renderModal();
+    await click(destructive());
+    expect(nameInput().disabled).toBe(true);
+    pending.reject(new Error('boom'));
+    await flush();
+    expect(nameInput().disabled).toBe(false);
+    expect(nameInput().value).toBe('alice');
+    expect(getByRole('heading', 'Delete alice')).toBeTruthy();
+  });
+
+  it('cannot be confirmed for an account with no username', async () => {
+    store.fetchUserOwnedServers.mockResolvedValue([RAID]);
+    await view.render(<AdminDeleteUserModal userId="u-9" username="" onSuccess={onSuccess} onCancel={onCancel} />);
+    await flush();
+    expect(queryAllByRole('textbox')).toHaveLength(0);
+    expect(bodyText()).toContain('no username to type');
+    expect(destructive().disabled).toBe(true);
+    await click(destructive());
+    expect(store.deleteUserWithTransfers).not.toHaveBeenCalled();
   });
 });
 
