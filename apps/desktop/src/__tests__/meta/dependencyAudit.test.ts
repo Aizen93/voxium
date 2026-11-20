@@ -130,6 +130,33 @@ describe('the minimatch override', () => {
   });
 });
 
+describe('the effect override', () => {
+  const overrides = (JSON.parse(read('package.json')) as { pnpm: { overrides: Record<string, string> } }).pnpm
+    .overrides;
+  const lock = read('pnpm-lock.yaml');
+
+  it('moves only the vulnerable range and stays inside major 3', () => {
+    // GHSA-7589-6fvf-x4pw: <=3.22.0, patched in 3.22.1. The package reaches the
+    // tree only through the Prisma command-line tool (@prisma/config), which
+    // asks for a 3.x release: unscoped and unbounded, the override would hand
+    // it major 4 at the next resolution
+    expect(overrides).not.toHaveProperty('effect');
+    expect(overrides['effect@<3.22.1']).toBe('>=3.22.1 <4');
+  });
+
+  it('the lockfile records the same override', () => {
+    expect(lock).toContain("  effect@<3.22.1: '>=3.22.1 <4'\n");
+  });
+
+  it('the lockfile resolves one effect, a 3.x at or above the patched release', () => {
+    const resolved = [...new Set([...lock.matchAll(/^ {2}effect@(\d+)\.(\d+)\.(\d+):$/gm)].map((m) => m.slice(1, 4).join('.')))];
+    expect(resolved).toHaveLength(1);
+    const [major, minor, patch] = resolved[0].split('.').map(Number);
+    expect(major).toBe(3);
+    expect(minor > 22 || (minor === 22 && patch >= 1), resolved[0]).toBe(true);
+  });
+});
+
 describe('desktop shell Cargo.lock audit', () => {
   const workflow = read('.github/workflows/desktop-shell.yml');
   const config = read('apps/desktop/src-tauri/.cargo/audit.toml');
