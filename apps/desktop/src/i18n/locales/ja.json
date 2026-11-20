@@ -2219,5 +2219,21 @@
   },
   "legal": {
     "englishVersionNotice": "この文書は英語とフランス語で提供されています。以下に英語版を表示しています。"
+  },
+  "vaultOwnership": {
+    "blockedTitle": "Voxium は別のタブで開かれています",
+    "blockedBody": "暗号化されたメッセージと通話は、一度にひとつのタブでのみ使えます。別のタブで使い続けるか、こちらで Voxium を使ってください。",
+    "waitingNote": "別のタブが閉じられるかサインアウトすると、このタブで自動的に Voxium が開きます。",
+    "lostTitle": "Voxium は別のタブで開かれました",
+    "lostBody": "別のタブが暗号化されたメッセージと通話を引き継いだため、このタブは停止しました。このタブを閉じるか、こちらで Voxium を使ってください。",
+    "useHere": "ここで使う",
+    "asking": "別のタブに確認しています…",
+    "releasing": "別のタブを待っています…",
+    "opening": "ここで Voxium を開いています…",
+    "callWarning": "別のタブで通話中です。通話は終了します。",
+    "noReply": "別のタブが応答しません。",
+    "callPossible": "そちらで通話中の場合、通話は終了します。",
+    "takeOverAnyway": "それでも引き継ぐ",
+    "cancel": "キャンセル"
   }
 }

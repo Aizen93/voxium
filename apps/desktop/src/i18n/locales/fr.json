@@ -2230,5 +2230,21 @@
   },
   "legal": {
     "englishVersionNotice": "Ce document est disponible en anglais et en français. La version anglaise est affichée ci-dessous."
+  },
+  "vaultOwnership": {
+    "blockedTitle": "Voxium est ouvert dans un autre onglet",
+    "blockedBody": "Vos messages et appels chiffrés fonctionnent dans un seul onglet à la fois. Vous pouvez continuer dans l’autre onglet, ou utiliser Voxium ici.",
+    "waitingNote": "Cet onglet ouvre Voxium de lui-même dès que l’autre onglet est fermé ou se déconnecte.",
+    "lostTitle": "Voxium est maintenant ouvert dans un autre onglet",
+    "lostBody": "Un autre onglet a pris le relais pour vos messages et appels chiffrés, et celui-ci s’est arrêté. Vous pouvez le fermer, ou utiliser Voxium ici.",
+    "useHere": "Utiliser ici",
+    "asking": "Question posée à l’autre onglet…",
+    "releasing": "En attente de l’autre onglet…",
+    "opening": "Ouverture de Voxium ici…",
+    "callWarning": "Un appel est en cours dans l’autre onglet ; il prendra fin.",
+    "noReply": "L’autre onglet ne répond pas.",
+    "callPossible": "Si un appel y est en cours, il prendra fin.",
+    "takeOverAnyway": "Prendre le relais quand même",
+    "cancel": "Annuler"
   }
 }

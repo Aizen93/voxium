@@ -85,6 +85,12 @@ const ENCRYPTION_ROWS: StorageRow[] = withFrenchSpacing([
     where: 'Application de bureau : le gestionnaire d’identifiants. Navigateur : stockage local',
     duration: 'Conservée lorsque vous vous déconnectez, avec son coffre ; supprimée de cet appareil avec le coffre lorsque vous y supprimez votre compte',
   },
+  {
+    item: 'voxium_vault_takeover, voxium_vault_start_claim',
+    purpose: 'Quel onglet de ce navigateur utilise le coffre de chiffrement : la première retient, le temps du rechargement qui suit, que vous avez choisi d’utiliser Voxium dans cet onglet ; la seconde n’existe que lorsque ce navigateur ne peut pas coordonner ses onglets par un verrou (sur un serveur joint sans HTTPS, par exemple), et fait patienter un instant le premier démarrage d’un coffre pendant qu’un autre onglet crée sa clé',
+    where: 'Navigateur : stockage de session pour la première, stockage local pour la seconde',
+    duration: 'La première : supprimée lorsque l’onglet rechargé la lit, ou à la fermeture de l’onglet. La seconde : supprimée lorsque le démarrage qui l’a écrite se termine ; celle qu’un démarrage interrompu a laissée est supprimée, une fois périmée, par un démarrage suivant de Voxium pour ce compte dans ce navigateur',
+  },
 ]);
 
 const PREFERENCE_ROWS: StorageRow[] = withFrenchSpacing([
@@ -136,7 +142,7 @@ export function CookiePolicyContentFr() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Politique de cookies</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 18 novembre 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 20 novembre 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>

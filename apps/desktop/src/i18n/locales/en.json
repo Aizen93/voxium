@@ -2183,5 +2183,21 @@
   },
   "legal": {
     "englishVersionNotice": "This document is available in English and French. The English version is shown below."
+  },
+  "vaultOwnership": {
+    "blockedTitle": "Voxium is open in another tab",
+    "blockedBody": "Your encrypted messages and calls work in one tab at a time. You can keep using the other tab, or use Voxium here instead.",
+    "waitingNote": "This tab opens Voxium by itself as soon as the other tab is closed or signs out.",
+    "lostTitle": "Voxium is now open in another tab",
+    "lostBody": "Another tab took over your encrypted messages and calls, so this one has stopped. You can close it, or use Voxium here instead.",
+    "useHere": "Use it here",
+    "asking": "Asking the other tab…",
+    "releasing": "Waiting for the other tab to let go…",
+    "opening": "Opening Voxium here…",
+    "callWarning": "A call is in progress in the other tab; it will end.",
+    "noReply": "The other tab is not answering.",
+    "callPossible": "If a call is in progress there, it will end.",
+    "takeOverAnyway": "Take over anyway",
+    "cancel": "Cancel"
   }
 }

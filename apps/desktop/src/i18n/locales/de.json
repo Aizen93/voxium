@@ -2230,5 +2230,21 @@
   },
   "legal": {
     "englishVersionNotice": "Dieses Dokument ist auf Englisch und Französisch verfügbar. Unten wird die englische Fassung angezeigt."
+  },
+  "vaultOwnership": {
+    "blockedTitle": "Voxium ist in einem anderen Tab geöffnet",
+    "blockedBody": "Deine verschlüsselten Nachrichten und Anrufe funktionieren immer nur in einem Tab. Du kannst den anderen Tab weiter nutzen oder Voxium stattdessen hier verwenden.",
+    "waitingNote": "Dieser Tab öffnet Voxium von selbst, sobald der andere Tab geschlossen oder abgemeldet wird.",
+    "lostTitle": "Voxium ist jetzt in einem anderen Tab geöffnet",
+    "lostBody": "Ein anderer Tab hat deine verschlüsselten Nachrichten und Anrufe übernommen, deshalb wurde dieser Tab angehalten. Du kannst ihn schließen oder Voxium stattdessen hier verwenden.",
+    "useHere": "Hier verwenden",
+    "asking": "Der andere Tab wird gefragt …",
+    "releasing": "Warten auf den anderen Tab …",
+    "opening": "Voxium wird hier geöffnet …",
+    "callWarning": "Im anderen Tab läuft ein Anruf; er wird beendet.",
+    "noReply": "Der andere Tab antwortet nicht.",
+    "callPossible": "Falls dort ein Anruf läuft, wird er beendet.",
+    "takeOverAnyway": "Trotzdem übernehmen",
+    "cancel": "Abbrechen"
   }
 }

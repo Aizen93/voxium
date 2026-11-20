@@ -2230,5 +2230,21 @@
   },
   "legal": {
     "englishVersionNotice": "Este documento está disponible en inglés y en francés. A continuación se muestra la versión en inglés."
+  },
+  "vaultOwnership": {
+    "blockedTitle": "Voxium está abierto en otra pestaña",
+    "blockedBody": "Tus mensajes y llamadas cifrados funcionan en una sola pestaña a la vez. Puedes seguir usando la otra pestaña o usar Voxium aquí.",
+    "waitingNote": "Esta pestaña abrirá Voxium por sí sola en cuanto la otra pestaña se cierre o cierre sesión.",
+    "lostTitle": "Voxium está abierto ahora en otra pestaña",
+    "lostBody": "Otra pestaña ha tomado el control de tus mensajes y llamadas cifrados, así que esta se ha detenido. Puedes cerrarla o usar Voxium aquí.",
+    "useHere": "Usarlo aquí",
+    "asking": "Preguntando a la otra pestaña…",
+    "releasing": "Esperando a que la otra pestaña lo suelte…",
+    "opening": "Abriendo Voxium aquí…",
+    "callWarning": "Hay una llamada en curso en la otra pestaña; terminará.",
+    "noReply": "La otra pestaña no responde.",
+    "callPossible": "Si hay una llamada en curso allí, terminará.",
+    "takeOverAnyway": "Tomar el control de todos modos",
+    "cancel": "Cancelar"
   }
 }

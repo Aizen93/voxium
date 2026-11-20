@@ -155,8 +155,8 @@ const LAST_UPDATED: Record<PageName, PerLanguage> = {
     fr: 'Dernière mise à jour : 25 octobre 2026',
   },
   cookies: {
-    en: 'Last updated: November 18, 2026',
-    fr: 'Dernière mise à jour : 18 novembre 2026',
+    en: 'Last updated: November 20, 2026',
+    fr: 'Dernière mise à jour : 20 novembre 2026',
   },
 };
 
