@@ -1,4 +1,5 @@
 import pkg from '../package.json' with { type: 'json' };
+import type { AnnouncementLegalDoc } from './types.js';
 
 export const APP_NAME = 'Voxium';
 export const APP_VERSION = pkg.version;
@@ -84,6 +85,13 @@ export const LIMITS = {
   WEBHOOK_EMBEDS_MAX: 10,
   WEBHOOK_EMBED_FIELDS_MAX: 25,
 } as const;
+
+/** The legal documents an announcement may name (server, admin and desktop all read this list). */
+export const ANNOUNCEMENT_LEGAL_DOCS: readonly AnnouncementLegalDoc[] = ['privacy', 'terms', 'cookies'];
+
+export function isAnnouncementLegalDoc(value: unknown): value is AnnouncementLegalDoc {
+  return typeof value === 'string' && (ANNOUNCEMENT_LEGAL_DOCS as readonly string[]).includes(value);
+}
 
 /** Incoming webhook kinds: "generic" takes the Discord-shaped payload,
  *  "github" verifies X-Hub-Signature-256 and formats GitHub events. */

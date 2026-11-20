@@ -1151,6 +1151,8 @@ export type AuditAction =
 
 export type AnnouncementType = 'info' | 'warning' | 'maintenance';
 export type AnnouncementScope = 'global' | 'servers';
+/** The legal document an announcement may point readers at. */
+export type AnnouncementLegalDoc = 'privacy' | 'terms' | 'cookies';
 
 export interface Announcement {
   id: string;
@@ -1164,6 +1166,8 @@ export interface Announcement {
   publishedAt: string | null;
   expiresAt: string | null;
   createdAt: string;
+  /** Optional: a server older than this field does not send it. */
+  legalDoc?: AnnouncementLegalDoc | null;
 }
 
 export interface AuditLogEntry {

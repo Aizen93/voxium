@@ -14,7 +14,7 @@ import { registerAdminSubscriptionHandlers } from './adminSubscriptions';
 import { socketRateLimit, normalizeIp } from '../middleware/rateLimiter';
 import { trustsProxy, forwardedClientAddress } from '../utils/trustProxy';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
-import { Permissions, DELETED_MESSAGE_TYPE } from '@voxium/shared';
+import { Permissions, DELETED_MESSAGE_TYPE, isAnnouncementLegalDoc } from '@voxium/shared';
 import { hasChannelPermission } from '../utils/permissionCalculator';
 import { visibilityRequestMark, resyncAfterJoins } from '../utils/channelVisibilityRooms';
 import { dmListedSql, dmUnreadSinceSql } from '../utils/conversationVisibility';
@@ -680,6 +680,7 @@ export function initSocketServer(httpServer: HttpServer) {
             publishedAt: a.publishedAt!.toISOString(),
             expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
             createdAt: a.createdAt.toISOString(),
+            legalDoc: isAnnouncementLegalDoc(a.legalDoc) ? a.legalDoc : null,
           })),
         });
       }

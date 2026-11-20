@@ -1007,6 +1007,29 @@ describe('socketServer — presence registration vs. disconnect race', () => {
     error.mockRestore();
     httpServer.close();
   });
+
+  it('announcement:init carries the legal document, and null for a row without one or an unknown one', async () => {
+    const { socket } = createMockSocket('user-1');
+    socket.disconnected = false;
+    const base = {
+      title: 'Notice', content: 'Body', type: 'info', scope: 'global', serverIds: [], createdById: 'a-1',
+      createdBy: { username: 'admin' }, publishedAt: new Date(0), expiresAt: null, createdAt: new Date(0),
+    };
+    mockPrisma.announcement.findMany.mockResolvedValue([
+      { ...base, id: 'a1', legalDoc: 'privacy' },
+      { ...base, id: 'a2', legalDoc: null },
+      { ...base, id: 'a3', legalDoc: 'bogus' },
+    ]);
+    const httpServer = http.createServer();
+    initSocketServer(httpServer);
+
+    await getConnectionHandler()(socket);
+
+    const call = socket.emit.mock.calls.find((c: any[]) => c[0] === 'announcement:init');
+    expect(call).toBeDefined();
+    expect(call![1].announcements.map((a: any) => a.legalDoc)).toEqual(['privacy', null, null]);
+    httpServer.close();
+  });
 });
 
 // ─── Connect-time unread counts (webhook rows have no author) ───────────────

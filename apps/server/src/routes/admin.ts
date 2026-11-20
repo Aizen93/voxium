@@ -28,8 +28,8 @@ import { lockAccountRows } from '../utils/accountRowLocks';
 import { listAllS3Objects, deleteFromS3, VALID_S3_KEY_RE, VALID_ATTACHMENT_KEY_RE } from '../utils/s3';
 import { runOrphanCleanup, runScheduledOrphanCleanup } from '../utils/orphanCleanup';
 import { runRegistrationHygieneLocked, getHygieneHistory, UNVERIFIED_ACCOUNT_TTL_DAYS } from '../utils/registrationHygiene';
-import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, SupportMessageData, ServerJoinMode, Server, AdminWebhook } from '@voxium/shared';
-import { WS_EVENTS, LIMITS } from '@voxium/shared';
+import type { StorageStats, StorageFile, StorageTopUploader, MemberRole, AuditLogEntry, Announcement, AnnouncementType, AnnouncementScope, AnnouncementLegalDoc, SupportMessageData, ServerJoinMode, Server, AdminWebhook } from '@voxium/shared';
+import { WS_EVENTS, LIMITS, ANNOUNCEMENT_LEGAL_DOCS, isAnnouncementLegalDoc } from '@voxium/shared';
 import { logAuditEvent, auditLogData } from '../utils/auditLog';
 import { recomputeListed, recomputeListedForOwner } from '../utils/discoveryListing';
 import { bumpDiscoveryPageCache } from '../utils/discoveryPageCache';
@@ -2592,6 +2592,7 @@ interface AnnouncementRow {
   publishedAt: Date | null;
   expiresAt: Date | null;
   createdAt: Date;
+  legalDoc?: string | null;
 }
 
 function mapAnnouncement(a: AnnouncementRow): Announcement {
@@ -2607,6 +2608,7 @@ function mapAnnouncement(a: AnnouncementRow): Announcement {
     publishedAt: a.publishedAt ? a.publishedAt.toISOString() : null,
     expiresAt: a.expiresAt ? a.expiresAt.toISOString() : null,
     createdAt: a.createdAt.toISOString(),
+    legalDoc: isAnnouncementLegalDoc(a.legalDoc) ? a.legalDoc : null,
   };
 }
 
@@ -2661,7 +2663,7 @@ adminRouter.get('/announcements', async (req: Request, res: Response, next: Next
 
 adminRouter.post('/announcements', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { title, content, type, scope, serverIds, expiresAt, publish } = req.body;
+    const { title, content, type, scope, serverIds, expiresAt, publish, legalDoc } = req.body;
 
     // Validate
     if (!title || typeof title !== 'string') throw new BadRequestError('Title is required');
@@ -2681,6 +2683,15 @@ adminRouter.post('/announcements', async (req: Request, res: Response, next: Nex
 
     const validScopes = ['global', 'servers'];
     if (scope && !validScopes.includes(scope)) throw new BadRequestError('Scope must be global or servers');
+
+    // undefined, null and '' mean no document; anything else must be on the shared list.
+    let annLegalDoc: AnnouncementLegalDoc | null = null;
+    if (legalDoc !== undefined && legalDoc !== null && legalDoc !== '') {
+      if (!isAnnouncementLegalDoc(legalDoc)) {
+        throw new BadRequestError(`legalDoc must be one of: ${ANNOUNCEMENT_LEGAL_DOCS.join(', ')}`);
+      }
+      annLegalDoc = legalDoc;
+    }
 
     const annScope = scope || 'global';
     let annServerIds: string[] = [];
@@ -2717,6 +2728,7 @@ adminRouter.post('/announcements', async (req: Request, res: Response, next: Nex
         createdById: req.user!.userId,
         publishedAt: publish ? new Date() : undefined,
         expiresAt: parsedExpiry,
+        legalDoc: annLegalDoc,
       },
       include: { createdBy: { select: { username: true } } },
     });
@@ -2730,7 +2742,7 @@ adminRouter.post('/announcements', async (req: Request, res: Response, next: Nex
         action: 'announcement.publish',
         targetType: 'announcement',
         targetId: announcement.id,
-        metadata: { title: sanitizedTitle, scope: annScope },
+        metadata: { title: sanitizedTitle, scope: annScope, legalDoc: annLegalDoc },
       });
     } else {
       logAuditEvent({
@@ -2738,7 +2750,7 @@ adminRouter.post('/announcements', async (req: Request, res: Response, next: Nex
         action: 'announcement.create',
         targetType: 'announcement',
         targetId: announcement.id,
-        metadata: { title: sanitizedTitle, scope: annScope },
+        metadata: { title: sanitizedTitle, scope: annScope, legalDoc: annLegalDoc },
       });
     }
 

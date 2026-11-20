@@ -715,6 +715,7 @@ erDiagram
         string createdById FK
         datetime publishedAt
         datetime expiresAt
+        string legalDoc "nullable: privacy, terms or cookies"
     }
 
     Report {
