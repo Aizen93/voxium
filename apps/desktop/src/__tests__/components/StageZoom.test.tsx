@@ -111,7 +111,8 @@ describe('useStageZoom', () => {
     render(true);
     wheel(-2000, 0, 0); // zoom in anchored at the top-left corner → tx stays 0
     const before = surface().style.transform;
-    expect(before).toMatch(/^translate\(0px, 0px\)/);
+    // No translation on either axis; an engine may print the pair as one value.
+    expect(before).toMatch(/^translate\(0px(, 0px)?\)/);
     act(() => {
       const el = stage();
       el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 400, clientY: 225 }));

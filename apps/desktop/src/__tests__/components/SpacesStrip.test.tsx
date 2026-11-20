@@ -477,7 +477,12 @@ describe('SpacesStrip — auto-hide (the chamfered hover panel)', () => {
     expect(panel().className).toContain('pointer-events-none');
     // Folded, the strip is still there for ⌘⇧L and Tab.
     expect(strip()).toBeTruthy();
-    expect((strip() as HTMLElement).style.clipPath).toBe(STRIP_CLIP_PATH);
+    // Compared as the style engine prints it: an engine may normalise the value it
+    // was given (a bare 0 printed as 0px), and the same value must still match.
+    const printedClip = document.createElement('div');
+    printedClip.style.clipPath = STRIP_CLIP_PATH;
+    expect(printedClip.style.clipPath).not.toBe('');
+    expect((strip() as HTMLElement).style.clipPath).toBe(printedClip.style.clipPath);
     expect(strip().className).toContain('h-[72px]');
     expect(strip().querySelector('[data-testid="messages-tab"]')).toBeTruthy();
     // The panel is narrower than the strip (insets, chamfers, the pin): Find,
