@@ -30,6 +30,7 @@ const storage = vi.hoisted(() => ({
   // A session-ending clear: 'replaced' when another tab stored a different session meanwhile
   clearSessionTokens: vi.fn((_endedToken: string | null): 'cleared' | 'replaced' => { storage.clearTokens(); return 'cleared'; }),
   reloadAfterSessionChange: vi.fn(),
+  announceSessionEnded: vi.fn(),
   isRemembered: vi.fn(() => true),
   // The stored session is read asynchronously (the OS credential store in
   // the desktop app); `true` = the store answered
@@ -44,6 +45,9 @@ vi.mock('../../services/tokenStorage', () => storage);
 const session = vi.hoisted(() => ({ SessionLostError: class SessionLostError extends Error {}, endSessionRenewals: vi.fn() }));
 vi.mock('../../services/session', () => session);
 vi.mock('../../stores/resetStores', () => ({ resetAccountStores: vi.fn() }));
+// The server side of a sign-out (services/sessionRevocation.ts): watched, never a real request
+const revocation = vi.hoisted(() => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
+vi.mock('../../services/sessionRevocation', () => revocation);
 vi.mock('../../stores/voiceStore', () => ({
   useVoiceStore: { getState: () => ({ activeChannelId: null, dmCallConversationId: null, leaveChannel: vi.fn(), leaveDMCall: vi.fn() }) },
 }));
@@ -934,5 +938,104 @@ describe('authStore — a local end of a session clears only that session (anoth
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => expect(useAuthStore.getState()).toMatchObject({ user: me, isAuthenticated: true }));
     expect(api.get).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('authStore.logout — the sign-out ends the session on the server too', () => {
+  beforeEach(() => {
+    useAuthStore.setState({ user: me as never, isAuthenticated: true, isLoading: false });
+  });
+
+  it('captures the refresh token FIRST, completes locally, THEN tells the server (not awaited) and the twin tabs', () => {
+    const order: string[] = [];
+    storage.getRefreshToken.mockImplementationOnce(() => { order.push('capture'); return 'refresh-old'; });
+    session.endSessionRenewals.mockImplementationOnce(() => { order.push('end renewals'); });
+    storage.clearSessionTokens.mockImplementationOnce(() => { order.push('clear'); return 'cleared'; });
+    socket.disconnectSocket.mockImplementationOnce(() => { order.push('disconnect'); });
+    revocation.endSessionOnServer.mockImplementationOnce(() => { order.push('server'); });
+    storage.announceSessionEnded.mockImplementationOnce(() => { order.push('twins'); });
+
+    const outcome = useAuthStore.getState().logout();
+
+    expect(outcome).toBe('cleared');
+    expect(order).toEqual(['capture', 'end renewals', 'clear', 'disconnect', 'server', 'twins']);
+    expect(revocation.endSessionOnServer).toHaveBeenCalledWith('refresh-old');
+    expect(storage.announceSessionEnded).toHaveBeenCalledWith('refresh-old');
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  it('with nothing held, nothing is sent (the call is a no-op without a token)', () => {
+    storage.getRefreshToken.mockReturnValueOnce(null);
+    useAuthStore.getState().logout();
+    expect(revocation.endSessionOnServer).toHaveBeenCalledWith(null);
+  });
+
+  it('tellServer: false (the server ended it, or it is over already) sends nothing and tells no twin', () => {
+    useAuthStore.getState().logout({ tellServer: false, endingSession: 'access-of-ended-session' });
+    expect(revocation.endSessionOnServer).not.toHaveBeenCalled();
+    expect(storage.announceSessionEnded).not.toHaveBeenCalled();
+  });
+
+  it('an account deletion never calls the server about the session (the account is gone)', async () => {
+    api.delete.mockResolvedValueOnce({ data: {} });
+    await useAuthStore.getState().deleteAccount('pw');
+    expect(revocation.endSessionOnServer).not.toHaveBeenCalled();
+  });
+
+  it('a refused session restore never calls the server either', async () => {
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+    api.get.mockRejectedValueOnce(status(401));
+    await useAuthStore.getState().checkAuth();
+    expect(revocation.endSessionOnServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('authStore — a sign-in that replaces a stored session ends that one on the server once it SUCCEEDED', () => {
+  beforeEach(() => {
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false, totpRequired: false, totpToken: null });
+  });
+
+  it('login: the stale token is held before the discard, and handed over with the new refresh token after success', async () => {
+    api.post.mockImplementationOnce(async () => {
+      expect(revocation.holdReplacedSession).toHaveBeenCalledWith('refresh-old');
+      expect(revocation.holdReplacedSession.mock.invocationCallOrder[0]).toBeLessThan(storage.clearTokens.mock.invocationCallOrder[0]);
+      expect(revocation.endReplacedSession).not.toHaveBeenCalled();
+      return { data: { data: { user: me, accessToken: 'access-b', refreshToken: 'refresh-b' } } };
+    });
+
+    await useAuthStore.getState().login('b@example.com', 'pw');
+
+    expect(revocation.endReplacedSession).toHaveBeenCalledWith('refresh-b');
+  });
+
+  it('a failed sign-in sends nothing about the stale session, and neither does a step that asks for the code', async () => {
+    api.post.mockRejectedValueOnce(Object.assign(new Error('401'), { isAxiosError: true, response: { status: 401, data: { error: 'Invalid credentials' } } }));
+    await expect(useAuthStore.getState().login('b@example.com', 'wrong')).rejects.toBeTruthy();
+    expect(revocation.endReplacedSession).not.toHaveBeenCalled();
+
+    api.post.mockResolvedValueOnce({ data: { data: { totpRequired: true, totpToken: 'challenge' } } });
+    await useAuthStore.getState().login('b@example.com', 'pw');
+    expect(revocation.endReplacedSession).not.toHaveBeenCalled();
+
+    api.post.mockRejectedValueOnce(Object.assign(new Error('400'), { isAxiosError: true, response: { status: 400, data: { error: 'Invalid verification code' } } }));
+    await expect(useAuthStore.getState().verifyTOTP('000000')).rejects.toBeTruthy();
+    expect(revocation.endReplacedSession).not.toHaveBeenCalled();
+
+    api.post.mockResolvedValueOnce({ data: { data: { user: me, accessToken: 'access-t', refreshToken: 'refresh-t' } } });
+    await useAuthStore.getState().verifyTOTP('123456');
+    expect(revocation.endReplacedSession).toHaveBeenCalledTimes(1);
+    expect(revocation.endReplacedSession).toHaveBeenCalledWith('refresh-t');
+  });
+
+  it('the completion of a registration hands the new refresh token over too', async () => {
+    useAuthStore.setState({
+      pendingRegistration: { pendingId: 'p-n', email: 'n@example.com', resendAfterSeconds: 600, issuedAt: Date.now(), resendUsed: false, usernameTaken: false },
+    });
+    api.post.mockResolvedValueOnce({ data: { data: { user: me, accessToken: 'access-n', refreshToken: 'refresh-n' } } });
+
+    await useAuthStore.getState().completeRegistration('123456');
+
+    expect(revocation.holdReplacedSession).toHaveBeenCalled();
+    expect(revocation.endReplacedSession).toHaveBeenCalledWith('refresh-n');
   });
 });

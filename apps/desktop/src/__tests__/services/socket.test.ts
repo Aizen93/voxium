@@ -1145,7 +1145,7 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
       await tick();
       await macrotask();
 
-      expect(authStoreMock.logout).toHaveBeenCalledWith(expect.objectContaining({ endingSession: 'access-of-ended-session' }));
+      expect(authStoreMock.logout).toHaveBeenCalledWith({ tellServer: false, endingSession: 'access-of-ended-session' });
       // authStore.logout reloads onto the stored session itself: no navigation here
       expect(window.location.href).toBe('');
       expect(socket.connect).not.toHaveBeenCalled();

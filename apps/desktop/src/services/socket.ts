@@ -306,7 +306,7 @@ export function connectSocket(token: string): VoxSocket | null {
     };
     import('../stores/authStore')
       .then(async ({ useAuthStore }) => {
-        const outcome = useAuthStore.getState().logout({ endingSession: endedSession });
+        const outcome = useAuthStore.getState().logout({ tellServer: false, endingSession: endedSession });
         // Another tab stored a different session meanwhile: the page reloads
         // onto it (authStore.logout), it is not signed out
         if (outcome === 'replaced') return;

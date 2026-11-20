@@ -36,6 +36,7 @@ vi.mock('../../services/tokenStorage', () => ({
   getRefreshToken: vi.fn(() => null),
   clearSessionTokens: vi.fn(() => { storage.clearTokens(); return 'cleared'; }),
   reloadAfterSessionChange: vi.fn(),
+  announceSessionEnded: vi.fn(),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null),
@@ -46,6 +47,8 @@ vi.mock('../../components/auth/AuthBackground', () => ({ AuthBackground: () => n
 vi.mock('../../components/auth/PeekingThief', () => ({ PeekingThief: () => null }));
 
 import i18n from '../../i18n';
+// The sign-out's server call and its retries: never a real request from a unit test
+vi.mock('../../services/sessionRevocation', () => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
 import { useAuthStore, type PendingRegistration } from '../../stores/authStore';
 import { RegisterPage } from '../../pages/RegisterPage';
 import { LoginPage } from '../../pages/LoginPage';

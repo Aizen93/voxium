@@ -24,6 +24,7 @@ vi.mock('../../services/tokenStorage', () => ({
   getRefreshToken: vi.fn(() => null),
   clearSessionTokens: vi.fn(() => 'cleared'),
   reloadAfterSessionChange: vi.fn(),
+  announceSessionEnded: vi.fn(),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null),
@@ -38,6 +39,8 @@ vi.mock('../../services/e2e/e2eService', () => e2e);
 // whole E2E service in for nothing.
 vi.mock('../../stores/resetStores', () => ({ resetAccountStores: vi.fn() }));
 
+// The sign-out's server call and its retries: never a real request from a unit test
+vi.mock('../../services/sessionRevocation', () => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
 import { useAuthStore } from '../../stores/authStore';
 import { isPinnedSecure, pinSecure, securePinStorageKey } from '../../utils/securePins';
 import type { User } from '@voxium/shared';

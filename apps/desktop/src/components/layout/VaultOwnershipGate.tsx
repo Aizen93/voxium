@@ -294,7 +294,7 @@ class GateController {
         reloadPage();
       } else {
         // signed out (or the account is gone): this tab follows
-        useAuthStore.getState().logout({ endingSession: sessionToken });
+        useAuthStore.getState().logout({ tellServer: false, endingSession: sessionToken });
       }
     } finally {
       this.opening = false;

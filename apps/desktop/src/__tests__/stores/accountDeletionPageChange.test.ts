@@ -53,6 +53,7 @@ const storage = vi.hoisted(() => ({
   clearTokens: vi.fn(() => void events.push('tokens cleared')),
   clearSessionTokens: vi.fn((_endedToken: string | null) => { storage.clearTokens(); return 'cleared' as const; }),
   reloadAfterSessionChange: vi.fn(),
+  announceSessionEnded: vi.fn(),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null as string | null),
@@ -77,6 +78,8 @@ vi.mock('../../services/powSolver', () => ({ solveRegistrationPowOffThread: vi.f
 vi.mock('../../i18n', () => ({ default: { t: (k: string) => k } }));
 
 import type { User } from '@voxium/shared';
+// The sign-out's server call and its retries: never a real request from a unit test
+vi.mock('../../services/sessionRevocation', () => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
 import { useAuthStore } from '../../stores/authStore';
 import { connectSocket, disconnectSocket } from '../../services/socket';
 import { handleSessionLost, setSessionLostNavigation } from '../../services/session';

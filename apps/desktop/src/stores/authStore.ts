@@ -4,8 +4,9 @@ import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange, 
 import {
   getAccessToken, getRefreshToken, setTokens, clearTokens, clearSessionTokens, reloadAfterSessionChange,
   isRemembered, hydrateTokens,
-  getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage,
+  getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage, announceSessionEnded,
 } from '../services/tokenStorage';
+import { endSessionOnServer, holdReplacedSession, endReplacedSession } from '../services/sessionRevocation';
 import { endSessionRenewals } from '../services/session';
 import { isAuthRefusal } from '../services/authRefusal';
 import { accountDeletionInFlight, accountDeletionSettled, beginAccountDeletion } from '../services/accountDeletion';
@@ -44,6 +45,14 @@ export interface PendingRegistration {
 }
 
 export interface LogoutOptions {
+  /**
+   * Tell the server to end the session too (POST /auth/logout, not awaited,
+   * retried in memory for a while: services/sessionRevocation.ts). Default
+   * yes: a sign-out the user made. False where the session is over already
+   * or the server ended it: its `force:logout`, an account deletion, a
+   * session the vault gate found refused.
+   */
+  tellServer?: boolean;
   /**
    * A token (access or refresh) of the session that ended, when the caller
    * knows which one did: the socket the server signed out, the session an
@@ -145,8 +154,14 @@ interface AuthState {
  * session being replaced must not ride along. The stale token would be sent
  * — and renewed, or refused — on the sign-in request itself, and a socket
  * still open for the old account would be handed to the new one.
+ *
+ * The discarded session is abandoned on this device, so the server is told
+ * to end it — once the new sign-in has SUCCEEDED (endReplacedSession, at
+ * each step that stores the new pair), never on a failed one: until then
+ * its refresh token is held in memory only (services/sessionRevocation.ts).
  */
 function discardStaleSession(): void {
+  holdReplacedSession(getRefreshToken());
   endSessionRestore();
   // A renewal of the OLD session still in flight must store nothing when it
   // lands — and, refused, must not end the NEW session (the stale session is
@@ -334,6 +349,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       const { user, accessToken, refreshToken } = data.data;
       setTokens(accessToken, refreshToken, rememberMe);
+      endReplacedSession(refreshToken);
       if (canConnect(user)) {
         connectSocket(accessToken);
       }
@@ -360,6 +376,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const { data } = await api.post('/auth/totp/verify', body);
       const { user, accessToken, refreshToken, trustedDeviceToken } = data.data;
       setTokens(accessToken, refreshToken, totpRememberMe);
+      endReplacedSession(refreshToken);
       if (trustedDeviceToken) {
         setTrustedDeviceToken(trustedDeviceToken);
       }
@@ -478,6 +495,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return;
       }
       setTokens(accessToken, refreshToken, true);
+      endReplacedSession(refreshToken);
 
       // The code proved the mailbox and the consent travelled with step one,
       // but the socket still waits for whatever the server says is missing
@@ -549,9 +567,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isRegistering: false, powProgress: null, error: null });
   },
 
-  logout: ({ endingSession }: LogoutOptions = {}) => {
+  logout: ({ tellServer = true, endingSession }: LogoutOptions = {}) => {
     // The session this sign-out ends, read before anything clears it
-    const sessionToken = endingSession !== undefined ? endingSession : getRefreshToken();
+    const refreshToken = getRefreshToken();
+    const sessionToken = endingSession !== undefined ? endingSession : refreshToken;
 
     // Clean up voice state before disconnecting socket (stops mic, audio pipeline)
     const vs = useVoiceStore.getState();
@@ -572,6 +591,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // never see the previous account's servers, DMs, or support transcript
     resetAccountStores();
     set({ user: null, isAuthenticated: false, pendingRegistration: null });
+    if (tellServer) {
+      // Signed out on this device whatever happens next: the server is told
+      // in the background (never awaited, nothing stored from its answer)
+      endSessionOnServer(refreshToken);
+      // ... and the not-remembered tabs of the same session forget their copy
+      announceSessionEnded(sessionToken);
+    }
     // ... the screen then belongs to that other session
     if (outcome === 'replaced') reloadAfterSessionChange();
     return outcome;
@@ -750,7 +776,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // is left is this device's copy of it. Same cleanup as logout, plus the
       // E2E vault and its key, which logout deliberately keeps — every key
       // the vault pairs with is gone.
-      get().logout({ endingSession: sessionToken });
+      get().logout({ tellServer: false, endingSession: sessionToken });
       // Never rejects: a part it could not remove is logged, and the account
       // is deleted either way
       const localE2EStateForgotten = userId ? forgetLocalE2EState(userId) : Promise.resolve();

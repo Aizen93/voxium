@@ -3,6 +3,8 @@ import { AxiosError } from 'axios';
 import {
   PowAbortedError, SIGNUP, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE,
 } from '@voxium/shared';
+// The sign-out's server call and its retries: never a real request from a unit test
+vi.mock('../../services/sessionRevocation', () => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
 import type { PendingRegistration } from '../../stores/authStore';
 
 // Moving the proof-of-work into a worker made the register view navigable
@@ -39,6 +41,7 @@ vi.mock('../../services/tokenStorage', () => ({
   getRefreshToken: vi.fn(() => null),
   clearSessionTokens: vi.fn(() => { storage.clearTokens(); return 'cleared'; }),
   reloadAfterSessionChange: vi.fn(),
+  announceSessionEnded: vi.fn(),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null),
