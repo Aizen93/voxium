@@ -105,14 +105,15 @@ describe('the session module is the only minter of session tokens', () => {
     }
   });
 
-  it('the places that open or renew a session go through the session module', () => {
+  it('the five places that open or renew a session go through the session module', () => {
     const text = (rel: string) => files.find((f) => f.rel === rel)!.text;
     // Sign-in, the two-factor step, the password change
     expect(text('services/authService.ts').match(/\bcreateSession\(/g)).toHaveLength(2);
     expect(text('services/authService.ts')).toMatch(/\brekeySession\(tx, account, sid, admittedVersion\)/);
     // Registration completion, in the account's transaction
     expect(text('services/signupService.ts')).toMatch(/\bopenSession\(\s*tx,/);
-    // The renewal
+    // The renewal and the sign-out
     expect(text('routes/auth.ts')).toMatch(/\brefreshSession\(refreshToken,/);
+    expect(text('routes/auth.ts')).toMatch(/\bendSessionWithRefreshToken\(refreshToken\)/);
   });
 });

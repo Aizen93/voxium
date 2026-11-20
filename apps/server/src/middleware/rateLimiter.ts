@@ -136,6 +136,12 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // handler is a signature check and one indexed query; a refresh JWT cannot
   // be guessed at any rate the limiter would matter for.
   refresh:        { keyPrefix: 'rl:refresh',  points: 60,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Token Refresh' },
+  // A sign-out that ends the session on the server (POST /auth/logout, the
+  // refresh token in the body). Sized like `refresh`, for everyone behind one
+  // address signing out at the end of the day, and no block: the handler is a
+  // signature check and at most one indexed delete, and a refresh token
+  // cannot be guessed at any rate the limiter would matter for.
+  logout:         { keyPrefix: 'rl:logout',   points: 60,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Sign-out' },
   changePassword: { keyPrefix: 'rl:chgpwd',   points: 5,   duration: 60,  blockDuration: 300, keyType: 'ip',     label: 'Change Password' },
   consent:        { keyPrefix: 'rl:consent',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId',   label: 'Accept legal documents' },
   deleteAccount:  { keyPrefix: 'rl:delacct',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Delete own account' },
@@ -956,6 +962,7 @@ export const rateLimitPowChallenge = createMiddleware('powChallenge', byIp);
 export const rateLimitForgotPassword = createMiddleware('forgotPassword', byIp);
 export const rateLimitResetPassword = createMiddleware('resetPassword', byIp);
 export const rateLimitRefresh = createMiddleware('refresh', byIp);
+export const rateLimitLogout = createMiddleware('logout', byIp);
 export const rateLimitChangePassword = createMiddleware('changePassword', byIp);
 export const rateLimitConsent = createMiddleware('consent', byUserId);
 // Password guesses against the deletion endpoint are password guesses; keep

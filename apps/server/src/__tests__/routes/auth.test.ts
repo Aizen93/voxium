@@ -182,10 +182,11 @@ vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 // The registration limiters are spies, so each route's chain can be observed.
 const {
   rateLimitRegisterMock, rateLimitRegisterAttemptMock, rateLimitRegisterAttemptSubnetMock,
-  rateLimitRegisterCompleteMock, rateLimitRegisterResendMock, chargeRegistrationBudgetsMock,
+  rateLimitRegisterCompleteMock, rateLimitRegisterResendMock, chargeRegistrationBudgetsMock, rateLimitLogoutMock,
 } = vi.hoisted(() => {
   const spy = () => vi.fn((_req: unknown, _res: unknown, next: () => void) => next());
   return {
+    rateLimitLogoutMock: spy(),
     rateLimitRegisterMock: spy(),
     rateLimitRegisterAttemptMock: spy(),
     rateLimitRegisterAttemptSubnetMock: spy(),
@@ -217,6 +218,7 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitForgotPassword: passthroughMiddleware,
   rateLimitResetPassword: passthroughMiddleware,
   rateLimitRefresh: passthroughMiddleware,
+  rateLimitLogout: rateLimitLogoutMock,
   rateLimitChangePassword: passthroughMiddleware,
   rateLimitTOTP: passthroughMiddleware,
   rateLimitVerifyEmail: passthroughMiddleware,
@@ -2035,5 +2037,100 @@ describe('POST /api/v1/auth/refresh — a token that names its session', () => {
       expect(sessionStore.rotateSession).not.toHaveBeenCalled();
       expect(sessionStore.deleteSession).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('POST /api/v1/auth/logout', () => {
+  const SID = 'Qm9vdHN0cmFwU2Vzc2lvbg';
+  const sessionToken = (over: Record<string, unknown> = {}, secret = JWT_REFRESH_SECRET) => jwt.sign(
+    { userId: MOCK_USER.id, tokenVersion: 0, rememberMe: true, sid: SID, gen: 7, exp: Math.floor(Date.now() / 1000) + 30 * 86400, ...over },
+    secret,
+    { algorithm: 'HS256' },
+  );
+  /** What a caller can observe of an answer: everything but the headers that differ per request. */
+  const observable = (res: request.Response) => {
+    const { date: _d, 'x-request-id': _r, ...headers } = res.headers;
+    return { status: res.status, text: res.text, headers };
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sessionStore.deleteSession.mockResolvedValue(1);
+    sessionStore.spendLegacyRedemption.mockResolvedValue([]);
+  });
+
+  it('ends the session the token names (any generation), its sockets told and closed: 204, nothing in the body', async () => {
+    const res = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken({ gen: 2 }) });
+
+    expect(res.status).toBe(204);
+    expect(res.text).toBe('');
+    expect(sessionStore.deleteSession).toHaveBeenCalledWith(expect.anything(), SID, MOCK_USER.id);
+    expect(revokeSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, SID, 'Your session has ended');
+    expect(rateLimitLogoutMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('needs no access token: it is authenticated by the refresh token alone (the access token may have expired)', async () => {
+    const res = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken() });
+    expect(res.status).toBe(204);
+    expect(mockPrismaUser.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('answers the SAME 204 for a valid, forged, expired, garbage, unknown or already-ended token, and one issued before sessions', async () => {
+    const valid = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken() });
+    sessionStore.deleteSession.mockResolvedValueOnce(0);
+    const gone = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken({ sid: 'unknownSessionId000000' }) });
+    const forged = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken({}, 'not-the-secret') });
+    const expired = await request(app).post('/api/v1/auth/logout').send({ refreshToken: sessionToken({ exp: Math.floor(Date.now() / 1000) - 60 }) });
+    const garbage = await request(app).post('/api/v1/auth/logout').send({ refreshToken: 'garbage' });
+    const access = await request(app).post('/api/v1/auth/logout').send({ refreshToken: generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username }) });
+    const legacy = await request(app).post('/api/v1/auth/logout').send({ refreshToken: generateRefreshToken({ userId: MOCK_USER.id, username: MOCK_USER.username }) });
+
+    const answers = [valid, gone, forged, expired, garbage, access, legacy].map(observable);
+    for (const answer of answers) expect(answer).toEqual(answers[0]);
+    expect(answers[0].status).toBe(204);
+    // Only the parseable ones reached a statement: one delete each, the legacy one spent
+    expect(sessionStore.deleteSession).toHaveBeenCalledTimes(2);
+    expect(sessionStore.spendLegacyRedemption).toHaveBeenCalledTimes(1);
+    // A socket is ended only for a session that was there
+    expect(revokeSessionSocketsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a token issued before sessions is spent (its digest recorded), and the session it became, if any, ended', async () => {
+    const legacy = generateRefreshToken({ userId: MOCK_USER.id, username: MOCK_USER.username });
+    sessionStore.spendLegacyRedemption.mockResolvedValueOnce([SID]);
+
+    const res = await request(app).post('/api/v1/auth/logout').send({ refreshToken: legacy });
+
+    expect(res.status).toBe(204);
+    expect(sessionStore.spendLegacyRedemption).toHaveBeenCalledWith(
+      expect.anything(), crypto.createHash('sha256').update(legacy).digest('hex'), (jwt.decode(legacy) as { exp: number }).exp, MOCK_USER.id,
+    );
+    expect(revokeSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, [SID], 'Your session has ended');
+  });
+
+  it.each([
+    ['missing', {}],
+    ['not a string', { refreshToken: 42 }],
+    ['empty', { refreshToken: '' }],
+    ['longer than any refresh token', { refreshToken: 'x'.repeat(4097) }],
+  ])('a body whose token is %s: 400 Refresh token is required, nothing read', async (_what, body) => {
+    const res = await request(app).post('/api/v1/auth/logout').send(body);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Refresh token is required' });
+    expect(sessionStore.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('a database failure answers 500: the client knows the session was not ended, and the token is never logged', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const token = sessionToken();
+    sessionStore.deleteSession.mockRejectedValueOnce(new Error('connection terminated unexpectedly'));
+
+    const res = await request(app).post('/api/v1/auth/logout').send({ refreshToken: token });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ success: false, error: 'Internal server error' });
+    expect(revokeSessionSocketsMock).not.toHaveBeenCalled();
+    for (const call of error.mock.calls) expect(JSON.stringify(call)).not.toContain(token.split('.')[2]);
+    error.mockRestore();
   });
 });
