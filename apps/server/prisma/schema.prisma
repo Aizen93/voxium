@@ -791,6 +791,7 @@ model Announcement {
   createdById String    @map("created_by_id")
   publishedAt DateTime? @map("published_at")
   expiresAt   DateTime? @map("expires_at")
+  legalDoc    String?   @map("legal_doc")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 

@@ -6,7 +6,8 @@ import { useAdminStore } from '../stores/adminStore';
 import { AdminTable } from './AdminTable';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { toast } from '../stores/toastStore';
-import type { Announcement } from '@voxium/shared';
+import { ANNOUNCEMENT_LEGAL_DOCS, isAnnouncementLegalDoc } from '@voxium/shared';
+import type { Announcement, AnnouncementLegalDoc } from '@voxium/shared';
 
 type FilterTab = 'all' | 'active' | 'draft' | 'expired';
 
@@ -16,6 +17,13 @@ const FILTER_TABS: Array<{ id: FilterTab; label: string }> = [
   { id: 'draft', label: 'Draft' },
   { id: 'expired', label: 'Expired' },
 ];
+
+// The documents' names as the desktop app shows them.
+const LEGAL_DOC_LABELS: Record<AnnouncementLegalDoc, string> = {
+  privacy: 'Privacy Policy',
+  terms: 'Terms of Service',
+  cookies: 'Cookie Policy',
+};
 
 function getStatus(a: Announcement): 'draft' | 'active' | 'expired' {
   if (!a.publishedAt) return 'draft';
@@ -57,6 +65,7 @@ export function AdminAnnouncements() {
   const [scope, setScope] = useState('global');
   const [selectedServerIds, setSelectedServerIds] = useState<string[]>([]);
   const [expiresAt, setExpiresAt] = useState('');
+  const [legalDoc, setLegalDoc] = useState('');
   const [publishImmediately, setPublishImmediately] = useState(false);
   const [creating, setCreating] = useState(false);
 
@@ -79,6 +88,7 @@ export function AdminAnnouncements() {
     setScope('global');
     setSelectedServerIds([]);
     setExpiresAt('');
+    setLegalDoc('');
     setPublishImmediately(false);
   };
 
@@ -92,6 +102,7 @@ export function AdminAnnouncements() {
         scope,
         serverIds: scope === 'servers' ? selectedServerIds : undefined,
         expiresAt: expiresAt || undefined,
+        legalDoc: isAnnouncementLegalDoc(legalDoc) ? legalDoc : undefined,
         publish: publishImmediately,
       });
       toast.success(publishImmediately ? 'Announcement created and published' : 'Announcement draft created');
@@ -117,6 +128,7 @@ export function AdminAnnouncements() {
     { key: 'content', label: 'Content' },
     { key: 'type', label: 'Type', width: '100px' },
     { key: 'scope', label: 'Scope', width: '100px' },
+    { key: 'legalDoc', label: 'Document', width: '140px' },
     { key: 'status', label: 'Status', width: '100px' },
     { key: 'expiresAt', label: 'Expires', width: '160px' },
     { key: 'createdAt', label: 'Created', width: '160px' },
@@ -130,6 +142,9 @@ export function AdminAnnouncements() {
       content: <span className="text-vox-text-secondary text-xs line-clamp-2">{a.content}</span>,
       type: <TypeBadge type={a.type} />,
       scope: <span className="capitalize text-xs">{a.scope}</span>,
+      legalDoc: isAnnouncementLegalDoc(a.legalDoc)
+        ? <span className="text-xs text-vox-text-secondary">{LEGAL_DOC_LABELS[a.legalDoc]}</span>
+        : <span className="text-vox-text-muted italic text-xs">None</span>,
       status: <StatusBadge status={status} />,
       expiresAt: a.expiresAt ? new Date(a.expiresAt).toLocaleString() : <span className="text-vox-text-muted italic">Never</span>,
       createdAt: new Date(a.createdAt).toLocaleString(),
@@ -296,6 +311,21 @@ export function AdminAnnouncements() {
                   onChange={(e) => setExpiresAt(e.target.value)}
                   className="w-full px-3 py-2 text-sm rounded-md bg-vox-bg-primary border border-vox-border text-vox-text-primary focus:outline-none focus:ring-1 focus:ring-vox-accent-primary"
                 />
+              </div>
+
+              <div>
+                <label htmlFor="announcement-legal-doc" className="block text-xs font-medium text-vox-text-muted mb-1">Link to a document</label>
+                <select
+                  id="announcement-legal-doc"
+                  value={legalDoc}
+                  onChange={(e) => setLegalDoc(e.target.value)}
+                  className="w-full px-3 py-2 text-sm rounded-md bg-vox-bg-primary border border-vox-border text-vox-text-primary focus:outline-none focus:ring-1 focus:ring-vox-accent-primary"
+                >
+                  <option value="">None</option>
+                  {ANNOUNCEMENT_LEGAL_DOCS.map((doc) => (
+                    <option key={doc} value={doc}>{LEGAL_DOC_LABELS[doc]}</option>
+                  ))}
+                </select>
               </div>
 
               <label className="flex items-center gap-2 text-sm text-vox-text-secondary cursor-pointer">

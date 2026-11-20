@@ -2102,7 +2102,9 @@
     "announcementGeneric": "Оголошення",
     "announcementToast": "{{label}}: {{title}}",
     "announcementMore": "ще {{n}}",
-    "dismissAnnouncement": "Приховати оголошення"
+    "dismissAnnouncement": "Приховати оголошення",
+    "announcementRead": "Читати",
+    "announcementOpenDocument": "Відкрити: {{document}}"
   },
   "updater": {
     "titleAvailable": "Потрібне оновлення",

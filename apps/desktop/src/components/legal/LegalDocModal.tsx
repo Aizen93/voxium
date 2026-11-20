@@ -3,8 +3,16 @@ import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 import { TermsContent } from './TermsContent';
 import { PrivacyContent } from './PrivacyContent';
+import { CookiePolicyContent } from './CookiePolicyContent';
 
-export type LegalDoc = 'terms' | 'privacy';
+export type LegalDoc = 'terms' | 'privacy' | 'cookies';
+
+/** The document's name as the app writes it (the same words as the sign-up form and the footer). */
+export function legalDocTitle(t: (key: string) => string, doc: LegalDoc): string {
+  if (doc === 'terms') return t('auth.register.termsOfService');
+  if (doc === 'privacy') return t('auth.register.privacyPolicy');
+  return t('landing.footer.cookiePolicy');
+}
 
 interface Props {
   doc: LegalDoc;
@@ -12,7 +20,8 @@ interface Props {
 }
 
 /**
- * The Terms of Service / Privacy Policy shown from the registration form.
+ * The Terms of Service / Privacy Policy / Cookie Policy shown from the registration form
+ * and from an announcement that names one.
  *
  * A modal rather than a link to /terms: consent has to be given on the form,
  * and navigating away loses everything typed so far — and the Tauri webview
@@ -43,7 +52,7 @@ export function LegalDocModal({ doc, onClose }: Props) {
       <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-vox-border bg-vox-bg-secondary shadow-2xl animate-slide-up">
         <div className="flex items-center justify-between border-b border-vox-border px-6 py-4">
           <h2 id="legal-doc-title" className="text-base font-semibold text-vox-text-primary">
-            {doc === 'terms' ? t('auth.register.termsOfService') : t('auth.register.privacyPolicy')}
+            {legalDocTitle(t, doc)}
           </h2>
           <button
             type="button"
@@ -55,7 +64,7 @@ export function LegalDocModal({ doc, onClose }: Props) {
           </button>
         </div>
         <div className="overflow-y-auto px-6 py-6 text-vox-text-primary">
-          {doc === 'terms' ? <TermsContent /> : <PrivacyContent />}
+          {doc === 'terms' ? <TermsContent /> : doc === 'privacy' ? <PrivacyContent /> : <CookiePolicyContent />}
         </div>
         <div className="border-t border-vox-border px-6 py-3 text-right">
           <button type="button" onClick={onClose} className="btn-primary px-4 py-2 text-sm">

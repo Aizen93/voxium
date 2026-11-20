@@ -2084,7 +2084,9 @@
     "announcementGeneric": "Anúncio",
     "announcementToast": "{{label}}: {{title}}",
     "announcementMore": "+{{n}} mais",
-    "dismissAnnouncement": "Dispensar anúncio"
+    "dismissAnnouncement": "Dispensar anúncio",
+    "announcementRead": "Ler",
+    "announcementOpenDocument": "Abrir: {{document}}"
   },
   "updater": {
     "titleAvailable": "Atualização necessária",
