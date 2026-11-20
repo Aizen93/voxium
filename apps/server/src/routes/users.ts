@@ -2,8 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { BadRequestError, NotFoundError } from '../utils/errors';
-import { validateDisplayName, validateBio, WS_EVENTS, LIMITS } from '@voxium/shared';
-import { getIO } from '../websocket/socketServer';
+import { validateDisplayName, validateBio, LIMITS } from '@voxium/shared';
+import { broadcastProfileUpdate } from '../utils/profileBroadcast';
 import { sanitizeText, sanitizeLabel } from '../utils/sanitize';
 import { VALID_S3_KEY_RE, deleteFromS3 } from '../utils/s3';
 import { adoptImageAssetUpload } from '../utils/uploadVerification';
@@ -140,15 +140,7 @@ userRouter.patch('/me/profile', rateLimitProfileUpdate, async (req: Request, res
 
     // Broadcast profile change to all servers the user is in
     if (displayNameSent || avatarUrl !== undefined) {
-      const memberships = await prisma.serverMember.findMany({
-        where: { userId: req.user!.userId },
-        select: { serverId: true },
-      });
-      const io = getIO();
-      const payload = { userId: updated.id, displayName: updated.displayName, avatarUrl: updated.avatarUrl };
-      for (const { serverId } of memberships) {
-        io.to(`server:${serverId}`).emit(WS_EVENTS.USER_UPDATED, payload);
-      }
+      await broadcastProfileUpdate(updated.id, { displayName: updated.displayName, avatarUrl: updated.avatarUrl });
     }
 
     res.json({ success: true, data: updated });

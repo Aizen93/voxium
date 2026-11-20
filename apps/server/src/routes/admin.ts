@@ -2,11 +2,13 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import net from 'net';
 import { authenticate } from '../middleware/auth';
 import { requireAdmin, requireSuperAdmin } from '../middleware/requireSuperAdmin';
-import { rateLimitAdmin, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitAdmin, normalizeIp, getAllRateLimits, clearUserRateLimits, updateRateLimit, resetRateLimit } from '../middleware/rateLimiter';
+import { getAllFeatureFlags, updateFeatureFlag, resetFeatureFlag } from '../utils/featureFlags';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { prisma } from '../utils/prisma';
 import { deleteUserAccount } from '../utils/accountDeletion';
 import { revokeUserSessions } from '../utils/sessionRevocation';
+import { broadcastProfileUpdate } from '../utils/profileBroadcast';
 import { getOnlineUsers } from '../utils/redis';
 import { getIO } from '../websocket/socketServer';
 import { getVoiceMediaCounts, getTransportCountsByChannel, getActiveVoiceChannelCount, getTotalVoiceUsers, getVoiceDiagnostics } from '../websocket/voiceHandler';
@@ -2213,7 +2215,7 @@ adminRouter.get('/storage/files', async (req: Request, res: Response, next: Next
   }
 });
 
-adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, next: NextFunction) => {
+adminRouter.delete('/storage/files/*path', async (req: Request<{ path: string[] }>, res: Response, next: NextFunction) => {
   try {
     const pathSegments = req.params.path;
     const key = Array.isArray(pathSegments) ? pathSegments.join('/') : pathSegments as string;
@@ -2221,15 +2223,51 @@ adminRouter.delete('/storage/files/*path', async (req: Request, res: Response, n
       throw new BadRequestError('Invalid file key');
     }
 
-    // Nullify or expire DB reference
+    // Nullify or expire DB reference. Who held the key is read first: the
+    // update commits, and then connected clients are told (below).
+    let formerOwnerIds: string[] = [];
+    let formerSpaceIds: string[] = [];
     if (key.startsWith('avatars/')) {
+      formerOwnerIds = (await prisma.user.findMany({ where: { avatarUrl: key }, select: { id: true } })).map((u) => u.id);
       await prisma.user.updateMany({ where: { avatarUrl: key }, data: { avatarUrl: null } });
     } else if (key.startsWith('server-icons/')) {
+      formerSpaceIds = (await prisma.server.findMany({ where: { iconUrl: key }, select: { id: true } })).map((s) => s.id);
       const cleared = await prisma.server.updateMany({ where: { iconUrl: key }, data: { iconUrl: null } });
       // A space lost its icon: its Explore card changed (never throws)
       if (cleared.count > 0) await bumpDiscoveryPageCache('admin storage delete (space icon)');
     } else if (key.startsWith('attachments/')) {
       await prisma.messageAttachment.updateMany({ where: { s3Key: key }, data: { expired: true } });
+    }
+
+    // Connected clients drop the dead key live, like after a profile or space
+    // edit. Each step is best effort: the delete has committed. Each former
+    // owner is announced as their row reads AFTER the write, so a rename or a
+    // new avatar that landed meanwhile is what clients are told.
+    if (formerOwnerIds.length > 0) {
+      let owners: Array<{ id: string; displayName: string; avatarUrl: string | null }> = [];
+      try {
+        owners = await prisma.user.findMany({ where: { id: { in: formerOwnerIds } }, select: { id: true, displayName: true, avatarUrl: true } });
+      } catch (readErr) {
+        console.error('[Admin] Failed to read the profiles to announce after an avatar removal:', readErr instanceof Error ? readErr.message : readErr);
+      }
+      for (const owner of owners) {
+        try {
+          await broadcastProfileUpdate(owner.id, { displayName: owner.displayName, avatarUrl: owner.avatarUrl });
+        } catch (broadcastErr) {
+          console.error('[Admin] Failed to broadcast avatar removal:', broadcastErr instanceof Error ? broadcastErr.message : broadcastErr);
+        }
+      }
+    }
+    if (formerSpaceIds.length > 0) {
+      try {
+        const spaces = await prisma.server.findMany({ where: { id: { in: formerSpaceIds } }, select: serverSelect });
+        const io = getIO();
+        for (const space of spaces) {
+          io.to(`server:${space.id}`).emit(WS_EVENTS.SERVER_UPDATED, space as unknown as Server);
+        }
+      } catch (broadcastErr) {
+        console.error('[Admin] Failed to broadcast space icon removal:', broadcastErr instanceof Error ? broadcastErr.message : broadcastErr);
+      }
     }
 
     await deleteFromS3(key);
@@ -2297,7 +2335,6 @@ adminRouter.get('/audit-logs', async (req: Request, res: Response, next: NextFun
 
 adminRouter.get('/rate-limits', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const { getAllRateLimits } = await import('../middleware/rateLimiter');
     res.json({ success: true, data: getAllRateLimits() });
   } catch (err) {
     next(err);
@@ -2311,7 +2348,6 @@ adminRouter.post('/rate-limits/clear-user', async (req: Request, res: Response, 
       throw new BadRequestError('Provide a user ID or IP address');
     }
 
-    const { clearUserRateLimits } = await import('../middleware/rateLimiter');
     const cleared = await clearUserRateLimits(key.trim());
 
     logAuditEvent({
@@ -2337,7 +2373,6 @@ adminRouter.put('/rate-limits/:name', async (req: Request<{ name: string }>, res
       throw new BadRequestError('Provide at least one of: points, duration, blockDuration');
     }
 
-    const { updateRateLimit } = await import('../middleware/rateLimiter');
     await updateRateLimit(name, { points, duration, blockDuration });
 
     logAuditEvent({
@@ -2357,7 +2392,6 @@ adminRouter.put('/rate-limits/:name', async (req: Request<{ name: string }>, res
 adminRouter.post('/rate-limits/:name/reset', async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
   try {
     const { name } = req.params;
-    const { resetRateLimit } = await import('../middleware/rateLimiter');
     await resetRateLimit(name);
 
     logAuditEvent({
@@ -2377,7 +2411,6 @@ adminRouter.post('/rate-limits/:name/reset', async (req: Request<{ name: string 
 
 adminRouter.get('/feature-flags', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const { getAllFeatureFlags } = await import('../utils/featureFlags');
     res.json({ success: true, data: getAllFeatureFlags() });
   } catch (err) {
     next(err);
@@ -2393,7 +2426,6 @@ adminRouter.put('/feature-flags/:name', async (req: Request<{ name: string }>, r
       throw new BadRequestError('Provide a boolean "enabled" value');
     }
 
-    const { updateFeatureFlag } = await import('../utils/featureFlags');
     await updateFeatureFlag(name, enabled);
 
     logAuditEvent({
@@ -2413,7 +2445,6 @@ adminRouter.put('/feature-flags/:name', async (req: Request<{ name: string }>, r
 adminRouter.post('/feature-flags/:name/reset', async (req: Request<{ name: string }>, res: Response, next: NextFunction) => {
   try {
     const { name } = req.params;
-    const { resetFeatureFlag } = await import('../utils/featureFlags');
     await resetFeatureFlag(name);
 
     logAuditEvent({
