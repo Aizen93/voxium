@@ -3566,6 +3566,62 @@ describe('E2EService — secure-channel group sessions', () => {
 
     await expect(outsider.service.fetchChannelDeviceLists(channelId)).rejects.toThrow('404');
     await expect(outsider.service.fetchChannelDeviceLists('ghost-channel')).rejects.toThrow('404');
+    // Asked to collect identity changes, the same refusal still fails the call
+    await expect(
+      outsider.service.fetchChannelDeviceLists(channelId, { collectIdentityChanges: true })
+    ).rejects.toThrow('404');
+  });
+
+  describe('a member whose identity changed since it was accepted', () => {
+    async function withChangedMember() {
+      const ctx = await threeMemberChannel();
+      // Alice pins every member's devices
+      await ctx.alice.service.fetchChannelDeviceLists(ctx.channelId);
+      // Bob loses his pickle key: same install (same device id), a new identity
+      const bobReborn = makeDevice(ctx.server, ctx.bob.userId, {
+        keyProvider: memoryKeyProvider(),
+        vaultNamespace: ctx.bob.vaultNamespace,
+      });
+      await bobReborn.service.initialize();
+      await flushQueue();
+      expect(bobReborn.service.deviceId).toBe(ctx.bob.service.deviceId);
+      return ctx;
+    }
+
+    it('fails the channel device lists and the send by default, exactly as before', async () => {
+      const { alice, bob, channelId } = await withChangedMember();
+
+      const listed = alice.service.fetchChannelDeviceLists(channelId);
+      await expect(listed).rejects.toThrow(E2EIdentityChangedError);
+      await expect(listed).rejects.toMatchObject({ peerUserId: bob.userId });
+      await expect(alice.service.encryptChannelMessage(channelId, 'not sent')).rejects.toThrow(E2EIdentityChangedError);
+    });
+
+    it('asked to collect, the call names that member and verifies the others as usual', async () => {
+      const { alice, bob, charlie, channelId } = await withChangedMember();
+
+      const collected = await alice.service.fetchChannelDeviceLists(channelId, { collectIdentityChanges: true });
+
+      expect(collected.members.map((m) => m.userId).sort()).toEqual([alice.userId, bob.userId, charlie.userId].sort());
+      expect(collected.identityChangedUserIds).toEqual([bob.userId]);
+      expect(collected.lists.has(bob.userId)).toBe(false);
+      expect(collected.lists.get(charlie.userId)?.devices.map((d) => d.deviceId)).toEqual([charlie.service.deviceId]);
+      expect(collected.unverifiableUserIds).toEqual([]);
+      // Collecting changes nothing for later calls: the default one still fails
+      await expect(alice.service.fetchChannelDeviceLists(channelId)).rejects.toThrow(E2EIdentityChangedError);
+    });
+
+    it('once the change is accepted, both forms list the member again, and only the collecting one carries the field', async () => {
+      const { alice, bob, channelId } = await withChangedMember();
+      await alice.service.acceptNewIdentity(bob.userId);
+
+      const plain = await alice.service.fetchChannelDeviceLists(channelId);
+      expect(plain.lists.has(bob.userId)).toBe(true);
+      expect(plain).not.toHaveProperty('identityChangedUserIds');
+      const collected = await alice.service.fetchChannelDeviceLists(channelId, { collectIdentityChanges: true });
+      expect(collected.lists.has(bob.userId)).toBe(true);
+      expect(collected.identityChangedUserIds).toEqual([]);
+    });
   });
 
   it('multi-device: a member reading from their SECOND device gets the session too', async () => {

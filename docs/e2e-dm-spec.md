@@ -2034,10 +2034,12 @@ invariants:
   from `seq` 2^32 − 2^16 (`VOICE_FRAME_SEQ_ROTATE_AT`) on, so the 4-byte field
   never wraps, and the frame worker asks for a fresh rotation once fewer than
   1,000,000 frames remain (about five and a half hours of 20 ms frames). The
-  counter restarts at 0 whenever the sender installs a key, so the cipher
-  relies on the key layer never installing the same key twice: it installs only
-  a fresh random key or the ratchet of its current one (`secureVoiceKeys.ts`),
-  and a session restart mints a new key (§21.5).
+  counter starts at 0 when the sender installs new key bytes; the key in use,
+  installed again, keeps its count. The cipher recognises only the key in use,
+  so it relies on the key layer installing every key once and never one that
+  has been replaced: it installs only a fresh random key or the ratchet of its
+  current one (`secureVoiceKeys.ts`), and a session restart mints a new key
+  (§21.5).
 - **Replay window.** Per (sender, keyId), a frame whose `seq` is 128 or more
   below the highest that decrypted is refused, a `seq` already seen is
   refused, and any other is accepted once, in any order. The window moves only
@@ -2087,6 +2089,13 @@ unheard.
 
 - **Arrival:** every sender hash-ratchets its key forward (HKDF-SHA256,
   keyId+1) and seals the POST-ratchet key to the joiner — no past audio.
+  This holds on every path that first keys a joiner (the arrival, a vet
+  retried after a transient failure, a key request): the joiner is only ever
+  sealed a generation installed after their arrival, and arrivals announced
+  at the same generation share one step. Only occupants listed before the
+  sender's encrypt transform is attached (so before its first frame) are not
+  arrivals; a participant re-announced in a new session (a new epoch) is a
+  departure of the old one (below) and an arrival.
   Existing receivers perform **tag-verified trial-ratchet** on keyId+1
   frames: GCM success proves an arrival ratchet (installed gaplessly, no
   wire flag an attacker could flip); failure means a fresh rotation whose
@@ -2098,13 +2107,27 @@ unheard.
 - **Departure / kick / device revocation / identity change:** fresh random
   keys sealed to everyone remaining — no future audio for the leaver.
   Server-side, secure-member removal force-evicts live voice cluster-wide.
-  Every exclusion is a rotation trigger, including ones discovered mid-call
-  (an inbound key that fails its identity pin, or a `legacy-key` payload):
-  the excluded device already holds the current key and the server keeps
-  forwarding audio to it, since neither event is a membership change.
+  Every exclusion of a participant who holds the key in use is a rotation
+  trigger, including ones discovered mid-call (an inbound key that fails its
+  identity pin, a `legacy-key` payload, an identity change found by the
+  periodic check or when a key is sealed to them again): the excluded device
+  holds the current key and the server keeps forwarding audio to it, since
+  none of these is a membership change. An exclusion takes no rotation of its
+  own only when the excluded device does not hold the key in use: a
+  participant who was never keyed (excluded at their vet or at their first
+  seal), or one excluded while a fresh rotation is sealing, which replaces
+  the key they held.
   Revocation has no event of its own, so participants re-ask the authoritative
   endpoint periodically and drop any peer whose PINNED device has left their
-  published list — the stolen-device response.
+  published list — the stolen-device response. The same check excludes a
+  participant whose identity changed since it was accepted, and it runs for
+  every participant on every pass: one member's unaccepted change is reported
+  for that member and does not stop the check for the others.
+- **Excluded for the session:** a participant excluded during a session is
+  not keyed again in it. The sender records the epoch each participant was
+  excluded under and refuses a later announcement under that epoch, or under
+  none; an announcement with a new epoch (a new session of theirs) is vetted
+  like any arrival. A participant who only left is not recorded.
 - Receivers hold a 3-generation key ring per sender (rotation races), and
   sealed key messages carry §20-style epoch/seq replay state (superseded
   epochs never return). Re-installing a generation already held preserves its

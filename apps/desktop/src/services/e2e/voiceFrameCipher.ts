@@ -8,12 +8,14 @@
 // a change to packages/crypto-engine, and the construction stays exactly the
 // one spec §21.2 specifies (native clients implement it too). It holds:
 //  - No IV twice under one key. Every generation is a distinct key, and within
-//    one the counter starts at 0 on setKey() and only rises: encrypt() claims
+//    one the counter only rises: it starts at 0 when setKey() is given new key
+//    bytes, and the key in use, given again, keeps its count. encrypt() claims
 //    its seq before its first await, so concurrent calls never share one, and
 //    it refuses from VOICE_FRAME_SEQ_ROTATE_AT (2^32 - 2^16) on, so the 4-byte
-//    seq never wraps. Because setKey() restarts the counter, the caller must
-//    never install the same key twice: secureVoiceKeys.ts installs only fresh
-//    random keys and ratchets of its current one.
+//    seq never wraps. setKey() recognises only the key in use, so the caller
+//    still installs every key once and never one that has been replaced:
+//    secureVoiceKeys.ts installs only fresh random keys and ratchets of its
+//    current one.
 //  - The ratchet is one-way (HKDF): a key handed to a joiner opens no earlier
 //    generation, and the receiver derives only from its newest generation and
 //    only one step ahead, never backward.
@@ -87,9 +89,17 @@ async function importGcmKey(raw: Uint8Array, usage: 'encrypt' | 'decrypt'): Prom
   return crypto.subtle.importKey('raw', raw as BufferSource, 'AES-GCM', false, [usage]);
 }
 
+function sameKeyBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
 // ─── Sender ─────────────────────────────────────────────────────────────────
 
 export interface SenderCipher {
+  /** Install a generation. A new key restarts the counter; the key in use, installed again, keeps it. */
   setKey(keyId: number, raw: Uint8Array): Promise<void>;
   /** Encrypt one encoded frame. Null = DROP (no key yet, or counter spent). */
   encrypt(frame: ArrayBuffer): Promise<ArrayBuffer | null>;
@@ -111,12 +121,26 @@ export function createSenderCipher(
   let key: CryptoKey | null = null;
   let keyId = -1;
   let seq = initialSeq;
+  /**
+   * A private copy of the key in use, kept only to recognise it if it is
+   * installed again, and zero-filled when a key replaces it. The sender has no
+   * teardown of its own: the last copy goes with the worker.
+   */
+  let held: Uint8Array | null = null;
 
   return {
     async setKey(nextKeyId: number, raw: Uint8Array): Promise<void> {
-      key = await importGcmKey(raw, 'encrypt');
+      const next = await importGcmKey(raw, 'encrypt');
+      // The key in use, installed again, keeps its counter: restarting it
+      // would repeat IVs under that key (the IV holds only the low byte of the
+      // keyId, so a different keyId does not make them new). Only new key
+      // bytes start a new counter.
+      const keyInUse = held !== null && sameKeyBytes(held, raw);
+      key = next;
       keyId = nextKeyId;
-      seq = initialSeq; // fresh generation ⇒ fresh counter ⇒ fresh IV space
+      held?.fill(0);
+      held = raw.slice();
+      if (!keyInUse) seq = initialSeq; // fresh generation ⇒ fresh counter ⇒ fresh IV space
     },
     async encrypt(frame: ArrayBuffer): Promise<ArrayBuffer | null> {
       if (!key || keyId < 0) return null; // never pass plaintext through
@@ -183,13 +207,6 @@ export function createReceiverCipher(channelId: string, senderUserId: string): R
     }
   }
 
-  function sameKeyBytes(a: Uint8Array, b: Uint8Array): boolean {
-    if (a.length !== b.length) return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-    return diff === 0;
-  }
-
   async function install(keyId: number, raw: Uint8Array): Promise<void> {
     // Re-delivery of a generation we already hold (a key_request re-seal, or a
     // duplicated envelope) must NOT reset the replay window: doing so would let
@@ -200,9 +217,16 @@ export function createReceiverCipher(channelId: string, senderUserId: string): R
     const existing = ring.get(keyId);
     if (existing && sameKeyBytes(existing.raw, raw)) return;
 
+    const key = await importGcmKey(raw, 'decrypt');
+    // Look again after the import: a trial ratchet may have installed this
+    // very generation meanwhile and recorded frames under it, and its window
+    // is the one that must stay.
+    const installed = ring.get(keyId);
+    if (installed && sameKeyBytes(installed.raw, raw)) return;
+
     ring.set(keyId, {
       raw,
-      key: await importGcmKey(raw, 'decrypt'),
+      key,
       highestSeq: -1n,
       windowMask: 0n,
     });
@@ -276,6 +300,15 @@ export function createReceiverCipher(channelId: string, senderUserId: string): R
         };
         const plain = await tryDecrypt(candidateEntry, top + 1, seq, header, body);
         if (plain !== null) {
+          // The sealed copy of this generation may have been installed while
+          // we derived it, with frames already recorded: keep that entry and
+          // its window, and judge this frame against it.
+          const installed = ring.get(top + 1);
+          if (installed && sameKeyBytes(installed.raw, derived)) {
+            if (!checkAndRecordSeq(installed, BigInt(seq))) { stats.replayed++; return null; }
+            stats.ok++;
+            return plain;
+          }
           ring.set(top + 1, candidateEntry);
           pruneRing();
           checkAndRecordSeq(candidateEntry, BigInt(seq));
