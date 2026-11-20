@@ -79,6 +79,7 @@ model User {
   friendshipsRequested Friendship[] @relation("FriendshipRequester")
   friendshipsReceived  Friendship[] @relation("FriendshipAddressee")
   ipRecords    IpRecord[]
+  sessions     Session[]
   ipBansCreated IpBan[]  @relation("IpBanCreator")
   auditLogs     AuditLog[] @relation("AuditLogActor")
   announcements Announcement[] @relation("AnnouncementCreator")
@@ -687,6 +688,61 @@ model IpRecord {
   @@unique([userId, ip])
   @@index([ip])
   @@map("ip_records")
+}
+
+// ─── Sign-in sessions ───────────────────────────────────────────────────────
+// One row per signed-in device or browser (migration 20261121120000_sessions).
+// Written by services/sessionService.ts alone, through the statements of
+// utils/sessionStore.ts, which write every timestamp on the database's clock
+// in UTC (`now() AT TIME ZONE 'UTC'`), never a node's. No address, no user
+// agent, no name anyone typed.
+
+model Session {
+  /// The `sid` claim of the session's tokens and the socket room `session:{id}`.
+  /// Chosen by the session service (128 random bits, base64url): the raw
+  /// INSERT that writes the row on the database's clock takes no Prisma default.
+  id           String   @id
+  userId       String   @map("user_id")
+  /// The generation of the newest refresh token issued (the `gen` claim);
+  /// moved by one conditional UPDATE per renewal.
+  generation   Int
+  /// When `generation` was issued: the start of the reuse grace window.
+  rotatedAt    DateTime @map("rotated_at")
+  createdAt    DateTime @map("created_at")
+  /// The refresh token's `exp`: the idle window from the last renewal, never
+  /// past created_at + SESSIONS.MAX_AGE_DAYS.
+  expiresAt    DateTime @map("expires_at")
+  rememberMe   Boolean  @map("remember_me")
+  /// The account's token_version when the row was issued or re-keyed: a row
+  /// below the account's is dead (a password change or reset, a ban).
+  tokenVersion Int      @map("token_version")
+  /// SESSION_CLIENT_KINDS / SESSION_CLIENT_OSES (shared), nothing else.
+  clientKind   String   @map("client_kind")
+  clientOs     String   @map("client_os")
+
+  user               User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  legacyRedemptions  LegacyRefreshRedemption[]
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+/// A refresh token issued before sessions existed (no `sid`), as it was first
+/// presented: the SHA-256 of the token, the session it was upgraded into, and
+/// the token's own expiry. A NULL session is a token that may never be
+/// upgraded again (signed out, or its session ended). Transitional: no new
+/// such token is issued, and every one has expired by itself within
+/// JWT_REFRESH_EXPIRES_IN of the deploy.
+model LegacyRefreshRedemption {
+  digest    String   @id
+  sessionId String?  @map("session_id")
+  expiresAt DateTime @map("expires_at")
+
+  session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  // The SET NULL of every session delete looks its rows up by this column
+  @@index([sessionId])
+  @@map("legacy_refresh_redemptions")
 }
 
 // ─── IP Bans ────────────────────────────────────────────────────────────────
