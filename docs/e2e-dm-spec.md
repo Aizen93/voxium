@@ -373,6 +373,9 @@ plain name:
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 | `ptpurge:read-only:{conversationId}` | `{at}`: when the purge of a read-only conversation's `pt:` entries ended, after a conversation list confirmed it read-only; cleared when a list serves the conversation live (§9.1) |
 | `ptpurge:cleared:{conversationId}` | `{at, level}`: when the purge of a cleared history ended, and the floor it purged up to (`level`, milliseconds since the epoch); a record never moves back (§9.1) |
+| `claim_sent` | `{at}`: when a claim of the key-share inbox last left; its page may still be leased (§7.4) |
+| `repair:{name}` | `{at}`: when a repair ran on this vault: `repair:outbound-sessions-rotated` once; `repair:fallback-key-uploaded` when this device last made a fallback key to be sent, written before the request that may send it and again once the server took it (§7.4) |
+| `vault_owner` | the random token of the page that owns the vault; every write checks it in its own transaction (§7.4) |
 
 Only the `pickle` fields (by vodozemac) and `master_secret` (sealed by the
 engine, §14.5) are encrypted, both under the pickle key.
@@ -433,6 +436,195 @@ A key that cannot be removed is logged and does not fail the deletion.
 If the pickle key is lost while the vault survives, the client detects
 undecryptable pickles and regenerates a fresh identity (safety number
 changes — the honest signal).
+
+### 7.4 One page owns the vault
+
+Two tabs of one account in one browser share one vault. Each E2E service
+holds the Olm account, the pairwise sessions and the outbound group sessions
+in memory and saves them whole, so two live services on one vault would each
+advance a copy of their own and the vault would keep whichever was saved
+last: a forked pairwise session, one-time keys lost or used twice, two
+ciphertexts at one Megolm index. So one page owns a vault at a time
+(`services/e2e/vaultOwnership.ts`), and only that page starts a service on it.
+
+- **The lock.** In a secure context the page takes an exclusive Web Lock named
+  `voxium-e2e-vault:` and the vault's database name, before the app mounts
+  (`components/layout/VaultOwnershipGate.tsx`, in front of the app proper only:
+  the public pages, sign-in and sign-up are never behind it). The page holds it
+  across every service of that account it starts, and lets it go only once it
+  is no longer signed in to the account and its last service has torn down,
+  a key-share claim that teardown kept a connection for included (bounded); a
+  sign-in back to the same account meanwhile keeps it. A tab that starts
+  hidden asks two seconds later, or as soon as it is shown, so that the
+  visible tab of a restored session wins. The first request asks for the
+  lock only if it is free; one that has not answered within five seconds is
+  abandoned, and the page waits as a second tab does (below): in the lock's
+  queue while it is visible, so that a free lock reaches it there and the app
+  opens after the session check, and a tab that owns the vault keeps it. The
+  bound is there only so that the page is never left blank. A grant that
+  comes to the abandoned request later is released at once and changes
+  nothing: it could only be granted with the lock free. A steal ("Take over
+  anyway", below) that has not answered within five seconds is abandoned too,
+  and there the page takes the vault by the fence alone (as without Web Locks,
+  below), since the person chose to take over; a steal granted after that is
+  released at once as well, but by then it has taken the lock from its
+  holder, which reads it as stolen if the takeover notice had not ended its
+  ownership already. A steal that settles after the page stopped waiting for it
+  takes the lock from whoever holds it at that moment, which can be a tab that
+  obtained the lock after the asker gave up waiting; that tab loses the vault
+  as for any steal. A page that took the vault by the fence alone holds no
+  lock, so a tab that gets the lock later through the queue takes the vault
+  from it at its first use, without asking it first. With the lock, a page
+  reads the vault as its own only while it holds the grant: the loss of the
+  grant it holds ends its ownership (a request of its own that it replaced
+  does not), it joins no queue while it takes the vault over (a request
+  there would wait behind its own lock), and once it owns the vault no
+  request of its own waits in the queue.
+- **A second tab.** Finding the lock held, a tab shows a screen instead of the
+  app and stays off the socket. It waits in the lock's queue while it is
+  visible: when the owner closes, crashes, reloads or signs out, the first
+  waiting tab in the queue gets the vault, and takes it by itself after asking
+  the server whether it is still signed in to that account (only a refusal of
+  the session counts as signed out: a 401 to a request sent with a token whose
+  renewal had just failed for a passing reason is asked again, on a growing
+  wait). Hidden, a waiting tab leaves the queue, and joins it again when it is
+  shown, taking the vault at once if it is free then; so an owner that
+  reloads while a tab of the account waits in the background gets the vault
+  back, and one that closes leaves it to that tab when the person looks at it.
+  An owner that reloads while a waiting tab is visible (another window) loses
+  the vault to that tab, as when it closes. "Use it here" asks the owner
+  (BroadcastChannel `voxium-e2e-vault`) which call it has running, and with one
+  the person is told it will end before anything is asked of the owner. The
+  owner then ends its calls, stops its service, says `released` once the
+  teardown has run, and keeps the lock for the asking tab, which takes it with
+  a steal (the lock goes to the queue after ten seconds otherwise). From the
+  moment it agrees nothing new starts on the vault in the owner, but its
+  token stays until the teardown has settled, so that what a key-share claim
+  in flight was handed reaches the vault instead of staying leased on the
+  server; the token goes before `released`, and the asker takes the vault only
+  after it, so the two never write at once. A steal, a fenced write, a
+  `taken` notice or the back/forward cache in that window clears the token at
+  once, and `released` is not sent. An owner that does not answer within five
+  seconds can be taken over anyway, with a steal. The tab that gave the vault
+  up shows a screen of its own; its "Use it here" reloads it, the intent kept
+  across the reload in sessionStorage (`voxium_vault_takeover`, one minute),
+  and the fresh page asks for the vault. Going into the back/forward cache a
+  page gives its vault up; coming back from it, it reloads. A question or a
+  release about the vault of an account the page has signed out of (its
+  teardown still pending after an account switch) is answered with no call
+  and ends nothing of the account it is signed in to now.
+- **The fence.** Acquiring the vault writes a random owner token into it
+  (`vault_owner`): at once at the start and after a steal, and for a tab that
+  got the vault through the queue at its first use of it, once the screen has
+  checked its session (an owner that let go because it deleted the account
+  does not have its database made again). A write at the acquisition that
+  fails is made at the first use too, over whatever token is there (one a
+  previous load of the same tab left). Every read-write transaction of the
+  vault reads that token first, in the same transaction, and writes only when
+  it is the page's own: IndexedDB runs read-write transactions over one store
+  one at a time, so no other page's token lands between the check and the
+  write. A page that lost the vault and has not heard of it yet (its lock was
+  stolen, it was frozen, a message was missed) is refused at its next write;
+  its vault then refuses every access (`E2EVaultFencedError`), and its service
+  ends as if disposed: no failed-decrypt marker comes of it, and nothing is
+  cached, claimed or acknowledged on its behalf. Every path that hands out Olm
+  or Megolm ciphertext saves the advanced state first, so a fenced page sends
+  nothing from a stale ratchet. What a task asks the server before its first
+  write is covered by a read of the token at the start of every task of the
+  serial queue, before every request of the service and before each claim of
+  the key-share inbox. A write that finds no token at all (the database
+  deleted and made again under a running service) is refused the same way:
+  the page gives the vault up and shows the screen of a tab that did, and a
+  reload starts again. Every check of the token on disk outside a write (a
+  service start in a page that owns the vault, a `taken` notice, the
+  read-back below) is a read that writes nothing and never makes the
+  database: an open that would make or upgrade it is abandoned first, and
+  leaves nothing behind. The page keeps the vault only when that token is
+  its own: another page's token, no token, or no database at all (deleted
+  under it, an account deletion in the tab that took over) and it gives the
+  vault up. A read that fails gives it up too, except at a service start,
+  which fails instead (end-to-end encryption unavailable, nothing opened)
+  and is tried again by the next start.
+- **Without Web Locks** (a page served over plain http; where Web Locks
+  exist, only after the lock manager refused a request, by throwing or by a
+  rejection that is not an abort, or after a steal that did not settle) the
+  fence holds alone, and the newest start wins. A start first asks the other
+  tabs which call the owner runs, waiting 300 ms at most (not at all without
+  a BroadcastChannel): no answer, or no call, and it writes its token and
+  tells the other tabs (`taken`); a call, and it writes nothing and shows the
+  warning a "Use it here" shows, claiming the vault only if the person agrees
+  (otherwise the screen, with "Use it here"). A tab told `taken` checks the
+  token on disk and keeps the vault only when it is its own (at once, or at
+  its next write when the message is missed), so two starts at once settle
+  on the one written last; a start that heard the other's notice while it
+  wrote its own token reads the token back the same way before it opens the
+  app, and waits on the screen unless the token is its own, a failed read
+  included. The making of a missing pickle key, which no transaction of the
+  vault covers, is then held behind a claim in localStorage
+  (`voxium_vault_start_claim:` and a digest of the vault's name), so that two
+  first starts never make two keys. The start that wrote it removes it when
+  it ends; one an interrupted start left behind (older than fifteen seconds)
+  is removed by the next start of that vault, in either mode.
+- **The messages** carry a digest of the vault's name, random page ids and
+  nonces, and in an owner's answer the kind of call running (`none`, `voice`
+  or `dm`); never a token, a key or a user id. They are courtesy only: nothing
+  decides safety on a message alone.
+- **The desktop app** runs one instance with one window: the lock is never
+  contended there and costs one request per start.
+
+**Repairs.** A vault two tabs used before this can hold what they left behind.
+Two repairs run, both only in a page that owns the vault. Every outbound group
+session is dropped once per vault (`repair:outbound-sessions-rotated`), so the
+next send of each conversation and secure channel starts a new session.
+
+The fallback key the server holds may have lost its private half, and the
+account cannot send its current key again (it answers only an unpublished
+one), so the repair is a new key. The engine keeps the private half of ONE
+key before the current one: a share sealed to a key two rotations old can no
+longer be opened, and is discarded as unusable. So a start makes a new
+fallback key only when all of these hold, judged in one task of the serial
+queue that runs after the start's key-share claim and its master-secret
+transfer claim:
+
+1. the start did not register the device (a registration uploads a key);
+2. the account in the vault is the one this service last read or wrote,
+   compared right before anything is done: another writer (a tab of a build
+   from before one page owned the vault) could save over the new key's private
+   half. On a difference nothing is uploaded at that start, one-time keys
+   included, and one line is logged;
+3. the start's key-share claim ran to its end without an error and emptied
+   the inbox (no page or request cap reached, no answer lost), no claim of an
+   earlier page load can still hold a page leased (the vault records when a
+   claim last left, `claim_sent`, and a start within 80 seconds of it — the
+   request's deadline, the lease and a margin — waits), no kept share
+   (`pks:`) waits in the vault, and the start read the master-secret
+   transfers (a transfer it read and could not import stays for the next
+   claim, as before; one rotation keeps the key before it);
+4. the last fallback key made to be sent is at least 24 hours old by the
+   vault's record (`repair:fallback-key-uploaded`), or the vault has no record
+   (the first start of this build, which is the repair). A record dated after
+   the clock's time now (the clock was set back) is moved to the time read
+   now, so the next key comes a full day after that start, never earlier, and
+   never not at all. A clock set forward lets one come early, and no other
+   condition stops that (the 80 seconds of the third read the same clock):
+   what bounds it is that a start makes one key at most, and that each new
+   key moves the record to the clock's time first, so a second early key
+   needs the clock to jump forward again.
+
+The record is written BEFORE any request that may send a newly made key
+(every registration, and the upload of a rotated key, before that key is
+made), and written again once the server took it: a page closed after the
+server took a key, or a write that fails then, still leaves it, so the next
+start does not rotate again at once, which would drop the key the server
+held until then. When it cannot be written first, no key is made and nothing
+is sent at that start (a registration then fails the start, as any failed
+vault write there does).
+The key is marked published only once the server took it: refused or
+unanswered, it stays unpublished in the vault and the same key goes again at
+the next start with no other writer (sending it makes nothing new), and no
+one-time key is made beside it meanwhile. A kept share that holds the
+rotation back is logged once a start, as a warning. A pairwise session two
+tabs already forked is not repaired (§11).
 
 ## 8. Safety numbers
 
@@ -715,6 +907,7 @@ did not vouch for:
 6. ~~No encrypted attachments~~ — shipped in Phase C (§13); the server can still see ciphertext sizes and upload timing (metadata, limitation 8).
 7. ~~Group (server-channel) E2E out of scope~~ — shipped as secure channels (§19) and secure voice channels (§21); ordinary channels stay readable by the server.
 8. Metadata (participants, timing, sizes) visible to the server, as in Signal-style designs generally.
+9. Pairwise Olm sessions that two tabs of one account forked before one page owned the vault (§7.4) are not repaired: nothing starts a new pairwise session after repeated failures from one device yet. The one-time rotation of the outbound group sessions and the rotation of the fallback key (at most once a day, §7.4) repair the rest.
 
 ## 12. Multi-device (Phase C, shipped)
 
