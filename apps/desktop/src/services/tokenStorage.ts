@@ -45,6 +45,9 @@
  */
 
 import { BUILD_API_ORIGIN, isOfficialOrigin } from './sessionOrigin';
+import { accountDeletionSettled } from './accountDeletion';
+import { currentE2ESessionUser } from './e2e/session';
+import { isSameSession, userIdOf } from './tokenClaims';
 
 const ACCESS_KEY = 'voxium_access_token';
 const REFRESH_KEY = 'voxium_refresh_token';
@@ -515,12 +518,95 @@ export function setTokens(accessToken: string, refreshToken: string, rememberMe?
   enqueueTokenWrite('Could not persist the session', (s) => s.saveTokens(accessToken, refreshToken, remembered));
 }
 
-/** Forget the pair: in memory and in the page's storage now, in the store in turn. */
+/**
+ * Forget the pair: in memory and in the page's storage now, in the store in
+ * turn, whoever's session it is. For a sign-in replacing whatever this device
+ * holds; a session that ENDS is forgotten with clearSessionTokens.
+ */
 export function clearTokens(): void {
   memory = { ...memory, accessToken: null, refreshToken: null };
   tokensWritten = true;
   removeLegacyPairs();
   enqueueTokenWrite('Could not clear the stored session', (s) => s.clearTokens());
+}
+
+/** The pair the web store holds where this tab follows it: the remembered pair (any tab's), else this tab's own not-remembered one. */
+function followedWebPair(apiOrigin: string): TokenPair | null {
+  const remembered = markedOwn(SESSION_ORIGIN_KEY, apiOrigin) ? readPair(localStorage) : null;
+  if (remembered) return remembered;
+  if (memory.remembered) return null;
+  const mark = sessionStorage.getItem(SESSION_ORIGIN_KEY);
+  return mark === null || mark === apiOrigin ? readPair(sessionStorage) : null;
+}
+
+/** Every copy of the ended session's pair the page's storage holds, gone — and no other. */
+function removeEndedSessionCopies(endedToken: string): void {
+  for (const area of [localStorage, sessionStorage]) {
+    const pair = readPair(area);
+    if (pair && isSameSession(pair, endedToken)) removePair(area);
+  }
+}
+
+/**
+ * A session ended on this device (a sign-out, a refusal, the server's word,
+ * an account deletion): forget its pair, as clearTokens does — but only
+ * while the pair stored where this tab follows it is still of that session
+ * (`endedToken` is any token of it, access or refresh; the session is told
+ * by its `sid`, or by the very token when it names none). When another tab
+ * stored a different session meanwhile (a sign-in, as anyone), that pair is
+ * left as it is, every copy of the ended session is removed, the memory lets
+ * go of both, and 'replaced' is answered: the caller reloads the page onto
+ * the stored session (reloadAfterSessionChange) instead of signing out a
+ * session that is not the one that ended. `null` (nothing to compare with)
+ * clears as clearTokens does. In the desktop app the memory is the store.
+ */
+export function clearSessionTokens(endedToken: string | null): 'cleared' | 'replaced' {
+  if (endedToken !== null) {
+    const stored = isWebStore(store)
+      ? followedWebPair(store.apiOrigin)
+      : memory.accessToken !== null && memory.refreshToken !== null
+        ? { accessToken: memory.accessToken, refreshToken: memory.refreshToken }
+        : null;
+    if (stored && !isSameSession(stored, endedToken)) {
+      memory = { ...memory, accessToken: null, refreshToken: null };
+      if (isWebStore(store)) {
+        removeEndedSessionCopies(endedToken);
+        // after a write of this tab still queued, which may be the ended session's
+        enqueueTokenWrite('Could not clear the ended session', () => removeEndedSessionCopies(endedToken));
+      }
+      return 'replaced';
+    }
+  }
+  clearTokens();
+  return 'cleared';
+}
+
+// What reloads the page onto the stored session, replaceable for tests (jsdom cannot navigate)
+let reloadPage: () => void = () => {
+  window.location.reload();
+};
+let reloading = false;
+
+/**
+ * Reload the page onto whatever session the storage holds now: once, after
+ * the queued writes have landed (a reload that outran them would load a
+ * stale pair) and after an account deletion of this client in flight has
+ * finished its local clean-up (services/accountDeletion.ts). For a tab whose
+ * session another tab replaced: its screen belongs to the session that was
+ * there before.
+ */
+export function reloadAfterSessionChange(): void {
+  if (reloading) return;
+  reloading = true;
+  void flushTokenStorage()
+    .then(() => accountDeletionSettled())
+    .then(() => reloadPage());
+}
+
+/** @internal tests */
+export function _setPageReloadForTests(fn: () => void): void {
+  reloadPage = fn;
+  reloading = false;
 }
 
 export function getTrustedDeviceToken(): string | null {
@@ -639,14 +725,43 @@ function followTrustedDeviceToken(apiOrigin: string): void {
   memory = { ...memory, trustedDeviceToken: markedOwn(TRUSTED_DEVICE_ORIGIN_KEY, apiOrigin) ? localStorage.getItem(TRUSTED_DEVICE_KEY) : null };
 }
 
-/** The memory follows the remembered pair another tab stored (any tab's sign-in takes over every tab), or its removal. */
-function followRememberedPair(apiOrigin: string): void {
+/**
+ * Whether `pair` belongs to an account other than the one this page shows:
+ * the signed-in user (authStore registers it, services/e2e/session.ts)
+ * against the pair's `userId`, decoded for routing only. Nobody signed in,
+ * or a pair that cannot be decoded, is never another account: the page
+ * follows it as it always did, and nothing reloads in a loop.
+ */
+function belongsToAnotherAccount(pair: TokenPair): boolean {
+  const signedIn = currentE2ESessionUser();
+  if (!signedIn) return false;
+  const owner = userIdOf(pair.accessToken) ?? userIdOf(pair.refreshToken);
+  return owner !== null && owner !== signedIn;
+}
+
+/**
+ * The memory follows the remembered pair another tab stored (any tab's
+ * sign-in takes over every tab), or its removal. A pair of ANOTHER account
+ * than the one on screen is not taken: a page that showed account X while
+ * holding account Y's tokens would act as Y under X's name. The memory lets
+ * go of the pair instead and the page reloads onto the stored session.
+ */
+function followRememberedPair(apiOrigin: string): 'followed' | 'reloading' {
+  if (reloading) return 'reloading';
   const pair = markedOwn(SESSION_ORIGIN_KEY, apiOrigin) ? readPair(localStorage) : null;
   if (pair) {
+    const changed = pair.accessToken !== memory.accessToken || pair.refreshToken !== memory.refreshToken;
+    if (changed && belongsToAnotherAccount(pair)) {
+      memory = { ...memory, accessToken: null, refreshToken: null };
+      console.info('[Session] Another tab signed in to another account — reloading onto it');
+      reloadAfterSessionChange();
+      return 'reloading';
+    }
     memory = { ...memory, accessToken: pair.accessToken, refreshToken: pair.refreshToken, remembered: true };
   } else if (memory.remembered) {
     memory = { ...memory, accessToken: null, refreshToken: null };
   }
+  return 'followed';
 }
 
 function followOtherTabs(event: StorageEvent): void {
@@ -670,13 +785,16 @@ function followOtherTabs(event: StorageEvent): void {
  * which the server treats as reused once its grace window has passed, ending
  * the session for every tab. Nothing is read while a write of this tab's own
  * is still queued (its memory is newer than the storage then), and nothing at
- * all outside the browser build.
+ * all outside the browser build. 'reloading' when the storage holds another
+ * account's session than the one on screen: the page is reloading onto it,
+ * and the caller sends nothing more.
  */
-export function followSharedSession(): void {
-  if (!isWebStore(store) || pendingTokenWrites > 0) return;
+export function followSharedSession(): 'followed' | 'reloading' {
+  if (reloading) return 'reloading';
+  if (!isWebStore(store) || pendingTokenWrites > 0) return 'followed';
   const { apiOrigin } = store;
   followTrustedDeviceToken(apiOrigin);
-  followRememberedPair(apiOrigin);
+  return followRememberedPair(apiOrigin);
 }
 
 // The desktop app has one webview: nothing to follow there
@@ -695,4 +813,5 @@ export function _resetTokenStorageForTests(backend?: SessionStore): void {
   tokensWritten = false;
   trustedWritten = false;
   pendingTokenWrites = 0;
+  reloading = false;
 }

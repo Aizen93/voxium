@@ -23,7 +23,14 @@ describe('socket force:logout reloads only after the stored session is cleared',
     expect(start).toBeGreaterThan(-1);
     const handler = source.slice(start, source.indexOf("s.on('disconnect'", start));
     expect(handler).toMatch(/const toLogin = async \(\) => \{[\s\S]*?await accountDeletionSettled\(\);\s*window\.location\.href = /);
-    expect(handler).toMatch(/useAuthStore\.getState\(\)\.logout\(\);[\s\S]*await flushTokenStorage\(\);[\s\S]*await toLogin\(\);/);
+    expect(handler).toMatch(/useAuthStore\.getState\(\)\.logout\(\{[^}]*\}\);[\s\S]*await flushTokenStorage\(\);[\s\S]*await toLogin\(\);/);
+  });
+
+  it('signs out only the session the socket was admitted with: another session stored meanwhile is reloaded onto, never navigated away from', () => {
+    const start = source.indexOf("s.on('force:logout'");
+    const handler = source.slice(start, source.indexOf("s.on('disconnect'", start));
+    expect(handler).toMatch(/const endedSession = handshakeToken\(s\);/);
+    expect(handler).toMatch(/logout\(\{[^}]*endingSession: endedSession[^}]*\}\);\s*[\s\S]*?if \(outcome === 'replaced'\) return;[\s\S]*await toLogin\(\);/);
   });
 
   it('still reaches the login page when the local clean-up fails (and logs it)', () => {

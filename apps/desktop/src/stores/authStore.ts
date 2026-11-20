@@ -2,7 +2,8 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange, beginCredentialChange } from '../services/socket';
 import {
-  getAccessToken, setTokens, clearTokens, isRemembered, hydrateTokens,
+  getAccessToken, getRefreshToken, setTokens, clearTokens, clearSessionTokens, reloadAfterSessionChange,
+  isRemembered, hydrateTokens,
   getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage,
 } from '../services/tokenStorage';
 import { endSessionRenewals } from '../services/session';
@@ -41,6 +42,19 @@ export interface PendingRegistration {
    *  another one and retries with the same code */
   usernameTaken: boolean;
 }
+
+export interface LogoutOptions {
+  /**
+   * A token (access or refresh) of the session that ended, when the caller
+   * knows which one did: the socket the server signed out, the session an
+   * account deletion was sent from. The pair is cleared only while it is
+   * still of that session. Default: the refresh token held when logout runs.
+   */
+  endingSession?: string | null;
+}
+
+/** What a logout found: the session cleared, or another session stored meanwhile (kept; the page reloads onto it). */
+export type LogoutOutcome = 'cleared' | 'replaced';
 
 interface AuthState {
   user: User | null;
@@ -89,7 +103,13 @@ interface AuthState {
    *  code works only with this pending id: coming back to /register shows the
    *  code step again. Memory only — a reload starts over. */
   leaveRegistration: () => void;
-  logout: () => void;
+  /**
+   * Sign out on this device. The local end is synchronous and complete
+   * whatever happens next. Resolves 'replaced' when another tab of this
+   * browser stored a different session meanwhile: that session is kept and
+   * the page reloads onto it (tokenStorage.clearSessionTokens).
+   */
+  logout: (options?: LogoutOptions) => LogoutOutcome;
   /** The session restore at launch: loads the stored session, verifies it
    *  with `/auth/me`, connects. Single-flight. A transport failure keeps the
    *  tokens and retries on a back-off (`SESSION_RESTORE_RETRY_DELAYS_MS`). */
@@ -157,7 +177,7 @@ export const SESSION_RESTORE_RETRY_AFTER_MAX_MS = 300_000;
 type RestoreOutcome =
   | { kind: 'signed-in'; user: User }
   | { kind: 'no-session'; storeAnswered: boolean }
-  | { kind: 'refused' }
+  | { kind: 'refused'; /** The refresh token of the session that was refused. */ sessionToken: string | null }
   | { kind: 'failed'; message: string; /** A 429's `Retry-After`, when the server named one. */ retryAfterMs?: number };
 
 /** The `Retry-After` of a 429 in milliseconds, bounded; undefined for anything else. */
@@ -227,11 +247,12 @@ async function attemptRestore(): Promise<RestoreOutcome> {
   // app (asynchronous IPC): nothing is known before this answers
   const storeAnswered = await hydrateTokens();
   if (!getAccessToken()) return { kind: 'no-session', storeAnswered };
+  const sessionToken = getRefreshToken();
   try {
     const { data } = await api.get('/auth/me', { timeout: SESSION_RESTORE_TIMEOUT_MS });
     return { kind: 'signed-in', user: data.data as User };
   } catch (err) {
-    if (isAuthRefusal(err)) return { kind: 'refused' };
+    if (isAuthRefusal(err)) return { kind: 'refused', sessionToken };
     return { kind: 'failed', message: err instanceof Error ? err.message : String(err), retryAfterMs: retryAfterOf(err) };
   }
 }
@@ -528,7 +549,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isRegistering: false, powProgress: null, error: null });
   },
 
-  logout: () => {
+  logout: ({ endingSession }: LogoutOptions = {}) => {
+    // The session this sign-out ends, read before anything clears it
+    const sessionToken = endingSession !== undefined ? endingSession : getRefreshToken();
+
     // Clean up voice state before disconnecting socket (stops mic, audio pipeline)
     const vs = useVoiceStore.getState();
     if (vs.activeChannelId) vs.leaveChannel();
@@ -540,12 +564,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // ... and a session restore in flight (one the email-verification page
     // started, a retry) must not sign the logged-out user back in
     endSessionRestore();
-    clearTokens();
+    // Only while the stored pair is still of the session that ended: another
+    // tab's sign-in meanwhile (as anyone) is not this tab's to wipe
+    const outcome = clearSessionTokens(sessionToken);
     disconnectSocket();
     // Wipe every account-scoped store — on a shared machine the next login must
     // never see the previous account's servers, DMs, or support transcript
     resetAccountStores();
     set({ user: null, isAuthenticated: false, pendingRegistration: null });
+    // ... the screen then belongs to that other session
+    if (outcome === 'replaced') reloadAfterSessionChange();
+    return outcome;
   },
 
   retrySessionRestore: async () => {
@@ -600,9 +629,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           break;
         case 'refused':
           // The one case that ends the session (a refused renewal has
-          // cleared the tokens already)
+          // cleared the tokens already) — the session that was refused: a
+          // different one another tab stored meanwhile is restored instead
           cancelRestoreRetry();
-          clearTokens();
+          if (clearSessionTokens(outcome.sessionToken) === 'replaced') setTimeout(retry, 0);
           set({ isLoading: false });
           break;
         case 'failed':
@@ -710,13 +740,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // (services/accountDeletion.ts). Nothing below reads a store logout()
     // resets: the account is the id read here.
     const endDeletion = beginAccountDeletion();
+    // The session the deletion is sent from: in the browser build another
+    // tab may sign in (as anyone) while the deletion runs, and that session
+    // is not this cleanup's to wipe
+    const sessionToken = getRefreshToken();
     try {
       await api.delete('/auth/account', { data: { password, ...(totpCode ? { totpCode } : {}) } });
       // The server has purged the account and disconnected its sockets; what
       // is left is this device's copy of it. Same cleanup as logout, plus the
       // E2E vault and its key, which logout deliberately keeps — every key
       // the vault pairs with is gone.
-      get().logout();
+      get().logout({ endingSession: sessionToken });
       // Never rejects: a part it could not remove is logged, and the account
       // is deleted either way
       const localE2EStateForgotten = userId ? forgetLocalE2EState(userId) : Promise.resolve();

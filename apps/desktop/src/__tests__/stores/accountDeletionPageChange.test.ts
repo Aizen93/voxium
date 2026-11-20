@@ -51,6 +51,8 @@ const storage = vi.hoisted(() => ({
   getRefreshToken: vi.fn(() => null as string | null),
   setTokens: vi.fn((access: string) => void events.push(`tokens set (${access})`)),
   clearTokens: vi.fn(() => void events.push('tokens cleared')),
+  clearSessionTokens: vi.fn((_endedToken: string | null) => { storage.clearTokens(); return 'cleared' as const; }),
+  reloadAfterSessionChange: vi.fn(),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null as string | null),

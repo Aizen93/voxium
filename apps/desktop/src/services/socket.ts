@@ -295,6 +295,8 @@ export function connectSocket(token: string): VoxSocket | null {
     forceLoggedOut = true;
     if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);
     const reason = data?.reason;
+    // The session the server ended is the one this socket was admitted with
+    const endedSession = handshakeToken(s);
     const toLogin = async () => {
       // This client's own account deletion, in flight, finishes its local
       // clean-up first: the server sends this before its transaction too, so
@@ -304,7 +306,10 @@ export function connectSocket(token: string): VoxSocket | null {
     };
     import('../stores/authStore')
       .then(async ({ useAuthStore }) => {
-        useAuthStore.getState().logout();
+        const outcome = useAuthStore.getState().logout({ endingSession: endedSession });
+        // Another tab stored a different session meanwhile: the page reloads
+        // onto it (authStore.logout), it is not signed out
+        if (outcome === 'replaced') return;
         // The reload must not outrun the persisted clear of the tokens (the
         // desktop app writes them to the OS credential store over IPC), or
         // the next launch restores the session this logout just ended

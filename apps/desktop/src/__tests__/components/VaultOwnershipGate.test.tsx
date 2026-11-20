@@ -396,6 +396,8 @@ describe('VaultOwnershipGate', () => {
     owner.release();
     await settle();
     expect(auth.logout).toHaveBeenCalledTimes(1);
+    // the session the check was made with, never one another tab stored meanwhile
+    expect(auth.logout).toHaveBeenCalledWith(expect.objectContaining({ endingSession: 'access-token' }));
     expect(appShown()).toBe(false);
   });
 

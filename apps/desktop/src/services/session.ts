@@ -2,8 +2,8 @@ import axios from 'axios';
 import type { RefreshRequest } from '@voxium/shared';
 import { API_BASE } from './apiBase';
 import {
-  getAccessToken, getRefreshToken, setTokens, clearTokens, flushTokenStorage,
-  followSharedSession, isSharedWithOtherTabs,
+  getAccessToken, getRefreshToken, setTokens, clearSessionTokens, flushTokenStorage,
+  followSharedSession, isSharedWithOtherTabs, reloadAfterSessionChange,
 } from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
 import { readTokenClaims } from './tokenClaims';
@@ -199,12 +199,22 @@ export function endSessionRenewals(): void {
  * of this client in flight: the server refuses the account's requests while
  * it deletes it, and the deletion's local clean-up must run before the page
  * changes (services/accountDeletion.ts).
+ *
+ * `endedToken` is the refresh token that was refused (null when there was
+ * none to send). The pair is cleared only while it is still of that session
+ * (tokenStorage.clearSessionTokens): when another tab stored a different
+ * session meanwhile, it is left as it is and the page reloads onto it
+ * instead of going to the login page.
  */
-export function handleSessionLost(): void {
+export function handleSessionLost(endedToken: string | null = null): void {
   endSessionRenewals();
-  clearTokens();
+  const outcome = clearSessionTokens(endedToken);
   if (sessionLost) return;
   sessionLost = true;
+  if (outcome === 'replaced') {
+    reloadAfterSessionChange();
+    return;
+  }
   void flushTokenStorage()
     .then(() => accountDeletionSettled())
     .then(() => navigateToLogin());
@@ -283,11 +293,23 @@ function freshStoredAccessToken(): string | null {
   return stored && isAccessTokenFresh(stored) ? stored : null;
 }
 
+/**
+ * What other tabs stored since this tab's memory last followed them
+ * (tokenStorage.followSharedSession). The storage holding another account's
+ * session than the one on screen stops the renewal: the page is reloading
+ * onto it, and nothing more is sent from this one.
+ */
+function followOtherTabsOrStop(): void {
+  if (followSharedSession() === 'reloading') {
+    throw new SessionLostError('Another tab signed in to another account: the page reloads onto it');
+  }
+}
+
 /** The renewal itself, lock already handled. */
 async function renew(epoch: number, intended: string | null): Promise<string> {
   if (epoch !== sessionEpoch) throw new SessionLostError('Session ended before the renewal');
   // What other tabs stored since this tab's memory last followed them
-  followSharedSession();
+  followOtherTabsOrStop();
   let refreshToken = getRefreshToken();
   if (!refreshToken) {
     handleSessionLost();
@@ -317,7 +339,7 @@ async function renew(epoch: number, intended: string | null): Promise<string> {
         // credential change stored a newer pair while the request was out.
         // Ending the session now would clear THAT pair — every tab follows
         // the removal — and sign out a session that is still valid.
-        followSharedSession();
+        followOtherTabsOrStop();
         const stored = getRefreshToken();
         if (stored && stored !== refreshToken) {
           const adopted = freshStoredAccessToken();
@@ -331,14 +353,14 @@ async function renew(epoch: number, intended: string | null): Promise<string> {
           // clear; this renewal fails, the tokens stay, the next one decides
           throw new Error('The refresh token was replaced during the renewal', { cause: err });
         }
-        handleSessionLost();
+        handleSessionLost(refreshToken);
         throw new SessionLostError(err instanceof Error ? err.message : 'Refresh refused');
       }
       if (promptRetried || !gotNoUsableAnswer(err) || !mayRetryNow()) throw err;
       promptRetried = true;
       await new Promise<void>((resolve) => setTimeout(resolve, REFRESH_RETRY_DELAY_MS));
       if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
-      followSharedSession();
+      followOtherTabsOrStop();
       if (getRefreshToken() !== refreshToken) {
         // Another tab stored a pair during the wait: its answer is ours
         const adopted = freshStoredAccessToken();
@@ -350,7 +372,7 @@ async function renew(epoch: number, intended: string | null): Promise<string> {
     }
     // Logged out while the request was out: this answer belongs to nobody
     if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
-    followSharedSession();
+    followOtherTabsOrStop();
     if (getRefreshToken() !== refreshToken) {
       // Another tab (or a credential change of this client) stored a pair
       // while the request was out: that pair stands, this answer is dropped

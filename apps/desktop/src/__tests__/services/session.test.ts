@@ -26,17 +26,36 @@ const storage = vi.hoisted(() => ({
   // once unless a test holds it
   flushTokenStorage: vi.fn(async () => {}),
   isSharedWithOtherTabs: vi.fn(() => storage.shared),
+  /** What following the shared storage answers: 'reloading' when it holds another account's session. */
+  follow: 'followed' as 'followed' | 'reloading',
   followSharedSession: vi.fn(() => {
-    if (!storage.shared || storage.page === undefined) return;
-    storage.access = storage.page.access;
-    storage.refresh = storage.page.refresh;
+    if (storage.follow === 'reloading') return 'reloading';
+    if (storage.shared && storage.page !== undefined) {
+      storage.access = storage.page.access;
+      storage.refresh = storage.page.refresh;
+    }
+    return 'followed';
   }),
+  /** What a session-ending clear finds: 'replaced' when another tab stored a different session. */
+  clearOutcome: 'cleared' as 'cleared' | 'replaced',
+  clearSessionTokens: vi.fn((_endedToken: string | null) => {
+    if (storage.clearOutcome === 'replaced') {
+      storage.access = null;
+      storage.refresh = null;
+      return 'replaced';
+    }
+    storage.clearTokens();
+    return 'cleared';
+  }),
+  reloadAfterSessionChange: vi.fn(),
 }));
 vi.mock('../../services/tokenStorage', () => ({
   getAccessToken: storage.getAccessToken,
   getRefreshToken: storage.getRefreshToken,
   setTokens: storage.setTokens,
   clearTokens: storage.clearTokens,
+  clearSessionTokens: storage.clearSessionTokens,
+  reloadAfterSessionChange: storage.reloadAfterSessionChange,
   flushTokenStorage: storage.flushTokenStorage,
   isSharedWithOtherTabs: storage.isSharedWithOtherTabs,
   followSharedSession: storage.followSharedSession,
@@ -92,6 +111,8 @@ beforeEach(() => {
   storage.refresh = 'refresh-old';
   storage.shared = false;
   storage.page = undefined;
+  storage.follow = 'followed';
+  storage.clearOutcome = 'cleared';
 });
 
 afterEach(() => {
@@ -797,5 +818,39 @@ describe('session — the browser build renews under one Web Lock', () => {
     await vi.advanceTimersByTimeAsync(REFRESH_LOCK_WAIT_MS);
     await settled;
     expect(http.post).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('session — a session-ending refusal clears only the session it refused', () => {
+  it('passes the refused token to the clear, and navigates to the login page once it is cleared', async () => {
+    http.post.mockRejectedValueOnce(axios401());
+
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
+  });
+
+  it('another tab stored a different session meanwhile: that one is kept and the page reloads onto it, no login page', async () => {
+    storage.clearOutcome = 'replaced';
+    http.post.mockRejectedValueOnce(axios401());
+
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('the storage holding another account\'s session stops the renewal at once: nothing sent, no login page', async () => {
+    storage.follow = 'reloading';
+
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+
+    expect(http.post).not.toHaveBeenCalled();
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
   });
 });

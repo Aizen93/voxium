@@ -1128,6 +1128,32 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     }
   });
 
+  it('force:logout signs out the session this socket was admitted with, and a different session another tab stored meanwhile is kept (no login page)', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-of-ended-session');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      authStoreMock.logout.mockReturnValueOnce('replaced');
+      socket.fire('force:logout', { reason: 'Your session has ended' });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(authStoreMock.logout).toHaveBeenCalledWith(expect.objectContaining({ endingSession: 'access-of-ended-session' }));
+      // authStore.logout reloads onto the stored session itself: no navigation here
+      expect(window.location.href).toBe('');
+      expect(socket.connect).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+    }
+  });
+
   it('a session the server ends right after admitting it (banned or deleted during the handshake) signs out with the reason and never reopens', async () => {
     const mod = await freshSocketModule();
     mod.connectSocket('access-old');

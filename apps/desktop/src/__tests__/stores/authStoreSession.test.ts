@@ -26,6 +26,10 @@ const storage = vi.hoisted(() => ({
   getAccessToken: vi.fn(() => 'access-old' as string | null),
   setTokens: vi.fn(),
   clearTokens: vi.fn(),
+  getRefreshToken: vi.fn(() => 'refresh-old' as string | null),
+  // A session-ending clear: 'replaced' when another tab stored a different session meanwhile
+  clearSessionTokens: vi.fn((_endedToken: string | null): 'cleared' | 'replaced' => { storage.clearTokens(); return 'cleared'; }),
+  reloadAfterSessionChange: vi.fn(),
   isRemembered: vi.fn(() => true),
   // The stored session is read asynchronously (the OS credential store in
   // the desktop app); `true` = the store answered
@@ -64,6 +68,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   _resetSessionRestoreForTests();
   storage.getAccessToken.mockReturnValue('access-old');
+  storage.getRefreshToken.mockReturnValue('refresh-old');
+  storage.clearSessionTokens.mockImplementation(() => { storage.clearTokens(); return 'cleared'; });
   storage.hydrateTokens.mockResolvedValue(true);
   storage.getTrustedDeviceToken.mockReturnValue(null);
   useAuthStore.setState({ user: null, isAuthenticated: true, isLoading: true });
@@ -875,5 +881,58 @@ describe('authStore — the signed-in user is the E2E session', () => {
     expect(currentE2ESessionUser()).toBe('u-1');
     useAuthStore.setState({ user: null });
     expect(currentE2ESessionUser()).toBeNull();
+  });
+});
+
+describe('authStore — a local end of a session clears only that session (another tab may have stored a new one)', () => {
+  it('logout ends the session held when it runs, by default, and reports it cleared', () => {
+    useAuthStore.setState({ user: me as never, isAuthenticated: true });
+
+    expect(useAuthStore.getState().logout()).toBe('cleared');
+
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
+  });
+
+  it('a different session stored meanwhile is kept: the stores are still reset, and the page reloads onto it', () => {
+    useAuthStore.setState({ user: me as never, isAuthenticated: true });
+    storage.clearSessionTokens.mockReturnValueOnce('replaced');
+
+    expect(useAuthStore.getState().logout({ endingSession: 'access-of-ended-session' })).toBe('replaced');
+
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('access-of-ended-session');
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(socket.disconnectSocket).toHaveBeenCalledTimes(1);
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('an account deletion ends the session it was sent from, read before the request', async () => {
+    useAuthStore.setState({ user: me as never, isAuthenticated: true });
+    api.delete.mockImplementationOnce(async () => {
+      // another tab signs in while the deletion runs
+      storage.getRefreshToken.mockReturnValue('refresh-of-another-tab');
+      return { data: {} };
+    });
+
+    await useAuthStore.getState().deleteAccount('pw');
+
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+  });
+
+  it('a refused restore ends the session it was made with; a different one stored meanwhile is restored instead', async () => {
+    vi.useFakeTimers();
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+    api.get.mockRejectedValueOnce(status(403));
+    storage.clearSessionTokens.mockReturnValueOnce('replaced');
+    api.get.mockResolvedValueOnce({ data: { data: me } });
+
+    await useAuthStore.getState().checkAuth();
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(useAuthStore.getState()).toMatchObject({ user: me, isAuthenticated: true }));
+    expect(api.get).toHaveBeenCalledTimes(2);
   });
 });
