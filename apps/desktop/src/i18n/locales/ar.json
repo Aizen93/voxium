@@ -2120,7 +2120,9 @@
     "announcementGeneric": "إعلان",
     "announcementToast": "{{label}}: {{title}}",
     "announcementMore": "+{{n}} أخرى",
-    "dismissAnnouncement": "تجاهل الإعلان"
+    "dismissAnnouncement": "تجاهل الإعلان",
+    "announcementRead": "قراءة",
+    "announcementOpenDocument": "فتح: {{document}}"
   },
   "updater": {
     "titleAvailable": "التحديث مطلوب",

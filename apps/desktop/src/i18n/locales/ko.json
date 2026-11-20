@@ -2075,7 +2075,9 @@
     "announcementGeneric": "공지",
     "announcementToast": "{{label}}: {{title}}",
     "announcementMore": "외 {{n}}개",
-    "dismissAnnouncement": "공지 닫기"
+    "dismissAnnouncement": "공지 닫기",
+    "announcementRead": "읽기",
+    "announcementOpenDocument": "열기: {{document}}"
   },
   "updater": {
     "titleAvailable": "업데이트 필요",

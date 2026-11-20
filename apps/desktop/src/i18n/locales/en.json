@@ -2037,7 +2037,9 @@
     "announcementGeneric": "Announcement",
     "announcementToast": "{{label}}: {{title}}",
     "announcementMore": "+{{n}} more",
-    "dismissAnnouncement": "Dismiss announcement"
+    "dismissAnnouncement": "Dismiss announcement",
+    "announcementRead": "Read",
+    "announcementOpenDocument": "Open: {{document}}"
   },
   "updater": {
     "titleAvailable": "Update Required",

@@ -2075,7 +2075,9 @@
     "announcementGeneric": "お知らせ",
     "announcementToast": "{{label}}：{{title}}",
     "announcementMore": "他 {{n}} 件",
-    "dismissAnnouncement": "お知らせを閉じる"
+    "dismissAnnouncement": "お知らせを閉じる",
+    "announcementRead": "読む",
+    "announcementOpenDocument": "開く：{{document}}"
   },
   "updater": {
     "titleAvailable": "アップデートが必要です",

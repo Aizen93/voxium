@@ -2075,7 +2075,9 @@
     "announcementGeneric": "公告",
     "announcementToast": "{{label}}：{{title}}",
     "announcementMore": "还有 {{n}} 条",
-    "dismissAnnouncement": "关闭公告"
+    "dismissAnnouncement": "关闭公告",
+    "announcementRead": "阅读",
+    "announcementOpenDocument": "打开：{{document}}"
   },
   "updater": {
     "titleAvailable": "需要更新",
