@@ -6,7 +6,7 @@ import { toast } from '../../stores/toastStore';
 import { Avatar } from '../common/Avatar';
 import type { ServerMember, MemberRole } from '@voxium/shared';
 import { LIMITS, MEMBER_LIST, MEMBER_DIRECTORY_ROLE_FILTERS, validateBanReason } from '@voxium/shared';
-import { outranksRole } from '../../utils/roles';
+import { useMemberRules } from '../../hooks/useMemberRules';
 import { getTranslatedError, translateServerError } from '../../utils/serverErrors';
 
 /** Module-level constant so a selector for another server's list never allocates. */
@@ -33,8 +33,12 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
   const fetchDirectory = useServerStore((s) => s.fetchDirectory);
   const fetchDirectoryMore = useServerStore((s) => s.fetchDirectoryMore);
   const assignMemberRoles = useServerStore((s) => s.assignMemberRoles);
-  // The viewer's own row is always among the known rows (the slice includes them)
-  const currentMember = useServerStore((s) => s.members.find((m) => m.userId === currentUser?.id));
+  // What the viewer may do to a member: their effective permission bits and
+  // the role order, the rules the server applies per action (never the
+  // legacy member.role string)
+  const view = useMemberRules(serverId);
+  const rules = view?.rules ?? null;
+  const isOwner = view?.isOwner ?? false;
 
   const [confirmAction, setConfirmAction] = useState<{ type: 'kick' | 'transfer'; userId: string } | null>(null);
   const [banReason, setBanReason] = useState('');
@@ -45,10 +49,9 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
   const [query, setQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<string | null>(null);
 
-  const isOwner = currentMember?.role === 'owner';
-  const isAdmin = currentMember?.role === 'admin';
-  const canManageRoles = isOwner || isAdmin;
-  const assignableRoles = roles.filter((r) => !r.isDefault).sort((a, b) => b.position - a.position);
+  // Every role can be filtered on; only those below the viewer can be handed out
+  const filterRoles = roles.filter((r) => !r.isDefault).sort((a, b) => b.position - a.position);
+  const assignableRoles = rules ? rules.assignableRoles() : [];
 
   // Typing settles before it becomes a request; the filter is immediate
   useEffect(() => {
@@ -86,14 +89,6 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
     observer.observe(el);
     return () => observer.disconnect();
   }, [hasMore, rows.length, serverId]);
-
-  async function handleRoleChange(memberId: string, newRole: MemberRole) {
-    try {
-      await useServerStore.getState().updateMemberRole(serverId, memberId, newRole);
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'serverSettings.members.failedToUpdateRole'));
-    }
-  }
 
   async function handleKick(memberId: string, name: string) {
     if (removing) return;
@@ -141,12 +136,6 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
     }
   }
 
-  function canKickMember(member: ServerMember): boolean {
-    if (!currentMember || member.userId === currentUser?.id) return false;
-    if (!isOwner && !isAdmin) return false;
-    return outranksRole(currentMember.role, member.role);
-  }
-
   const filtered = !!query || !!roleFilter;
   const total = Math.max(memberCount, matching);
 
@@ -178,7 +167,7 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
           {MEMBER_DIRECTORY_ROLE_FILTERS.filter((f) => f !== 'none').map((f) => (
             <option key={f} value={f}>{t(f === 'owner' ? 'serverSettings.members.owners' : 'serverSettings.members.admins')}</option>
           ))}
-          {assignableRoles.map((r) => (
+          {filterRoles.map((r) => (
             <option key={r.id} value={r.id}>{r.name}</option>
           ))}
           <option value="none">{t('serverSettings.members.noRoles')}</option>
@@ -195,12 +184,10 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
         {rows.map((member) => {
           const isSelf = member.userId === currentUser?.id;
           const isExpanded = expandedMember === member.userId;
-          const showPromote = isOwner && member.role === 'member' && !isSelf;
-          const showDemote = isOwner && member.role === 'admin' && !isSelf;
-          const showKick = canKickMember(member);
+          const showKick = !!rules && rules.canKick(member);
           const showTransfer = isOwner && !isSelf;
-          const showRoleEdit = canManageRoles && !isSelf && member.role !== 'owner' && assignableRoles.length > 0;
-          const hasActions = showPromote || showDemote || showKick || showTransfer || showRoleEdit;
+          const showRoleEdit = !!rules && rules.canAssignRoles(member) && assignableRoles.length > 0;
+          const hasActions = showKick || showTransfer || showRoleEdit;
           const isConfirmingKick = confirmAction?.type === 'kick' && confirmAction.userId === member.userId;
           const isConfirmingTransfer = confirmAction?.type === 'transfer' && confirmAction.userId === member.userId;
 
@@ -305,34 +292,6 @@ export function MembersDirectory({ serverId }: { serverId: string }) {
                           );
                         })}
                       </div>
-                    </div>
-                  )}
-
-                  {/* Promote / Demote */}
-                  {(showPromote || showDemote) && (
-                    <div className="flex items-center gap-2">
-                      {showPromote && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleRoleChange(member.userId, 'admin'); }}
-                          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-vox-accent-primary hover:bg-vox-accent-primary/10 transition-colors"
-                        >
-                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                          </svg>
-                          {t('serverSettings.members.promoteToAdmin')}
-                        </button>
-                      )}
-                      {showDemote && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleRoleChange(member.userId, 'member'); }}
-                          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-vox-text-secondary hover:bg-vox-bg-hover transition-colors"
-                        >
-                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-                          </svg>
-                          {t('serverSettings.members.demoteToMember')}
-                        </button>
-                      )}
                     </div>
                   )}
 

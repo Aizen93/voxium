@@ -8,8 +8,8 @@ import { useAuthStore } from '../../stores/authStore';
 import { toast } from '../../stores/toastStore';
 import type { ServerMember, VoiceUser } from '@voxium/shared';
 import { Shield, ChevronRight, Mic, MicOff, Headphones, HeadphoneOff, ArrowRightLeft, Pencil, UserX } from 'lucide-react';
-import { outranksRole } from '../../utils/roles';
-import { LIMITS, validateBanReason } from '@voxium/shared';
+import { ALL_PERMISSIONS, LIMITS, Permissions, hasPermission, validateBanReason, permissionsFromString } from '@voxium/shared';
+import { useMemberRules } from '../../hooks/useMemberRules';
 
 interface Props {
   member: ServerMember;
@@ -21,7 +21,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
   const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const currentUser = useAuthStore((s) => s.user);
-  const { members, activeServerId, roles, channels } = useServerStore();
+  const { activeServerId, channels, fetchEffectivePermissions } = useServerStore();
   const { channelUsers, serverMuteUser, serverDeafenUser, forceMoveUser } = useVoiceStore();
   const [confirmAction, setConfirmAction] = useState<'kick' | null>(null);
   const [banReason, setBanReason] = useState('');
@@ -32,16 +32,15 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
   const [showNicknameInput, setShowNicknameInput] = useState(false);
   const [nicknameInput, setNicknameInput] = useState(member.nickname || '');
 
-  const currentMember = members.find((m) => m.userId === currentUser?.id);
-
-  const isOwner = currentMember?.role === 'owner';
-  const isAdmin = currentMember?.role === 'admin';
+  // What the viewer may do to another member comes from their effective
+  // permission bits and the role order, the rules the server applies per
+  // action (utils/memberActions) — never the legacy member.role string
+  const view = useMemberRules(activeServerId);
+  const rules = view?.rules ?? null;
   const isSelf = member.userId === currentUser?.id;
 
-  // Assignable roles (non-default, sorted by position descending)
-  const assignableRoles = roles
-    .filter((r) => !r.isDefault)
-    .sort((a, b) => b.position - a.position);
+  // Roles the viewer may hand out: below their own position, never @everyone
+  const assignableRoles = rules ? rules.assignableRoles() : [];
 
   // Current member's role IDs
   const memberRoleIds = new Set(member.roles?.map((r) => r.id) || []);
@@ -58,11 +57,36 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
     }
   }
 
-  const voiceChannels = channels.filter((c) => c.type === 'voice' && c.id !== targetVoiceChannelId);
+  // Voice moderation applies to a call in the space being VIEWED, on a channel
+  // that is not secure: channelUsers covers every space, and the server
+  // refuses a move across spaces and treats a secure channel as absent
+  const targetChannel = channels.find((c) => c.id === targetVoiceChannelId);
+  const isTargetChannelModerable = !!targetChannel && !targetChannel.secure;
+  // A secure voice channel is never a destination (the server refuses it as if it did not exist)
+  const voiceChannels = channels.filter((c) => c.type === 'voice' && !c.secure && c.id !== targetVoiceChannelId);
   const isTargetInVoice = !!targetVoiceUser;
   // Check if the actor is in the same voice channel as the target
   const actorVoiceChannelId = useVoiceStore.getState().activeChannelId;
   const isActorInSameChannel = isTargetInVoice && actorVoiceChannelId === targetVoiceChannelId;
+
+  // Server mute and deafen are checked by the server in the actor's VOICE
+  // CHANNEL (channel overrides count), so the bits are asked for that channel
+  // once the menu is open; until they arrive the two controls stay hidden.
+  // The space's owner and an ADMINISTRATOR holder have every bit in every
+  // channel (the server's channel calculation answers the same), so for them
+  // there is nothing to wait for and no request.
+  const holdsEveryChannelBit = !!view && (view.isOwner || (view.ctx.bits !== null && hasPermission(view.ctx.bits, Permissions.ADMINISTRATOR)));
+  const spaceBitsKnown = !!view && view.ctx.bits !== null;
+  const [fetchedVoiceBits, setVoiceBits] = useState<bigint | null>(null);
+  const voiceBits = holdsEveryChannelBit && isTargetChannelModerable ? ALL_PERMISSIONS : fetchedVoiceBits;
+  useEffect(() => {
+    if (!activeServerId || !actorVoiceChannelId || !isActorInSameChannel || !isTargetChannelModerable || !spaceBitsKnown || holdsEveryChannelBit) return;
+    let cancelled = false;
+    fetchEffectivePermissions(activeServerId, actorVoiceChannelId)
+      .then((bits) => { if (!cancelled) setVoiceBits(permissionsFromString(bits)); })
+      .catch((err) => console.warn('[Permissions] Failed to fetch the voice channel permissions:', err instanceof Error ? err.message : err));
+    return () => { cancelled = true; };
+  }, [activeServerId, actorVoiceChannelId, isActorInSameChannel, isTargetChannelModerable, spaceBitsKnown, holdsEveryChannelBit, fetchEffectivePermissions]);
 
   // Close on outside click or Escape
   useEffect(() => {
@@ -97,39 +121,25 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       if (y < 0) y = 8;
       setAdjustedPos({ x, y });
     }
-  }, [position, confirmAction, showNicknameInput]);
+  }, [position, confirmAction, showNicknameInput, voiceBits]);
 
-  if (!currentMember || !activeServerId) return null;
+  if (!rules || !activeServerId) return null;
 
-  const canPromote = !isSelf && isOwner && member.role === 'member';
-  const canDemote = !isSelf && isOwner && member.role === 'admin';
-  const canKick = !isSelf && (isOwner || isAdmin) && outranksRole(currentMember.role, member.role);
-  const canManageRoles = !isSelf && (isOwner || isAdmin) && assignableRoles.length > 0 && member.role !== 'owner';
-  // Voice moderation — mute/deafen require same channel; move works cross-channel
-  const canVoiceModerate = !isSelf && isActorInSameChannel && (isOwner || isAdmin) && member.role !== 'owner';
-  const canMoveUser = !isSelf && isTargetInVoice && (isOwner || isAdmin) && member.role !== 'owner';
-  const canManageNicknames = (isOwner || isAdmin) && member.role !== 'owner';
-  const isTargetNotOwner = member.role !== 'owner';
+  const canKick = rules.canKick(member);
+  const canManageRoles = rules.canAssignRoles(member) && assignableRoles.length > 0;
+  // Mute/deafen need the target in the actor's own voice channel; move works
+  // cross-channel within this space. None of them for a call in another
+  // space or in a secure channel (membership-governed: the server never
+  // grants mute or deafen there and answers a move as if nobody were in it)
+  const canMute = isActorInSameChannel && isTargetChannelModerable && rules.canServerMute(member, voiceBits);
+  const canDeafen = isActorInSameChannel && isTargetChannelModerable && rules.canServerDeafen(member, voiceBits);
+  const canMoveUser = isTargetInVoice && isTargetChannelModerable && rules.canMove(member);
+  const canManageNicknames = rules.canSetNickname(member);
+  const canEditOwnNickname = isSelf && rules.canChangeOwnNickname();
+  // Setting a nickname needs CHANGE_NICKNAME; clearing one's own never does
+  const canClearOwnNickname = isSelf && !canEditOwnNickname && !!member.nickname;
 
-  if (!canPromote && !canDemote && !canKick && !canManageRoles && !canVoiceModerate && !canMoveUser && !canManageNicknames && !(isSelf && isTargetNotOwner)) return null;
-
-  async function handlePromote() {
-    try {
-      await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'admin');
-      onClose();
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'contextMenu.failedToPromote'));
-    }
-  }
-
-  async function handleDemote() {
-    try {
-      await useServerStore.getState().updateMemberRole(activeServerId!, member.userId, 'member');
-      onClose();
-    } catch (err) {
-      toast.error(getTranslatedError(err, t, 'contextMenu.failedToDemote'));
-    }
-  }
+  if (!canKick && !canManageRoles && !canMute && !canDeafen && !canMoveUser && !canManageNicknames && !canEditOwnNickname && !canClearOwnNickname) return null;
 
   // Every removal is a ban (server discovery): the first click opens the
   // reason panel, the confirm sends it. The undo is the Members tab's Banned
@@ -243,7 +253,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       )}
 
       {/* Voice moderation section */}
-      {canVoiceModerate && (
+      {(canMute || canDeafen) && (
         <>
           <div className="my-1 border-t border-vox-border" />
           <div className="px-2 py-1 text-[10px] font-semibold text-vox-text-muted uppercase tracking-wider">
@@ -251,7 +261,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
           </div>
 
           {/* Server Mute */}
-          <button
+          {canMute && <button
             onClick={handleServerMute}
             className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
           >
@@ -266,10 +276,10 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
                 {t('contextMenu.muteServer')}
               </>
             )}
-          </button>
+          </button>}
 
           {/* Server Deafen */}
-          <button
+          {canDeafen && <button
             onClick={handleServerDeafen}
             className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
           >
@@ -284,7 +294,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
                 {t('contextMenu.deafenServer')}
               </>
             )}
-          </button>
+          </button>}
 
         </>
       )}
@@ -292,7 +302,7 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
       {/* Move to Channel — separate from mute/deafen, works cross-channel */}
       {canMoveUser && voiceChannels.length > 0 && (
         <>
-          {!canVoiceModerate && <div className="my-1 border-t border-vox-border" />}
+          {!(canMute || canDeafen) && <div className="my-1 border-t border-vox-border" />}
           <div>
             <button
               onClick={() => { setShowMoveMenu(!showMoveMenu); setShowRoles(false); }}
@@ -308,8 +318,20 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
         </>
       )}
 
-      {/* Nickname management — admins/owners can set for others; any user can set their own */}
-      {((canManageNicknames && isTargetNotOwner) || (isSelf && isTargetNotOwner)) && (
+      {/* Nickname: MANAGE_NICKNAMES sets another member's; CHANGE_NICKNAME sets one's own; clearing one's own needs neither */}
+      {canClearOwnNickname && (
+        <>
+          <div className="my-1 border-t border-vox-border" />
+          <button
+            onClick={handleClearNickname}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
+          >
+            <Pencil size={16} className="text-vox-text-secondary" />
+            {t('contextMenu.clearNickname')}
+          </button>
+        </>
+      )}
+      {(canManageNicknames || canEditOwnNickname) && (
         <>
           <div className="my-1 border-t border-vox-border" />
           <button
@@ -347,30 +369,6 @@ export function MemberContextMenu({ member, position, onClose }: Props) {
             </div>
           )}
         </>
-      )}
-
-      {canPromote && (
-        <button
-          onClick={handlePromote}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-        >
-          <svg className="h-4 w-4 text-vox-accent-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-          </svg>
-          {t('contextMenu.promoteToAdmin')}
-        </button>
-      )}
-
-      {canDemote && (
-        <button
-          onClick={handleDemote}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-vox-text-primary hover:bg-vox-bg-hover transition-colors"
-        >
-          <svg className="h-4 w-4 text-vox-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-          </svg>
-          {t('contextMenu.demoteToMember')}
-        </button>
       )}
 
       {canKick && (

@@ -32,11 +32,15 @@ const snap = vi.hoisted(() => ({
 }));
 vi.mock('../../utils/shareSnapshot', () => snap);
 
+const toastError = vi.hoisted(() => vi.fn());
+vi.mock('../../stores/toastStore', () => ({ toast: { error: toastError, success: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
+
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
   return { ...actual, useTranslation: () => ({ t: (key: string, opts?: Record<string, unknown>) => (opts?.name ? `${key}:${opts.name}` : key) }) };
 });
 
+import { AxiosError } from 'axios';
 import { SnapshotMenu } from '../../components/voice/SnapshotMenu';
 import { useAnnotationStore } from '../../stores/annotationStore';
 import { activateSecurePins, deactivateSecurePins, forgetSecurePins, pinSecure } from '../../utils/securePins';
@@ -54,6 +58,30 @@ function render() {
   });
 }
 
+const TARGETS_URL = '/servers/server-1/channels/attachment-targets';
+const LIST_URL = '/servers/server-1/channels';
+const httpError = (status: number, error: string) =>
+  new AxiosError('failed', 'ERR_BAD_REQUEST', undefined, undefined, { status, data: { success: false, error } } as never);
+/** The API as the picker sees it: one answer per URL (a URL not listed is a 404). */
+function givenApi(routes: Record<string, unknown>) {
+  apiMock.get.mockImplementation((url: string) => {
+    const answer = routes[url];
+    if (answer instanceof Error) return Promise.reject(answer);
+    if (answer === undefined) return Promise.reject(httpError(404, 'Not found'));
+    return Promise.resolve({ data: { data: answer } });
+  });
+}
+async function openPicker() {
+  render();
+  act(() => button().click());
+  await act(async () => {
+    (document.querySelector('[data-testid="snapshot-send-to"]') as HTMLButtonElement).click();
+  });
+  await flush();
+}
+const channelList = () => document.querySelector('[data-testid="snapshot-channel-list"]')!;
+const listed = () => Array.from(channelList().querySelectorAll('[data-channel-id]')).map((b) => b.getAttribute('data-channel-id'));
+
 const button = () => container.querySelector('[data-testid="snapshot-button"]') as HTMLButtonElement;
 const menu = () => document.querySelector('[data-testid="snapshot-menu"]');
 
@@ -67,6 +95,7 @@ beforeEach(() => {
   voiceState.screenSharingUserId = 'sharer-1';
   voiceState.isScreenSharing = false;
   socketEmit.mockClear();
+  toastError.mockClear();
   apiMock.get.mockReset();
   apiMock.post.mockReset();
   snap.composeSnapshotCanvas.mockReset().mockReturnValue(fakeCanvas);
@@ -127,39 +156,27 @@ describe('SnapshotMenu', () => {
     activateSecurePins('viewer-1');
     pinSecure('ch-flipped');
     try {
-      apiMock.get.mockResolvedValue({
-        data: {
-          data: [
-            { id: 'ch-text', name: 'general', type: 'text' },
-            // The server downgraded it: a plaintext snapshot there would be a leak
-            { id: 'ch-flipped', name: 'vault', type: 'text', secure: false },
-          ],
-        },
+      givenApi({
+        [TARGETS_URL]: [
+          { id: 'ch-text', name: 'general', categoryId: null, position: 0 },
+          // The server downgraded it: a plaintext snapshot there would be a leak
+          { id: 'ch-flipped', name: 'vault', categoryId: null, position: 1 },
+        ],
       });
-      render();
-      act(() => button().click());
-      await act(async () => {
-        (document.querySelector('[data-testid="snapshot-send-to"]') as HTMLButtonElement).click();
-      });
-      await flush();
-      const list = document.querySelector('[data-testid="snapshot-channel-list"]')!;
-      expect(list.querySelector('[data-channel-id="ch-flipped"]')).toBeNull();
-      expect(list.querySelector('[data-channel-id="ch-text"]')).not.toBeNull();
+      await openPicker();
+      expect(listed()).toEqual(['ch-text']);
     } finally {
       deactivateSecurePins();
       forgetSecurePins('viewer-1');
     }
   });
 
-  it('Send to channel: picker excludes secure and voice channels; the send reuses the attachment pipeline', async () => {
-    apiMock.get.mockResolvedValue({
-      data: {
-        data: [
-          { id: 'ch-text', name: 'general', type: 'text' },
-          { id: 'ch-secure', name: 'vault', type: 'text', secure: true },
-          { id: 'ch-voice', name: 'lounge', type: 'voice' },
-        ],
-      },
+  it('Send to channel: the picker lists exactly what the attachment-targets route answers, for the VOICE server; the send reuses the attachment pipeline', async () => {
+    givenApi({
+      [TARGETS_URL]: [
+        { id: 'ch-text', name: 'general', categoryId: null, position: 0 },
+        { id: 'ch-pics', name: 'pictures', categoryId: 'cat-1', position: 1 },
+      ],
     });
     apiMock.post
       .mockResolvedValueOnce({ data: { data: { uploadUrl: 'https://s3/put-url', key: 'attachments/snap.webp' } } })
@@ -167,20 +184,13 @@ describe('SnapshotMenu', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
 
-    render();
-    act(() => button().click());
-    await act(async () => {
-      (document.querySelector('[data-testid="snapshot-send-to"]') as HTMLButtonElement).click();
-    });
-    await flush();
-    const list = document.querySelector('[data-testid="snapshot-channel-list"]')!;
-    expect(apiMock.get).toHaveBeenCalledWith('/servers/server-1/channels'); // the VOICE server, never serverStore.channels
-    expect(list.querySelectorAll('[data-channel-id]')).toHaveLength(1);
-    expect(list.querySelector('[data-channel-id="ch-secure"]')).toBeNull();
-    expect(list.querySelector('[data-channel-id="ch-voice"]')).toBeNull();
+    await openPicker();
+    expect(apiMock.get).toHaveBeenCalledTimes(1);
+    expect(apiMock.get).toHaveBeenCalledWith(TARGETS_URL); // the VOICE server, never serverStore.channels
+    expect(listed()).toEqual(['ch-text', 'ch-pics']);
 
     await act(async () => {
-      (list.querySelector('[data-channel-id="ch-text"]') as HTMLButtonElement).click();
+      (channelList().querySelector('[data-channel-id="ch-text"]') as HTMLButtonElement).click();
     });
     await flush();
 
@@ -202,8 +212,78 @@ describe('SnapshotMenu', () => {
     vi.unstubAllGlobals();
   });
 
+  it('a server without the route (404) falls back to the plain channel list: text channels only, secure ones left out', async () => {
+    givenApi({
+      [LIST_URL]: [
+        { id: 'ch-text', name: 'general', type: 'text' },
+        { id: 'ch-secure', name: 'vault', type: 'text', secure: true },
+        { id: 'ch-voice', name: 'lounge', type: 'voice' },
+      ],
+    });
+    await openPicker();
+    expect(apiMock.get).toHaveBeenNthCalledWith(1, TARGETS_URL);
+    expect(apiMock.get).toHaveBeenNthCalledWith(2, LIST_URL);
+    expect(listed()).toEqual(['ch-text']);
+  });
+
+  it('no channel to post in: the empty state', async () => {
+    givenApi({ [TARGETS_URL]: [] });
+    await openPicker();
+    expect(listed()).toEqual([]);
+    expect(channelList().textContent).toBe('voice.snapshot.noChannels');
+  });
+
+  it('a failing route (not a 404) shows the empty state and never falls back to the wider list', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    givenApi({ [TARGETS_URL]: httpError(403, 'Not a member of this server'), [LIST_URL]: [{ id: 'ch-text', name: 'general', type: 'text' }] });
+    await openPicker();
+    expect(apiMock.get).toHaveBeenCalledTimes(1);
+    expect(channelList().textContent).toBe('voice.snapshot.noChannels');
+    warn.mockRestore();
+  });
+
+  it('a refusal that still happens (permissions changed meanwhile) shows the reason of the server in the language of the user, not "Snapshot failed"', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    givenApi({ [TARGETS_URL]: [{ id: 'ch-text', name: 'general', categoryId: null, position: 0 }] });
+    apiMock.post.mockRejectedValueOnce(httpError(403, 'You do not have permission to attach files in this channel'));
+    await openPicker();
+    await act(async () => {
+      (channelList().querySelector('[data-channel-id="ch-text"]') as HTMLButtonElement).click();
+    });
+    await flush();
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledWith('serverErrors.noPermissionAttachFiles');
+    expect(menu()).not.toBeNull(); // stays open: pick another channel
+    errSpy.mockRestore();
+  });
+
+  it('a send refused at the message POST says so too; an unmapped failure keeps the generic message', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+    givenApi({ [TARGETS_URL]: [{ id: 'ch-text', name: 'general', categoryId: null, position: 0 }] });
+    apiMock.post
+      .mockResolvedValueOnce({ data: { data: { uploadUrl: 'https://s3/put-url', key: 'k' } } })
+      .mockRejectedValueOnce(httpError(403, 'You do not have permission to send messages in this channel'));
+    await openPicker();
+    const send = async () => {
+      await act(async () => {
+        (channelList().querySelector('[data-channel-id="ch-text"]') as HTMLButtonElement).click();
+      });
+      await flush();
+    };
+    await send();
+    expect(toastError).toHaveBeenLastCalledWith('serverErrors.noPermissionSendMessages');
+
+    toastError.mockClear();
+    apiMock.post.mockResolvedValueOnce({ data: { data: { uploadUrl: 'https://s3/put-url', key: 'k' } } }).mockRejectedValueOnce(new Error('socket hang up'));
+    await send();
+    expect(toastError).toHaveBeenLastCalledWith('voice.snapshot.failed');
+    errSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
   it('a failed S3 PUT surfaces an error and never posts the message', async () => {
-    apiMock.get.mockResolvedValue({ data: { data: [{ id: 'ch-text', name: 'general', type: 'text' }] } });
+    givenApi({ [TARGETS_URL]: [{ id: 'ch-text', name: 'general', categoryId: null, position: 0 }] });
     apiMock.post.mockResolvedValueOnce({ data: { data: { uploadUrl: 'https://s3/put-url', key: 'k' } } });
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 403 }));
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

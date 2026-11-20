@@ -66,6 +66,7 @@ const { serverState } = vi.hoisted(() => ({
     roles: [] as Role[],
     channels: [] as Channel[],
     fetchEffectivePermissions: vi.fn(),
+    servers: [] as { id: string; ownerId: string }[],
   },
 }));
 vi.mock('../../stores/serverStore', () => {
@@ -120,6 +121,7 @@ beforeEach(() => {
   serverState.activeChannelId = 'ch-1';
   serverState.channels = [channel('ch-1'), channel('ch-sec', { secure: true, createdById: 'u-creator' } as Partial<Channel>)];
   serverState.roles = [];
+  serverState.servers = [];
   serverState.members = [member('me', 'member')];
   fetchPerms.mockResolvedValue((Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES).toString());
   container = document.createElement('div');
@@ -157,8 +159,21 @@ describe('MessageList — Delete follows MANAGE_MESSAGES, not only the legacy ro
     expect(canDelete('m-hook')).toBe('true');
   });
 
-  it('the owner (legacy role) keeps Delete without waiting for the answer, and when the fetch fails', async () => {
-    serverState.members = [member('me', 'owner')];
+  it('a legacy owner or admin label without the bit gets no Delete: the permission bit decides, not the label', async () => {
+    for (const legacy of ['owner', 'admin'] as const) {
+      serverState.members = [member('me', legacy)];
+      await render();
+      expect(canDelete('m-alice')).toBe('false');
+      expect(canDelete('m-hook')).toBe('false');
+      expect(canDelete('m-mine')).toBe('true');
+      act(() => root.unmount());
+      root = createRoot(container);
+      resetServerPermissionsCache();
+    }
+  });
+
+  it('the owner of the space (Server.ownerId) keeps Delete without waiting for the answer, and when the fetch fails', async () => {
+    serverState.servers = [{ id: 'srv-1', ownerId: 'me' }];
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     fetchPerms.mockRejectedValue(new Error('offline'));
     await render();

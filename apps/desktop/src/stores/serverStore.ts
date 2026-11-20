@@ -353,7 +353,6 @@ interface ServerState {
   updateMemberProfile: (userId: string, fields: Record<string, unknown>) => void;
   reorderCategories: (serverId: string, order: { id: string; position: number }[]) => Promise<void>;
   reorderChannels: (serverId: string, order: { id: string; position: number; categoryId: string | null }[]) => Promise<void>;
-  updateMemberRole: (serverId: string, memberId: string, role: MemberRole) => Promise<void>;
   /** Remove AND ban (every removal is a ban); the reason is optional and shown to moderators. */
   kickMember: (serverId: string, memberId: string, reason?: string) => Promise<void>;
   transferOwnership: (serverId: string, targetUserId: string) => Promise<void>;
@@ -992,10 +991,6 @@ export const useServerStore = create<ServerState>((set, get) => ({
       // Revert on failure
       set({ channels: prev });
     }
-  },
-
-  updateMemberRole: async (serverId: string, memberId: string, role: MemberRole) => {
-    await api.patch(`/servers/${serverId}/members/${memberId}/role`, { role });
   },
 
   kickMember: async (serverId: string, memberId: string, reason?: string) => {

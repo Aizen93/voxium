@@ -338,6 +338,17 @@ export interface WebhookTarget {
   position: number;
 }
 
+/** One row of `GET /servers/:serverId/channels/attachment-targets`: a
+ *  non-secure text channel of the space where the caller holds VIEW_CHANNEL,
+ *  SEND_MESSAGES and ATTACH_FILES, i.e. where a message with an attachment
+ *  can be posted. */
+export interface AttachmentTarget {
+  id: string;
+  name: string;
+  categoryId: string | null;
+  position: number;
+}
+
 /** The create/rotate answer: the plaintext token (and, for "github", the
  *  signing secret) are shown exactly once. */
 export type WebhookCreated = Webhook & { token: string; secret?: string };
