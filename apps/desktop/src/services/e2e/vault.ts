@@ -22,7 +22,11 @@
 //   pt:{messageId}                   decrypted-plaintext cache entry
 //   ptpurge:{mark}:{scope}           a purge of the `pt:` entries of a scope that ended (purgeCachedPlaintexts);
 //                                    under `cleared`, with the floor it purged up to
-//   vault_owner                     the token of the page that owns the vault (vaultOwnership.ts):
+//   claim_sent                       when a claim of the key-share inbox last left (its page may still be leased)
+//   repair:{name}                    a repair that ran on this vault (E2EService), and when; `fallback-key-uploaded`:
+//                                    when this device last made a fallback key to be sent (written before the
+//                                    request that may send it, and again once the server took it)
+//   vault_owner                      the token of the page that owns the vault (vaultOwnership.ts):
 //                                    every write checks it in its own transaction (the fence)
 //
 // `master_secret` holds the Ed25519 master private key that cross-signs this
@@ -985,6 +989,22 @@ export class E2EVault {
     const known = new Set(await this.getBackedUpSessionIds());
     for (const id of sessionIds) known.add(id);
     await this.put('bku:sessions', [...known]);
+  }
+
+  // ── Repairs that ran on this vault (repair:{name}: when, nothing else) ──
+  getRepair(name: string): Promise<{ at: number } | undefined> {
+    return this.get(`repair:${name}`);
+  }
+  putRepair(name: string): Promise<void> {
+    return this.put(`repair:${name}`, { at: Date.now() });
+  }
+
+  // ── When a claim of the key-share inbox last left (claim_sent: when, nothing else) ──
+  getClaimSent(): Promise<{ at: number } | undefined> {
+    return this.get('claim_sent');
+  }
+  putClaimSent(): Promise<void> {
+    return this.put('claim_sent', { at: Date.now() });
   }
 
   // ── Where an unfinished message-key history pull stands (spec §16.3) ──
