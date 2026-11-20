@@ -11,13 +11,15 @@ import {
   Permissions,
   permissionsFromString,
   permissionsToString,
-  ALL_PERMISSIONS,
+  mergeKnownPermissions,
+  LEGACY_CLIENT_KNOWN_PERMISSIONS,
 } from '@voxium/shared';
 import type { Role, MemberRole } from '@voxium/shared';
 import { getIO } from '../websocket/socketServer';
 import { sanitizeLabel } from '../utils/sanitize';
 import { rateLimitRoleManage } from '../middleware/rateLimiter';
 import {
+  computeServerPermissions,
   hasServerPermission,
   hasChannelPermission,
   getHighestRolePosition,
@@ -25,6 +27,7 @@ import {
   type PermissionReadClient,
 } from '../utils/permissionCalculator';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
+import { planOverrideWrite, readKnownPermissions, readPermissionValue, storedPermissionBits } from '../utils/permissionWrites';
 
 export const roleRouter = Router({ mergeParams: true });
 
@@ -173,12 +176,16 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
       actorHighest === Infinity ? 999 : actorHighest,
     );
 
-    // Parse permissions from request (default to 0)
+    // Parse permissions from request (default to 0). A creation stores the
+    // bits its client knows from what it sent (see utils/permissionWrites.ts;
+    // nothing is stored yet, so there is nothing else to keep)
+    const known = readKnownPermissions(req.body.knownPermissions);
     let permissions = 0n;
     if (req.body.permissions !== undefined) {
       if (typeof req.body.permissions !== 'string') throw new BadRequestError('permissions must be a string');
-      permissions = permissionsFromString(req.body.permissions);
-      // Cannot grant permissions the actor doesn't have (except owner)
+      permissions = mergeKnownPermissions(0n, readPermissionValue('permissions', req.body.permissions), known);
+      // Cannot grant permissions the actor doesn't have (except owner): every
+      // bit a creation stores is one it turns on
       if (actorHighest !== Infinity) {
         const actorPerms = await getEffectivePermissions(req.user!.userId, serverId);
         const actorPermBits = permissionsFromString(actorPerms.permissions);
@@ -226,7 +233,7 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       throw new ForbiddenError('Cannot edit a role at or above your own position');
     }
 
-    const updateData: Record<string, unknown> = {};
+    const updateData: { name?: string; color?: string | null } = {};
 
     // Name
     if (req.body.name !== undefined) {
@@ -254,42 +261,100 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       }
     }
 
-    // Permissions
-    if (req.body.permissions !== undefined) {
-      if (typeof req.body.permissions !== 'string') throw new BadRequestError('permissions must be a string');
-      const newPerms = permissionsFromString(req.body.permissions);
+    // Permissions: merged into the stored value, never replacing it (the bits
+    // the client knows from the request, every other bit as stored: see
+    // utils/permissionWrites.ts). Validated whenever it is sent.
+    const known = readKnownPermissions(req.body.knownPermissions);
 
-      // Cannot grant permissions the actor doesn't have (except owner)
-      if (actorHighest !== Infinity) {
-        const actorPerms = await getEffectivePermissions(req.user!.userId, serverId);
-        const actorPermBits = permissionsFromString(actorPerms.permissions);
-        if ((newPerms & ~actorPermBits) !== 0n) {
+    if (req.body.permissions === undefined) {
+      if (Object.keys(updateData).length === 0) {
+        throw new BadRequestError('No fields to update');
+      }
+      const updated = await prisma.role.update({
+        where: { id: roleId },
+        data: updateData,
+      });
+      getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_UPDATED, {
+        serverId,
+        role: updated as unknown as Role,
+      });
+      // Name/color changes don't affect visibility — no room re-sync
+      res.json({ success: true, data: updated });
+      return;
+    }
+
+    if (typeof req.body.permissions !== 'string') throw new BadRequestError('permissions must be a string');
+    const sent = readPermissionValue('permissions', req.body.permissions);
+    const actorId = req.user!.userId;
+
+    // The actor must hold every bit the write turns ON. A bit it turns off
+    // is never refused on that ground (who may manage a role below them may
+    // already delete it, or take it from its holders), and a bit it leaves as
+    // stored is not the actor's act (a role below them may hold a permission
+    // they lack, which they can already hand out by assigning the role). The
+    // early answer, against the role as read above; the transaction asks it
+    // again against the row it overwrites.
+    if (actorHighest !== Infinity) {
+      const stored = storedPermissionBits(role.permissions);
+      const turnedOn = mergeKnownPermissions(stored, sent, known) & ~stored;
+      if (turnedOn !== 0n) {
+        const actorPerms = await getEffectivePermissions(actorId, serverId);
+        if ((turnedOn & ~permissionsFromString(actorPerms.permissions)) !== 0n) {
           throw new ForbiddenError('Cannot grant permissions you do not have');
         }
       }
-
-      updateData.permissions = permissionsToString(newPerms);
     }
 
-    if (Object.keys(updateData).length === 0) {
-      throw new BadRequestError('No fields to update');
-    }
-
-    const updated = await prisma.role.update({
-      where: { id: roleId },
-      data: updateData,
-    });
+    // One transaction under the role row, so the value merged over is the
+    // value replaced: the row FIRST (FOR NO KEY UPDATE, the mode a
+    // permission-only update takes it: a member-role insert's key check on it
+    // still passes; a save that also renames takes the stronger lock at its
+    // update, because the name is in a unique index), then the checks above
+    // made again on the transaction's client, then the write. Two saves of
+    // one role run one after the other; without the lock a save judged
+    // against a stale value could put back a permission the actor lacks (a
+    // bit taken away meanwhile is turned on again: judged as such), or drop a
+    // bit outside its own mask that another save had just set (inside its
+    // mask the later save decides, as before). The long budget: a space or
+    // role delete holds the row through its cascade. Run again whole when
+    // PostgreSQL aborts it to break a deadlock.
+    const { updated, changed } = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      const [locked] = await tx.$queryRaw<{ permissions: string; position: number }[]>`SELECT permissions, position FROM roles WHERE id = ${roleId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
+      if (!locked) throw new NotFoundError('Role');
+      const mayManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, tx);
+      if (!mayManage) throw new ForbiddenError('You do not have permission to manage roles');
+      const highest = await getHighestRolePosition(actorId, serverId, tx);
+      if (highest !== Infinity && locked.position >= highest) {
+        throw new ForbiddenError('Cannot edit a role at or above your own position');
+      }
+      const stored = storedPermissionBits(locked.permissions);
+      const merged = mergeKnownPermissions(stored, sent, known);
+      const turnedOn = merged & ~stored;
+      if (highest !== Infinity && turnedOn !== 0n) {
+        const actorBits = await computeServerPermissions(actorId, serverId, tx);
+        if ((turnedOn & ~actorBits) !== 0n) {
+          throw new ForbiddenError('Cannot grant permissions you do not have');
+        }
+      }
+      const row = await tx.role.update({
+        where: { id: roleId },
+        data: { ...updateData, permissions: permissionsToString(merged) },
+      });
+      return { updated: row, changed: merged !== stored };
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The update of role ${roleId} in ${serverId}`);
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_UPDATED, {
       serverId,
       role: updated as unknown as Role,
     });
 
-    // Permission changes can grant/revoke VIEW_CHANNEL — re-sync live socket
-    // room membership so real-time events match the new visibility. Fire-and-
-    // forget: the util catches its own errors, and the response must not wait
-    // on a per-online-member permission sweep.
-    if (updateData.permissions !== undefined) {
+    // A permission change can grant/revoke VIEW_CHANNEL (or ADMINISTRATOR) —
+    // re-sync live socket room membership so real-time events match the new
+    // visibility, whenever the merged value differs from the stored one (a
+    // write that changed no bit changed no visibility). Fire-and-forget: the
+    // util catches its own errors, and the response must not wait on a
+    // per-online-member permission sweep.
+    if (changed) {
       void syncChannelVisibilityRooms(serverId);
     }
 
@@ -521,6 +586,108 @@ roleRouter.get(
   }
 );
 
+/**
+ * The write of one role's override on one channel, shared by the PUT (what
+ * the client sent, merged with the bits it knows) and the DELETE (a 0/0 write
+ * with the 2.1.x set: it clears only the bits such a client knows and keeps
+ * any other). allow and deny are each merged over the stored override (see
+ * utils/permissionWrites.ts), then stripped of the flags a channel override
+ * never carries: ADMINISTRATOR, and the two server-level-only flags
+ * CREATE_SECURE_CHANNELS and MANAGE_WEBHOOKS (a channel-scoped grant of
+ * either is meaningless and would just confuse effective-permission displays
+ * — webhook management is checked against the SERVER permissions, so a
+ * channel grant must never look like one). The overlap check and the
+ * delete-or-upsert choice judge that result: the row goes when nothing is
+ * left in it. The actor must hold every bit the write turns ON, in allow or
+ * in deny (each against its own stored mask: denying a permission needs it
+ * too); a bit turned off, or left as stored, is never refused on that ground.
+ *
+ * One transaction under the ROLE row (FOR NO KEY UPDATE, the mode a role
+ * update takes it, so an override's key check on it still passes): it is the
+ * one row every write of this override takes first, an existing override or
+ * not, so two writes of it (or a role save) run one after the other and the
+ * value merged over is the value replaced. Then every check of the route made
+ * again on the transaction's client, the override read again, and the write.
+ * The long budget: a space, channel or role delete holds these rows through
+ * its cascade. Run again whole when PostgreSQL aborts it to break a deadlock:
+ * a space delete's cascade reaches the channel before the role, the reverse
+ * of this write's order, so the two can meet as a deadlock; both sides run
+ * under retryOnTransactionConflict, and whichever is aborted runs again (this
+ * write then answers 404 Role, or 200 before the space goes).
+ * A write that stores something for a channel deleted while it ran answers
+ * 404 Channel; one that leaves nothing to store (a 0/0 write, the DELETE)
+ * finds no row to remove and answers as for an override that did not exist.
+ * Returns the bits that changed (the room re-sync is decided on them).
+ */
+async function writeChannelOverride(w: {
+  serverId: string;
+  channelId: string;
+  roleId: string;
+  actorId: string;
+  sentAllow: bigint;
+  sentDeny: bigint;
+  known: bigint;
+  /** The route's own answer to a role at or above the actor. */
+  rankRefusal: string;
+}): Promise<bigint> {
+  const { serverId, channelId, roleId, actorId } = w;
+  try {
+    return await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      const [locked] = await tx.$queryRaw<{ position: number; is_default: boolean }[]>`SELECT position, is_default FROM roles WHERE id = ${roleId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
+      if (!locked) throw new NotFoundError('Role');
+      const mayManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, tx);
+      if (!mayManage) throw new ForbiddenError('You do not have permission to manage permissions');
+      const stillThere = await tx.channel.findFirst({ where: { id: channelId, serverId }, select: { secure: true } });
+      if (!stillThere || stillThere.secure) throw new NotFoundError('Channel');
+      const highest = await getHighestRolePosition(actorId, serverId, tx);
+      if (highest !== Infinity && !locked.is_default && locked.position >= highest) {
+        throw new ForbiddenError(w.rankRefusal);
+      }
+      const stored = await tx.channelPermissionOverride.findUnique({
+        where: { channelId_roleId: { channelId, roleId } },
+        select: { allow: true, deny: true },
+      });
+      const plan = planOverrideWrite(stored, w.sentAllow, w.sentDeny, w.known);
+      if (highest !== Infinity && plan.turnedOn !== 0n) {
+        const actorBits = await computeServerPermissions(actorId, serverId, tx);
+        if ((plan.turnedOn & ~actorBits) !== 0n) {
+          throw new ForbiddenError('Cannot set overrides for permissions you do not have');
+        }
+      }
+      if (plan.allow === 0n && plan.deny === 0n) {
+        // Nothing left: remove the override (reset to inherit)
+        await tx.channelPermissionOverride.deleteMany({ where: { channelId, roleId } });
+      } else {
+        const values = { allow: permissionsToString(plan.allow), deny: permissionsToString(plan.deny) };
+        await tx.channelPermissionOverride.upsert({
+          where: { channelId_roleId: { channelId, roleId } },
+          update: values,
+          create: { channelId, roleId, ...values },
+        });
+      }
+      return plan.changed;
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The override of role ${roleId} on channel ${channelId}`);
+  } catch (err) {
+    // A channel deleted while the transaction ran: the new row's key refused
+    if (violatesForeignKey(err, 'channel_permission_overrides_channel_id_fkey')) throw new NotFoundError('Channel');
+    throw err;
+  }
+}
+
+/**
+ * After an override write: `{ serverId }` only to the space (members refetch
+ * what they may see; the channel id and its overrides must not travel on the
+ * space-wide room, which reaches members without VIEW_CHANNEL on this channel
+ * too), and this channel's rooms re-synced when the merged override differs
+ * from the stored one (it may have granted or revoked VIEW_CHANNEL).
+ */
+function announceOverrideWrite(serverId: string, channelId: string, changed: bigint): void {
+  getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId });
+  if (changed !== 0n) {
+    void syncChannelVisibilityRooms(serverId, { channelId });
+  }
+}
+
 // Set channel permission override for a role
 roleRouter.put(
   '/channels/:channelId/permissions/:roleId',
@@ -550,46 +717,30 @@ roleRouter.put(
       if (typeof allow !== 'string' || typeof deny !== 'string') {
         throw new BadRequestError('allow and deny must be strings (decimal bigint)');
       }
+      const known = readKnownPermissions(req.body.knownPermissions);
+      const sentAllow = readPermissionValue('allow', allow);
+      const sentDeny = readPermissionValue('deny', deny);
+      const actorId = req.user!.userId;
 
-      // Validate that allow and deny don't overlap, and strip the flags that
-      // cannot be granted via channel overrides: ADMINISTRATOR, and the two
-      // server-level-only flags CREATE_SECURE_CHANNELS and MANAGE_WEBHOOKS (a
-      // channel-scoped grant of either is meaningless and would just confuse
-      // effective-permission displays — webhook management is checked against
-      // the SERVER permissions, so a channel grant must never look like one)
-      const CHANNEL_OVERRIDE_MASK =
-        ALL_PERMISSIONS & ~Permissions.ADMINISTRATOR & ~Permissions.CREATE_SECURE_CHANNELS & ~Permissions.MANAGE_WEBHOOKS;
-      const allowBits = permissionsFromString(allow) & CHANNEL_OVERRIDE_MASK;
-      const denyBits = permissionsFromString(deny) & CHANNEL_OVERRIDE_MASK;
-      if ((allowBits & denyBits) !== 0n) {
-        throw new BadRequestError('allow and deny cannot have overlapping bits');
-      }
-
-      // Validate that actor has the permissions they're trying to grant/deny
-      if (actorHighest !== Infinity) {
-        const actorPerms = await getEffectivePermissions(req.user!.userId, serverId);
-        const actorPermBits = permissionsFromString(actorPerms.permissions);
-        const combined = allowBits | denyBits;
-        if ((combined & ~actorPermBits) !== 0n) {
+      // The early answer (see writeChannelOverride for the rules), against the
+      // override as stored now; the transaction asks it again against the row
+      // it overwrites.
+      const current = await prisma.channelPermissionOverride.findUnique({
+        where: { channelId_roleId: { channelId, roleId } },
+        select: { allow: true, deny: true },
+      });
+      const early = planOverrideWrite(current, sentAllow, sentDeny, known);
+      if (actorHighest !== Infinity && early.turnedOn !== 0n) {
+        const actorPerms = await getEffectivePermissions(actorId, serverId);
+        if ((early.turnedOn & ~permissionsFromString(actorPerms.permissions)) !== 0n) {
           throw new ForbiddenError('Cannot set overrides for permissions you do not have');
         }
       }
 
-      // Upsert the override (use sanitized bitmask values, not raw input)
-      const sanitizedAllow = permissionsToString(allowBits);
-      const sanitizedDeny = permissionsToString(denyBits);
-      if (allowBits === 0n && denyBits === 0n) {
-        // Remove override if both are zero (reset to inherit)
-        await prisma.channelPermissionOverride.deleteMany({
-          where: { channelId, roleId },
-        });
-      } else {
-        await prisma.channelPermissionOverride.upsert({
-          where: { channelId_roleId: { channelId, roleId } },
-          update: { allow: sanitizedAllow, deny: sanitizedDeny },
-          create: { channelId, roleId, allow: sanitizedAllow, deny: sanitizedDeny },
-        });
-      }
+      const changed = await writeChannelOverride({
+        serverId, channelId, roleId, actorId, sentAllow, sentDeny, known,
+        rankRefusal: 'Cannot set overrides for roles at or above your own position',
+      });
 
       // The caller (who holds MANAGE_ROLES) gets the channel's overrides back
       const allOverrides = await prisma.channelPermissionOverride.findMany({
@@ -597,13 +748,7 @@ roleRouter.put(
         include: { role: true },
       });
 
-      // { serverId } only: members of the space refetch what they may see. The
-      // channel id and its overrides must not travel on the space-wide room, which
-      // reaches members without VIEW_CHANNEL on this channel too.
-      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId });
-
-      // Override may have granted/revoked VIEW_CHANNEL for this channel
-      void syncChannelVisibilityRooms(serverId, { channelId });
+      announceOverrideWrite(serverId, channelId, changed);
 
       res.json({ success: true, data: allOverrides });
     } catch (err) {
@@ -612,7 +757,11 @@ roleRouter.put(
   }
 );
 
-// Delete a channel permission override
+// Delete a channel permission override: a 0/0 write with the 2.1.x set, like
+// every write that names no known bits. It clears what such a client knows
+// and keeps any other bit in the row (the row goes only when nothing is left),
+// so a 2.1.x client clearing every bit it shows never removes a flag added
+// after it. It turns nothing on, so it is never refused for the actor's bits.
 roleRouter.delete(
   '/channels/:channelId/permissions/:roleId',
   rateLimitRoleManage,
@@ -630,22 +779,19 @@ roleRouter.delete(
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');
 
+      const rankRefusal = 'Cannot modify overrides for roles at or above your own position';
       const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
       if (actorHighest !== Infinity && !role.isDefault && role.position >= actorHighest) {
-        throw new ForbiddenError('Cannot modify overrides for roles at or above your own position');
+        throw new ForbiddenError(rankRefusal);
       }
 
-      await prisma.channelPermissionOverride.deleteMany({
-        where: { channelId, roleId },
+      const changed = await writeChannelOverride({
+        serverId, channelId, roleId, actorId: req.user!.userId,
+        sentAllow: 0n, sentDeny: 0n, known: LEGACY_CLIENT_KNOWN_PERMISSIONS,
+        rankRefusal,
       });
 
-      // { serverId } only: members of the space refetch what they may see. The
-      // channel id and its overrides must not travel on the space-wide room, which
-      // reaches members without VIEW_CHANNEL on this channel too.
-      getIO().to(`server:${serverId}`).emit(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId });
-
-      // Removing an override may restore/revoke VIEW_CHANNEL for this channel
-      void syncChannelVisibilityRooms(serverId, { channelId });
+      announceOverrideWrite(serverId, channelId, changed);
 
       res.json({ success: true, message: 'Override removed' });
     } catch (err) {

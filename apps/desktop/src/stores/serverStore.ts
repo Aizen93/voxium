@@ -5,9 +5,9 @@ import { processImage } from '../utils/imageProcessing';
 import { toast } from './toastStore';
 import i18n from '../i18n';
 import { pinSecure, isPinnedSecure, claimDowngradeWarning } from '../utils/securePins';
-import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST, OPAQUE_ID_RE } from '@voxium/shared';
+import { isDiscoveryTier, DISCOVERY_TIERS, LIMITS, MEMBER_LIST, OPAQUE_ID_RE, ALL_PERMISSIONS, permissionsToString } from '@voxium/shared';
 import type { DiscoveryTier } from '@voxium/shared';
-import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode } from '@voxium/shared';
+import type { Server, Channel, Category, ServerMember, PublicUser, UserStatus, UnreadCount, MemberRole, Role, ChannelPermissionOverride, SecureChannelMember, ServerJoinRequest, ServerBan, ServerDiscoveryInfo, ServerJoinMode, CreateRoleRequest, UpdateRoleRequest, SetChannelPermissionOverrideRequest } from '@voxium/shared';
 
 /** Module-level constant so selectors can default without a fresh reference. */
 export const NO_SECURE_MEMBERS: SecureChannelMember[] = [];
@@ -20,6 +20,15 @@ export const NO_BANS: ServerBan[] = [];
  *  10 × MEMBERS_PER_PAGE rows is far past any real queue, and bounds the
  *  fan-out of one tab open. */
 const MODERATION_LIST_MAX_PAGES = 10;
+
+/**
+ * Every permission bit this build knows, sent as `knownPermissions` with each
+ * permission value a role or override write carries: the server takes those
+ * bits from the request and keeps every other bit as stored, so a save from
+ * this build never clears a permission added after it (a server that ignores
+ * the field knows no bit this build does not).
+ */
+const KNOWN_PERMISSIONS = permissionsToString(ALL_PERMISSIONS);
 
 /** `page` within a moderation payload, or the shape we refuse (socket events
  *  are unauthenticated JSON as far as this client knows). */
@@ -357,7 +366,8 @@ interface ServerState {
   // Roles
   fetchRoles: (serverId: string) => Promise<void>;
   createRole: (serverId: string, name: string, color?: string, permissions?: string) => Promise<Role>;
-  updateRole: (serverId: string, roleId: string, fields: { name?: string; color?: string | null; permissions?: string }) => Promise<void>;
+  /** `fields.permissions` only when a permission changed (the request then names the bits this build knows). */
+  updateRole: (serverId: string, roleId: string, fields: Omit<UpdateRoleRequest, 'knownPermissions'>) => Promise<void>;
   deleteRole: (serverId: string, roleId: string) => Promise<void>;
   reorderRoles: (serverId: string, order: { id: string; position: number }[]) => Promise<void>;
   assignMemberRoles: (serverId: string, memberId: string, roleIds: string[]) => Promise<void>;
@@ -370,7 +380,6 @@ interface ServerState {
   // Channel permissions
   fetchChannelPermissions: (serverId: string, channelId: string) => Promise<ChannelPermissionOverride[]>;
   setChannelPermissionOverride: (serverId: string, channelId: string, roleId: string, allow: string, deny: string) => Promise<void>;
-  deleteChannelPermissionOverride: (serverId: string, channelId: string, roleId: string) => Promise<void>;
 
   // Permission calculator
   fetchEffectivePermissions: (serverId: string, channelId?: string) => Promise<string>;
@@ -1082,12 +1091,16 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   createRole: async (serverId: string, name: string, color?: string, permissions?: string) => {
-    const { data } = await api.post(`/servers/${serverId}/roles`, { name, color, permissions });
+    const body: CreateRoleRequest = { name, color, permissions };
+    if (permissions !== undefined) body.knownPermissions = KNOWN_PERMISSIONS;
+    const { data } = await api.post(`/servers/${serverId}/roles`, body);
     return data.data;
   },
 
   updateRole: async (serverId: string, roleId: string, fields) => {
-    await api.patch(`/servers/${serverId}/roles/${roleId}`, fields);
+    const body: UpdateRoleRequest = { ...fields };
+    if (fields.permissions !== undefined) body.knownPermissions = KNOWN_PERMISSIONS;
+    await api.patch(`/servers/${serverId}/roles/${roleId}`, body);
   },
 
   deleteRole: async (serverId: string, roleId: string) => {
@@ -1153,11 +1166,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   setChannelPermissionOverride: async (serverId: string, channelId: string, roleId: string, allow: string, deny: string) => {
-    await api.put(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`, { allow, deny });
-  },
-
-  deleteChannelPermissionOverride: async (serverId: string, channelId: string, roleId: string) => {
-    await api.delete(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`);
+    const body: SetChannelPermissionOverrideRequest = { allow, deny, knownPermissions: KNOWN_PERMISSIONS };
+    await api.put(`/servers/${serverId}/roles/channels/${channelId}/permissions/${roleId}`, body);
   },
 
   fetchEffectivePermissions: async (serverId: string, channelId?: string) => {

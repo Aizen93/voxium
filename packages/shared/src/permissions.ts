@@ -49,6 +49,46 @@ export type PermissionFlag = (typeof Permissions)[keyof typeof Permissions];
 /** All permission flags OR'd together */
 export const ALL_PERMISSIONS = Object.values(Permissions).reduce((acc, p) => acc | p, 0n);
 
+/**
+ * The permission bits every released 2.1.x client knows: the 22 flags that
+ * build was compiled with. A role or channel-override write that does not say
+ * which bits its client knows (`knownPermissions`, which every 2.1.x client
+ * omits) is read as coming from such a client: the server takes these bits
+ * from the request and keeps every other bit as stored, so an older client's
+ * save never clears a flag it cannot show.
+ *
+ * FROZEN. It names what those installed clients know, not what this build
+ * knows: a flag added later must NOT be added here (it is spelled out flag by
+ * flag, never derived from ALL_PERMISSIONS, for that reason), and a test pins
+ * its value.
+ */
+export const LEGACY_CLIENT_KNOWN_PERMISSIONS =
+  Permissions.VIEW_CHANNEL |
+  Permissions.MANAGE_CHANNELS |
+  Permissions.MANAGE_CATEGORIES |
+  Permissions.MANAGE_SERVER |
+  Permissions.MANAGE_ROLES |
+  Permissions.CREATE_INVITES |
+  Permissions.KICK_MEMBERS |
+  Permissions.MANAGE_NICKNAMES |
+  Permissions.CHANGE_NICKNAME |
+  Permissions.SEND_MESSAGES |
+  Permissions.MANAGE_MESSAGES |
+  Permissions.ATTACH_FILES |
+  Permissions.ADD_REACTIONS |
+  Permissions.MENTION_EVERYONE |
+  Permissions.CONNECT |
+  Permissions.SPEAK |
+  Permissions.MUTE_MEMBERS |
+  Permissions.DEAFEN_MEMBERS |
+  Permissions.MOVE_MEMBERS |
+  Permissions.ADMINISTRATOR |
+  Permissions.CREATE_SECURE_CHANNELS |
+  Permissions.MANAGE_WEBHOOKS;
+
+/** The longest permission bitmask string a request may carry (decimal digits; 40 covers 132 flags). */
+export const PERMISSION_STRING_MAX_DIGITS = 40;
+
 /** Default permissions for the @everyone role (new servers).
  * Basics only — no file uploads, invites, or nickname changes.
  * Admins can grant additional permissions via custom roles. */
@@ -106,6 +146,28 @@ export function permissionsFromString(str: string): bigint {
   } catch {
     return 0n;
   }
+}
+
+const PERMISSION_DIGITS_RE = /^[0-9]+$/;
+
+/**
+ * Every bit of a permission bitmask string, the ones this build does not know
+ * included: the form `permissionsToString` writes (decimal digits only), or
+ * null for anything else (`BigInt` alone would also take '', whitespace, a
+ * sign or `0x…`). Unlike `permissionsFromString` it masks nothing, so a write
+ * that merges over a stored value can keep the bits it does not know.
+ */
+export function permissionBitsFromString(str: string): bigint | null {
+  if (!PERMISSION_DIGITS_RE.test(str)) return null;
+  return BigInt(str);
+}
+
+/**
+ * The bits a role or override write stores: the bits its client knows taken
+ * from what it sent, every other bit kept as stored (0 for a creation).
+ */
+export function mergeKnownPermissions(stored: bigint, sent: bigint, known: bigint): bigint {
+  return (stored & ~known) | (sent & known);
 }
 
 /**

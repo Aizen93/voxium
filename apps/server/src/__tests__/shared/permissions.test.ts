@@ -8,6 +8,12 @@ import {
   permissionsFromString,
   computeBasePermissions,
   computeChannelPermissions,
+  LEGACY_CLIENT_KNOWN_PERMISSIONS,
+  PERMISSION_STRING_MAX_DIGITS,
+  permissionBitsFromString,
+  mergeKnownPermissions,
+  validateKnownPermissions,
+  validatePermissionString,
 } from '@voxium/shared';
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -309,6 +315,84 @@ describe('Shared permissions utilities', () => {
       expect(result & Permissions.SEND_MESSAGES).toBe(Permissions.SEND_MESSAGES);
       expect(result & Permissions.ATTACH_FILES).toBe(Permissions.ATTACH_FILES);
       expect(result & Permissions.ADD_REACTIONS).toBe(Permissions.ADD_REACTIONS);
+    });
+  });
+
+  // ── The merge of a role or override write (#75) ────────────────────────
+
+  describe('LEGACY_CLIENT_KNOWN_PERMISSIONS (the bits a 2.1.x client knows)', () => {
+    // FROZEN: this is what the installed 2.1.x clients were built with (22
+    // flags, bits 0 to 21). It must NOT grow when a flag is added: a request
+    // without knownPermissions comes from such a client, and the server keeps
+    // every bit outside this set as stored. A new flag changes ALL_PERMISSIONS,
+    // never this value.
+    it('is exactly bits 0 to 21', () => {
+      expect(LEGACY_CLIENT_KNOWN_PERMISSIONS).toBe(4194303n);
+      expect(LEGACY_CLIENT_KNOWN_PERMISSIONS).toBe((1n << 22n) - 1n);
+    });
+  });
+
+  describe('permissionBitsFromString (every bit, known or not)', () => {
+    it('keeps the bits this build does not know, where permissionsFromString masks them', () => {
+      const future = (1n << 22n) | (1n << 40n) | Permissions.VIEW_CHANNEL;
+      expect(permissionBitsFromString(future.toString())).toBe(future);
+      expect(permissionsFromString(future.toString())).toBe(Permissions.VIEW_CHANNEL);
+    });
+
+    it('reads what permissionsToString writes', () => {
+      expect(permissionBitsFromString(permissionsToString(ALL_PERMISSIONS))).toBe(ALL_PERMISSIONS);
+      expect(permissionBitsFromString('0')).toBe(0n);
+    });
+
+    it.each(['', ' ', ' 1', '1 ', '-1', '+1', '0x10', '0b1', '1e3', '1.0', 'abc', '\u0661'])('refuses %j (BigInt alone would take some of these)', (value) => {
+      expect(permissionBitsFromString(value)).toBeNull();
+    });
+  });
+
+  describe('mergeKnownPermissions', () => {
+    const stored = Permissions.VIEW_CHANNEL | Permissions.KICK_MEMBERS | (1n << 22n);
+    it('takes the known bits from what was sent and keeps every other bit as stored', () => {
+      const known = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES;
+      expect(mergeKnownPermissions(stored, Permissions.SEND_MESSAGES, known))
+        .toBe(Permissions.SEND_MESSAGES | Permissions.KICK_MEMBERS | (1n << 22n));
+    });
+
+    it('ignores a sent bit outside what the client knows', () => {
+      expect(mergeKnownPermissions(0n, Permissions.KICK_MEMBERS, Permissions.SEND_MESSAGES)).toBe(0n);
+    });
+
+    it('a mask of everything replaces; an empty mask changes nothing', () => {
+      expect(mergeKnownPermissions(stored, Permissions.SEND_MESSAGES, stored | Permissions.SEND_MESSAGES)).toBe(Permissions.SEND_MESSAGES);
+      expect(mergeKnownPermissions(stored, Permissions.SEND_MESSAGES, 0n)).toBe(stored);
+    });
+  });
+
+  describe('validateKnownPermissions', () => {
+    it('accepts decimal digits up to the cap', () => {
+      expect(validateKnownPermissions(permissionsToString(ALL_PERMISSIONS))).toBeNull();
+      expect(validateKnownPermissions('0')).toBeNull();
+      expect(validateKnownPermissions('9'.repeat(PERMISSION_STRING_MAX_DIGITS))).toBeNull();
+    });
+
+    it.each([['1'.repeat(41)], [''], ['0x1f'], [' 1'], ['-1'], [1], [null], [undefined], [{}]])('refuses %j, saying what it must be', (value) => {
+      expect(validateKnownPermissions(value)).toBe(
+        `knownPermissions must be a permission bitmask: a non-negative whole number as a string of 1 to ${PERMISSION_STRING_MAX_DIGITS} decimal digits`,
+      );
+    });
+  });
+
+  describe('validatePermissionString', () => {
+    it('names the field it judges', () => {
+      expect(validatePermissionString('allow', 'abc')).toBe(
+        `allow must be a permission bitmask: a non-negative whole number as a string of 1 to ${PERMISSION_STRING_MAX_DIGITS} decimal digits`,
+      );
+      expect(validatePermissionString('deny', '')).toContain('deny must be');
+      expect(validatePermissionString('permissions', '-1')).toContain('permissions must be');
+    });
+
+    it('accepts what permissionsToString writes', () => {
+      expect(validatePermissionString('permissions', permissionsToString(0n))).toBeNull();
+      expect(validatePermissionString('permissions', permissionsToString(ALL_PERMISSIONS))).toBeNull();
     });
   });
 });

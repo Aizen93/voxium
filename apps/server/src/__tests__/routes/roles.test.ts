@@ -31,6 +31,7 @@ const prismaMock: Record<string, any> = {
   },
   channelPermissionOverride: {
     findMany: vi.fn(),
+    findUnique: vi.fn(),
     upsert: vi.fn(),
     deleteMany: vi.fn(),
   },
@@ -38,6 +39,7 @@ const prismaMock: Record<string, any> = {
     findUnique: vi.fn(),
   },
   $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
 };
 
 vi.mock('../../utils/prisma', () => ({
@@ -62,7 +64,9 @@ const mockHasServerPermission = vi.fn();
 const mockHasChannelPermission = vi.fn();
 const mockGetHighestRolePosition = vi.fn();
 const mockGetEffectivePermissions = vi.fn();
+const mockComputeServerPermissions = vi.fn();
 vi.mock('../../utils/permissionCalculator', () => ({
+  computeServerPermissions: (...args: any[]) => mockComputeServerPermissions(...args),
   hasServerPermission: (...args: any[]) => mockHasServerPermission(...args),
   hasChannelPermission: (...args: any[]) => mockHasChannelPermission(...args),
   getHighestRolePosition: (...args: any[]) => mockGetHighestRolePosition(...args),
@@ -114,8 +118,21 @@ describe('Role Routes', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // The permission writes run in a transaction: by default it runs on the
+    // shared client's mocks, so a test written against them sees the writes
+    // (the tests of the transaction itself give it a client of its own, here
+    // and in rolePermissionWrites.test.ts)
+    prismaMock.$transaction.mockImplementation(async (fn: (client: unknown) => unknown) => fn(prismaMock));
+    prismaMock.channelPermissionOverride.findUnique.mockResolvedValue(null);
+    // No role row to lock unless a test names one (lockedRole)
+    prismaMock.$queryRaw.mockResolvedValue([]);
+    mockComputeServerPermissions.mockReset();
     app = createApp();
   });
+
+  /** The role row the transaction locks: what its SELECT … FOR NO KEY UPDATE answers. */
+  const lockedRole = (row: { permissions?: string; position: number; isDefault?: boolean }) =>
+    prismaMock.$queryRaw.mockResolvedValue([{ permissions: row.permissions ?? '0', position: row.position, is_default: row.isDefault ?? false }]);
 
   // ── GET /api/v1/servers/:serverId/roles ────────────────────────────────
 
@@ -393,6 +410,7 @@ describe('Role Routes', () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity); // owner
       const newPerms = Permissions.MANAGE_CHANNELS | Permissions.KICK_MEMBERS;
+      lockedRole({ position: 3 });
       prismaMock.role.findFirst.mockResolvedValue({
         id: 'role1',
         name: 'Mod',
@@ -417,6 +435,7 @@ describe('Role Routes', () => {
         .send({ permissions: permissionsToString(newPerms) });
 
       expect(res.status).toBe(200);
+      expect(prismaMock.role.update).toHaveBeenCalledWith({ where: { id: 'role1' }, data: { permissions: permissionsToString(newPerms) } });
       // Permission changes can grant/revoke VIEW_CHANNEL — rooms must re-sync
       expect(mockSyncVisibilityRooms).toHaveBeenCalledWith('srv1');
     });
@@ -487,6 +506,7 @@ describe('Role Routes', () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity); // owner bypasses position check
       const newPerms = Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES;
+      lockedRole({ position: 0, isDefault: true });
       prismaMock.role.findFirst.mockResolvedValue({
         id: 'role-everyone',
         name: 'everyone',
@@ -1277,6 +1297,7 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
       prismaMock.channelPermissionOverride.upsert.mockResolvedValue({
         channelId: 'ch1',
         roleId: 'r2',
@@ -1322,6 +1343,7 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
       prismaMock.channelPermissionOverride.deleteMany.mockResolvedValue({ count: 1 });
       prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
 
@@ -1347,6 +1369,7 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
 
       const overlap = permissionsToString(Permissions.SEND_MESSAGES);
       const res = await request(app)
@@ -1389,6 +1412,7 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
       prismaMock.channelPermissionOverride.upsert.mockResolvedValue({});
       prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
 
@@ -1426,6 +1450,7 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
       prismaMock.channelPermissionOverride.upsert.mockResolvedValue({});
       prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
 
@@ -1459,6 +1484,7 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
 
       const res = await request(app)
         .put('/api/v1/servers/srv1/roles/channels/ch1/permissions/r2')
@@ -1503,10 +1529,13 @@ describe('Role Routes', () => {
         position: 0,
         isDefault: true,
       });
+      lockedRole({ position: 0, isDefault: true });
       mockGetEffectivePermissions.mockResolvedValue({
         permissions: permissionsToString(Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_ROLES),
         source: 'computed',
       });
+      // the same bits, read again on the transaction's client
+      mockComputeServerPermissions.mockResolvedValue(Permissions.VIEW_CHANNEL | Permissions.SEND_MESSAGES | Permissions.MANAGE_ROLES);
       prismaMock.channelPermissionOverride.upsert.mockResolvedValue({});
       prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
 
@@ -1534,6 +1563,7 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
       // Actor only has VIEW_CHANNEL + MANAGE_ROLES, not KICK_MEMBERS
       mockGetEffectivePermissions.mockResolvedValue({
         permissions: permissionsToString(Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES),
@@ -1556,6 +1586,7 @@ describe('Role Routes', () => {
       mockGetHighestRolePosition.mockResolvedValue(Infinity);
       prismaMock.channel.findFirst.mockResolvedValue({ id: 'ch1', serverId: 'srv1' });
       prismaMock.role.findFirst.mockResolvedValue({ id: 'r1', serverId: 'srv1', position: 1, isDefault: false });
+      lockedRole({ position: 1 });
       prismaMock.channelPermissionOverride.deleteMany.mockResolvedValue({ count: 0 });
       prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
 
@@ -1632,6 +1663,9 @@ describe('Role Routes', () => {
         position: 2,
         isDefault: false,
       });
+      lockedRole({ position: 2 });
+      // an override every bit of which a 2.1.x client knows: nothing is kept
+      prismaMock.channelPermissionOverride.findUnique.mockResolvedValue({ allow: permissionsToString(Permissions.SEND_MESSAGES), deny: '0' });
       prismaMock.channelPermissionOverride.deleteMany.mockResolvedValue({ count: 1 });
       prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
 
@@ -1640,7 +1674,9 @@ describe('Role Routes', () => {
       );
 
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
+      expect(res.body).toEqual({ success: true, message: 'Override removed' });
+      expect(prismaMock.channelPermissionOverride.deleteMany).toHaveBeenCalledWith({ where: { channelId: 'ch1', roleId: 'r2' } });
+      expect(prismaMock.channelPermissionOverride.upsert).not.toHaveBeenCalled();
       // The space-wide room gets { serverId } only: no channel id, no overrides
       expect(mockTo).toHaveBeenCalledWith('server:srv1');
       expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.CHANNEL_PERMISSIONS_UPDATED, { serverId: 'srv1' });

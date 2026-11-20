@@ -3,7 +3,7 @@ import {
   DISCOVERY_TAGS, DISCOVERY_SEARCH_MIN, DISCOVERY_SEARCH_MAX, DISCOVERY_TEXT_FORBIDDEN_RE,
 } from './constants.js';
 import type { DiscoveryTag } from './constants.js';
-import { ROLE_COLOR_REGEX } from './permissions.js';
+import { ROLE_COLOR_REGEX, PERMISSION_STRING_MAX_DIGITS, permissionBitsFromString } from './permissions.js';
 import { hasUnsupportedLabelText } from './labelText.js';
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -141,6 +141,27 @@ export function validateNickname(nickname: string): string | null {
 export function validateRoleColor(color: string): string | null {
   if (!ROLE_COLOR_REGEX.test(color)) return 'Color must be a valid hex color (e.g., #FF5733)';
   return null;
+}
+
+/**
+ * A permission bitmask field of a request (`permissions`, `allow`, `deny`,
+ * `knownPermissions`): what `permissionsToString` writes, a non-negative whole
+ * number as a string of decimal digits, at most PERMISSION_STRING_MAX_DIGITS
+ * of them. The message names the field.
+ */
+export function validatePermissionString(field: string, value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > PERMISSION_STRING_MAX_DIGITS || permissionBitsFromString(value) === null) {
+    return `${field} must be a permission bitmask: a non-negative whole number as a string of 1 to ${PERMISSION_STRING_MAX_DIGITS} decimal digits`;
+  }
+  return null;
+}
+
+/**
+ * `knownPermissions` on a role or channel-override write: the bitmask of every
+ * permission the calling build knows, as `permissionsToString` writes it.
+ */
+export function validateKnownPermissions(value: unknown): string | null {
+  return validatePermissionString('knownPermissions', value);
 }
 
 export function validateThemeName(name: string): string | null {
