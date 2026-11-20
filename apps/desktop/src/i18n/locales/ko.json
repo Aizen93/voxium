@@ -52,7 +52,13 @@
       "signIn": "로그인",
       "signingIn": "로그인 중...",
       "noAccount": "계정이 없으신가요?",
-      "createOne": "계정 만들기"
+      "createOne": "계정 만들기",
+      "reason": {
+        "signedOutElsewhere": "다른 기기에서 로그아웃되었습니다.",
+        "sessionEnded": "세션이 종료되었습니다. 다시 로그인하세요.",
+        "accountBanned": "계정이 차단되었습니다.",
+        "accountDeleted": "계정이 삭제되었습니다."
+      }
     },
     "register": {
       "registrationFailed": "가입에 실패했습니다. 연결을 확인하고 다시 시도하세요.",

@@ -52,7 +52,13 @@
       "signIn": "Iniciar sesión",
       "signingIn": "Iniciando sesión...",
       "noAccount": "¿No tienes una cuenta?",
-      "createOne": "Crear una"
+      "createOne": "Crear una",
+      "reason": {
+        "signedOutElsewhere": "Se cerró tu sesión desde otro dispositivo.",
+        "sessionEnded": "Tu sesión ha finalizado. Vuelve a iniciar sesión.",
+        "accountBanned": "Tu cuenta ha sido suspendida.",
+        "accountDeleted": "Tu cuenta ha sido eliminada."
+      }
     },
     "register": {
       "registrationFailed": "No se pudo completar el registro. Comprueba tu conexión e inténtalo de nuevo.",

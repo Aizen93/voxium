@@ -52,7 +52,13 @@
       "signIn": "サインイン",
       "signingIn": "サインイン中...",
       "noAccount": "アカウントをお持ちでないですか？",
-      "createOne": "アカウントを作成"
+      "createOne": "アカウントを作成",
+      "reason": {
+        "signedOutElsewhere": "別のデバイスからサインアウトされました。",
+        "sessionEnded": "セッションが終了しました。もう一度サインインしてください。",
+        "accountBanned": "アカウントがBANされました。",
+        "accountDeleted": "アカウントが削除されました。"
+      }
     },
     "register": {
       "registrationFailed": "登録に失敗しました。接続を確認してもう一度お試しください。",

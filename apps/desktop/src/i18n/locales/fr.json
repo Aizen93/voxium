@@ -52,7 +52,13 @@
       "signIn": "Se connecter",
       "signingIn": "Connexion en cours…",
       "noAccount": "Vous n'avez pas de compte ?",
-      "createOne": "Créer un compte"
+      "createOne": "Créer un compte",
+      "reason": {
+        "signedOutElsewhere": "Vous avez été déconnecté depuis un autre appareil.",
+        "sessionEnded": "Votre session a pris fin. Reconnectez-vous.",
+        "accountBanned": "Votre compte a été banni.",
+        "accountDeleted": "Votre compte a été supprimé."
+      }
     },
     "register": {
       "registrationFailed": "L'inscription a échoué. Vérifiez votre connexion et réessayez.",

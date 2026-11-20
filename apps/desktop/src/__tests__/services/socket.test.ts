@@ -1007,7 +1007,7 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
 
     try {
-      socket.fire('force:logout', { reason: 'banned' });
+      socket.fire('force:logout', { reason: 'Your account has been banned' });
       serverDisconnect(socket);
       await macrotask();
       await tick();
@@ -1113,7 +1113,7 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
 
     try {
-      socket.fire('force:logout', { reason: 'banned' });
+      socket.fire('force:logout', { reason: 'Your account has been banned' });
       serverDisconnect(socket);
       await macrotask();
       await tick();
@@ -1154,6 +1154,36 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     }
   });
 
+  it.each([
+    ['You were signed out from another device', '/login?reason=signed-out-elsewhere'],
+    ['Your session has ended', '/login?reason=session-ended'],
+    // a reason the closed list does not know: the sign-in page alone, its text never carried along
+    ['<b>Call this number</b>', '/login'],
+    [undefined, '/login'],
+  ])('force:logout with the reason %j signs out locally without calling the server, then opens %s', async (reason, target) => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-old');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      socket.fire('force:logout', reason === undefined ? undefined : { reason });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(authStoreMock.logout).toHaveBeenCalledWith(expect.objectContaining({ tellServer: false }));
+      expect(window.location.href).toBe(target);
+      expect(socket.connect).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+    }
+  });
+
   it('a session the server ends right after admitting it (banned or deleted during the handshake) signs out with the reason and never reopens', async () => {
     const mod = await freshSocketModule();
     mod.connectSocket('access-old');
@@ -1173,7 +1203,7 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
       await macrotask();
 
       expect(authStoreMock.logout).toHaveBeenCalledTimes(1);
-      expect(window.location.href).toBe('/login?reason=Your%20account%20has%20been%20deleted');
+      expect(window.location.href).toBe('/login?reason=deleted');
       expect(session.getFreshAccessToken).not.toHaveBeenCalled();
       expect(socket.connect).not.toHaveBeenCalled();
     } finally {
@@ -1359,7 +1389,7 @@ describe('services/socket — a node going away (deploy, shutdown): spread reope
     const originalLocation = window.location;
     Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
     try {
-      socket.fire('force:logout', { reason: 'banned' });
+      socket.fire('force:logout', { reason: 'Your account has been banned' });
       serverDisconnect(socket);
       await vi.advanceTimersByTimeAsync(mod.SERVER_DISCONNECT_REOPEN_MAX_DELAY_MS);
       await tick();

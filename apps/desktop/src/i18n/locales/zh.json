@@ -52,7 +52,13 @@
       "signIn": "登录",
       "signingIn": "登录中...",
       "noAccount": "还没有账号？",
-      "createOne": "立即注册"
+      "createOne": "立即注册",
+      "reason": {
+        "signedOutElsewhere": "你已在另一台设备上被退出登录。",
+        "sessionEnded": "你的会话已结束，请重新登录。",
+        "accountBanned": "你的账号已被封禁。",
+        "accountDeleted": "你的账号已被删除。"
+      }
     },
     "register": {
       "registrationFailed": "注册失败。请检查网络连接后重试。",

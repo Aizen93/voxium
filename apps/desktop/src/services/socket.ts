@@ -3,6 +3,7 @@ import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared'
 import { getAccessToken, flushTokenStorage } from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
 import { bumpRequestGeneration } from './requestGeneration';
+import { loginReasonOf, loginPathFor } from '../utils/loginReasons';
 
 /** Events that arrive many times a second during a call and carry no state a REST read would show. */
 const NOISY_EVENTS = new Set([
@@ -294,7 +295,9 @@ export function connectSocket(token: string): VoxSocket | null {
   s.on('force:logout', (data) => {
     forceLoggedOut = true;
     if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);
-    const reason = data?.reason;
+    // Shown on the sign-in page from a closed list of sentences: the server's
+    // words travel as a code, never as text (utils/loginReasons.ts)
+    const reason = loginReasonOf(data?.reason);
     // The session the server ended is the one this socket was admitted with
     const endedSession = handshakeToken(s);
     const toLogin = async () => {
@@ -302,7 +305,7 @@ export function connectSocket(token: string): VoxSocket | null {
       // clean-up first: the server sends this before its transaction too, so
       // it proves nothing and erases nothing (services/accountDeletion.ts)
       await accountDeletionSettled();
-      window.location.href = reason ? `/login?reason=${encodeURIComponent(reason)}` : '/login';
+      window.location.href = loginPathFor(reason);
     };
     import('../stores/authStore')
       .then(async ({ useAuthStore }) => {

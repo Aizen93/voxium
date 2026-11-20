@@ -52,7 +52,13 @@
       "signIn": "Entrar",
       "signingIn": "Entrando...",
       "noAccount": "Não tem uma conta?",
-      "createOne": "Criar uma"
+      "createOne": "Criar uma",
+      "reason": {
+        "signedOutElsewhere": "Você foi desconectado a partir de outro dispositivo.",
+        "sessionEnded": "Sua sessão foi encerrada. Entre novamente.",
+        "accountBanned": "Sua conta foi banida.",
+        "accountDeleted": "Sua conta foi excluída."
+      }
     },
     "register": {
       "registrationFailed": "Falha no cadastro. Verifique sua conexão e tente novamente.",

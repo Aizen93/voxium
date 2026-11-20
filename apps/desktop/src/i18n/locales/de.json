@@ -52,7 +52,13 @@
       "signIn": "Anmelden",
       "signingIn": "Anmeldung läuft...",
       "noAccount": "Noch kein Konto?",
-      "createOne": "Erstelle eins"
+      "createOne": "Erstelle eins",
+      "reason": {
+        "signedOutElsewhere": "Du wurdest von einem anderen Gerät aus abgemeldet.",
+        "sessionEnded": "Deine Sitzung wurde beendet. Melde dich erneut an.",
+        "accountBanned": "Dein Konto wurde gesperrt.",
+        "accountDeleted": "Dein Konto wurde gelöscht."
+      }
     },
     "register": {
       "registrationFailed": "Registrierung fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",

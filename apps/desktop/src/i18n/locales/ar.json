@@ -52,7 +52,13 @@
       "signIn": "تسجيل الدخول",
       "signingIn": "جارٍ تسجيل الدخول...",
       "noAccount": "ليس لديك حساب؟",
-      "createOne": "أنشئ حسابًا"
+      "createOne": "أنشئ حسابًا",
+      "reason": {
+        "signedOutElsewhere": "تم تسجيل خروجك من جهاز آخر.",
+        "sessionEnded": "انتهت جلستك. سجّل الدخول مجددًا.",
+        "accountBanned": "تم حظر حسابك.",
+        "accountDeleted": "تم حذف حسابك."
+      }
     },
     "register": {
       "registrationFailed": "فشل التسجيل. تحقق من اتصالك وحاول مرة أخرى.",

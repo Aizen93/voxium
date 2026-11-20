@@ -52,7 +52,13 @@
       "signIn": "Sign In",
       "signingIn": "Signing in...",
       "noAccount": "Don't have an account?",
-      "createOne": "Create one"
+      "createOne": "Create one",
+      "reason": {
+        "signedOutElsewhere": "You were signed out from another device.",
+        "sessionEnded": "Your session ended. Sign in again.",
+        "accountBanned": "Your account has been banned.",
+        "accountDeleted": "Your account has been deleted."
+      }
     },
     "register": {
       "registrationFailed": "Registration failed. Check your connection and try again.",
