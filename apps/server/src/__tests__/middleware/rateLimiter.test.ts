@@ -1174,8 +1174,13 @@ describe('clearUserRateLimits — the admin tool reaches the account buckets too
 
     await mod.clearUserRateLimits('clx1user');
     expect(del).toHaveBeenCalledWith('rl:loginacct:t:clx1user');
-    // An id may be a webhook's: only its unverified-delivery buckets are scanned
-    expect(scanIterator.mock.calls).toEqual([[{ MATCH: 'rl:whsigfail:clx1user|*', COUNT: 100 }]]);
+    // An id may be a webhook's (its unverified-delivery buckets) or a user's
+    // (the per-session buckets of its sign-in sessions): both are scanned
+    expect(scanIterator.mock.calls).toEqual([
+      [{ MATCH: 'rl:whsigfail:clx1user|*', COUNT: 100 }],
+      [{ MATCH: 'rl:sessread:clx1user|*', COUNT: 100 }],
+      [{ MATCH: 'rl:sessrvk:clx1user|*', COUNT: 100 }],
+    ]);
     scanIterator.mockClear();
 
     del.mockClear();
@@ -1188,13 +1193,19 @@ describe('clearUserRateLimits — the admin tool reaches the account buckets too
   it("a webhook id clears its execute bucket and its unverified-delivery buckets on every network (found by scan)", async () => {
     const found = ['rl:whsigfail:wh-1|203.0.113.0/24', 'rl:whsigfail:wh-1|2001:db8:1::/48'];
     const del = vi.fn(async () => 1);
-    const scanIterator = vi.fn(async function* () { yield found; });
+    const scanIterator = vi.fn(async function* ({ MATCH }: { MATCH: string }) { yield MATCH.startsWith('rl:whsigfail:') ? found : []; });
     vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
     const mod = await freshRateLimiter();
 
     const cleared = await mod.clearUserRateLimits('wh-1');
 
-    expect(scanIterator.mock.calls).toEqual([[{ MATCH: 'rl:whsigfail:wh-1|*', COUNT: 100 }]]);
+    // The id is scanned for as a webhook's and as a user's (the session
+    // buckets find nothing here)
+    expect(scanIterator.mock.calls).toEqual([
+      [{ MATCH: 'rl:whsigfail:wh-1|*', COUNT: 100 }],
+      [{ MATCH: 'rl:sessread:wh-1|*', COUNT: 100 }],
+      [{ MATCH: 'rl:sessrvk:wh-1|*', COUNT: 100 }],
+    ]);
     for (const key of found) expect(del).toHaveBeenCalledWith(key);
     expect(del).toHaveBeenCalledWith('rl:whexec:wh-1');
     expect(cleared).toBeGreaterThanOrEqual(found.length + 1);
@@ -1599,5 +1610,174 @@ describe('the sign-out bucket (POST /auth/logout)', () => {
     } finally {
       process.env.JWT_SECRET = secretBefore;
     }
+  });
+});
+
+describe('sign-in sessions: the list\'s bucket and the step-up\'s, which counts wrong passwords only', () => {
+  let rl: RateLimiterModule;
+  let store: Map<string, number>;
+  let rewards: Array<{ prefix: string; key: string }>;
+
+  beforeEach(async () => {
+    rl = await freshRateLimiter();
+    vi.mocked(getRedis).mockImplementation(() => ({}) as ReturnType<typeof getRedis>);
+    store = new Map();
+    rewards = [];
+    vi.spyOn(RateLimiterRedis.prototype, 'consume').mockImplementation(async function (this: RateLimiterRedis, key) {
+      const slot = `${this.keyPrefix} ${String(key)}`;
+      const consumed = (store.get(slot) ?? 0) + 1;
+      store.set(slot, consumed);
+      if (consumed > this.points) throw new RateLimiterRes(0, 900_000, consumed);
+      return new RateLimiterRes(this.points - consumed, 900_000, consumed) as never;
+    });
+    vi.spyOn(RateLimiterRedis.prototype, 'reward').mockImplementation(async function (this: RateLimiterRedis, key) {
+      const slot = `${this.keyPrefix} ${String(key)}`;
+      rewards.push({ prefix: this.keyPrefix, key: String(key) });
+      store.set(slot, (store.get(slot) ?? 0) - 1);
+      return new RateLimiterRes(0, 0, 0) as never;
+    });
+  });
+
+  /**
+   * A request of `userId` on session `sid` (authenticate ran; undefined: a
+   * token that names no session), shaped like one of the two sign-out
+   * routes, and a response that can finish.
+   */
+  function call(userId: string, sid: string | undefined, route: 'one' | 'others' = 'one') {
+    const json = vi.fn();
+    const finish: Array<() => void> = [];
+    const res: any = {
+      statusCode: 200,
+      locals: {},
+      set: vi.fn(),
+      status: vi.fn((code: number) => { res.statusCode = code; return { json }; }),
+      json,
+      on: vi.fn((event: string, fn: () => void) => { if (event === 'finish') finish.push(fn); return res; }),
+    };
+    const shape = route === 'one'
+      ? { method: 'DELETE', params: { sessionId: 'Other00000000000000000' }, body: { password: 'x' } }
+      : { method: 'POST', params: {}, body: { password: 'x' } };
+    return {
+      req: { ...shape, user: { userId, ...(sid !== undefined ? { sid } : {}) }, ip: '203.0.113.7', socket: {} } as any,
+      res,
+      json,
+      finished: (status: number) => { res.statusCode = status; for (const fn of finish) fn(); },
+    };
+  }
+  const flush = () => new Promise((r) => setImmediate(r));
+  /** Five wrong passwords from `sid` through the route shape `route`. */
+  async function fiveWrong(userId: string, sid: string | undefined, route: 'one' | 'others') {
+    for (let i = 0; i < 5; i++) {
+      const c = call(userId, sid, route);
+      await rl.rateLimitSessionRevoke(c.req, c.res, vi.fn());
+      c.res.locals[rl.STEP_UP_REFUSED_LOCAL] = true;
+      c.finished(400);
+    }
+  }
+  /** Whether the middleware let the request through. */
+  async function passes(mw: (req: any, res: any, next: () => void) => Promise<void>, c: ReturnType<typeof call>) {
+    const next = vi.fn();
+    await mw(c.req, c.res, next);
+    return next.mock.calls.length === 1;
+  }
+
+  it('registers the two buckets: the list 30 a minute, no block; the step-up 5 per 15 minutes, then 15 minutes blocked; both per session', () => {
+    const byName = (name: string) => getAllRateLimits().find((l) => l.name === name);
+    expect(byName('sessionsRead')).toMatchObject({ keyPrefix: 'rl:sessread', points: 30, duration: 60, blockDuration: 0, keyType: 'userId', label: 'Sign-in sessions: list (per session)' });
+    expect(byName('sessionRevoke')).toMatchObject({ keyPrefix: 'rl:sessrvk', points: 5, duration: 900, blockDuration: 900, keyType: 'userId', label: 'Sign-in sessions: sign out (wrong passwords, per session)' });
+  });
+
+  it('the key is the account AND the caller\'s session; a token that names no session is keyed `nosid`; never the account alone', () => {
+    expect(rl.byUserSession(call('u-1', 'SessionAAAAAAAAAAAAAAA').req)).toBe('u-1|SessionAAAAAAAAAAAAAAA');
+    expect(rl.byUserSession(call('u-1', undefined).req)).toBe('u-1|nosid');
+    expect(rl.byUserSession(call('u-1', 'SessionAAAAAAAAAAAAAAA').req)).not.toBe('u-1');
+    // No user (never on these routes: authenticate runs first): the
+    // address, as byUserId
+    expect(rl.byUserSession({ ip: '203.0.113.7', socket: {} } as any)).toBe('203.0.113.7');
+  });
+
+  it('the step-up: a wrong password (the route marks it) keeps its point; every other outcome gives it back', async () => {
+    for (const [status, wrong] of [[400, true], [200, false], [404, false], [400, false], [401, false], [500, false]] as const) {
+      const c = call('u-1', 's-1');
+      const next = vi.fn();
+      await rl.rateLimitSessionRevoke(c.req, c.res, next);
+      expect(next).toHaveBeenCalledWith();
+      if (wrong) c.res.locals[rl.STEP_UP_REFUSED_LOCAL] = true;
+      c.finished(status);
+    }
+    await flush();
+    // Six requests charged, five given back: only the wrong password counts
+    expect(store.get('rl:sessrvk u-1|s-1')).toBe(1);
+    expect(rewards).toHaveLength(5);
+    expect(rewards.every((r) => r.prefix === 'rl:sessrvk' && r.key === 'u-1|s-1')).toBe(true);
+  });
+
+  it('five wrong passwords, then the step-up answers that session the byte-identical 429 of every limiter, right password or not', async () => {
+    await fiveWrong('u-2', 's-2', 'one');
+    const c = call('u-2', 's-2');
+    const next = vi.fn();
+    await rl.rateLimitSessionRevoke(c.req, c.res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(c.res.status).toHaveBeenCalledWith(429);
+    expect(c.res.set).toHaveBeenCalledWith('Retry-After', '900');
+    expect(c.json).toHaveBeenCalledWith({ success: false, error: 'Too many requests. Please try again later.' });
+    // Another account is not touched
+    expect(await passes(rl.rateLimitSessionRevoke, call('u-3', 's-3'))).toBe(true);
+  });
+
+  it.each([
+    ['DELETE /auth/sessions/:sessionId', 'one'],
+    ['POST /auth/sessions/revoke-others', 'others'],
+  ] as const)('%s: wrong passwords from one session never charge another session of the same account', async (_route, route) => {
+    await fiveWrong('u-5', 'thisOne', route);
+    // The session that sent them is refused, on either route
+    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', 'thisOne', 'one'))).toBe(false);
+    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', 'thisOne', 'others'))).toBe(false);
+    // Another session of the same account signs out on both routes, and
+    // so does a token that names none
+    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', 'another', 'one'))).toBe(true);
+    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', 'another', 'others'))).toBe(true);
+    expect(await passes(rl.rateLimitSessionRevoke, call('u-5', undefined, route))).toBe(true);
+    expect(store.get('rl:sessrvk u-5|thisOne')).toBeGreaterThan(5);
+    expect(store.get('rl:sessrvk u-5')).toBeUndefined();
+  });
+
+  it('the list charges its own bucket, per session, and gives nothing back; one session\'s reads never charge another\'s', async () => {
+    const c = call('u-4', 's-4');
+    expect(await passes(rl.rateLimitSessionsRead, c)).toBe(true);
+    c.finished(200);
+    await flush();
+    expect(store.get('rl:sessread u-4|s-4')).toBe(1);
+    expect(store.get('rl:sessrvk u-4|s-4')).toBeUndefined();
+    expect(rewards).toEqual([]);
+
+    for (let i = 0; i < 29; i++) expect(await passes(rl.rateLimitSessionsRead, call('u-4', 's-4'))).toBe(true);
+    expect(await passes(rl.rateLimitSessionsRead, call('u-4', 's-4'))).toBe(false);
+    expect(await passes(rl.rateLimitSessionsRead, call('u-4', 'other-4'))).toBe(true);
+    expect(await passes(rl.rateLimitSessionsRead, call('u-4', undefined))).toBe(true);
+    expect([...store.keys()].filter((k) => k.startsWith('rl:sessread')).sort()).toEqual(['rl:sessread u-4|nosid', 'rl:sessread u-4|other-4', 'rl:sessread u-4|s-4']);
+  });
+
+  it('the admin clear by user id removes both buckets\' keys of every session of that account, found by scan', async () => {
+    const found: Record<string, string[]> = {
+      'rl:sessread:u-6|*': ['rl:sessread:u-6|s-a', 'rl:sessread:u-6|nosid'],
+      'rl:sessrvk:u-6|*': ['rl:sessrvk:u-6|s-a', 'rl:sessrvk:u-6|s-b'],
+    };
+    const del = vi.fn(async () => 1);
+    const scanIterator = vi.fn(async function* ({ MATCH }: { MATCH: string }) { yield found[MATCH] ?? []; });
+    vi.mocked(getRedis).mockReturnValue({ del, scanIterator } as never);
+    const mod = await freshRateLimiter();
+
+    const cleared = await mod.clearUserRateLimits('u-6');
+
+    const scanned = scanIterator.mock.calls.map(([arg]) => arg.MATCH);
+    expect(scanned).toEqual(expect.arrayContaining(['rl:sessread:u-6|*', 'rl:sessrvk:u-6|*']));
+    for (const keys of Object.values(found)) for (const key of keys) expect(del).toHaveBeenCalledWith(key);
+    expect(cleared).toBeGreaterThanOrEqual(4);
+    // Never for a key that is no opaque id: no glob reaches a pattern
+    scanIterator.mockClear();
+    await mod.clearUserRateLimits('u-6|*');
+    await mod.clearUserRateLimits('*');
+    expect(scanIterator).not.toHaveBeenCalled();
   });
 });
