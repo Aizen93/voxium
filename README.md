@@ -627,9 +627,9 @@ Every setting below is in the matching template: `apps/server/.env.example` (dev
 | `DATABASE_URL` | — | **Required.** PostgreSQL connection string (set by `docker-compose.production.yml` in the Docker deployment) |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection string (set by the compose file in the Docker deployment) |
 | `JWT_SECRET` | — | **Required.** Secret for signing access tokens |
-| `JWT_REFRESH_SECRET` | — | **Required.** Secret for signing refresh tokens |
+| `JWT_REFRESH_SECRET` | — | **Required.** Secret for signing refresh tokens; a different value from `JWT_SECRET` (the server logs a warning at start when the two are equal) |
 | `JWT_EXPIRES_IN` | `15m` | Access token expiry |
-| `JWT_REFRESH_EXPIRES_IN` | `30d` | Refresh token expiry for "remember me" sessions (otherwise 24h); the Cookie Policy states up to 30 days |
+| `JWT_REFRESH_EXPIRES_IN` | `30d` | How long a "remember me" sign-in session lasts without being used (otherwise 24h): every renewal of the refresh token starts the window again, never past 365 days after the sign-in; the Cookie Policy states up to 30 days |
 | `TOTP_ENCRYPTION_KEY` | — | 32-byte hex key for encrypting TOTP secrets at rest (and the signing secrets of GitHub-type webhooks). Generate with `openssl rand -hex 32`. **Required in production** (the server refuses to start without it); in development it is optional and TOTP secrets are stored unencrypted with a warning. When set, it must be 64 hexadecimal characters: a value that does not give 32 bytes stops the start in every environment, and characters after the 64th are ignored with a warning. |
 | `PORT` | `3001` | HTTP server port |
 | `NODE_ENV` | `development` | `production` (set by the compose file) makes `TOTP_ENCRYPTION_KEY` mandatory and turns on HSTS, the trusted proxy, JSON access logs and the STARTTLS requirement for mail; the demo seed refuses it |
