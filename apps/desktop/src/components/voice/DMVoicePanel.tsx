@@ -4,6 +4,7 @@ import { useDMStore } from '../../stores/dmStore';
 import { useServerStore } from '../../stores/serverStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useLocalSpeaking } from '../../hooks/useLocalSpeaking';
+import { useLocalMicIndicator } from '../../hooks/useLocalMicIndicator';
 import { UserHoverTarget } from '../common/UserHoverTarget';
 import { Mic, MicOff, Headphones, HeadphoneOff, PhoneOff, Phone, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -27,16 +28,15 @@ export function DMVoicePanel() {
 function DMVoicePanelCall({ dmCallConversationId }: { dmCallConversationId: string }) {
   const { t } = useTranslation();
   const dmCallUsers = useVoiceStore((s) => s.dmCallUsers);
-  const selfMute = useVoiceStore((s) => s.selfMute);
+  const mic = useLocalMicIndicator();
   const selfDeaf = useVoiceStore((s) => s.selfDeaf);
-  const pttActive = useVoiceStore((s) => s.pttActive);
   const toggleMute = useVoiceStore((s) => s.toggleMute);
   const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
   const leaveDMCall = useVoiceStore((s) => s.leaveDMCall);
   const dmCallPeerDevice = useVoiceStore((s) => s.dmCallPeerDevice);
   const { user } = useAuthStore();
-  // Push-to-talk overrides mute: the ring can light only while either lets the mic through
-  const micOpen = !selfMute || pttActive;
+  // The ring can light only while the mic lets sound through (push-to-talk key held, or not muted)
+  const micOpen = !mic.micOff;
   const localSpeaking = useLocalSpeaking(micOpen);
 
   const conversations = useDMStore((s) => s.conversations);
@@ -132,14 +132,16 @@ function DMVoicePanelCall({ dmCallConversationId }: { dmCallConversationId: stri
           onClick={toggleMute}
           className={clsx(
             'rounded-lg p-2 transition-colors',
-            selfMute
+            mic.manualMute
               ? 'bg-vox-accent-danger/20 text-vox-accent-danger hover:bg-vox-accent-danger/30'
-              : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
+              : mic.pttIdle
+                ? 'bg-vox-bg-hover text-vox-voice-muted hover:bg-vox-bg-active'
+                : 'bg-vox-bg-hover text-vox-text-primary hover:bg-vox-bg-active'
           )}
-          title={selfMute ? t('voice.unmute') : t('voice.mute')}
-          aria-label={selfMute ? t('voice.unmute') : t('voice.mute')}
+          title={mic.label}
+          aria-label={mic.label}
         >
-          {selfMute ? <MicOff size={18} /> : <Mic size={18} />}
+          {mic.micOff ? <MicOff size={18} /> : <Mic size={18} />}
         </button>
 
         <button

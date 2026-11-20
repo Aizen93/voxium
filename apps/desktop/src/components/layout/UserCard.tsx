@@ -4,6 +4,7 @@ import { clsx } from 'clsx';
 import { Mic, MicOff, Headphones, HeadphoneOff, Settings, LogOut } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
+import { useLocalMicIndicator } from '../../hooks/useLocalMicIndicator';
 import { useServerStore } from '../../stores/serverStore';
 import { useVoiceStore } from '../../stores/voiceStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -34,7 +35,7 @@ export function UserCard() {
   // permissions do not include; clearing an existing one is always allowed
   const permissions = useServerPermissions(activeServerId, user?.id);
   const canSetNickname = hasEffective(permissions, Permissions.CHANGE_NICKNAME);
-  const selfMute = useVoiceStore((s) => s.selfMute);
+  const mic = useLocalMicIndicator();
   const selfDeaf = useVoiceStore((s) => s.selfDeaf);
   const toggleMute = useVoiceStore((s) => s.toggleMute);
   const toggleDeaf = useVoiceStore((s) => s.toggleDeaf);
@@ -94,12 +95,14 @@ export function UserCard() {
   const connection = useConnectionStatus();
   const ownStatus = connection === 'connected' ? 'online' : 'offline';
 
-  const iconBtn = (active: boolean) =>
+  const iconBtn = (active: boolean, waiting = false) =>
     clsx(
       'flex h-[26px] w-[26px] items-center justify-center rounded-md transition-colors',
       active
         ? 'text-vox-accent-danger bg-vox-accent-danger/15 hover:bg-vox-accent-danger/25'
-        : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary',
+        : waiting
+          ? 'text-vox-voice-muted hover:bg-vox-bg-hover hover:text-vox-text-primary'
+          : 'text-vox-text-muted hover:bg-vox-bg-hover hover:text-vox-text-primary',
     );
 
   return (
@@ -179,11 +182,11 @@ export function UserCard() {
         <div className="flex shrink-0 items-center gap-0.5">
           <button
             onClick={toggleMute}
-            className={iconBtn(selfMute)}
-            title={selfMute ? t('voice.unmute') : t('voice.mute')}
-            aria-label={selfMute ? t('voice.unmute') : t('voice.mute')}
+            className={iconBtn(mic.manualMute, mic.pttIdle)}
+            title={mic.label}
+            aria-label={mic.label}
           >
-            {selfMute ? <MicOff size={14} /> : <Mic size={14} />}
+            {mic.micOff ? <MicOff size={14} /> : <Mic size={14} />}
           </button>
           <button
             onClick={toggleDeaf}
