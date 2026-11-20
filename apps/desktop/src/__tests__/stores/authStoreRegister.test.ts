@@ -294,7 +294,7 @@ describe('authStore.completeRegistration — the code creates the account', () =
 
     await useAuthStore.getState().completeRegistration('123456');
 
-    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '123456' });
+    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '123456', client: 'web' });
     // The stale session of this launch is dropped BEFORE the request goes out
     expect(storage.clearTokens.mock.invocationCallOrder[0]).toBeLessThan(api.post.mock.invocationCallOrder[0]);
     expect(socket.disconnectSocket.mock.invocationCallOrder[0]).toBeLessThan(api.post.mock.invocationCallOrder[0]);
@@ -311,7 +311,7 @@ describe('authStore.completeRegistration — the code creates the account', () =
   it('sends the new username when one is given', async () => {
     api.post.mockResolvedValue({ data: { data: { user, accessToken: 'at', refreshToken: 'rt' } } });
     await useAuthStore.getState().completeRegistration('123456', 'alice2');
-    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '123456', username: 'alice2' });
+    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '123456', client: 'web', username: 'alice2' });
   });
 
   it('does not connect the socket for an account the server still gates (consent missing)', async () => {

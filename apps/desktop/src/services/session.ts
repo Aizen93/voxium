@@ -1,7 +1,10 @@
 import axios from 'axios';
+import type { RefreshRequest } from '@voxium/shared';
 import { API_BASE } from './apiBase';
 import { getAccessToken, getRefreshToken, setTokens, clearTokens, flushTokenStorage } from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
+import { readTokenClaims } from './tokenClaims';
+import { sessionClientHint } from './sessionClient';
 
 /**
  * The signed-in session's access token, and the ONE way it is renewed.
@@ -49,27 +52,11 @@ export class SessionLostError extends Error {
   }
 }
 
-/** The claims of a JWT, or null when the token cannot be decoded. The
- *  signature is NOT checked: this reads our own stored token to decide when
- *  to renew it, nothing more; the server verifies every request. */
-function jwtClaims(token: string): { exp?: number; iat?: number } | null {
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-  try {
-    const json = atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'));
-    const payload = JSON.parse(json) as Record<string, unknown>;
-    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
-    return { exp: num(payload.exp), iat: num(payload.iat) };
-  } catch {
-    // Not an error to report: an undecodable token is sent as is, and the
-    // server's 401 is the signal (logging it here would be once per request)
-    return null;
-  }
-}
-
-/** The `exp` claim of a JWT as a millisecond timestamp, or null when the token cannot be decoded. */
+/** The `exp` claim of a JWT as a millisecond timestamp, or null when the token
+ *  cannot be decoded. The signature is NOT checked: this reads our own stored
+ *  token to decide when to renew it, nothing more (services/tokenClaims.ts). */
 export function accessTokenExpiresAt(token: string): number | null {
-  const exp = jwtClaims(token)?.exp;
+  const exp = readTokenClaims(token)?.exp;
   return exp === undefined ? null : exp * 1000;
 }
 
@@ -203,7 +190,8 @@ export function refreshAccessToken(): Promise<string> {
       try {
         // Plain axios on purpose: the api instance's interceptors would try to
         // refresh a refused refresh
-        const { data } = await axios.post(`${API_BASE}/auth/refresh`, { refreshToken }, { timeout: REFRESH_TIMEOUT_MS });
+        const body: RefreshRequest = { refreshToken, client: sessionClientHint() };
+        const { data } = await axios.post(`${API_BASE}/auth/refresh`, body, { timeout: REFRESH_TIMEOUT_MS });
         answer = data.data as { accessToken: string; refreshToken: string };
       } catch (err) {
         if (epoch !== sessionEpoch) throw new SessionLostError('Session ended during the renewal');
@@ -243,7 +231,7 @@ export function refreshAccessToken(): Promise<string> {
 
 /** A renewed token's `iat` is the server's "now": the clock offset follows it. */
 function learnServerClock(accessToken: string): void {
-  const claims = jwtClaims(accessToken);
+  const claims = readTokenClaims(accessToken);
   if (claims?.iat !== undefined) clockOffsetMs = claims.iat * 1000 - Date.now();
   if (!isAccessTokenFresh(accessToken)) {
     if (!proactiveRenewalSuspended) {

@@ -252,7 +252,7 @@ describe('authStore — a sign-in discards the session it replaces FIRST', () =>
 
     await useAuthStore.getState().completeRegistration('123456');
 
-    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p-n', code: '123456' });
+    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p-n', code: '123456', client: 'web' });
     expect(storage.setTokens).toHaveBeenCalledWith('access-n', 'refresh-n', true);
   });
 });
@@ -444,7 +444,7 @@ describe('authStore.changePassword — the live socket follows the new tokens', 
     // The change is marked in flight BEFORE the request (its server
     // disconnect may beat the answer), and ended after the reopen
     expect(order).toEqual(['begin', 'post', 'setTokens', 'reconnect', 'end']);
-    expect(api.post).toHaveBeenCalledWith('/auth/change-password', { currentPassword: 'old-pw', newPassword: 'new-pw-123', rememberMe: true });
+    expect(api.post).toHaveBeenCalledWith('/auth/change-password', { currentPassword: 'old-pw', newPassword: 'new-pw-123', rememberMe: true, client: 'web' });
     expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
     expect(socket.reconnectSocketAfterCredentialChange).toHaveBeenCalledWith('access-new');
     // The session is the same one: nothing torn down, still signed in
@@ -490,6 +490,21 @@ describe('authStore — the trusted-device token lives with the session, not in 
     await useAuthStore.getState().login('a@example.com', 'pw');
     expect(api.post.mock.calls[1][1]).toMatchObject({ trustedDeviceToken: 'trusted-1' });
     expect(localStorage.getItem('voxium_trusted_device')).toBeNull();
+  });
+
+  it("the sign-in and the two-factor step name the kind of app ('web' in the browser build, 'desktop' in the Tauri app)", async () => {
+    api.post.mockResolvedValue({ data: { data: { user: me, accessToken: 'a', refreshToken: 'r' } } });
+    await useAuthStore.getState().login('a@example.com', 'pw');
+    expect(api.post).toHaveBeenLastCalledWith('/auth/login', expect.objectContaining({ client: 'web' }));
+
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    try {
+      useAuthStore.setState({ totpRequired: true, totpToken: 'totp-challenge', totpRememberMe: true });
+      await useAuthStore.getState().verifyTOTP('123456');
+      expect(api.post).toHaveBeenLastCalledWith('/auth/totp/verify', { totpToken: 'totp-challenge', code: '123456', client: 'desktop' });
+    } finally {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    }
   });
 
   it('verifyTOTP stores the trusted-device token the server hands out, through the session store', async () => {

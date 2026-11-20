@@ -179,7 +179,7 @@ describe('RegisterPage — the code step', () => {
     setInput(codeInput()!, '012345');
     await submit();
 
-    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '012345' });
+    expect(api.post).toHaveBeenCalledWith('/auth/register/complete', { pendingId: 'p1', code: '012345', client: 'web' });
     expect(storage.setTokens).toHaveBeenCalledWith('at', 'rt', true);
     expect(socket.connectSocket).toHaveBeenCalledWith('at');
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
@@ -215,7 +215,7 @@ describe('RegisterPage — the code step', () => {
     setInput(field, '  alice2 ');
     await submit();
 
-    expect(api.post).toHaveBeenLastCalledWith('/auth/register/complete', { pendingId: 'p1', code: '424242', username: 'alice2' });
+    expect(api.post).toHaveBeenLastCalledWith('/auth/register/complete', { pendingId: 'p1', code: '424242', client: 'web', username: 'alice2' });
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
   });
 

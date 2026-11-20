@@ -97,9 +97,20 @@ describe('session — refreshAccessToken', () => {
 
     await expect(refreshAccessToken()).resolves.toBe('access-new');
 
-    expect(http.post).toHaveBeenCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-old' }, { timeout: REFRESH_TIMEOUT_MS });
+    expect(http.post).toHaveBeenCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-old', client: 'web' }, { timeout: REFRESH_TIMEOUT_MS });
     expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("the refresh body names the kind of app: 'desktop' in the Tauri app", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    try {
+      http.post.mockResolvedValueOnce({ data: { data: { accessToken: 'access-new', refreshToken: 'refresh-new' } } });
+      await refreshAccessToken();
+      expect(http.post).toHaveBeenCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-old', client: 'desktop' }, { timeout: REFRESH_TIMEOUT_MS });
+    } finally {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    }
   });
 
   it('is single-flight: callers during the round trip share ONE request and its answer', async () => {
@@ -223,7 +234,7 @@ describe('session — refreshAccessToken', () => {
     http.post.mockResolvedValueOnce({ data: { data: { accessToken: 'access-2', refreshToken: 'refresh-2' } } });
 
     await expect(refreshAccessToken()).resolves.toBe('access-2');
-    expect(http.post).toHaveBeenLastCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-next-session' }, { timeout: REFRESH_TIMEOUT_MS });
+    expect(http.post).toHaveBeenLastCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-next-session', client: 'web' }, { timeout: REFRESH_TIMEOUT_MS });
   });
 
   it('a refusal while the refused refresh token is STILL the stored one signs out exactly once, however many callers shared it', async () => {
@@ -271,7 +282,7 @@ describe('session — refreshAccessToken', () => {
 
     await expect(pending).resolves.toBe('access-2');
     expect(http.post).toHaveBeenCalledTimes(2);
-    expect(http.post).toHaveBeenLastCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-from-other-tab' }, { timeout: REFRESH_TIMEOUT_MS });
+    expect(http.post).toHaveBeenLastCalledWith(`${API_BASE}/auth/refresh`, { refreshToken: 'refresh-from-other-tab', client: 'web' }, { timeout: REFRESH_TIMEOUT_MS });
     expect(storage.setTokens).toHaveBeenCalledWith('access-2', 'refresh-2');
     expect(storage.clearTokens).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();

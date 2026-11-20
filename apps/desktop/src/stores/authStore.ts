@@ -15,7 +15,10 @@ import { resetAccountStores } from './resetStores';
 import { processImage, ASSET_UPLOAD_CONTENT_TYPE } from '../utils/imageProcessing';
 import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
-import type { User, RegistrationConsent } from '@voxium/shared';
+import type {
+  User, RegistrationConsent, LoginRequest, TotpVerifyRequest, RegisterCompleteRequest, ChangePasswordRequest,
+} from '@voxium/shared';
+import { sessionClientHint } from '../services/sessionClient';
 import { PowExpiredError, PowAbortedError, SIGNUP, USERNAME_TAKEN_MESSAGE } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
 import { forgetLocalE2EState } from '../services/e2e/e2eService';
@@ -299,7 +302,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // With none in flight nothing is awaited: the order is today's
       if (accountDeletionInFlight()) await accountDeletionSettled();
       const trustedDeviceToken = getTrustedDeviceToken() || undefined;
-      const { data } = await api.post('/auth/login', { email, password, rememberMe, trustedDeviceToken });
+      const body: LoginRequest = { email, password, rememberMe, trustedDeviceToken, client: sessionClientHint() };
+      const { data } = await api.post('/auth/login', body);
 
       // If TOTP is required, pause login flow
       if (data.data.totpRequired) {
@@ -331,7 +335,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       // as in login
       if (accountDeletionInFlight()) await accountDeletionSettled();
-      const { data } = await api.post('/auth/totp/verify', { totpToken, code });
+      const body: TotpVerifyRequest = { totpToken, code, client: sessionClientHint() };
+      const { data } = await api.post('/auth/totp/verify', body);
       const { user, accessToken, refreshToken, trustedDeviceToken } = data.data;
       setTokens(accessToken, refreshToken, totpRememberMe);
       if (trustedDeviceToken) {
@@ -436,7 +441,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       // as in login
       if (accountDeletionInFlight()) await accountDeletionSettled();
-      const body: { pendingId: string; code: string; username?: string } = { pendingId: pending.pendingId, code };
+      const body: RegisterCompleteRequest = { pendingId: pending.pendingId, code, client: sessionClientHint() };
       if (username !== undefined) body.username = username;
       const { data } = await api.post('/auth/register/complete', body);
       const { user, accessToken, refreshToken } = data.data;
@@ -681,7 +686,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // before the answer arrives: no reopen with the old token meanwhile
     const endCredentialChange = beginCredentialChange();
     try {
-      const { data } = await api.post('/auth/change-password', { currentPassword, newPassword, rememberMe: isRemembered() });
+      const body: ChangePasswordRequest = { currentPassword, newPassword, rememberMe: isRemembered(), client: sessionClientHint() };
+      const { data } = await api.post('/auth/change-password', body);
       // Store fresh tokens so the current session survives the tokenVersion bump
       if (data.data?.accessToken && data.data?.refreshToken) {
         setTokens(data.data.accessToken, data.data.refreshToken);
