@@ -17,8 +17,8 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1166.0",
-    "@aws-sdk/s3-request-presigner": "^3.1166.0",
+    "@aws-sdk/client-s3": "^3.1171.0",
+    "@aws-sdk/s3-request-presigner": "^3.1171.0",
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
     "@socket.io/redis-adapter": "^8.3.0",
@@ -34,7 +34,7 @@
     "jsonwebtoken": "^9.0.2",
     "mediasoup": "^3.32.2",
     "morgan": "^1.12.1",
-    "nodemailer": "^10.5.0",
+    "nodemailer": "^10.6.0",
     "otpauth": "^9.6.0",
     "prisma": "^7.10.1",
     "qrcode": "^1.5.4",
