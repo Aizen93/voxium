@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useDMStore } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { useSupportStore } from '../../stores/supportStore';
+import { useVoiceStore } from '../../stores/voiceStore';
 import { Avatar } from '../common/Avatar';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 import { MessageSquare, Users, X, LifeBuoy } from 'lucide-react';
 import { clsx } from 'clsx';
 import { dmPreviewText } from '../../utils/dmPreview';
@@ -12,15 +14,48 @@ import { toast } from '../../stores/toastStore';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
 import { DeletedUserAvatar } from './DeletedParticipant';
-import { isParticipantDeleted } from '../../utils/dmParticipant';
+import { isParticipantDeleted, participantDisplayName } from '../../utils/dmParticipant';
+import { getTranslatedError } from '../../utils/serverErrors';
+import type { Conversation } from '@voxium/shared';
 import { isDeletedPreview } from '../../utils/dmPreview';
 
 export function DMList() {
   const { t } = useTranslation();
-  const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, deleteConversation } = useDMStore();
+  const { conversations, activeConversationId, isLoading, fetchConversations, setActiveConversation, dmUnreadCounts, participantStatuses, removeConversation } = useDMStore();
   const showFriendsView = useFriendStore((s) => s.showFriendsView);
   const pendingIncoming = useFriendStore((s) => s.pendingIncoming);
   const [showSupportConfirm, setShowSupportConfirm] = useState(false);
+  // the conversation whose removal the dialog asks about, and whether its request is in flight
+  const [pendingRemoval, setPendingRemoval] = useState<Conversation | null>(null);
+  const [removalBusy, setRemovalBusy] = useState(false);
+  const dmCallConversationId = useVoiceStore((s) => s.dmCallConversationId);
+
+  const closeRemoval = useCallback(() => setPendingRemoval(null), []);
+
+  const handleConfirmRemoval = async (conversation: Conversation) => {
+    setRemovalBusy(true);
+    try {
+      await removeConversation(conversation.id);
+      toast.success(t('dm.remove.done'));
+      setPendingRemoval(null);
+    } catch (err) {
+      // the store changed nothing: the dialog stays open for another try
+      console.warn('[DM] The conversation was not removed:', err instanceof Error ? err.message : err);
+      toast.error(getTranslatedError(err, t, 'dm.remove.failed'));
+    } finally {
+      setRemovalBusy(false);
+    }
+  };
+
+  // The dialog holds a snapshot of the conversation: when that conversation
+  // leaves the list while it is open (removed from another device), it
+  // closes, unless its own request is in flight (that request's answer, which
+  // drops the row too, closes it)
+  useEffect(() => {
+    if (pendingRemoval && !removalBusy && !conversations.some((c) => c.id === pendingRemoval.id)) {
+      setPendingRemoval(null);
+    }
+  }, [conversations, pendingRemoval, removalBusy]);
 
   useEffect(() => {
     fetchConversations();
@@ -187,11 +222,12 @@ export function DMList() {
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  deleteConversation(conv.id);
+                  // nothing is sent until the dialog's confirm button
+                  setPendingRemoval(conv);
                 }}
-                className="opacity-0 group-hover:opacity-100 shrink-0 rounded p-0.5 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-active transition-all"
-                title={t('common.delete')}
-                aria-label={t('common.delete')}
+                className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 shrink-0 rounded p-0.5 text-vox-text-muted hover:text-vox-text-primary hover:bg-vox-bg-active transition-all"
+                title={t('dm.remove.action')}
+                aria-label={t('dm.remove.actionWith', { name: participantDisplayName(conv, t) })}
               >
                 <X size={14} />
               </button>
@@ -199,6 +235,29 @@ export function DMList() {
           );
         })}
       </div>
+
+      {pendingRemoval && (
+        <ConfirmDialog
+          id="dm-remove-title"
+          title={t('dm.remove.title')}
+          body={isParticipantDeleted(pendingRemoval)
+            ? t('dm.remove.bodyDeleted')
+            : t('dm.remove.body', { name: participantDisplayName(pendingRemoval, t) })}
+          confirmLabel={removalBusy ? t('dm.remove.removing') : t('dm.remove.confirm')}
+          busy={removalBusy}
+          danger
+          onConfirm={() => void handleConfirmRemoval(pendingRemoval)}
+          onClose={closeRemoval}
+          testId="dm-remove-dialog"
+        >
+          {!isParticipantDeleted(pendingRemoval) && (
+            <p className="mt-3 text-sm text-vox-text-secondary">{t('dm.remove.bodyOther')}</p>
+          )}
+          {dmCallConversationId === pendingRemoval.id && (
+            <p className="mt-3 text-sm font-medium text-vox-text-primary">{t('dm.remove.callEnds')}</p>
+          )}
+        </ConfirmDialog>
+      )}
 
       {/* Global DM voice panel */}
       <DMVoicePanel />

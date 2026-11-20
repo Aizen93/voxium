@@ -2770,8 +2770,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // A read-only conversation (the other side's account was deleted) has no
     // calls, by any path: refused before anything is left, acquired or sent.
     // Dynamic import per the resetStores eval-cycle rule.
+    // The removals applied so far: one applied while the call is set up stops it before its join
+    let removalCheck: { dm: typeof import('./dmStore'); mark: number } | null = null;
     try {
-      const { useDMStore } = await import('./dmStore');
+      const dm = await import('./dmStore');
+      const { useDMStore } = dm;
+      removalCheck = { dm, mark: useDMStore.getState().removalSeq };
       if (isHeldReadOnly(useDMStore.getState(), conversationId)) {
         console.warn('[DMVoice] Refusing a call in a read-only conversation');
         if (get().incomingCall?.conversationId === conversationId) set({ incomingCall: null });
@@ -2884,6 +2888,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
 
     if (generation !== voiceSessionGeneration) return; // superseded during the async imports
+
+    // Removed (here or on another device) while the call was set up: no join,
+    // and the stream it opened is stopped (nothing was emitted to undo)
+    if (removalCheck?.dm.wasRemovedSince(conversationId, removalCheck.mark)) {
+      console.warn('[DMVoice] Not joining a call of a conversation removed while it was set up');
+      get().handleDMCallEnded();
+      return;
+    }
 
     socket.emit('dm:voice:join', conversationId, { selfMute: serverMute, selfDeaf, deviceId });
     get().startLatencyMeasurement();

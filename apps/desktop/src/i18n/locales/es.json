@@ -836,6 +836,19 @@
     "conversationStart": "Este es el inicio de tu historial de mensajes directos.",
     "welcomeMessage": "Selecciona una conversación de la barra lateral, o haz clic en un miembro de cualquier espacio para iniciar una nueva.",
     "failedToLoadConversations": "No se pudieron cargar las conversaciones",
+    "remove": {
+      "action": "Quitar conversación",
+      "actionWith": "Quitar la conversación con {{name}}",
+      "title": "¿Quitar esta conversación?",
+      "body": "Tu conversación con {{name}} saldrá de tu lista y su historial se borrará para ti, en todos tus dispositivos. Esta acción no se puede deshacer.",
+      "bodyOther": "La otra persona conserva su copia y no recibe ningún aviso. Si cualquiera de las dos escribe de nuevo, la conversación vuelve solo con los mensajes nuevos.",
+      "bodyDeleted": "Esta conversación saldrá de tu lista y su historial se borrará para ti, en todos tus dispositivos. La otra cuenta se eliminó, por lo que no podrá volver.",
+      "callEnds": "La llamada en curso terminará.",
+      "confirm": "Quitar",
+      "removing": "Quitando…",
+      "done": "Conversación quitada",
+      "failed": "No se pudo quitar la conversación"
+    },
     "deletedParticipant": {
       "name": "Usuario eliminado",
       "readOnlyNotice": "Esta conversación es de solo lectura: la cuenta de la otra persona fue eliminada.",

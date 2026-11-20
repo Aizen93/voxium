@@ -12,6 +12,7 @@ import { useMaskLayoutStore, resetMaskLayoutModuleState } from './maskLayoutStor
 import { useDiscoveryStore, resetDiscoveryModuleState } from './discoveryStore';
 import { disposeE2EService } from '../services/e2e/e2eService';
 import { resetUndecryptedRows } from '../services/e2e/undecryptedRows';
+import { resetClearedHistory } from '../services/dmClearedHistory';
 import { stopE2EDeviceListWatch } from './e2eStore';
 import { resetServerPermissionsCache } from '../hooks/useServerPermissions';
 
@@ -88,6 +89,9 @@ export function resetAccountStores(): void {
   retireDirectory();
   // The effective-permission answers are the leaving account's too
   resetServerPermissionsCache();
+  // The floors of the histories it cleared, and the purges still owed for
+  // them (a pass still running applies nothing)
+  resetClearedHistory();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).

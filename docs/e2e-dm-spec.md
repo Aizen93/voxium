@@ -369,9 +369,10 @@ plain name:
 | `pks:{createdAt}\|{shareId}` | a claimed key share not imported yet, as the inbox returned it (Olm ciphertext + routing fields, whether a leasing claim handed it out, refused look-ups counted; §12.3) |
 | `pka:{shareId}` | an acknowledgement this device owes the server for a claimed share it is done with: the share id and when it was noted, nothing else (§12.3) |
 | `history_pull` | an unfinished message-key history pull: the account key's public half, the cursor of the next page and the page requests made so far (§16.3) |
-| `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, sessionId?, messageIndex?}` |
+| `pt:{messageId}` | decrypted plaintext `{conversationId, text, editedAt, authorId?, createdAt?, sessionId?, messageIndex?}`; `createdAt` is the server's time of the row (the POST or PATCH answer for an own send or edit, the row as served for a decrypt) |
 | `mi:{sessionId}:{messageIndex}` | the one `{messageId, editedAt}` this ratchet position was shown as (§9.1) |
 | `ptpurge:read-only:{conversationId}` | `{at}`: when the purge of a read-only conversation's `pt:` entries ended, after a conversation list confirmed it read-only; cleared when a list serves the conversation live (§9.1) |
+| `ptpurge:cleared:{conversationId}` | `{at, level}`: when the purge of a cleared history ended, and the floor it purged up to (`level`, milliseconds since the epoch); a record never moves back (§9.1) |
 
 Only the `pickle` fields (by vodozemac) and `master_secret` (sealed by the
 engine, §14.5) are encrypted, both under the pickle key.
@@ -464,6 +465,7 @@ verification and shows a warning.
 | Reply previews | encrypted quotes resolved from the plaintext cache (same conversation, quoted author); an unencrypted quote shows only when it is a listed call notice; lock placeholder otherwise; a quote without an author is dropped. A quote under the placeholder `deleted:{conversationId}`, and in a read-only conversation any quote that is neither the reader's own nor a listed call notice, shows "Message deleted" with no text from the server or the cache. |
 | Notifications | client decrypts first → body shows plaintext locally (never leaves device). A deleted row, and any row the read-only rule shows as deleted, raises no sound, unread count or notification. |
 | Read-only conversation | The other side's account was deleted, recognised by `participantDeleted: true` or a `deleted:` participant id, never by a name. No send, edit, reaction, reply, upload, typing or call. Reading, marking read, deleting one's own messages and removing the conversation stay. |
+| Removing a conversation | For the reader only. The client removes it after a confirmation, with its history cleared (`DELETE /dm/:id?clearHistory=true`): the server sets the reader's floor to the newest message's time and serves them nothing at or below it again; the device purges what it cached up to it (§9.1, "A cleared history"). The other person keeps the conversation whole. |
 | Server search | none for DMs (route removed in 2.1); DM history is searched client-side over the local plaintext cache |
 | Plaintext cache | answers only for the scope it was decrypted under and, when recorded, the author who wrote it — the cache must not vouch for a relabelled id or author that the ratchet's bindings refuse |
 | Reports | DMs: reporter's client attaches its decrypted plaintext (`reportedContent`); stored with `contentSource: "reporter"` — flagged unverifiable, ciphertext never copied. Secure channels: not reportable (§19.1) |
@@ -534,6 +536,52 @@ did not vouch for:
   entry deletes the mark's record, so the next walk of that conversation runs
   again. The deleted account's inbound group sessions are kept (keys, not
   text).
+- **A cleared history.** The reader's floor for a conversation reaches the
+  device four ways: the removal's answer (`data.clearedUntil`),
+  `dm:conversation:deleted { conversationId, clearedUntil }` (every device of
+  the remover), `clearedUntil` on a conversation the list or an open serves,
+  and the list's `cleared: [{ conversationId, clearedUntil }]`, the floors of
+  the reader's removed conversations that the list leaves out (at most
+  `DM_CLEARED_LIST_MAX`, 200, newest floor first; absent when there is none).
+  A floor is taken only for a direct conversation's id (`OPAQUE_ID_RE`, which
+  a secure channel's scope `ch:{channelId}` never passes), only in the
+  server's ISO form of a time, and only when it is no later than a day ahead
+  of the device's clock (`CLEARED_FLOOR_MAX_AHEAD_MS`); anything else is
+  ignored with a warning. A floor never moves back, and applying the same one
+  twice changes nothing. A list whose request began before a removal does not
+  bring the removed conversation back, unless it was opened again or a new
+  message came in it since. From the moment a floor is known, for that
+  conversation: no `pt:` entry whose `createdAt` is at or below it is written
+  (checked inside the queue task, right before the write, so a decrypt or a
+  send already running when the floor lands writes nothing), none answers a
+  cache read (a preview, a quote, an own row, local search), and no row at or
+  below it is shown, previewed, counted or notified (the gate settles such a
+  row as nothing, before any cache read or decrypt and again once it is done;
+  a page leaves it out). Times are compared as times, never as strings. The
+  device then purges every `pt:` entry of that conversation whose `createdAt`
+  is at or below the floor, the reader's own included (the server never
+  serves those rows to the reader again); an entry that records no time is
+  kept, and the `mi:` bindings and every key are kept. One bounded walk on the
+  service queue for every floor owed, after the service has started; its
+  record (`ptpurge:cleared:{conversationId}`, §7) holds the floor and is
+  written only when the walk ended with no failure, so a later session walks
+  nothing for that floor or a lower one and walks again for a higher one. A
+  walk that fails, or that waits for a service that has not started, stays
+  owed and is tried again at the next list fetch of the session; a walk still
+  owed when the session ends is asked again by the next session's list, which
+  teaches every floor again. Floors and owed walks belong to the account
+  signed in and go at logout. A device that missed the removal (offline, or a
+  session that ended before its walk) purges at its next list. What stays: a
+  conversation really deleted on the server while a device was offline, whose
+  floor no list names any more, and the removed conversations beyond the 200
+  newest floors; such a device keeps those entries, unreachable from the
+  interface (no list shows the conversation). The floor is the server's word,
+  which the device cannot check: it can make a device delete its cached text
+  of a conversation up to any time no later than a day ahead of that device's
+  clock. Text the device holds only in its cache, its own sent lines among
+  it, is then gone from that device. Up to that time the device also shows,
+  caches and finds none of that conversation's rows, newer ones included
+  while that time lies ahead; nothing else the display gate decides changes.
 - **What the read-only flag lets a server do.** `participantDeleted` and
   `dm:conversation:read_only` are the server's word, like a row's `type`. A
   server that sets them on a live conversation can, for as long as it keeps

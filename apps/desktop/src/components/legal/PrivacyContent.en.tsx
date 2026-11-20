@@ -30,7 +30,7 @@ export function PrivacyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Privacy Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: October 30, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 19, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
@@ -238,6 +238,12 @@ export function PrivacyContentEn() {
               <strong className="text-vox-text-primary">Incoming webhooks</strong> store their name, the channel they
               post to, who created them, who last rotated their URL and when, and when they were last used; the body
               of a request a webhook receives is not kept beyond the message it produced
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">A direct conversation you remove</strong> leaves your own
+              list, and its history up to that moment is no longer shown to you; the other participant keeps the
+              conversation and its messages. It is deleted from our servers once neither participant can reach any
+              of it
             </li>
             <li>
               <strong className="text-vox-text-primary">Everything else</strong> is kept for as long as your account

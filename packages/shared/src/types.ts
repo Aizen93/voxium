@@ -438,6 +438,21 @@ export interface Conversation {
    *  this is status, never a flag to branch "is encryption on?" against. */
   encryptedAt: string;
   createdAt: string;
+  /** The reader's FLOOR (ISO time), present only once they removed the
+   *  conversation clearing its history: nothing at or below it is served to
+   *  them again, and their device purges what it cached up to it. Absent
+   *  otherwise (a 2.1.x server never sends it). */
+  clearedUntil?: string;
+}
+
+/**
+ * The floor of a conversation the reader removed with its history cleared and
+ * that is off their list (`GET /dm` answers these as `cleared`, beside `data`,
+ * at most DM_CLEARED_LIST_MAX, newest floor first; absent when there is none).
+ */
+export interface ClearedConversationFloor {
+  conversationId: string;
+  clearedUntil: string;
 }
 
 export interface DMUnreadCount {

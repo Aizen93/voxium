@@ -70,9 +70,16 @@ const cc = vi.hoisted(() => {
 });
 vi.mock('../../services/e2e/callCrypto', () => cc);
 // Mutable: the read-only refusal of joinDMCall reads the loaded conversations
-const dmEnv = vi.hoisted(() => ({ conversations: [] as Array<Record<string, unknown>> }));
+const dmEnv = vi.hoisted(() => ({
+  conversations: [] as Array<Record<string, unknown>>,
+  // the removals of this session (dmStore.removedAt / removalSeq)
+  removalSeq: 0,
+  removedAt: {} as Record<string, number>,
+}));
 vi.mock('../../stores/dmStore', () => ({
-  useDMStore: { getState: () => ({ conversations: dmEnv.conversations }) },
+  useDMStore: { getState: () => ({ conversations: dmEnv.conversations, removalSeq: dmEnv.removalSeq, removedAt: dmEnv.removedAt }) },
+  // the real rule (dmStore.ts), on this mock's state
+  wasRemovedSince: (conversationId: string, mark: number) => (dmEnv.removedAt[conversationId] ?? -1) > mark,
 }));
 
 // The secure-voice keying module, reached by dynamic import from the store:
@@ -1307,6 +1314,60 @@ describe('voiceStore', () => {
 
       expect(socketEmit()).toHaveBeenCalledWith('dm:voice:join', 'conv-1',
         expect.objectContaining({ deviceId: 'device-me000001' }));
+    });
+
+    it('a removal of the conversation while the call is being set up stops it before its join: no dm:voice:join, the stream it opened stopped', async () => {
+      const track = { kind: 'audio', enabled: true, readyState: 'live', stop: vi.fn(), getSettings: () => ({}) };
+      const stream = { getTracks: () => [track], getAudioTracks: () => [track], id: 'mic-1' };
+      vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia: vi.fn().mockResolvedValue(stream) } });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      e2eEnv.ready = false;
+      useVoiceStore.getState().setLocalUserId('me');
+      try {
+        const joinPromise = useVoiceStore.getState().joinDMCall('conv-1');
+        await flushAsync();
+        expect(useVoiceStore.getState().localStream).not.toBeNull();
+
+        // removed (on another device: the event's mark, dmStore.applyConversationRemoval) while it waits
+        dmEnv.removalSeq = 1;
+        dmEnv.removedAt = { 'conv-1': 1 };
+        e2eEnv.ready = true;
+        for (const cb of e2eEnv.subscribers.splice(0)) cb({ ready: true, error: null });
+        await joinPromise;
+
+        expect(socketEmit().mock.calls.filter((c) => c[0] === 'dm:voice:join')).toHaveLength(0);
+        expect(useVoiceStore.getState().dmCallConversationId).toBeNull();
+        expect(useVoiceStore.getState().localStream).toBeNull();
+        expect(track.stop).toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith('[DMVoice] Not joining a call of a conversation removed while it was set up');
+      } finally {
+        dmEnv.removalSeq = 0;
+        dmEnv.removedAt = {};
+        vi.unstubAllGlobals();
+        warn.mockRestore();
+      }
+    });
+
+    it('a removal of ANOTHER conversation while the call is being set up changes nothing: the join goes out', async () => {
+      e2eEnv.ready = false;
+      useVoiceStore.getState().setLocalUserId('me');
+      try {
+        const joinPromise = useVoiceStore.getState().joinDMCall('conv-1');
+        await flushAsync();
+
+        dmEnv.removalSeq = 1;
+        dmEnv.removedAt = { 'conv-2': 1 };
+        e2eEnv.ready = true;
+        for (const cb of e2eEnv.subscribers.splice(0)) cb({ ready: true, error: null });
+        await joinPromise;
+
+        expect(socketEmit()).toHaveBeenCalledWith('dm:voice:join', 'conv-1',
+          expect.objectContaining({ deviceId: 'device-me000001' }));
+        expect(useVoiceStore.getState().dmCallConversationId).toBe('conv-1');
+      } finally {
+        dmEnv.removalSeq = 0;
+        dmEnv.removedAt = {};
+      }
     });
 
     describe('a read-only conversation (the other side\'s account was deleted)', () => {

@@ -72,6 +72,7 @@ import {
 import { defaultPickleKeyProvider } from './pickleKeyProvider';
 import { pinSecure, securePinGeneration } from '../../utils/securePins';
 import { currentE2ESessionUser, isE2ESessionEnded } from './session';
+import { isAtOrBelowClearedFloor } from './clearedFloors';
 
 interface OneTimeKeyPair {
   keyId: string;
@@ -339,6 +340,17 @@ export const PLAINTEXT_PURGE_BATCH = 500;
  * (clearPurgeMarks), so that the next session starts right.
  */
 export const READ_ONLY_PURGE_MARK = 'read-only';
+
+/**
+ * The purge mark of a conversation whose history this account cleared (it
+ * removed the conversation after the confirmation, #47):
+ * `ptpurge:cleared:{conversationId}` holds the FLOOR the walk that ended
+ * purged up to (services/dmClearedHistory.ts). A later session walks nothing
+ * for a floor at or below it, and walks again for a higher one. A levelled
+ * mark (purgeCachedPlaintexts' `levels`), never read as a set like the
+ * read-only one.
+ */
+export const CLEARED_HISTORY_PURGE_MARK = 'cleared';
 
 /** After a read of the purge marks failed, questions answer "not marked" for this long before the marks are read again. */
 export const PURGE_MARK_RETRY_MS = 30_000;
@@ -4199,6 +4211,12 @@ export class E2EService {
           });
         }
       }
+      // A message at or below a floor this account cleared its history to
+      // (clearedFloors.ts) is never cached again, judged here, inside the
+      // queue task, so a send answered just before the removal and cached
+      // after it writes nothing the purge's walk may already have passed.
+      // The position stays bound: the replay firewall keeps every binding.
+      if (this.clearedForThisAccount(conversationId, meta?.createdAt)) return;
       await this.vault.putPlaintext(messageId, {
         conversationId,
         text,
@@ -4208,6 +4226,20 @@ export class E2EService {
         ...(position && { sessionId: position.sessionId, messageIndex: position.messageIndex }),
       });
     });
+  }
+
+  /**
+   * Whether a row or entry of `scope` written at `createdAt` lies at or below
+   * the floor this service's account cleared that conversation's history to
+   * (clearedFloors.ts). A secure channel's scope (`ch:{id}`) never has one:
+   * a floor is taken only for an id that passes OPAQUE_ID_RE, which the colon
+   * fails, in dmClearedHistory.applyClearedFloor and again in
+   * raiseClearedFloor, so a server cannot name a channel's scope. Asked
+   * synchronously at every `pt:` write and read: from the moment a floor is
+   * known nothing at or below it is cached, answered or found.
+   */
+  private clearedForThisAccount(scope: string, createdAt: unknown): boolean {
+    return isAtOrBelowClearedFloor(this.userId, scope, createdAt);
   }
 
   /**
@@ -4364,6 +4396,10 @@ export class E2EService {
   ): Promise<string | null> {
     const cached = await this.liveVault.getPlaintext(messageId);
     if (!cached || cached.failed) return null;
+    // an entry at or below a cleared floor answers nothing (a preview, a
+    // quote, an own row), from the moment the floor is known until the
+    // purge's walk has removed it
+    if (this.clearedForThisAccount(cached.conversationId, cached.createdAt)) return null;
     return this.cacheEntryAnswers(cached, expected) ? cached.text : null;
   }
 
@@ -4397,6 +4433,10 @@ export class E2EService {
     // A row under the deleted-account placeholder: no session speaks for that
     // id, so nothing is read, claimed or decrypted for it
     if (namesDeletedParticipant(message.authorId)) return { text: '', failed: true };
+    // A row at or below a floor this account cleared the conversation's
+    // history to: nothing is read, claimed, decrypted or cached for it (the
+    // display gate shows nothing of it)
+    if (this.clearedForThisAccount(message.conversationId, message.createdAt)) return { text: '', failed: true };
     const claimMissing = opts.claimMissing ?? true;
     const storageFailureRejects = opts.storageFailureRejects ?? false;
     const version = message.editedAt ?? null;
@@ -4412,7 +4452,13 @@ export class E2EService {
     // binds the session to its sender — a cache hit must not skip that binding
     // for a row whose author the server relabelled. Version-checked always: an
     // edit is a fresh ciphertext under the same id.
-    if (cached && this.cacheEntryAnswers(cached, { scope: message.conversationId, authorId: message.authorId, editedAt: version })) {
+    if (
+      cached &&
+      // the entry's own time, whatever the row says: an entry at or below a
+      // cleared floor answers nothing
+      !this.clearedForThisAccount(cached.conversationId, cached.createdAt) &&
+      this.cacheEntryAnswers(cached, { scope: message.conversationId, authorId: message.authorId, editedAt: version })
+    ) {
       return { text: cached.text, failed: cached.failed };
     }
     // cache miss OR a stale pre-edit entry: the edit is a fresh ciphertext, so
@@ -4436,6 +4482,11 @@ export class E2EService {
         if (decrypted === null || decrypted.text === null) return { text: '', failed: true };
         const { text, position } = decrypted;
 
+        // The floor again, inside the task and right before the write: one
+        // learnt while this decrypt ran (the removal landed meanwhile) writes
+        // nothing the purge's walk may already have passed, and the row is
+        // not shown (its gate asks the floor again when it settles)
+        if (this.clearedForThisAccount(message.conversationId, message.createdAt)) return { text: '', failed: true };
         await this.vault.putPlaintext(message.id, {
           conversationId: message.conversationId,
           text,
@@ -4573,6 +4624,9 @@ export class E2EService {
     const needle = query.toLowerCase();
     const all = await this.liveVault.listPlaintexts(conversationId);
     return all
+      // nothing at or below a floor this account cleared the history to is
+      // found, whether or not the purge's walk has reached it yet
+      .filter(({ entry }) => !this.clearedForThisAccount(entry.conversationId, entry.createdAt))
       .map(({ messageId, entry }) => {
         // entries hold raw plaintext — structured payloads carry text + metas
         const { text, attachments } = parseE2EPlaintext(entry.text);
@@ -4616,6 +4670,14 @@ export class E2EService {
    * back (a read-only conversation's other author writes nothing new, and the
    * display gate decrypts none of their rows).
    *
+   * With `levels` as well (a LEVELLED mark: one level per scope asked, a
+   * number, the cleared history's floor), the record holds the level its walk
+   * purged up to, a scope is left out only when its record holds that level
+   * or a higher one (so a higher floor is walked again), and a record never
+   * moves back. `remove` must then remove at least what the level asks for:
+   * the caller decides with the same levels. A levelled mark is never read
+   * as a set (scopePurged answers for unlevelled marks only).
+   *
    * Bounded: a cursor walks the cache PLAINTEXT_PURGE_BATCH entries at a time,
    * each batch its own task of the serial queue (so it is ordered with the
    * decrypts that write entries, refused once the service is disposed, and
@@ -4628,7 +4690,7 @@ export class E2EService {
   async purgeCachedPlaintexts(
     scopes: readonly string[],
     remove: (entry: PlaintextPurgeEntry) => boolean,
-    opts: { mark?: string; record?: (scope: string) => boolean } = {},
+    opts: { mark?: string; record?: (scope: string) => boolean; levels?: ReadonlyMap<string, number> } = {},
   ): Promise<{ removed: number; marked: string[] }> {
     this.assertLive();
     const wanted = [...new Set(scopes)];
@@ -4639,9 +4701,13 @@ export class E2EService {
     if (mark !== undefined && (typeof mark !== 'string' || !/^[a-z][a-z0-9-]*$/.test(mark))) {
       throw new Error('a cache purge mark is a lowercase word');
     }
+    const levels = opts.levels;
+    if (levels !== undefined && (!mark || wanted.some((scope) => !Number.isFinite(levels.get(scope))))) {
+      throw new Error('a levelled cache purge needs a mark and a level for every scope');
+    }
     // a removal that fails from here on voids the mark of its scope for this walk
     const voidsAtStart = new Map(wanted.map((scope) => [scope, this.purgeMarkVoids.get(`${mark}:${scope}`) ?? 0]));
-    const pending = mark ? await this.enqueue(() => this.vault.scopesNotPurged(mark, wanted)) : wanted;
+    const pending = mark ? await this.enqueue(() => this.vault.scopesNotPurged(mark, wanted, levels)) : wanted;
     const alreadyMarked = mark ? wanted.filter((scope) => !pending.includes(scope)) : [];
     if (pending.length === 0) return { removed: 0, marked: alreadyMarked };
     const set = new Set(pending);
@@ -4663,7 +4729,9 @@ export class E2EService {
       const chosen = pending.filter((scope) =>
         (opts.record?.(scope) ?? true) && (this.purgeMarkVoids.get(`${mark}:${scope}`) ?? 0) === voidsAtStart.get(scope));
       if (chosen.length === 0) return chosen;
-      await this.vault.putScopesPurged(mark, chosen);
+      await this.vault.putScopesPurged(mark, chosen, levels);
+      // a levelled mark is the vault's alone: nothing in memory answers for it
+      if (levels) return chosen;
       const known = this.purgeMarks.get(mark);
       if (known) {
         for (const scope of chosen) known.add(scope);

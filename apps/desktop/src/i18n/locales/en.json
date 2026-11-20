@@ -836,6 +836,19 @@
     "conversationStart": "This is the start of your direct message history.",
     "welcomeMessage": "Select a conversation from the sidebar, or click on a member in any space to start a new one.",
     "failedToLoadConversations": "Failed to load conversations",
+    "remove": {
+      "action": "Remove conversation",
+      "actionWith": "Remove conversation with {{name}}",
+      "title": "Remove this conversation?",
+      "body": "Your conversation with {{name}} will leave your list and its history will be cleared for you, on all your devices. This cannot be undone.",
+      "bodyOther": "The other person keeps their copy and is not notified. If either of you writes again, the conversation comes back with only the new messages.",
+      "bodyDeleted": "This conversation will leave your list and its history will be cleared for you, on all your devices. The other account was deleted, so it cannot come back.",
+      "callEnds": "The call in progress will end.",
+      "confirm": "Remove",
+      "removing": "Removing…",
+      "done": "Conversation removed",
+      "failed": "Could not remove the conversation"
+    },
     "deletedParticipant": {
       "name": "Deleted user",
       "readOnlyNotice": "This conversation is read-only: the other person's account was deleted.",

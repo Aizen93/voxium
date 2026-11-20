@@ -836,6 +836,19 @@
     "conversationStart": "Ceci est le début de votre historique de messages privés.",
     "welcomeMessage": "Sélectionnez une conversation dans la barre latérale, ou cliquez sur un membre dans n'importe quel espace pour en démarrer une nouvelle.",
     "failedToLoadConversations": "Impossible de charger les conversations",
+    "remove": {
+      "action": "Retirer la conversation",
+      "actionWith": "Retirer la conversation avec {{name}}",
+      "title": "Retirer cette conversation ?",
+      "body": "Votre conversation avec {{name}} quittera votre liste et son historique sera effacé pour vous, sur tous vos appareils. Cette action est irréversible.",
+      "bodyOther": "L’autre personne conserve sa copie et n’est pas prévenue. Si l’un de vous écrit de nouveau, la conversation revient avec uniquement les nouveaux messages.",
+      "bodyDeleted": "Cette conversation quittera votre liste et son historique sera effacé pour vous, sur tous vos appareils. L’autre compte a été supprimé : elle ne pourra donc pas revenir.",
+      "callEnds": "L’appel en cours prendra fin.",
+      "confirm": "Retirer",
+      "removing": "Retrait…",
+      "done": "Conversation retirée",
+      "failed": "Impossible de retirer la conversation"
+    },
     "deletedParticipant": {
       "name": "Utilisateur supprimé",
       "readOnlyNotice": "Cette conversation est en lecture seule : le compte de l’autre personne a été supprimé.",

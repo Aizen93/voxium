@@ -54,7 +54,10 @@ vi.mock('../../services/e2e/secureVoiceKeys', () => ({
   endSecureVoiceSession: vi.fn(),
   endSecureVoiceSessionFor: vi.fn(),
 }));
-vi.mock('../../stores/dmStore', () => ({ useDMStore: { getState: () => ({ conversations: [] }) } }));
+vi.mock('../../stores/dmStore', () => ({
+  useDMStore: { getState: () => ({ conversations: [], removalSeq: 0, removedAt: {} }) },
+  wasRemovedSince: () => false,
+}));
 vi.mock('../../stores/serverStore', () => ({
   useServerStore: { getState: () => ({ channels: [{ id: 'ch-1', type: 'voice', secure: false }] }) },
 }));

@@ -836,6 +836,19 @@
     "conversationStart": "Dies ist der Beginn deines Direktnachrichtenverlaufs.",
     "welcomeMessage": "Wähle eine Unterhaltung in der Seitenleiste aus oder klicke auf ein Mitglied in einem beliebigen Space, um eine neue zu starten.",
     "failedToLoadConversations": "Unterhaltungen konnten nicht geladen werden",
+    "remove": {
+      "action": "Unterhaltung entfernen",
+      "actionWith": "Unterhaltung mit {{name}} entfernen",
+      "title": "Diese Unterhaltung entfernen?",
+      "body": "Deine Unterhaltung mit {{name}} verschwindet aus deiner Liste, und ihr Verlauf wird für dich auf allen deinen Geräten gelöscht. Das lässt sich nicht rückgängig machen.",
+      "bodyOther": "Die andere Person behält ihre Kopie und wird nicht benachrichtigt. Sobald eine von euch beiden Personen wieder schreibt, kommt die Unterhaltung zurück, aber nur mit den neuen Nachrichten.",
+      "bodyDeleted": "Diese Unterhaltung verschwindet aus deiner Liste, und ihr Verlauf wird für dich auf allen deinen Geräten gelöscht. Das andere Konto wurde gelöscht, deshalb kann sie nicht zurückkommen.",
+      "callEnds": "Der laufende Anruf wird beendet.",
+      "confirm": "Entfernen",
+      "removing": "Wird entfernt…",
+      "done": "Unterhaltung entfernt",
+      "failed": "Die Unterhaltung konnte nicht entfernt werden"
+    },
     "deletedParticipant": {
       "name": "Gelöschter Benutzer",
       "readOnlyNotice": "Diese Unterhaltung ist schreibgeschützt: Das Konto der anderen Person wurde gelöscht.",
