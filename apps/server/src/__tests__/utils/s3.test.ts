@@ -15,6 +15,8 @@ vi.mock('@aws-sdk/client-s3', () => ({
   ListObjectsV2Command: vi.fn(),
   GetBucketEncryptionCommand: vi.fn(),
   PutBucketEncryptionCommand: vi.fn(),
+  GetBucketCorsCommand: vi.fn(),
+  PutBucketCorsCommand: vi.fn(),
 }));
 
 vi.mock('@aws-sdk/s3-request-presigner', () => ({
@@ -59,6 +61,46 @@ describe('utils/s3 — lazy initialization', () => {
 
     await import('../../utils/s3');
     expect(S3Client).not.toHaveBeenCalled();
+  });
+});
+
+describe('utils/s3 — client settings', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+  });
+
+  it('builds the client from s3ClientConfig(): path-style, checksums only where an operation requires one', async () => {
+    const { S3Client } = await import('@aws-sdk/client-s3');
+    vi.mocked(S3Client).mockClear();
+    mockSend.mockResolvedValue({ ContentLength: 1 });
+    const { headS3Object, s3ClientConfig } = await import('../../utils/s3');
+
+    await headS3Object('avatars/u1-1.webp');
+
+    expect(S3Client).toHaveBeenCalledTimes(1);
+    const config = vi.mocked(S3Client).mock.calls[0][0] as Record<string, unknown>;
+    expect(config).toEqual(s3ClientConfig());
+    expect(config).toMatchObject({
+      forcePathStyle: true,
+      // The SDK's default WHEN_SUPPORTED put a CRC32 of an empty body into
+      // every presigned PUT URL, which a store enforcing it refuses
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      // The default put x-amz-checksum-mode=ENABLED into every presigned GET
+      responseChecksumValidation: 'WHEN_REQUIRED',
+    });
+  });
+
+  it('reads the environment when called, so a value set after import is the one used', async () => {
+    const { s3ClientConfig } = await import('../../utils/s3');
+    const saved = process.env.S3_ASSETS_ENDPOINT;
+    process.env.S3_ASSETS_ENDPOINT = 'http://store.example.test:9000';
+    try {
+      expect(s3ClientConfig().endpoint).toBe('http://store.example.test:9000');
+    } finally {
+      if (saved === undefined) delete process.env.S3_ASSETS_ENDPOINT;
+      else process.env.S3_ASSETS_ENDPOINT = saved;
+    }
   });
 });
 
@@ -152,6 +194,80 @@ describe('utils/s3 — S3_SSE bucket-default encryption', () => {
     await expect(ensureBucketEncryption()).resolves.toBeUndefined();
 
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Could not enable default encryption'));
+  });
+
+  describe('what the encryption check logs and how long it takes', () => {
+    const BUCKET = 'acme-private-assets';
+    let saved: Record<string, string | undefined>;
+
+    beforeEach(() => {
+      saved = { S3_ASSETS_BUCKET: process.env.S3_ASSETS_BUCKET };
+      process.env.S3_ASSETS_BUCKET = BUCKET;
+      process.env.S3_SSE = 'AES256';
+    });
+
+    afterEach(() => {
+      if (saved.S3_ASSETS_BUCKET === undefined) delete process.env.S3_ASSETS_BUCKET;
+      else process.env.S3_ASSETS_BUCKET = saved.S3_ASSETS_BUCKET;
+    });
+
+    /** A store call that never answers, ended only by the abort signal it was given. */
+    const hangingSend = (_cmd: unknown, options?: { abortSignal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        // Like the SDK's HTTP handler: an AbortError whose cause is the signal's reason
+        const abortError = () => Object.assign(new Error('Request aborted'), { name: 'AbortError', cause: options?.abortSignal?.reason });
+        // A signal that has already fired rejects at once
+        if (options?.abortSignal?.aborted) reject(abortError());
+        options?.abortSignal?.addEventListener('abort', () => reject(abortError()), { once: true });
+      });
+
+    it('a store that never answers does not hold the caller past the bound; the line holds neither bucket nor host', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockSend.mockImplementation(hangingSend);
+      const { ensureBucketEncryption, BUCKET_ENCRYPTION_TIMEOUT_MS } = await import('../../utils/s3');
+      expect(BUCKET_ENCRYPTION_TIMEOUT_MS).toBe(15_000);
+
+      const started = Date.now();
+      await expect(ensureBucketEncryption(80)).resolves.toBeUndefined();
+
+      // The two calls share ONE bound
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const text = String(errorSpy.mock.calls[0][0]);
+      expect(text).toContain('Could not enable default encryption');
+      expect(text).toContain('AbortError, cause TimeoutError');
+      expect(text).not.toContain(BUCKET);
+      // Both commands were given the same abort signal
+      const signals = mockSend.mock.calls.map((c) => (c[1] as { abortSignal?: AbortSignal }).abortSignal);
+      expect(signals).toHaveLength(2);
+      expect(signals[0]).toBeDefined();
+      expect(signals[0]).toBe(signals[1]);
+    });
+
+    it('a failure logs its name, code and status, never the message (which names host and port) or the bucket', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockSend.mockRejectedValue(Object.assign(new Error(`connect ECONNREFUSED store-7f3a.private-host.example:9443 for ${BUCKET}`), { name: 'Error', code: 'ECONNREFUSED' }));
+      const { ensureBucketEncryption } = await import('../../utils/s3');
+
+      await ensureBucketEncryption();
+
+      const text = String(errorSpy.mock.calls[0][0]);
+      expect(text).toContain('Error, ECONNREFUSED');
+      for (const secret of [BUCKET, 'store-7f3a', 'private-host', '9443']) expect(text).not.toContain(secret);
+    });
+
+    it('the success lines name no bucket either', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      mockSend.mockResolvedValue({ ServerSideEncryptionConfiguration: { Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }] } });
+      const { ensureBucketEncryption } = await import('../../utils/s3');
+      await ensureBucketEncryption();
+      // Nothing there yet: the second line is the "enabled" one
+      mockSend.mockResolvedValue({});
+      await ensureBucketEncryption();
+
+      expect(logSpy).toHaveBeenCalledTimes(2);
+      for (const call of logSpy.mock.calls) expect(String(call[0])).not.toContain(BUCKET);
+    });
   });
 
   it('warns and no-ops on an unsupported S3_SSE value', async () => {
@@ -472,5 +588,22 @@ describe('utils/s3 — deleteMultipleFromS3', () => {
     } finally {
       error.mockRestore();
     }
+  });
+});
+
+describe('utils/s3 — describeStoreError', () => {
+  it('keeps identifiers and the status, never a message', async () => {
+    const { describeStoreError } = await import('../../utils/s3');
+
+    expect(describeStoreError(Object.assign(new Error('getaddrinfo ENOTFOUND store.private.example'), { code: 'ENOTFOUND' }))).toBe('Error, ENOTFOUND');
+    expect(describeStoreError({ name: 'AccessDenied', Code: 'AccessDenied', $metadata: { httpStatusCode: 403 } })).toBe('AccessDenied, HTTP 403');
+    expect(describeStoreError({ name: 'a sentence with spaces', code: 'store.private.example:9000 refused' })).toBe('unknown error');
+    // fetch hides the system error's code in `cause`
+    expect(describeStoreError(Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED host:1'), { code: 'ECONNREFUSED' }) }))).toBe('TypeError, ECONNREFUSED');
+    // The SDK's HTTP handler wraps an abort as an AbortError whose cause is the signal's reason
+    expect(describeStoreError(Object.assign(new Error('The operation was aborted'), { name: 'AbortError', cause: new DOMException('signal timed out 15000', 'TimeoutError') }))).toBe('AbortError, cause TimeoutError');
+    expect(describeStoreError({ name: 'AbortError', cause: { name: 'a sentence with spaces' } })).toBe('AbortError');
+    expect(describeStoreError(null)).toBe('unknown error');
+    expect(describeStoreError('a string')).toBe('unknown error');
   });
 });

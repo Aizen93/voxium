@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import http from 'node:http';
 import express from 'express';
 import request from 'supertest';
 import { Readable } from 'stream';
@@ -29,7 +30,9 @@ vi.mock('../../middleware/rateLimiter', () => {
 const mockPresignedGetUrl = 'https://s3.example.com/signed-get-url';
 const mockPresignedPutUrl = 'https://s3.example.com/signed-put-url';
 
-vi.mock('../../utils/s3', () => ({
+vi.mock('../../utils/s3', async () => ({
+  // The real formatter: the log assertions below must hold for what it prints
+  describeStoreError: (await vi.importActual<typeof import('../../utils/s3')>('../../utils/s3')).describeStoreError,
   generatePresignedPutUrl: vi.fn().mockResolvedValue('https://s3.example.com/signed-put-url'),
   generatePresignedGetUrl: vi.fn().mockResolvedValue('https://s3.example.com/signed-get-url'),
   getS3Object: vi.fn().mockResolvedValue({
@@ -132,12 +135,11 @@ describe('uploads — GET /server-icons/* with ?inline', () => {
   });
 
   it('proxies image directly when ?inline is set', async () => {
-    // Mock getS3Object to return a body that auto-ends the response
-    // (avoids ECONNRESET from stream piping in vitest fork pool)
     const imgData = Buffer.alloc(8, 0);
-    const mockPipe = vi.fn((dest: any) => { dest.end(imgData); return dest; });
+    const body = Readable.from([imgData]);
+    const mockPipe = vi.spyOn(body, 'pipe');
     vi.mocked(getS3Object).mockResolvedValueOnce({
-      Body: { pipe: mockPipe },
+      Body: body,
       ContentType: 'image/webp',
       ContentLength: imgData.length,
     } as any);
@@ -171,9 +173,10 @@ describe('uploads — GET /attachments/* (authorized proxy)', () => {
     } as any);
     vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1' } as any);
     const fileData = Buffer.alloc(64, 0);
-    const mockPipe = vi.fn((dest: any) => { dest.end(fileData); return dest; });
+    const body = Readable.from([fileData]);
+    const mockPipe = vi.spyOn(body, 'pipe');
     vi.mocked(getS3Object).mockResolvedValueOnce({
-      Body: { pipe: mockPipe },
+      Body: body,
       ContentType: 'application/pdf',
       ContentLength: fileData.length,
     } as any);
@@ -240,9 +243,10 @@ describe('uploads — GET /attachments/* (authorized proxy)', () => {
       id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2', reads: [],
     } as any);
     const dmData = Buffer.alloc(32, 0);
-    const mockPipe = vi.fn((dest: any) => { dest.end(dmData); return dest; });
+    const body = Readable.from([dmData]);
+    const mockPipe = vi.spyOn(body, 'pipe');
     vi.mocked(getS3Object).mockResolvedValueOnce({
-      Body: { pipe: mockPipe },
+      Body: body,
       ContentType: 'image/png',
       ContentLength: dmData.length,
     } as any);
@@ -277,7 +281,7 @@ describe('uploads — GET /attachments/* (authorized proxy)', () => {
     });
     const conversationWith = (reads: unknown[]) => ({ id: 'conv-1', user1Id: 'user-1', user2Id: 'user-2', reads });
     const stored = () => vi.mocked(getS3Object).mockResolvedValueOnce({
-      Body: { pipe: vi.fn((dest: any) => { dest.end(Buffer.alloc(8, 0)); return dest; }) },
+      Body: Readable.from([Buffer.alloc(8, 0)]),
       ContentType: 'application/octet-stream',
       ContentLength: 8,
     } as any);
@@ -461,9 +465,10 @@ describe('uploads — GET /* Express 5 Array.isArray wildcard path fix', () => {
     } as any);
     vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1' } as any);
     const fileData = Buffer.alloc(16, 0);
-    const mockPipe = vi.fn((dest: any) => { dest.end(fileData); return dest; });
+    const body = Readable.from([fileData]);
+    const mockPipe = vi.spyOn(body, 'pipe');
     vi.mocked(getS3Object).mockResolvedValueOnce({
-      Body: { pipe: mockPipe },
+      Body: body,
       ContentType: 'application/pdf',
       ContentLength: fileData.length,
     } as any);
@@ -691,7 +696,7 @@ describe('uploads — a conversation with a NULL side', () => {
     vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({ id: 'conv-1', user1Id: null, user2Id: 'user-1', reads: [] } as any);
     const dmData = Buffer.alloc(16, 0);
     vi.mocked(getS3Object).mockResolvedValueOnce({
-      Body: { pipe: vi.fn((dest: any) => { dest.end(dmData); return dest; }) },
+      Body: Readable.from([dmData]),
       ContentType: 'application/octet-stream',
       ContentLength: dmData.length,
     } as any);
@@ -734,5 +739,136 @@ describe('uploads — a conversation with a NULL side', () => {
       expect(res.body.error).toBe('Not a participant of this conversation');
     }
     expect(generatePresignedPutUrl).not.toHaveBeenCalled();
+  });
+});
+
+// ─── The store fails while its body is being proxied ────────────────────────
+// An `error` event on the stream nobody listens to is an uncaught exception,
+// which stops the node. The log holds the error's name only, never the key.
+
+describe('uploads — a store failure while a download is proxied', () => {
+  const KEY = 'attachments/ch-abc/secret-report.pdf';
+  const uncaught: unknown[] = [];
+  const onUncaught = (err: unknown) => { uncaught.push(err); };
+  let logged: string[];
+  let warned: string[];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    uncaught.length = 0;
+    process.on('uncaughtException', onUncaught);
+    logged = [];
+    warned = [];
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(' ')); });
+    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warned.push(args.map(String).join(' ')); });
+  });
+
+  afterEach(() => {
+    process.off('uncaughtException', onUncaught);
+    vi.restoreAllMocks();
+  });
+
+  const storeFailure = () => Object.assign(new Error('read ECONNRESET store-host.internal:9000 secret-report.pdf'), { name: 'StoreStreamError', code: 'ECONNRESET' });
+
+  function allowAttachment() {
+    vi.mocked(prisma.messageAttachment.findFirst).mockResolvedValueOnce({
+      expired: false,
+      message: { channelId: 'ch-1', conversationId: null, channel: { serverId: 'srv-1', secure: false } },
+    } as any);
+    vi.mocked(prisma.serverMember.findUnique).mockResolvedValueOnce({ userId: 'user-1', serverId: 'srv-1' } as any);
+  }
+
+  /** A body that sends some bytes, then fails. */
+  function failingMidBody(): Readable {
+    const body = new Readable({ read() { /* pushed below */ } });
+    body.push(Buffer.alloc(32, 1));
+    setTimeout(() => body.destroy(storeFailure()), 30);
+    return body;
+  }
+
+  /** A body that fails before the first byte. */
+  function failingBeforeBytes(): Readable {
+    return new Readable({ read() { this.destroy(storeFailure()); } });
+  }
+
+  function expectCleanLog() {
+    expect(logged.length).toBeGreaterThan(0);
+    for (const line of logged) {
+      for (const secret of ['secret-report', 'store-host', '9000', KEY]) expect(line).not.toContain(secret);
+    }
+    expect(logged.join(' ')).toContain('StoreStreamError, ECONNRESET');
+  }
+
+  it('attachments: a failure mid-body breaks the transfer, stops the source and does not stop the process', async () => {
+    allowAttachment();
+    const body = failingMidBody();
+    vi.mocked(getS3Object).mockResolvedValueOnce({ Body: body, ContentType: 'application/pdf', ContentLength: 4096 } as any);
+
+    await expect(request(createApp()).get(`/api/v1/uploads/${KEY}`)).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(body.destroyed).toBe(true);
+    expect(uncaught).toEqual([]);
+    expectCleanLog();
+  });
+
+  it('attachments: a failure before the first byte is answered 502 with no leftover headers', async () => {
+    allowAttachment();
+    vi.mocked(getS3Object).mockResolvedValueOnce({ Body: failingBeforeBytes(), ContentType: 'application/pdf', ContentLength: 4096 } as any);
+
+    const res = await request(createApp()).get(`/api/v1/uploads/${KEY}`);
+
+    expect(res.status).toBe(502);
+    expect(res.body).toMatchObject({ success: false });
+    expect(res.headers['content-length']).not.toBe('4096');
+    expect(res.headers['content-type']).not.toContain('application/pdf');
+    expect(uncaught).toEqual([]);
+    expectCleanLog();
+  });
+
+  it('?inline avatars: a failure mid-body breaks the transfer and does not stop the process', async () => {
+    const body = failingMidBody();
+    vi.mocked(getS3Object).mockResolvedValueOnce({ Body: body, ContentType: 'image/webp', ContentLength: 4096 } as any);
+
+    await expect(request(createApp()).get('/api/v1/uploads/server-icons/srv-123.webp?inline')).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(body.destroyed).toBe(true);
+    expect(uncaught).toEqual([]);
+    expect(logged.join(' ')).not.toContain('srv-123');
+  });
+
+  it('?inline avatars: a failure before the first byte is answered 502', async () => {
+    vi.mocked(getS3Object).mockResolvedValueOnce({ Body: failingBeforeBytes(), ContentType: 'image/webp', ContentLength: 4096 } as any);
+
+    const res = await request(createApp()).get('/api/v1/uploads/server-icons/srv-123.webp?inline');
+
+    expect(res.status).toBe(502);
+    expect(res.headers['cache-control'] ?? '').not.toContain('immutable');
+    expect(uncaught).toEqual([]);
+  });
+
+  it('a client that goes away stops the read from the store', async () => {
+    const body = new Readable({ read() { /* never ends */ } });
+    body.push(Buffer.alloc(1024, 1));
+    vi.mocked(getS3Object).mockResolvedValueOnce({ Body: body, ContentType: 'image/webp', ContentLength: 10_000_000 } as any);
+    const server = createApp().listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    try {
+      const { port } = server.address() as { port: number };
+      await new Promise<void>((resolve, reject) => {
+        const req = http.get({ host: '127.0.0.1', port, path: '/api/v1/uploads/server-icons/srv-123.webp?inline' }, (res) => {
+          res.once('data', () => { req.destroy(); resolve(); });
+        });
+        req.on('error', () => undefined);
+        setTimeout(() => reject(new Error('no data')), 3000).unref();
+      });
+      await vi.waitFor(() => expect(body.destroyed).toBe(true));
+      // A client leaving is not a store failure: nothing is logged for it
+      expect(logged).toEqual([]);
+      expect(warned).toEqual([]);
+    } finally {
+      server.close();
+    }
   });
 });

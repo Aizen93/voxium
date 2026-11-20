@@ -430,10 +430,21 @@ PORT=3001
 # Add the Tauri desktop origins so the native apps can connect too:
 # https://tauri.localhost (Windows), tauri://localhost (macOS), http://tauri.localhost (Linux)
 CORS_ORIGIN=https://chat.example.com,https://tauri.localhost,tauri://localhost,http://tauri.localhost
-# The object-storage BUCKET needs the same origins in its own CORS rules (methods GET, PUT, HEAD;
-# headers *): avatars, space icons and attachments are uploaded straight from the client to a
-# presigned URL, and a bucket that allows only the web origin fails the desktop app's uploads
-# with "Failed to fetch" while the images still display. scripts/setup-dev-bucket.ts shows the rule.
+# The object-storage bucket must allow PUT with the `content-type` header from every client origin
+# (GET is optional): avatars, space icons and attachments are uploaded straight from the client to
+# a presigned URL, and a store that refuses the browser's preflight for one origin (the desktop
+# app's, say) fails that client's uploads with "Failed to fetch" while the images still display.
+# At every start the server sends that preflight for each origin above and logs one line: all
+# accepted, which origins are refused, or that the check could not run. It reads and writes no rule
+# of the bucket, and the server starts either way. To let it add the rule after a refusal, set
+# S3_CORS_APPLY=true (the S3 key then needs permission to change the bucket's CORS configuration):
+# it writes back every existing rule and changes only the rule named "voxium-uploads". That rule can
+# change the store's answer only for the origins it names; on a store that answers with the first
+# rule matching an origin, an origin named by this rule and by another one is answered by whichever
+# comes first. PutBucketCors has no precondition: an edit made to the bucket's rules between the
+# server's read and its write is lost. The check sends the preflight only: a proxy in front of the
+# store that answers the preflight itself but removes Access-Control-Allow-Origin from the upload's
+# own answer passes the check while uploads fail.
 CLIENT_URL=https://chat.example.com
 # Set to true when running behind a reverse proxy (nginx etc.)
 TRUST_PROXY=true
@@ -632,6 +643,7 @@ Every setting below is in the matching template: `apps/server/.env.example` (dev
 | `S3_SECRET_KEY` | — | **Required.** S3 secret key |
 | `S3_ASSETS_BUCKET` | — | **Required.** S3 bucket name |
 | `S3_SSE` | — | Optional bucket-default encryption at rest: `AES256` or `aws:kms` |
+| `S3_CORS_APPLY` | `false` | The server checks at start that the store accepts the upload preflight (PUT with the `content-type` header; GET is optional) from every `CORS_ORIGIN` origin, and logs the result; it reads and writes no CORS rule. `true` also lets it add the rule after a refusal (needs permission to change the bucket's CORS configuration): every existing rule is written back and only the rule named `voxium-uploads` is changed. |
 | `SMTP_HOST` | `localhost` | SMTP server host |
 | `SMTP_PORT` | `1025` | SMTP server port |
 | `SMTP_USER` | — | SMTP auth username (the server logs in only when both this and `SMTP_PASS` are set) |
