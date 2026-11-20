@@ -26,6 +26,8 @@ const sessions = vi.hoisted(() => ({
   openSession: vi.fn(),
   rekeySession: vi.fn(),
   trimSessions: vi.fn(),
+  endOtherSessions: vi.fn(),
+  revokeSession: vi.fn(),
 }));
 vi.mock('../../services/sessionService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../services/sessionService')>()),
@@ -33,6 +35,16 @@ vi.mock('../../services/sessionService', async (importOriginal) => ({
   openSession: (...a: unknown[]) => sessions.openSession(...a),
   rekeySession: (...a: unknown[]) => sessions.rekeySession(...a),
   trimSessions: (...a: unknown[]) => sessions.trimSessions(...a),
+  endOtherSessions: (...a: unknown[]) => sessions.endOtherSessions(...a),
+  revokeSession: (...a: unknown[]) => sessions.revokeSession(...a),
+}));
+
+// The sockets of the other sessions, after a sign-out of them (its own suite: sessionRevocation.test.ts)
+const sockets = vi.hoisted(() => ({ revokeOthers: vi.fn() }));
+vi.mock('../../utils/sessionRevocation', () => ({
+  revokeOtherSessionSockets: (...a: unknown[]) => sockets.revokeOthers(...a),
+  revokeUserSessions: vi.fn(),
+  revokeSessionSockets: vi.fn(),
 }));
 
 // The two-factor step's code check (totpService has its own suite)
@@ -86,7 +98,7 @@ vi.mock('../../utils/sanitize', () => ({
 import jwt from 'jsonwebtoken';
 import { prisma } from '../../utils/prisma';
 import { LOCK_WAIT_TRANSACTION_OPTIONS } from '../../utils/transactionRetry';
-import { UnauthorizedError } from '../../utils/errors';
+import { PasswordStepUpError, UnauthorizedError } from '../../utils/errors';
 import { TEST_JWT_SECRET } from '../helpers/testSecrets';
 import {
   loginUser,
@@ -96,6 +108,8 @@ import {
   requestPasswordReset,
   resetPassword,
   changePassword,
+  revokeOtherSessions,
+  revokeOneSession,
 } from '../../services/authService';
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -1145,5 +1159,182 @@ describe('authService — verifyEmail', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null);
     await expect(verifyEmail('invalid-token-abcdef'))
       .rejects.toThrow(/Invalid or expired verification link/);
+  });
+});
+
+// ─── Signing out of one session, or of every other ──────────────────────────
+
+describe('authService — signing out of every other session', () => {
+  const ran: string[] = [];
+  let lockedVersion: number;
+  let hash: string;
+  const input = (over: Partial<Parameters<typeof revokeOtherSessions>[0]> = {}) => ({
+    userId: 'u-1', sid: 'sid-mine', admittedVersion: 7, password: 'RightPassword1', trustedDeviceToken: undefined,
+    rememberMe: true, label: LABEL, ...over,
+  });
+  const trusted = (over: Record<string, unknown> = {}, opts: jwt.SignOptions = { expiresIn: '30d' }, secret = TEST_JWT_SECRET) =>
+    jwt.sign({ userId: 'u-1', purpose: 'trusted-device', tokenVersion: 7, ...over }, secret, { algorithm: 'HS256', ...opts });
+
+  beforeEach(async () => {
+    ran.length = 0;
+    lockedVersion = 7;
+    const bcrypt = await import('bcryptjs');
+    hash = hash || await bcrypt.hash('RightPassword1', 4);
+    process.env.JWT_SECRET = TEST_JWT_SECRET;
+    vi.mocked(prisma.user.findUnique).mockImplementation((async (args: { select: Record<string, unknown> }) => {
+      if (args.select.password) { ran.push('password'); return { password: hash }; }
+      ran.push('read');
+      return { id: 'u-1', username: 'alice', role: 'user', tokenVersion: lockedVersion };
+    }) as never);
+    vi.mocked(prisma.$queryRaw).mockImplementation((async (strings: TemplateStringsArray) => {
+      ran.push(strings.join('?').includes('FOR NO KEY UPDATE') ? 'lock' : 'other');
+      return [{ id: 'u-1' }];
+    }) as never);
+    vi.mocked(prisma.user.update).mockImplementation((async () => { ran.push('bump'); return { id: 'u-1', username: 'alice', role: 'user', tokenVersion: 8 }; }) as never);
+    sessions.rekeySession.mockImplementation(async () => { ran.push('rekey'); return { accessToken: 'access-3', refreshToken: 'refresh-3' }; });
+    sessions.openSession.mockImplementation(async () => { ran.push('open'); return { sessionId: 'sid-new', tokens: { accessToken: 'access-2', refreshToken: 'refresh-2' } }; });
+    sessions.endOtherSessions.mockImplementation(async () => { ran.push('end-others'); return { ended: ['a', 'b', 'c'], live: 2 }; });
+    sockets.revokeOthers.mockImplementation(() => { ran.push('sockets'); });
+  });
+
+  it('the password, then ONE transaction with the lock-wait budget: the account row locked at the admitted version, the bump, the caller\'s row re-keyed, every other session deleted; then the sockets', async () => {
+    const out = await revokeOtherSessions(input());
+
+    expect(ran).toEqual(['password', 'lock', 'read', 'bump', 'rekey', 'end-others', 'sockets']);
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), LOCK_WAIT_TRANSACTION_OPTIONS);
+    expect(prisma.user.update).toHaveBeenCalledWith({ where: { id: 'u-1' }, data: { tokenVersion: { increment: 1 } }, select: { id: true, username: true, role: true, tokenVersion: true } });
+    expect(sessions.rekeySession).toHaveBeenCalledWith(prisma, { userId: 'u-1', username: 'alice', role: 'user', tokenVersion: 8 }, 'sid-mine', 7);
+    expect(sessions.endOtherSessions).toHaveBeenCalledWith(prisma, 'u-1', 'sid-mine', 7);
+    expect(sockets.revokeOthers).toHaveBeenCalledWith('u-1', 'sid-mine', 'You were signed out from another device');
+    // The others that were live, and the caller's fresh pair; no trusted-device token asked, none given
+    expect(out).toEqual({ revoked: 2, accessToken: 'access-3', refreshToken: 'refresh-3' });
+  });
+
+  it('a wrong password: 400 Password is incorrect (PasswordStepUpError), nothing read under a lock, nothing written', async () => {
+    const err = await revokeOtherSessions(input({ password: 'WrongPassword1' })).catch((e) => e);
+    expect(err).toBeInstanceOf(PasswordStepUpError);
+    expect(err).toMatchObject({ statusCode: 400, message: 'Password is incorrect' });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(sockets.revokeOthers).not.toHaveBeenCalled();
+  });
+
+  it('an account gone since the caller was admitted: the same hash work against the equalizer, then 401 User not found', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null as never);
+    const bcrypt = await import('bcryptjs');
+    const compare = vi.spyOn(bcrypt.default, 'compare');
+    await expect(revokeOtherSessions(input())).rejects.toMatchObject({ statusCode: 401, message: 'User not found' });
+    expect(compare).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    compare.mockRestore();
+  });
+
+  it('the version moved since the caller was admitted (a reset, a ban, a password change or another of these): 401 Session invalidated, nothing written, no socket touched', async () => {
+    lockedVersion = 8;
+    await expect(revokeOtherSessions(input())).rejects.toMatchObject({ statusCode: 401, message: 'Session invalidated' });
+    expect(ran).toEqual(['password', 'lock', 'read']);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(sockets.revokeOthers).not.toHaveBeenCalled();
+  });
+
+  it('the caller\'s own session ended meanwhile: the re-key refuses and the whole transaction rolls back, no socket touched', async () => {
+    sessions.rekeySession.mockRejectedValueOnce(new UnauthorizedError('Session invalidated'));
+    await expect(revokeOtherSessions(input())).rejects.toMatchObject({ statusCode: 401, message: 'Session invalidated' });
+    expect(sessions.endOtherSessions).not.toHaveBeenCalled();
+    expect(sockets.revokeOthers).not.toHaveBeenCalled();
+  });
+
+  it('a caller whose token names no session: a new session opened in the same transaction and kept; its sockets spared none', async () => {
+    const out = await revokeOtherSessions(input({ sid: undefined, rememberMe: false }));
+    expect(ran).toEqual(['password', 'lock', 'read', 'bump', 'open', 'end-others', 'sockets']);
+    expect(sessions.openSession).toHaveBeenCalledWith(prisma, { userId: 'u-1', username: 'alice', role: 'user', tokenVersion: 8 }, { rememberMe: false, label: LABEL, accountGoneMessage: 'User not found' });
+    expect(sessions.endOtherSessions).toHaveBeenCalledWith(prisma, 'u-1', 'sid-new', 7);
+    expect(sockets.revokeOthers).toHaveBeenCalledWith('u-1', undefined, 'You were signed out from another device');
+    expect(out).toMatchObject({ accessToken: 'access-2', refreshToken: 'refresh-2' });
+  });
+
+  it('a deadlock victim runs again whole, every check with it; a failed statement is thrown as it is (500), the sockets untouched', async () => {
+    vi.mocked(prisma.$transaction)
+      .mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: 'P2034' }))
+      .mockImplementationOnce(((fn: (tx: unknown) => unknown) => fn(prisma)) as never);
+    await expect(revokeOtherSessions(input())).resolves.toMatchObject({ revoked: 2 });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+
+    sockets.revokeOthers.mockClear();
+    sessions.endOtherSessions.mockRejectedValueOnce(new Error('connection lost'));
+    await expect(revokeOtherSessions(input())).rejects.toThrow('connection lost');
+    expect(sockets.revokeOthers).not.toHaveBeenCalled();
+  });
+
+  it('a valid trusted-device token of this account at the old version: re-issued under the new version, with the same expiry', async () => {
+    const old = trusted();
+    const out = await revokeOtherSessions(input({ trustedDeviceToken: old }));
+    const fresh = jwt.verify(out.trustedDeviceToken!, TEST_JWT_SECRET, { algorithms: ['HS256'] }) as Record<string, unknown>;
+    expect(fresh).toMatchObject({ userId: 'u-1', purpose: 'trusted-device', tokenVersion: 8 });
+    expect(fresh.exp).toBe((jwt.decode(old) as { exp: number }).exp);
+  });
+
+  it.each([
+    ['of another account', () => trusted({ userId: 'u-2' })],
+    ['of another version', () => trusted({ tokenVersion: 6 })],
+    ['without a version', () => trusted({ tokenVersion: undefined })],
+    ['of another purpose', () => trusted({ purpose: 'totp-verify' })],
+    ['expired', () => trusted({ exp: Math.floor(Date.now() / 1000) - 60 }, {})],
+    ['forged', () => trusted({}, { expiresIn: '30d' }, 'not-the-secret')],
+    ['garbage', () => 'garbage'],
+    ['an access token', () => jwt.sign({ userId: 'u-1', username: 'alice', role: 'user', tokenVersion: 7 }, TEST_JWT_SECRET, { expiresIn: '15m' })],
+  ])('a trusted-device token %s: the sign-out goes through, and none is re-issued', async (_what, make) => {
+    const out = await revokeOtherSessions(input({ trustedDeviceToken: make() }));
+    expect(out.trustedDeviceToken).toBeUndefined();
+    expect(out.revoked).toBe(2);
+  });
+});
+
+describe('authService — signing out of one other session', () => {
+  let hash: string;
+  beforeEach(async () => {
+    const bcrypt = await import('bcryptjs');
+    hash = hash || await bcrypt.hash('RightPassword1', 4);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue({ password: hash } as never);
+    sessions.revokeSession.mockResolvedValue(true);
+  });
+
+  it('the password, then the session of THIS account ended with the reason its device is told', async () => {
+    await expect(revokeOneSession('u-1', 'sid-mine', 'sid-other-000000000000', 'RightPassword1')).resolves.toBeUndefined();
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { id: 'u-1' }, select: { password: true } });
+    expect(sessions.revokeSession).toHaveBeenCalledWith('u-1', 'sid-other-000000000000', 'You were signed out from another device');
+  });
+
+  it('a wrong password: 400 Password is incorrect before anything that depends on the id, whatever the id', async () => {
+    for (const id of ['sid-other-000000000000', 'sid-mine', 'a:b', 'unknown-000000000000000']) {
+      const err = await revokeOneSession('u-1', 'sid-mine', id, 'WrongPassword1').catch((e) => e);
+      expect(err).toBeInstanceOf(PasswordStepUpError);
+    }
+    expect(sessions.revokeSession).not.toHaveBeenCalled();
+  });
+
+  it('an unknown id, another account\'s id, or an id no session can carry: the same 404 Session not found', async () => {
+    sessions.revokeSession.mockResolvedValueOnce(false);
+    const unknown = await revokeOneSession('u-1', 'sid-mine', 'unknown-000000000000000', 'RightPassword1').catch((e) => e);
+    const malformed = await revokeOneSession('u-1', 'sid-mine', 'has:colon', 'RightPassword1').catch((e) => e);
+    for (const err of [unknown, malformed]) expect(err).toMatchObject({ statusCode: 404, message: 'Session not found' });
+    // The malformed one reached no statement
+    expect(sessions.revokeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('the caller\'s own session: 400 (signing out is what ends it), nothing ended', async () => {
+    await expect(revokeOneSession('u-1', 'sid-mine', 'sid-mine', 'RightPassword1')).rejects.toMatchObject({
+      statusCode: 400, message: 'This is the session you are using: sign out to end it',
+    });
+    expect(sessions.revokeSession).not.toHaveBeenCalled();
+  });
+
+  it('a caller whose token names no session can end any of its sessions', async () => {
+    await expect(revokeOneSession('u-1', undefined, 'sid-mine', 'RightPassword1')).resolves.toBeUndefined();
+    expect(sessions.revokeSession).toHaveBeenCalledWith('u-1', 'sid-mine', 'You were signed out from another device');
+  });
+
+  it('a failing statement is thrown as it is (500)', async () => {
+    sessions.revokeSession.mockRejectedValueOnce(new Error('connection lost'));
+    await expect(revokeOneSession('u-1', 'sid-mine', 'sid-other-000000000000', 'RightPassword1')).rejects.toThrow('connection lost');
   });
 });

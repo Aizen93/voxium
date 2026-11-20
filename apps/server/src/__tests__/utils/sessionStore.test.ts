@@ -309,3 +309,37 @@ describe('sessionStore — the sweep\'s statements', () => {
     expect(values).toEqual([3600, 5000, 3600]);
   });
 });
+
+describe('sessionStore — the list, and signing out of the other sessions', () => {
+  it('listLiveSessions: live rows only (the account\'s version, not expired, on the database\'s clock), the sign-in rounded down to its day and the renewal to its hour in SQL, the caller\'s first, bounded', async () => {
+    results.push([{ id: 'sid-1', client_kind: 'desktop', client_os: 'windows', signed_in: 1_790_000_000, last_active: 1_790_003_600 }]);
+    await expect(store.listLiveSessions(db(), 'u-1', 'sid-1', 50)).resolves.toEqual([
+      { id: 'sid-1', clientKind: 'desktop', clientOs: 'windows', signedInAt: 1_790_000_000, lastActiveAt: 1_790_003_600 },
+    ]);
+    const { sql, values } = calls[0];
+    // The sign-in to its day, the last renewal to its hour
+    expect(sql).toContain("extract(epoch FROM date_trunc('day', s.created_at))::float8 AS signed_in");
+    expect(sql).toContain("extract(epoch FROM date_trunc('hour', s.rotated_at))::float8 AS last_active");
+    expect(sql).toContain('FROM sessions s JOIN users u ON u.id = s.user_id');
+    expect(sql).toContain('WHERE s.user_id = ? AND s.token_version = u.token_version AND s.expires_at > t.now');
+    expect(sql).toContain('ORDER BY (s.id = ?) IS TRUE DESC, s.rotated_at DESC, s.id DESC LIMIT ?::integer');
+    expect(values).toEqual(['u-1', 'sid-1', 50]);
+    expectDatabaseClockOnly(sql);
+    // Nothing finer than the hour, and no other column, leaves the database
+    expect(sql).not.toMatch(/SELECT[^]*\b(expires_at|remember_me|generation|token_version)\b[^]*FROM sessions s JOIN/);
+  });
+
+  it('listLiveSessions: a caller whose token names no session passes null (no row is the current one)', async () => {
+    await store.listLiveSessions(db(), 'u-1', null, 50);
+    expect(calls[0].values).toEqual(['u-1', null, 50]);
+  });
+
+  it('deleteOtherSessions: every session of the account but the kept one, whatever its state; each with whether it was live at the version before the bump', async () => {
+    results.push([{ id: 'a', live: true }, { id: 'b', live: false }]);
+    await expect(store.deleteOtherSessions(db(), 'u-1', 'sid-keep', 4)).resolves.toEqual([{ id: 'a', live: true }, { id: 'b', live: false }]);
+    const { sql, values } = calls[0];
+    expect(sql).toMatch(/^DELETE FROM sessions s USING \(SELECT \(now\(\) AT TIME ZONE 'UTC'\)::timestamp\(3\) AS now\) t WHERE s\.user_id = \? AND s\.id <> \? RETURNING s\.id, \(s\.token_version = \?::integer AND s\.expires_at > t\.now\) AS live$/);
+    expect(values).toEqual(['u-1', 'sid-keep', 4]);
+    expectDatabaseClockOnly(sql);
+  });
+});

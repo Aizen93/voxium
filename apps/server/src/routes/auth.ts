@@ -1,20 +1,32 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { logAuditEvent } from '../utils/auditLog';
-import { loginUser, verifyLoginTOTP, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError } from '../services/authService';
+import { loginUser, verifyLoginTOTP, requestPasswordReset, resetPassword, changePassword, verifyEmail, resendVerificationEmail, acceptConsent, withConsentFlag, CONSENT_SELECT, deleteOwnAccount, OwnedServersError, revokeOneSession, revokeOtherSessions } from '../services/authService';
 import { setupTOTP, enableTOTP, disableTOTP } from '../services/totpService';
 import { startRegistration, completeRegistration, resendRegistrationCode } from '../services/signupService';
-import { refreshSession, endSessionWithRefreshToken, deriveSessionLabel, readClientHint, type SessionLabel } from '../services/sessionService';
+import { refreshSession, endSessionWithRefreshToken, deriveSessionLabel, readClientHint, listSessions, type SessionLabel } from '../services/sessionService';
+import { PasswordStepUpError } from '../utils/errors';
 import { authenticate } from '../middleware/auth';
-import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, rateLimitRegisterComplete, rateLimitRegisterResend, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitLogout, rateLimitChangePassword, rateLimitTOTP, rateLimitVerifyEmail, rateLimitMailBlock, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
+import { rateLimitRegister, rateLimitRegisterAttempt, rateLimitRegisterAttemptSubnet, rateLimitRegisterComplete, rateLimitRegisterResend, chargeRegistrationBudgets, rateLimitPowChallenge, getSubnetRegistrationPressure, rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, rateLimitTotpAccount, rateLimitForgotPassword, rateLimitResetPassword, rateLimitRefresh, rateLimitLogout, rateLimitChangePassword, rateLimitSessionsRead, rateLimitSessionRevoke, STEP_UP_REFUSED_LOCAL, rateLimitTOTP, rateLimitVerifyEmail, rateLimitMailBlock, rateLimitResendVerification, rateLimitConsent, rateLimitDeleteAccount, normalizeIp } from '../middleware/rateLimiter';
 import { issueRegistrationChallenge, verifyRegistrationPow } from '../utils/registrationPow';
 import { readMailBlockToken, isDigestSuppressed, suppressDigest, unsuppressDigest } from '../utils/mailSuppression';
 import { prisma } from '../utils/prisma';
 import { isFeatureEnabled } from '../utils/featureFlags';
 import { revokeUserSessions } from '../utils/sessionRevocation';
 import { sanitizeLabel } from '../utils/sanitize';
-import { validateDisplayName } from '@voxium/shared';
+import { validateDisplayName, REMEMBER_ME_INVALID_MESSAGE, TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE } from '@voxium/shared';
+import type {
+  ChangePasswordRequest, LoginRequest, LogoutRequest, RefreshRequest, RegisterCompleteRequest, RevokeOtherSessionsRequest,
+  RevokeSessionRequest, SessionClientField, TotpVerifyRequest,
+} from '@voxium/shared';
 
 export const authRouter = Router();
+
+/**
+ * A body as it arrives: the field names of the shared request type (so a
+ * route reads only what the contract names), every value still unchecked.
+ * Each route checks the values it reads; the types never stand in for that.
+ */
+type Unchecked<T> = { [K in keyof T]?: unknown };
 
 /**
  * The label of a session this request opens: the body's `client` hint, else
@@ -22,7 +34,8 @@ export const authRouter = Router();
  * kept or logged (sessionService.deriveSessionLabel).
  */
 function sessionLabelOf(req: Request): SessionLabel {
-  return deriveSessionLabel({ hint: req.body?.client, origin: req.get('origin'), userAgent: req.get('user-agent') });
+  const hint = (req.body as Unchecked<SessionClientField> | undefined)?.client;
+  return deriveSessionLabel({ hint, origin: req.get('origin'), userAgent: req.get('user-agent') });
 }
 
 /** "Remember me" as every sign-in read it: absent means yes, otherwise its truthiness. */
@@ -107,7 +120,7 @@ authRouter.post('/register/complete', rateLimitRegisterComplete, chargeRegistrat
       res.status(403).json({ success: false, error: 'Registration is currently disabled' });
       return;
     }
-    const { pendingId, code, username } = req.body;
+    const { pendingId, code, username } = req.body as Unchecked<RegisterCompleteRequest>;
     const result = await completeRegistration(pendingId, code, username, req.ip || req.socket.remoteAddress, sessionLabelOf(req));
     res.status(201).json({ success: true, data: result });
   } catch (err) {
@@ -134,10 +147,12 @@ authRouter.post('/register/resend', rateLimitRegisterResend, async (req: Request
 // Per address, per network, then per account and network (all count failures only, middleware/rateLimiter.ts)
 authRouter.post('/login', rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAccount, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { email, password, rememberMe, trustedDeviceToken } = req.body;
+    const { email, password, rememberMe, trustedDeviceToken } = req.body as Unchecked<LoginRequest>;
     if (!email || typeof email !== 'string') { res.status(400).json({ success: false, error: 'Email is required' }); return; }
     if (!password || typeof password !== 'string') { res.status(400).json({ success: false, error: 'Password is required' }); return; }
-    const result = await loginUser(email, password, rememberMeOf(rememberMe), req.ip || req.socket.remoteAddress, trustedDeviceToken, sessionLabelOf(req));
+    // The trusted-device token is verified by the service: anything that
+    // is not one is refused like a bad one
+    const result = await loginUser(email, password, rememberMeOf(rememberMe), req.ip || req.socket.remoteAddress, trustedDeviceToken as string | undefined, sessionLabelOf(req));
 
     res.json({
       success: true,
@@ -155,7 +170,7 @@ authRouter.post('/login', rateLimitLogin, rateLimitLoginSubnet, rateLimitLoginAc
 // `client` field labels nothing: it is only written into the reuse log line.
 authRouter.post('/refresh', rateLimitRefresh, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { refreshToken, client } = req.body ?? {};
+    const { refreshToken, client } = (req.body ?? {}) as Unchecked<RefreshRequest>;
     if (!refreshToken || typeof refreshToken !== 'string') {
       res.status(400).json({ success: false, error: 'Refresh token is required' });
       return;
@@ -188,7 +203,7 @@ authRouter.post('/refresh', rateLimitRefresh, async (req: Request, res: Response
 // session was not ended.
 authRouter.post('/logout', rateLimitLogout, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const refreshToken: unknown = req.body?.refreshToken;
+    const refreshToken = (req.body as Unchecked<LogoutRequest> | undefined)?.refreshToken;
     if (typeof refreshToken !== 'string' || refreshToken.length === 0 || refreshToken.length > REFRESH_TOKEN_MAX_CHARS) {
       res.status(400).json({ success: false, error: 'Refresh token is required' });
       return;
@@ -196,6 +211,90 @@ authRouter.post('/logout', rateLimitLogout, async (req: Request, res: Response, 
     await endSessionWithRefreshToken(refreshToken);
     res.status(204).end();
   } catch (err) {
+    next(err);
+  }
+});
+
+// ─── The account's own sign-in sessions ─────────────────────────────────────
+// The list, signing out of one other session and of every other one
+// (services/sessionService.ts, services/authService.ts). Authenticated, and
+// under /auth like the other self-management routes: an account that has
+// not verified its e-mail or given its consent can still end its sessions.
+// `authenticate` before the limiters: they are keyed by user and session.
+// The two sign-outs take the account password, checked before anything
+// that depends on a session id; their bucket keeps the charge of a wrong
+// password only.
+
+authRouter.get('/sessions', authenticate, rateLimitSessionsRead, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const sessions = await listSessions(req.user!.userId, req.user!.sid);
+    res.json({ success: true, data: { sessions } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** The step-up password of a body, or null after the 400 was sent. */
+function stepUpPassword(req: Request, res: Response): string | null {
+  // Both sign-outs' bodies carry it (RevokeSessionRequest,
+  // RevokeOtherSessionsRequest)
+  const password = (req.body as Unchecked<RevokeSessionRequest> | undefined)?.password;
+  if (typeof password !== 'string' || password.length === 0) {
+    res.status(400).json({ success: false, error: 'Password is required' });
+    return null;
+  }
+  return password;
+}
+
+/**
+ * A refused step-up keeps its charge on the bucket (rateLimitSessionRevoke);
+ * every other outcome is given back.
+ */
+function noteStepUp(res: Response, err: unknown): void {
+  if (err instanceof PasswordStepUpError) res.locals[STEP_UP_REFUSED_LOCAL] = true;
+}
+
+/** A trusted-device token is a JWT of a few hundred characters. */
+const TRUSTED_DEVICE_TOKEN_MAX_CHARS = 4096;
+
+authRouter.post('/sessions/revoke-others', authenticate, rateLimitSessionRevoke, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const password = stepUpPassword(req, res);
+    if (password === null) return;
+    const { trustedDeviceToken, rememberMe } = req.body as Unchecked<RevokeOtherSessionsRequest>;
+    if (trustedDeviceToken !== undefined && trustedDeviceToken !== null
+      && (typeof trustedDeviceToken !== 'string' || trustedDeviceToken.length > TRUSTED_DEVICE_TOKEN_MAX_CHARS)) {
+      res.status(400).json({ success: false, error: TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE });
+      return;
+    }
+    if (rememberMe !== undefined && typeof rememberMe !== 'boolean') {
+      res.status(400).json({ success: false, error: REMEMBER_ME_INVALID_MESSAGE });
+      return;
+    }
+    const result = await revokeOtherSessions({
+      userId: req.user!.userId,
+      sid: req.user!.sid,
+      admittedVersion: req.user!.tokenVersion,
+      password,
+      trustedDeviceToken: typeof trustedDeviceToken === 'string' ? trustedDeviceToken : undefined,
+      rememberMe: rememberMe ?? true,
+      label: sessionLabelOf(req),
+    });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    noteStepUp(res, err);
+    next(err);
+  }
+});
+
+authRouter.delete('/sessions/:sessionId', authenticate, rateLimitSessionRevoke, async (req: Request<{ sessionId: string }>, res: Response, next: NextFunction) => {
+  try {
+    const password = stepUpPassword(req, res);
+    if (password === null) return;
+    await revokeOneSession(req.user!.userId, req.user!.sid, req.params.sessionId, password);
+    res.json({ success: true, data: { revoked: 1 } });
+  } catch (err) {
+    noteStepUp(res, err);
     next(err);
   }
 });
@@ -317,7 +416,7 @@ authRouter.post('/reset-password', rateLimitResetPassword, async (req: Request, 
 
 authRouter.post('/change-password', authenticate, rateLimitChangePassword, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { currentPassword, newPassword, rememberMe } = req.body;
+    const { currentPassword, newPassword, rememberMe } = req.body as Unchecked<ChangePasswordRequest>;
     if (!currentPassword || typeof currentPassword !== 'string') {
       res.status(400).json({ success: false, error: 'Current password is required' });
       return;
@@ -428,7 +527,7 @@ authRouter.post('/resend-verification', authenticate, rateLimitResendVerificatio
 // The per-address and per-network sign-in buckets, then the per-account one keyed on the verified challenge token's user
 authRouter.post('/totp/verify', rateLimitLogin, rateLimitLoginSubnet, rateLimitTotpAccount, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { totpToken, code } = req.body;
+    const { totpToken, code } = req.body as Unchecked<TotpVerifyRequest>;
     if (!totpToken || typeof totpToken !== 'string') {
       res.status(400).json({ success: false, error: 'TOTP token is required' });
       return;

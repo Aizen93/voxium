@@ -3,8 +3,14 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import geoip from 'geoip-lite';
 import { prisma } from '../utils/prisma';
-import type { RegistrationConsent } from '@voxium/shared';
-import { BadRequestError, ForbiddenError, OwnedServersError, ServiceUnavailableError, UnauthorizedError, prismaErrorCode } from '../utils/errors';
+import type { RegistrationConsent, RevokeOtherSessionsResponse } from '@voxium/shared';
+import { OPAQUE_ID_RE, SESSION_REVOKE_CURRENT_MESSAGE, SIGNED_OUT_ELSEWHERE_REASON } from '@voxium/shared';
+import {
+  BadRequestError, ForbiddenError, OwnedServersError, PasswordStepUpError, ServiceUnavailableError, SessionNotFoundError,
+  UnauthorizedError, prismaErrorCode,
+} from '../utils/errors';
+import { isJwtVerifyError } from '../utils/jwtErrors';
+import { revokeOtherSessionSockets } from '../utils/sessionRevocation';
 import { validateEmail, validatePassword, canonicalizeEmail, TRUSTED_DEVICE_TTL_DAYS } from '@voxium/shared';
 import { sendPasswordResetEmail, sendVerificationEmail, describeEmailError, failedBeforeAnyRecipient, MailSuppressedError } from '../utils/email';
 import { isMailSuppressed } from '../utils/mailSuppression';
@@ -15,8 +21,8 @@ import { deleteUserAccount } from '../utils/accountDeletion';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import { lockAccountAtVersion } from '../utils/accountRowLocks';
 import {
-  createSession, openSession, rekeySession, trimSessions, readCarriedLabel, carriedLabel,
-  type SessionLabel, type SessionTokens,
+  createSession, openSession, rekeySession, trimSessions, readCarriedLabel, carriedLabel, endOtherSessions,
+  revokeSession, type SessionLabel, type SessionTokens,
 } from './sessionService';
 
 /**
@@ -221,13 +227,46 @@ export async function verifyLoginTOTP(totpToken: string, code: string, fallbackL
 
   // Issue a trusted device token (TRUSTED_DEVICE_TTL_DAYS, the figure the
   // Security tab quotes) — includes tokenVersion so password changes invalidate it
-  const trustedDeviceToken = jwt.sign(
-    { userId: user.id, purpose: 'trusted-device', tokenVersion: user.tokenVersion },
+  const trustedDeviceToken = signTrustedDeviceToken(user.id, user.tokenVersion);
+
+  return { user: withConsentFlag(safeUser), ...tokens, trustedDeviceToken };
+}
+
+/**
+ * A trusted-device token (skips the two-factor step at a sign-in on that
+ * device): bound to the account and its token version, so a version bump
+ * ends it. `exp` keeps the expiry of a token it replaces; without it, a
+ * fresh TRUSTED_DEVICE_TTL_DAYS.
+ */
+function signTrustedDeviceToken(userId: string, tokenVersion: number, exp?: number): string {
+  if (exp !== undefined) {
+    return jwt.sign({ userId, purpose: 'trusted-device', tokenVersion, exp }, process.env.JWT_SECRET!, { algorithm: 'HS256' });
+  }
+  return jwt.sign(
+    { userId, purpose: 'trusted-device', tokenVersion },
     process.env.JWT_SECRET!,
     { expiresIn: `${TRUSTED_DEVICE_TTL_DAYS}d` } as jwt.SignOptions,
   );
+}
 
-  return { user: withConsentFlag(safeUser), ...tokens, trustedDeviceToken };
+/**
+ * The claims of a trusted-device token that verifies (HS256, the access
+ * secret, not expired, purpose 'trusted-device'), or null for anything else.
+ * Never throws: it is read after a commit, where an exception would answer
+ * 500 to a request that has done its work.
+ */
+function readTrustedDeviceToken(token: string): { userId: string; tokenVersion: number | undefined; exp: number } | null {
+  if (token.length === 0 || token.length > 4096) return null;
+  let payload: unknown;
+  try {
+    payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] });
+  } catch (err) {
+    if (!isJwtVerifyError(err)) console.warn('[Auth] A trusted-device token could not be read:', err instanceof Error ? err.message : err);
+    return null;
+  }
+  const p = payload as { userId?: unknown; purpose?: unknown; tokenVersion?: unknown; exp?: unknown } | null;
+  if (!p || typeof p !== 'object' || p.purpose !== 'trusted-device' || typeof p.userId !== 'string' || typeof p.exp !== 'number') return null;
+  return { userId: p.userId, tokenVersion: typeof p.tokenVersion === 'number' ? p.tokenVersion : undefined, exp: p.exp };
 }
 
 export async function requestPasswordReset(email: string) {
@@ -426,6 +465,140 @@ export async function changePassword(
   );
   if (outcome.openedId !== null) await trimSessions(userId, outcome.openedId);
   return outcome.tokens;
+}
+
+// ─── Signing out of one session, or of every other ──────────────────────────
+
+/**
+ * The account password, as the step-up of the two session sign-outs below:
+ * the hash work is done on every branch (an account gone since the caller
+ * was admitted is compared against the equalizer hash, then 401 'User not
+ * found'). A wrong password is PasswordStepUpError (400 'Password is
+ * incorrect'), the one answer whose step-up charge is kept (routes/auth.ts).
+ * It runs before anything that depends on a session id, so the time and the
+ * answer of a wrong password never tell whether one exists.
+ */
+async function requireAccountPassword(userId: string, password: string): Promise<void> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { password: true } });
+  const valid = await bcrypt.compare(password, user ? user.password : await getTimingEqualizerHash());
+  if (!user) throw new UnauthorizedError('User not found');
+  if (!valid) throw new PasswordStepUpError();
+}
+
+/**
+ * DELETE /auth/sessions/:sessionId: end ONE other session of the caller's
+ * account, after the password step-up. An id no session can carry, an
+ * unknown one and one of another account answer the same 404 'Session not
+ * found'; the caller's own session is 400 (signing out is what ends it).
+ * The session is ended whatever its state, and its sockets are told
+ * SIGNED_OUT_ELSEWHERE_REASON and closed, with the account's sockets that
+ * name no session (closed without being told; revokeSessionSockets).
+ */
+export async function revokeOneSession(userId: string, callerSid: string | undefined, sessionId: string, password: string): Promise<void> {
+  await requireAccountPassword(userId, password);
+  if (!OPAQUE_ID_RE.test(sessionId)) throw new SessionNotFoundError();
+  if (sessionId === callerSid) throw new BadRequestError(SESSION_REVOKE_CURRENT_MESSAGE);
+  if (!(await revokeSession(userId, sessionId, SIGNED_OUT_ELSEWHERE_REASON))) throw new SessionNotFoundError();
+}
+
+export interface RevokeOtherSessionsInput {
+  userId: string;
+  /**
+   * The caller's session (its access token's `sid`); none for a token issued
+   * before sessions.
+   */
+  sid: string | undefined;
+  /** The token version the caller's access token was admitted with. */
+  admittedVersion: number;
+  password: string;
+  /**
+   * The caller's trusted-device token, when it sent one: re-issued under the
+   * new version if it is valid for this account at the old one.
+   */
+  trustedDeviceToken: string | undefined;
+  /**
+   * For a caller whose token names no session: its new session's "Remember me".
+   */
+  rememberMe: boolean;
+  /** For a caller whose token names no session: its new session's label. */
+  label: SessionLabel;
+}
+
+/**
+ * POST /auth/sessions/revoke-others: sign out of every other session of the
+ * account, after the password step-up, keeping the caller signed in. ONE
+ * transaction, the order of the password change and a ban:
+ *  1. the account row locked ('update' mode) and still at the caller's
+ *     admitted version (lockAccountAtVersion: a reset, a ban, a password
+ *     change or another of these that committed meanwhile refuses with 401
+ *     'Session invalidated'; an account gone, 401 'User not found');
+ *  2. the account's token version bumped: every token of the old version
+ *     dies at once, the access tokens of every other device, the refresh
+ *     tokens issued before sessions, the trusted-device tokens;
+ *  3. the caller's own session re-keyed to the new version and a new
+ *     generation (only while it holds the admitted version), or, for a
+ *     caller whose token names none, a new session opened;
+ *  4. every other session of the account deleted.
+ * The lock-wait budget (an account deletion or a ban can hold the account
+ * row for long); a deadlock victim is run again whole, every check with it.
+ * After the commit: every other session's sockets are told and every
+ * socket of the account closed, the caller's too (revokeOtherSessionSockets:
+ * opened on the old version's tokens, it reopens with the fresh pair), and
+ * the answer carries the caller's fresh
+ * pair, the number of other live sessions ended and, when the request
+ * carried one valid for this account at the old version, the caller's
+ * trusted-device token re-issued under the new one with the same expiry.
+ */
+export async function revokeOtherSessions(input: RevokeOtherSessionsInput): Promise<RevokeOtherSessionsResponse> {
+  const { userId, sid, admittedVersion } = input;
+  await requireAccountPassword(userId, input.password);
+
+  // The trusted-device token is checked against the version the transaction
+  // requires; it is signed again only once the bump has committed
+  const trusted = input.trustedDeviceToken !== undefined ? readTrustedDeviceToken(input.trustedDeviceToken) : null;
+  const keepTrust = trusted !== null && trusted.userId === userId && trusted.tokenVersion === admittedVersion;
+
+  const outcome = await retryOnTransactionConflict(
+    () => prisma.$transaction(async (tx) => {
+      await lockAccountAtVersion(tx, userId, admittedVersion);
+      const bumped = await tx.user.update({
+        where: { id: userId },
+        data: { tokenVersion: { increment: 1 } },
+        select: { id: true, username: true, role: true, tokenVersion: true },
+      });
+      const account = { userId: bumped.id, username: bumped.username, role: bumped.role, tokenVersion: bumped.tokenVersion };
+      let tokens: SessionTokens;
+      let keepId: string;
+      if (sid !== undefined) {
+        tokens = await rekeySession(tx, account, sid, admittedVersion);
+        keepId = sid;
+      } else {
+        const opened = await openSession(tx, account, { rememberMe: input.rememberMe, label: input.label, accountGoneMessage: 'User not found' });
+        tokens = opened.tokens;
+        keepId = opened.sessionId;
+      }
+      const others = await endOtherSessions(tx, userId, keepId, admittedVersion);
+      return { tokens, live: others.live, newVersion: bumped.tokenVersion };
+    }, LOCK_WAIT_TRANSACTION_OPTIONS),
+    '[Auth] Signing out of the other sessions',
+  );
+
+  // Committed: nothing below may throw (best effort, logged)
+  revokeOtherSessionSockets(userId, sid, SIGNED_OUT_ELSEWHERE_REASON);
+  let trustedDeviceToken: string | undefined;
+  if (keepTrust) {
+    try {
+      trustedDeviceToken = signTrustedDeviceToken(userId, outcome.newVersion, trusted.exp);
+    } catch (err) {
+      console.warn('[Auth] The trusted-device token could not be re-issued:', err instanceof Error ? err.message : err);
+    }
+  }
+  return {
+    revoked: outcome.live,
+    accessToken: outcome.tokens.accessToken,
+    refreshToken: outcome.tokens.refreshToken,
+    ...(trustedDeviceToken !== undefined ? { trustedDeviceToken } : {}),
+  };
 }
 
 export async function verifyEmail(token: string) {

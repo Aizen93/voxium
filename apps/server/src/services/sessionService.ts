@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import {
   OPAQUE_ID_RE, SESSIONS, SESSION_CLIENT_HINTS, SESSION_CLIENT_KINDS, SESSION_CLIENT_OSES, SESSION_ENDED_REASON,
-  type SessionClientHint, type SessionClientKind, type SessionClientOs,
+  type SessionClientHint, type SessionClientKind, type SessionClientOs, type SessionSummary,
 } from '@voxium/shared';
 import { prisma } from '../utils/prisma';
 import { UnauthorizedError } from '../utils/errors';
@@ -606,6 +606,56 @@ export async function revokeSession(userId: string, sid: string, reason: string)
   const deleted = await store.deleteSession(prisma, sid, userId);
   if (deleted > 0) revokeSessionSockets(userId, sid, reason);
   return deleted > 0;
+}
+
+// ─── The list, and signing out of the other sessions ─────────────────────────
+
+/**
+ * The most sessions the list shows: the cap, with room for sign-ins that raced
+ * it.
+ */
+export const SESSION_LIST_MAX = SESSIONS.MAX_PER_ACCOUNT * 2;
+
+function listedKind(value: string): SessionClientKind {
+  return (SESSION_CLIENT_KINDS as readonly string[]).includes(value) ? (value as SessionClientKind) : 'unknown';
+}
+
+function listedOs(value: string): SessionClientOs {
+  return (SESSION_CLIENT_OSES as readonly string[]).includes(value) ? (value as SessionClientOs) : 'other';
+}
+
+/**
+ * GET /auth/sessions: the account's live sessions (store.listLiveSessions),
+ * each as its label from the closed lists, the day it was signed in and the
+ * hour it last renewed itself, and whether it is the caller's own
+ * (`currentSid`, the access token's; none is when the token names none).
+ */
+export async function listSessions(userId: string, currentSid: string | undefined): Promise<SessionSummary[]> {
+  const rows = await store.listLiveSessions(prisma, userId, currentSid ?? null, SESSION_LIST_MAX);
+  return rows.map((r) => ({
+    id: r.id,
+    clientKind: listedKind(r.clientKind),
+    clientOs: listedOs(r.clientOs),
+    signedInAt: new Date(r.signedInAt * 1000).toISOString(),
+    lastActiveAt: new Date(r.lastActiveAt * 1000).toISOString(),
+    current: currentSid !== undefined && r.id === currentSid,
+  }));
+}
+
+/**
+ * Signing out of every other session, in the transaction that bumped the
+ * account's version: every session but `keepId` deleted (their sockets are
+ * the caller's to end after the commit). The ids, and how many of them were
+ * live at `liveVersion`, the version before the bump.
+ */
+export async function endOtherSessions(
+  db: SessionDb,
+  userId: string,
+  keepId: string,
+  liveVersion: number,
+): Promise<{ ended: string[]; live: number }> {
+  const rows = await store.deleteOtherSessions(db, userId, keepId, liveVersion);
+  return { ended: rows.map((r) => r.id), live: rows.filter((r) => r.live).length };
 }
 
 // ─── The access check (authenticate, the socket handshake and its re-check) ──
