@@ -7,7 +7,10 @@ import {
   getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage, announceSessionEnded,
 } from '../services/tokenStorage';
 import { endSessionOnServer, holdReplacedSession, endReplacedSession } from '../services/sessionRevocation';
-import { endSessionRenewals } from '../services/session';
+import type { AxiosRequestConfig } from 'axios';
+import {
+  endSessionRenewals, runCredentialChange, refreshAccessToken, SessionLostError, CREDENTIAL_CHANGE_TIMEOUT_MS,
+} from '../services/session';
 import { isAuthRefusal } from '../services/authRefusal';
 import { accountDeletionInFlight, accountDeletionSettled, beginAccountDeletion } from '../services/accountDeletion';
 import { useServerStore } from './serverStore';
@@ -19,6 +22,7 @@ import i18n from '../i18n';
 import { getTranslatedError } from '../utils/serverErrors';
 import type {
   User, RegistrationConsent, LoginRequest, TotpVerifyRequest, RegisterCompleteRequest, ChangePasswordRequest,
+  RevokeOtherSessionsRequest, RevokeOtherSessionsResponse,
 } from '@voxium/shared';
 import { sessionClientHint } from '../services/sessionClient';
 import { PowExpiredError, PowAbortedError, SIGNUP, USERNAME_TAKEN_MESSAGE } from '@voxium/shared';
@@ -64,6 +68,77 @@ export interface LogoutOptions {
 
 /** What a logout found: the session cleared, or another session stored meanwhile (kept; the page reloads onto it). */
 export type LogoutOutcome = 'cleared' | 'replaced';
+
+/** What "sign out of all other sessions" did. */
+export interface RevokeOtherSessionsResult {
+  /** The other sessions that were live and are now ended (rows: a token issued before sessions and never used since is not counted). */
+  revoked: number;
+}
+
+/**
+ * The request of a credential change: it renews nothing itself (renewals are
+ * held until its answer is stored, services/session.ts), and its deadline
+ * bounds that hold.
+ */
+function credentialChangeRequest(): AxiosRequestConfig & { _noRenewal: true } {
+  return { _noRenewal: true, timeout: CREDENTIAL_CHANGE_TIMEOUT_MS };
+}
+
+/**
+ * Store the pair a credential change answered, when it carried one and the
+ * session the change began in has not ended meanwhile: the server re-keyed
+ * this device's session to the new version. The server then disconnects
+ * every socket opened with the old tokens, this one included: it reopens
+ * with the new access token (never force:logout — the session is valid).
+ */
+function storeCredentialChangePair(answer: { accessToken?: unknown; refreshToken?: unknown } | undefined, stillCurrent: () => boolean): void {
+  const accessToken = answer?.accessToken;
+  const refreshToken = answer?.refreshToken;
+  if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || !accessToken || !refreshToken) return;
+  if (!stillCurrent()) {
+    console.warn('[Auth] The credential change answered after the session ended — its pair is not stored');
+    return;
+  }
+  setTokens(accessToken, refreshToken);
+  reconnectSocketAfterCredentialChange(accessToken);
+}
+
+/**
+ * A credential change, its rules kept in one place: one at a time, renewals
+ * held around it (runCredentialChange), the socket's own disconnect by the
+ * server not answered with the old token meanwhile (beginCredentialChange).
+ * A 401 means the account moved under the request (a reset, a ban, another
+ * change committed first) or this session ended: once the hold is lifted the
+ * session is renewed, and a refused renewal signs out (services/session.ts);
+ * the error is the caller's either way. An answer lost after the commit
+ * leaves a pair of the old version: its next renewal is refused, a normal
+ * session loss.
+ */
+async function credentialChange<T>(send: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
+  try {
+    return await runCredentialChange(async (stillCurrent) => {
+      const endCredentialChange = beginCredentialChange();
+      try {
+        return await send(stillCurrent);
+      } finally {
+        endCredentialChange();
+      }
+    });
+  } catch (err) {
+    if ((err as { response?: { status?: unknown } } | null)?.response?.status === 401) {
+      try {
+        await refreshAccessToken();
+      } catch (renewalErr) {
+        // A refusal has ended the session already; anything else is a
+        // passing failure the next request tries again
+        if (!(renewalErr instanceof SessionLostError)) {
+          console.warn('[Auth] Could not renew the session after a refused credential change:', renewalErr instanceof Error ? renewalErr.message : String(renewalErr));
+        }
+      }
+    }
+    throw err;
+  }
+}
 
 interface AuthState {
   user: User | null;
@@ -132,7 +207,20 @@ interface AuthState {
   updateProfile: (fields: { displayName?: string; bio?: string }) => Promise<void>;
   forgotPassword: (email: string) => Promise<string>;
   resetPassword: (token: string, password: string) => Promise<string>;
+  /**
+   * A credential change (services/session.ts runCredentialChange): renewals
+   * are held until the answer is stored, the socket is reopened with the
+   * new access token, a 401 renews (a refused renewal signs out).
+   */
   changePassword: (currentPassword: string, newPassword: string) => Promise<string>;
+  /**
+   * "Sign out of all other sessions" (`POST /auth/sessions/revoke-others`),
+   * behind the account password. The same rules as the password change; the
+   * device's trusted-device token is sent, the one that comes back stored,
+   * and one sent that does not come back is dropped (it died with the
+   * version). Resolves how many other sessions were ended.
+   */
+  revokeOtherSessions: (password: string) => Promise<RevokeOtherSessionsResult>;
   resendVerification: () => Promise<void>;
   /** Accept the Terms of Service and the Privacy Policy from an existing
    *  account (one that predates consent-at-signup). Clears the gate the
@@ -738,24 +826,47 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // It stores a renewed pair: never while an account deletion of this
     // client is in flight (services/accountDeletion.ts)
     if (accountDeletionInFlight()) await accountDeletionSettled();
-    // The server disconnects this socket when the change commits, possibly
-    // before the answer arrives: no reopen with the old token meanwhile
-    const endCredentialChange = beginCredentialChange();
-    try {
+    return credentialChange(async (stillCurrent) => {
       const body: ChangePasswordRequest = { currentPassword, newPassword, rememberMe: isRemembered(), client: sessionClientHint() };
-      const { data } = await api.post('/auth/change-password', body);
+      const { data } = await api.post('/auth/change-password', body, credentialChangeRequest());
       // Store fresh tokens so the current session survives the tokenVersion bump
-      if (data.data?.accessToken && data.data?.refreshToken) {
-        setTokens(data.data.accessToken, data.data.refreshToken);
-        // The server disconnects every socket opened with the old tokens, this
-        // one included: reopen it with the new one (never force:logout — the
-        // session is still valid)
-        reconnectSocketAfterCredentialChange(data.data.accessToken);
-      }
+      storeCredentialChangePair(data.data, stillCurrent);
       return data.message;
-    } finally {
-      endCredentialChange();
-    }
+    });
+  },
+
+  revokeOtherSessions: async (password) => {
+    // as in changePassword
+    if (accountDeletionInFlight()) await accountDeletionSettled();
+    return credentialChange(async (stillCurrent) => {
+      // The trusted-device token is of the version this moves away from: the
+      // server re-issues it under the new one when it is sent and valid
+      const sentTrustedDeviceToken = getTrustedDeviceToken();
+      const body: RevokeOtherSessionsRequest = {
+        password,
+        rememberMe: isRemembered(),
+        client: sessionClientHint(),
+        ...(sentTrustedDeviceToken ? { trustedDeviceToken: sentTrustedDeviceToken } : {}),
+      };
+      const { data } = await api.post<{ success: boolean; data: RevokeOtherSessionsResponse }>(
+        '/auth/sessions/revoke-others', body, credentialChangeRequest(),
+      );
+      const answer: Partial<RevokeOtherSessionsResponse> = data?.data ?? {};
+      // The pair may be absent (a later server may end the others without
+      // moving this device to a new one): only what came back is stored
+      storeCredentialChangePair(answer, stillCurrent);
+      if (stillCurrent()) {
+        if (typeof answer.trustedDeviceToken === 'string' && answer.trustedDeviceToken.length > 0) {
+          setTrustedDeviceToken(answer.trustedDeviceToken);
+        } else if (sentTrustedDeviceToken && getTrustedDeviceToken() === sentTrustedDeviceToken) {
+          // Sent and not given back: dead after the version bump (and only
+          // that one: another tab may have stored a new one meanwhile)
+          clearTrustedDeviceToken();
+        }
+      }
+      const revoked = typeof answer.revoked === 'number' && Number.isInteger(answer.revoked) && answer.revoked >= 0 ? answer.revoked : 0;
+      return { revoked };
+    });
   },
 
   deleteAccount: async (password, totpCode) => {

@@ -5,8 +5,12 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TFunction } from 'i18next';
-import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
-import { translateServerError, ALL_ERROR_KEYS } from '../../utils/serverErrors';
+import {
+  LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE, CONVERSATION_READ_ONLY_MESSAGE,
+  SESSION_NOT_FOUND_MESSAGE, SESSION_REVOKE_CURRENT_MESSAGE, TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE, REMEMBER_ME_INVALID_MESSAGE,
+  SIGNED_OUT_ELSEWHERE_REASON, SESSION_ENDED_REASON,
+} from '@voxium/shared';
+import { translateServerError, ALL_ERROR_KEYS, SESSION_ERROR_KEYS } from '../../utils/serverErrors';
 
 /**
  * Every English sentence a normal user can receive from the server is shown in
@@ -61,6 +65,13 @@ const EXACT: Row[] = [
   { msg: 'You must accept the Privacy Policy', key: 'mustAcceptPrivacy' },
   { msg: 'You must accept the Terms of Service and the Privacy Policy', key: 'mustAcceptTermsAndPrivacy' },
   { msg: 'Password is incorrect', key: 'passwordIncorrect' },
+  // Sign-in sessions (shared constants, read by the server and here)
+  { msg: SESSION_NOT_FOUND_MESSAGE, key: 'sessionNotFound' },
+  { msg: SESSION_REVOKE_CURRENT_MESSAGE, key: 'sessionRevokeCurrent' },
+  { msg: TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE, key: 'trustedDeviceTokenInvalid' },
+  { msg: REMEMBER_ME_INVALID_MESSAGE, key: 'rememberMeInvalid' },
+  { msg: SIGNED_OUT_ELSEWHERE_REASON, key: 'signedOutElsewhere' },
+  { msg: SESSION_ENDED_REASON, key: 'sessionEnded' },
   { msg: 'Two-factor authentication code is required', key: 'twoFactorCodeRequired' },
   { msg: 'Invalid two-factor authentication code', key: 'invalidTwoFactorCode' },
   { msg: 'Email already verified', key: 'emailAlreadyVerified' },
@@ -305,6 +316,10 @@ describe('the serverErrors.* keys exist in all 11 locales', () => {
     expect(ALL_ERROR_KEYS.length).toBeGreaterThan(250);
     const missing = bundles.flatMap((b) => ALL_ERROR_KEYS.filter((k) => !(typeof b.errors[k] === 'string' && b.errors[k].length > 0)).map((k) => `${b.name}: ${k}`));
     expect(missing).toEqual([]);
+  });
+
+  it('the session subset is mapped (every key a member can meet on the session screen)', () => {
+    expect(SESSION_ERROR_KEYS.filter((k) => !ALL_ERROR_KEYS.includes(k))).toEqual([]);
   });
 
   it('every translation names the same {{placeholders}} as English', () => {

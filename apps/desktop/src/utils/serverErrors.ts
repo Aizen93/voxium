@@ -1,7 +1,11 @@
 import type { TFunction } from 'i18next';
 import { DMConversationReadOnlyError } from './dmParticipant';
 import axios from 'axios';
-import { LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE, VOICE_SPEAK_REFUSED_MESSAGE, CONVERSATION_READ_ONLY_MESSAGE } from '@voxium/shared';
+import {
+  LIMITS, USERNAME_TAKEN_MESSAGE, SIGNUP_CODE_INVALID_MESSAGE, SIGNUP_EMAIL_REGISTERED_MESSAGE, VOICE_SPEAK_REFUSED_MESSAGE, CONVERSATION_READ_ONLY_MESSAGE,
+  SESSION_NOT_FOUND_MESSAGE, SESSION_REVOKE_CURRENT_MESSAGE, TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE, REMEMBER_ME_INVALID_MESSAGE,
+  SIGNED_OUT_ELSEWHERE_REASON, SESSION_ENDED_REASON,
+} from '@voxium/shared';
 
 /**
  * Maps known server error strings → i18n keys under "serverErrors.*".
@@ -208,6 +212,13 @@ const ERROR_MAP: Record<string, string> = {
   'You must accept the Privacy Policy': 'mustAcceptPrivacy',
   'You must accept the Terms of Service and the Privacy Policy': 'mustAcceptTermsAndPrivacy',
   'Password is incorrect': 'passwordIncorrect',
+  // ─── Sign-in sessions (routes/auth.ts /auth/sessions, the force:logout reasons) ───
+  [SESSION_NOT_FOUND_MESSAGE]: 'sessionNotFound',
+  [SESSION_REVOKE_CURRENT_MESSAGE]: 'sessionRevokeCurrent',
+  [TRUSTED_DEVICE_TOKEN_INVALID_MESSAGE]: 'trustedDeviceTokenInvalid',
+  [REMEMBER_ME_INVALID_MESSAGE]: 'rememberMeInvalid',
+  [SIGNED_OUT_ELSEWHERE_REASON]: 'signedOutElsewhere',
+  [SESSION_ENDED_REASON]: 'sessionEnded',
   'Two-factor authentication code is required': 'twoFactorCodeRequired',
   'Invalid two-factor authentication code': 'invalidTwoFactorCode',
   'Email already verified': 'emailAlreadyVerified',
@@ -451,6 +462,17 @@ export const DISCOVERY_ERROR_KEYS: readonly string[] = [
   'banNotFound', 'cannotTransferToBanned', 'cannotReportOwnServer', 'noPermissionManageMembers', 'noPermissionKickMembers',
   'cannotKickHigherRole', 'serverNameUnsupportedChars', 'descriptionUnsupportedChars', 'descriptionTooLong', 'reasonUnsupportedChars', 'reasonTooLong',
   'tagsNotSupported', 'tooManyTags', 'joinMessageUnsupportedChars', 'joinMessageTooLong', 'refineSearch', 'serverNotFound',
+];
+
+/**
+ * The sign-in sessions subset: every answer of `/auth/sessions` and of
+ * revoke-others a person can meet (the step-up password, the rate limit,
+ * a session ended under the request), for the session screen's parity test.
+ */
+export const SESSION_ERROR_KEYS: readonly string[] = [
+  'sessionNotFound', 'sessionRevokeCurrent', 'trustedDeviceTokenInvalid', 'rememberMeInvalid',
+  'signedOutElsewhere', 'sessionEnded', 'passwordIncorrect', 'passwordRequired', 'sessionInvalidated',
+  'userNotFound', 'tooManyRequests',
 ];
 
 /** The incoming-webhooks subset (exact strings AND patterns), for the locale parity test. */

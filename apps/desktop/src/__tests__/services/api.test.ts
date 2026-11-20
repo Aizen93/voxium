@@ -121,6 +121,18 @@ describe('api — the request interceptor', () => {
     await expect(requestInterceptor()(config())).rejects.toBeInstanceOf(session.SessionLostError);
   });
 
+  it('a credential change (_noRenewal) renews nothing before sending, nor on its 401: the change holds renewals until its answer is stored', async () => {
+    session.shouldRenewBeforeSending.mockReturnValue(true);
+    const out = await requestInterceptor()({ ...config(), method: 'post', _noRenewal: true }) as { headers: Record<string, string> };
+    expect(out.headers.Authorization).toBe('Bearer access-old');
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+
+    const err = { response: { status: 401 }, config: { ...out } };
+    await expect(responseRejected()(err)).rejects.toBe(err);
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(fake.instance).not.toHaveBeenCalled();
+  });
+
   it('sends no header without a stored token', async () => {
     storage.getAccessToken.mockReturnValue(null as never);
 

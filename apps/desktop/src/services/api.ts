@@ -16,6 +16,13 @@ export type SessionRequestConfig = InternalAxiosRequestConfig & {
   _renewalFailed?: boolean;
   /** The session the request was sent under (`currentSessionEpoch()` at send time). */
   _sessionEpoch?: number;
+  /**
+   * A credential change (a password change, signing out of the other
+   * sessions): renewals are held until its answer is stored
+   * (session.runCredentialChange), so the request renews nothing itself,
+   * neither before sending nor on a 401; the caller handles that 401.
+   */
+  _noRenewal?: boolean;
 };
 
 /** The token a request carried, from its Authorization header (an AxiosHeaders on a sent request, a plain object before). */
@@ -150,7 +157,7 @@ export const api = axios.create({
 // and the renewal failing leaves the request to the 401 path below.
 api.interceptors.request.use(async (config) => {
   let token = getAccessToken();
-  if (token && shouldRenewBeforeSending(token)) {
+  if (token && !(config as SessionRequestConfig)._noRenewal && shouldRenewBeforeSending(token)) {
     try {
       token = await refreshAccessToken();
     } catch (err) {
@@ -192,7 +199,7 @@ api.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config as SessionRequestConfig | undefined;
 
-    if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !originalRequest._noRenewal) {
       originalRequest._retry = true;
       const sent = bearerOf(originalRequest);
       if (!sent || !getRefreshToken()) return Promise.reject(error);

@@ -64,7 +64,7 @@ vi.mock('../../services/tokenStorage', () => ({
 import {
   accessTokenExpiresAt, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, getFreshAccessToken,
   endSessionRenewals, isDefinitiveRefreshFailure, SessionLostError, setSessionLostNavigation, _resetSessionForTests,
-  _setRefreshLocksForTests, type RefreshLockManager,
+  _setRefreshLocksForTests, runCredentialChange, CREDENTIAL_CHANGE_TIMEOUT_MS, type RefreshLockManager,
   TOKEN_EXPIRY_SKEW_MS, REFRESH_TIMEOUT_MS, REFRESH_RETRY_DELAY_MS, REFRESH_LOCK_NAME, REFRESH_LOCK_WAIT_MS, API_BASE,
 } from '../../services/session';
 
@@ -852,5 +852,117 @@ describe('session — a session-ending refusal clears only the session it refuse
     expect(http.post).not.toHaveBeenCalled();
     expect(storage.clearSessionTokens).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — a credential change holds the renewals around it', () => {
+  it('a renewal in flight lands (and is stored) BEFORE the change goes out', async () => {
+    let finish!: (v: unknown) => void;
+    http.post.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+    const renewal = refreshAccessToken();
+    const change = vi.fn(async () => 'changed');
+
+    const pending = runCredentialChange(change);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(change).not.toHaveBeenCalled();
+
+    finish(renewed(freshToken(), 'refresh-renewed'));
+    await expect(renewal).resolves.toBeTruthy();
+    await expect(pending).resolves.toBe('changed');
+    expect(storage.setTokens.mock.invocationCallOrder[0]).toBeLessThan(change.mock.invocationCallOrder[0]);
+  });
+
+  it('renewals asked for during the change wait for it, then take the pair it stored and send nothing', async () => {
+    storage.access = freshToken();
+    let answer!: () => void;
+    const pending = runCredentialChange(() => new Promise<string>((resolve) => {
+      answer = () => {
+        // the change stores the pair of the new version
+        storage.access = freshToken();
+        storage.refresh = 'refresh-new-version';
+        resolve('changed');
+      };
+    }));
+    await vi.waitFor(() => expect(answer).toBeDefined());
+
+    const held = refreshAccessToken();
+    await Promise.resolve();
+    expect(http.post).not.toHaveBeenCalled();
+
+    answer();
+    await expect(pending).resolves.toBe('changed');
+    await expect(held).resolves.toBe(storage.access);
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('one change at a time: the second starts once the first has settled', async () => {
+    storage.access = freshToken();
+    let releaseFirst!: () => void;
+    const first = vi.fn(() => new Promise<string>((resolve) => { releaseFirst = () => resolve('first'); }));
+    const second = vi.fn(async () => 'second');
+
+    const a = runCredentialChange(first);
+    const b = runCredentialChange(second);
+    await vi.waitFor(() => expect(first).toHaveBeenCalled());
+    expect(second).not.toHaveBeenCalled();
+
+    releaseFirst();
+    await expect(a).resolves.toBe('first');
+    await expect(b).resolves.toBe('second');
+  });
+
+  it('a change that fails lifts the hold, and the next renewal goes out', async () => {
+    storage.access = freshToken();
+    await expect(runCredentialChange(async () => { throw new Error('400'); })).rejects.toThrow('400');
+
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    await expect(refreshAccessToken()).resolves.toBe('access-new');
+  });
+
+  it('an expired access token is renewed inline before the change, without waiting for itself', async () => {
+    storage.access = expiredToken();
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const change = vi.fn(async () => {
+      expect(storage.access).toBe('access-new');
+      return 'changed';
+    });
+
+    await expect(runCredentialChange(change)).resolves.toBe('changed');
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('with no session there is nothing to change: SessionLostError, nothing sent', async () => {
+    storage.access = null;
+    const change = vi.fn(async () => 'changed');
+    await expect(runCredentialChange(change)).rejects.toBeInstanceOf(SessionLostError);
+    expect(change).not.toHaveBeenCalled();
+  });
+
+  it('stillCurrent() is false once the session ended (logout) while the change was out', async () => {
+    storage.access = freshToken();
+    const seen: boolean[] = [];
+    await runCredentialChange(async (stillCurrent) => {
+      seen.push(stillCurrent());
+      endSessionRenewals();
+      seen.push(stillCurrent());
+      return 'changed';
+    });
+    expect(seen).toEqual([true, false]);
+  });
+
+  it('in the browser build the change runs under the renewal lock, after reading the shared storage', async () => {
+    storage.shared = true;
+    storage.access = freshToken();
+    const request = vi.fn((_name: string, _opts: unknown, callback: () => Promise<unknown>) => callback());
+    _setRefreshLocksForTests({ request });
+    const change = vi.fn(async () => {
+      expect(storage.followSharedSession).toHaveBeenCalled();
+      return 'changed';
+    });
+
+    await expect(runCredentialChange(change)).resolves.toBe('changed');
+    expect(request).toHaveBeenCalledWith(REFRESH_LOCK_NAME, expect.objectContaining({ mode: 'exclusive' }), expect.any(Function));
+    expect(CREDENTIAL_CHANGE_TIMEOUT_MS).toBe(75_000);
   });
 });

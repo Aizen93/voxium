@@ -259,11 +259,96 @@ export function refreshAccessToken(): Promise<string> {
   // The token this renewal was asked for with: another tab's newer pair,
   // found once the lock is held, makes the request unnecessary
   const intended = getRefreshToken();
-  const run = (async () => underRefreshLock(() => renew(epoch, intended)))().finally(() => {
+  const run = (async () => {
+    // A credential change of this client is on the wire: its answer is the
+    // new pair, and a refresh token of the old version would be refused once
+    // it commits. Waited for before the lock (the change holds it)
+    while (renewalHold) await renewalHold;
+    return underRefreshLock(() => renew(epoch, intended));
+  })().finally(() => {
     if (refreshInFlight === run) refreshInFlight = null;
   });
   refreshInFlight = run;
   return run;
+}
+
+// ─── Credential changes ──────────────────────────────────────────────────────
+//
+// A password change and "sign out of all other sessions" move the account to
+// a new token version: once one commits, every refresh token of the old
+// version is refused, this device's included, and the answer carries the
+// device's new pair. So around either of them (shared RevokeOtherSessionsResponse):
+// a renewal in flight lands first; renewals are then held until the answer is
+// stored (a renewal sent meanwhile would carry an old-version token and be
+// refused); a renewal answer that arrives after the change is never stored
+// (its pair is of the old version: renew() drops any answer whose token is no
+// longer the stored one); one change at a time.
+
+/** A credential change in flight: every renewal of this client waits for it. */
+let renewalHold: Promise<void> | null = null;
+/** Credential changes run one after the other. */
+let credentialChangeQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * The deadline of a credential change's request: it bounds how long renewals
+ * stay held. Longer than the server's own budget for the transaction (60 s,
+ * plus 10 s to get a connection), so a slow commit is still answered.
+ */
+export const CREDENTIAL_CHANGE_TIMEOUT_MS = 75_000;
+
+/**
+ * Run a credential change of this client (`change` sends it and stores its
+ * answer). In order: one change at a time; a renewal in flight lands first;
+ * renewals are held until `change` has settled; in the browser build the
+ * change runs under the renewal lock, so no other tab renews meanwhile
+ * either, after reading the shared storage again; an access token that has
+ * expired is renewed inline, under that lock, before the change goes out.
+ * `change` receives `stillCurrent()`, false once the session has ended
+ * (logout) since the change began: its answer must then store nothing.
+ *
+ * The request `change` sends must not renew by itself (the api's
+ * `_noRenewal`): a renewal waiting for the change it is part of would never
+ * settle. A 401 answer is the caller's to handle once this has settled
+ * (renew, and a refused renewal signs out).
+ */
+export function runCredentialChange<T>(change: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
+  const run = credentialChangeQueue.then(() => credentialChangeStep(change));
+  credentialChangeQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function credentialChangeStep<T>(change: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  renewalHold = hold;
+  // Started before the hold, so not held by it: its answer is stored first
+  const before = refreshInFlight;
+  try {
+    if (before) {
+      try {
+        await before;
+      } catch (err) {
+        if (err instanceof SessionLostError) throw err;
+        // A transient failure: the stored token decides below
+      }
+    }
+    const epoch = sessionEpoch;
+    return await underRefreshLock(async () => {
+      followOtherTabsOrStop();
+      const token = getAccessToken();
+      if (!token) throw new SessionLostError('No session for the credential change');
+      if (shouldRenewBeforeSending(token)) await renew(epoch, getRefreshToken());
+      return change(() => epoch === sessionEpoch);
+    });
+  } finally {
+    if (renewalHold === hold) renewalHold = null;
+    release();
+  }
 }
 
 /** The answer of a refresh, checked: two strings, or a transient failure (the tokens stay). */
@@ -460,6 +545,8 @@ export async function getFreshAccessToken(): Promise<string | null> {
 /** @internal tests */
 export function _resetSessionForTests(): void {
   refreshInFlight = null;
+  renewalHold = null;
+  credentialChangeQueue = Promise.resolve();
   sessionLost = false;
   sessionEpoch = 0;
   clockOffsetMs = 0;

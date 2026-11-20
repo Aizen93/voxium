@@ -23,7 +23,14 @@ vi.mock('../../services/socket', () => ({
   getConnectionStatus: vi.fn(() => 'connected'),
 }));
 
-const session = vi.hoisted(() => ({ SessionLostError: class SessionLostError extends Error {}, endSessionRenewals: vi.fn() }));
+const session = vi.hoisted(() => ({
+  SessionLostError: class SessionLostError extends Error {},
+  endSessionRenewals: vi.fn(),
+  // A credential change runs at once here; its holds and lock are services/session.ts's own tests
+  runCredentialChange: vi.fn(<T,>(change: (stillCurrent: () => boolean) => Promise<T>) => change(() => true)),
+  refreshAccessToken: vi.fn(async () => 'access-renewed'),
+  CREDENTIAL_CHANGE_TIMEOUT_MS: 75_000,
+}));
 vi.mock('../../services/session', () => session);
 vi.mock('../../stores/resetStores', () => ({ resetAccountStores: vi.fn() }));
 // The sign-out's server call and its retries: never a real request from a unit test
