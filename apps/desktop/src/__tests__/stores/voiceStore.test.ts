@@ -1633,6 +1633,54 @@ describe('voiceStore — secure voice re-announcement keying (spec 21)', () => {
 
     expect(svk.onParticipantJoined).not.toHaveBeenCalled();
   });
+
+  describe('a departure naming an E2E epoch', () => {
+    const listed = vu('peer', { deviceId: 'device-peer0001', epoch: 'epochPEER0002' });
+
+    beforeEach(async () => {
+      useVoiceStore.getState().addUserToChannel('ch-sec', listed, 'srv-1');
+      await flushAsync();
+      svk.onParticipantLeft.mockClear();
+    });
+
+    it('of a session other than the one listed changes nothing', async () => {
+      const applied = useVoiceStore.getState().removeUserFromChannel('ch-sec', 'peer', 'epochPEER0001');
+      await flushAsync();
+
+      expect(applied).toBe(false);
+      expect(useVoiceStore.getState().channelUsers.get('ch-sec')).toEqual([listed]);
+      expect(svk.onParticipantLeft).not.toHaveBeenCalled();
+    });
+
+    it('of the session listed removes the row and passes the epoch on', async () => {
+      const applied = useVoiceStore.getState().removeUserFromChannel('ch-sec', 'peer', 'epochPEER0002');
+      await flushAsync();
+
+      expect(applied).toBe(true);
+      expect(useVoiceStore.getState().channelUsers.get('ch-sec')).toBeUndefined();
+      expect(svk.onParticipantLeft).toHaveBeenCalledWith('ch-sec', 'peer', 'epochPEER0002');
+    });
+
+    it('without an epoch applies as before', async () => {
+      const applied = useVoiceStore.getState().removeUserFromChannel('ch-sec', 'peer');
+      await flushAsync();
+
+      expect(applied).toBe(true);
+      expect(useVoiceStore.getState().channelUsers.get('ch-sec')).toBeUndefined();
+      expect(svk.onParticipantLeft).toHaveBeenCalledWith('ch-sec', 'peer', undefined);
+    });
+
+    it('for a row listed without an epoch applies as before', async () => {
+      useVoiceStore.setState({ channelUsers: new Map([['ch-sec', [vu('peer')]]]) });
+
+      const applied = useVoiceStore.getState().removeUserFromChannel('ch-sec', 'peer', 'epochPEER0001');
+      await flushAsync();
+
+      expect(applied).toBe(true);
+      expect(useVoiceStore.getState().channelUsers.get('ch-sec')).toBeUndefined();
+      expect(svk.onParticipantLeft).toHaveBeenCalledWith('ch-sec', 'peer', 'epochPEER0001');
+    });
+  });
 });
 
 describe('voiceStore — snapshot replays vs. the channel being re-joined', () => {

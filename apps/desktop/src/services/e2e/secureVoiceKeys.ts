@@ -26,17 +26,28 @@
 //    recognises only the key in use (given again, it keeps its count), so a
 //    key that has been replaced is never installed again.
 //  - A joiner is keyed with a post-arrival generation only (no past audio), and
-//    every departure rotates to a fresh key (no future audio). After an
-//    exclusion the key in use is one the excluded device was never sealed: a
-//    fresh rotation, except for a participant who was never keyed, or one
-//    excluded while a fresh rotation is sealing (it replaces the key they
-//    held).
+//    every departure rotates to a fresh key (no future audio); a departure
+//    naming another session than the one held for a participant is not
+//    theirs and changes nothing. After an exclusion the key in use is one the
+//    excluded device was never sealed: a fresh rotation, except for a
+//    participant who was never keyed, or one excluded while a fresh rotation
+//    is sealing (it replaces the key they held). A membership check excludes
+//    everyone it holds who must go (an identity change, no longer a member, a
+//    pinned device no longer published), and takes their one rotation, before
+//    it keys anyone; a participant whose retried vet it refuses is excluded
+//    without ever having been keyed. So nothing it seals derives from a key
+//    an excluded device holds. A vet whose own list read names a keyed
+//    participant's identity change keys nobody: the membership check it
+//    queues excludes that participant first, then retries the vet.
 //  - A participant excluded during a session is not keyed again in it: the
 //    epoch they were excluded under is recorded, and only an announcement
 //    with a new epoch is vetted again.
 //  - Neither a key nor seq is ever persisted. Teardown zero-fills only the
 //    current key; superseded generations, the peers' keys decoded here and the
 //    base64 copies sealed into Olm plaintexts are left to the garbage collector.
+//    A rotation for a session that has ended mints nothing, and a fresh key
+//    whose session ends while it is being sealed is never installed (it is the
+//    current key, which the teardown zero-filled).
 //  - Session epochs (mintEpoch) carry 96 random bits (16 random bytes, each
 //    mapped to one of 64 characters): their unpredictability is what stops an
 //    envelope withheld from an earlier session from installing.
@@ -239,22 +250,25 @@ async function vetParticipant(state: SecureVoiceSessionState, userId: string, de
   if (!state.members.has(userId)) {
     // The socket event claimed a participant the authoritative list doesn't
     // know — refetch once (they may have JUST been invited), then fail closed.
-    let members: Array<{ userId: string }>;
-    try {
-      ({ members } = await service.fetchChannelDeviceLists(state.channelId));
-    } catch (err) {
-      if (!(err instanceof E2EIdentityChangedError)) throw err;
-      await flagIdentityChanged(err.peerUserId);
-      // The list verifies every member, so it fails on any member whose
-      // identity changed. Only a change of their own is a verdict on this
-      // participant; another member's leaves them unvetted, and the next
-      // membership check retries them.
-      if (err.peerUserId === userId) throw err;
-      throw new Error(`the member list could not be verified for ${userId}: another member's identity changed`, { cause: err });
-    }
+    // The list verifies every member and is read collecting identity changes:
+    // each member it names is flagged, and only a change of the participant's
+    // own is a verdict on them; another member's does not hold their vet up.
+    const { members, identityChangedUserIds = [] } = await service.fetchChannelDeviceLists(
+      state.channelId,
+      { collectIdentityChanges: true },
+    );
+    for (const changed of identityChangedUserIds) await flagIdentityChanged(changed);
     state.members = new Set(members.map((m) => m.userId));
+    if (identityChangedUserIds.includes(userId)) throw new E2EIdentityChangedError(userId);
     if (!state.members.has(userId)) {
       throw new SecureVoiceError('binding-mismatch', `${userId} is not a member of channel ${state.channelId}`);
+    }
+    // A participant this session keyed whose identity change the answer names
+    // is excluded by a membership check before anyone else is keyed: this
+    // participant waits for it, and that check retries their vet right after.
+    if (identityChangedUserIds.some((changed) => state.peers.get(changed)?.vetted)) {
+      confirmMembership(state.channelId);
+      throw new Error(`${userId} is vetted by the membership check that follows: a keyed participant's identity changed`);
     }
   }
 
@@ -409,8 +423,17 @@ export async function beginSecureVoiceSession(
   const service = getE2EService(selfId);
 
   // Authoritative member list up front — also proves WE are a member and the
-  // E2E stack is alive before any media plumbing exists.
-  const { members } = await service.fetchChannelDeviceLists(channelId);
+  // E2E stack is alive before any media plumbing exists. Read collecting
+  // identity changes, so one member's unaccepted change does not stop the
+  // session from starting: each member it names is flagged, and stays in the
+  // member list. Nobody is keyed at start; a named member in the call is
+  // excluded by their vet, and a new session of theirs is vetted like any
+  // arrival.
+  const { members, identityChangedUserIds = [] } = await service.fetchChannelDeviceLists(
+    channelId,
+    { collectIdentityChanges: true },
+  );
+  for (const changed of identityChangedUserIds) await flagIdentityChanged(changed);
   if (opts?.isCurrent && !opts.isCurrent()) {
     throw new SecureVoiceSupersededError();
   }
@@ -625,11 +648,23 @@ async function keyVettedParticipantLocked(
   }
 }
 
-/** A participant left / was evicted: fresh key for everyone remaining. */
-export function onParticipantLeft(channelId: string, userId: string): void {
+/**
+ * A participant left / was evicted: fresh key for everyone remaining. `epoch`,
+ * when the departure carries one, is the epoch of the session that left: a
+ * departure naming another epoch than the one held for them (a late event of
+ * their previous session, after a new one was announced) changes nothing.
+ */
+export function onParticipantLeft(channelId: string, userId: string, epoch?: string): void {
   const state = sessions.get(channelId);
   if (!state) return;
   enqueue(state, async () => {
+    // Read in the step: the announcement of their new session may be queued
+    // ahead of this departure.
+    const held = state.peers.get(userId);
+    if (epoch && held && held.epoch !== epoch) {
+      console.warn(`[SecureVoice] Departure of a previous session of ${userId} ignored`);
+      return;
+    }
     // Clear the badge FIRST: an already-excluded peer is not in `peers`, so
     // the early return below would otherwise leave "N members can't be keyed"
     // on screen for the rest of the call after they have gone.
@@ -667,6 +702,8 @@ export function rotateFresh(channelId: string, why: string): void {
 }
 
 async function rotateFreshLocked(state: SecureVoiceSessionState): Promise<void> {
+  // A session that has ended rotates nothing: no key is minted for it.
+  if (state.ended) return;
   state.currentKey = mintKey();
   state.keyId += 1;
   if (state.keyId >= VOICE_KEY_ID_MAX) {
@@ -687,8 +724,10 @@ async function rotateFreshLocked(state: SecureVoiceSessionState): Promise<void> 
       console.error(`[SecureVoice] Fresh-key seal to ${userId} failed:`, err);
     }
   }
-  state.frames.setLocalKey(state.keyId, state.currentKey);
+  // A session that ended while the key was being sealed never installs it:
+  // it is the current key, which the teardown zero-filled.
   if (state.ended) return;
+  state.frames.setLocalKey(state.keyId, state.currentKey);
   // A participant whose identity the seal found changed (the seal flagged it)
   // is excluded once our frames have switched. The fresh key never reached
   // them, so their exclusion needs no further rotation.
@@ -724,31 +763,60 @@ export function confirmMembership(channelId: string): void {
     if (state.ended) return;
     state.members = new Set(members.map((m) => m.userId));
 
-    // A member whose identity changed since it was accepted is flagged, and
-    // excluded if they are in the call, exactly like the inbound-key identity
-    // path. The fresh rotation every exclusion takes (spec §21.4) runs at once,
-    // before anyone is keyed below. They stay in the member list: a new session
-    // of theirs goes through vetting like any arrival.
-    let identityExcluded = false;
+    // A member whose identity changed since it was accepted is flagged, in the
+    // call or not. They stay in the member list: a new session of theirs goes
+    // through vetting like any arrival.
+    const identityChanged = new Set(identityChangedUserIds);
     for (const userId of identityChangedUserIds) {
       await flagIdentityChanged(userId);
       if (state.ended) return;
-      const conflicted = state.peers.get(userId);
-      if (!conflicted) continue;
-      state.peers.delete(userId);
-      recordExclusion(state, userId, conflicted.epoch);
-      forgetPeer(state, userId);
-      await notifyPeerExcluded(channelId, userId, new E2EIdentityChangedError(userId));
-      identityExcluded = true;
     }
-    if (identityExcluded) await rotateFreshLocked(state);
+
+    // Everyone held who must go is excluded before anyone is keyed in the
+    // pass: an identity change, a participant no longer a member, a pinned
+    // device no longer published. When one of them had been keyed, one fresh
+    // rotation follows (spec §21.4), so nothing keyed below derives from a key
+    // an excluded device holds. A participant never keyed takes none, and one
+    // whose retried vet is refused below is excluded without having been keyed.
+    let keyedExcluded = false;
+    for (const [userId, peer] of [...state.peers.entries()]) {
+      let notice: unknown;
+      if (identityChanged.has(userId)) {
+        notice = new E2EIdentityChangedError(userId);
+      } else if (!state.members.has(userId)) {
+        // Keyed: removed without a notice, like a departure. Never vetted: the
+        // notice their vet gives a non-member.
+        notice = peer.vetted
+          ? undefined
+          : new SecureVoiceError('binding-mismatch', `${userId} is not a member of channel ${channelId}`);
+      } else if (peer.vetted && devicePublished(lists, userId, peer.deviceId) === false) {
+        // The device we pinned at vet time may since have been REVOKED — the
+        // stolen-laptop response. Revocation is not a membership change, so no
+        // event fires and the server never evicts them; without this check we
+        // would keep sealing every future key to a device its owner disowned.
+        console.warn(`[SecureVoice] Pinned device of ${userId} is no longer published — excluding`);
+        notice = new SecureVoiceError('device-revoked', 'the pinned device was revoked');
+      } else {
+        continue;
+      }
+      if (peer.vetted) keyedExcluded = true;
+      state.peers.delete(userId);
+      recordExclusion(state, userId, peer.epoch);
+      forgetPeer(state, userId);
+      if (notice) await notifyPeerExcluded(channelId, userId, notice);
+    }
+    if (state.ended) return;
+    if (keyedExcluded) await rotateFreshLocked(state);
     if (state.ended) return;
 
     // Retry peers whose vet failed transiently (a blip, a 429, a node
     // restarting). They are still in the channel and will never re-announce,
     // so this poll is their only way back into the session. An arrival among
     // them is keyed past the generation in use when they arrived, exactly as
-    // if their first vet had passed.
+    // if their first vet had passed. Their device is checked against this
+    // pass's list too, whatever their vet answered, and before any key: one
+    // the list no longer publishes is excluded as revoked, with no rotation
+    // (they were never keyed).
     for (const [userId, peer] of [...state.peers.entries()]) {
       if (peer.vetted) continue;
       try {
@@ -759,12 +827,22 @@ export function confirmMembership(channelId: string): void {
           recordExclusion(state, userId, peer.epoch);
           forgetPeer(state, userId);
           await notifyPeerExcluded(channelId, userId, err);
-        } else {
-          console.warn(`[SecureVoice] Re-vetting ${userId} failed transiently — retried at the next membership check:`, err);
+          continue;
         }
-        continue;
+        if (devicePublished(lists, userId, peer.deviceId) !== false) {
+          console.warn(`[SecureVoice] Re-vetting ${userId} failed transiently — retried at the next membership check:`, err);
+          continue;
+        }
       }
       if (state.ended) return;
+      if (devicePublished(lists, userId, peer.deviceId) === false) {
+        console.warn(`[SecureVoice] Pinned device of ${userId} is no longer published — excluding`);
+        state.peers.delete(userId);
+        recordExclusion(state, userId, peer.epoch);
+        forgetPeer(state, userId);
+        await notifyPeerExcluded(channelId, userId, new SecureVoiceError('device-revoked', 'the pinned device was revoked'));
+        continue;
+      }
       peer.vetted = true;
       try {
         await keyVettedParticipantLocked(state, userId, peer, 'fresh');
@@ -775,32 +853,18 @@ export function confirmMembership(channelId: string): void {
         console.warn(`[SecureVoice] Keying ${userId} after a passed re-vet failed — not retried here; recovery comes from the key requests:`, err);
       }
     }
-
-    let removed = false;
-    for (const [userId, peer] of [...state.peers.entries()]) {
-      if (!state.members.has(userId)) {
-        state.peers.delete(userId);
-        recordExclusion(state, userId, peer.epoch);
-        forgetPeer(state, userId);
-        removed = true;
-        continue;
-      }
-      // The device we pinned at vet time may since have been REVOKED — the
-      // stolen-laptop response. Revocation is not a membership change, so no
-      // event fires and the server never evicts them; without this check we
-      // would keep sealing every future key to a device its owner disowned.
-      const list = lists.get(userId);
-      if (list && !list.devices.some((d) => d.deviceId === peer.deviceId)) {
-        console.warn(`[SecureVoice] Pinned device of ${userId} is no longer published — excluding`);
-        state.peers.delete(userId);
-        recordExclusion(state, userId, peer.epoch);
-        forgetPeer(state, userId);
-        removed = true;
-        await notifyPeerExcluded(channelId, userId, new SecureVoiceError('device-revoked', 'the pinned device was revoked'));
-      }
-    }
-    if (removed) await rotateFreshLocked(state);
   });
+}
+
+/** Whether a member's device list publishes this device; undefined when the list does not hold theirs. */
+function devicePublished(
+  lists: Map<string, { devices: Array<{ deviceId: string }> }>,
+  userId: string,
+  deviceId: string,
+): boolean | undefined {
+  const list = lists.get(userId);
+  if (!list) return undefined;
+  return list.devices.some((d) => d.deviceId === deviceId);
 }
 
 /**
@@ -986,6 +1050,19 @@ export function endSecureVoiceSessionFor(channelId: string, frames: FrameCryptoS
   // Not the registered session (superseded) — destroy just this handle.
   frames.destroy();
 }
+
+/**
+ * What the unit tests of this module wait on; nothing in the app does. The
+ * serial key chain of the channel's session, which settles once every step
+ * queued on it so far has run, or one settled promise, the same on every
+ * call, when the channel has no session. It never rejects (see `enqueue`).
+ */
+export function secureVoiceKeyChain(channelId: string): Promise<void> {
+  return sessions.get(channelId)?.chain ?? NO_CHAIN;
+}
+
+/** What secureVoiceKeyChain answers for a channel with no chain to wait on. */
+const NO_CHAIN: Promise<void> = Promise.resolve();
 
 function endSessionState(state: SecureVoiceSessionState): void {
   state.ended = true;

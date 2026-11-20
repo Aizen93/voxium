@@ -75,6 +75,8 @@ import {
   confirmMembership,
   SecureVoiceError,
   E2EIdentityChangedError,
+  secureVoiceKeyChain,
+  getSecureVoiceSession,
 } from '../../services/e2e/secureVoiceKeys';
 
 const CH = 'chan-1';
@@ -84,10 +86,20 @@ const KEY_B64 = 'A'.repeat(43);
 /** OUR session epoch — peers must echo it back as recipientEpoch. */
 let myEpoch = '';
 
+/**
+ * Wait until the key chain of the session under test is at rest twice in a
+ * row. Every key step runs on that chain, so waiting on it is waiting on the
+ * work itself, however slow its WebCrypto calls are; the turn between the two
+ * looks lets a step queued meanwhile, or a notice or a module import a step
+ * started without awaiting, land before the second look.
+ */
 const flush = async () => {
-  // The session chain nests dynamic imports + async steps — settle generously
-  // (a 2-round flush was observed to race under parallel-worker contention)
-  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  for (let calm = 0; calm < 2; ) {
+    const chain = secureVoiceKeyChain(CH);
+    await chain;
+    await new Promise((r) => setTimeout(r, 0));
+    calm = secureVoiceKeyChain(CH) === chain ? calm + 1 : 0;
+  }
 };
 
 function deviceListFor(deviceId: string) {
@@ -153,19 +165,92 @@ beforeEach(() => {
   supported.value = true;
   endSecureVoiceSession(CH);
   vi.clearAllMocks(); // drop the teardown's destroy() call from the record
+  // The service's answers start from nothing in every test: an answer queued
+  // for one call that never came must not reach the next test.
+  for (const serviceMock of [fetchChannelDeviceLists, fetchDeviceList, encryptToDevice, decryptFromDevice]) serviceMock.mockReset();
 });
 
 describe('beginSecureVoiceSession', () => {
   it('fetches the authoritative list, creates the frame session, installs key 0', async () => {
     const { deviceId } = await begunSession();
     expect(deviceId).toBe('device-me000001');
-    expect(fetchChannelDeviceLists).toHaveBeenCalledWith(CH);
+    expect(fetchChannelDeviceLists).toHaveBeenCalledWith(CH, { collectIdentityChanges: true });
     expect(frameSession.setLocalKey).toHaveBeenCalledWith(0, expect.any(Uint8Array));
   });
 
   it('throws unsupported-platform when transforms are unavailable — the join must abort', async () => {
     supported.value = false;
     await expect(beginSecureVoiceSession(CH)).rejects.toMatchObject({ kind: 'unsupported-platform' });
+  });
+
+  describe('while a member\'s identity change is not accepted', () => {
+    const lists = {
+      members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'other', isCreator: false }],
+      lists: new Map([['peer', deviceListFor(PEER_DEVICE)], ['other', deviceListFor('device-other001')]]),
+      unverifiableUserIds: [],
+    };
+
+    async function beginWhilePeerChanged() {
+      fetchChannelDeviceLists.mockImplementation(answerWithIdentityChanges(['peer'], lists));
+      encryptToDevice.mockResolvedValue(ENV);
+      const session = await beginSecureVoiceSession(CH);
+      myEpoch = session.epoch;
+      return session;
+    }
+
+    it('the session starts, and the change is flagged', async () => {
+      const { deviceId } = await beginWhilePeerChanged();
+
+      expect(deviceId).toBe('device-me000001');
+      expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
+      expect(frameSession.setLocalKey).toHaveBeenCalledWith(0, expect.any(Uint8Array));
+      expect(encryptToDevice).not.toHaveBeenCalled();
+    });
+
+    it('the start flags the member before it asks whether it is still current, and registers its session with no wait after that answer', async () => {
+      fetchChannelDeviceLists.mockImplementation(answerWithIdentityChanges(['peer'], lists));
+      // Whatever runs right after isCurrent answers already finds the session registered
+      let registeredBeforeAnyOtherTask: boolean | undefined;
+      const isCurrent = vi.fn(() => {
+        queueMicrotask(() => { registeredBeforeAnyOtherTask = getSecureVoiceSession(CH) !== null; });
+        return true;
+      });
+
+      await beginSecureVoiceSession(CH, { isCurrent });
+
+      expect(isCurrent).toHaveBeenCalledTimes(1);
+      expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
+      expect(registeredBeforeAnyOtherTask).toBe(true);
+    });
+
+    it('that member in the call is excluded by their vet and never keyed; the others are keyed', async () => {
+      await beginWhilePeerChanged();
+      fetchDeviceList.mockImplementation(async (userId: string) => {
+        if (userId === 'peer') throw new E2EIdentityChangedError('peer');
+        return deviceListFor('device-other001');
+      });
+
+      onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+      onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001', epoch: PEER_EPOCH }, { initialReplay: true });
+      await vi.waitFor(() => expect(encryptToDevice).toHaveBeenCalledWith('other', 'device-other001', expect.any(String)));
+      await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'identity-changed'));
+
+      expect(encryptToDevice).not.toHaveBeenCalledWith('peer', expect.anything(), expect.anything());
+      // Both are members on the list read at start: neither vet read it again
+      expect(fetchChannelDeviceLists).toHaveBeenCalledTimes(1);
+    });
+
+    it('that member stays on the member list: once the change is accepted, a new session of theirs is vetted and keyed like any arrival', async () => {
+      await beginWhilePeerChanged();
+      fetchDeviceList.mockResolvedValue(deviceListFor(PEER_DEVICE));
+
+      onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: 'peerEpoch0002' }, { initialReplay: false });
+      await vi.waitFor(() =>
+        expect(encryptToDevice).toHaveBeenCalledWith('peer', PEER_DEVICE, expect.stringContaining('"reason":"ratchet"')));
+
+      expect(fetchChannelDeviceLists).toHaveBeenCalledTimes(1);
+      expect(markExcluded).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -231,36 +316,26 @@ describe('participant lifecycle', () => {
     expect(markExcluded).toHaveBeenCalledWith(CH, 'stranger', 'binding-mismatch');
   });
 
-  it('a newcomer whose membership refetch fails on another member\'s identity change stays unvetted, and is keyed at the next membership check', async () => {
+  it('a newcomer whose membership refetch names another member\'s identity change is keyed at once, and that change is flagged', async () => {
     await begunSession();
-    // The refetch for the newcomer: the list fails on the identity change of a member already known
-    fetchChannelDeviceLists.mockRejectedValueOnce(new E2EIdentityChangedError('peer'));
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      onParticipantJoined(CH, { id: 'newcomer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: false });
-      await vi.waitFor(() =>
-        expect(warn.mock.calls.some((args) => String(args[0]).includes('Vetting newcomer failed transiently'))).toBe(true));
+    // The refetch for the newcomer lists them, and names the identity change of a member already known
+    fetchChannelDeviceLists.mockImplementationOnce(answerWithIdentityChanges(['peer'], {
+      members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'newcomer', isCreator: false }],
+      lists: new Map([['peer', deviceListFor(PEER_DEVICE)], ['newcomer', deviceListFor(PEER_DEVICE)]]),
+      unverifiableUserIds: [],
+    }));
 
-      expect(markExcluded).not.toHaveBeenCalled();
-      expect(encryptToDevice).not.toHaveBeenCalled();
-      expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
-      expect(flagIdentityChanged).not.toHaveBeenCalledWith('newcomer');
+    onParticipantJoined(CH, { id: 'newcomer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: false });
+    await vi.waitFor(() =>
+      expect(encryptToDevice).toHaveBeenCalledWith('newcomer', PEER_DEVICE, expect.stringContaining('"reason":"ratchet"')));
 
-      fetchChannelDeviceLists.mockResolvedValue({
-        members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'newcomer', isCreator: false }],
-        lists: new Map(),
-        unverifiableUserIds: [],
-      });
-      confirmMembership(CH);
-      await vi.waitFor(() =>
-        expect(encryptToDevice).toHaveBeenCalledWith('newcomer', PEER_DEVICE, expect.stringContaining('"reason":"ratchet"')));
-      expect(markExcluded).not.toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
-    }
+    expect(fetchChannelDeviceLists).toHaveBeenLastCalledWith(CH, { collectIdentityChanges: true });
+    expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
+    expect(flagIdentityChanged).not.toHaveBeenCalledWith('newcomer');
+    expect(markExcluded).not.toHaveBeenCalled();
   });
 
-  it('at a later check, a participant the list no longer names leaves as a non-member, not for another member\'s identity change', async () => {
+  it('at a later check, a participant never vetted whom the list no longer names is excluded with the notice of a failed vet, and no rotation', async () => {
     await begunSession();
     const withNewcomer = {
       members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'newcomer', isCreator: false }],
@@ -276,26 +351,31 @@ describe('participant lifecycle', () => {
       await vi.waitFor(() =>
         expect(warn.mock.calls.some((args) => String(args[0]).includes('Vetting newcomer failed transiently'))).toBe(true));
 
-      // The check's list no longer names them, and the refetch fails on another member's identity change
-      fetchChannelDeviceLists
-        .mockResolvedValueOnce({ ...withNewcomer, members: withNewcomer.members.filter((m) => m.userId !== 'newcomer') })
-        .mockRejectedValueOnce(new E2EIdentityChangedError('peer'));
+      // The check's list no longer names them
+      fetchChannelDeviceLists.mockResolvedValue({ ...withNewcomer, members: withNewcomer.members.filter((m) => m.userId !== 'newcomer') });
       frameSession.setLocalKey.mockClear();
+      const fetches = fetchChannelDeviceLists.mock.calls.length;
       confirmMembership(CH);
-      // Removed as a non-member: a fresh rotation, with no identity verdict on them
-      await vi.waitFor(() => expect(frameSession.setLocalKey).toHaveBeenCalledWith(1, expect.any(Uint8Array)));
+      await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'newcomer', 'binding-mismatch'));
+      await flush();
 
       expect(frameSession.removeRemote).toHaveBeenCalledWith('newcomer');
-      expect(markExcluded).not.toHaveBeenCalledWith(CH, 'newcomer', 'identity-changed');
+      // The pass decides on the list it read, once
+      expect(fetchChannelDeviceLists.mock.calls.length).toBe(fetches + 1);
+      expect(frameSession.setLocalKey).not.toHaveBeenCalled();
       expect(encryptToDevice).not.toHaveBeenCalledWith('newcomer', expect.anything(), expect.anything());
     } finally {
       warn.mockRestore();
     }
   });
 
-  it('a newcomer whose own identity change fails the membership refetch is excluded, and the change is flagged', async () => {
+  it('a newcomer whose own identity change the membership refetch names is excluded, and the change is flagged', async () => {
     await begunSession();
-    fetchChannelDeviceLists.mockRejectedValueOnce(new E2EIdentityChangedError('newcomer'));
+    fetchChannelDeviceLists.mockImplementationOnce(answerWithIdentityChanges(['newcomer'], {
+      members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'newcomer', isCreator: false }],
+      lists: new Map([['peer', deviceListFor(PEER_DEVICE)], ['newcomer', deviceListFor(PEER_DEVICE)]]),
+      unverifiableUserIds: [],
+    }));
     onParticipantJoined(CH, { id: 'newcomer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: false });
     await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'newcomer', 'identity-changed'));
 
@@ -671,31 +751,104 @@ describe('cross-session and exclusion hardening', () => {
     expect(frameSession.setLocalKey).toHaveBeenCalledWith(1, expect.any(Uint8Array));
   });
 
-  it('in one re-check, a participant whose identity changed and one whose device was revoked are both excluded, each with its fresh rotation', async () => {
+  it('in one re-check, participants excluded for an identity change, a revoked device and a removal take one fresh rotation together', async () => {
     await begunSession();
-    const members = [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'other', isCreator: false }];
-    fetchDeviceList.mockImplementation(async (userId: string) =>
-      userId === 'other' ? deviceListFor('device-other001') : deviceListFor(PEER_DEVICE));
+    const members = [
+      { userId: 'me', isCreator: true },
+      { userId: 'peer', isCreator: false },
+      { userId: 'other', isCreator: false },
+      { userId: 'gone', isCreator: false },
+    ];
+    const devices: Record<string, string> = { peer: PEER_DEVICE, other: 'device-other001', gone: 'device-gone0001' };
+    fetchDeviceList.mockImplementation(async (userId: string) => deviceListFor(devices[userId]));
     fetchChannelDeviceLists.mockResolvedValue({ members, lists: new Map(), unverifiableUserIds: [] });
-    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
-    onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001', epoch: PEER_EPOCH }, { initialReplay: true });
-    await vi.waitFor(() => expect(encryptToDevice).toHaveBeenCalledTimes(2));
+    for (const id of ['peer', 'other', 'gone']) {
+      onParticipantJoined(CH, { id, deviceId: devices[id], epoch: PEER_EPOCH }, { initialReplay: true });
+    }
+    await vi.waitFor(() => expect(encryptToDevice).toHaveBeenCalledTimes(3));
     frameSession.setLocalKey.mockClear();
 
-    // One answer: peer's identity change is not accepted, and other's pinned device is no longer published
+    // One answer: peer's identity change is not accepted, other's pinned device is no longer published, gone is no longer a member
     fetchChannelDeviceLists.mockImplementationOnce(answerWithIdentityChanges(['peer'], {
-      members,
+      members: members.filter((m) => m.userId !== 'gone'),
       lists: new Map([['peer', deviceListFor(PEER_DEVICE)], ['other', deviceListFor('device-replaced1')]]),
       unverifiableUserIds: [],
     }));
     confirmMembership(CH);
-    await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'other', 'device-revoked'));
+    await vi.waitFor(() => expect(frameSession.setLocalKey).toHaveBeenCalled());
     await flush();
 
     expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'identity-changed');
-    expect(frameSession.removeRemote).toHaveBeenCalledWith('peer');
-    expect(frameSession.removeRemote).toHaveBeenCalledWith('other');
-    expect(frameSession.setLocalKey.mock.calls.map((call) => call[0])).toEqual([1, 2]);
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'other', 'device-revoked');
+    expect(markExcluded).not.toHaveBeenCalledWith(CH, 'gone', expect.anything());
+    for (const id of ['peer', 'other', 'gone']) expect(frameSession.removeRemote).toHaveBeenCalledWith(id);
+    expect(frameSession.setLocalKey.mock.calls.map((call) => call[0])).toEqual([1]);
+  });
+
+  it('a participant never keyed whose identity changed is excluded at the check, with no rotation', async () => {
+    await begunSession();
+    fetchDeviceList.mockRejectedValueOnce(new Error('Network Error'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+      await vi.waitFor(() =>
+        expect(warn.mock.calls.some((args) => String(args[0]).includes('Vetting peer failed transiently'))).toBe(true));
+      frameSession.setLocalKey.mockClear();
+      fetchChannelDeviceLists.mockImplementation(answerWithIdentityChanges(['peer'], {
+        members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }],
+        lists: new Map([['peer', deviceListFor(PEER_DEVICE)]]),
+        unverifiableUserIds: [],
+      }));
+
+      confirmMembership(CH);
+      await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'identity-changed'));
+      await flush();
+
+      expect(flagIdentityChanged).toHaveBeenCalledWith('peer');
+      expect(frameSession.removeRemote).toHaveBeenCalledWith('peer');
+      expect(frameSession.setLocalKey).not.toHaveBeenCalled();
+      expect(encryptToDevice).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  describe('a retried vet whose device the check\'s list no longer publishes', () => {
+    async function retriedVetWithDeviceGone(vet: 'passes' | 'fails transiently') {
+      await begunSession();
+      fetchDeviceList.mockRejectedValueOnce(new Error('Network Error'));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+        await vi.waitFor(() =>
+          expect(warn.mock.calls.some((args) => String(args[0]).includes('Vetting peer failed transiently'))).toBe(true));
+        frameSession.setLocalKey.mockClear();
+        if (vet === 'fails transiently') fetchDeviceList.mockRejectedValueOnce(new Error('Network Error'));
+        fetchChannelDeviceLists.mockResolvedValue({
+          members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }],
+          lists: new Map([['peer', deviceListFor('device-replaced1')]]),
+          unverifiableUserIds: [],
+        });
+
+        confirmMembership(CH);
+        await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'device-revoked'));
+        await flush();
+
+        expect(frameSession.removeRemote).toHaveBeenCalledWith('peer');
+        expect(encryptToDevice).not.toHaveBeenCalled();
+        expect(frameSession.setLocalKey).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    }
+
+    it('is excluded as revoked when the vet passes, before any key and with no rotation', async () => {
+      await retriedVetWithDeviceGone('passes');
+    });
+
+    it('is excluded as revoked when the vet fails transiently, with no rotation', async () => {
+      await retriedVetWithDeviceGone('fails transiently');
+    });
   });
 
   it('while another member\'s identity change stays unaccepted, a participant whose vet failed transiently is vetted and keyed at the re-check', async () => {
@@ -724,9 +877,9 @@ describe('cross-session and exclusion hardening', () => {
   it('a departing member stops being reported as un-hearable', async () => {
     await withVettedPeer();
     onParticipantLeft(CH, 'peer');
-    await flush();
 
-    expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+    // The badge is cleared by a notice the step starts without waiting for it
+    await vi.waitFor(() => expect(clearIssue).toHaveBeenCalledWith(CH, 'peer'));
   });
 
   it('an ALREADY-EXCLUDED member also stops being reported when they leave', async () => {
@@ -739,9 +892,9 @@ describe('cross-session and exclusion hardening', () => {
     // They are no longer in `peers`, so the badge must be cleared before the
     // "was this peer known?" early return.
     onParticipantLeft(CH, 'peer');
-    await flush();
 
-    expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+    // The badge is cleared by a notice the step starts without waiting for it
+    await vi.waitFor(() => expect(clearIssue).toHaveBeenCalledWith(CH, 'peer'));
   });
 
   it('a TRANSIENT vet failure does not exclude — the next membership tick re-vets and keys them', async () => {
@@ -805,6 +958,36 @@ describe('cross-session and exclusion hardening', () => {
 
     expect(encryptToDevice).not.toHaveBeenCalled();
   });
+
+  it('a departure naming another session than the one held clears no badge and keeps them', async () => {
+    await begunSession();
+    fetchChannelDeviceLists.mockResolvedValue({
+      members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'other', isCreator: false }],
+      lists: new Map(),
+      unverifiableUserIds: [],
+    });
+    fetchDeviceList.mockImplementation(async (userId: string) =>
+      userId === 'other' ? deviceListFor('device-other001') : deviceListFor(PEER_DEVICE));
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+    onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001', epoch: PEER_EPOCH }, { initialReplay: true });
+    // peer is announced again in a new session
+    onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: 'peerEpoch0002' }, { initialReplay: false });
+    await flush();
+    clearIssue.mockClear();
+    frameSession.removeRemote.mockClear();
+
+    // A late departure of peer's previous session, then a departure of other's current one
+    onParticipantLeft(CH, 'peer', PEER_EPOCH);
+    onParticipantLeft(CH, 'other', PEER_EPOCH);
+    // The badges are cleared by notices started without being waited for, in step order:
+    // once other's is cleared, one for peer would have been before it
+    await vi.waitFor(() => expect(clearIssue).toHaveBeenCalledWith(CH, 'other'));
+    await flush();
+
+    expect(clearIssue).not.toHaveBeenCalledWith(CH, 'peer');
+    expect(frameSession.removeRemote).not.toHaveBeenCalledWith('peer');
+    expect(frameSession.removeRemote).toHaveBeenCalledWith('other');
+  });
 });
 
 describe('decrypt watchdog (spec §21.4 lost-key healing)', () => {
@@ -842,8 +1025,8 @@ describe('decrypt watchdog (spec §21.4 lost-key healing)', () => {
       // Healed before the grace period: no warning, and any existing one goes
       onStalled('peer', true);
       onStalled('peer', false);
-      await flush();
-      expect(clearIssue).toHaveBeenCalledWith(CH, 'peer');
+      // The badge is cleared by a notice started outside the key chain
+      await vi.waitFor(() => expect(clearIssue).toHaveBeenCalledWith(CH, 'peer'));
       vi.advanceTimersByTime(30_000);
       await flush();
       expect(markExcluded).not.toHaveBeenCalledWith(CH, 'peer', 'no-key');
@@ -851,8 +1034,8 @@ describe('decrypt watchdog (spec §21.4 lost-key healing)', () => {
       // Never healed: the member is surfaced as one we cannot hear
       onStalled('peer', true);
       vi.advanceTimersByTime(30_000);
-      await flush();
-      expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'no-key');
+      // Raised by the watchdog's timer, outside the key chain
+      await vi.waitFor(() => expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'no-key'));
     } finally {
       vi.useRealTimers();
     }
@@ -888,6 +1071,81 @@ describe('teardown', () => {
 
   it('SecureVoiceError carries its kind', () => {
     expect(new SecureVoiceError('legacy-key', 'x').kind).toBe('legacy-key');
+  });
+
+  describe('a rotation never runs for a session that has ended', () => {
+    /** Every 32-byte key minted from here on (the epochs are 16 bytes). */
+    function recordMintedKeys(): { keys: Uint8Array[]; restore: () => void } {
+      const keys: Uint8Array[] = [];
+      const real = crypto.getRandomValues.bind(crypto);
+      const record = (array: Uint8Array<ArrayBuffer>) => {
+        const filled = real(array);
+        if (array instanceof Uint8Array && array.length === 32) keys.push(array);
+        return filled;
+      };
+      const spy = vi.spyOn(crypto, 'getRandomValues').mockImplementation(record as typeof crypto.getRandomValues);
+      return { keys, restore: () => spy.mockRestore() };
+    }
+
+    async function withTwoVettedPeers() {
+      await begunSession();
+      fetchChannelDeviceLists.mockResolvedValue({
+        members: [{ userId: 'me', isCreator: true }, { userId: 'peer', isCreator: false }, { userId: 'other', isCreator: false }],
+        lists: new Map(),
+        unverifiableUserIds: [],
+      });
+      fetchDeviceList.mockImplementation(async (userId: string) =>
+        userId === 'other' ? deviceListFor('device-other001') : deviceListFor(PEER_DEVICE));
+      onParticipantJoined(CH, { id: 'peer', deviceId: PEER_DEVICE, epoch: PEER_EPOCH }, { initialReplay: true });
+      onParticipantJoined(CH, { id: 'other', deviceId: 'device-other001', epoch: PEER_EPOCH }, { initialReplay: true });
+      await vi.waitFor(() => expect(encryptToDevice).toHaveBeenCalledTimes(2));
+      frameSession.setLocalKey.mockClear();
+      encryptToDevice.mockClear();
+      socketEmit.mockClear();
+    }
+
+    it('a session that ends during the notice of an exclusion mints and installs no key for that exclusion', async () => {
+      await withTwoVettedPeers();
+      const minted = recordMintedKeys();
+      try {
+        // The exclusion's notice is where the session ends
+        markExcluded.mockImplementationOnce(() => { endSecureVoiceSession(CH); });
+        handleInboundKey(CH, 'peer', PEER_DEVICE, '{"keyB64":"plaintext-key"}');
+        // The session ends inside this step, so the step itself is what is waited on
+        await secureVoiceKeyChain(CH);
+
+        expect(markExcluded).toHaveBeenCalledWith(CH, 'peer', 'legacy-key');
+
+        expect(minted.keys).toHaveLength(0);
+        expect(frameSession.setLocalKey).not.toHaveBeenCalled();
+        expect(encryptToDevice).not.toHaveBeenCalled();
+      } finally {
+        minted.restore();
+      }
+    });
+
+    it('a key minted for a session that ends while the rotation seals it is zero-filled and never installed', async () => {
+      await withTwoVettedPeers();
+      const minted = recordMintedKeys();
+      try {
+        // The session ends while the departure's fresh key is being sealed to `peer`
+        encryptToDevice.mockImplementationOnce(async () => {
+          endSecureVoiceSession(CH);
+          return ENV;
+        });
+        onParticipantLeft(CH, 'other');
+        // The session ends inside this step, so the step itself is what is waited on
+        await secureVoiceKeyChain(CH);
+
+        expect(encryptToDevice).toHaveBeenCalledTimes(1);
+        expect(minted.keys).toHaveLength(1);
+        expect(minted.keys[0].every((byte) => byte === 0)).toBe(true);
+        expect(frameSession.setLocalKey).not.toHaveBeenCalled();
+        expect(socketEmit).not.toHaveBeenCalledWith('voice:e2e:key', expect.anything());
+      } finally {
+        minted.restore();
+      }
+    });
   });
 });
 

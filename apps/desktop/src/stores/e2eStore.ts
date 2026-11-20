@@ -309,7 +309,12 @@ export const useE2EStore = create<E2EState>((set, get) => ({
   },
 
   flagIdentityChanged: (peerUserId: string) => {
-    set((state) => ({ identityWarnings: { ...state.identityWarnings, [peerUserId]: true } }));
+    // A member already flagged leaves the state as it is: the secure voice
+    // check flags every unaccepted change on each of its passes.
+    set((state) =>
+      state.identityWarnings[peerUserId]
+        ? state
+        : { identityWarnings: { ...state.identityWarnings, [peerUserId]: true } });
   },
 
   acceptNewIdentity: async (userId: string, peerUserId: string) => {

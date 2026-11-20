@@ -92,6 +92,7 @@ import {
   handleInboundKey,
   handleKeyRequest,
   confirmMembership,
+  secureVoiceKeyChain,
 } from '../../services/e2e/secureVoiceKeys';
 
 const CH = 'chan-1';
@@ -226,10 +227,22 @@ async function until(condition: () => boolean): Promise<void> {
   }, { timeout: 3000, interval: 2 });
 }
 
-/** Let the key chain finish whatever it was given (it mixes imports, timers and WebCrypto). */
+/**
+ * Let the key chain finish whatever it was given: the chain of the session
+ * under test and the sender cipher's installs (`senderReady`, which the
+ * module's setLocalKey feeds here, outside the chain) both at rest twice in a
+ * row. The turn between the two looks lets a step queued meanwhile, or a
+ * notice or an import a step started without awaiting, land before the second.
+ */
 async function settle(): Promise<void> {
-  for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 2));
-  await senderReady;
+  for (let calm = 0; calm < 2; ) {
+    const chain = secureVoiceKeyChain(CH);
+    const ready = senderReady;
+    await chain;
+    await ready;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    calm = secureVoiceKeyChain(CH) === chain && senderReady === ready ? calm + 1 : 0;
+  }
 }
 
 /** A transiently failing first vet: the step logs it and leaves them un-vetted. */
@@ -257,6 +270,8 @@ let log: MockInstance<typeof console.log>;
 beforeEach(() => {
   endSecureVoiceSession(CH);
   vi.clearAllMocks();
+  // An answer queued for a call that never came must not reach the next test
+  for (const serviceMock of [fetchChannelDeviceLists, fetchDeviceList, encryptToDevice, decryptFromDevice]) serviceMock.mockReset();
   failingVets.clear();
   routeLocalKeysToCipher();
   fetchChannelDeviceLists.mockResolvedValue(ALL_MEMBERS);
@@ -578,7 +593,7 @@ describe('one member\'s unaccepted identity change does not hold back the others
     expect(markExcluded).not.toHaveBeenCalled();
   });
 
-  it('a joiner the list did not name yet, whose refetch fails on that change, is keyed past their arrival at the next check', async () => {
+  it('a joiner the list did not name yet, whose refetch names that change, is keyed past their arrival at once', async () => {
     // Our join's list does not name `x` yet
     fetchChannelDeviceLists.mockResolvedValueOnce({
       ...ALL_MEMBERS,
@@ -589,15 +604,63 @@ describe('one member\'s unaccepted identity change does not hold back the others
     fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('z'));
 
     onParticipantJoined(CH, user('x'), { initialReplay: false });
-    await until(() => warn.mock.calls.some((args) => String(args[0]).includes('Vetting x failed transiently')));
-    expect(sealedTo('x')).toHaveLength(0);
-
-    await membershipCheck();
     await until(() => sealedTo('x').length === 1);
+    const afterKeying = await speak(2);
 
     const [sealed] = sealedTo('x');
     expect(sealed.keyId).toBe(1);
     await expectClosedTo(sealed, beforeArrival, 0);
+    expect(await opens([sealed], afterKeying)).toBe(true);
+    expect(markExcluded).not.toHaveBeenCalled();
+    expect(warn.mock.calls.some((args) => String(args[0]).includes('Vetting x failed transiently'))).toBe(false);
+  });
+
+  it('a refetch that names a participant already keyed: the check that follows excludes them and rotates before the joiner is keyed', async () => {
+    // Our join's list does not name `x` yet
+    fetchChannelDeviceLists.mockResolvedValueOnce({
+      ...ALL_MEMBERS,
+      members: ALL_MEMBERS.members.filter((m) => m.userId !== 'x'),
+    });
+    await callWithOccupant();
+    onParticipantJoined(CH, user('y'), { initialReplay: false });
+    await until(() => sealedTo('y').length === 1);
+    const heldByY = sealedTo('y');
+
+    // From here on, one frame of ours is sealed under every generation the moment it is installed
+    const recorded: Array<{ keyId: number; frame: Promise<ArrayBuffer | null> }> = [];
+    frameSession.setLocalKey.mockImplementation((keyId: number, raw: Uint8Array) => {
+      const key = raw.slice();
+      installs.push({ keyId, key });
+      let resolveFrame!: (frame: ArrayBuffer | null) => void;
+      recorded.push({ keyId, frame: new Promise((resolve) => { resolveFrame = resolve; }) });
+      senderReady = senderReady
+        .then(() => sender.setKey(keyId, key))
+        .then(async () => resolveFrame(await sender.encrypt(new Uint8Array([9, keyId, 9]).buffer)));
+    });
+
+    fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('y'));
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1 && markExcluded.mock.calls.some((call) => call[1] === 'y'));
+    await settle();
+
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'y', 'identity-changed');
+    expect(recorded.map((generation) => generation.keyId)).toEqual([2]);
+    for (const generation of recorded) {
+      const frame = await generation.frame;
+      expect(frame).not.toBeNull();
+      expect(await opens(heldByY, frame!)).toBe(false);
+    }
+    const last = await recorded[recorded.length - 1].frame;
+    expect(await opens(sealedTo('x'), last!)).toBe(true);
+  });
+
+  it('a session starts while that change is not accepted, and keys everyone else', async () => {
+    fetchChannelDeviceLists.mockImplementation(listsWhileIdentityChanged('z'));
+    await callWithOccupant();
+    const first = await speak(1);
+
+    expect(sealedTo('old')).toHaveLength(1);
+    expect(await opens(sealedTo('old'), first)).toBe(true);
     expect(markExcluded).not.toHaveBeenCalled();
   });
 
@@ -633,6 +696,61 @@ describe('one member\'s unaccepted identity change does not hold back the others
     }
     const last = await recorded[recorded.length - 1].frame;
     expect(await opens(sealedTo('x'), last!)).toBe(true);
+  });
+});
+
+describe('a membership check decides every exclusion before a retried vet is keyed', () => {
+  /**
+   * `y` keyed, `x` waiting on a retried vet, and a check whose answer excludes
+   * `y`: no generation installed during that check opens with the keys `y`
+   * held, and `x` is keyed with the last of them.
+   */
+  async function checkExcludingKeyedMemberBesideRetriedVet(answer: typeof ALL_MEMBERS): Promise<void> {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('y'), { initialReplay: false });
+    await until(() => sealedTo('y').length === 1);
+    await arriveWithFailingVet('x');
+    const heldByY = sealedTo('y');
+
+    const recorded: Array<{ keyId: number; frame: Promise<ArrayBuffer | null> }> = [];
+    frameSession.setLocalKey.mockImplementation((keyId: number, raw: Uint8Array) => {
+      const key = raw.slice();
+      installs.push({ keyId, key });
+      let resolveFrame!: (frame: ArrayBuffer | null) => void;
+      recorded.push({ keyId, frame: new Promise((resolve) => { resolveFrame = resolve; }) });
+      senderReady = senderReady
+        .then(() => sender.setKey(keyId, key))
+        .then(async () => resolveFrame(await sender.encrypt(new Uint8Array([9, keyId, 9]).buffer)));
+    });
+
+    fetchChannelDeviceLists.mockResolvedValue(answer);
+    await membershipCheck();
+    await until(() => sealedTo('x').length >= 1 && frameSession.removeRemote.mock.calls.some((call) => call[0] === 'y'));
+    await settle();
+
+    // One fresh rotation for y's exclusion, then x keyed with it: no ratchet of a key y held
+    expect(recorded.map((generation) => generation.keyId)).toEqual([2]);
+    for (const generation of recorded) {
+      const frame = await generation.frame;
+      expect(frame).not.toBeNull();
+      expect(await opens(heldByY, frame!)).toBe(false);
+    }
+    const last = await recorded[recorded.length - 1].frame;
+    expect(await opens(sealedTo('x'), last!)).toBe(true);
+  }
+
+  it('a pinned device revoked in the same check', async () => {
+    await checkExcludingKeyedMemberBesideRetriedVet({ ...ALL_MEMBERS, lists: new Map([['y', deviceListFor('z')]]) });
+    expect(markExcluded).toHaveBeenCalledWith(CH, 'y', 'device-revoked');
+  });
+
+  it('a removal from the channel in the same check', async () => {
+    await checkExcludingKeyedMemberBesideRetriedVet({
+      ...ALL_MEMBERS,
+      members: ALL_MEMBERS.members.filter((m) => m.userId !== 'y'),
+    });
+    // Removed without a notice, as before
+    expect(markExcluded).not.toHaveBeenCalledWith(CH, 'y', expect.anything());
   });
 });
 
@@ -881,6 +999,82 @@ describe('a member excluded during a call stays excluded until they start a new 
     const sealed = sealedTo('x')[1];
     expect(sealed.keyId).toBe(3);
     await expectClosedTo(sealed, whileAway, 2);
+  });
+});
+
+describe('a departure naming the epoch of the session that left', () => {
+  const keyOfX = (epoch: string, seq: number) => buildVoiceKeyPlaintext({
+    v: 1,
+    scope: e2eVoiceScope(CH),
+    senderUserId: 'x',
+    senderDeviceId: DEVICES.x[0],
+    epoch,
+    recipientEpoch: myEpoch,
+    seq,
+    keyId: 0,
+    keyB64: 'A'.repeat(43),
+    reason: 'initial',
+  });
+
+  /** `x` keyed in a first session, then announced again in a second one. */
+  async function xInSecondSession(): Promise<void> {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    onParticipantJoined(CH, user('x', 'epoch-x-2'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 2);
+    await settle();
+  }
+
+  it('a late departure of their previous session keeps the new one: no rotation, and their new keys still install', async () => {
+    await xInSecondSession();
+    const installed = installs.length;
+    const removals = frameSession.removeRemote.mock.calls.length;
+
+    onParticipantLeft(CH, 'x', 'epoch-x-1');
+    await settle();
+
+    expect(installs.length).toBe(installed);
+    expect(frameSession.removeRemote.mock.calls.length).toBe(removals);
+    decryptFromDevice.mockResolvedValueOnce(keyOfX('epoch-x-2', 0));
+    handleInboundKey(CH, 'x', DEVICES.x[0], ENV);
+    await until(() => frameSession.setRemoteKey.mock.calls.some((call) => call[0] === 'x'));
+    // ...and their key request is answered with the generation they hold
+    const seals = sealedTo('x').length;
+    handleKeyRequest(CH, 'x');
+    await until(() => sealedTo('x').length === seals + 1);
+    expect(sealedTo('x').at(-1)!.keyId).toBe(sealedTo('x')[1].keyId);
+  });
+
+  it('a departure queued behind the announcement of their new session is judged against the new one', async () => {
+    await callWithOccupant();
+    onParticipantJoined(CH, user('x'), { initialReplay: false });
+    await until(() => sealedTo('x').length === 1);
+    const removals = frameSession.removeRemote.mock.calls.length;
+
+    // Both reach the session before either step runs
+    onParticipantJoined(CH, user('x', 'epoch-x-2'), { initialReplay: false });
+    onParticipantLeft(CH, 'x', 'epoch-x-1');
+    await until(() => sealedTo('x').length === 2);
+    await settle();
+
+    // The re-announcement's own departure of the first session only: x stays, in the new session
+    expect(frameSession.removeRemote.mock.calls.length).toBe(removals + 1);
+    decryptFromDevice.mockResolvedValueOnce(keyOfX('epoch-x-2', 0));
+    handleInboundKey(CH, 'x', DEVICES.x[0], ENV);
+    await until(() => frameSession.setRemoteKey.mock.calls.some((call) => call[0] === 'x'));
+  });
+
+  it('a departure of the session held removes them and rotates fresh, as one without an epoch does', async () => {
+    await xInSecondSession();
+    const installed = installs.length;
+
+    onParticipantLeft(CH, 'x', 'epoch-x-2');
+    await until(() => installs.length === installed + 1);
+    await settle();
+
+    expect(hex(installs.at(-1)!.key)).not.toBe(hex(await ratchetVoiceKey(installs.at(-2)!.key)));
+    expect(sealedTo('x').some((sealed) => sealed.keyId === installs.at(-1)!.keyId)).toBe(false);
   });
 });
 

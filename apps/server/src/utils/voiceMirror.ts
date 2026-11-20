@@ -1,11 +1,35 @@
+import { E2E_CALL_EPOCH_RE } from '@voxium/shared';
 import { getRedis } from './redis';
 import { annotationKey } from './annotationState';
+
+/** One occupant a reap removed, with the E2E epoch their session announced (secure voice only). */
+export interface ReapedVoiceOccupant {
+  userId: string;
+  epoch?: string;
+}
+
+/**
+ * The epoch a mirrored occupant's session announced, when its entry holds a
+ * well-formed one. Anything else (malformed JSON, another shape, an older
+ * entry without it) gives none, and the departure then applies as before.
+ */
+function mirroredEpoch(json: string): string | undefined {
+  try {
+    const value: unknown = JSON.parse(json);
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+    const epoch = (value as { e2eEpoch?: unknown }).e2eEpoch;
+    return typeof epoch === 'string' && E2E_CALL_EPOCH_RE.test(epoch) ? epoch : undefined;
+  } catch {
+    // Not JSON: the entry carries no epoch to report (the reap still removes it)
+    return undefined;
+  }
+}
 
 /**
  * Delete one channel's entire Redis voice mirror (users hash, server/node
  * mapping, screen-share flag, active-set membership, and the participants'
- * reverse-lookup keys). Returns the userIds that were mirrored so callers can
- * emit voice:user_left for each ghost.
+ * reverse-lookup keys). Returns the occupants that were mirrored, each with the
+ * epoch its entry holds, so callers can emit voice:user_left for each ghost.
  *
  * `preserveNodeKey` keeps `voice:channel:node:{id}` intact — used by the
  * dead-owner takeover, which has already CAS'd that key to itself and must not
@@ -17,10 +41,14 @@ import { annotationKey } from './annotationState';
 export async function reapVoiceChannelMirror(
   channelId: string,
   opts?: { preserveNodeKey?: boolean },
-): Promise<string[]> {
+): Promise<ReapedVoiceOccupant[]> {
   const redis = getRedis();
   const users = await redis.hGetAll(`voice:channel:users:${channelId}`);
-  const userIds = Object.keys(users ?? {});
+  const occupants = Object.entries(users ?? {}).map(([userId, json]): ReapedVoiceOccupant => {
+    const epoch = mirroredEpoch(json);
+    return epoch ? { userId, epoch } : { userId };
+  });
+  const userIds = occupants.map((occupant) => occupant.userId);
   const pipeline = redis.multi()
     .del(`voice:channel:users:${channelId}`)
     .del(`voice:channel:server:${channelId}`)
@@ -34,7 +62,7 @@ export async function reapVoiceChannelMirror(
     pipeline.del(`voice:user:${uid}`);
   }
   await pipeline.exec();
-  return userIds;
+  return occupants;
 }
 
 /**
@@ -44,12 +72,12 @@ export async function reapVoiceChannelMirror(
  * and this call, the fresh owner's mirror is left untouched and `null` is
  * returned. Prevents the reaper from wiping a concurrent takeover.
  *
- * Returns the reaped userIds, or null when ownership changed under us.
+ * Returns the reaped occupants, or null when ownership changed under us.
  */
 export async function reapDeadOwnerChannelMirror(
   channelId: string,
   observedOwner: string | null,
-): Promise<string[] | null> {
+): Promise<ReapedVoiceOccupant[] | null> {
   const redis = getRedis();
   if (observedOwner) {
     const won = await redis.eval(

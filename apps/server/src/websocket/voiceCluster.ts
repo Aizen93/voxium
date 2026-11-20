@@ -132,11 +132,12 @@ export async function reapDeadNodeVoiceState(io: IO): Promise<void> {
     if (owner && await isNodeAlive(owner)) continue; // healthy peer's channel
     // Guarded reap (CAS on the recorded owner): if a peer took the channel
     // over between our liveness check and now, its fresh mirror is untouched.
-    const userIds = await reapDeadOwnerChannelMirror(channelId, owner);
-    if (userIds === null) continue; // ownership changed under us — hands off
-    for (const userId of userIds) {
-      io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId });
+    const occupants = await reapDeadOwnerChannelMirror(channelId, owner);
+    if (occupants === null) continue; // ownership changed under us — hands off
+    for (const { userId, epoch } of occupants) {
+      // With the epoch the ghost's session announced (secure voice), as a live leave carries it
+      io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId, ...(epoch && { epoch }) });
     }
-    console.warn(`[VoiceCluster] Reaped voice channel ${channelId} owned by dead node ${owner ?? '(none)'} — ${userIds.length} ghost user(s)`);
+    console.warn(`[VoiceCluster] Reaped voice channel ${channelId} owned by dead node ${owner ?? '(none)'} — ${occupants.length} ghost user(s)`);
   }
 }

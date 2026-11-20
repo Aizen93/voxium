@@ -279,7 +279,8 @@ interface VoiceState {
    * it acted (the caller toasts the message only then).
    */
   handleVoiceError: (data: { message: string; channelId?: string }) => boolean;
-  removeUserFromChannel: (channelId: string, userId: string) => void;
+  /** Removes a participant's row; false when the departure was ignored (it named another E2E session than the listed one). */
+  removeUserFromChannel: (channelId: string, userId: string, epoch?: string) => boolean;
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => void;
   handleForceMove: (targetChannelId: string) => void;
   serverMuteUser: (targetUserId: string, muted: boolean) => void;
@@ -2060,8 +2061,20 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
   },
 
-  removeUserFromChannel: (channelId: string, userId: string) => {
+  removeUserFromChannel: (channelId: string, userId: string, epoch?: string) => {
     debugLog('[Voice] removeUserFromChannel:', channelId, userId);
+
+    // A departure naming the E2E epoch of another session than the one listed
+    // for this participant (a late event of their previous session, after the
+    // new one was announced) changes nothing. Without an epoch on both sides
+    // it applies as before.
+    if (epoch) {
+      const listed = (get().channelUsers.get(channelId) || []).find((u) => u.id === userId);
+      if (listed?.epoch && listed.epoch !== epoch) {
+        debugLog('[Voice] removeUserFromChannel: departure of a previous session ignored:', channelId, userId);
+        return false;
+      }
+    }
 
     set((state) => {
       const newMap = new Map(state.channelUsers);
@@ -2083,9 +2096,10 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     // the leaver must not decrypt future audio (spec §21).
     if (userId !== get().localUserId && activeSecureVoiceSession(channelId)) {
       void import('../services/e2e/secureVoiceKeys')
-        .then((m) => m.onParticipantLeft(channelId, userId))
+        .then((m) => m.onParticipantLeft(channelId, userId, epoch))
         .catch((err) => console.error('[SecureVoice] Departure rotation failed:', err));
     }
+    return true;
   },
 
   updateUserState: (channelId: string, userId: string, selfMute: boolean, selfDeaf: boolean, serverMuted: boolean, serverDeafened: boolean) => {
