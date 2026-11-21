@@ -543,6 +543,15 @@ function storePair(accessToken: string, refreshToken: string, remembered: boolea
 // ignores the channel: it follows the `storage` events. A pair that names no
 // session is never touched.
 //
+// A twin that missed those messages (restored with its sessionStorage,
+// discarded and reloaded by the browser, kept in the back-forward cache)
+// starts with an older generation. So a tab that loads a not-remembered pair,
+// or comes back from the back-forward cache, asks: 'sync' with its sid and
+// gen, never a token. A twin that holds the same session at a HIGHER
+// generation answers with its pair as 'rotated', the one message that carries
+// tokens. The asking tab's next renewal waits for that answer, at most
+// TWIN_SYNC_WAIT_MS after the ask, and then sends what it holds.
+//
 // The messages carry tokens. A BroadcastChannel reaches only the browsing
 // contexts of this same origin (and the same storage partition): exactly
 // those that can read this origin's localStorage, where any remembered
@@ -553,6 +562,21 @@ function storePair(accessToken: string, refreshToken: string, remembered: boolea
 export const SESSION_CHANNEL_NAME = 'voxium-session';
 /** A token longer than this is no token of ours (the keychain caps the whole pair at 1280 characters). */
 const CHANNEL_TOKEN_MAX_CHARS = 4096;
+/** A generation above this is no generation the server issues (it counts the renewals of one session). */
+const CHANNEL_GEN_MAX = 2 ** 31;
+
+/**
+ * How long after a tab asked its twins ('sync') its next renewal waits for
+ * their answer. A twin answers from its own event loop: a message each way
+ * between two tabs of one browser on one machine, a few milliseconds, or the
+ * length of a long task the twin is running (a render, a decrypt batch),
+ * usually well under 200 ms. 300 ms covers that with room, and costs the
+ * renewal that waits (every request waits on it) about a third of a second,
+ * once per page load, only for a not-remembered tab whose access token has
+ * expired by then. A twin frozen by the browser answers nothing: the tab then
+ * sends what it holds, as before.
+ */
+export const TWIN_SYNC_WAIT_MS = 300;
 
 /** The part of BroadcastChannel used here (injectable for tests). */
 export interface SessionChannel {
@@ -563,7 +587,8 @@ export interface SessionChannel {
 
 type SessionMessage =
   | { type: 'rotated'; sid: string; accessToken: string; refreshToken: string }
-  | { type: 'ended'; sid: string };
+  | { type: 'ended'; sid: string }
+  | { type: 'sync'; sid: string; gen: number };
 
 // The page's BroadcastChannel unless a test installed its own (null: none)
 let channelFactory: (() => SessionChannel) | null | undefined;
@@ -630,6 +655,8 @@ function sessionMessageOf(data: unknown): SessionMessage | null {
   if (!isTokenString(sid)) return null;
   if (type === 'ended') return { type, sid };
   if (type === 'rotated' && isTokenString(accessToken) && isTokenString(refreshToken)) return { type, sid, accessToken, refreshToken };
+  const { gen } = data as Record<string, unknown>;
+  if (type === 'sync' && typeof gen === 'number' && Number.isSafeInteger(gen) && gen >= 0 && gen <= CHANNEL_GEN_MAX) return { type, sid, gen };
   return null;
 }
 
@@ -647,16 +674,104 @@ function onSessionMessage(data: unknown): void {
     reloadAfterSessionChange();
     return;
   }
+  if (message.type === 'sync') {
+    // A twin asks for the newest pair of this session. Answered only when it
+    // names this tab's own not-remembered session (the guards above) at an
+    // OLDER generation than this tab holds: anything else (another session,
+    // the same or a newer generation, a remembered tab, a malformed message)
+    // is never answered, so no message makes a tab post its pair on request.
+    // A sid and a generation are claims, not proof of holding a token: a page
+    // of this origin that learnt the sid (the account's own pages list its
+    // sessions) could ask too. It would get what every renewal of this
+    // session already posts ('rotated') to every context of this origin, the
+    // contexts that can read this origin's localStorage, and only for a
+    // session and a generation below the current one that it named
+    if (own.gen === undefined || message.gen >= own.gen) return;
+    announceRotation(memory.accessToken, memory.refreshToken);
+    return;
+  }
   const theirs = readTokenClaims(message.refreshToken);
   if (theirs?.sid !== message.sid || sessionIdOf(message.accessToken) !== message.sid) return;
   if (own.gen === undefined || theirs.gen === undefined || theirs.gen <= own.gen) return;
   // Taken as this tab's own pair, without posting it again
   storePair(message.accessToken, message.refreshToken, false);
+  // ... which answers this tab's own question, if it asked
+  if (twinSync?.sid === message.sid) {
+    twinSync.answered();
+    twinSync = null;
+  }
 }
 
-/** Open the channel when this tab holds a not-remembered pair, so it hears its twins from its start. */
+// This tab's question to its twins, until it is answered or a renewal has waited for it
+let twinSync: { sid: string; askedAt: number; waited: boolean; answered: () => void; answer: Promise<void> } | null = null;
+
+/**
+ * Ask the twins of this tab's not-remembered session for its newest pair
+ * ('sync': the sid and this tab's generation, decoded for routing only, and
+ * no token). Nothing for a remembered pair, a pair that names no session or
+ * no generation, while a reload is pending, and outside the browser build.
+ */
+function askTwins(): void {
+  if (!isWebStore(store) || reloadPending() || memory.remembered || memory.accessToken === null || memory.refreshToken === null) return;
+  const own = readTokenClaims(memory.refreshToken);
+  if (!own?.sid || own.gen === undefined || sessionIdOf(memory.accessToken) !== own.sid) return;
+  if (!sessionChannel()) return;
+  let answered!: () => void;
+  const answer = new Promise<void>((resolve) => {
+    answered = resolve;
+  });
+  twinSync = { sid: own.sid, askedAt: Date.now(), waited: false, answered, answer };
+  post({ type: 'sync', sid: own.sid, gen: own.gen });
+}
+
+/**
+ * Whether this tab asked its twins and no renewal has waited for their
+ * answer yet (services/session.ts asks this first, so that a renewal with
+ * nothing to wait for awaits nothing).
+ */
+export function twinSyncPending(): boolean {
+  return twinSync !== null && !twinSync.waited;
+}
+
+/**
+ * Wait for the twins' answer to this tab's question, at most until
+ * TWIN_SYNC_WAIT_MS after it was asked, and once: a later renewal waits for
+ * nothing. Resolves once the answer came (already taken as this tab's pair)
+ * or the time is up. Never rejects.
+ */
+export function awaitTwinSync(): Promise<void> {
+  const asked = twinSync;
+  if (!asked || asked.waited) return Promise.resolve();
+  asked.waited = true;
+  const done = () => {
+    if (twinSync === asked) twinSync = null;
+  };
+  const remaining = asked.askedAt + TWIN_SYNC_WAIT_MS - Date.now();
+  if (remaining <= 0) {
+    done();
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      done();
+      resolve();
+    }, remaining);
+    void asked.answer.then(() => {
+      clearTimeout(timer);
+      done();
+      resolve();
+    });
+  });
+}
+
+/**
+ * Open the channel when this tab holds a not-remembered pair, so it hears its
+ * twins from its start, and ask them for the newest pair of its session.
+ */
 function listenWhenNotRemembered(): void {
-  if (memory.refreshToken !== null && !memory.remembered) sessionChannel();
+  if (memory.refreshToken === null || memory.remembered) return;
+  sessionChannel();
+  askTwins();
 }
 
 /** @internal tests: the channel factory (undefined: the page's BroadcastChannel, null: none). */
@@ -1153,9 +1268,13 @@ export function waitForCredentialChange(maxAheadMs: number): Promise<boolean> {
   });
 }
 
-// The desktop app has one webview: nothing to follow there
+// The desktop app has one webview: nothing to follow there, and no twin
 if (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) {
   window.addEventListener('storage', followOtherTabs);
+  // Back from the back-forward cache: the twins' messages of the meantime never arrived
+  window.addEventListener('pageshow', (event) => {
+    if ((event as PageTransitionEvent).persisted) askTwins();
+  });
 }
 
 /** @internal tests — empties the memory and installs a store (the one for this environment when omitted). */
@@ -1171,4 +1290,5 @@ export function _resetTokenStorageForTests(backend?: SessionStore): void {
   pendingTokenWrites = 0;
   _resetPageNavigationForTests();
   _setSessionChannelForTests(undefined);
+  twinSync = null;
 }

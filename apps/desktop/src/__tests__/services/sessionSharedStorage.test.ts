@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import axios from 'axios';
 import {
   getRefreshToken, setTokens, flushTokenStorage, hydrateTokens, reloadAfterSessionChange, createKeychainSessionStore,
-  _resetTokenStorageForTests, _setPageReloadForTests, _setSessionChannelForTests,
+  TWIN_SYNC_WAIT_MS, _resetTokenStorageForTests, _setPageReloadForTests, _setSessionChannelForTests, type SessionChannel,
 } from '../../services/tokenStorage';
 import {
   refreshAccessToken, goToLoginPage, SessionLostError, setSessionLostNavigation, _resetSessionForTests, _setRefreshLocksForTests,
@@ -54,14 +54,34 @@ type Tab = {
   reload: ReturnType<typeof vi.fn>;
 };
 
-async function openTab(locks: unknown): Promise<Tab> {
+/** A BroadcastChannel between the tabs: a message reaches every OTHER tab's channel, on a later task. */
+function channelBus() {
+  const members: SessionChannel[] = [];
+  return () => {
+    const own: SessionChannel = {
+      postMessage: (message: unknown) => {
+        for (const other of members) {
+          if (other !== own) setTimeout(() => other.onmessage?.({ data: structuredClone(message) }), 0);
+        }
+      },
+      onmessage: null,
+      close: () => {
+        members.splice(members.indexOf(own), 1);
+      },
+    };
+    members.push(own);
+    return own;
+  };
+}
+
+async function openTab(locks: unknown, bus: (() => SessionChannel) | null = null): Promise<Tab> {
   vi.resetModules();
   const storage = await import('../../services/tokenStorage');
   const session = await import('../../services/session');
   storage._resetTokenStorageForTests();
   const tabReload = vi.fn();
   storage._setPageReloadForTests(tabReload);
-  storage._setSessionChannelForTests(null);
+  storage._setSessionChannelForTests(bus);
   session._resetSessionForTests();
   const tabNavigate = vi.fn();
   session.setSessionLostNavigation(tabNavigate);
@@ -97,6 +117,77 @@ function sharedLocks() {
     },
   };
 }
+
+describe('a not-remembered tab restored with an old copy of its session renews with the newest refresh token', () => {
+  const pairAt = (gen: number, expired: boolean) => ({
+    accessToken: jwt({ userId: 'user-x', sid: 's-1', exp: expired ? nowSeconds() - 60 : nowSeconds() + 900, n: gen }),
+    refreshToken: jwt({ userId: 'user-x', sid: 's-1', gen }),
+  });
+  const sentRefreshTokens = () => post.mock.calls.map((call: unknown[]) => (call[1] as { refreshToken: string }).refreshToken);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('its twin, still open at a later generation, answers: the restored tab sends that generation, never its own', async () => {
+    const bus = channelBus();
+    // the twin, still open: it renewed to generation 3 since the other tab was closed
+    const current = pairAt(3, true);
+    sessionStorage.setItem('voxium_access_token', current.accessToken);
+    sessionStorage.setItem('voxium_refresh_token', current.refreshToken);
+    const twin = await openTab(null, bus);
+    // the restored tab (Ctrl+Shift+T restores its sessionStorage): generation 1
+    const stale = pairAt(1, true);
+    sessionStorage.setItem('voxium_access_token', stale.accessToken);
+    sessionStorage.setItem('voxium_refresh_token', stale.refreshToken);
+    const restored = await openTab(null, bus);
+    expect(restored.storage.getRefreshToken()).toBe(stale.refreshToken);
+    post.mockResolvedValueOnce({ data: { data: pairAt(4, false) } });
+
+    const renewal = restored.session.refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(50);
+    await renewal;
+
+    expect(sentRefreshTokens()).toEqual([current.refreshToken]);
+    expect(twin.navigate).not.toHaveBeenCalled();
+  });
+
+  it('a twin whose access token is still fresh: its pair is the answer and nothing is sent', async () => {
+    const bus = channelBus();
+    const current = pairAt(3, false);
+    sessionStorage.setItem('voxium_access_token', current.accessToken);
+    sessionStorage.setItem('voxium_refresh_token', current.refreshToken);
+    await openTab(null, bus);
+    const stale = pairAt(1, true);
+    sessionStorage.setItem('voxium_access_token', stale.accessToken);
+    sessionStorage.setItem('voxium_refresh_token', stale.refreshToken);
+    const restored = await openTab(null, bus);
+
+    const renewal = restored.session.refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(renewal).resolves.toBe(current.accessToken);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('with no twin alive nothing answers: after the wait the tab sends what it holds', async () => {
+    const stale = pairAt(1, true);
+    sessionStorage.setItem('voxium_access_token', stale.accessToken);
+    sessionStorage.setItem('voxium_refresh_token', stale.refreshToken);
+    const alone = await openTab(null, channelBus());
+    post.mockResolvedValueOnce({ data: { data: pairAt(2, false) } });
+
+    const renewal = alone.session.refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS - 1);
+    expect(post).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await renewal;
+
+    expect(sentRefreshTokens()).toEqual([stale.refreshToken]);
+  });
+});
 
 describe('a credential change in one tab while another tab renews', () => {
   const refused = () => Object.assign(new Error('Request failed with status code 401'), { isAxiosError: true, response: { status: 401 } });

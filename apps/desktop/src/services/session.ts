@@ -4,7 +4,7 @@ import { API_BASE } from './apiBase';
 import {
   getAccessToken, getRefreshToken, setTokens, clearSessionTokens, flushTokenStorage,
   followSharedSession, isSharedWithOtherTabs, reloadAfterSessionChange,
-  markCredentialChange, credentialChangeInFlightUntil, waitForCredentialChange,
+  markCredentialChange, credentialChangeInFlightUntil, waitForCredentialChange, twinSyncPending, awaitTwinSync,
 } from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
 import { isSameSession, readTokenClaims, sessionIdOf, userIdOf } from './tokenClaims';
@@ -45,6 +45,14 @@ import { claimPageNavigation, _resetPageNavigationForTests } from './pageNavigat
  *   so two tabs never renew together: the second finds the first one's pair
  *   and sends nothing. The wait for the lock is bounded; at the bound the
  *   renewal goes on with the re-read alone;
+ * - a credential change of any tab (a password change, "sign out of all
+ *   other sessions") is marked in flight in the shared storage, and every
+ *   renewal waits for its answer before it sends anything, the lock or not
+ *   (tokenStorage.markCredentialChange); a refusal received while one is in
+ *   flight is not final until its answer has been looked for;
+ * - a not-remembered tab that loaded its pair, or came back from the
+ *   back-forward cache, asks its twins for the newest one first, and its
+ *   first renewal waits briefly for the answer (tokenStorage.awaitTwinSync);
  * - a refresh that got no usable answer (a timeout, a transport error, a
  *   5xx) is sent once more shortly after, inside the same renewal, while the
  *   page is online and nothing else stored a pair meanwhile: an answer lost
@@ -555,6 +563,11 @@ async function credentialChangeStep<T>(change: (stillCurrent: () => boolean) => 
     let outcome!: Promise<T>;
     await underRefreshLock(async () => {
       if (epoch !== sessionEpoch) throw new SessionLostError('The session ended before the credential change went out');
+      // The change goes out with the newest pair of this session there is
+      if (twinSyncPending()) {
+        await awaitTwinSync();
+        if (epoch !== sessionEpoch) throw new SessionLostError('The session ended before the credential change went out');
+      }
       // Another tab's credential change is out (an origin without Web Locks,
       // or one past the lock's bound): this one goes out on what it stores
       if (credentialChangeMarked() && (await credentialChangeWaitEnded(epoch))) {
@@ -629,6 +642,14 @@ function followOtherTabsOrStop(): void {
 /** The renewal itself, lock already handled. `promptRetry`: false for a background renewal (one request). */
 async function renew(epoch: number, intended: string | null, promptRetry = true): Promise<string> {
   if (epoch !== sessionEpoch) throw new SessionLostError('Session ended before the renewal');
+  // This tab asked the twins of its not-remembered session for its newest
+  // pair (a tab restored, reloaded or back from the back-forward cache missed
+  // their renewals): its first renewal waits for their answer, briefly
+  // (tokenStorage.TWIN_SYNC_WAIT_MS), and sends what it holds then
+  if (twinSyncPending()) {
+    await awaitTwinSync();
+    if (epoch !== sessionEpoch) throw new SessionLostError('Session ended while the other tabs of this session were asked');
+  }
   // A credential change of another tab is out: a refresh token sent now is
   // of the version it moves away from once it commits. This renewal waits
   // for its answer (bounded by the change's own deadline), then goes on with

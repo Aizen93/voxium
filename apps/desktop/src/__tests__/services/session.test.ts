@@ -62,6 +62,14 @@ const storage = vi.hoisted(() => ({
   }),
   unmark: vi.fn(() => storage.clearMark()),
   credentialChangeInFlightUntil: vi.fn(() => storage.mark),
+  /** This tab asked its twins and no renewal has waited for their answer yet. */
+  twinAsked: false,
+  twinAnswer: null as (() => void) | null,
+  twinSyncPending: vi.fn(() => storage.twinAsked),
+  awaitTwinSync: vi.fn(() => {
+    storage.twinAsked = false;
+    return new Promise<void>((resolve) => { storage.twinAnswer = resolve; });
+  }),
   waitForCredentialChange: vi.fn(() => (storage.mark === null
     ? Promise.resolve(false)
     : new Promise<boolean>((resolve) => { storage.markWaiters.push(() => resolve(true)); }))),
@@ -79,6 +87,8 @@ vi.mock('../../services/tokenStorage', () => ({
   markCredentialChange: storage.markCredentialChange,
   credentialChangeInFlightUntil: storage.credentialChangeInFlightUntil,
   waitForCredentialChange: storage.waitForCredentialChange,
+  twinSyncPending: storage.twinSyncPending,
+  awaitTwinSync: storage.awaitTwinSync,
 }));
 
 import {
@@ -146,6 +156,8 @@ beforeEach(() => {
   storage.clearOutcome = 'cleared';
   storage.mark = null;
   storage.markWaiters = [];
+  storage.twinAsked = false;
+  storage.twinAnswer = null;
 });
 
 afterEach(() => {
@@ -1364,6 +1376,112 @@ describe('session — a credential change in another tab, marked in the shared s
     storage.clearMark();
     await expect(refused).rejects.toBeInstanceOf(SessionLostError);
     expect(later).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — a not-remembered tab that asked its twins renews on their answer', () => {
+  it('its renewal waits for the answer, then sends the newest refresh token it holds', async () => {
+    storage.twinAsked = true;
+    storage.access = expiredToken();
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const renewal = refreshAccessToken();
+    await Promise.resolve();
+    expect(http.post).not.toHaveBeenCalled();
+
+    // the twin's answer: its pair is taken as this tab's
+    storage.refresh = 'refresh-from-twin';
+    storage.twinAnswer!();
+
+    await expect(renewal).resolves.toBe('access-new');
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(http.post.mock.calls[0][1]).toEqual({ refreshToken: 'refresh-from-twin', client: 'web' });
+  });
+
+  it('a fresh pair in the answer is the renewal\'s answer: nothing is sent', async () => {
+    storage.twinAsked = true;
+    storage.access = expiredToken();
+    const renewal = refreshAccessToken();
+    await Promise.resolve();
+
+    const fromTwin = freshToken();
+    storage.access = fromTwin;
+    storage.refresh = 'refresh-from-twin';
+    storage.twinAnswer!();
+
+    await expect(renewal).resolves.toBe(fromTwin);
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('no answer within the wait: it sends what it holds, as before', async () => {
+    storage.twinAsked = true;
+    storage.access = expiredToken();
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const renewal = refreshAccessToken();
+    await Promise.resolve();
+    storage.twinAnswer!(); // the wait ran out
+
+    await expect(renewal).resolves.toBe('access-new');
+    expect(http.post.mock.calls[0][1]).toEqual({ refreshToken: 'refresh-old', client: 'web' });
+  });
+
+  it('only a tab that asked waits: with no question out nothing is awaited', () => {
+    storage.access = expiredToken();
+    http.post.mockReturnValueOnce(new Promise(() => {}));
+    void refreshAccessToken();
+    expect(storage.awaitTwinSync).not.toHaveBeenCalled();
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('a sign-out and a new sign-in during the wait: the old renewal sends nothing for the new session', async () => {
+    storage.twinAsked = true;
+    storage.access = expiredToken();
+    const outcome = refreshAccessToken().then(() => 'resolved', (err: unknown) => err);
+    await Promise.resolve();
+
+    endSessionRenewals();
+    storage.refresh = 'refresh-next-session';
+    storage.twinAnswer!();
+
+    expect(await outcome).toBeInstanceOf(SessionLostError);
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('the wait runs under the renewal lock, where there is one', async () => {
+    storage.shared = true;
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    locks.hold();
+    storage.twinAsked = true;
+    storage.access = expiredToken();
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const renewal = refreshAccessToken();
+    await Promise.resolve();
+    expect(storage.awaitTwinSync).not.toHaveBeenCalled();
+
+    locks.release();
+    await vi.waitFor(() => expect(storage.awaitTwinSync).toHaveBeenCalledTimes(1));
+    storage.twinAnswer!();
+    await expect(renewal).resolves.toBe('access-new');
+  });
+
+  it('a credential change waits for the answer too, and goes out on the newest pair of the session', async () => {
+    storage.twinAsked = true;
+    storage.access = freshToken();
+    const seen: boolean[] = [];
+    const change = vi.fn(async (stillCurrent: () => boolean) => {
+      seen.push(stillCurrent());
+      return 'changed';
+    });
+    const pending = runCredentialChange(change);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(change).not.toHaveBeenCalled();
+
+    storage.refresh = 'refresh-from-twin';
+    storage.twinAnswer!();
+
+    await expect(pending).resolves.toBe('changed');
+    // the session it was made in is the twin's pair it went out with
+    expect(seen).toEqual([true]);
   });
 });
 
