@@ -1170,3 +1170,29 @@ describe('session — background renewals after a refresh that got no usable ans
     expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
   });
 });
+
+describe('session — the background chain after its last attempt', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  it('is done once its last timer fired: a refresh unanswered later starts a chain of its own', async () => {
+    http.post.mockRejectedValue(networkError());
+    const first = expect(refreshAccessToken()).rejects.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await first;
+    await vi.advanceTimersByTimeAsync(80_000);
+    // the caller's request, its prompt retry and the three background ones
+    expect(http.post).toHaveBeenCalledTimes(5);
+
+    // much later, the same token goes unanswered again
+    await vi.advanceTimersByTimeAsync(600_000);
+    const later = expect(refreshAccessToken()).rejects.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await later;
+    expect(http.post).toHaveBeenCalledTimes(7);
+    await vi.advanceTimersByTimeAsync(10_000 - REFRESH_RETRY_DELAY_MS);
+    expect(http.post).toHaveBeenCalledTimes(8);
+    http.post.mockReset();
+  });
+});

@@ -49,6 +49,9 @@ const session = vi.hoisted(() => ({
   runCredentialChange: vi.fn(<T,>(change: (stillCurrent: () => boolean) => Promise<T>) => change(() => true)),
   refreshAccessToken: vi.fn(async () => 'access-renewed'),
   CREDENTIAL_CHANGE_TIMEOUT_MS: 75_000,
+  /** The session epoch: endSessionRenewals (a logout) moves it */
+  epoch: 0,
+  currentSessionEpoch: vi.fn((): number => session.epoch),
 }));
 vi.mock('../../services/session', () => session);
 vi.mock('../../stores/resetStores', () => ({ resetAccountStores: vi.fn() }));
@@ -1230,5 +1233,35 @@ describe('authStore.checkAuth — the answer is applied only for the session it 
 
     expect(useAuthStore.getState()).toMatchObject({ user: me, isAuthenticated: true });
     expect(socket.connectSocket).toHaveBeenCalledWith(`${tokenOf('u-1')}-renewed`);
+  });
+});
+
+describe('authStore — a credential change answered after a sign-out is left to its caller', () => {
+  beforeEach(() => {
+    session.epoch = 0;
+    useAuthStore.setState({ user: me as never, isAuthenticated: true, isLoading: false });
+    socket.beginCredentialChange.mockImplementation(() => socket.endCredentialChange);
+  });
+
+  afterEach(() => {
+    session.epoch = 0;
+  });
+
+  it('its 401 renews nothing once the session ended meanwhile (a sign-out, a new sign-in)', async () => {
+    const refused = Object.assign(new Error('401'), { isAxiosError: true, response: { status: 401, data: { error: 'Session invalidated' } } });
+    api.post.mockImplementationOnce(async () => {
+      session.epoch = 1; // the user signed out while the change was out
+      throw refused;
+    });
+
+    await expect(useAuthStore.getState().revokeOtherSessions('pw')).rejects.toBe(refused);
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+
+    api.post.mockImplementationOnce(async () => {
+      session.epoch = 2;
+      throw refused;
+    });
+    await expect(useAuthStore.getState().changePassword('old-pw', 'new-pw-123')).rejects.toBe(refused);
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
   });
 });

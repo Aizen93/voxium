@@ -343,7 +343,13 @@ function scheduleBackgroundRenewals(epoch: number, refreshToken: string): void {
   cancelBackgroundRenewals();
   const chain: BackgroundChain = { epoch, refreshToken, timers: [] };
   backgroundChain = chain;
-  chain.timers = BACKGROUND_RENEWAL_DELAYS_MS.map((delay) => setTimeout(() => void backgroundRenewal(chain), delay));
+  const last = BACKGROUND_RENEWAL_DELAYS_MS.length - 1;
+  chain.timers = BACKGROUND_RENEWAL_DELAYS_MS.map((delay, at) => setTimeout(() => {
+    void backgroundRenewal(chain).finally(() => {
+      // Its last timer has fired: a later refresh that goes unanswered starts a chain of its own
+      if (at === last && backgroundChain === chain) backgroundChain = null;
+    });
+  }, delay));
 }
 
 async function backgroundRenewal(chain: BackgroundChain): Promise<void> {

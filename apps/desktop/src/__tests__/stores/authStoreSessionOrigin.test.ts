@@ -30,6 +30,9 @@ const session = vi.hoisted(() => ({
   runCredentialChange: vi.fn(<T,>(change: (stillCurrent: () => boolean) => Promise<T>) => change(() => true)),
   refreshAccessToken: vi.fn(async () => 'access-renewed'),
   CREDENTIAL_CHANGE_TIMEOUT_MS: 75_000,
+  /** The session epoch: endSessionRenewals (a logout) moves it */
+  epoch: 0,
+  currentSessionEpoch: vi.fn((): number => session.epoch),
 }));
 vi.mock('../../services/session', () => session);
 vi.mock('../../stores/resetStores', () => ({ resetAccountStores: vi.fn() }));

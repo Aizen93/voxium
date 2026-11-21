@@ -9,7 +9,7 @@ import {
 import { endSessionOnServer, holdReplacedSession, endReplacedSession } from '../services/sessionRevocation';
 import type { AxiosRequestConfig } from 'axios';
 import {
-  endSessionRenewals, runCredentialChange, refreshAccessToken, SessionLostError, CREDENTIAL_CHANGE_TIMEOUT_MS,
+  endSessionRenewals, runCredentialChange, refreshAccessToken, currentSessionEpoch, SessionLostError, CREDENTIAL_CHANGE_TIMEOUT_MS,
 } from '../services/session';
 import { isAuthRefusal } from '../services/authRefusal';
 import { accountDeletionInFlight, accountDeletionSettled, beginAccountDeletion } from '../services/accountDeletion';
@@ -116,6 +116,9 @@ function storeCredentialChangePair(answer: { accessToken?: unknown; refreshToken
  * session loss.
  */
 async function credentialChange<T>(send: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
+  // The session the change is made in: a 401 that answers after a sign-out
+  // (or a new sign-in) is its caller's, and renews nothing of what is stored now
+  const epoch = currentSessionEpoch();
   try {
     return await runCredentialChange(async (stillCurrent) => {
       const endCredentialChange = beginCredentialChange();
@@ -126,7 +129,7 @@ async function credentialChange<T>(send: (stillCurrent: () => boolean) => Promis
       }
     });
   } catch (err) {
-    if ((err as { response?: { status?: unknown } } | null)?.response?.status === 401) {
+    if ((err as { response?: { status?: unknown } } | null)?.response?.status === 401 && epoch === currentSessionEpoch()) {
       try {
         await refreshAccessToken();
       } catch (renewalErr) {
