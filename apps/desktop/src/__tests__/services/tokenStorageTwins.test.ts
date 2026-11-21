@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getAccessToken, getRefreshToken, setTokens, flushTokenStorage, hydrateTokens, announceSessionEnded,
   createKeychainSessionStore, reloadAfterSessionChange, twinSyncPending, awaitTwinSync, SESSION_CHANNEL_NAME, TWIN_SYNC_WAIT_MS,
+  TWIN_SYNC_ANSWER_INTERVAL_MS,
   _resetTokenStorageForTests, _setPageReloadForTests, _setSessionChannelForTests, type SessionChannel,
 } from '../../services/tokenStorage';
 
@@ -318,7 +319,7 @@ describe('a twin that missed the messages asks for the newest pair of its sessio
     expect(channel.posted).toEqual([]);
   });
 
-  it('the answer is taken as the asking tab\'s pair, and ends the wait of its renewal early', async () => {
+  it('the answer is taken as the asking tab\'s pair, and the wait still runs its whole length', async () => {
     vi.useFakeTimers();
     await restoredWith(pairOf('s-1', 1));
     let waited = false;
@@ -326,14 +327,109 @@ describe('a twin that missed the messages asks for the newest pair of its sessio
     expect(twinSyncPending()).toBe(false);
 
     await vi.advanceTimersByTimeAsync(10);
-    expect(waited).toBe(false);
     const theirs = pairOf('s-1', 3);
     channel.deliver({ type: 'rotated', sid: 's-1', ...theirs });
     await vi.advanceTimersByTimeAsync(0);
+    expect(getRefreshToken()).toBe(theirs.refreshToken);
+    // another twin may still answer with a newer generation
+    expect(waited).toBe(false);
 
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS - 10 - 1);
+    expect(waited).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     expect(waited).toBe(true);
     await wait;
-    expect(getRefreshToken()).toBe(theirs.refreshToken);
+    vi.useRealTimers();
+  });
+
+  it('twins at different generations all answer: the newest is held when the wait ends, whichever came first', async () => {
+    vi.useFakeTimers();
+    for (const order of [[5, 3], [3, 5]]) {
+      _resetTokenStorageForTests();
+      _setPageReloadForTests(reload);
+      channel = fakeChannel();
+      _setSessionChannelForTests(channel.factory);
+      sessionStorage.clear();
+      await restoredWith(pairOf('s-1', 1));
+      const wait = awaitTwinSync();
+      for (const gen of order) channel.deliver({ type: 'rotated', sid: 's-1', ...pairOf('s-1', gen) });
+      await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS);
+      await wait;
+      expect(getRefreshToken(), order.join(',')).toBe(pairOf('s-1', 5).refreshToken);
+    }
+    vi.useRealTimers();
+  });
+
+  it('a rotated message that comes with no question asked neither starts nor ends a wait', async () => {
+    vi.useFakeTimers();
+    const mine = pairOf('s-1', 1);
+    setTokens(mine.accessToken, mine.refreshToken, false);
+    await flushTokenStorage();
+    channel.deliver({ type: 'rotated', sid: 's-1', ...pairOf('s-1', 2) });
+    expect(twinSyncPending()).toBe(false);
+    let waited = false;
+    void awaitTwinSync().then(() => { waited = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(waited).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('nothing is asked while the page reloads onto another session', async () => {
+    const mine = pairOf('s-1', 2);
+    setTokens(mine.accessToken, mine.refreshToken, false);
+    await flushTokenStorage();
+    channel.posted.length = 0;
+    reloadAfterSessionChange();
+
+    pageshow(true);
+
+    expect(channel.posted).toEqual([]);
+    expect(twinSyncPending()).toBe(false);
+  });
+
+  it('with no channel nothing is asked, and no renewal waits', async () => {
+    _setSessionChannelForTests(null);
+    await restoredWith(pairOf('s-1', 1));
+    expect(twinSyncPending()).toBe(false);
+  });
+
+  it(`a twin answers a question for its session at most once per ${TWIN_SYNC_ANSWER_INTERVAL_MS} ms; questions in between get one answer when it ends`, async () => {
+    vi.useFakeTimers();
+    const mine = pairOf('s-1', 3);
+    setTokens(mine.accessToken, mine.refreshToken, false);
+    await flushTokenStorage();
+    channel.posted.length = 0;
+    const answers = () => channel.posted.filter((m) => (m as { type: string }).type === 'rotated').length;
+
+    channel.deliver({ type: 'sync', sid: 's-1', gen: 0 });
+    expect(answers()).toBe(1);
+    for (let i = 0; i < 5; i++) channel.deliver({ type: 'sync', sid: 's-1', gen: 0 });
+    expect(answers()).toBe(1);
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_ANSWER_INTERVAL_MS - 1);
+    expect(answers()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(answers()).toBe(2);
+    // nothing more is owed: the next interval holds no answer
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_ANSWER_INTERVAL_MS * 3);
+    expect(answers()).toBe(2);
+    expect(TWIN_SYNC_ANSWER_INTERVAL_MS).toBeLessThan(TWIN_SYNC_WAIT_MS / 2);
+    vi.useRealTimers();
+  });
+
+  it('the answer owed at the end of the interval is checked again then: none once the tab no longer holds a newer generation', async () => {
+    vi.useFakeTimers();
+    const mine = pairOf('s-1', 3);
+    setTokens(mine.accessToken, mine.refreshToken, false);
+    await flushTokenStorage();
+    channel.deliver({ type: 'sync', sid: 's-1', gen: 1 });
+    channel.posted.length = 0;
+    channel.deliver({ type: 'sync', sid: 's-1', gen: 2 });
+    // this tab holds another session before the interval ends: its pair answers no question about s-1
+    const other = pairOf('s-2', 9);
+    setTokens(other.accessToken, other.refreshToken, false);
+    channel.posted.length = 0;
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_ANSWER_INTERVAL_MS);
+    expect(channel.posted).toEqual([]);
     vi.useRealTimers();
   });
 

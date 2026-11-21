@@ -164,7 +164,7 @@ describe('a not-remembered tab restored with an old copy of its session renews w
     post.mockResolvedValueOnce({ data: { data: pairAt(4, false) } });
 
     const renewal = restored.session.refreshAccessToken();
-    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS);
     await renewal;
 
     expect(sentRefreshTokens()).toEqual([current.refreshToken]);
@@ -183,10 +183,35 @@ describe('a not-remembered tab restored with an old copy of its session renews w
     const restored = await openTab(null, true);
 
     const renewal = restored.session.refreshAccessToken();
-    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS);
 
     await expect(renewal).resolves.toBe(current.accessToken);
     expect(post).not.toHaveBeenCalled();
+  });
+
+  it('twins at different generations both answer: the restored tab sends the newest, not the first to answer', async () => {
+    // the twin at generation 3 opened first: it answers first; the one at 5 answers after it
+    const twins: Tab[] = [];
+    for (const gen of [3, 5]) {
+      const held = pairAt(gen, true);
+      sessionStorage.setItem('voxium_access_token', held.accessToken);
+      sessionStorage.setItem('voxium_refresh_token', held.refreshToken);
+      twins.push(await openTab(null, true));
+    }
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS);
+    expect(twins[0].storage.getRefreshToken()).toBe(pairAt(3, true).refreshToken);
+    const stale = pairAt(1, true);
+    sessionStorage.setItem('voxium_access_token', stale.accessToken);
+    sessionStorage.setItem('voxium_refresh_token', stale.refreshToken);
+    const restored = await openTab(null, true);
+    post.mockResolvedValueOnce({ data: { data: pairAt(6, false) } });
+
+    const renewal = restored.session.refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS);
+    await renewal;
+
+    expect(sentRefreshTokens()).toEqual([pairAt(5, true).refreshToken]);
+    expectOneListenerEach(...twins, restored);
   });
 
   it('with no twin alive nothing answers: after the wait the tab sends what it holds', async () => {

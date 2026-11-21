@@ -550,14 +550,25 @@ function storePair(accessToken: string, refreshToken: string, remembered: boolea
 // or comes back from the back-forward cache, asks: 'sync' with its sid and
 // gen, never a token. A twin that holds the same session at a HIGHER
 // generation answers with its pair as 'rotated', the one message that carries
-// tokens. The asking tab's next renewal waits for that answer, at most
-// TWIN_SYNC_WAIT_MS after the ask, and then sends what it holds.
+// tokens, at most once per TWIN_SYNC_ANSWER_INTERVAL_MS. The asking tab's next
+// renewal waits TWIN_SYNC_WAIT_MS after the ask, the whole of it: twins at
+// different generations may all answer, and each answer newer than what the
+// tab holds is taken, so the newest one received is held when the wait ends.
+// Then it sends what it holds.
 //
-// The messages carry tokens. A BroadcastChannel reaches only the browsing
-// contexts of this same origin (and the same storage partition): exactly
-// those that can read this origin's localStorage, where any remembered
-// session of this browser sits in full. They are never logged; a message is
-// checked field by field and anything else in it is ignored.
+// The messages carry tokens, and the channel reaches farther than the
+// storage a not-remembered pair lives in. That pair sits in one tab's
+// sessionStorage, which no other context can read; a BroadcastChannel
+// delivers to every context of this origin (and storage partition) that
+// listens on its name: the other tabs, whatever account they show, and
+// workers, which have no localStorage at all. So a not-remembered pair is
+// handed to all of them at every renewal ('rotated'), and, since 'sync', on
+// request to any of them that knows the session's id. That is accepted: the
+// twins of one session can be kept in step only by handing them its pair,
+// and every context of this origin runs the app's own code, which can read
+// the page's remembered session in localStorage anyway. The messages are
+// never logged; a message is checked field by field and anything else in it
+// is ignored.
 
 /** The channel's name: one per origin, like the page's storage. */
 export const SESSION_CHANNEL_NAME = 'voxium-session';
@@ -680,49 +691,96 @@ function onSessionMessage(data: unknown): void {
     // names this tab's own not-remembered session (the guards above) at an
     // OLDER generation than this tab holds: anything else (another session,
     // the same or a newer generation, a remembered tab, a malformed message)
-    // is never answered, so no message makes a tab post its pair on request.
-    // A sid and a generation are claims, not proof of holding a token: a page
-    // of this origin that learnt the sid (the account's own pages list its
-    // sessions) could ask too. It would get what every renewal of this
-    // session already posts ('rotated') to every context of this origin, the
-    // contexts that can read this origin's localStorage, and only for a
-    // session and a generation below the current one that it named
+    // is never answered, and an answer goes out at most once per
+    // TWIN_SYNC_ANSWER_INTERVAL_MS (answerSync). A sid and a generation are
+    // claims, not proof of holding a token: a context of this origin that
+    // learnt the sid (the account's own pages list its sessions, an 'ended'
+    // or 'sync' message names it) could ask too, and would get the pair that
+    // every renewal of this session posts to every context listening (see
+    // the section comment for why that is accepted)
     if (own.gen === undefined || message.gen >= own.gen) return;
-    announceRotation(memory.accessToken, memory.refreshToken);
+    answerSync(message.sid, message.gen);
     return;
   }
   const theirs = readTokenClaims(message.refreshToken);
   if (theirs?.sid !== message.sid || sessionIdOf(message.accessToken) !== message.sid) return;
   if (own.gen === undefined || theirs.gen === undefined || theirs.gen <= own.gen) return;
-  // Taken as this tab's own pair, without posting it again
+  // Taken as this tab's own pair, without posting it again. It ends no wait
+  // for the twins: a twin at a still higher generation may answer after it
   storePair(message.accessToken, message.refreshToken, false);
-  // ... which answers this tab's own question, if it asked
-  if (twinSync?.sid === message.sid) {
-    twinSync.answered();
-    twinSync = null;
-  }
 }
 
-// This tab's question to its twins, until it is answered or a renewal has waited for it
-let twinSync: { sid: string; askedAt: number; waited: boolean; answered: () => void; answer: Promise<void> } | null = null;
+/**
+ * The shortest time between two answers of this tab to a 'sync'. One answer
+ * is a broadcast that reaches every twin listening, so it serves every
+ * question that came before it; a question that arrives within the interval
+ * is answered once, when the interval ends, by one answer for all of them,
+ * re-checked then (answerSync). 100 ms keeps that answer well inside the
+ * asker's TWIN_SYNC_WAIT_MS (300 ms) and bounds what any number of questions
+ * can make a tab post to 10 pairs a second.
+ */
+export const TWIN_SYNC_ANSWER_INTERVAL_MS = 100;
+
+// When this tab last answered a 'sync', and the one answer it still owes
+let lastSyncAnswerAt = Number.NEGATIVE_INFINITY;
+let owedSyncAnswer: { sid: string; lowestGen: number; timer: ReturnType<typeof setTimeout> } | null = null;
+
+/**
+ * Answer a twin's 'sync' for this tab's session `sid`, asked from generation
+ * `askedGen`: now, unless this tab answered less than
+ * TWIN_SYNC_ANSWER_INTERVAL_MS ago; then once, when the interval ends, for
+ * every question of the meantime (from the lowest generation asked).
+ */
+function answerSync(sid: string, askedGen: number): void {
+  if (owedSyncAnswer) {
+    if (owedSyncAnswer.sid === sid) owedSyncAnswer.lowestGen = Math.min(owedSyncAnswer.lowestGen, askedGen);
+    return;
+  }
+  // a clock set back must not hold an answer for longer than the interval
+  const wait = Math.min(lastSyncAnswerAt + TWIN_SYNC_ANSWER_INTERVAL_MS - Date.now(), TWIN_SYNC_ANSWER_INTERVAL_MS);
+  if (wait <= 0) {
+    postPairAnswering(sid, askedGen);
+    return;
+  }
+  const owed = {
+    sid,
+    lowestGen: askedGen,
+    timer: setTimeout(() => {
+      if (owedSyncAnswer !== owed) return;
+      owedSyncAnswer = null;
+      postPairAnswering(owed.sid, owed.lowestGen);
+    }, wait),
+  };
+  owedSyncAnswer = owed;
+}
+
+/** This tab's pair as the answer to a 'sync' for `sid` from `askedGen`, while this tab still answers it (checked again now). */
+function postPairAnswering(sid: string, askedGen: number): void {
+  if (!isWebStore(store) || reloadPending() || memory.remembered || memory.accessToken === null || memory.refreshToken === null) return;
+  const own = readTokenClaims(memory.refreshToken);
+  if (own?.sid !== sid || own.gen === undefined || askedGen >= own.gen) return;
+  lastSyncAnswerAt = Date.now();
+  announceRotation(memory.accessToken, memory.refreshToken);
+}
+
+// This tab's question to its twins, until a renewal has waited for it
+let twinSync: { askedAt: number; waited: boolean } | null = null;
 
 /**
  * Ask the twins of this tab's not-remembered session for its newest pair
  * ('sync': the sid and this tab's generation, decoded for routing only, and
  * no token). Nothing for a remembered pair, a pair that names no session or
- * no generation, while a reload is pending, and outside the browser build.
+ * no generation, while a reload is pending, without a channel, and outside
+ * the browser build. True when the question went out.
  */
-function askTwins(): void {
-  if (!isWebStore(store) || reloadPending() || memory.remembered || memory.accessToken === null || memory.refreshToken === null) return;
+function askTwins(): boolean {
+  if (!isWebStore(store) || reloadPending() || memory.remembered || memory.accessToken === null || memory.refreshToken === null) return false;
   const own = readTokenClaims(memory.refreshToken);
-  if (!own?.sid || own.gen === undefined || sessionIdOf(memory.accessToken) !== own.sid) return;
-  if (!sessionChannel()) return;
-  let answered!: () => void;
-  const answer = new Promise<void>((resolve) => {
-    answered = resolve;
-  });
-  twinSync = { sid: own.sid, askedAt: Date.now(), waited: false, answered, answer };
+  if (!own?.sid || own.gen === undefined || sessionIdOf(memory.accessToken) !== own.sid) return false;
+  if (!sessionChannel()) return false;
+  twinSync = { askedAt: Date.now(), waited: false };
   post({ type: 'sync', sid: own.sid, gen: own.gen });
+  return true;
 }
 
 /**
@@ -735,10 +793,11 @@ export function twinSyncPending(): boolean {
 }
 
 /**
- * Wait for the twins' answer to this tab's question, at most until
- * TWIN_SYNC_WAIT_MS after it was asked, and once: a later renewal waits for
- * nothing. Resolves once the answer came (already taken as this tab's pair)
- * or the time is up. Never rejects.
+ * Wait for the twins' answers to this tab's question until TWIN_SYNC_WAIT_MS
+ * after it was asked, the whole of it, and once: a later renewal waits for
+ * nothing. Every answer received meanwhile that is newer than what the tab
+ * holds has been taken as its pair (onSessionMessage), so the newest of them
+ * is held when this resolves. Never rejects.
  */
 export function awaitTwinSync(): Promise<void> {
   const asked = twinSync;
@@ -747,21 +806,17 @@ export function awaitTwinSync(): Promise<void> {
   const done = () => {
     if (twinSync === asked) twinSync = null;
   };
-  const remaining = asked.askedAt + TWIN_SYNC_WAIT_MS - Date.now();
+  // a clock set back must not stretch the wait past its length
+  const remaining = Math.min(asked.askedAt + TWIN_SYNC_WAIT_MS - Date.now(), TWIN_SYNC_WAIT_MS);
   if (remaining <= 0) {
     done();
     return Promise.resolve();
   }
   return new Promise<void>((resolve) => {
-    const timer = setTimeout(() => {
+    setTimeout(() => {
       done();
       resolve();
     }, remaining);
-    void asked.answer.then(() => {
-      clearTimeout(timer);
-      done();
-      resolve();
-    });
   });
 }
 
@@ -1378,4 +1433,8 @@ export function _resetTokenStorageForTests(backend?: SessionStore): void {
   _resetPageNavigationForTests();
   _setSessionChannelForTests(undefined);
   twinSync = null;
+  if (owedSyncAnswer) clearTimeout(owedSyncAnswer.timer);
+  owedSyncAnswer = null;
+  lastSyncAnswerAt = Number.NEGATIVE_INFINITY;
+  lastScope = null;
 }
