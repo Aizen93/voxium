@@ -147,15 +147,18 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // opened and refreshed. A bucket of its own, so reading never spends the
   // step-up's below. Per account AND session (byUserSession), no block.
   sessionsRead:   { keyPrefix: 'rl:sessread', points: 30,  duration: 60,  blockDuration: 0,   keyType: 'userId', label: 'Sign-in sessions: list (per session)' },
-  // The account password that signs sessions out (DELETE
-  // /auth/sessions/:sessionId, POST /auth/sessions/revoke-others), per
+  // A wrong account password typed from a signed-in session: the two session
+  // sign-outs (DELETE /auth/sessions/:sessionId, POST
+  // /auth/sessions/revoke-others) and the password change (POST
+  // /auth/change-password) share this one bucket (the name and the key
+  // prefix are historical: an administrator may have tuned them). Per
   // account AND session (byUserSession): charged before the check and given
   // back unless the password was wrong, so it counts wrong passwords only.
-  // 5 in 15 minutes, then the two routes answer 429 for 15 minutes to that
-  // session (signing in and changing the password are not affected). Never
-  // the account alone: a bucket any one session can fill is a lock that
-  // session holds on every other session of the account.
-  sessionRevoke:  { keyPrefix: 'rl:sessrvk',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Sign-in sessions: sign out (wrong passwords, per session)' },
+  // 5 in 15 minutes, then the three routes answer 429 for 15 minutes to that
+  // session (signing in is not affected). Never the account alone: a bucket
+  // any one session can fill is a lock that session holds on every other
+  // session of the account.
+  sessionRevoke:  { keyPrefix: 'rl:sessrvk',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Wrong account passwords from a session: sign-outs and password change (per session)' },
   consent:        { keyPrefix: 'rl:consent',  points: 10,  duration: 60,  blockDuration: 0,   keyType: 'userId',   label: 'Accept legal documents' },
   deleteAccount:  { keyPrefix: 'rl:delacct',  points: 5,   duration: 900, blockDuration: 900, keyType: 'userId', label: 'Delete own account' },
   totp:           { keyPrefix: 'rl:totp',     points: 10,  duration: 60,  blockDuration: 300, keyType: 'userId', label: 'TOTP Management' },
@@ -1025,11 +1028,11 @@ export const rateLimitLogout = createMiddleware('logout', byIp);
 export const rateLimitChangePassword = createMiddleware('changePassword', byIp);
 export const rateLimitSessionsRead = createMiddleware('sessionsRead', byUserSession);
 /**
- * Set by a session sign-out whose step-up password was wrong: the one outcome
- * its bucket keeps charged.
+ * Set by a route whose account password was wrong (a session sign-out, the
+ * password change): the one outcome its bucket keeps charged.
  */
 export const STEP_UP_REFUSED_LOCAL = 'stepUpRefused';
-export const rateLimitSessionRevoke = createMiddleware('sessionRevoke', byUserSession, {
+export const rateLimitPasswordStepUp = createMiddleware('sessionRevoke', byUserSession, {
   refundUnless: (res) => res.locals[STEP_UP_REFUSED_LOCAL] === true,
 });
 export const rateLimitConsent = createMiddleware('consent', byUserId);

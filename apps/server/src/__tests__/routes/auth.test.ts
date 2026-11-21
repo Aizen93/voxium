@@ -189,13 +189,14 @@ vi.mock('../../routes/roles', () => ({ roleRouter: Router() }));
 const {
   rateLimitRegisterMock, rateLimitRegisterAttemptMock, rateLimitRegisterAttemptSubnetMock,
   rateLimitRegisterCompleteMock, rateLimitRegisterResendMock, chargeRegistrationBudgetsMock, rateLimitLogoutMock,
-  rateLimitSessionsReadMock, rateLimitSessionRevokeMock,
+  rateLimitSessionsReadMock, rateLimitPasswordStepUpMock, rateLimitChangePasswordMock,
 } = vi.hoisted(() => {
   const spy = () => vi.fn((_req: unknown, _res: unknown, next: () => void) => next());
   return {
     rateLimitLogoutMock: spy(),
     rateLimitSessionsReadMock: spy(),
-    rateLimitSessionRevokeMock: spy(),
+    rateLimitPasswordStepUpMock: spy(),
+    rateLimitChangePasswordMock: spy(),
     rateLimitRegisterMock: spy(),
     rateLimitRegisterAttemptMock: spy(),
     rateLimitRegisterAttemptSubnetMock: spy(),
@@ -229,9 +230,9 @@ vi.mock('../../middleware/rateLimiter', () => ({
   rateLimitRefresh: passthroughMiddleware,
   rateLimitLogout: rateLimitLogoutMock,
   rateLimitSessionsRead: rateLimitSessionsReadMock,
-  rateLimitSessionRevoke: rateLimitSessionRevokeMock,
+  rateLimitPasswordStepUp: rateLimitPasswordStepUpMock,
   STEP_UP_REFUSED_LOCAL: 'stepUpRefused',
-  rateLimitChangePassword: passthroughMiddleware,
+  rateLimitChangePassword: rateLimitChangePasswordMock,
   rateLimitTOTP: passthroughMiddleware,
   rateLimitVerifyEmail: passthroughMiddleware,
   rateLimitMailBlock: passthroughMiddleware,
@@ -1134,8 +1135,108 @@ describe('GET /api/v1/auth/me', () => {
 });
 
 describe('POST /api/v1/auth/change-password', () => {
+  /** What the route left on the response when it finished (the bucket keeps the charge only when it is true). */
+  let stepUpRefused: unknown;
+  let chain: string[];
+
   beforeEach(() => {
     vi.clearAllMocks();
+    stepUpRefused = undefined;
+    chain = [];
+    rateLimitChangePasswordMock.mockImplementation((_req: unknown, _res: unknown, next: () => void) => { chain.push('address'); next(); });
+    rateLimitPasswordStepUpMock.mockImplementation((_req: unknown, res: { on: (e: string, f: () => void) => void; locals: Record<string, unknown> }, next: () => void) => {
+      chain.push('session');
+      res.on('finish', () => { stepUpRefused = res.locals.stepUpRefused; });
+      next();
+    });
+  });
+
+  const changeBody = { currentPassword: 'currentpassword', newPassword: 'newpassword123' };
+  const authedAs = () => generateAccessToken({ userId: MOCK_USER.id, username: MOCK_USER.username, tokenVersion: 0 });
+  const authRow = { bannedAt: null, tokenVersion: 0, role: 'user', emailVerified: false };
+
+  it('the address limiter runs first, then the session\'s wrong-password bucket, both after authenticate; an unauthenticated call reaches neither', async () => {
+    const anon = await request(app).post('/api/v1/auth/change-password').send(changeBody);
+    expect(anon.status).toBe(401);
+    expect(chain).toEqual([]);
+
+    mockPrismaUser.findUnique.mockResolvedValueOnce(authRow);
+    await request(app).post('/api/v1/auth/change-password').set('Authorization', `Bearer ${authedAs()}`).send({ newPassword: 'newpassword123' });
+    expect(chain).toEqual(['address', 'session']);
+    expect(rateLimitChangePasswordMock).toHaveBeenCalledTimes(1);
+    expect(rateLimitPasswordStepUpMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a wrong current password: 400 with the sentence clients map, and the session\'s charge is kept', async () => {
+    mockPrismaUser.findUnique
+      .mockResolvedValueOnce(authRow)
+      .mockResolvedValueOnce({ ...MOCK_USER, password: await bcrypt.hash('correctpassword', 4) });
+
+    const res = await request(app).post('/api/v1/auth/change-password').set('Authorization', `Bearer ${authedAs()}`).send({ currentPassword: 'wrongpassword', newPassword: 'newpassword123' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'Current password is incorrect' });
+    expect(stepUpRefused).toBe(true);
+  });
+
+  it('every other outcome gives the charge back: success, a refused new password, a missing field, a 401 from the service, a 500', async () => {
+    const hashedCurrent = await bcrypt.hash('currentpassword', 4);
+    const send = (body: Record<string, unknown> = changeBody) =>
+      request(app).post('/api/v1/auth/change-password').set('Authorization', `Bearer ${authedAs()}`).send(body);
+
+    // Success
+    mockPrismaUser.findUnique
+      .mockResolvedValueOnce(authRow)
+      .mockResolvedValueOnce({ ...MOCK_USER, password: hashedCurrent })
+      .mockResolvedValueOnce({ id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 0 });
+    mockPrismaUser.update.mockResolvedValue({ id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 1 });
+    expect((await send()).status).toBe(200);
+    expect(stepUpRefused).toBeUndefined();
+
+    // A new password the validator refuses (400 before the current one is compared)
+    mockPrismaUser.findUnique.mockResolvedValueOnce(authRow);
+    const weak = await send({ currentPassword: 'currentpassword', newPassword: 'short' });
+    expect(weak.status).toBe(400);
+    expect(weak.body.error).not.toBe('Current password is incorrect');
+    expect(stepUpRefused).toBeUndefined();
+
+    // A missing field
+    mockPrismaUser.findUnique.mockResolvedValueOnce(authRow);
+    expect((await send({ newPassword: 'newpassword123' })).status).toBe(400);
+    expect(stepUpRefused).toBeUndefined();
+
+    // 401 from the service: a reset or a ban committed meanwhile
+    mockPrismaUser.findUnique
+      .mockResolvedValueOnce(authRow)
+      .mockResolvedValueOnce({ ...MOCK_USER, password: hashedCurrent })
+      .mockResolvedValueOnce({ id: MOCK_USER.id, username: MOCK_USER.username, role: 'user', tokenVersion: 1 });
+    const stale = await send();
+    expect(stale.status).toBe(401);
+    expect(stale.body.error).toBe('Session invalidated');
+    expect(stepUpRefused).toBeUndefined();
+
+    // 401 from the service: the account row is gone
+    mockPrismaUser.findUnique.mockResolvedValueOnce(authRow).mockResolvedValueOnce(null);
+    expect((await send()).status).toBe(401);
+    expect(stepUpRefused).toBeUndefined();
+
+    // 500
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPrismaUser.findUnique.mockResolvedValueOnce(authRow).mockRejectedValueOnce(new Error('connection lost'));
+    expect((await send()).status).toBe(500);
+    expect(stepUpRefused).toBeUndefined();
+    err.mockRestore();
+  });
+
+  it('the two sign-outs and the change mount the one limiter (one shared budget)', async () => {
+    mockPrismaUser.findUnique.mockResolvedValue({ ...authRow, sessions: [{ tokenVersion: 0, expiresAt: new Date(Date.now() + 3_600_000) }] });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const bearer = `Bearer ${authedAs()}`;
+    await request(app).post('/api/v1/auth/change-password').set('Authorization', bearer).send(changeBody);
+    await request(app).post('/api/v1/auth/sessions/revoke-others').set('Authorization', bearer).send({});
+    await request(app).delete('/api/v1/auth/sessions/Other00000000000000000').set('Authorization', bearer).send({});
+    err.mockRestore();
+    expect(rateLimitPasswordStepUpMock).toHaveBeenCalledTimes(3);
   });
 
   it('changes password and returns new tokens', async () => {
@@ -2163,7 +2264,7 @@ describe('the account\'s own sign-in sessions: GET /auth/sessions, DELETE /auth/
     hash = hash || await bcrypt.hash('RightPassword1', 4);
     lockedVersion = 0;
     stepUpRefused = undefined;
-    rateLimitSessionRevokeMock.mockImplementation((_req: unknown, res: { on: (e: string, f: () => void) => void; locals: Record<string, unknown> }, next: () => void) => {
+    rateLimitPasswordStepUpMock.mockImplementation((_req: unknown, res: { on: (e: string, f: () => void) => void; locals: Record<string, unknown> }, next: () => void) => {
       res.on('finish', () => { stepUpRefused = res.locals.stepUpRefused; });
       next();
     });
@@ -2207,7 +2308,7 @@ describe('the account\'s own sign-in sessions: GET /auth/sessions, DELETE /auth/
       });
       expect(sessionStore.listLiveSessions).toHaveBeenCalledWith(expect.anything(), MOCK_USER.id, SID, 50);
       expect(rateLimitSessionsReadMock).toHaveBeenCalledTimes(1);
-      expect(rateLimitSessionRevokeMock).not.toHaveBeenCalled();
+      expect(rateLimitPasswordStepUpMock).not.toHaveBeenCalled();
     });
 
     it('a token that names no session: the list with none marked', async () => {
@@ -2250,7 +2351,7 @@ describe('the account\'s own sign-in sessions: GET /auth/sessions, DELETE /auth/
       expect(res.body).toEqual({ success: true, data: { revoked: 1 } });
       expect(sessionStore.deleteSession).toHaveBeenCalledWith(expect.anything(), OTHER, MOCK_USER.id);
       expect(revokeSessionSocketsMock).toHaveBeenCalledWith(MOCK_USER.id, OTHER, 'You were signed out from another device');
-      expect(rateLimitSessionRevokeMock).toHaveBeenCalledTimes(1);
+      expect(rateLimitPasswordStepUpMock).toHaveBeenCalledTimes(1);
       expect(stepUpRefused).toBeUndefined();
     });
 
@@ -2299,7 +2400,7 @@ describe('the account\'s own sign-in sessions: GET /auth/sessions, DELETE /auth/
     it('unauthenticated: 401, the step-up bucket never reached', async () => {
       const res = await request(app).delete(`/api/v1/auth/sessions/${OTHER}`).send({ password: 'RightPassword1' });
       expect(res.status).toBe(401);
-      expect(rateLimitSessionRevokeMock).not.toHaveBeenCalled();
+      expect(rateLimitPasswordStepUpMock).not.toHaveBeenCalled();
     });
   });
 
@@ -2393,7 +2494,7 @@ describe('the account\'s own sign-in sessions: GET /auth/sessions, DELETE /auth/
     it('unauthenticated: 401, the bucket never reached', async () => {
       const res = await request(app).post('/api/v1/auth/sessions/revoke-others').send({ password: 'RightPassword1' });
       expect(res.status).toBe(401);
-      expect(rateLimitSessionRevokeMock).not.toHaveBeenCalled();
+      expect(rateLimitPasswordStepUpMock).not.toHaveBeenCalled();
     });
   });
 

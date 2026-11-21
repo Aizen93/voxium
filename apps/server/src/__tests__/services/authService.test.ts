@@ -782,7 +782,10 @@ describe('authService — a password change keeps its caller signed in', () => {
   });
 
   it('a wrong current password changes nothing and touches no session', async () => {
-    await expect(changePassword('u-1', 'sid-mine', 7, 'WrongPassword1', 'NewPassword123', true, LABEL)).rejects.toThrow('Current password is incorrect');
+    const err = await changePassword('u-1', 'sid-mine', 7, 'WrongPassword1', 'NewPassword123', true, LABEL).catch((e: unknown) => e);
+    // The class the session's wrong-password bucket keys on, with the sentence clients map and the 400 they get
+    expect(err).toBeInstanceOf(PasswordStepUpError);
+    expect(err).toMatchObject({ message: 'Current password is incorrect', statusCode: 400 });
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(sessions.rekeySession).not.toHaveBeenCalled();
   });
