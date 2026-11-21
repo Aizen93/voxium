@@ -4,7 +4,7 @@ import { API_BASE } from './apiBase';
 import {
   getAccessToken, getRefreshToken, setTokens, clearSessionTokens, flushTokenStorage,
   followSharedSession, isSharedWithOtherTabs, reloadAfterSessionChange,
-  markCredentialChange, credentialChangeInFlightUntil, waitForCredentialChange, twinSyncPending, awaitTwinSync,
+  markCredentialChange, credentialChangeInFlightUntil, waitForCredentialChange, twinSyncPending, awaitTwinSync, askTwinsForNewestPair,
 } from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
 import { isSameSession, readTokenClaims, sessionIdOf, userIdOf } from './tokenClaims';
@@ -770,6 +770,19 @@ async function renew(epoch: number, intended: string | null, promptRetry = true)
           if (await credentialChangeWaitEnded(epoch)) throw new SessionLostError('Session ended while a credential change was out');
           followOtherTabsOrStop();
           stored = getRefreshToken();
+          // The mark is gone and this tab still holds the refused token. A
+          // twin of the changing tab (the same not-remembered session in
+          // another tab) receives the change's pair as a 'rotated' message,
+          // which can arrive after it saw the mark removed: it asks its twins
+          // and waits for their answers (tokenStorage.TWIN_SYNC_WAIT_MS)
+          // before the refusal is final. Nothing is asked by a tab that has
+          // no twin to ask (a remembered pair, no session id, no channel)
+          if (stored === refreshToken && askTwinsForNewestPair()) {
+            await awaitTwinSync();
+            if (epoch !== sessionEpoch) throw new SessionLostError('Session ended while the other tabs of this session were asked');
+            followOtherTabsOrStop();
+            stored = getRefreshToken();
+          }
         }
         if (stored && stored !== refreshToken) {
           const adopted = freshStoredAccessToken();

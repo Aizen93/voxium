@@ -784,6 +784,18 @@ function askTwins(): boolean {
 }
 
 /**
+ * Ask the twins of this tab's not-remembered session for its newest pair now
+ * (askTwins), for a renewal that must not decide on the pair it holds before
+ * they answered: true when the question went out, and awaitTwinSync() then
+ * waits for their answers. False for a remembered pair, a pair that names no
+ * session, while a reload is pending, without a channel, and in the desktop
+ * app: nothing to wait for then.
+ */
+export function askTwinsForNewestPair(): boolean {
+  return askTwins();
+}
+
+/**
  * Whether this tab asked its twins and no renewal has waited for their
  * answer yet (services/session.ts asks this first, so that a renewal with
  * nothing to wait for awaits nothing).

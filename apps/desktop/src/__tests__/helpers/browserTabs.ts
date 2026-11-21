@@ -154,8 +154,13 @@ function callListener(listener: AnyListener, event: Event): void {
   else listener.handleEvent(event);
 }
 
+export interface BrowserOptions {
+  /** How long a channel message takes to reach the other tabs (a busy tab reads it later); `storage` events take none. */
+  channelDelayMs?: number;
+}
+
 /** Install the tabs of one browser on this test file's jsdom window. One at a time; `dispose()` undoes it. */
-export function createBrowser(): Browser {
+export function createBrowser({ channelDelayMs = 0 }: BrowserOptions = {}): Browser {
   const tabs: TabImpl[] = [];
   const pageSessionStorage = globalThis.sessionStorage;
   const sharedLocalStorage = globalThis.localStorage;
@@ -197,11 +202,11 @@ export function createBrowser(): Browser {
     },
   });
 
-  /** A task for `tab`, as the browser queues one: later, as that tab's code. */
-  function queueFor(tab: TabImpl, work: () => void): void {
+  /** A task for `tab`, as the browser queues one: later (`delayMs`), as that tab's code. */
+  function queueFor(tab: TabImpl, work: () => void, delayMs = 0): void {
     setTimeout(() => {
       if (!tab.closed) tab.run(work);
-    }, 0);
+    }, delayMs);
   }
 
   // Every change of the origin's localStorage is told to every OTHER tab
@@ -314,7 +319,7 @@ export function createBrowser(): Browser {
           const data = structuredClone(message);
           queueFor(other.tab, () => {
             if (other.open) other.onmessage?.({ data });
-          });
+          }, channelDelayMs);
         }
       },
       close() {

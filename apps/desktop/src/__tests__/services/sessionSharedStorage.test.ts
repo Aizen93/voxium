@@ -376,6 +376,43 @@ describe('a credential change in one tab while another tab renews', () => {
     expect(localStorage.getItem('voxium_refresh_token')).toBe(x2.refreshToken);
     expectOneListenerEach(tabA, tabB);
   });
+
+  it('twins of a not-remembered session: the one refused under the mark asks before it gives up, and takes the change\'s pair arriving after the mark went', async () => {
+    // the channel is slower than the storage event that tells of the mark's removal
+    browser.dispose();
+    browser = createBrowser({ channelDelayMs: 200 });
+    const oldRefresh = r1();
+    sessionStorage.setItem('voxium_access_token', jwt({ userId: 'user-x', sid: 's-1', exp: nowSeconds() - 60, v: 1 }));
+    sessionStorage.setItem('voxium_refresh_token', oldRefresh);
+    const tabA = await openTab(null, true);
+    const tabB = await openTab(null, true);
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS * 2); // the questions they asked at load, unanswered
+    // tab A's access token is fresh: its change goes out without an inline renewal
+    tabA.storage.setTokens(a1(), oldRefresh);
+    await vi.advanceTimersByTimeAsync(TWIN_SYNC_WAIT_MS);
+    const state = { committed: false };
+    // tab B's request is out from now and refused at 3 s, after tab A's change committed
+    post.mockImplementationOnce(() => new Promise((_resolve, reject) => setTimeout(() => reject(refused()), 3_000)));
+    const renewal = tabB.session.refreshAccessToken().then((token) => ({ token }), (err: Error) => ({ err: err.name }));
+    await vi.advanceTimersByTimeAsync(500);
+    const x2 = answer();
+    const change = tabA.session.runCredentialChange(async (stillCurrent) => {
+      setTimeout(() => { state.committed = true; }, 1_000);
+      await new Promise((r) => setTimeout(r, 10_000));
+      if (stillCurrent()) tabA.storage.setTokens(x2.accessToken, x2.refreshToken);
+      return 'changed';
+    });
+
+    await vi.advanceTimersByTimeAsync(12_000);
+    await change;
+
+    expect(await renewal).toEqual({ token: x2.accessToken });
+    expect(tabB.storage.getRefreshToken()).toBe(x2.refreshToken);
+    expect(tabB.tab.sessionStorage.getItem('voxium_refresh_token')).toBe(x2.refreshToken);
+    expect(tabB.navigate).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledTimes(1);
+    expectOneListenerEach(tabA, tabB);
+  });
 });
 
 describe('one page-level navigation per page load: the first one asked for wins', () => {

@@ -98,6 +98,13 @@ const storage = vi.hoisted(() => ({
     storage.twinAskedAt = Date.now();
   },
   twinSyncPending: vi.fn(() => storage.twinAsked),
+  /** This tab has twins it can ask now (a not-remembered pair naming a session, a channel): false unless a test says so. */
+  twinsAskable: false,
+  askTwinsForNewestPair: vi.fn(() => {
+    if (!storage.twinsAskable) return false;
+    storage.askTwins();
+    return true;
+  }),
   /** As the real wait: once, until 300 ms (TWIN_SYNC_WAIT_MS) after the question, the whole of it. */
   awaitTwinSync: vi.fn(() => {
     if (!storage.twinAsked) return Promise.resolve();
@@ -122,6 +129,7 @@ vi.mock('../../services/tokenStorage', () => ({
   waitForCredentialChange: storage.waitForCredentialChange,
   twinSyncPending: storage.twinSyncPending,
   awaitTwinSync: storage.awaitTwinSync,
+  askTwinsForNewestPair: storage.askTwinsForNewestPair,
 }));
 
 import {
@@ -193,6 +201,7 @@ beforeEach(() => {
   storage.markWaiters = [];
   storage.twinAsked = false;
   storage.twinAskedAt = 0;
+  storage.twinsAskable = false;
 });
 
 afterEach(() => {
@@ -1420,6 +1429,60 @@ describe('session — a credential change in another tab, marked in the shared s
 
     await renewal;
     expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+  });
+
+  it('... and, the mark gone with the token unchanged, a not-remembered tab asks its twins first: their pair is the answer', async () => {
+    vi.useFakeTimers();
+    storage.twinsAskable = true;
+    storage.access = expiredToken();
+    http.post.mockImplementationOnce(async () => {
+      markLive();
+      throw axios401();
+    });
+    const renewal = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(0);
+    // the mark goes before the twin's 'rotated' message has arrived
+    storage.clearMark();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(storage.askTwinsForNewestPair).toHaveBeenCalledTimes(1);
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+    // the twin's answer: the change's pair
+    const answered = freshToken();
+    storage.access = answered;
+    storage.refresh = 'refresh-of-the-new-version';
+    await vi.advanceTimersByTimeAsync(300);
+
+    await expect(renewal).resolves.toBe(answered);
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('... and final once the twins gave nothing newer by the end of the wait', async () => {
+    vi.useFakeTimers();
+    storage.twinsAskable = true;
+    storage.access = expiredToken();
+    http.post.mockImplementationOnce(async () => {
+      markLive();
+      throw axios401();
+    });
+    const outcome = refreshAccessToken().then(() => 'resolved', (err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(0);
+    storage.clearMark();
+    await vi.advanceTimersByTimeAsync(299);
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await outcome).toBeInstanceOf(SessionLostError);
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+  });
+
+  it('... and a refusal with no mark in flight asks no twin: it is final at once', async () => {
+    storage.twinsAskable = true;
+    storage.access = expiredToken();
+    http.post.mockRejectedValueOnce(axios401());
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    expect(storage.askTwinsForNewestPair).not.toHaveBeenCalled();
   });
 
   it('... and a sign-out during that wait clears nothing and sends nothing more', async () => {
