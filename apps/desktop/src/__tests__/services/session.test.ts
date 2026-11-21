@@ -111,6 +111,11 @@ const expiredToken = () => jwtWithExp(Math.floor(Date.now() / 1000) - 60);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks keeps the queued answers (mockResolvedValueOnce and the
+  // like) a failed test left unconsumed: they would answer the next tests
+  http.post.mockReset();
+  storage.flushTokenStorage.mockReset();
+  storage.flushTokenStorage.mockImplementation(async () => {});
   _resetSessionForTests();
   setSessionLostNavigation(navigate);
   storage.access = 'access-old';
@@ -601,6 +606,35 @@ describe('session — the prompt retry after a refresh that got no usable answer
     expect(storage.clearTokens).not.toHaveBeenCalled();
   });
 
+  it('reads the shared storage again after the wait: a pair another tab stored during it is the answer, nothing more is sent', async () => {
+    storage.shared = true;
+    _setRefreshLocksForTests(null);
+    const fresh = freshToken();
+    http.post.mockRejectedValueOnce(networkError()).mockResolvedValueOnce(renewed('access-late', 'refresh-late'));
+    const pending = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(1);
+    // another tab renewed during the wait; this tab's memory missed the event
+    storage.page = { access: fresh, refresh: 'refresh-from-other-tab' };
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+
+    await expect(pending).resolves.toBe(fresh);
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(storage.setTokens).not.toHaveBeenCalled();
+  });
+
+  it('the storage holding another account after the wait stops the retry: nothing more is sent', async () => {
+    storage.shared = true;
+    _setRefreshLocksForTests(null);
+    http.post.mockRejectedValueOnce(networkError()).mockResolvedValueOnce(renewed('access-late', 'refresh-late'));
+    const settled = expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    await vi.advanceTimersByTimeAsync(1);
+    storage.follow = 'reloading';
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+
+    await settled;
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
   it('the retry refused with a newer pair stored meanwhile still adopts it: at most three requests in all', async () => {
     http.post
       .mockRejectedValueOnce(networkError())
@@ -938,6 +972,27 @@ describe('session — a credential change holds the renewals around it', () => {
     expect(http.post).toHaveBeenCalledTimes(1);
   });
 
+  it('a renewal that waited for a change, overtaken by a sign-out and a new sign-in, sends nothing for the new session', async () => {
+    storage.access = freshToken();
+    let finish!: () => void;
+    const change = runCredentialChange(() => new Promise<string>((resolve) => { finish = () => resolve('changed'); }));
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    const outcome = refreshAccessToken().then(() => 'resolved', (err: unknown) => err);
+    await Promise.resolve();
+
+    // signed out, then in again: a new session whose access token has expired
+    endSessionRenewals();
+    storage.access = expiredToken();
+    storage.refresh = 'refresh-next-session';
+    finish();
+    await change;
+
+    expect(await outcome).toBeInstanceOf(SessionLostError);
+    expect(http.post).not.toHaveBeenCalled();
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(storage.refresh).toBe('refresh-next-session');
+  });
+
   it('with no session there is nothing to change: SessionLostError, nothing sent', async () => {
     storage.access = null;
     const change = vi.fn(async () => 'changed');
@@ -1054,6 +1109,19 @@ describe('session — a renewal never answers another account\'s session', () =>
     expect(storage.clearSessionTokens).not.toHaveBeenCalled();
   });
 
+  it('another account\'s fresh pair found at the START of a renewal (another tab signed in as someone else) is not answered: nothing sent, the page reloads onto it', async () => {
+    storage.shared = true;
+    _setRefreshLocksForTests(null);
+    // this tab's memory missed the other tab's sign-in: the re-read finds it
+    storage.page = { access: accessOf('user-y'), refresh: refreshOf('user-y') };
+
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    expect(http.post).not.toHaveBeenCalled();
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it('the same account\'s newer pair is adopted as before', async () => {
     const fresh = accessOf('user-x');
     http.post.mockImplementationOnce(async () => {
@@ -1167,6 +1235,31 @@ describe('session — background renewals after a refresh that got no usable ans
     http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
     await vi.advanceTimersByTimeAsync(20_000);
     expect(http.post).toHaveBeenCalledTimes(3);
+    expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
+  });
+
+  it('skips the one due while another renewal is out (that renewal\'s answer is its own, not the chain\'s), and goes on with the next', async () => {
+    http.post.mockRejectedValueOnce(networkError()).mockRejectedValueOnce(networkError());
+    const settled = expect(refreshAccessToken()).rejects.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await settled;
+    expect(http.post).toHaveBeenCalledTimes(2);
+
+    // a caller's renewal is out when the 10 s one falls due
+    let answer!: (err: unknown) => void;
+    http.post.mockImplementationOnce(() => new Promise((_resolve, reject) => { answer = reject; }));
+    await vi.advanceTimersByTimeAsync(10_000 - REFRESH_RETRY_DELAY_MS - 100);
+    const caller = refreshAccessToken().then(() => 'renewed', () => 'failed');
+    expect(http.post).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(http.post).toHaveBeenCalledTimes(3);
+
+    // the caller's renewal is answered with a 429: the chain is not ended by it
+    answer(axiosStatus(429));
+    await expect(caller).resolves.toBe('failed');
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(http.post).toHaveBeenCalledTimes(4);
     expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
   });
 });

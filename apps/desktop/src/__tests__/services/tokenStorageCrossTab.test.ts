@@ -109,6 +109,26 @@ describe('a tab never shows one account while holding another account\'s tokens'
     await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   });
 
+  it('while a reload is pending the re-read follows nothing and answers reloading, in the desktop app too', async () => {
+    const x = pairOf('user-x', 's-x');
+    setTokens(x.accessToken, x.refreshToken, true);
+    await flushTokenStorage();
+    reloadAfterSessionChange();
+    localStorage.setItem(ACCESS, pairOf('user-x', 's-x', 2).accessToken);
+    localStorage.setItem(REFRESH, pairOf('user-x', 's-x', 2).refreshToken);
+    expect(followSharedSession()).toBe('reloading');
+    expect(getRefreshToken()).toBe(x.refreshToken);
+
+    const invoke = async <T>(): Promise<T> => null as T;
+    _resetTokenStorageForTests(createKeychainSessionStore(invoke, { apiOrigin: 'https://voxium.app' }));
+    _setPageReloadForTests(reload);
+    await hydrateTokens();
+    setTokens(x.accessToken, x.refreshToken, true);
+    expect(followSharedSession()).toBe('followed');
+    reloadAfterSessionChange();
+    expect(followSharedSession()).toBe('reloading');
+  });
+
   it('the reload waits for an account deletion of this client in flight to finish its clean-up', async () => {
     const endDeletion = beginAccountDeletion();
     reloadAfterSessionChange();
@@ -162,6 +182,23 @@ describe('ending a session clears only that session', () => {
 
     expect(sessionStorage.getItem(REFRESH)).toBeNull();
     expect(localStorage.getItem(REFRESH)).toBe(y.refreshToken);
+  });
+
+  it('a remembered tab does not take a pair left in its own sessionStorage for the stored session: the session it ends is cleared', async () => {
+    const x = pairOf('user-x', 's-x');
+    setTokens(x.accessToken, x.refreshToken, true);
+    await flushTokenStorage();
+    // a pair of another session, left in this tab's sessionStorage from before it was remembered
+    const orphan = pairOf('user-x', 's-orphan');
+    sessionStorage.setItem(ACCESS, orphan.accessToken);
+    sessionStorage.setItem(REFRESH, orphan.refreshToken);
+    // another tab signed out; the event did not reach this one (it was frozen)
+    localStorage.removeItem(ACCESS);
+    localStorage.removeItem(REFRESH);
+
+    expect(clearSessionTokens(x.refreshToken)).toBe('cleared');
+    expect(getRefreshToken()).toBeNull();
+    expect(reload).not.toHaveBeenCalled();
   });
 
   it('a write of the ended session still queued is removed after it lands', async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getAccessToken, getRefreshToken, setTokens, flushTokenStorage, hydrateTokens, announceSessionEnded,
-  createKeychainSessionStore, SESSION_CHANNEL_NAME,
+  createKeychainSessionStore, reloadAfterSessionChange, SESSION_CHANNEL_NAME,
   _resetTokenStorageForTests, _setPageReloadForTests, _setSessionChannelForTests, type SessionChannel,
 } from '../../services/tokenStorage';
 
@@ -75,6 +75,11 @@ describe('the not-remembered tabs of one session keep each other current', () =>
     expect(channel.posted).toEqual([]);
   });
 
+  it('nor for a pair whose access token names another session than its refresh token', () => {
+    setTokens(pairOf('s-2', 1).accessToken, pairOf('s-1', 2).refreshToken, false);
+    expect(channel.posted).toEqual([]);
+  });
+
   it('a tab of the same session at a LOWER generation takes the pair, without posting it again', async () => {
     const mine = pairOf('s-1', 1);
     setTokens(mine.accessToken, mine.refreshToken, false);
@@ -108,19 +113,59 @@ describe('the not-remembered tabs of one session keep each other current', () =>
     expect(getRefreshToken()).toBe(mine.refreshToken);
   });
 
-  it('a tab whose pair names no session is never touched; a remembered tab ignores the channel', async () => {
-    setTokens('opaque-a', 'opaque-r', false);
+  it('a token longer than the cap is no token of ours, even one that names the session at a higher generation', async () => {
+    const mine = pairOf('s-1', 3);
+    setTokens(mine.accessToken, mine.refreshToken, false);
+    await flushTokenStorage();
+
+    const long = jwt({ userId: 'user-x', sid: 's-1', n: 9, pad: 'x'.repeat(5000) });
+    expect(long.length).toBeGreaterThan(4096);
+    channel.deliver({ type: 'rotated', sid: 's-1', accessToken: long, refreshToken: pairOf('s-1', 9).refreshToken });
+    channel.deliver({ type: 'rotated', sid: 's-1', accessToken: pairOf('s-1', 9).accessToken, refreshToken: jwt({ userId: 'user-x', sid: 's-1', gen: 9, pad: 'x'.repeat(5000) }) });
+
+    expect(getRefreshToken()).toBe(mine.refreshToken);
+  });
+
+  it('a tab whose pair names no session is never touched', async () => {
+    sessionStorage.setItem(ACCESS, 'opaque-a');
+    sessionStorage.setItem(REFRESH, 'opaque-r');
+    await hydrateTokens();
+    expect(channel.opened()).toBe(1);
+
     channel.deliver({ type: 'rotated', sid: 's-1', ...pairOf('s-1', 9) });
     channel.deliver({ type: 'ended', sid: 's-1' });
     expect(getRefreshToken()).toBe('opaque-r');
+    expect(reload).not.toHaveBeenCalled();
+  });
 
+  it('a remembered tab ignores the channel it opened while its pair was not remembered', async () => {
+    const before = pairOf('s-1', 1);
+    setTokens(before.accessToken, before.refreshToken, false);
+    expect(channel.opened()).toBe(1);
     const remembered = pairOf('s-1', 1);
     setTokens(remembered.accessToken, remembered.refreshToken, true);
     await flushTokenStorage();
+
     channel.deliver({ type: 'rotated', sid: 's-1', ...pairOf('s-1', 2) });
     channel.deliver({ type: 'ended', sid: 's-1' });
+
     expect(getRefreshToken()).toBe(remembered.refreshToken);
+    expect(localStorage.getItem(REFRESH)).toBe(remembered.refreshToken);
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('nothing is taken from the channel while the page reloads onto another session', async () => {
+    const mine = pairOf('s-1', 1);
+    setTokens(mine.accessToken, mine.refreshToken, false);
+    await flushTokenStorage();
+    reloadAfterSessionChange();
+
+    channel.deliver({ type: 'rotated', sid: 's-1', ...pairOf('s-1', 2) });
+    channel.deliver({ type: 'ended', sid: 's-1' });
+
+    expect(getRefreshToken()).toBe(mine.refreshToken);
+    await flushTokenStorage();
+    expect(sessionStorage.getItem(REFRESH)).toBe(mine.refreshToken);
   });
 
   it("'ended' for this tab's session: its pair goes and the page reloads, signed out; another session's 'ended' changes nothing", async () => {
