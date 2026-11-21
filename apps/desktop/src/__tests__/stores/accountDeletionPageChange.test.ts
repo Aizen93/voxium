@@ -124,6 +124,8 @@ beforeEach(async () => {
   events.length = 0;
   sockets.length = 0;
   localStorage.clear();
+  // A fresh page load: one trip to the sign-in page each (services/session.ts goToLoginPage)
+  setSessionLostNavigation((path) => { window.location.href = path; });
   warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   Object.defineProperty(window, 'location', {
     value: {

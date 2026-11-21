@@ -54,6 +54,18 @@ vi.mock('../../services/socket', () => socket);
 const storage = vi.hoisted(() => ({
   getAccessToken: vi.fn(() => 'access-old' as string | null),
   getRefreshToken: vi.fn(() => 'refresh-old' as string | null),
+  // The account this page shows, as tokenStorage judges a token against it
+  shownUser: null as string | null,
+  isTokenOfAnotherAccount: vi.fn((token: string | null) => {
+    if (!storage.shownUser || !token) return false;
+    try {
+      const owner = (JSON.parse(atob(token.split('.')[1])) as { userId?: string }).userId;
+      return owner !== undefined && owner !== storage.shownUser;
+    } catch {
+      return false;
+    }
+  }),
+  reloadAfterSessionChange: vi.fn(),
 }));
 vi.mock('../../services/tokenStorage', () => storage);
 
@@ -73,8 +85,14 @@ beforeEach(() => {
   session.shouldRenewBeforeSending.mockReturnValue(false);
   storage.getAccessToken.mockReturnValue('access-old');
   storage.getRefreshToken.mockReturnValue('refresh-old');
+  storage.shownUser = null;
   fake.instance.mockResolvedValue({ data: { success: true } });
 });
+
+/** An access token of `userId` (unsigned: only the claims are read). */
+function tokenOf(userId: string, n = 1): string {
+  return `h.${btoa(JSON.stringify({ userId, n }))}.s`;
+}
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -479,5 +497,85 @@ describe('api — a request belongs to the session it was sent under', () => {
 
     expect(fake.instance).toHaveBeenCalledTimes(1);
     expect(session.refreshAccessToken).not.toHaveBeenCalled();
+  });
+});
+
+describe('api — never as another account than the one this page shows (another tab signed in as someone else)', () => {
+  beforeEach(() => {
+    session.currentSessionEpoch.mockReturnValue(0);
+  });
+
+  it('a request is refused UNSENT when the stored token is another account\'s, and the page reloads onto it', async () => {
+    storage.shownUser = 'user-x';
+    storage.getAccessToken.mockReturnValue(tokenOf('user-y'));
+
+    await expect(requestInterceptor()(config())).rejects.toBeInstanceOf(session.SessionLostError);
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('the shown account\'s own token goes out as before', async () => {
+    storage.shownUser = 'user-x';
+    storage.getAccessToken.mockReturnValue(tokenOf('user-x'));
+
+    const out = await requestInterceptor()(config()) as { headers: Record<string, string> };
+    expect(out.headers.Authorization).toBe(`Bearer ${tokenOf('user-x')}`);
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
+  });
+
+  it('a 401 is never retried with a stored token of another account: left to its caller, and the page reloads onto it', async () => {
+    storage.shownUser = 'user-x';
+    const original = { ...config(), headers: { Authorization: `Bearer ${tokenOf('user-x')}` }, _sessionEpoch: 0 };
+    storage.getAccessToken.mockReturnValue(tokenOf('user-y'));
+    const error = { response: { status: 401 }, config: original };
+
+    await expect(responseRejected()(error)).rejects.toBe(error);
+
+    expect(fake.instance).not.toHaveBeenCalled();
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('nor with a token of another account than the one the request carried, nor after a renewal that answered one', async () => {
+    const original = { ...config(), headers: { Authorization: `Bearer ${tokenOf('user-x')}` }, _sessionEpoch: 0 };
+    storage.getAccessToken.mockReturnValue(tokenOf('user-y'));
+    const error = { response: { status: 401 }, config: original };
+    await expect(responseRejected()(error)).rejects.toBe(error);
+    expect(fake.instance).not.toHaveBeenCalled();
+
+    storage.getAccessToken.mockReturnValue(tokenOf('user-x'));
+    session.isAccessTokenFresh.mockReturnValue(false);
+    session.refreshAccessToken.mockResolvedValueOnce(tokenOf('user-y', 2));
+    const again = { response: { status: 401 }, config: { ...original, _retry: false } };
+    await expect(responseRejected()(again)).rejects.toBe(again);
+    expect(fake.instance).not.toHaveBeenCalled();
+  });
+});
+
+describe('api — a late 401 after a local sign-out is left to its caller', () => {
+  it('with a bearer: no renewal, no retry under the pair another tab stored meanwhile, no storage change', async () => {
+    // sent under epoch 0; signed out (epoch 1); another tab then stored a fresh pair
+    const original = { ...config(), headers: { Authorization: 'Bearer access-old' }, _sessionEpoch: 0 };
+    session.currentSessionEpoch.mockReturnValue(1);
+    storage.getAccessToken.mockReturnValue('access-of-another-tab');
+    storage.getRefreshToken.mockReturnValue('refresh-of-another-tab');
+    const error = { response: { status: 401 }, config: original };
+
+    await expect(responseRejected()(error)).rejects.toBe(error);
+
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(fake.instance).not.toHaveBeenCalled();
+    expect(socket.connectSocket).not.toHaveBeenCalled();
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
+  });
+
+  it('without a bearer: the same', async () => {
+    session.currentSessionEpoch.mockReturnValue(1);
+    const error = { response: { status: 401 }, config: { ...config(), _sessionEpoch: 0 } };
+
+    await expect(responseRejected()(error)).rejects.toBe(error);
+
+    expect(session.refreshAccessToken).not.toHaveBeenCalled();
+    expect(fake.instance).not.toHaveBeenCalled();
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
   });
 });

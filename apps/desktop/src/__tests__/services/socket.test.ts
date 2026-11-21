@@ -85,6 +85,10 @@ const session = vi.hoisted(() => {
     refreshAccessToken: vi.fn(),
     getFreshAccessToken: vi.fn(),
     isAccessTokenFresh: vi.fn(() => true),
+    // The one trip to the sign-in page (its flush and deletion waits are session.ts's own tests)
+    goToLoginPage: vi.fn((reason: string | null) => {
+      window.location.href = reason ? `/login?reason=${reason}` : '/login';
+    }),
   };
 });
 vi.mock('../../services/session', () => session);

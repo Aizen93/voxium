@@ -25,6 +25,7 @@ import type {
   RevokeOtherSessionsRequest, RevokeOtherSessionsResponse,
 } from '@voxium/shared';
 import { sessionClientHint } from '../services/sessionClient';
+import { userIdOf } from '../services/tokenClaims';
 import { PowExpiredError, PowAbortedError, SIGNUP, USERNAME_TAKEN_MESSAGE } from '@voxium/shared';
 import { solveRegistrationPowOffThread } from '../services/powSolver';
 import { forgetLocalE2EState } from '../services/e2e/e2eService';
@@ -731,7 +732,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           // have renewed it (an app launched after its access token expired),
           // and a handshake with the old one is refused and waits a back-off
           const token = getAccessToken();
-          if (token && canConnect(outcome.user)) connectSocket(token);
+          // ... but only while it is still a session of the account the
+          // answer is about: another tab may have signed out, or in as
+          // someone else, while `/auth/me` was out. Then nothing of this
+          // answer is applied, and the restore runs again on what is stored now
+          const owner = userIdOf(token);
+          if (!token || (owner !== null && owner !== outcome.user.id)) {
+            set({ isLoading: false });
+            setTimeout(retry, 0);
+            break;
+          }
+          if (canConnect(outcome.user)) connectSocket(token);
           set({ user: outcome.user, isAuthenticated: true, isLoading: false });
           break;
         }

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getAccessToken, getRefreshToken, setTokens, flushTokenStorage, hydrateTokens, followSharedSession,
-  clearSessionTokens, reloadAfterSessionChange, createKeychainSessionStore,
+  clearSessionTokens, reloadAfterSessionChange, createKeychainSessionStore, isTokenOfAnotherAccount,
   _resetTokenStorageForTests, _setPageReloadForTests,
 } from '../../services/tokenStorage';
 import { registerE2ESessionUser } from '../../services/e2e/session';
@@ -215,5 +215,16 @@ describe('ending a session clears only that session', () => {
     expect(clearSessionTokens(x.accessToken)).toBe('cleared');
     await flushTokenStorage();
     expect(entries.has('tokens')).toBe(false);
+  });
+});
+
+describe('isTokenOfAnotherAccount — the rule the REST client applies to one token', () => {
+  it('true only for a decodable token of another account than the one shown', () => {
+    expect(isTokenOfAnotherAccount(pairOf('user-y', 's-y').accessToken)).toBe(false); // nobody shown
+    signedIn = 'user-x';
+    expect(isTokenOfAnotherAccount(pairOf('user-y', 's-y').accessToken)).toBe(true);
+    expect(isTokenOfAnotherAccount(pairOf('user-x', 's-x').accessToken)).toBe(false);
+    expect(isTokenOfAnotherAccount('opaque')).toBe(false);
+    expect(isTokenOfAnotherAccount(null)).toBe(false);
   });
 });

@@ -64,7 +64,7 @@ vi.mock('../../services/tokenStorage', () => ({
 import {
   accessTokenExpiresAt, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, getFreshAccessToken,
   endSessionRenewals, isDefinitiveRefreshFailure, SessionLostError, setSessionLostNavigation, _resetSessionForTests,
-  _setRefreshLocksForTests, runCredentialChange, CREDENTIAL_CHANGE_TIMEOUT_MS, type RefreshLockManager,
+  _setRefreshLocksForTests, runCredentialChange, goToLoginPage, CREDENTIAL_CHANGE_TIMEOUT_MS, BACKGROUND_RENEWAL_DELAYS_MS, type RefreshLockManager,
   TOKEN_EXPIRY_SKEW_MS, REFRESH_TIMEOUT_MS, REFRESH_RETRY_DELAY_MS, REFRESH_LOCK_NAME, REFRESH_LOCK_WAIT_MS, API_BASE,
 } from '../../services/session';
 
@@ -74,6 +74,12 @@ import {
 function jwtWithExp(expSeconds: number, iatSeconds?: number): string {
   const claims: Record<string, unknown> = { sub: 'u-1', exp: expSeconds };
   if (iatSeconds !== undefined) claims.iat = iatSeconds;
+  const payload = btoa(JSON.stringify(claims)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
+}
+
+/** A JWT-shaped string carrying `claims` (unsigned: only the claims are read). */
+function jwtWith(claims: Record<string, unknown>): string {
   const payload = btoa(JSON.stringify(claims)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
 }
@@ -964,5 +970,203 @@ describe('session — a credential change holds the renewals around it', () => {
     await expect(runCredentialChange(change)).resolves.toBe('changed');
     expect(request).toHaveBeenCalledWith(REFRESH_LOCK_NAME, expect.objectContaining({ mode: 'exclusive' }), expect.any(Function));
     expect(CREDENTIAL_CHANGE_TIMEOUT_MS).toBe(75_000);
+  });
+});
+
+describe('session — one trip to the sign-in page per page load, the reason kept', () => {
+  it('waits for the persisted clear, then goes once, whoever else asks', async () => {
+    let release!: () => void;
+    storage.flushTokenStorage.mockReturnValueOnce(new Promise<void>((r) => { release = r; }));
+
+    goToLoginPage('session-ended');
+    goToLoginPage(null);
+    goToLoginPage('banned');
+    await Promise.resolve();
+    expect(navigate).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    // the first reason given stands
+    expect(navigate).toHaveBeenCalledWith('/login?reason=session-ended');
+    goToLoginPage(null);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it('a force:logout followed by a late refusal: ONE navigation, with the reason', async () => {
+    goToLoginPage('signed-out-elsewhere');
+    // a request in flight comes back refused after the sign-out
+    http.post.mockRejectedValueOnce(axios401());
+    storage.refresh = 'refresh-old';
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith('/login?reason=signed-out-elsewhere');
+  });
+
+  it('a refusal first, then the force:logout before the page has left: the reason is still shown', async () => {
+    let release!: () => void;
+    storage.flushTokenStorage.mockReturnValueOnce(new Promise<void>((r) => { release = r; }));
+    http.post.mockRejectedValueOnce(axios401());
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    goToLoginPage('session-ended');
+    release();
+
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith('/login?reason=session-ended');
+  });
+});
+
+describe('session — a renewal never answers another account\'s session', () => {
+  /** An access token of `userId`, fresh, and a refresh token of the same account. */
+  const accessOf = (userId: string) => jwtWith({ userId, exp: Math.floor(Date.now() / 1000) + 15 * 60 });
+  const refreshOf = (userId: string, gen = 1) => jwtWith({ userId, sid: `s-${userId}`, gen });
+
+  beforeEach(() => {
+    storage.access = expiredToken();
+    storage.refresh = refreshOf('user-x');
+  });
+
+  it('a pair of another account stored while the request was out: not handed over, nothing cleared, the page reloads onto it', async () => {
+    http.post.mockImplementationOnce(async () => {
+      storage.access = accessOf('user-y');
+      storage.refresh = refreshOf('user-y');
+      return renewed(accessOf('user-x'), refreshOf('user-x', 2));
+    });
+
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
+    expect(storage.setTokens).not.toHaveBeenCalled();
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('a refusal while another account\'s pair is stored: no adoption, no refresh with its token, no sign-out of it', async () => {
+    http.post.mockImplementationOnce(async () => {
+      storage.access = expiredToken();
+      storage.refresh = refreshOf('user-y');
+      throw axios401();
+    });
+
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+  });
+
+  it('the same account\'s newer pair is adopted as before', async () => {
+    const fresh = accessOf('user-x');
+    http.post.mockImplementationOnce(async () => {
+      storage.access = fresh;
+      storage.refresh = refreshOf('user-x', 5);
+      throw axios401();
+    });
+
+    await expect(refreshAccessToken()).resolves.toBe(fresh);
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — background renewals after a refresh that got no usable answer', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  it('three of them, 10 s, 30 s and 75 s after the lost answer, inside the grace window', () => {
+    expect(BACKGROUND_RENEWAL_DELAYS_MS).toEqual([10_000, 30_000, 75_000]);
+    expect(Math.max(...BACKGROUND_RENEWAL_DELAYS_MS)).toBeLessThan(120_000);
+  });
+
+  it('go out on their own after the caller got its failure, one request each, until the first real answer', async () => {
+    http.post
+      .mockRejectedValueOnce(timeoutError()) // the caller's request
+      .mockRejectedValueOnce(networkError()) // its prompt retry, 3 s later
+      .mockRejectedValueOnce(axiosStatus(503)) // background, 10 s
+      .mockResolvedValueOnce(renewed('access-new', 'refresh-new')); // background, 30 s
+    const settled = expect(refreshAccessToken()).rejects.toMatchObject({ message: 'Network Error' });
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await settled;
+    expect(http.post).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(10_000 - REFRESH_RETRY_DELAY_MS - 1);
+    expect(http.post).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(http.post).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(http.post).toHaveBeenCalledTimes(4);
+    expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
+    // every one with the token that went unanswered
+    expect(new Set(http.post.mock.calls.map((c) => (c[1] as { refreshToken: string }).refreshToken))).toEqual(new Set(['refresh-old']));
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(http.post).toHaveBeenCalledTimes(4);
+  });
+
+  it('a refusal or a 429 is an answer: the chain stops there', async () => {
+    for (const answer of [axios401(), axiosStatus(429)]) {
+      _resetSessionForTests();
+      setSessionLostNavigation(navigate);
+      storage.access = 'access-old';
+      storage.refresh = 'refresh-old';
+      http.post.mockReset();
+      http.post.mockRejectedValueOnce(networkError()).mockRejectedValueOnce(networkError()).mockRejectedValueOnce(answer);
+      const settled = expect(refreshAccessToken()).rejects.toBeTruthy();
+      await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+      await settled;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(http.post).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(80_000);
+      expect(http.post).toHaveBeenCalledTimes(3);
+    }
+    http.post.mockReset();
+  });
+
+  it('none once the stored token changed (renewed elsewhere) or the session ended; a prompt retry that succeeds stops it', async () => {
+    http.post.mockRejectedValueOnce(networkError()).mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const first = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await expect(first).resolves.toBe('access-new');
+    await vi.advanceTimersByTimeAsync(80_000);
+    expect(http.post).toHaveBeenCalledTimes(2);
+
+    http.post.mockReset();
+    storage.access = 'access-old';
+    storage.refresh = 'refresh-old';
+    http.post.mockRejectedValue(networkError());
+    const second = expect(refreshAccessToken()).rejects.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await second;
+    endSessionRenewals();
+    await vi.advanceTimersByTimeAsync(80_000);
+    expect(http.post).toHaveBeenCalledTimes(2);
+
+    http.post.mockReset();
+    http.post.mockRejectedValue(networkError());
+    const third = expect(refreshAccessToken()).rejects.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await third;
+    storage.refresh = 'refresh-from-other-tab';
+    await vi.advanceTimersByTimeAsync(80_000);
+    expect(http.post).toHaveBeenCalledTimes(2);
+    http.post.mockReset();
+  });
+
+  it('skips one while the page is offline or another renewal is out, and goes on with the next', async () => {
+    const nav = { onLine: true };
+    vi.stubGlobal('navigator', nav);
+    http.post.mockRejectedValueOnce(networkError()).mockRejectedValueOnce(networkError());
+    const settled = expect(refreshAccessToken()).rejects.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    await settled;
+
+    nav.onLine = false;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(http.post).toHaveBeenCalledTimes(2);
+
+    nav.onLine = true;
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(http.post).toHaveBeenCalledTimes(3);
+    expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
   });
 });

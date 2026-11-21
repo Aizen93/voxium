@@ -11,31 +11,43 @@ import { fileURLToPath } from 'node:url';
  * clear of the tokens. In the desktop app the tokens live in the OS
  * credential store, written over IPC after the synchronous `clearTokens()`
  * returns: a reload that outran the write would load the just-refused tokens
- * again at the next launch and be refused again, a reload loop.
+ * again at the next launch and be refused again, a reload loop. Both go
+ * through ONE trip to the sign-in page per page load (session.ts
+ * goToLoginPage), so a late refusal never replaces the force:logout's
+ * navigation and its reason.
  */
 
 const SOCKET = fileURLToPath(new URL('../../services/socket.ts', import.meta.url));
+const SESSION = fileURLToPath(new URL('../../services/session.ts', import.meta.url));
 const source = readFileSync(SOCKET, 'utf8');
+const session = readFileSync(SESSION, 'utf8');
+
+function forceLogoutHandler(): string {
+  const start = source.indexOf("s.on('force:logout'");
+  expect(start).toBeGreaterThan(-1);
+  return source.slice(start, source.indexOf("s.on('disconnect'", start));
+}
 
 describe('socket force:logout reloads only after the stored session is cleared', () => {
-  it('awaits flushTokenStorage() between logout() and the navigation, and the navigation waits for an account deletion in flight', () => {
-    const start = source.indexOf("s.on('force:logout'");
-    expect(start).toBeGreaterThan(-1);
-    const handler = source.slice(start, source.indexOf("s.on('disconnect'", start));
-    expect(handler).toMatch(/const toLogin = async \(\) => \{[\s\S]*?await accountDeletionSettled\(\);\s*window\.location\.href = /);
-    expect(handler).toMatch(/useAuthStore\.getState\(\)\.logout\(\{[^}]*\}\);[\s\S]*await flushTokenStorage\(\);[\s\S]*await toLogin\(\);/);
+  it('signs out locally first, then asks for the one trip to the sign-in page with the reason', () => {
+    expect(forceLogoutHandler()).toMatch(/useAuthStore\.getState\(\)\.logout\(\{[^}]*\}\);[\s\S]*goToLoginPage\(reason\);/);
   });
 
-  it('signs out only the session the socket was admitted with: another session stored meanwhile is reloaded onto, never navigated away from', () => {
-    const start = source.indexOf("s.on('force:logout'");
-    const handler = source.slice(start, source.indexOf("s.on('disconnect'", start));
-    expect(handler).toMatch(/const endedSession = handshakeToken\(s\);/);
-    expect(handler).toMatch(/logout\(\{[^}]*endingSession: endedSession[^}]*\}\);\s*[\s\S]*?if \(outcome === 'replaced'\) return;[\s\S]*await toLogin\(\);/);
+  it('that trip waits for the persisted clear, then for an account deletion in flight, and happens once per page load', () => {
+    const start = session.indexOf('export function goToLoginPage(');
+    expect(start).toBeGreaterThan(-1);
+    const fn = session.slice(start, session.indexOf('\n}\n', start));
+    expect(fn).toMatch(/if \(loginNavigation\) \{[\s\S]*return;\s*\}/);
+    expect(fn).toMatch(/flushTokenStorage\(\)\s*\.then\(\(\) => accountDeletionSettled\(\)\)\s*\.then\(\(\) => navigateToLogin\(/);
   });
 
   it('still reaches the login page when the local clean-up fails (and logs it)', () => {
-    const start = source.indexOf("s.on('force:logout'");
-    const handler = source.slice(start, source.indexOf("s.on('disconnect'", start));
-    expect(handler).toMatch(/\.catch\(\(err: unknown\) => \{[\s\S]*console\.error\([\s\S]*toLogin\(\);/);
+    expect(forceLogoutHandler()).toMatch(/\.catch\(\(err: unknown\) => \{[\s\S]*console\.error\([\s\S]*goToLoginPage\(reason\);/);
+  });
+
+  it('signs out only the session the socket was admitted with: another session stored meanwhile is reloaded onto, never navigated away from', () => {
+    const handler = forceLogoutHandler();
+    expect(handler).toMatch(/const endedSession = handshakeToken\(s\);/);
+    expect(handler).toMatch(/logout\(\{[^}]*endingSession: endedSession[^}]*\}\);\s*[\s\S]*?if \(outcome === 'replaced'\) return;[\s\S]*goToLoginPage\(reason\);/);
   });
 });

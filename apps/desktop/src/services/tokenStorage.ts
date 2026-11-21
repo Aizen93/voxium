@@ -881,9 +881,18 @@ function followTrustedDeviceToken(apiOrigin: string): void {
  * follows it as it always did, and nothing reloads in a loop.
  */
 function belongsToAnotherAccount(pair: TokenPair): boolean {
+  return isTokenOfAnotherAccount(pair.accessToken) || isTokenOfAnotherAccount(pair.refreshToken);
+}
+
+/**
+ * Whether `token` belongs to an account other than the one this page shows
+ * (the same rule as belongsToAnotherAccount, for one token): the REST
+ * client sends no such token and retries with none.
+ */
+export function isTokenOfAnotherAccount(token: string | null): boolean {
   const signedIn = currentE2ESessionUser();
   if (!signedIn) return false;
-  const owner = userIdOf(pair.accessToken) ?? userIdOf(pair.refreshToken);
+  const owner = userIdOf(token);
   return owner !== null && owner !== signedIn;
 }
 

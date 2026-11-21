@@ -6,7 +6,8 @@ import {
   followSharedSession, isSharedWithOtherTabs, reloadAfterSessionChange,
 } from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
-import { readTokenClaims } from './tokenClaims';
+import { readTokenClaims, userIdOf } from './tokenClaims';
+import { loginPathFor, type LoginReason } from '../utils/loginReasons';
 import { sessionClientHint } from './sessionClient';
 
 /**
@@ -152,10 +153,12 @@ export function isDefinitiveRefreshFailure(err: unknown): boolean {
 }
 
 // What ends the session, replaceable for tests (jsdom cannot navigate)
-let navigateToLogin: () => void = () => {
-  window.location.href = '/login';
+let navigateToLogin: (path: string) => void = (path) => {
+  window.location.href = path;
 };
-let sessionLost = false;
+// The one trip to the sign-in page of this page load, once asked for: the
+// reason it shows can still be given until it leaves
+let loginNavigation: { reason: LoginReason | null } | null = null;
 // Bumped whenever the session ends (logout, a refusal): a renewal started
 // under an older epoch stores nothing when it lands. Without it a refresh in
 // flight at logout resurrected the session: its answer was stored (as the
@@ -171,10 +174,33 @@ export function currentSessionEpoch(): number {
   return sessionEpoch;
 }
 
-/** @internal tests */
-export function setSessionLostNavigation(fn: () => void): void {
+/** @internal tests: what navigates, and a fresh page load (no trip to the sign-in page asked for yet) */
+export function setSessionLostNavigation(fn: (path: string) => void): void {
   navigateToLogin = fn;
-  sessionLost = false;
+  loginNavigation = null;
+}
+
+/**
+ * Go to the sign-in page: ONCE per page load, after the queued writes of the
+ * session storage have landed (in the desktop app the OS credential store is
+ * written over IPC: a reload that outran the clear would restore the session
+ * just ended) and after an account deletion of this client in flight has
+ * finished its local clean-up (services/accountDeletion.ts). A server's
+ * `force:logout` and a refusal can land together: every caller after the
+ * first only adds its reason when the first gave none, so the sign-in page
+ * says why (utils/loginReasons.ts) and a second navigation never replaces
+ * the first.
+ */
+export function goToLoginPage(reason: LoginReason | null = null): void {
+  if (loginNavigation) {
+    if (reason !== null && loginNavigation.reason === null) loginNavigation.reason = reason;
+    return;
+  }
+  const trip: { reason: LoginReason | null } = { reason };
+  loginNavigation = trip;
+  void flushTokenStorage()
+    .then(() => accountDeletionSettled())
+    .then(() => navigateToLogin(loginPathFor(trip.reason)));
 }
 
 /**
@@ -185,6 +211,7 @@ export function setSessionLostNavigation(fn: () => void): void {
 export function endSessionRenewals(): void {
   sessionEpoch++;
   refreshInFlight = null;
+  cancelBackgroundRenewals();
 }
 
 /**
@@ -208,16 +235,11 @@ export function endSessionRenewals(): void {
  */
 export function handleSessionLost(endedToken: string | null = null): void {
   endSessionRenewals();
-  const outcome = clearSessionTokens(endedToken);
-  if (sessionLost) return;
-  sessionLost = true;
-  if (outcome === 'replaced') {
+  if (clearSessionTokens(endedToken) === 'replaced') {
     reloadAfterSessionChange();
     return;
   }
-  void flushTokenStorage()
-    .then(() => accountDeletionSettled())
-    .then(() => navigateToLogin());
+  goToLoginPage(null);
 }
 
 /**
@@ -247,6 +269,16 @@ export function handleSessionLost(endedToken: string | null = null): void {
  * answered if fresh, else ONE more refresh goes out with its refresh token.
  * At most three requests in all: the first, the prompt retry and that one.
  *
+ * After a refresh that got no usable answer, renewals also go out in the
+ * background (BACKGROUND_RENEWAL_DELAYS_MS), whether or not anything asks:
+ * an answer lost after the server rotated the session is then recovered
+ * within its grace window even across a short outage.
+ *
+ * Whatever is stored now is answered only when it belongs to the account
+ * the renewal was for: another account's session (another tab signed in as
+ * someone else) is never handed to the caller; the renewal fails with
+ * `SessionLostError`, nothing is cleared, and the page reloads onto it.
+ *
  * Throws `SessionLostError` after a definitive refusal — and has already
  * ended the session (tokens cleared, login page) — or when the session was
  * ended (logout, another tab's sign-out) while the request was out: nothing
@@ -254,6 +286,10 @@ export function handleSessionLost(endedToken: string | null = null): void {
  * tokens untouched: the caller's request fails, the next one tries again.
  */
 export function refreshAccessToken(): Promise<string> {
+  return startRenewal(true);
+}
+
+function startRenewal(promptRetry: boolean): Promise<string> {
   if (refreshInFlight) return refreshInFlight;
   const epoch = sessionEpoch;
   // The token this renewal was asked for with: another tab's newer pair,
@@ -264,12 +300,95 @@ export function refreshAccessToken(): Promise<string> {
     // new pair, and a refresh token of the old version would be refused once
     // it commits. Waited for before the lock (the change holds it)
     while (renewalHold) await renewalHold;
-    return underRefreshLock(() => renew(epoch, intended));
+    return underRefreshLock(() => renew(epoch, intended, promptRetry));
   })().finally(() => {
     if (refreshInFlight === run) refreshInFlight = null;
   });
   refreshInFlight = run;
   return run;
+}
+
+// ─── Background renewals after a lost answer ─────────────────────────────────
+
+/**
+ * After a refresh that got no usable answer (a timeout, a transport error, a
+ * 5xx), up to three more renewals go out on their own this long after it,
+ * each only while the session has not ended and the stored refresh token is
+ * still the one that went unanswered, and the chain stops at the first real
+ * answer (a new pair, a refusal, a 429). All within the 120 s the server
+ * answers a replaced token again (shared `SESSIONS.REUSE_GRACE_SECONDS`):
+ * a rotation whose answer was lost, followed by a short outage, is
+ * recovered before the old token counts as reused. Each sends one request
+ * (no prompt retry of its own), and none while the page is offline or while
+ * another renewal is out.
+ */
+export const BACKGROUND_RENEWAL_DELAYS_MS: readonly number[] = [10_000, 30_000, 75_000];
+
+interface BackgroundChain {
+  epoch: number;
+  refreshToken: string;
+  timers: Array<ReturnType<typeof setTimeout>>;
+}
+let backgroundChain: BackgroundChain | null = null;
+
+function cancelBackgroundRenewals(): void {
+  if (!backgroundChain) return;
+  for (const timer of backgroundChain.timers) clearTimeout(timer);
+  backgroundChain = null;
+}
+
+/** A refresh with `refreshToken` got no usable answer: the background chain for it, unless one is already set. */
+function scheduleBackgroundRenewals(epoch: number, refreshToken: string): void {
+  if (backgroundChain && backgroundChain.epoch === epoch && backgroundChain.refreshToken === refreshToken) return;
+  cancelBackgroundRenewals();
+  const chain: BackgroundChain = { epoch, refreshToken, timers: [] };
+  backgroundChain = chain;
+  chain.timers = BACKGROUND_RENEWAL_DELAYS_MS.map((delay) => setTimeout(() => void backgroundRenewal(chain), delay));
+}
+
+async function backgroundRenewal(chain: BackgroundChain): Promise<void> {
+  if (backgroundChain !== chain) return;
+  if (chain.epoch !== sessionEpoch || getRefreshToken() !== chain.refreshToken) {
+    // Renewed (or signed out) since: nothing left to recover
+    cancelBackgroundRenewals();
+    return;
+  }
+  // A renewal already out decides this one; an offline page waits for the next
+  if (refreshInFlight || !mayRetryNow()) return;
+  try {
+    await startRenewal(false);
+    if (backgroundChain === chain) cancelBackgroundRenewals();
+  } catch (err) {
+    // No usable answer again: the next one of the chain. Anything else (a
+    // refusal, a 429, the session ended) is an answer: the chain ends
+    if (!gotNoUsableAnswer(err) && backgroundChain === chain) cancelBackgroundRenewals();
+    if (!(err instanceof SessionLostError)) {
+      console.warn('[Session] A background renewal failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
+}
+
+/** Two tokens of one account, as far as they tell (decoded for routing only): a token that names no account matches any. */
+function sameAccount(a: string | null, b: string | null): boolean {
+  const ua = userIdOf(a);
+  const ub = userIdOf(b);
+  return ua === null || ub === null || ua === ub;
+}
+
+/**
+ * `token`, stored now, as this renewal's answer — only when it belongs to
+ * the account the renewal was for (`renewedWith`, the refresh token it was
+ * started or sent with). Otherwise another tab signed in as someone else:
+ * nothing of that session reaches this page's caller, nothing is cleared,
+ * and the page reloads onto it.
+ */
+function ownAccountsToken(token: string, renewedWith: string | null): string {
+  if (!sameAccount(token, renewedWith)) {
+    console.info('[Session] Another account is signed in on this browser now — reloading onto it');
+    reloadAfterSessionChange();
+    throw new SessionLostError('Another account is signed in on this browser');
+  }
+  return token;
 }
 
 // ─── Credential changes ──────────────────────────────────────────────────────
@@ -390,8 +509,8 @@ function followOtherTabsOrStop(): void {
   }
 }
 
-/** The renewal itself, lock already handled. */
-async function renew(epoch: number, intended: string | null): Promise<string> {
+/** The renewal itself, lock already handled. `promptRetry`: false for a background renewal (one request). */
+async function renew(epoch: number, intended: string | null, promptRetry = true): Promise<string> {
   if (epoch !== sessionEpoch) throw new SessionLostError('Session ended before the renewal');
   // What other tabs stored since this tab's memory last followed them
   followOtherTabsOrStop();
@@ -404,9 +523,9 @@ async function renew(epoch: number, intended: string | null): Promise<string> {
     // Another tab renewed while this one waited (for the lock, or with its
     // memory frozen): its pair is the answer when it is fresh
     const adopted = freshStoredAccessToken();
-    if (adopted) return adopted;
+    if (adopted) return ownAccountsToken(adopted, intended);
   }
-  let promptRetried = false;
+  let promptRetried = !promptRetry;
   let newerTried = false;
   for (;;) {
     let answer: { accessToken: string; refreshToken: string };
@@ -428,10 +547,11 @@ async function renew(epoch: number, intended: string | null): Promise<string> {
         const stored = getRefreshToken();
         if (stored && stored !== refreshToken) {
           const adopted = freshStoredAccessToken();
-          if (adopted) return adopted;
+          if (adopted) return ownAccountsToken(adopted, refreshToken);
           if (!newerTried) {
             newerTried = true;
-            refreshToken = stored;
+            // never another account's token, sent on this page's behalf
+            refreshToken = ownAccountsToken(stored, refreshToken);
             continue;
           }
           // Replaced once more while the retry was out: still not ours to
@@ -441,6 +561,9 @@ async function renew(epoch: number, intended: string | null): Promise<string> {
         handleSessionLost(refreshToken);
         throw new SessionLostError(err instanceof Error ? err.message : 'Refresh refused');
       }
+      // The answer may have been lost after the server rotated the session:
+      // renewals go out in the background too, within its grace window
+      if (gotNoUsableAnswer(err)) scheduleBackgroundRenewals(epoch, refreshToken);
       if (promptRetried || !gotNoUsableAnswer(err) || !mayRetryNow()) throw err;
       promptRetried = true;
       await new Promise<void>((resolve) => setTimeout(resolve, REFRESH_RETRY_DELAY_MS));
@@ -449,7 +572,7 @@ async function renew(epoch: number, intended: string | null): Promise<string> {
       if (getRefreshToken() !== refreshToken) {
         // Another tab stored a pair during the wait: its answer is ours
         const adopted = freshStoredAccessToken();
-        if (adopted) return adopted;
+        if (adopted) return ownAccountsToken(adopted, refreshToken);
         throw err;
       }
       if (!mayRetryNow()) throw err;
@@ -462,11 +585,12 @@ async function renew(epoch: number, intended: string | null): Promise<string> {
       // Another tab (or a credential change of this client) stored a pair
       // while the request was out: that pair stands, this answer is dropped
       const current = getAccessToken();
-      if (current) return current;
+      if (current) return ownAccountsToken(current, refreshToken);
       throw new SessionLostError('The session was ended while the renewal was out');
     }
     setTokens(answer.accessToken, answer.refreshToken);
     learnServerClock(answer.accessToken);
+    if (backgroundChain?.refreshToken === refreshToken) cancelBackgroundRenewals();
     return answer.accessToken;
   }
 }
@@ -547,7 +671,8 @@ export function _resetSessionForTests(): void {
   refreshInFlight = null;
   renewalHold = null;
   credentialChangeQueue = Promise.resolve();
-  sessionLost = false;
+  loginNavigation = null;
+  cancelBackgroundRenewals();
   sessionEpoch = 0;
   clockOffsetMs = 0;
   proactiveRenewalSuspended = false;

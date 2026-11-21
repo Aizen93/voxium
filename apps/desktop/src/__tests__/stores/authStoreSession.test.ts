@@ -1175,3 +1175,60 @@ describe('authStore.revokeOtherSessions — "sign out of all other sessions" is 
     expect(session.refreshAccessToken).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('authStore.checkAuth — the answer is applied only for the session it checked', () => {
+  /** An access token of `userId` (unsigned: only the claims are read). */
+  const tokenOf = (userId: string) => `h.${btoa(JSON.stringify({ userId }))}.s`;
+
+  beforeEach(() => {
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+  });
+
+  it('another account stored while /auth/me was out (another tab signed in as someone else): not signed in as the old one, no socket, the restore runs again', async () => {
+    vi.useFakeTimers();
+    storage.getAccessToken.mockReturnValue(tokenOf('u-1'));
+    api.get
+      .mockImplementationOnce(async () => {
+        storage.getAccessToken.mockReturnValue(tokenOf('u-2'));
+        return { data: { data: me } };
+      })
+      .mockResolvedValueOnce({ data: { data: { ...me, id: 'u-2', username: 'bob' } } });
+
+    await useAuthStore.getState().checkAuth();
+    expect(useAuthStore.getState().user).toBeNull();
+    expect(socket.connectSocket).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(useAuthStore.getState().user).toMatchObject({ id: 'u-2' }));
+    expect(socket.connectSocket).toHaveBeenCalledWith(tokenOf('u-2'));
+    expect(socket.connectSocket).toHaveBeenCalledTimes(1);
+  });
+
+  it('the pair removed while /auth/me was out (another tab signed out): nobody signed in, nothing connected', async () => {
+    vi.useFakeTimers();
+    storage.getAccessToken.mockReturnValue(tokenOf('u-1'));
+    api.get.mockImplementationOnce(async () => {
+      storage.getAccessToken.mockReturnValue(null);
+      return { data: { data: me } };
+    });
+
+    await useAuthStore.getState().checkAuth();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(useAuthStore.getState()).toMatchObject({ user: null, isAuthenticated: false, isLoading: false });
+    expect(socket.connectSocket).not.toHaveBeenCalled();
+  });
+
+  it('a token renewed during /auth/me for the same account is applied as before', async () => {
+    storage.getAccessToken.mockReturnValue(tokenOf('u-1'));
+    api.get.mockImplementationOnce(async () => {
+      storage.getAccessToken.mockReturnValue(`${tokenOf('u-1')}-renewed`);
+      return { data: { data: me } };
+    });
+
+    await useAuthStore.getState().checkAuth();
+
+    expect(useAuthStore.getState()).toMatchObject({ user: me, isAuthenticated: true });
+    expect(socket.connectSocket).toHaveBeenCalledWith(`${tokenOf('u-1')}-renewed`);
+  });
+});

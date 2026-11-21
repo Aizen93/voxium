@@ -1,9 +1,8 @@
 import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
-import { getAccessToken, flushTokenStorage } from './tokenStorage';
-import { accountDeletionSettled } from './accountDeletion';
+import { getAccessToken } from './tokenStorage';
 import { bumpRequestGeneration } from './requestGeneration';
-import { loginReasonOf, loginPathFor } from '../utils/loginReasons';
+import { loginReasonOf } from '../utils/loginReasons';
 
 /** Events that arrive many times a second during a call and carry no state a REST read would show. */
 const NOISY_EVENTS = new Set([
@@ -12,7 +11,7 @@ const NOISY_EVENTS = new Set([
   'dm:voice:signal',
   'voice:annotation:ops', 'voice:annotation:live',
 ]);
-import { getFreshAccessToken, refreshAccessToken, isAccessTokenFresh, SessionLostError } from './session';
+import { getFreshAccessToken, refreshAccessToken, isAccessTokenFresh, SessionLostError, goToLoginPage } from './session';
 
 const SOCKET_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3001';
 
@@ -300,30 +299,26 @@ export function connectSocket(token: string): VoxSocket | null {
     const reason = loginReasonOf(data?.reason);
     // The session the server ended is the one this socket was admitted with
     const endedSession = handshakeToken(s);
-    const toLogin = async () => {
-      // This client's own account deletion, in flight, finishes its local
-      // clean-up first: the server sends this before its transaction too, so
-      // it proves nothing and erases nothing (services/accountDeletion.ts)
-      await accountDeletionSettled();
-      window.location.href = loginPathFor(reason);
-    };
     import('../stores/authStore')
-      .then(async ({ useAuthStore }) => {
+      .then(({ useAuthStore }) => {
         const outcome = useAuthStore.getState().logout({ tellServer: false, endingSession: endedSession });
         // Another tab stored a different session meanwhile: the page reloads
         // onto it (authStore.logout), it is not signed out
         if (outcome === 'replaced') return;
-        // The reload must not outrun the persisted clear of the tokens (the
-        // desktop app writes them to the OS credential store over IPC), or
-        // the next launch restores the session this logout just ended
-        await flushTokenStorage();
-        await toLogin();
+        // One trip to the sign-in page per page load, the reason kept even
+        // when a late refusal asks for one too (services/session.ts). It
+        // waits for the persisted clear of the tokens (the desktop app writes
+        // the OS credential store over IPC: the next launch would restore the
+        // session this logout just ended) and for this client's own account
+        // deletion in flight: the server sends this before its transaction
+        // too, so it proves nothing and erases nothing (services/accountDeletion.ts)
+        goToLoginPage(reason);
       })
       .catch((err: unknown) => {
         // The server ended this session: the login page is where to be
         // even when the local clean-up failed
         console.error('[WS] Forced logout could not clean up locally:', err instanceof Error ? err.message : err);
-        void toLogin();
+        goToLoginPage(reason);
       });
   });
 
