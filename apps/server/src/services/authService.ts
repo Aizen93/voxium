@@ -426,7 +426,7 @@ export async function changePassword(
   if (!user) throw new UnauthorizedError('User not found');
 
   const valid = await bcrypt.compare(currentPassword, user.password);
-  if (!valid) throw new BadRequestError('Current password is incorrect');
+  if (!valid) throw new PasswordStepUpError('Current password is incorrect');
 
   const hashedPassword = await bcrypt.hash(newPassword, 12);
 
