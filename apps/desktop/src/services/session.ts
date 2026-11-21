@@ -511,8 +511,10 @@ async function credentialChangeWaitEnded(epoch: number): Promise<boolean> {
  *
  * The session ending while the change is out releases everything the
  * change holds for the next one (endSessionRenewals): the renewals it held,
- * the queue, and the renewal lock. A change whose session ended while it
- * waited for the lock sends nothing.
+ * the queue, and the renewal lock. A change runs only in the session it was
+ * asked in, read when it is queued: one whose session ended while it waited
+ * (for a change queued before it, for a renewal in flight, for the lock)
+ * sends nothing and rejects with SessionLostError.
  *
  * The request `change` sends must not renew by itself (the api's
  * `_noRenewal`): a renewal waiting for the change it is part of would never
@@ -520,7 +522,12 @@ async function credentialChangeWaitEnded(epoch: number): Promise<boolean> {
  * (renew, and a refused renewal signs out).
  */
 export function runCredentialChange<T>(change: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
-  const run = credentialChangeQueue.then(() => credentialChangeStep(change));
+  // The session the change is asked in: it goes out in that one or not at all
+  const epoch = sessionEpoch;
+  const run = credentialChangeQueue.then(() => {
+    if (epoch !== sessionEpoch) throw new SessionLostError('The session ended before the credential change went out');
+    return credentialChangeStep(epoch, change);
+  });
   credentialChangeQueue = run.then(
     () => undefined,
     () => undefined,
@@ -541,7 +548,7 @@ function storedSessionIs(startedWith: string | null): boolean {
   return isSameSession({ accessToken, refreshToken }, startedWith);
 }
 
-async function credentialChangeStep<T>(change: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
+async function credentialChangeStep<T>(epoch: number, change: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
   let release!: () => void;
   const hold = new Promise<void>((resolve) => {
     release = resolve;
@@ -559,7 +566,6 @@ async function credentialChangeStep<T>(change: (stillCurrent: () => boolean) => 
         // A transient failure: the stored token decides below
       }
     }
-    const epoch = sessionEpoch;
     let outcome!: Promise<T>;
     await underRefreshLock(async () => {
       if (epoch !== sessionEpoch) throw new SessionLostError('The session ended before the credential change went out');

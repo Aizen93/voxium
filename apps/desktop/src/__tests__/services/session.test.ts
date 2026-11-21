@@ -1287,6 +1287,26 @@ describe('session — a credential change answers for the session it was made in
     await expect(pending).rejects.toBeInstanceOf(SessionLostError);
     expect(change).not.toHaveBeenCalled();
   });
+
+  it('a change queued behind one, its session ended meanwhile, sends nothing under the next session', async () => {
+    storage.access = freshToken();
+    let releaseFirst!: (value: string) => void;
+    const first = runCredentialChange(() => new Promise<string>((resolve) => { releaseFirst = resolve; }));
+    const queued = vi.fn(async () => 'changed');
+    const second = runCredentialChange(queued);
+    await vi.waitFor(() => expect(storage.markCredentialChange).toHaveBeenCalledTimes(1));
+
+    // a sign-out, then a sign-in to another session, while the first change is out
+    endSessionRenewals();
+    storage.access = freshToken();
+    storage.refresh = 'refresh-next-session';
+    releaseFirst('changed');
+
+    await expect(first).resolves.toBe('changed');
+    await expect(second).rejects.toBeInstanceOf(SessionLostError);
+    expect(queued).not.toHaveBeenCalled();
+    expect(storage.markCredentialChange).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('session — a credential change in another tab, marked in the shared storage', () => {
