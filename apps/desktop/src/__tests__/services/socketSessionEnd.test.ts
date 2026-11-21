@@ -128,6 +128,47 @@ async function socketOfSessionA(followQ = true) {
   return { a, q, s };
 }
 
+/** The server's disconnect that follows a force:logout. */
+function serverDisconnect(s: FakeSocket): void {
+  s.connected = false;
+  s.active = false;
+  s.fire('disconnect', 'io server disconnect');
+}
+
+describe('the end of the session this tab let go of is no end of the one it holds', () => {
+  it('nothing is signed out, and the server\'s disconnect reopens the socket with the session held now', async () => {
+    const { s, q } = await socketOfSessionA();
+
+    s.fire('force:logout', { reason: 'Your session has ended' });
+    serverDisconnect(s);
+    await vi.waitFor(() => expect(s.connect).toHaveBeenCalled());
+
+    expect(s.auth).toEqual({ token: q.accessToken });
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(getRefreshToken()).toBe(q.refreshToken);
+    expect(reload).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('... also when the end arrives before this tab has heard of the sign-in it follows (the storage is read again first)', async () => {
+    const { s } = await socketOfSessionA(false);
+    // another tab signed in to the same account; its `storage` event is still on its way
+    const q = pairOf('user-x', 's-Q');
+    otherTabSignsIn(q, false);
+
+    s.fire('force:logout', { reason: 'Your session has ended' });
+    serverDisconnect(s);
+    await vi.waitFor(() => expect(s.connect).toHaveBeenCalled());
+
+    expect(s.auth).toEqual({ token: q.accessToken });
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(getRefreshToken()).toBe(q.refreshToken);
+    expect(localStorage.getItem(REFRESH)).toBe(q.refreshToken);
+    expect(reload).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
 describe('a ban or a deletion signs out whatever session of the account this tab holds', () => {
   it.each([
     ['Your account has been banned', 'banned'],

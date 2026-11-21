@@ -1111,8 +1111,15 @@ function endAbandonedSession(abandoned: TokenPair | null, followed: TokenPair): 
  * go of). An end of that session is then no end of anything this tab holds.
  * False when nothing is held, and for a token or a held pair that names no
  * session or no account (nothing tells them apart then).
+ *
+ * The shared storage is read again first (followSharedSession): the server
+ * ends the session let go of, and tells its socket, as soon as another tab's
+ * sign-in replaced it, which can be before this tab has handled the
+ * `storage` event of that sign-in. The memory then still holds the session
+ * let go of, and the end would be taken as this tab's own.
  */
 export function holdsAnotherSessionOf(token: string | null): boolean {
+  followSharedSession();
   const { accessToken, refreshToken } = memory;
   if (token === null || accessToken === null || refreshToken === null) return false;
   if (sessionIdOf(token) === null || sessionIdOf(refreshToken) === null) return false;

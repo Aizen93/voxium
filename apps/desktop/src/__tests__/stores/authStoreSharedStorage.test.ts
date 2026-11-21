@@ -429,6 +429,26 @@ describe('a not-remembered tab that follows another tab\'s remembered sign-in en
     expect(holdsAnotherSessionOf(null)).toBe(false);
   });
 
+  it('a tab holding no pair holds no other session: nothing held, or only a refresh token', async () => {
+    const { holdsAnotherSessionOf } = await import('../../services/tokenStorage');
+    const ended = pairOf('user-x', 's-ended').accessToken;
+    expect(holdsAnotherSessionOf(ended)).toBe(false);
+
+    // a refresh token alone of another session of the account, and no access token
+    sessionStorage.setItem(REFRESH, pairOf('user-x', 's-own').refreshToken);
+    await hydrateTokens();
+    expect(getRefreshToken()).not.toBeNull();
+    expect(getAccessToken()).toBeNull();
+    expect(holdsAnotherSessionOf(ended)).toBe(false);
+  });
+
+  it('a held pair that names no session is never told apart from the ended one', async () => {
+    const { holdsAnotherSessionOf } = await import('../../services/tokenStorage');
+    setTokens(jwt({ userId: 'user-x', exp: exp() }), jwt({ userId: 'user-x' }), false);
+    await flushTokenStorage();
+    expect(holdsAnotherSessionOf(pairOf('user-x', 's-ended').accessToken)).toBe(false);
+  });
+
   it('... also when it reloads onto another account\'s remembered session instead', async () => {
     const own = pairOf('user-x', 's-own');
     setTokens(own.accessToken, own.refreshToken, false);
