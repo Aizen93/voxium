@@ -278,7 +278,9 @@ class GateController {
     this.opening = true;
     this.show({ kind: 'opening' });
     // The session the check is made with: a refusal ends that one, never
-    // one another tab stores while the check runs
+    // one another tab stores while the check runs. None (this tab's memory
+    // let go: another tab signed out, or in, and this page may be reloading):
+    // the sign-out then ends nothing but this tab's memory (authStore.logout)
     const sessionToken = getAccessToken();
     try {
       const verdict = await checkSession(this.userId);

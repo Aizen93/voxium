@@ -21,6 +21,8 @@ const SOCKET = fileURLToPath(new URL('../../services/socket.ts', import.meta.url
 const SESSION = fileURLToPath(new URL('../../services/session.ts', import.meta.url));
 const source = readFileSync(SOCKET, 'utf8');
 const session = readFileSync(SESSION, 'utf8');
+const storage = readFileSync(fileURLToPath(new URL('../../services/tokenStorage.ts', import.meta.url)), 'utf8');
+const latch = readFileSync(fileURLToPath(new URL('../../services/pageNavigation.ts', import.meta.url)), 'utf8');
 
 function forceLogoutHandler(): string {
   const start = source.indexOf("s.on('force:logout'");
@@ -39,6 +41,18 @@ describe('socket force:logout reloads only after the stored session is cleared',
     const fn = session.slice(start, session.indexOf('\n}\n', start));
     expect(fn).toMatch(/if \(loginNavigation\) \{[\s\S]*return;\s*\}/);
     expect(fn).toMatch(/flushTokenStorage\(\)\s*\.then\(\(\) => accountDeletionSettled\(\)\)\s*\.then\(\(\) => navigateToLogin\(/);
+  });
+
+  it('the trip and the reload onto another session claim ONE latch, the first navigation of the page load winning', () => {
+    const start = session.indexOf('export function goToLoginPage(');
+    const fn = session.slice(start, session.indexOf('\n}\n', start));
+    // a pending trip still takes a reason before the latch is asked
+    expect(fn).toMatch(/if \(loginNavigation\) \{[\s\S]*?return;\s*\}\s*if \(!claimPageNavigation\('login'\)\) return;/);
+    const reloadStart = storage.indexOf('export function reloadAfterSessionChange(');
+    expect(reloadStart).toBeGreaterThan(-1);
+    const reload = storage.slice(reloadStart, storage.indexOf('\n}\n', reloadStart));
+    expect(reload).toMatch(/^export function reloadAfterSessionChange\(\): void \{\s*if \(!claimPageNavigation\('reload'\)\) return;/);
+    expect(latch).not.toMatch(/^import /m);
   });
 
   it('still reaches the login page when the local clean-up fails (and logs it)', () => {

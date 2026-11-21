@@ -54,6 +54,9 @@ const storage = vi.hoisted(() => ({
   clearSessionTokens: vi.fn((_endedToken: string | null) => { storage.clearTokens(); return 'cleared' as const; }),
   reloadAfterSessionChange: vi.fn(),
   announceSessionEnded: vi.fn(),
+  // no reload onto another session pending; a sign-out with no session to end lets go of the memory only
+  isReloadPending: vi.fn(() => false),
+  letGoOfSession: vi.fn((): 'cleared' | 'replaced' => 'cleared'),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null as string | null),

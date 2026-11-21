@@ -46,6 +46,7 @@
 
 import { BUILD_API_ORIGIN, isOfficialOrigin } from './sessionOrigin';
 import { accountDeletionSettled } from './accountDeletion';
+import { claimPageNavigation, pendingPageNavigation, _resetPageNavigationForTests } from './pageNavigation';
 import { currentE2ESessionUser } from './e2e/session';
 import { isSameSession, readTokenClaims, sessionIdOf, userIdOf, type SameSessionOptions } from './tokenClaims';
 
@@ -632,7 +633,7 @@ function sessionMessageOf(data: unknown): SessionMessage | null {
 }
 
 function onSessionMessage(data: unknown): void {
-  if (!isWebStore(store) || reloading) return;
+  if (!isWebStore(store) || reloadPending()) return;
   const message = sessionMessageOf(data);
   // A remembered pair follows the storage events; a tab without a pair has no session to keep current
   if (!message || memory.remembered || memory.accessToken === null || memory.refreshToken === null) return;
@@ -705,13 +706,21 @@ function removeEndedSessionCopies(endedToken: string, options: SameSessionOption
  * go of both, and 'replaced' is answered: the caller reloads the page onto
  * the stored session (reloadAfterSessionChange) instead of signing out a
  * session that is not the one that ended. `null` (nothing to compare with)
- * clears as clearTokens does. In the desktop app the memory is the store.
+ * clears this tab's own pair as clearTokens does. In the desktop app the
+ * memory is the store.
+ *
+ * A tab with no session of its own to end touches nothing but its memory
+ * (letGoOfSession): when its memory holds no token (it let go already:
+ * another tab signed out, or in as someone else), and while a reload of the
+ * page onto another session is pending (what the memory holds then, if
+ * anything, is not this page's to clear).
  *
  * `accountWide`: the whole account's sessions ended (a ban, a deletion); a
  * token issued before sessions then also matches a stored pair of its
  * account (tokenClaims.isSameSession).
  */
 export function clearSessionTokens(endedToken: string | null, options: SameSessionOptions = {}): 'cleared' | 'replaced' {
+  if (reloadPending() || (memory.accessToken === null && memory.refreshToken === null)) return letGoOfSession();
   if (endedToken !== null) {
     const stored = isWebStore(store)
       ? followedWebPair(store.apiOrigin)
@@ -732,11 +741,36 @@ export function clearSessionTokens(endedToken: string | null, options: SameSessi
   return 'cleared';
 }
 
+/**
+ * This tab has no session of its own to end: its memory is signed out, and
+ * nothing else is touched (no storage, no store, no other tab). 'replaced'
+ * while a reload onto another session is pending (the caller does not go to
+ * the sign-in page: the reload stands), 'cleared' otherwise.
+ */
+export function letGoOfSession(): 'cleared' | 'replaced' {
+  memory = { ...memory, accessToken: null, refreshToken: null };
+  return reloadPending() ? 'replaced' : 'cleared';
+}
+
 // What reloads the page onto the stored session, replaceable for tests (jsdom cannot navigate)
 let reloadPage: () => void = () => {
   window.location.reload();
 };
-let reloading = false;
+
+/**
+ * A reload of this page onto another session is pending: nothing more is
+ * taken from the storage, the channel or the memory for this page, and
+ * nothing is sent on its behalf. A trip to the sign-in page pending instead
+ * is not this (its page is signed out already, and may still learn why).
+ */
+function reloadPending(): boolean {
+  return pendingPageNavigation() === 'reload';
+}
+
+/** Whether a reload of this page onto another session is pending (reloadAfterSessionChange). */
+export function isReloadPending(): boolean {
+  return reloadPending();
+}
 
 /**
  * Reload the page onto whatever session the storage holds now: once, after
@@ -744,20 +778,21 @@ let reloading = false;
  * stale pair) and after an account deletion of this client in flight has
  * finished its local clean-up (services/accountDeletion.ts). For a tab whose
  * session another tab replaced: its screen belongs to the session that was
- * there before.
+ * there before. It is the page's one navigation (services/pageNavigation.ts):
+ * a trip to the sign-in page asked for first stands, and one asked for after
+ * this goes nowhere.
  */
 export function reloadAfterSessionChange(): void {
-  if (reloading) return;
-  reloading = true;
+  if (!claimPageNavigation('reload')) return;
   void flushTokenStorage()
     .then(() => accountDeletionSettled())
     .then(() => reloadPage());
 }
 
-/** @internal tests */
+/** @internal tests: what reloads, and a fresh page load (no navigation asked for yet) */
 export function _setPageReloadForTests(fn: () => void): void {
   reloadPage = fn;
-  reloading = false;
+  _resetPageNavigationForTests();
 }
 
 export function getTrustedDeviceToken(): string | null {
@@ -908,7 +943,7 @@ export function isTokenOfAnotherAccount(token: string | null): boolean {
  * go of the pair instead and the page reloads onto the stored session.
  */
 function followRememberedPair(apiOrigin: string): 'followed' | 'reloading' {
-  if (reloading) return 'reloading';
+  if (reloadPending()) return 'reloading';
   const pair = markedOwn(SESSION_ORIGIN_KEY, apiOrigin) ? readPair(localStorage) : null;
   if (pair) {
     const changed = pair.accessToken !== memory.accessToken || pair.refreshToken !== memory.refreshToken;
@@ -951,7 +986,7 @@ function followOtherTabs(event: StorageEvent): void {
  * and the caller sends nothing more.
  */
 export function followSharedSession(): 'followed' | 'reloading' {
-  if (reloading) return 'reloading';
+  if (reloadPending()) return 'reloading';
   if (!isWebStore(store) || pendingTokenWrites > 0) return 'followed';
   const { apiOrigin } = store;
   followTrustedDeviceToken(apiOrigin);
@@ -974,6 +1009,6 @@ export function _resetTokenStorageForTests(backend?: SessionStore): void {
   tokensWritten = false;
   trustedWritten = false;
   pendingTokenWrites = 0;
-  reloading = false;
+  _resetPageNavigationForTests();
   _setSessionChannelForTests(undefined);
 }

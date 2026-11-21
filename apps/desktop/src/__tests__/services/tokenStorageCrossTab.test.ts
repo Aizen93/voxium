@@ -2,8 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getAccessToken, getRefreshToken, setTokens, flushTokenStorage, hydrateTokens, followSharedSession,
   clearSessionTokens, reloadAfterSessionChange, createKeychainSessionStore, isTokenOfAnotherAccount,
-  _resetTokenStorageForTests, _setPageReloadForTests,
+  isReloadPending, letGoOfSession, _resetTokenStorageForTests, _setPageReloadForTests,
 } from '../../services/tokenStorage';
+import { claimPageNavigation } from '../../services/pageNavigation';
 import { registerE2ESessionUser } from '../../services/e2e/session';
 import { beginAccountDeletion } from '../../services/accountDeletion';
 
@@ -222,6 +223,102 @@ describe('ending a session clears only that session', () => {
     expect(clearSessionTokens(null)).toBe('cleared');
     expect(localStorage.getItem(REFRESH)).toBeNull();
     expect(clearSessionTokens(x.refreshToken)).toBe('cleared');
+  });
+
+  it('a tab whose memory let go to reload onto another account\'s session ends nothing: that session is kept, whatever is asked', async () => {
+    const x = pairOf('user-x', 's-x');
+    setTokens(x.accessToken, x.refreshToken, true);
+    await flushTokenStorage();
+    signedIn = 'user-x';
+    const y = pairOf('user-y', 's-y');
+    otherTabStores(y);
+    expect(getRefreshToken()).toBeNull();
+    expect(isReloadPending()).toBe(true);
+
+    expect(clearSessionTokens(null)).toBe('replaced');
+    expect(clearSessionTokens(x.refreshToken)).toBe('replaced');
+    expect(clearSessionTokens(y.refreshToken)).toBe('replaced');
+    expect(letGoOfSession()).toBe('replaced');
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(y.refreshToken);
+    expect(localStorage.getItem(ACCESS)).toBe(y.accessToken);
+  });
+
+  it('... nor while a reload is pending with the memory still holding the pair it is leaving', async () => {
+    const y = pairOf('user-y', 's-y');
+    setTokens(y.accessToken, y.refreshToken, true);
+    await flushTokenStorage();
+    reloadAfterSessionChange();
+
+    expect(clearSessionTokens(y.refreshToken)).toBe('replaced');
+    expect(getRefreshToken()).toBeNull();
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(y.refreshToken);
+  });
+
+  it('a tab whose memory holds no token (it followed a sign-out) clears nothing another tab stored since, and answers cleared', async () => {
+    const x = pairOf('user-x', 's-x');
+    setTokens(x.accessToken, x.refreshToken, true);
+    await flushTokenStorage();
+    localStorage.removeItem(ACCESS);
+    localStorage.removeItem(REFRESH);
+    window.dispatchEvent(new StorageEvent('storage', { key: REFRESH, newValue: null, storageArea: localStorage }));
+    expect(getRefreshToken()).toBeNull();
+    // another tab signed in again; this one has not heard of it yet
+    const again = pairOf('user-x', 's-x2');
+    localStorage.setItem(ACCESS, again.accessToken);
+    localStorage.setItem(REFRESH, again.refreshToken);
+
+    expect(clearSessionTokens(null)).toBe('cleared');
+    expect(clearSessionTokens(x.refreshToken)).toBe('cleared');
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(again.refreshToken);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('letGoOfSession signs the memory out and touches no storage', async () => {
+    const x = pairOf('user-x', 's-x');
+    setTokens(x.accessToken, x.refreshToken, true);
+    await flushTokenStorage();
+
+    expect(letGoOfSession()).toBe('cleared');
+    expect(getAccessToken()).toBeNull();
+    expect(getRefreshToken()).toBeNull();
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(x.refreshToken);
+  });
+
+  it('the desktop app with nothing in memory deletes nothing from its store', async () => {
+    const calls: string[] = [];
+    const invoke = async <T>(cmd: string): Promise<T> => {
+      calls.push(cmd);
+      return null as T;
+    };
+    _resetTokenStorageForTests(createKeychainSessionStore(invoke, { apiOrigin: 'https://voxium.app' }));
+    await hydrateTokens();
+    calls.length = 0;
+
+    expect(clearSessionTokens(null)).toBe('cleared');
+    expect(clearSessionTokens(pairOf('user-x', 's-x').refreshToken)).toBe('cleared');
+    await flushTokenStorage();
+    expect(calls).toEqual([]);
+  });
+
+  it('a trip to the sign-in page pending is not a reload: a session that ends then is cleared as usual, and answers cleared', async () => {
+    const x = pairOf('user-x', 's-x');
+    setTokens(x.accessToken, x.refreshToken, true);
+    await flushTokenStorage();
+    expect(claimPageNavigation('login')).toBe(true);
+
+    expect(isReloadPending()).toBe(false);
+    expect(clearSessionTokens(x.refreshToken)).toBe('cleared');
+    expect(localStorage.getItem(REFRESH)).toBeNull();
+    expect(letGoOfSession()).toBe('cleared');
+    // and it is the page's one navigation: a reload asked for after it goes nowhere
+    reloadAfterSessionChange();
+    await flushTokenStorage();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(reload).not.toHaveBeenCalled();
   });
 
   it('a token naming no session matches by string only: a pair it cannot be told apart from is kept', async () => {

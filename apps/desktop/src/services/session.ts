@@ -9,6 +9,7 @@ import { accountDeletionSettled } from './accountDeletion';
 import { readTokenClaims, userIdOf } from './tokenClaims';
 import { loginPathFor, type LoginReason } from '../utils/loginReasons';
 import { sessionClientHint } from './sessionClient';
+import { claimPageNavigation, _resetPageNavigationForTests } from './pageNavigation';
 
 /**
  * The signed-in session's access token, and the ONE way it is renewed.
@@ -174,10 +175,11 @@ export function currentSessionEpoch(): number {
   return sessionEpoch;
 }
 
-/** @internal tests: what navigates, and a fresh page load (no trip to the sign-in page asked for yet) */
+/** @internal tests: what navigates, and a fresh page load (no navigation asked for yet) */
 export function setSessionLostNavigation(fn: (path: string) => void): void {
   navigateToLogin = fn;
   loginNavigation = null;
+  _resetPageNavigationForTests();
 }
 
 /**
@@ -189,13 +191,16 @@ export function setSessionLostNavigation(fn: (path: string) => void): void {
  * `force:logout` and a refusal can land together: every caller after the
  * first only adds its reason when the first gave none, so the sign-in page
  * says why (utils/loginReasons.ts) and a second navigation never replaces
- * the first.
+ * the first. The trip is the page's one navigation (services/pageNavigation.ts):
+ * a reload onto another session asked for before it stands, and this goes
+ * nowhere; one asked for after it goes nowhere either.
  */
 export function goToLoginPage(reason: LoginReason | null = null): void {
   if (loginNavigation) {
     if (reason !== null && loginNavigation.reason === null) loginNavigation.reason = reason;
     return;
   }
+  if (!claimPageNavigation('login')) return;
   const trip: { reason: LoginReason | null } = { reason };
   loginNavigation = trip;
   void flushTokenStorage()
@@ -678,6 +683,7 @@ export function _resetSessionForTests(): void {
   renewalHold = null;
   credentialChangeQueue = Promise.resolve();
   loginNavigation = null;
+  _resetPageNavigationForTests();
   cancelBackgroundRenewals();
   sessionEpoch = 0;
   clockOffsetMs = 0;

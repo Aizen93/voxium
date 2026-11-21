@@ -3,7 +3,7 @@ import { api } from '../services/api';
 import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange, beginCredentialChange } from '../services/socket';
 import {
   getAccessToken, getRefreshToken, setTokens, clearTokens, clearSessionTokens, reloadAfterSessionChange,
-  isRemembered, hydrateTokens,
+  isRemembered, hydrateTokens, isReloadPending, letGoOfSession,
   getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage, announceSessionEnded,
 } from '../services/tokenStorage';
 import { endSessionOnServer, holdReplacedSession, endReplacedSession } from '../services/sessionRevocation';
@@ -667,9 +667,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: ({ tellServer = true, endingSession, accountEnded = false }: LogoutOptions = {}) => {
-    // The session this sign-out ends, read before anything clears it
-    const refreshToken = getRefreshToken();
-    const sessionToken = endingSession !== undefined ? endingSession : refreshToken;
+    // A reload of this page onto another session is pending: the page holds
+    // no session of its own any more (what its memory holds, if anything, is
+    // another tab's). Only its memory signs out: no storage, no server, no
+    // other tab is touched
+    const ownSession = !isReloadPending();
+    // The session this sign-out ends, read before anything clears it: its
+    // refresh token, or its access token when that is all this tab holds
+    const refreshToken = ownSession ? getRefreshToken() : null;
+    const sessionToken = !ownSession ? null : endingSession !== undefined ? endingSession : (refreshToken ?? getAccessToken());
 
     // Clean up voice state before disconnecting socket (stops mic, audio pipeline)
     const vs = useVoiceStore.getState();
@@ -683,14 +689,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // started, a retry) must not sign the logged-out user back in
     endSessionRestore();
     // Only while the stored pair is still of the session that ended: another
-    // tab's sign-in meanwhile (as anyone) is not this tab's to wipe
-    const outcome = clearSessionTokens(sessionToken, { accountWide: accountEnded });
+    // tab's sign-in meanwhile (as anyone) is not this tab's to wipe. No
+    // session to end (none held, or the caller's own session check was made
+    // with none): the memory signs out and nothing else is touched
+    const outcome = sessionToken === null ? letGoOfSession() : clearSessionTokens(sessionToken, { accountWide: accountEnded });
     disconnectSocket();
     // Wipe every account-scoped store — on a shared machine the next login must
     // never see the previous account's servers, DMs, or support transcript
     resetAccountStores();
     set({ user: null, isAuthenticated: false, pendingRegistration: null });
-    if (tellServer) {
+    if (tellServer && ownSession) {
       // Signed out on this device whatever happens next: the server is told
       // in the background (never awaited, nothing stored from its answer)
       endSessionOnServer(refreshToken);
@@ -901,7 +909,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // The session the deletion is sent from: in the browser build another
     // tab may sign in (as anyone) while the deletion runs, and that session
     // is not this cleanup's to wipe
-    const sessionToken = getRefreshToken();
+    const sessionToken = getRefreshToken() ?? getAccessToken();
     try {
       await api.delete('/auth/account', { data: { password, ...(totpCode ? { totpCode } : {}) } });
       // The server has purged the account and disconnected its sockets; what
