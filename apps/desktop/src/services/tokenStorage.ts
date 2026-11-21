@@ -47,6 +47,7 @@
 import { BUILD_API_ORIGIN, isOfficialOrigin } from './sessionOrigin';
 import { accountDeletionSettled } from './accountDeletion';
 import { claimPageNavigation, pendingPageNavigation, _resetPageNavigationForTests } from './pageNavigation';
+import { endSessionOnServer } from './sessionRevocation';
 import { currentE2ESessionUser } from './e2e/session';
 import { isSameSession, readTokenClaims, sessionIdOf, userIdOf, type SameSessionOptions } from './tokenClaims';
 
@@ -941,23 +942,76 @@ export function isTokenOfAnotherAccount(token: string | null): boolean {
  * than the one on screen is not taken: a page that showed account X while
  * holding account Y's tokens would act as Y under X's name. The memory lets
  * go of the pair instead and the page reloads onto the stored session.
+ *
+ * A not-remembered tab that lets go of its OWN session this way (to follow
+ * the remembered pair, or to reload onto it) abandons it: see
+ * endAbandonedSession.
  */
 function followRememberedPair(apiOrigin: string): 'followed' | 'reloading' {
   if (reloadPending()) return 'reloading';
   const pair = markedOwn(SESSION_ORIGIN_KEY, apiOrigin) ? readPair(localStorage) : null;
   if (pair) {
     const changed = pair.accessToken !== memory.accessToken || pair.refreshToken !== memory.refreshToken;
+    const own = !memory.remembered && memory.accessToken !== null && memory.refreshToken !== null
+      ? { accessToken: memory.accessToken, refreshToken: memory.refreshToken }
+      : null;
     if (changed && belongsToAnotherAccount(pair)) {
       memory = { ...memory, accessToken: null, refreshToken: null };
+      endAbandonedSession(own, pair);
       console.info('[Session] Another tab signed in to another account — reloading onto it');
       reloadAfterSessionChange();
       return 'reloading';
     }
     memory = { ...memory, accessToken: pair.accessToken, refreshToken: pair.refreshToken, remembered: true };
+    endAbandonedSession(own, pair);
   } else if (memory.remembered) {
     memory = { ...memory, accessToken: null, refreshToken: null };
   }
   return 'followed';
+}
+
+/**
+ * The not-remembered session this tab just let go of to follow a remembered
+ * pair (`abandoned`, null when it held none), when that is another session
+ * than the one it follows (`followed`): nothing of this page uses it again,
+ * and every other tab of it follows the same remembered pair. So its copy
+ * leaves this tab's sessionStorage (a reload would load it back, as a session
+ * this tab already ended), and the server is told to end it, fire and forget
+ * (services/sessionRevocation.ts). A pair that names no session is left alone:
+ * one issued before sessions may be what the followed session was upgraded
+ * from, and its sign-out would end that session too.
+ */
+function endAbandonedSession(abandoned: TokenPair | null, followed: TokenPair): void {
+  if (!abandoned || sessionIdOf(abandoned.refreshToken) === null || isSameSession(followed, abandoned.refreshToken)) return;
+  const copy = readPair(sessionStorage);
+  if (copy && isSameSession(copy, abandoned.refreshToken)) removePair(sessionStorage);
+  console.info('[Session] This tab follows the session another tab remembered — ending the one it held');
+  endSessionOnServer(abandoned.refreshToken);
+}
+
+/**
+ * After a session ended and clearSessionTokens found another one stored in
+ * its place ('replaced'), for a restore of the session at launch: the memory
+ * takes up that stored session, read where this tab follows it (the
+ * remembered pair, else this tab's own not-remembered one), so the restore
+ * runs again on it instead of showing the sign-in page over a stored
+ * session. Read once the queued writes have landed (the clear of the ended
+ * session's copies is one of them): the caller flushes first. True when it
+ * took a pair up. False, with nothing taken, in the desktop app (its memory
+ * is its store, which only a reload reads again), while a reload is pending,
+ * when nothing is stored, and for a pair of another account than the one on
+ * screen (this page never holds one): the caller reloads then.
+ */
+export function takeUpStoredSession(): boolean {
+  if (!isWebStore(store) || reloadPending()) return false;
+  const { apiOrigin } = store;
+  const remembered = markedOwn(SESSION_ORIGIN_KEY, apiOrigin) ? readPair(localStorage) : null;
+  const pair = remembered ?? followedWebPair(apiOrigin);
+  if (!pair || belongsToAnotherAccount(pair)) return false;
+  memory = { ...memory, accessToken: pair.accessToken, refreshToken: pair.refreshToken, remembered: remembered !== null };
+  followTrustedDeviceToken(apiOrigin);
+  listenWhenNotRemembered();
+  return true;
 }
 
 function followOtherTabs(event: StorageEvent): void {

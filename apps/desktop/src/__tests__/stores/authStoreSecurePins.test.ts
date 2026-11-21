@@ -28,6 +28,8 @@ vi.mock('../../services/tokenStorage', () => ({
   // no reload onto another session pending; a sign-out with no session to end lets go of the memory only
   isReloadPending: vi.fn(() => false),
   letGoOfSession: vi.fn((): 'cleared' | 'replaced' => 'cleared'),
+  // after a 'replaced' restore: what is stored now, taken up (false: the caller reloads onto it)
+  takeUpStoredSession: vi.fn(() => false),
   isRemembered: vi.fn(() => true),
   hydrateTokens: vi.fn(async () => true),
   getTrustedDeviceToken: vi.fn(() => null),

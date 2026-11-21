@@ -34,6 +34,8 @@ const storage = vi.hoisted(() => ({
   // no reload onto another session pending; a sign-out with no session to end lets go of the memory only
   isReloadPending: vi.fn(() => false),
   letGoOfSession: vi.fn((): 'cleared' | 'replaced' => 'cleared'),
+  // after a 'replaced' restore: what is stored now, taken up (false: the caller reloads onto it)
+  takeUpStoredSession: vi.fn(() => false),
   isRemembered: vi.fn(() => true),
   // The stored session is read asynchronously (the OS credential store in
   // the desktop app); `true` = the store answered
@@ -83,6 +85,10 @@ const status = (code: number) => Object.assign(new Error(`${code}`), { isAxiosEr
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks keeps the answers a failed test queued and left unconsumed
+  for (const mock of [api.get, api.post, api.patch, api.delete, storage.clearSessionTokens, storage.takeUpStoredSession, storage.flushTokenStorage]) mock.mockReset();
+  storage.takeUpStoredSession.mockReturnValue(false);
+  storage.flushTokenStorage.mockImplementation(async () => {});
   _resetSessionRestoreForTests();
   storage.getAccessToken.mockReturnValue('access-old');
   storage.getRefreshToken.mockReturnValue('refresh-old');
@@ -941,7 +947,18 @@ describe('authStore — a local end of a session clears only that session (anoth
     vi.useFakeTimers();
     useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
     api.get.mockRejectedValueOnce(status(403));
-    storage.clearSessionTokens.mockReturnValueOnce('replaced');
+    // as the storage module does: 'replaced' lets go of the memory, and only
+    // taking up what is stored brings a session back into it
+    storage.clearSessionTokens.mockImplementationOnce(() => {
+      storage.getAccessToken.mockReturnValue(null);
+      storage.getRefreshToken.mockReturnValue(null);
+      return 'replaced';
+    });
+    storage.takeUpStoredSession.mockImplementationOnce(() => {
+      storage.getAccessToken.mockReturnValue('access-other');
+      storage.getRefreshToken.mockReturnValue('refresh-other');
+      return true;
+    });
     api.get.mockResolvedValueOnce({ data: { data: me } });
 
     await useAuthStore.getState().checkAuth();
@@ -951,6 +968,45 @@ describe('authStore — a local end of a session clears only that session (anoth
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => expect(useAuthStore.getState()).toMatchObject({ user: me, isAuthenticated: true }));
     expect(api.get).toHaveBeenCalledTimes(2);
+    // taken up once the clear of the refused session's copies had landed
+    expect(storage.flushTokenStorage.mock.invocationCallOrder[0]).toBeLessThan(storage.takeUpStoredSession.mock.invocationCallOrder[0]);
+    expect(socket.connectSocket).toHaveBeenCalledWith('access-other');
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
+  });
+
+  it('a refused restore whose replacement cannot be taken up here (the desktop app, another account) reloads onto it: never the sign-in page over it', async () => {
+    vi.useFakeTimers();
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+    api.get.mockRejectedValueOnce(status(401));
+    storage.clearSessionTokens.mockImplementationOnce(() => {
+      storage.getAccessToken.mockReturnValue(null);
+      return 'replaced';
+    });
+
+    await useAuthStore.getState().checkAuth();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(storage.takeUpStoredSession).toHaveBeenCalledTimes(1);
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
+    expect(api.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('a sign-in made before the take-up runs is left alone: nothing taken up, nothing reloaded', async () => {
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+    api.get.mockRejectedValueOnce(status(401));
+    storage.clearSessionTokens.mockReturnValueOnce('replaced');
+    let flushed!: () => void;
+    storage.flushTokenStorage.mockReturnValueOnce(new Promise<void>((resolve) => { flushed = resolve; }));
+
+    await useAuthStore.getState().checkAuth();
+    api.post.mockResolvedValueOnce({ data: { data: { user: me, accessToken: 'access-b', refreshToken: 'refresh-b' } } });
+    await useAuthStore.getState().login('b@example.com', 'pw');
+    flushed();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(storage.takeUpStoredSession).not.toHaveBeenCalled();
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
   });
 });
 

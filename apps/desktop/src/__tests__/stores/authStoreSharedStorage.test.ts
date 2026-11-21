@@ -214,5 +214,139 @@ describe('the sign-out queue sends what the auth store hands it', () => {
   });
 });
 
-// Keeps the helpers above in use for the describes later steps add here
-void ok;
+describe('a refused restore that finds another session stored restores that session', () => {
+  const refused = (status: number) => (config: InternalAxiosRequestConfig) =>
+    Promise.reject(Object.assign(new Error(String(status)), { isAxiosError: true, config, response: { status, data: {}, headers: {}, config } }));
+
+  it('another tab signed in while /auth/me was out: this tab takes up its pair and signs in as that account, no sign-in page', async () => {
+    const x = pairOf('user-x', 's-x');
+    localStorage.setItem(ACCESS, x.accessToken);
+    localStorage.setItem(REFRESH, x.refreshToken);
+    const y = pairOf('user-y', 's-y');
+    useAuthStore.setState({ isLoading: true });
+    answers = [
+      (config) => {
+        // the other tab's sign-in, heard while the refused request was out
+        otherTabStores(y);
+        return refused(403)(config);
+      },
+      async (config) => ok(config, { data: userOf('user-y') }),
+    ];
+
+    await useAuthStore.getState().checkAuth();
+    await vi.waitFor(() => expect(useAuthStore.getState().user).toMatchObject({ id: 'user-y' }));
+
+    expect(requests.map((r) => r.bearer)).toEqual([x.accessToken, y.accessToken]);
+    expect(useAuthStore.getState()).toMatchObject({ isAuthenticated: true, isLoading: false });
+    expect(localStorage.getItem(REFRESH)).toBe(y.refreshToken);
+    expect(getRefreshToken()).toBe(y.refreshToken);
+    expect(socket.connectSocket).toHaveBeenCalledWith(y.accessToken);
+    expect(reload).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('... also when this tab never heard of that sign-in (it was frozen): the refusal\'s clear finds it', async () => {
+    const x = pairOf('user-x', 's-x');
+    localStorage.setItem(ACCESS, x.accessToken);
+    localStorage.setItem(REFRESH, x.refreshToken);
+    const y = pairOf('user-x', 's-x-again');
+    useAuthStore.setState({ isLoading: true });
+    answers = [
+      (config) => {
+        // a 403 (the session's account was banned): no renewal is tried for it
+        localStorage.setItem(ACCESS, y.accessToken);
+        localStorage.setItem(REFRESH, y.refreshToken);
+        return refused(403)(config);
+      },
+      async (config) => ok(config, { data: userOf('user-x') }),
+    ];
+
+    await useAuthStore.getState().checkAuth();
+    await vi.waitFor(() => expect(useAuthStore.getState().isAuthenticated).toBe(true));
+
+    expect(requests.map((r) => r.bearer)).toEqual([x.accessToken, y.accessToken]);
+    expect(localStorage.getItem(REFRESH)).toBe(y.refreshToken);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('the page shows an account and the session stored in place of its refused one is another account\'s: the page reloads onto it', async () => {
+    const x = pairOf('user-x', 's-x');
+    setTokens(x.accessToken, x.refreshToken, true);
+    await flushTokenStorage();
+    useAuthStore.setState({ user: userOf('user-x') as never, isAuthenticated: true, isLoading: false });
+    const y = pairOf('user-y', 's-y');
+    answers = [
+      (config) => {
+        localStorage.setItem(ACCESS, y.accessToken);
+        localStorage.setItem(REFRESH, y.refreshToken);
+        return refused(403)(config);
+      },
+    ];
+
+    await useAuthStore.getState().checkAuth();
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+
+    expect(getRefreshToken()).toBeNull();
+    expect(localStorage.getItem(REFRESH)).toBe(y.refreshToken);
+    expect(requests).toHaveLength(1);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('a not-remembered tab that follows another tab\'s remembered sign-in ends the session it held', () => {
+  it('its own session goes from its sessionStorage and the server is told to end it', async () => {
+    const own = pairOf('user-x', 's-own');
+    setTokens(own.accessToken, own.refreshToken, false);
+    await flushTokenStorage();
+    useAuthStore.setState({ user: userOf('user-x') as never, isAuthenticated: true });
+    const remembered = pairOf('user-x', 's-remembered');
+
+    otherTabStores(remembered);
+
+    expect(getRefreshToken()).toBe(remembered.refreshToken);
+    expect(sessionStorage.getItem(REFRESH)).toBeNull();
+    expect(signedOutOnServer()).toEqual([own.refreshToken]);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('... also when it reloads onto another account\'s remembered session instead', async () => {
+    const own = pairOf('user-x', 's-own');
+    setTokens(own.accessToken, own.refreshToken, false);
+    await flushTokenStorage();
+    useAuthStore.setState({ user: userOf('user-x') as never, isAuthenticated: true });
+
+    otherTabStores(pairOf('user-y', 's-y'));
+
+    expect(getRefreshToken()).toBeNull();
+    expect(sessionStorage.getItem(REFRESH)).toBeNull();
+    expect(signedOutOnServer()).toEqual([own.refreshToken]);
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  });
+
+  it('nothing is ended when the remembered pair is of its own session, or when its pair names no session', async () => {
+    const own = pairOf('user-x', 's-own', 1);
+    setTokens(own.accessToken, own.refreshToken, false);
+    await flushTokenStorage();
+    otherTabStores(pairOf('user-x', 's-own', 2));
+    expect(signedOutOnServer()).toEqual([]);
+
+    _resetTokenStorageForTests();
+    _setPageReloadForTests(reload);
+    sessionStorage.clear();
+    localStorage.clear();
+    setTokens(jwt({ userId: 'user-x', exp: exp() }), jwt({ userId: 'user-x' }), false);
+    await flushTokenStorage();
+    otherTabStores(pairOf('user-x', 's-other'));
+    expect(signedOutOnServer()).toEqual([]);
+  });
+
+  it('a remembered tab following another remembered sign-in ends nothing (the pair it held was the shared one)', async () => {
+    const before = pairOf('user-x', 's-1');
+    setTokens(before.accessToken, before.refreshToken, true);
+    await flushTokenStorage();
+
+    otherTabStores(pairOf('user-x', 's-2'));
+
+    expect(signedOutOnServer()).toEqual([]);
+  });
+});

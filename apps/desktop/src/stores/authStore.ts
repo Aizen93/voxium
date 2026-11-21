@@ -3,7 +3,7 @@ import { api } from '../services/api';
 import { connectSocket, disconnectSocket, reconnectSocketAfterCredentialChange, beginCredentialChange } from '../services/socket';
 import {
   getAccessToken, getRefreshToken, setTokens, clearTokens, clearSessionTokens, reloadAfterSessionChange,
-  isRemembered, hydrateTokens, isReloadPending, letGoOfSession,
+  isRemembered, hydrateTokens, isReloadPending, letGoOfSession, takeUpStoredSession,
   getTrustedDeviceToken, setTrustedDeviceToken, clearTrustedDeviceToken, flushTokenStorage, announceSessionEnded,
 } from '../services/tokenStorage';
 import { endSessionOnServer, holdReplacedSession, endReplacedSession } from '../services/sessionRevocation';
@@ -371,6 +371,26 @@ async function attemptRestore(): Promise<RestoreOutcome> {
   }
 }
 
+/**
+ * A restore was refused, and the clear found a different session stored in
+ * its place (another tab signed in meanwhile, as anyone): the memory let go
+ * of both (tokenStorage.clearSessionTokens). Once the clear of the refused
+ * session's copies has landed, this tab takes up the stored session and the
+ * restore runs again on it; where it cannot (the desktop app, another
+ * account than the one on screen, a reload already pending) the page reloads
+ * onto it. Never the sign-in page over a stored session: signing in there
+ * would clear it. Nothing happens once the restore's session is over (a
+ * sign-in or a sign-out since: `epoch`). The restore runs again on a timer,
+ * once the refused one has finished (checkAuth is single-flight).
+ */
+function restoreStoredSessionInstead(epoch: number, retry: () => void): void {
+  void flushTokenStorage().then(() => {
+    if (epoch !== restoreEpoch) return;
+    if (takeUpStoredSession()) setTimeout(retry, 0);
+    else reloadAfterSessionChange();
+  });
+}
+
 /** @internal tests */
 export function _resetSessionRestoreForTests(): void {
   endSessionRestore();
@@ -591,6 +611,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // account they walked away from; they can sign in to it deliberately.
       const current = get();
       if (controller.signal.aborted && current.isAuthenticated && current.user && current.user.id !== user.id) {
+        // The server opened a session for the account with this answer: it
+        // is abandoned here, so the server is told to end it (fire and
+        // forget). Nothing of it is stored, and the session on screen stays
+        endSessionOnServer(refreshToken);
         return;
       }
       setTokens(accessToken, refreshToken, true);
@@ -775,7 +799,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           // cleared the tokens already) — the session that was refused: a
           // different one another tab stored meanwhile is restored instead
           cancelRestoreRetry();
-          if (clearSessionTokens(outcome.sessionToken) === 'replaced') setTimeout(retry, 0);
+          if (clearSessionTokens(outcome.sessionToken) === 'replaced') restoreStoredSessionInstead(epoch, retry);
           set({ isLoading: false });
           break;
         case 'failed':
