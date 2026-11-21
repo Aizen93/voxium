@@ -50,8 +50,10 @@ import { CREDENTIAL_CHANGE_MARK_MS } from './credentialChangeLimits';
  *   other sessions") is marked in flight in the shared storage, for its
  *   account, and every renewal of a tab holding a pair of that account
  *   waits for its answer before it sends anything, the lock or not
- *   (tokenStorage.markCredentialChange); a refusal received while one is in
- *   flight is not final until its answer has been looked for;
+ *   (tokenStorage.markCredentialChange), except one that recovers a token
+ *   this tab already sent without an answer (it must reach the server
+ *   within its grace window); a refusal received while one is in flight is
+ *   not final until its answer has been looked for;
  * - a not-remembered tab that loaded its pair, or came back from the
  *   back-forward cache, asks its twins for the newest one first, and its
  *   first renewal waits briefly for the answer (tokenStorage.awaitTwinSync);
@@ -418,6 +420,16 @@ interface BackgroundChain {
 }
 let backgroundChain: BackgroundChain | null = null;
 
+/**
+ * Whether `refreshToken` is one a refresh of this tab sent, in session
+ * `epoch`, without getting a usable answer, while the background renewals
+ * that recover it still run (until the first real answer, and within the
+ * server's grace window): a renewal that sends it now recovers that answer.
+ */
+function sendsUnansweredToken(epoch: number, refreshToken: string | null): boolean {
+  return refreshToken !== null && backgroundChain !== null && backgroundChain.epoch === epoch && backgroundChain.refreshToken === refreshToken;
+}
+
 function cancelBackgroundRenewals(): void {
   if (!backgroundChain) return;
   for (const timer of backgroundChain.timers) clearTimeout(timer);
@@ -697,15 +709,29 @@ async function renew(epoch: number, intended: string | null, promptRetry = true)
     await awaitTwinSync();
     if (epoch !== sessionEpoch) throw new SessionLostError('Session ended while the other tabs of this session were asked');
   }
-  // A credential change of another tab is out: a refresh token sent now is
-  // of the version it moves away from once it commits. This renewal waits
-  // for its answer (bounded by the change's own deadline), then goes on with
-  // what is stored then
-  if (credentialChangeMarked() && (await credentialChangeWaitEnded(epoch))) {
-    throw new SessionLostError('Session ended while a credential change was out');
-  }
   // What other tabs stored since this tab's memory last followed them
   followOtherTabsOrStop();
+  // A credential change of another tab of this account is out: a refresh
+  // token sent now is of the version it moves away from once it commits.
+  // This renewal waits for its answer (bounded by the change's own
+  // deadline), then goes on with what is stored then.
+  //
+  // Except a renewal that recovers an unanswered token: the token it would
+  // send is one this tab already sent without getting an answer, which the
+  // server may have rotated, and it answers that token again only within its
+  // grace window (shared SESSIONS.REUSE_GRACE_SECONDS, 120 s). The background
+  // chain (and the prompt retry, inside the loop below) must go out within
+  // it, and the mark may hold a renewal for up to 80 s more. Going out
+  // without waiting is safe: had the change committed meanwhile, the token
+  // is of the old version and is refused, and a refusal while the mark is
+  // live is not final (the rule below waits for the change's answer and
+  // takes the pair it stored); had it not, the answer is stored as any
+  // renewal's, and the change's answer, when it is for this same session,
+  // replaces it (a pair of the new version, at a higher generation)
+  if (!sendsUnansweredToken(epoch, getRefreshToken()) && credentialChangeMarked()) {
+    if (await credentialChangeWaitEnded(epoch)) throw new SessionLostError('Session ended while a credential change was out');
+    followOtherTabsOrStop();
+  }
   let refreshToken = getRefreshToken();
   if (!refreshToken) {
     handleSessionLost();

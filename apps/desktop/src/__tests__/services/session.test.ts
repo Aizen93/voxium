@@ -1805,6 +1805,75 @@ describe('session — background renewals after a refresh that got no usable ans
     expect(Math.max(...BACKGROUND_RENEWAL_DELAYS_MS)).toBeLessThan(120_000);
   });
 
+  it('a mark another tab of the account writes meanwhile holds none of them: each goes out on time', async () => {
+    storage.access = expiredToken();
+    http.post
+      .mockRejectedValueOnce(timeoutError()) // the caller's request
+      .mockRejectedValueOnce(timeoutError()) // its prompt retry
+      .mockRejectedValueOnce(timeoutError()) // background, 10 s
+      .mockResolvedValueOnce(renewed('access-new', 'refresh-new')); // background, 30 s
+    const settled = refreshAccessToken().catch(() => 'failed');
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    expect(await settled).toBe('failed');
+    // another tab starts a password change (and may be closed before it settles)
+    storage.mark = Date.now() + CREDENTIAL_CHANGE_MARK_MS;
+
+    await vi.advanceTimersByTimeAsync(10_000 - REFRESH_RETRY_DELAY_MS);
+    expect(http.post).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(http.post).toHaveBeenCalledTimes(4);
+    expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
+    expect(storage.waitForCredentialChange).not.toHaveBeenCalled();
+  });
+
+  it('... and so does a renewal asked for meanwhile that sends that same token', async () => {
+    storage.access = expiredToken();
+    http.post
+      .mockRejectedValueOnce(timeoutError())
+      .mockRejectedValueOnce(timeoutError())
+      .mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const settled = refreshAccessToken().catch(() => 'failed');
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    expect(await settled).toBe('failed');
+    storage.mark = Date.now() + CREDENTIAL_CHANGE_MARK_MS;
+
+    const renewal = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.post).toHaveBeenCalledTimes(3);
+    await expect(renewal).resolves.toBe('access-new');
+  });
+
+  it('a renewal that would send another token than the unanswered one still waits for the mark', async () => {
+    storage.access = expiredToken();
+    http.post.mockRejectedValueOnce(timeoutError()).mockRejectedValueOnce(timeoutError());
+    const settled = refreshAccessToken().catch(() => 'failed');
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
+    expect(await settled).toBe('failed');
+    // another tab stored a newer pair (its access token expired too), then started a change
+    storage.refresh = 'refresh-newer';
+    storage.mark = Date.now() + CREDENTIAL_CHANGE_MARK_MS;
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+
+    const renewal = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(http.post).toHaveBeenCalledTimes(2);
+    storage.clearMark();
+    await expect(renewal).resolves.toBe('access-new');
+    expect(http.post.mock.calls[2][1]).toEqual({ refreshToken: 'refresh-newer', client: 'web' });
+  });
+
+  it('the prompt retry is not held by a mark that appears during its wait', async () => {
+    storage.access = expiredToken();
+    http.post.mockRejectedValueOnce(timeoutError()).mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const renewal = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(1_000);
+    storage.mark = Date.now() + CREDENTIAL_CHANGE_MARK_MS;
+    await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS - 1_000);
+
+    expect(http.post).toHaveBeenCalledTimes(2);
+    await expect(renewal).resolves.toBe('access-new');
+  });
+
   it('go out on their own after the caller got its failure, one request each, until the first real answer', async () => {
     http.post
       .mockRejectedValueOnce(timeoutError()) // the caller's request

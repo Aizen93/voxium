@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import axios from 'axios';
+import { createHash } from 'node:crypto';
 import {
   getRefreshToken, setTokens, flushTokenStorage, hydrateTokens, reloadAfterSessionChange, createKeychainSessionStore,
   TWIN_SYNC_WAIT_MS, _resetTokenStorageForTests, _setPageReloadForTests, _setSessionChannelForTests,
@@ -419,6 +420,39 @@ describe('one page-level navigation per page load: the first one asked for wins'
 
     expect(reload).toHaveBeenCalledTimes(1);
     expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('a lost answer is recovered within the grace window, whatever mark another tab left', () => {
+  const noAnswer = () => Object.assign(new Error('timeout of 15000ms exceeded'), { isAxiosError: true, code: 'ECONNABORTED' });
+  /** A mark as tokenStorage writes it, computed here: T and the first 12 hex digits of SHA-256('voxium-credential-change:' + id). */
+  const markOf = (until: number, userId: string) => `${until}:${createHash('sha256').update(`voxium-credential-change:${userId}`).digest('hex').slice(0, 12)}`;
+
+  it('a mark of this account written while the background renewals run (its tab then closed) holds none of them past 120 s', async () => {
+    vi.useFakeTimers();
+    const t0 = Date.now();
+    localStorage.setItem('voxium_access_token', jwt({ userId: 'u', sid: 's', exp: nowSeconds() - 60 }));
+    localStorage.setItem('voxium_refresh_token', jwt({ userId: 'u', sid: 's', gen: 1 }));
+    await hydrateTokens();
+    const sentAt: number[] = [];
+    // the server rotates at the first request; its answer, and the prompt retry's, never arrive
+    post.mockImplementation(() => {
+      sentAt.push(Date.now() - t0);
+      if (sentAt.length <= 2) return new Promise((_resolve, reject) => setTimeout(() => reject(noAnswer()), 15_000));
+      return Promise.resolve({ data: { data: { accessToken: jwt({ userId: 'u', sid: 's', exp: nowSeconds() + 900 }), refreshToken: jwt({ userId: 'u', sid: 's', gen: 3 }) } } });
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    void refreshAccessToken().catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(44_000);
+    // another tab of the account starts a password change here, and is closed before it settles
+    localStorage.setItem('voxium_credential_change', markOf(Date.now() + 80_000, 'u'));
+    await vi.advanceTimersByTimeAsync(200_000);
+
+    expect(sentAt).toHaveLength(3);
+    for (const at of sentAt) expect(at).toBeLessThan(120_000);
+    expect(sentAt[2]).toBe(45_000);
+    expect(getRefreshToken()).toBe(jwt({ userId: 'u', sid: 's', gen: 3 }));
   });
 });
 
