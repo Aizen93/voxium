@@ -1,6 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import type { ServerToClientEvents, ClientToServerEvents } from '@voxium/shared';
-import { getAccessToken } from './tokenStorage';
+import { getAccessToken, holdsAnotherSessionOf } from './tokenStorage';
 import { bumpRequestGeneration } from './requestGeneration';
 import { loginReasonOf } from '../utils/loginReasons';
 
@@ -292,7 +292,6 @@ export function connectSocket(token: string): VoxSocket | null {
   let forceLoggedOut = false;
 
   s.on('force:logout', (data) => {
-    forceLoggedOut = true;
     if (import.meta.env.DEV) console.log('[WS] Force logout received:', data?.reason);
     // Shown on the sign-in page from a closed list of sentences: the server's
     // words travel as a code, never as text (utils/loginReasons.ts)
@@ -304,6 +303,17 @@ export function connectSocket(token: string): VoxSocket | null {
     // session that token became once renewed (tokenClaims.isSameSession)
     const endedSession = handshakeToken(s);
     const accountEnded = reason === 'banned' || reason === 'deleted';
+    // One session ended, and it is no longer this tab's: the tab follows
+    // another session of the same account since (a sign-in in another tab;
+    // tokenStorage.followRememberedPair asked the server to end the one it
+    // let go of, which is what tells this socket). Nothing here is signed
+    // out: the server's disconnect that follows reopens the socket with the
+    // session held now, like any other server disconnect
+    if (!accountEnded && holdsAnotherSessionOf(endedSession)) {
+      console.info('[WS] The session this socket was opened with has ended; this tab holds another session of the account — reconnecting with it');
+      return;
+    }
+    forceLoggedOut = true;
     import('../stores/authStore')
       .then(({ useAuthStore }) => {
         const outcome = useAuthStore.getState().logout({ tellServer: false, endingSession: endedSession, accountEnded });

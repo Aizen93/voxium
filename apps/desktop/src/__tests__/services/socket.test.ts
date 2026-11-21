@@ -95,6 +95,8 @@ vi.mock('../../services/session', () => session);
 const storage = vi.hoisted(() => ({
   getAccessToken: vi.fn(() => 'stored-token' as string | null),
   flushTokenStorage: vi.fn(async () => {}),
+  /** The tab holds another session of the account than the one a token names (it followed another tab's sign-in). */
+  holdsAnotherSessionOf: vi.fn((_token: string | null) => false),
 }));
 vi.mock('../../services/tokenStorage', () => storage);
 // A server disconnect leaves any voice call (the 'disconnect' handler)
@@ -1049,6 +1051,64 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     // Not the window's reopen with the stored token: the resume path was asked
     expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
     expect(socket.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('force:logout for a session this tab no longer holds (it follows another session of the account since) signs nothing out: the disconnect reopens with the session held now', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-of-the-session-it-let-go-of');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    storage.holdsAnotherSessionOf.mockReturnValueOnce(true);
+    session.getFreshAccessToken.mockResolvedValueOnce('access-held-now');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      socket.fire('force:logout', { reason: 'Your session has ended' });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(storage.holdsAnotherSessionOf).toHaveBeenCalledWith('access-of-the-session-it-let-go-of');
+      expect(authStoreMock.logout).not.toHaveBeenCalled();
+      expect(window.location.href).toBe('');
+      expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
+      expect(socket.auth).toEqual({ token: 'access-held-now' });
+      expect(socket.connect).toHaveBeenCalledTimes(1);
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('holds another session of the account'));
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+      info.mockRestore();
+    }
+  });
+
+  it('a ban or a deletion signs out whatever session this tab holds, a later one of the account included', async () => {
+    const mod = await freshSocketModule();
+    mod.connectSocket('access-of-the-session-it-let-go-of');
+    const socket = createdSockets[0];
+    socket.connected = true;
+    socket.fire('connect');
+    storage.holdsAnotherSessionOf.mockReturnValue(true);
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
+
+    try {
+      socket.fire('force:logout', { reason: 'Your account has been banned' });
+      serverDisconnect(socket);
+      await macrotask();
+      await tick();
+      await macrotask();
+
+      expect(authStoreMock.logout).toHaveBeenCalledWith(expect.objectContaining({ accountEnded: true }));
+      expect(window.location.href).toBe('/login?reason=banned');
+      expect(socket.connect).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
+      storage.holdsAnotherSessionOf.mockReset().mockReturnValue(false);
+    }
   });
 
   it('a server disconnect without force:logout (a demotion) reopens through the resume path with the stored token', async () => {

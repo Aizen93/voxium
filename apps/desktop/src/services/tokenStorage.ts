@@ -1105,6 +1105,23 @@ function endAbandonedSession(abandoned: TokenPair | null, followed: TokenPair): 
 }
 
 /**
+ * Whether this tab holds, now, a pair of ANOTHER session of the same account
+ * than the one `token` names: it let go of that session since, to follow
+ * another (followRememberedPair, which asks the server to end the one it let
+ * go of). An end of that session is then no end of anything this tab holds.
+ * False when nothing is held, and for a token or a held pair that names no
+ * session or no account (nothing tells them apart then).
+ */
+export function holdsAnotherSessionOf(token: string | null): boolean {
+  const { accessToken, refreshToken } = memory;
+  if (token === null || accessToken === null || refreshToken === null) return false;
+  if (sessionIdOf(token) === null || sessionIdOf(refreshToken) === null) return false;
+  if (isSameSession({ accessToken, refreshToken }, token)) return false;
+  const owner = userIdOf(token);
+  return owner !== null && owner === userIdOf(refreshToken);
+}
+
+/**
  * After a session ended and clearSessionTokens found another one stored in
  * its place ('replaced'), for a restore of the session at launch: the memory
  * takes up that stored session, read where this tab follows it (the

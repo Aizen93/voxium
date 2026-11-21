@@ -409,6 +409,26 @@ describe('a not-remembered tab that follows another tab\'s remembered sign-in en
     expect(reload).not.toHaveBeenCalled();
   });
 
+  it('the end of the session it let go of, which the server tells its socket, is no end of the session it holds now', async () => {
+    const own = pairOf('user-x', 's-own');
+    setTokens(own.accessToken, own.refreshToken, false);
+    await flushTokenStorage();
+    useAuthStore.setState({ user: userOf('user-x') as never, isAuthenticated: true });
+    const remembered = pairOf('user-x', 's-remembered');
+    const { holdsAnotherSessionOf } = await import('../../services/tokenStorage');
+    expect(holdsAnotherSessionOf(own.accessToken)).toBe(false);
+
+    otherTabStores(remembered);
+
+    // the socket was admitted with the session let go of
+    expect(holdsAnotherSessionOf(own.accessToken)).toBe(true);
+    // ... never with the session held, another account's, or a token that names no session
+    expect(holdsAnotherSessionOf(remembered.accessToken)).toBe(false);
+    expect(holdsAnotherSessionOf(pairOf('user-y', 's-y').accessToken)).toBe(false);
+    expect(holdsAnotherSessionOf(jwt({ userId: 'user-x', exp: exp() }))).toBe(false);
+    expect(holdsAnotherSessionOf(null)).toBe(false);
+  });
+
   it('... also when it reloads onto another account\'s remembered session instead', async () => {
     const own = pairOf('user-x', 's-own');
     setTokens(own.accessToken, own.refreshToken, false);
