@@ -388,13 +388,33 @@ async function attemptRestore(): Promise<RestoreOutcome> {
  * would clear it. Nothing happens once the restore's session is over (a
  * sign-in or a sign-out since: `epoch`). The restore runs again on a timer,
  * once the refused one has finished (checkAuth is single-flight).
+ *
+ * The loading state the refusal found stays as it is meanwhile, so the
+ * sign-in or landing page never flashes between the refusal and the restore
+ * of the stored session: `restore` (the restore run again) settles it, a
+ * reload leaves it up (the page goes), and `release` takes it down when
+ * nothing is restored after all (a sign-in or a sign-out since) or when the
+ * take-up failed; a failure is logged by its message.
  */
-function restoreStoredSessionInstead(epoch: number, retry: () => void): void {
-  void flushTokenStorage().then(() => {
-    if (epoch !== restoreEpoch) return;
-    if (takeUpStoredSession()) setTimeout(retry, 0);
-    else reloadAfterSessionChange();
-  });
+function restoreStoredSessionInstead(epoch: number, restore: () => Promise<void>, release: () => void): void {
+  flushTokenStorage()
+    .then(async () => {
+      if (epoch !== restoreEpoch) {
+        release();
+        return;
+      }
+      if (!takeUpStoredSession()) {
+        reloadAfterSessionChange();
+        return;
+      }
+      // once the refused restore has finished (checkAuth is single-flight)
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await restore();
+    })
+    .catch((err: unknown) => {
+      console.error('[Auth] The session stored in place of a refused one could not be restored:', err instanceof Error ? err.message : String(err));
+      release();
+    });
 }
 
 /** @internal tests */
@@ -805,7 +825,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           // cleared the tokens already) — the session that was refused: a
           // different one another tab stored meanwhile is restored instead
           cancelRestoreRetry();
-          if (clearSessionTokens(outcome.sessionToken) === 'replaced') restoreStoredSessionInstead(epoch, retry);
+          if (clearSessionTokens(outcome.sessionToken) === 'replaced') {
+            // The loading state stays up until that session's restore has settled
+            restoreStoredSessionInstead(
+              epoch,
+              async () => {
+                if (get().isAuthenticated) set({ isLoading: false });
+                else await get().checkAuth();
+              },
+              () => set({ isLoading: false }),
+            );
+            break;
+          }
           set({ isLoading: false });
           break;
         case 'failed':

@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getAccessToken, getRefreshToken, setTokens, flushTokenStorage, hydrateTokens, followSharedSession,
   clearSessionTokens, reloadAfterSessionChange, createKeychainSessionStore, isTokenOfAnotherAccount,
-  isReloadPending, letGoOfSession, _resetTokenStorageForTests, _setPageReloadForTests,
+  isReloadPending, letGoOfSession, takeUpStoredSession, isRemembered, setTrustedDeviceToken, getTrustedDeviceToken,
+  _resetTokenStorageForTests, _setPageReloadForTests,
 } from '../../services/tokenStorage';
 import { claimPageNavigation } from '../../services/pageNavigation';
 import { registerE2ESessionUser } from '../../services/e2e/session';
@@ -414,5 +415,76 @@ describe('isTokenOfAnotherAccount — the rule the REST client applies to one to
     expect(isTokenOfAnotherAccount(pairOf('user-x', 's-x').accessToken)).toBe(false);
     expect(isTokenOfAnotherAccount('opaque')).toBe(false);
     expect(isTokenOfAnotherAccount(null)).toBe(false);
+  });
+});
+
+describe('takeUpStoredSession — the session stored in place of a refused one', () => {
+  it('a not-remembered pair taken up stays not remembered: a renewal of it never writes localStorage', async () => {
+    const own = pairOf('user-x', 's-own');
+    sessionStorage.setItem(ACCESS, own.accessToken);
+    sessionStorage.setItem(REFRESH, own.refreshToken);
+
+    expect(takeUpStoredSession()).toBe(true);
+    expect(getRefreshToken()).toBe(own.refreshToken);
+    expect(isRemembered()).toBe(false);
+    const renewed = pairOf('user-x', 's-own', 2);
+    setTokens(renewed.accessToken, renewed.refreshToken);
+    await flushTokenStorage();
+
+    expect(sessionStorage.getItem(REFRESH)).toBe(renewed.refreshToken);
+    expect(localStorage.getItem(REFRESH)).toBeNull();
+    expect(localStorage.getItem(ACCESS)).toBeNull();
+  });
+
+  it('a remembered pair taken up is remembered', () => {
+    const shared = pairOf('user-x', 's-shared');
+    localStorage.setItem(ACCESS, shared.accessToken);
+    localStorage.setItem(REFRESH, shared.refreshToken);
+
+    expect(takeUpStoredSession()).toBe(true);
+    expect(isRemembered()).toBe(true);
+  });
+
+  it('the trusted-device token is read as stored, and left as it is in the storage', async () => {
+    setTrustedDeviceToken('trusted-old');
+    await flushTokenStorage();
+    // another tab replaced it; this tab missed the event
+    localStorage.setItem('voxium_trusted_device', 'trusted-new');
+    const shared = pairOf('user-x', 's-shared');
+    localStorage.setItem(ACCESS, shared.accessToken);
+    localStorage.setItem(REFRESH, shared.refreshToken);
+
+    expect(takeUpStoredSession()).toBe(true);
+    expect(getTrustedDeviceToken()).toBe('trusted-new');
+    await flushTokenStorage();
+    expect(localStorage.getItem('voxium_trusted_device')).toBe('trusted-new');
+  });
+
+  it('nothing is taken up while the page reloads onto another session', () => {
+    const shared = pairOf('user-x', 's-shared');
+    localStorage.setItem(ACCESS, shared.accessToken);
+    localStorage.setItem(REFRESH, shared.refreshToken);
+    reloadAfterSessionChange();
+
+    expect(takeUpStoredSession()).toBe(false);
+    expect(getRefreshToken()).toBeNull();
+  });
+});
+
+describe('the session a not-remembered tab abandons to follow a remembered one', () => {
+  it('only that session\'s copy leaves this tab\'s sessionStorage', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 204 })));
+    const own = pairOf('user-x', 's-own');
+    setTokens(own.accessToken, own.refreshToken, false);
+    await flushTokenStorage();
+    // what this tab's sessionStorage holds is not (or no longer) the copy of the session it abandons
+    const other = pairOf('user-x', 's-other');
+    sessionStorage.setItem(ACCESS, other.accessToken);
+    sessionStorage.setItem(REFRESH, other.refreshToken);
+
+    otherTabStores(pairOf('user-x', 's-remembered'));
+
+    expect(sessionStorage.getItem(REFRESH)).toBe(other.refreshToken);
+    vi.unstubAllGlobals();
   });
 });

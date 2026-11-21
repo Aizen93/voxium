@@ -1037,6 +1037,61 @@ describe('authStore — a local end of a session clears only that session (anoth
     expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
   });
 
+  it('the loading state stays up from the refusal until the restore of the session taken up has settled: no sign-in page in between', async () => {
+    vi.useFakeTimers();
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+    api.get.mockRejectedValueOnce(status(403));
+    storage.clearSessionTokens.mockImplementationOnce(() => {
+      storage.forgetPair();
+      return 'replaced';
+    });
+    let flushed!: () => void;
+    storage.flushTokenStorage.mockReturnValueOnce(new Promise<void>((resolve) => { flushed = resolve; }));
+    storage.takeUpStoredSession.mockImplementationOnce(() => {
+      storage.getAccessToken.mockReturnValue('access-other');
+      storage.getRefreshToken.mockReturnValue('refresh-other');
+      return true;
+    });
+    let answer!: (value: unknown) => void;
+    api.get.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    const seen: boolean[] = [];
+    const unsubscribe = useAuthStore.subscribe((state) => seen.push(state.isLoading));
+
+    await useAuthStore.getState().checkAuth();
+    expect(useAuthStore.getState().isLoading).toBe(true);
+    flushed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(useAuthStore.getState().isLoading).toBe(true);
+    answer({ data: { data: me } });
+    await vi.advanceTimersByTimeAsync(0);
+    unsubscribe();
+
+    expect(useAuthStore.getState()).toMatchObject({ user: me, isAuthenticated: true, isLoading: false });
+    // never down in between
+    expect(seen.indexOf(false)).toBe(seen.length - 1);
+  });
+
+  it('a take-up that throws is logged by its message and takes the loading state down', async () => {
+    vi.useFakeTimers();
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
+    api.get.mockRejectedValueOnce(status(401));
+    storage.clearSessionTokens.mockImplementationOnce(() => {
+      storage.forgetPair();
+      return 'replaced';
+    });
+    storage.takeUpStoredSession.mockImplementationOnce(() => { throw new Error('The storage is not available'); });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await useAuthStore.getState().checkAuth();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('could not be restored'), 'The storage is not available');
+    expect(useAuthStore.getState().isLoading).toBe(false);
+    expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+
   it('a refused restore whose replacement cannot be taken up here (the desktop app, another account) reloads onto it: never the sign-in page over it', async () => {
     vi.useFakeTimers();
     useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: true });
@@ -1065,11 +1120,11 @@ describe('authStore — a local end of a session clears only that session (anoth
     api.post.mockResolvedValueOnce({ data: { data: { user: me, accessToken: 'access-b', refreshToken: 'refresh-b' } } });
     await useAuthStore.getState().login('b@example.com', 'pw');
     flushed();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(useAuthStore.getState().isLoading).toBe(false));
 
     expect(storage.takeUpStoredSession).not.toHaveBeenCalled();
     expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
+    expect(useAuthStore.getState()).toMatchObject({ user: me, isAuthenticated: true });
   });
 });
 

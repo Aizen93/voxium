@@ -1156,11 +1156,17 @@ function followRememberedPair(apiOrigin: string): 'followed' | 'reloading' {
 /**
  * The not-remembered session this tab just let go of to follow a remembered
  * pair (`abandoned`, null when it held none), when that is another session
- * than the one it follows (`followed`): nothing of this page uses it again,
- * and every other tab of it follows the same remembered pair. So its copy
- * leaves this tab's sessionStorage (a reload would load it back, as a session
- * this tab already ended), and the server is told to end it, fire and forget
- * (services/sessionRevocation.ts). A pair that names no session is left alone:
+ * than the one it follows (`followed`). This page renews and sends only the
+ * remembered pair from here, and so does every open tab of that session (each
+ * follows the same remembered pair). Its copy in this tab's sessionStorage
+ * would still be used, by a later load of this tab, if the remembered pair
+ * went away (a sign-out in another tab): a load falls back to this tab's own
+ * pair then. So that copy leaves this tab's sessionStorage (only that
+ * session's copy), and the server is told to end the session, fire and forget
+ * (services/sessionRevocation.ts): a sign-out of the remembered session must
+ * not leave this tab signed in to the one it held before, nor a closed twin
+ * restorable with it; the abandoned session ending on the server is what a
+ * sign-out of this browser means. A pair that names no session is left alone:
  * one issued before sessions may be what the followed session was upgraded
  * from, and its sign-out would end that session too.
  */
