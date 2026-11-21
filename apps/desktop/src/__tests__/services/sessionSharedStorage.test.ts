@@ -291,6 +291,37 @@ describe('a credential change in one tab while another tab renews', () => {
     expectOneListenerEach(tabA, tabB);
   });
 
+  it('a tab of another account does not wait for the change: its renewal goes out at once', async () => {
+    // tab X (user-x) and tab Y (user-y), each with its own not-remembered session
+    sessionStorage.setItem('voxium_access_token', a1());
+    sessionStorage.setItem('voxium_refresh_token', r1());
+    const tabX = await openTab(null);
+    const y = expiredPair('s-y', 1, 'user-y');
+    sessionStorage.setItem('voxium_access_token', y.accessToken);
+    sessionStorage.setItem('voxium_refresh_token', y.refreshToken);
+    const tabY = await openTab(null);
+    const x2 = answer();
+    const change = tabX.session.runCredentialChange(async (stillCurrent) => {
+      await new Promise((r) => setTimeout(r, 45_000));
+      if (stillCurrent()) tabX.storage.setTokens(x2.accessToken, x2.refreshToken);
+      return 'changed';
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(localStorage.getItem('voxium_credential_change')).not.toBeNull();
+    const renewedY = { accessToken: jwt({ userId: 'user-y', sid: 's-y', exp: exp() }), refreshToken: jwt({ userId: 'user-y', sid: 's-y', gen: 2 }) };
+    post.mockResolvedValueOnce({ data: { data: renewedY } });
+
+    const renewal = tabY.session.refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(post).toHaveBeenCalledTimes(1);
+    await expect(renewal).resolves.toBe(renewedY.accessToken);
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    await change;
+    expect(localStorage.getItem('voxium_credential_change')).toBeNull();
+    expectOneListenerEach(tabX, tabY);
+  });
+
   it('without Web Locks, a renewal sent just before the change and refused after its commit is not final: it takes the change\'s pair', async () => {
     const oldRefresh = r1();
     localStorage.setItem('voxium_access_token', jwt({ userId: 'user-x', sid: 's-1', exp: nowSeconds() - 60, v: 1 }));

@@ -2,6 +2,7 @@ import { StorageTable, type StorageRow, type StorageTableHeaders } from './Stora
 import { LEGAL_OPERATOR } from './operator';
 import { MailLink } from './MailLink';
 import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocationLimits';
+import { CREDENTIAL_CHANGE_MARK_SECONDS } from '../../services/credentialChangeLimits';
 
 /**
  * The Cookie Policy text itself, in English, without page chrome (the public
@@ -53,9 +54,9 @@ const SESSION_ROWS: StorageRow[] = [
   },
   {
     item: 'voxium_credential_change',
-    purpose: 'Exists only while a password change or a sign-out of your other sessions, made in one tab of this browser, is waiting for its answer, so that the other tabs wait for the renewed session instead of renewing the one it replaces. It holds the time until which that answer can arrive, and nothing else',
+    purpose: 'Exists only while a password change or a sign-out of your other sessions, made in one tab of this browser, is waiting for its answer, so that the other tabs of the same account wait for the renewed session instead of renewing the one it replaces. It holds the time until which that answer can arrive and a short code computed from your account’s identifier, from which the identifier cannot be read back; the tabs of another account ignore it',
     where: 'Browser: local storage',
-    duration: 'Removed once the change has its answer or has failed, and when you sign out in that tab; ignored once that time has passed',
+    duration: `Written when the change starts; removed once its answer has been stored or the change has failed, when you sign out in that tab, or, if that tab was closed meanwhile, by the next session renewal in this browser after about ${CREDENTIAL_CHANGE_MARK_SECONDS} seconds`,
   },
 ];
 

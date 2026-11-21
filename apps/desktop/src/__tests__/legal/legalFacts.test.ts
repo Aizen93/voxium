@@ -24,6 +24,7 @@ import { PRIVACY_CONTENT } from '../../components/legal/PrivacyContent';
 import { TERMS_CONTENT } from '../../components/legal/TermsContent';
 import { COOKIE_POLICY_CONTENT } from '../../components/legal/CookiePolicyContent';
 import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocationLimits';
+import { CREDENTIAL_CHANGE_MARK_SECONDS } from '../../services/credentialChangeLimits';
 
 /**
  * The legal pages state facts the code implements, pinned to the code.
@@ -285,6 +286,11 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
       en: `for up to ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes to try again`,
       fr: `pendant ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes au plus pour réessayer`,
     },
+    {
+      source: 'CREDENTIAL_CHANGE_MARK_SECONDS (services/credentialChangeLimits.ts)',
+      en: `after about ${CREDENTIAL_CHANGE_MARK_SECONDS} seconds`,
+      fr: `au bout d’environ ${CREDENTIAL_CHANGE_MARK_SECONDS} secondes`,
+    },
   ],
 };
 
@@ -497,6 +503,15 @@ describe('the legal documents tell what a sign-in session is, how long it lasts 
       en: 'Signing out removes your session from the credential store and, when our servers can be reached, ends it there too.',
       fr: 'La déconnexion supprime votre session du gestionnaire d’identifiants et, lorsque nos serveurs sont joignables, met aussi fin à la session sur ceux-ci.',
     },
+    // voxium_credential_change: what it holds, and when it goes
+    {
+      en: 'It holds the time until which that answer can arrive and a short code computed from your account’s identifier, from which the identifier cannot be read back; the tabs of another account ignore it',
+      fr: 'Elle contient l’heure jusqu’à laquelle cette réponse peut arriver et un code court calculé à partir de l’identifiant de votre compte, qui ne permet pas de retrouver cet identifiant ; les onglets d’un autre compte l’ignorent',
+    },
+    {
+      en: `Written when the change starts; removed once its answer has been stored or the change has failed, when you sign out in that tab, or, if that tab was closed meanwhile, by the next session renewal in this browser after about ${CREDENTIAL_CHANGE_MARK_SECONDS} seconds`,
+      fr: `Écrite au début du changement ; supprimée une fois sa réponse enregistrée ou l’échec du changement constaté, lorsque vous vous déconnectez dans cet onglet, ou, si cet onglet a été fermé entre-temps, par le renouvellement de session suivant dans ce navigateur au bout d’environ ${CREDENTIAL_CHANGE_MARK_SECONDS} secondes`,
+    },
   ];
 
   it.each(LEGAL_LANGUAGES)('the Cookie Policy states the retry window, the other-sessions effect on the trusted-device token and the server-side end (%s)', (lang) => {
@@ -505,7 +520,7 @@ describe('the legal documents tell what a sign-in session is, how long it lasts 
   });
 
   it('keeps the session lifetimes the documents state in step with the code that applies them', () => {
-    for (const value of [SESSIONS.MAX_AGE_DAYS, SIGN_OUT_RETRY_MAX_AGE_MINUTES]) {
+    for (const value of [SESSIONS.MAX_AGE_DAYS, SIGN_OUT_RETRY_MAX_AGE_MINUTES, CREDENTIAL_CHANGE_MARK_SECONDS]) {
       expect(Number.isInteger(value) && value > 0, String(value)).toBe(true);
     }
     // the idle window and the cap are applied from these constants (never a second copy of a figure)

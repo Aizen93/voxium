@@ -2,6 +2,7 @@ import { StorageTable, type StorageRow, type StorageTableHeaders } from './Stora
 import { LEGAL_OPERATOR } from './operator';
 import { MailLink } from './MailLink';
 import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocationLimits';
+import { CREDENTIAL_CHANGE_MARK_SECONDS } from '../../services/credentialChangeLimits';
 
 /**
  * La Politique de cookies en français: the translation of
@@ -73,9 +74,9 @@ const SESSION_ROWS: StorageRow[] = withFrenchSpacing([
   },
   {
     item: 'voxium_credential_change',
-    purpose: 'N’existe que pendant qu’un changement de mot de passe ou une déconnexion de vos autres sessions, fait dans un onglet de ce navigateur, attend sa réponse, afin que les autres onglets attendent la session renouvelée au lieu de renouveler celle qu’il remplace. Elle contient l’heure jusqu’à laquelle cette réponse peut arriver, et rien d’autre',
+    purpose: 'N’existe que pendant qu’un changement de mot de passe ou une déconnexion de vos autres sessions, fait dans un onglet de ce navigateur, attend sa réponse, afin que les autres onglets du même compte attendent la session renouvelée au lieu de renouveler celle qu’il remplace. Elle contient l’heure jusqu’à laquelle cette réponse peut arriver et un code court calculé à partir de l’identifiant de votre compte, qui ne permet pas de retrouver cet identifiant ; les onglets d’un autre compte l’ignorent',
     where: 'Navigateur : stockage local',
-    duration: 'Supprimée une fois que le changement a sa réponse ou a échoué, et lorsque vous vous déconnectez dans cet onglet ; ignorée une fois cette heure passée',
+    duration: `Écrite au début du changement ; supprimée une fois sa réponse enregistrée ou l’échec du changement constaté, lorsque vous vous déconnectez dans cet onglet, ou, si cet onglet a été fermé entre-temps, par le renouvellement de session suivant dans ce navigateur au bout d’environ ${CREDENTIAL_CHANGE_MARK_SECONDS} secondes`,
   },
 ]);
 

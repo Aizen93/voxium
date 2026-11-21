@@ -11,6 +11,7 @@ import { isSameSession, readTokenClaims, sessionIdOf, userIdOf } from './tokenCl
 import { loginPathFor, type LoginReason } from '../utils/loginReasons';
 import { sessionClientHint } from './sessionClient';
 import { claimPageNavigation, _resetPageNavigationForTests } from './pageNavigation';
+import { CREDENTIAL_CHANGE_MARK_MS } from './credentialChangeLimits';
 
 /**
  * The signed-in session's access token, and the ONE way it is renewed.
@@ -46,8 +47,9 @@ import { claimPageNavigation, _resetPageNavigationForTests } from './pageNavigat
  *   and sends nothing. The wait for the lock is bounded; at the bound the
  *   renewal goes on with the re-read alone;
  * - a credential change of any tab (a password change, "sign out of all
- *   other sessions") is marked in flight in the shared storage, and every
- *   renewal waits for its answer before it sends anything, the lock or not
+ *   other sessions") is marked in flight in the shared storage, for its
+ *   account, and every renewal of a tab holding a pair of that account
+ *   waits for its answer before it sends anything, the lock or not
  *   (tokenStorage.markCredentialChange); a refusal received while one is in
  *   flight is not final until its answer has been looked for;
  * - a not-remembered tab that loaded its pair, or came back from the
@@ -500,25 +502,17 @@ let renewalHold: Promise<void> | null = null;
 let credentialChangeQueue: Promise<unknown> = Promise.resolve();
 
 /**
- * The deadline of a credential change's request: it bounds how long renewals
- * stay held. Longer than the server's own budget for the transaction (60 s,
- * plus 10 s to get a connection), so a slow commit is still answered.
+ * The deadline of a credential change's request (CREDENTIAL_CHANGE_TIMEOUT_MS)
+ * and how far ahead its mark says it may still be answered
+ * (CREDENTIAL_CHANGE_MARK_MS): defined in a module without imports, which
+ * the Cookie Policy reads too.
  */
-export const CREDENTIAL_CHANGE_TIMEOUT_MS = 75_000;
-
-/**
- * How far ahead a credential change's mark in the shared storage says it may
- * still be answered (tokenStorage.markCredentialChange): its request's
- * deadline, plus the time to store its answer and remove the mark. Every tab
- * of the browser build holds its renewals while the mark is live, at most
- * this long.
- */
-export const CREDENTIAL_CHANGE_MARK_MS = CREDENTIAL_CHANGE_TIMEOUT_MS + 5_000;
+export { CREDENTIAL_CHANGE_TIMEOUT_MS, CREDENTIAL_CHANGE_MARK_MS } from './credentialChangeLimits';
 
 /** The removal of this tab's mark of a credential change in flight, while there is one. */
 let ownCredentialChangeMark: (() => void) | null = null;
 
-/** A credential change of a tab of this browser is marked in flight (tokenStorage), now. */
+/** A credential change of this tab's account, made in a tab of this browser, is marked in flight (tokenStorage), now. */
 function credentialChangeMarked(): boolean {
   return credentialChangeInFlightUntil(CREDENTIAL_CHANGE_MARK_MS) !== null;
 }

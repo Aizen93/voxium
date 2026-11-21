@@ -26,3 +26,18 @@ describe('the sign-out queue (services/sessionRevocation.ts)', () => {
     }
   });
 });
+
+describe('the bounds of a credential change (services/credentialChangeLimits.ts)', () => {
+  it('are defined in a module that imports nothing, and only re-exported by the renewal', () => {
+    expect(importsOf(read('../../services/credentialChangeLimits.ts'))).toEqual([]);
+    expect(read('../../services/session.ts')).not.toMatch(/^export const CREDENTIAL_CHANGE_/m);
+  });
+
+  it('the legal pages read them without pulling the renewal in', () => {
+    for (const page of ['CookiePolicyContent.en.tsx', 'CookiePolicyContent.fr.tsx']) {
+      const imports = importsOf(read(`../../components/legal/${page}`));
+      expect(imports).toContain('../../services/credentialChangeLimits');
+      expect(imports).not.toContain('../../services/session');
+    }
+  });
+});
