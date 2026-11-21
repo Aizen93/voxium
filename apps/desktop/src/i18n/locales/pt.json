@@ -225,6 +225,46 @@
       "failed": "Não foi possível excluir sua conta. Tente novamente."
     },
     "security": {
+      "sessions": {
+        "title": "Onde você está conectado",
+        "description": "Os dispositivos e navegadores atualmente conectados à sua conta.",
+        "thisDevice": "Este dispositivo",
+        "kind": {
+          "desktop": "Aplicativo de computador",
+          "web": "Navegador web",
+          "admin": "Painel de administração",
+          "android": "Aplicativo Android",
+          "ios": "Aplicativo de iPhone ou iPad",
+          "unknown": "Aplicativo desconhecido"
+        },
+        "os": {
+          "windows": "Windows",
+          "macos": "macOS",
+          "linux": "Linux",
+          "android": "Android",
+          "ios": "iOS",
+          "other": "Outro sistema"
+        },
+        "kindAndOs": "{{kind}} · {{os}}",
+        "signedInOn": "Conectado em {{date}}",
+        "activeToday": "Ativo hoje",
+        "activeYesterday": "Ativo ontem",
+        "activeOn": "Ativo em {{date}}",
+        "signOut": "Sair",
+        "signOutOthers": "Sair de todas as outras sessões",
+        "noOthers": "Você não está conectado em nenhum outro lugar.",
+        "confirmTitle": "Confirme com a sua senha",
+        "confirmOthers": "Todos os outros dispositivos e navegadores serão desconectados. Os que você marcou como confiáveis para a autenticação em duas etapas voltarão a pedir o seu código. Este dispositivo continua conectado.",
+        "confirmOne": "{{label}} será desconectado.",
+        "confirmOneTrusted": "Se esse dispositivo era confiável para a autenticação em duas etapas, ele continua sendo até você alterar a senha ou sair de todas as outras sessões.",
+        "password": "Senha",
+        "signedOutOthers_one": "Desconectado de {{count}} outra sessão",
+        "signedOutOthers_other": "Desconectado de {{count}} outras sessões",
+        "signedOutOne": "Desconectado",
+        "failed": "Não foi possível sair. Tente novamente.",
+        "loadFailed": "Não foi possível carregar onde você está conectado.",
+        "retry": "Tentar novamente"
+      },
       "hidePasswords": "Ocultar senhas",
       "showPasswords": "Mostrar senhas",
       "changePassword": "Alterar senha",

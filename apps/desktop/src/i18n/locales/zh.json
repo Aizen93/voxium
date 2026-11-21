@@ -225,6 +225,45 @@
       "failed": "无法删除您的账户，请重试。"
     },
     "security": {
+      "sessions": {
+        "title": "已登录的位置",
+        "description": "当前已登录你账号的设备和浏览器。",
+        "thisDevice": "此设备",
+        "kind": {
+          "desktop": "桌面应用",
+          "web": "网页浏览器",
+          "admin": "管理后台",
+          "android": "Android 应用",
+          "ios": "iPhone 或 iPad 应用",
+          "unknown": "未知应用"
+        },
+        "os": {
+          "windows": "Windows",
+          "macos": "macOS",
+          "linux": "Linux",
+          "android": "Android",
+          "ios": "iOS",
+          "other": "其他系统"
+        },
+        "kindAndOs": "{{kind}} · {{os}}",
+        "signedInOn": "登录于 {{date}}",
+        "activeToday": "今天活跃",
+        "activeYesterday": "昨天活跃",
+        "activeOn": "活跃于 {{date}}",
+        "signOut": "退出登录",
+        "signOutOthers": "退出所有其他会话",
+        "noOthers": "你没有在其他地方登录。",
+        "confirmTitle": "请用密码确认",
+        "confirmOthers": "所有其他设备和浏览器都将退出登录。你曾为双重验证标记为受信任的设备，下次也需要重新输入验证码。此设备保持登录状态。",
+        "confirmOne": "{{label}}将退出登录。",
+        "confirmOneTrusted": "如果该设备曾被信任用于双重验证，在你更改密码或退出所有其他会话之前，它仍然受信任。",
+        "password": "密码",
+        "signedOutOthers_other": "已退出其他 {{count}} 个会话",
+        "signedOutOne": "已退出登录",
+        "failed": "无法退出登录，请重试。",
+        "loadFailed": "无法加载已登录的位置。",
+        "retry": "重试"
+      },
       "hidePasswords": "隐藏密码",
       "showPasswords": "显示密码",
       "changePassword": "修改密码",

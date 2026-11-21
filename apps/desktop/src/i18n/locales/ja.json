@@ -225,6 +225,45 @@
       "failed": "アカウントを削除できませんでした。もう一度お試しください。"
     },
     "security": {
+      "sessions": {
+        "title": "ログイン中の場所",
+        "description": "現在アカウントにログインしているデバイスとブラウザです。",
+        "thisDevice": "このデバイス",
+        "kind": {
+          "desktop": "デスクトップアプリ",
+          "web": "ウェブブラウザ",
+          "admin": "管理ダッシュボード",
+          "android": "Androidアプリ",
+          "ios": "iPhone・iPadアプリ",
+          "unknown": "不明なアプリ"
+        },
+        "os": {
+          "windows": "Windows",
+          "macos": "macOS",
+          "linux": "Linux",
+          "android": "Android",
+          "ios": "iOS",
+          "other": "その他のシステム"
+        },
+        "kindAndOs": "{{kind}} · {{os}}",
+        "signedInOn": "{{date}}にログイン",
+        "activeToday": "今日アクティブ",
+        "activeYesterday": "昨日アクティブ",
+        "activeOn": "{{date}}にアクティブ",
+        "signOut": "ログアウト",
+        "signOutOthers": "他のすべてのセッションからログアウト",
+        "noOthers": "他の場所ではログインしていません。",
+        "confirmTitle": "パスワードで確認",
+        "confirmOthers": "他のすべてのデバイスとブラウザがログアウトされます。2段階認証で信頼済みにしていたものも、次回は再びコードの入力が必要になります。このデバイスはログインしたままです。",
+        "confirmOne": "{{label}}をログアウトします。",
+        "confirmOneTrusted": "そのデバイスが2段階認証で信頼済みだった場合、パスワードを変更するか他のすべてのセッションからログアウトするまで、信頼済みのままです。",
+        "password": "パスワード",
+        "signedOutOthers_other": "他の{{count}}件のセッションからログアウトしました",
+        "signedOutOne": "ログアウトしました",
+        "failed": "ログアウトできませんでした。もう一度お試しください。",
+        "loadFailed": "ログイン中の場所を読み込めませんでした。",
+        "retry": "再試行"
+      },
       "hidePasswords": "パスワードを非表示",
       "showPasswords": "パスワードを表示",
       "changePassword": "パスワードを変更",
