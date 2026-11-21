@@ -1,6 +1,6 @@
 import type { APIRequestContext, Page } from '@playwright/test';
 import { test, expect } from './helpers/fixtures';
-import { testUser, injectAuth } from './helpers/auth';
+import { testUser, injectAuth, injectSeparateSignIn } from './helpers/auth';
 import { registerUser, sendFriendRequest, acceptFriendRequest, API_URL } from './helpers/api';
 import { getConversationServerState, getE2EDevices, getE2EKeyShareCount } from './helpers/db';
 import { clearRateLimits } from './helpers/rateLimits';
@@ -252,7 +252,8 @@ test.describe('E2E encrypted DMs — live two-client smoke test', () => {
     // ── A signs in on a SECOND device (fresh context ⇒ fresh vault ⇒ new deviceId) ──
     const contextA2 = await browser.newContext();
     const pageA2 = await contextA2.newPage();
-    await injectAuth(pageA2, dataA);
+    // its own session: one pair in two contexts would be one session twice
+    await injectSeparateSignIn(pageA2, request, userA);
     await expect(pageA2.getByRole('heading', { name: 'Direct Messages' }).first()).toBeVisible({ timeout: 20_000 });
 
     await expect

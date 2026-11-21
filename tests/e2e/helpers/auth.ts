@@ -1,4 +1,5 @@
-import type { Page } from '@playwright/test';
+import type { APIRequestContext, Page } from '@playwright/test';
+import { loginUser } from './api';
 import { setLatestPendingRegistrationCodeForEmail, TEST_SIGNUP_CODE } from './db';
 
 /** Unique suffix for test isolation — avoids collisions across runs. */
@@ -92,4 +93,25 @@ export async function injectAuth(
   await page.goto('/');
   // Wait for the app to hydrate with auth
   await page.waitForURL('/', { timeout: 15_000 });
+}
+
+/**
+ * A SECOND, separate sign-in of an account that already exists: a real
+ * `POST /auth/login` with its e-mail and password, which opens a session of
+ * its own, injected into `page`. Every renewal of a refresh token replaces
+ * it, so two browser contexts given the SAME pair would be one session
+ * presented from two places, each renewal by one invalidating the other's
+ * token. Two contexts that stand for two devices of one account each sign in
+ * (the first through `registerUser` and `injectAuth`, the others through
+ * this). Two pages of ONE context share one pair and need nothing more.
+ * Returns the pair this context holds.
+ */
+export async function injectSeparateSignIn(
+  page: Page,
+  request: APIRequestContext,
+  account: { email: string; password: string },
+) {
+  const signedIn = await loginUser(request, account);
+  await injectAuth(page, signedIn);
+  return signedIn;
 }
