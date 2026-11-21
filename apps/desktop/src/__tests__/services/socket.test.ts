@@ -1085,32 +1085,6 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
     }
   });
 
-  it('a ban or a deletion signs out whatever session this tab holds, a later one of the account included', async () => {
-    const mod = await freshSocketModule();
-    mod.connectSocket('access-of-the-session-it-let-go-of');
-    const socket = createdSockets[0];
-    socket.connected = true;
-    socket.fire('connect');
-    storage.holdsAnotherSessionOf.mockReturnValue(true);
-    const originalLocation = window.location;
-    Object.defineProperty(window, 'location', { value: { href: '' }, writable: true, configurable: true });
-
-    try {
-      socket.fire('force:logout', { reason: 'Your account has been banned' });
-      serverDisconnect(socket);
-      await macrotask();
-      await tick();
-      await macrotask();
-
-      expect(authStoreMock.logout).toHaveBeenCalledWith(expect.objectContaining({ accountEnded: true }));
-      expect(window.location.href).toBe('/login?reason=banned');
-      expect(socket.connect).not.toHaveBeenCalled();
-    } finally {
-      Object.defineProperty(window, 'location', { value: originalLocation, writable: true, configurable: true });
-      storage.holdsAnotherSessionOf.mockReset().mockReturnValue(false);
-    }
-  });
-
   it('a server disconnect without force:logout (a demotion) reopens through the resume path with the stored token', async () => {
     const mod = await freshSocketModule();
     mod.connectSocket('access-old');

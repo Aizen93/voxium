@@ -349,6 +349,25 @@ describe('ending a session clears only that session', () => {
     expect(localStorage.getItem(REFRESH)).toBeNull();
   });
 
+  it('a ban or a deletion named by a token of another session of the account ends the session held now too', async () => {
+    // this tab followed another tab's sign-in (session Q) since its socket was admitted with session A
+    const q = pairOf('user-x', 's-q');
+    setTokens(q.accessToken, q.refreshToken, true);
+    await flushTokenStorage();
+    const ofSessionA = pairOf('user-x', 's-a').accessToken;
+
+    // one session ended (A): Q is not it, and stays
+    expect(clearSessionTokens(ofSessionA)).toBe('replaced');
+    expect(localStorage.getItem(REFRESH)).toBe(q.refreshToken);
+
+    setTokens(q.accessToken, q.refreshToken, true);
+    await flushTokenStorage();
+    // the account ended: Q ended with it
+    expect(clearSessionTokens(ofSessionA, { accountWide: true })).toBe('cleared');
+    expect(getRefreshToken()).toBeNull();
+    expect(localStorage.getItem(REFRESH)).toBeNull();
+  });
+
   it('... never another account\'s pair; the ended account\'s copy in this tab\'s own storage goes', async () => {
     const y = pairOf('user-y', 's-y');
     setTokens(y.accessToken, y.refreshToken, true);

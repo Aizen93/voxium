@@ -66,10 +66,11 @@ export function userIdOf(token: string | null | undefined): string | null {
 export interface SameSessionOptions {
   /**
    * The end covers the whole account (a ban, an account deletion: the server
-   * signs out every session of it). A token issued before sessions cannot
-   * say which session it became (the server upgrades it into one at its
-   * first renewal, and a socket admitted with it stays open across that
-   * renewal), so a pair of the SAME account counts as its session then.
+   * signs out every session of it). Every session of that account has ended
+   * then, so a pair of the SAME account counts, whichever session it is: the
+   * one the ended token names, a later one this tab followed since (another
+   * tab's sign-in to the same account), or the one a token issued before
+   * sessions became at its first renewal.
    */
   accountWide?: boolean;
 }
@@ -80,8 +81,10 @@ export interface SameSessionOptions {
  * A token that names no session is matched by string only, so a pair it
  * cannot be told apart from reads as ANOTHER session: the callers keep that
  * pair rather than remove a session they cannot identify. Except for an end
- * of the whole account (`accountWide`): such a token then matches a pair of
- * the account it names (decoded, both sides), whatever session that is.
+ * of the whole account (`accountWide`): the token then matches any pair of
+ * the account it names (decoded: its `userId` against either token of the
+ * pair), whether or not it names a session, and whatever session the pair
+ * is. A token that names no account matches by string only, even then.
  */
 export function isSameSession(
   pair: { accessToken: string; refreshToken: string },
@@ -90,11 +93,11 @@ export function isSameSession(
 ): boolean {
   if (typeof token !== 'string') return false;
   if (token === pair.refreshToken || token === pair.accessToken) return true;
-  const sid = sessionIdOf(token);
-  if (sid === null) {
-    if (!accountWide) return false;
+  if (accountWide) {
     const owner = userIdOf(token);
     return owner !== null && (userIdOf(pair.refreshToken) === owner || userIdOf(pair.accessToken) === owner);
   }
+  const sid = sessionIdOf(token);
+  if (sid === null) return false;
   return sessionIdOf(pair.refreshToken) === sid || sessionIdOf(pair.accessToken) === sid;
 }

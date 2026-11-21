@@ -831,9 +831,9 @@ function removeEndedSessionCopies(endedToken: string, options: SameSessionOption
  * page onto another session is pending (what the memory holds then, if
  * anything, is not this page's to clear).
  *
- * `accountWide`: the whole account's sessions ended (a ban, a deletion); a
- * token issued before sessions then also matches a stored pair of its
- * account (tokenClaims.isSameSession).
+ * `accountWide`: the whole account's sessions ended (a ban, a deletion): any
+ * stored pair of the account `endedToken` names is then of the ended session,
+ * whichever session it is (tokenClaims.isSameSession).
  */
 export function clearSessionTokens(endedToken: string | null, options: SameSessionOptions = {}): 'cleared' | 'replaced' {
   if (reloadPending() || (memory.accessToken === null && memory.refreshToken === null)) return letGoOfSession();

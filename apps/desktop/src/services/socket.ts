@@ -297,10 +297,10 @@ export function connectSocket(token: string): VoxSocket | null {
     // words travel as a code, never as text (utils/loginReasons.ts)
     const reason = loginReasonOf(data?.reason);
     // The session the server ended is the one this socket was admitted with.
-    // A ban or a deletion ends every session of the account: a socket
-    // admitted with a token issued before sessions (no sid; the server tells
-    // such sockets only then) ends the account's stored pair, which is the
-    // session that token became once renewed (tokenClaims.isSameSession)
+    // A ban or a deletion ends every session of the account: whatever pair of
+    // that account the tab holds then ended too, a later session it followed
+    // since and the session a token issued before sessions became included
+    // (tokenClaims.isSameSession, `accountWide`)
     const endedSession = handshakeToken(s);
     const accountEnded = reason === 'banned' || reason === 'deleted';
     // One session ended, and it is no longer this tab's: the tab follows

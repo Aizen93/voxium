@@ -67,9 +67,8 @@ export interface LogoutOptions {
   endingSession?: string | null;
   /**
    * The server ended every session of the account (a ban, an account
-   * deletion): an `endingSession` issued before sessions (no `sid`) then
-   * also matches a stored pair of the same account, which is the session it
-   * became (tokenClaims.isSameSession).
+   * deletion): any stored pair of the account `endingSession` names is then
+   * of the ended session, whichever session it is (tokenClaims.isSameSession).
    */
   accountEnded?: boolean;
 }

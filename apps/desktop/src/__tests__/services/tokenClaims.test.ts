@@ -50,14 +50,33 @@ describe('tokenClaims — reading our own tokens for routing, never for trust', 
     expect(isSameSession(pair, beforeSessions, { accountWide: false })).toBe(false);
     // the whole account ended (a ban, a deletion): the account's stored pair is that token's session
     expect(isSameSession(pair, beforeSessions, { accountWide: true })).toBe(true);
-    expect(isSameSession({ accessToken: 'opaque', refreshToken: jwt({ userId: 'u', sid: 's-9', gen: 1 }) }, beforeSessions, { accountWide: true })).toBe(true);
     // never another account's, never one that names no account, never one it cannot read
     expect(isSameSession(pair, jwt({ userId: 'v', exp: 10 }), { accountWide: true })).toBe(false);
     expect(isSameSession(pair, jwt({ exp: 10 }), { accountWide: true })).toBe(false);
     expect(isSameSession(pair, 'opaque-legacy', { accountWide: true })).toBe(false);
     expect(isSameSession({ accessToken: 'a-opaque', refreshToken: 'r-opaque' }, beforeSessions, { accountWide: true })).toBe(false);
-    // a token that names a session is matched by its sid only, whatever the scope
-    expect(isSameSession(pair, jwt({ userId: 'u', sid: 's-2', gen: 1 }), { accountWide: true })).toBe(false);
+  });
+
+  it('an end of the whole account matches any pair of that account, a token of another of its sessions included', () => {
+    const pair = { accessToken: jwt({ userId: 'u', sid: 's-1' }), refreshToken: jwt({ userId: 'u', sid: 's-1', gen: 4 }) };
+    const ofAnotherSession = jwt({ userId: 'u', sid: 's-2', gen: 1 });
+
+    // one session ended: another session of the account is not it
+    expect(isSameSession(pair, ofAnotherSession)).toBe(false);
+    // the account ended: every session of it ended, the one this pair is of included
+    expect(isSameSession(pair, ofAnotherSession, { accountWide: true })).toBe(true);
+    // ... never another account's session
+    expect(isSameSession(pair, jwt({ userId: 'v', sid: 's-1', gen: 1 }), { accountWide: true })).toBe(false);
+  });
+
+  it('an end of the whole account reads the account from either token of the pair', () => {
+    const ended = jwt({ userId: 'u', sid: 's-2', gen: 1 });
+    // only the refresh token names the account
+    expect(isSameSession({ accessToken: 'opaque', refreshToken: jwt({ userId: 'u', sid: 's-9', gen: 1 }) }, ended, { accountWide: true })).toBe(true);
+    // only the access token names it
+    expect(isSameSession({ accessToken: jwt({ userId: 'u', sid: 's-9' }), refreshToken: 'opaque' }, ended, { accountWide: true })).toBe(true);
+    // neither names it
+    expect(isSameSession({ accessToken: jwt({ userId: 'v', sid: 's-9' }), refreshToken: 'opaque' }, ended, { accountWide: true })).toBe(false);
   });
 });
 
