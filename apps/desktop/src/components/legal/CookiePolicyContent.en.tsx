@@ -1,6 +1,7 @@
 import { StorageTable, type StorageRow, type StorageTableHeaders } from './StorageTable';
 import { LEGAL_OPERATOR } from './operator';
 import { MailLink } from './MailLink';
+import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocation';
 
 /**
  * The Cookie Policy text itself, in English, without page chrome (the public
@@ -36,13 +37,13 @@ const SESSION_ROWS: StorageRow[] = [
     item: 'Refresh token',
     purpose: 'Renews the access token without asking for your password again',
     where: 'Same place as the access token',
-    duration: 'Up to 30 days with “Remember me”, 24 hours without; replaced at each renewal and removed when you sign out',
+    duration: `Up to 30 days with “Remember me”, 24 hours without; replaced at each renewal and removed when you sign out. Signing out also ends it on our servers when they can be reached; when they cannot, the app keeps it in memory, never on disk, for up to ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes to try again`,
   },
   {
     item: 'Trusted-device token',
     purpose: 'Issued when you enter a two-factor code on this device, so that your next sign-ins here skip the code',
     where: 'Desktop app: the credential store. Browser: local storage',
-    duration: '30 days; kept when you sign out, removed when you turn off two-factor authentication or delete your account on this device; changing your password invalidates it',
+    duration: '30 days; kept when you sign out, removed when you turn off two-factor authentication or delete your account on this device; changing your password invalidates it, and signing out of your other sessions invalidates it on your other devices',
   },
   {
     item: 'voxium_session_origin, voxium_trusted_device_origin',
@@ -170,7 +171,7 @@ export function CookiePolicyContentEn() {
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">4. Managing Stored Data</h2>
           <p className="mb-3">
             <strong className="text-vox-text-primary">Desktop app.</strong> Signing out removes your session
-            from the credential store. With &ldquo;Remember me&rdquo; off, your session is never written to
+            from the credential store and, when our servers can be reached, ends it there too. With &ldquo;Remember me&rdquo; off, your session is never written to
             disk: it stays in memory and ends when you close the app. Signing out keeps your trusted-device
             token, your encryption vault and your preferences, so that your encrypted history is still
             readable when you sign back in; deleting your account removes the vault, its key and the

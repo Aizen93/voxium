@@ -1,4 +1,4 @@
-import { MINIMUM_AGE, SIGNUP } from '@voxium/shared';
+import { MINIMUM_AGE, SESSIONS, SIGNUP } from '@voxium/shared';
 import { LEGAL_OPERATOR, PRIVACY_POLICY_DATES, publisherOf } from './operator';
 import { formatLegalDate } from './legalDates';
 import { MailLink } from './MailLink';
@@ -73,6 +73,15 @@ export function PrivacyContentFr() {
               détection des inscriptions automatisées, application des bannissements et des limites de débit — et,
               uniquement sous forme de décomptes agrégés de comptes par pays, pour nos propres statistiques sur le
               Service. Leur durée de conservation est précisée sous «&nbsp;Conservation&nbsp;» ci-dessous
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Sessions ouvertes</strong>, un enregistrement pour chaque appareil ou navigateur sur lequel
+              votre compte est connecté&nbsp;: la date de la connexion, la date du dernier renouvellement de la
+              session, si vous avez choisi «&nbsp;Se souvenir de moi&nbsp;», et le type d’application et de système
+              d’exploitation (par exemple «&nbsp;Application de bureau, Windows&nbsp;»). Il nous permet de mettre fin
+              à une session sur nos serveurs et de vous montrer où vous êtes connecté. Il ne contient ni adresse IP,
+              ni nom d’appareil, ni empreinte de navigateur. Sa durée de conservation est précisée sous
+              «&nbsp;Conservation&nbsp;» ci-dessous
             </li>
             <li>
               <strong className="text-vox-text-primary">Données de support et de modération</strong>, les
@@ -193,7 +202,11 @@ export function PrivacyContentFr() {
             Vos données sont stockées sur nos serveurs. Les mots de passe sont hachés avec bcrypt et ne sont jamais
             stockés en clair. Les sessions reposent sur des jetons signés que nous pouvons révoquer et sur une
             authentification à deux facteurs facultative, dont les secrets sont stockés chiffrés et les codes de
-            secours stockés hachés. Les fichiers que vous envoyez sont conservés dans un stockage privé dont rien n’est
+            secours stockés hachés. Depuis la version 2.2.0, la déconnexion de l’application met aussi fin à la
+            session sur nos serveurs lorsque l’application peut les joindre&nbsp;; à défaut, la session prend fin
+            d’elle-même après 30&nbsp;jours sans utilisation (24&nbsp;heures sans «&nbsp;Se souvenir de moi&nbsp;»).
+            Paramètres → Sécurité, sur chacun de vos appareils, indique où vous êtes connecté et vous permet de vous
+            déconnecter des autres. Les fichiers que vous envoyez sont conservés dans un stockage privé dont rien n’est
             accessible sans un lien signé par nos serveurs&nbsp;: votre appareil les envoie directement au moyen d’un
             tel lien, à durée de vie limitée. Les avatars et les icônes d’espace sont servis à toute personne qui en
             possède le lien&nbsp;; les pièces jointes des messages transitent par nos serveurs, qui ne les remettent
@@ -221,6 +234,13 @@ export function PrivacyContentFr() {
               longtemps que le blocage est maintenu&nbsp;; et nos journaux serveur, qui enregistrent l’adresse IP de
               chaque requête, font l’objet d’une rotation automatique et ne sont conservés que pendant une courte
               période
+            </li>
+            <li>
+              <strong className="text-vox-text-primary">Les sessions ouvertes</strong> prennent fin lorsque l’application s’en déconnecte auprès de
+              nos serveurs, lorsque vous y mettez fin depuis un autre appareil, lorsque votre mot de passe est changé
+              ou réinitialisé, après 30&nbsp;jours sans utilisation (24&nbsp;heures sans «&nbsp;Se souvenir de
+              moi&nbsp;»), et au plus tard {SESSIONS.MAX_AGE_DAYS}&nbsp;jours après la connexion&nbsp;; l’enregistrement
+              est alors supprimé dans la journée
             </li>
             <li>
               <strong className="text-vox-text-primary">Les inscriptions non finalisées</strong> expirent{' '}
@@ -263,7 +283,7 @@ export function PrivacyContentFr() {
               <strong className="text-vox-text-primary">Tout le reste</strong> est conservé tant que votre compte
               existe. La suppression de votre compte (Paramètres → Sécurité) supprime avec lui votre profil, vos
               messages et vos réactions, leurs pièces jointes, les clés et les sauvegardes de clés de vos appareils,
-              vos données de connexion, vos conversations de support et les traces de votre consentement
+              vos données de connexion, vos sessions ouvertes, vos conversations de support et les traces de votre consentement
             </li>
             <li>
               <strong className="text-vox-text-primary">Vos conversations privées lorsque vous supprimez votre compte.</strong>{' '}
@@ -294,7 +314,7 @@ export function PrivacyContentFr() {
           <h2 className="text-xl font-semibold text-vox-text-primary mb-3">7. Bases légales</h2>
           <p className="mb-3">En vertu du RGPD, nous traitons vos données sur les bases suivantes&nbsp;:</p>
           <ul className="list-disc list-inside space-y-1.5 ml-2">
-            <li><strong className="text-vox-text-primary">Exécution d’un contrat</strong> — votre compte, votre profil, vos messages, votre présence et vos appels&nbsp;: le Service que vous avez demandé</li>
+            <li><strong className="text-vox-text-primary">Exécution d’un contrat</strong> — votre compte et ses sessions ouvertes, votre profil, vos messages, votre présence et vos appels&nbsp;: le Service que vous avez demandé</li>
             <li><strong className="text-vox-text-primary">Intérêt légitime</strong> — les données de connexion utilisées pour assurer la sécurité du Service et prévenir les abus, et comptabilisées par pays dans nos propres statistiques&nbsp;; les données de support et de modération</li>
             <li><strong className="text-vox-text-primary">Consentement</strong> — enregistré lorsque vous acceptez les Conditions d’utilisation et la présente Politique de confidentialité lors de votre inscription, ou ultérieurement depuis un compte existant</li>
           </ul>

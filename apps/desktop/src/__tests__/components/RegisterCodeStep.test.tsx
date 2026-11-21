@@ -48,7 +48,7 @@ vi.mock('../../components/auth/PeekingThief', () => ({ PeekingThief: () => null 
 
 import i18n from '../../i18n';
 // The sign-out's server call and its retries: never a real request from a unit test
-vi.mock('../../services/sessionRevocation', () => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn() }));
+vi.mock('../../services/sessionRevocation', () => ({ endSessionOnServer: vi.fn(), holdReplacedSession: vi.fn(), endReplacedSession: vi.fn(), forgetReplacedSession: vi.fn(), SIGN_OUT_RETRY_MAX_AGE_MINUTES: 15 })); // the Cookie Policy (rendered by the consent modal) quotes it
 import { useAuthStore, type PendingRegistration } from '../../stores/authStore';
 import { RegisterPage } from '../../pages/RegisterPage';
 import { LoginPage } from '../../pages/LoginPage';
