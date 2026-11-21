@@ -904,7 +904,7 @@ describe('authStore — a local end of a session clears only that session (anoth
 
     expect(useAuthStore.getState().logout()).toBe('cleared');
 
-    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old', { accountWide: false });
     expect(storage.reloadAfterSessionChange).not.toHaveBeenCalled();
   });
 
@@ -914,7 +914,7 @@ describe('authStore — a local end of a session clears only that session (anoth
 
     expect(useAuthStore.getState().logout({ endingSession: 'access-of-ended-session' })).toBe('replaced');
 
-    expect(storage.clearSessionTokens).toHaveBeenCalledWith('access-of-ended-session');
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('access-of-ended-session', { accountWide: false });
     expect(storage.clearTokens).not.toHaveBeenCalled();
     expect(socket.disconnectSocket).toHaveBeenCalledTimes(1);
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
@@ -931,7 +931,7 @@ describe('authStore — a local end of a session clears only that session (anoth
 
     await useAuthStore.getState().deleteAccount('pw');
 
-    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old', { accountWide: true });
   });
 
   it('a refused restore ends the session it was made with; a different one stored meanwhile is restored instead', async () => {

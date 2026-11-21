@@ -40,6 +40,25 @@ describe('tokenClaims — reading our own tokens for routing, never for trust', 
     expect(isSameSession(legacy, 'r-other')).toBe(false);
     expect(isSameSession(legacy, jwt({ sid: 's-1' }))).toBe(false);
   });
+
+  it('a token issued before sessions matches a pair of its account only for an end of the whole account', () => {
+    const pair = { accessToken: jwt({ userId: 'u', sid: 's-1' }), refreshToken: jwt({ userId: 'u', sid: 's-1', gen: 4 }) };
+    const beforeSessions = jwt({ userId: 'u', exp: 10 });
+
+    // one session ended: a token that names none cannot be told to be this one
+    expect(isSameSession(pair, beforeSessions)).toBe(false);
+    expect(isSameSession(pair, beforeSessions, { accountWide: false })).toBe(false);
+    // the whole account ended (a ban, a deletion): the account's stored pair is that token's session
+    expect(isSameSession(pair, beforeSessions, { accountWide: true })).toBe(true);
+    expect(isSameSession({ accessToken: 'opaque', refreshToken: jwt({ userId: 'u', sid: 's-9', gen: 1 }) }, beforeSessions, { accountWide: true })).toBe(true);
+    // never another account's, never one that names no account, never one it cannot read
+    expect(isSameSession(pair, jwt({ userId: 'v', exp: 10 }), { accountWide: true })).toBe(false);
+    expect(isSameSession(pair, jwt({ exp: 10 }), { accountWide: true })).toBe(false);
+    expect(isSameSession(pair, 'opaque-legacy', { accountWide: true })).toBe(false);
+    expect(isSameSession({ accessToken: 'a-opaque', refreshToken: 'r-opaque' }, beforeSessions, { accountWide: true })).toBe(false);
+    // a token that names a session is matched by its sid only, whatever the scope
+    expect(isSameSession(pair, jwt({ userId: 'u', sid: 's-2', gen: 1 }), { accountWide: true })).toBe(false);
+  });
 });
 
 describe('sessionClientHint — the kind of app the sign-in and renewal bodies name', () => {

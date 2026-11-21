@@ -232,6 +232,39 @@ describe('ending a session clears only that session', () => {
     expect(clearSessionTokens('r-legacy')).toBe('cleared');
   });
 
+  it('a ban or a deletion seen by a socket admitted before sessions ends the account\'s stored pair, the session that token became', async () => {
+    const renewed = pairOf('user-x', 's-x', 2);
+    setTokens(renewed.accessToken, renewed.refreshToken, true);
+    await flushTokenStorage();
+    // the socket's handshake token: an access token issued before sessions (no sid)
+    const handshake = jwt({ userId: 'user-x', exp: 10 });
+
+    // one session ended: such a token cannot be told to be this one, the pair is kept
+    expect(clearSessionTokens(handshake)).toBe('replaced');
+    expect(localStorage.getItem(REFRESH)).toBe(renewed.refreshToken);
+
+    setTokens(renewed.accessToken, renewed.refreshToken, true);
+    await flushTokenStorage();
+    expect(clearSessionTokens(handshake, { accountWide: true })).toBe('cleared');
+    expect(getRefreshToken()).toBeNull();
+    expect(localStorage.getItem(REFRESH)).toBeNull();
+  });
+
+  it('... never another account\'s pair; the ended account\'s copy in this tab\'s own storage goes', async () => {
+    const y = pairOf('user-y', 's-y');
+    setTokens(y.accessToken, y.refreshToken, true);
+    await flushTokenStorage();
+    // this tab's not-remembered copy of the ended account's session, left in its sessionStorage
+    const x = pairOf('user-x', 's-x', 2);
+    sessionStorage.setItem(ACCESS, x.accessToken);
+    sessionStorage.setItem(REFRESH, x.refreshToken);
+
+    expect(clearSessionTokens(jwt({ userId: 'user-x', exp: 10 }), { accountWide: true })).toBe('replaced');
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(y.refreshToken);
+    expect(sessionStorage.getItem(REFRESH)).toBeNull();
+  });
+
   it('the desktop app compares with the memory, its one store', async () => {
     const entries = new Map<string, string>();
     const invoke = async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {

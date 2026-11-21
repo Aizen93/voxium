@@ -63,17 +63,38 @@ export function userIdOf(token: string | null | undefined): string | null {
   return readTokenClaims(token)?.userId ?? null;
 }
 
+export interface SameSessionOptions {
+  /**
+   * The end covers the whole account (a ban, an account deletion: the server
+   * signs out every session of it). A token issued before sessions cannot
+   * say which session it became (the server upgrades it into one at its
+   * first renewal, and a socket admitted with it stays open across that
+   * renewal), so a pair of the SAME account counts as its session then.
+   */
+  accountWide?: boolean;
+}
+
 /**
  * Whether `token` (an access or a refresh token) belongs to the session of
  * the pair: the same `sid` when both name one, else the very same string.
  * A token that names no session is matched by string only, so a pair it
  * cannot be told apart from reads as ANOTHER session: the callers keep that
- * pair rather than remove a session they cannot identify.
+ * pair rather than remove a session they cannot identify. Except for an end
+ * of the whole account (`accountWide`): such a token then matches a pair of
+ * the account it names (decoded, both sides), whatever session that is.
  */
-export function isSameSession(pair: { accessToken: string; refreshToken: string }, token: string | null | undefined): boolean {
+export function isSameSession(
+  pair: { accessToken: string; refreshToken: string },
+  token: string | null | undefined,
+  { accountWide = false }: SameSessionOptions = {},
+): boolean {
   if (typeof token !== 'string') return false;
   if (token === pair.refreshToken || token === pair.accessToken) return true;
   const sid = sessionIdOf(token);
-  if (sid === null) return false;
+  if (sid === null) {
+    if (!accountWide) return false;
+    const owner = userIdOf(token);
+    return owner !== null && (userIdOf(pair.refreshToken) === owner || userIdOf(pair.accessToken) === owner);
+  }
   return sessionIdOf(pair.refreshToken) === sid || sessionIdOf(pair.accessToken) === sid;
 }

@@ -65,6 +65,13 @@ export interface LogoutOptions {
    * still of that session. Default: the refresh token held when logout runs.
    */
   endingSession?: string | null;
+  /**
+   * The server ended every session of the account (a ban, an account
+   * deletion): an `endingSession` issued before sessions (no `sid`) then
+   * also matches a stored pair of the same account, which is the session it
+   * became (tokenClaims.isSameSession).
+   */
+  accountEnded?: boolean;
 }
 
 /** What a logout found: the session cleared, or another session stored meanwhile (kept; the page reloads onto it). */
@@ -659,7 +666,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isRegistering: false, powProgress: null, error: null });
   },
 
-  logout: ({ tellServer = true, endingSession }: LogoutOptions = {}) => {
+  logout: ({ tellServer = true, endingSession, accountEnded = false }: LogoutOptions = {}) => {
     // The session this sign-out ends, read before anything clears it
     const refreshToken = getRefreshToken();
     const sessionToken = endingSession !== undefined ? endingSession : refreshToken;
@@ -677,7 +684,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     endSessionRestore();
     // Only while the stored pair is still of the session that ended: another
     // tab's sign-in meanwhile (as anyone) is not this tab's to wipe
-    const outcome = clearSessionTokens(sessionToken);
+    const outcome = clearSessionTokens(sessionToken, { accountWide: accountEnded });
     disconnectSocket();
     // Wipe every account-scoped store — on a shared machine the next login must
     // never see the previous account's servers, DMs, or support transcript
@@ -901,7 +908,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // is left is this device's copy of it. Same cleanup as logout, plus the
       // E2E vault and its key, which logout deliberately keeps — every key
       // the vault pairs with is gone.
-      get().logout({ tellServer: false, endingSession: sessionToken });
+      get().logout({ tellServer: false, endingSession: sessionToken, accountEnded: true });
       // Never rejects: a part it could not remove is logged, and the account
       // is deleted either way
       const localE2EStateForgotten = userId ? forgetLocalE2EState(userId) : Promise.resolve();

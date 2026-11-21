@@ -1124,6 +1124,8 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
       await macrotask();
 
       expect(authStoreMock.logout).toHaveBeenCalledTimes(1);
+      // a ban ends every session of the account
+      expect(authStoreMock.logout).toHaveBeenCalledWith({ tellServer: false, endingSession: 'access-old', accountEnded: true });
       expect(session.getFreshAccessToken).not.toHaveBeenCalled();
       expect(socket.connect).not.toHaveBeenCalled();
       expect(window.location.href).toBe('/login?reason=banned');
@@ -1149,7 +1151,7 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
       await tick();
       await macrotask();
 
-      expect(authStoreMock.logout).toHaveBeenCalledWith({ tellServer: false, endingSession: 'access-of-ended-session' });
+      expect(authStoreMock.logout).toHaveBeenCalledWith({ tellServer: false, endingSession: 'access-of-ended-session', accountEnded: false });
       // authStore.logout reloads onto the stored session itself: no navigation here
       expect(window.location.href).toBe('');
       expect(socket.connect).not.toHaveBeenCalled();
@@ -1181,6 +1183,8 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
       await macrotask();
 
       expect(authStoreMock.logout).toHaveBeenCalledWith(expect.objectContaining({ tellServer: false }));
+      // one session ended (or a reason not in the list): never every session of the account
+      expect(authStoreMock.logout).toHaveBeenCalledWith(expect.objectContaining({ accountEnded: false }));
       expect(window.location.href).toBe(target);
       expect(socket.connect).not.toHaveBeenCalled();
     } finally {
@@ -1207,6 +1211,8 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
       await macrotask();
 
       expect(authStoreMock.logout).toHaveBeenCalledTimes(1);
+      // a deletion ends every session of the account
+      expect(authStoreMock.logout).toHaveBeenCalledWith({ tellServer: false, endingSession: 'access-old', accountEnded: true });
       expect(window.location.href).toBe('/login?reason=deleted');
       expect(session.getFreshAccessToken).not.toHaveBeenCalled();
       expect(socket.connect).not.toHaveBeenCalled();

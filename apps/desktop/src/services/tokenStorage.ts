@@ -47,7 +47,7 @@
 import { BUILD_API_ORIGIN, isOfficialOrigin } from './sessionOrigin';
 import { accountDeletionSettled } from './accountDeletion';
 import { currentE2ESessionUser } from './e2e/session';
-import { isSameSession, readTokenClaims, sessionIdOf, userIdOf } from './tokenClaims';
+import { isSameSession, readTokenClaims, sessionIdOf, userIdOf, type SameSessionOptions } from './tokenClaims';
 
 const ACCESS_KEY = 'voxium_access_token';
 const REFRESH_KEY = 'voxium_refresh_token';
@@ -687,10 +687,10 @@ function followedWebPair(apiOrigin: string): TokenPair | null {
 }
 
 /** Every copy of the ended session's pair the page's storage holds, gone — and no other. */
-function removeEndedSessionCopies(endedToken: string): void {
+function removeEndedSessionCopies(endedToken: string, options: SameSessionOptions): void {
   for (const area of [localStorage, sessionStorage]) {
     const pair = readPair(area);
-    if (pair && isSameSession(pair, endedToken)) removePair(area);
+    if (pair && isSameSession(pair, endedToken, options)) removePair(area);
   }
 }
 
@@ -706,20 +706,24 @@ function removeEndedSessionCopies(endedToken: string): void {
  * the stored session (reloadAfterSessionChange) instead of signing out a
  * session that is not the one that ended. `null` (nothing to compare with)
  * clears as clearTokens does. In the desktop app the memory is the store.
+ *
+ * `accountWide`: the whole account's sessions ended (a ban, a deletion); a
+ * token issued before sessions then also matches a stored pair of its
+ * account (tokenClaims.isSameSession).
  */
-export function clearSessionTokens(endedToken: string | null): 'cleared' | 'replaced' {
+export function clearSessionTokens(endedToken: string | null, options: SameSessionOptions = {}): 'cleared' | 'replaced' {
   if (endedToken !== null) {
     const stored = isWebStore(store)
       ? followedWebPair(store.apiOrigin)
       : memory.accessToken !== null && memory.refreshToken !== null
         ? { accessToken: memory.accessToken, refreshToken: memory.refreshToken }
         : null;
-    if (stored && !isSameSession(stored, endedToken)) {
+    if (stored && !isSameSession(stored, endedToken, options)) {
       memory = { ...memory, accessToken: null, refreshToken: null };
       if (isWebStore(store)) {
-        removeEndedSessionCopies(endedToken);
+        removeEndedSessionCopies(endedToken, options);
         // after a write of this tab still queued, which may be the ended session's
-        enqueueTokenWrite('Could not clear the ended session', () => removeEndedSessionCopies(endedToken));
+        enqueueTokenWrite('Could not clear the ended session', () => removeEndedSessionCopies(endedToken, options));
       }
       return 'replaced';
     }
