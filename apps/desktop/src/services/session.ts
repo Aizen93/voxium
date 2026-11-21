@@ -4,6 +4,7 @@ import { API_BASE } from './apiBase';
 import {
   getAccessToken, getRefreshToken, setTokens, clearSessionTokens, flushTokenStorage,
   followSharedSession, isSharedWithOtherTabs, reloadAfterSessionChange,
+  markCredentialChange, credentialChangeInFlightUntil, waitForCredentialChange,
 } from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
 import { isSameSession, readTokenClaims, sessionIdOf, userIdOf } from './tokenClaims';
@@ -222,6 +223,9 @@ export function endSessionRenewals(): void {
   // changes, not the renewal lock (it lets go of it on this signal)
   renewalHold = null;
   credentialChangeQueue = Promise.resolve();
+  // ... and its mark no longer holds any tab's renewals
+  ownCredentialChangeMark?.();
+  ownCredentialChangeMark = null;
   const ended = sessionEnd;
   sessionEnd = deferred();
   ended.resolve();
@@ -448,6 +452,34 @@ let credentialChangeQueue: Promise<unknown> = Promise.resolve();
 export const CREDENTIAL_CHANGE_TIMEOUT_MS = 75_000;
 
 /**
+ * How far ahead a credential change's mark in the shared storage says it may
+ * still be answered (tokenStorage.markCredentialChange): its request's
+ * deadline, plus the time to store its answer and remove the mark. Every tab
+ * of the browser build holds its renewals while the mark is live, at most
+ * this long.
+ */
+export const CREDENTIAL_CHANGE_MARK_MS = CREDENTIAL_CHANGE_TIMEOUT_MS + 5_000;
+
+/** The removal of this tab's mark of a credential change in flight, while there is one. */
+let ownCredentialChangeMark: (() => void) | null = null;
+
+/** A credential change of a tab of this browser is marked in flight (tokenStorage), now. */
+function credentialChangeMarked(): boolean {
+  return credentialChangeInFlightUntil(CREDENTIAL_CHANGE_MARK_MS) !== null;
+}
+
+/**
+ * Wait while that change is marked in flight (tokenStorage.waitForCredentialChange).
+ * Resolves whether the session `epoch` ended during the wait: the caller then
+ * sends nothing. Called only once credentialChangeMarked() said so, so that a
+ * renewal with no change to wait for awaits nothing.
+ */
+async function credentialChangeWaitEnded(epoch: number): Promise<boolean> {
+  await waitForCredentialChange(CREDENTIAL_CHANGE_MARK_MS);
+  return epoch !== sessionEpoch;
+}
+
+/**
  * Run a credential change of this client (`change` sends it and stores its
  * answer). In order: one change at a time; a renewal in flight lands first;
  * renewals are held until `change` has settled; in the browser build the
@@ -523,13 +555,27 @@ async function credentialChangeStep<T>(change: (stillCurrent: () => boolean) => 
     let outcome!: Promise<T>;
     await underRefreshLock(async () => {
       if (epoch !== sessionEpoch) throw new SessionLostError('The session ended before the credential change went out');
+      // Another tab's credential change is out (an origin without Web Locks,
+      // or one past the lock's bound): this one goes out on what it stores
+      if (credentialChangeMarked() && (await credentialChangeWaitEnded(epoch))) {
+        throw new SessionLostError('The session ended before the credential change went out');
+      }
       followOtherTabsOrStop();
       const token = getAccessToken();
       if (!token) throw new SessionLostError('No session for the credential change');
       if (shouldRenewBeforeSending(token)) await renew(epoch, getRefreshToken());
       // The session this change is made in, read as it goes out
       const startedWith = getRefreshToken();
-      outcome = change(() => epoch === sessionEpoch && followSharedSession() !== 'reloading' && storedSessionIs(startedWith));
+      // Every tab of the browser build sees the change in flight, without a
+      // lock, until its answer is stored and written (tokenStorage). Written
+      // after the inline renewal above: this tab never waits for its own
+      const unmark = markCredentialChange(Date.now() + CREDENTIAL_CHANGE_MARK_MS);
+      ownCredentialChangeMark = unmark;
+      outcome = (async () => change(() => epoch === sessionEpoch && followSharedSession() !== 'reloading' && storedSessionIs(startedWith)))()
+        .finally(() => flushTokenStorage().then(() => {
+          unmark?.();
+          if (ownCredentialChangeMark === unmark) ownCredentialChangeMark = null;
+        }));
       // The lock is held until the change has settled, or until the session
       // it is made in ends: nothing of that session needs it any more
       await Promise.race([outcome.then(() => undefined, () => undefined), ended]);
@@ -583,6 +629,13 @@ function followOtherTabsOrStop(): void {
 /** The renewal itself, lock already handled. `promptRetry`: false for a background renewal (one request). */
 async function renew(epoch: number, intended: string | null, promptRetry = true): Promise<string> {
   if (epoch !== sessionEpoch) throw new SessionLostError('Session ended before the renewal');
+  // A credential change of another tab is out: a refresh token sent now is
+  // of the version it moves away from once it commits. This renewal waits
+  // for its answer (bounded by the change's own deadline), then goes on with
+  // what is stored then
+  if (credentialChangeMarked() && (await credentialChangeWaitEnded(epoch))) {
+    throw new SessionLostError('Session ended while a credential change was out');
+  }
   // What other tabs stored since this tab's memory last followed them
   followOtherTabsOrStop();
   let refreshToken = getRefreshToken();
@@ -615,7 +668,15 @@ async function renew(epoch: number, intended: string | null, promptRetry = true)
         // Ending the session now would clear THAT pair — every tab follows
         // the removal — and sign out a session that is still valid.
         followOtherTabsOrStop();
-        const stored = getRefreshToken();
+        let stored = getRefreshToken();
+        if (stored === refreshToken && credentialChangeMarked()) {
+          // Refused while a credential change of another tab is out: the
+          // token may be of the version that change moved away from, so the
+          // refusal is not final. Its answer, once stored, is this renewal's
+          if (await credentialChangeWaitEnded(epoch)) throw new SessionLostError('Session ended while a credential change was out');
+          followOtherTabsOrStop();
+          stored = getRefreshToken();
+        }
         if (stored && stored !== refreshToken) {
           const adopted = freshStoredAccessToken();
           if (adopted) return ownAccountsToken(adopted, refreshToken);

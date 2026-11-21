@@ -51,6 +51,12 @@ const SESSION_ROWS: StorageRow[] = [
     where: 'Browser: next to the tokens. Desktop app: inside each token’s credential store entry',
     duration: 'Removed with the token it belongs to',
   },
+  {
+    item: 'voxium_credential_change',
+    purpose: 'Exists only while a password change or a sign-out of your other sessions, made in one tab of this browser, is waiting for its answer, so that the other tabs wait for the renewed session instead of renewing the one it replaces. It holds the time until which that answer can arrive, and nothing else',
+    where: 'Browser: local storage',
+    duration: 'Removed once the change has its answer or has failed, and when you sign out in that tab; ignored once that time has passed',
+  },
 ];
 
 const ENCRYPTION_ROWS: StorageRow[] = [
@@ -123,7 +129,7 @@ export function CookiePolicyContentEn() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Cookie Policy</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 20, 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Last updated: November 21, 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>

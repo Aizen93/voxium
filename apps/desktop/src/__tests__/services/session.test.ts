@@ -48,6 +48,23 @@ const storage = vi.hoisted(() => ({
     return 'cleared';
   }),
   reloadAfterSessionChange: vi.fn(),
+  /** The T of a credential change marked in flight by some tab of this browser (null: none). */
+  mark: null as number | null,
+  markWaiters: [] as Array<() => void>,
+  /** The mark goes (its change was answered, or failed): every wait for it ends. */
+  clearMark: () => {
+    storage.mark = null;
+    for (const waiter of storage.markWaiters.splice(0)) waiter();
+  },
+  markCredentialChange: vi.fn((until: number) => {
+    storage.mark = until;
+    return storage.unmark;
+  }),
+  unmark: vi.fn(() => storage.clearMark()),
+  credentialChangeInFlightUntil: vi.fn(() => storage.mark),
+  waitForCredentialChange: vi.fn(() => (storage.mark === null
+    ? Promise.resolve(false)
+    : new Promise<boolean>((resolve) => { storage.markWaiters.push(() => resolve(true)); }))),
 }));
 vi.mock('../../services/tokenStorage', () => ({
   getAccessToken: storage.getAccessToken,
@@ -59,12 +76,15 @@ vi.mock('../../services/tokenStorage', () => ({
   flushTokenStorage: storage.flushTokenStorage,
   isSharedWithOtherTabs: storage.isSharedWithOtherTabs,
   followSharedSession: storage.followSharedSession,
+  markCredentialChange: storage.markCredentialChange,
+  credentialChangeInFlightUntil: storage.credentialChangeInFlightUntil,
+  waitForCredentialChange: storage.waitForCredentialChange,
 }));
 
 import {
   accessTokenExpiresAt, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, getFreshAccessToken,
   endSessionRenewals, isDefinitiveRefreshFailure, SessionLostError, setSessionLostNavigation, _resetSessionForTests,
-  _setRefreshLocksForTests, runCredentialChange, goToLoginPage, CREDENTIAL_CHANGE_TIMEOUT_MS, BACKGROUND_RENEWAL_DELAYS_MS, type RefreshLockManager,
+  _setRefreshLocksForTests, runCredentialChange, goToLoginPage, CREDENTIAL_CHANGE_TIMEOUT_MS, CREDENTIAL_CHANGE_MARK_MS, BACKGROUND_RENEWAL_DELAYS_MS, type RefreshLockManager,
   TOKEN_EXPIRY_SKEW_MS, REFRESH_TIMEOUT_MS, REFRESH_RETRY_DELAY_MS, REFRESH_LOCK_NAME, REFRESH_LOCK_WAIT_MS, API_BASE,
 } from '../../services/session';
 
@@ -124,6 +144,8 @@ beforeEach(() => {
   storage.page = undefined;
   storage.follow = 'followed';
   storage.clearOutcome = 'cleared';
+  storage.mark = null;
+  storage.markWaiters = [];
 });
 
 afterEach(() => {
@@ -1207,6 +1229,182 @@ describe('session — a credential change answers for the session it was made in
 
     await expect(pending).rejects.toBeInstanceOf(SessionLostError);
     expect(change).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — a credential change in another tab, marked in the shared storage', () => {
+  const markLive = () => { storage.mark = Date.now() + CREDENTIAL_CHANGE_MARK_MS; };
+
+  it('the mark lasts the change\'s own deadline and a little more', () => {
+    expect(CREDENTIAL_CHANGE_MARK_MS).toBe(CREDENTIAL_CHANGE_TIMEOUT_MS + 5_000);
+  });
+
+  it('a renewal while it is in flight waits for it, then takes the pair it stored: nothing is sent', async () => {
+    storage.access = expiredToken();
+    markLive();
+    const renewal = refreshAccessToken();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(http.post).not.toHaveBeenCalled();
+
+    // the change is answered in the other tab: its pair is stored, then the mark goes
+    const answered = freshToken();
+    storage.access = answered;
+    storage.refresh = 'refresh-of-the-new-version';
+    storage.clearMark();
+
+    await expect(renewal).resolves.toBe(answered);
+    expect(http.post).not.toHaveBeenCalled();
+    expect(storage.waitForCredentialChange).toHaveBeenCalledWith(CREDENTIAL_CHANGE_MARK_MS);
+  });
+
+  it('... and sends the newest refresh token there is once it is over, when its access token has expired too', async () => {
+    storage.access = expiredToken();
+    markLive();
+    http.post.mockResolvedValueOnce(renewed('access-3', 'refresh-3'));
+    const renewal = refreshAccessToken();
+    await Promise.resolve();
+
+    storage.refresh = 'refresh-of-the-new-version';
+    storage.clearMark();
+
+    await expect(renewal).resolves.toBe('access-3');
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(http.post.mock.calls[0][1]).toEqual({ refreshToken: 'refresh-of-the-new-version', client: 'web' });
+  });
+
+  it('a sign-out and a new sign-in during that wait: the old renewal sends nothing for the new session', async () => {
+    storage.access = expiredToken();
+    markLive();
+    const outcome = refreshAccessToken().then(() => 'resolved', (err: unknown) => err);
+    await Promise.resolve();
+
+    endSessionRenewals();
+    storage.refresh = 'refresh-next-session';
+    storage.clearMark();
+
+    expect(await outcome).toBeInstanceOf(SessionLostError);
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('a refusal while it is in flight is not final: once the change\'s answer is stored, that pair is the answer', async () => {
+    storage.access = expiredToken();
+    let refuse!: () => void;
+    http.post.mockReturnValueOnce(new Promise((_resolve, reject) => { refuse = () => reject(axios401()); }));
+    const renewal = refreshAccessToken();
+    await vi.waitFor(() => expect(http.post).toHaveBeenCalledTimes(1));
+    // the other tab's change went out while this request was out, and committed first
+    markLive();
+    refuse();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+
+    const answered = freshToken();
+    storage.access = answered;
+    storage.refresh = 'refresh-of-the-new-version';
+    storage.clearMark();
+
+    await expect(renewal).resolves.toBe(answered);
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('... and final when the change stored nothing (it failed, or its answer was dropped)', async () => {
+    storage.access = expiredToken();
+    http.post.mockImplementationOnce(async () => {
+      markLive();
+      throw axios401();
+    });
+    const renewal = expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+    await new Promise((r) => setTimeout(r, 0));
+    storage.clearMark();
+
+    await renewal;
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old');
+  });
+
+  it('... and a sign-out during that wait clears nothing and sends nothing more', async () => {
+    storage.access = expiredToken();
+    http.post.mockImplementationOnce(async () => {
+      markLive();
+      throw axios401();
+    });
+    const outcome = refreshAccessToken().then(() => 'resolved', (err: unknown) => err);
+    await new Promise((r) => setTimeout(r, 0));
+    endSessionRenewals();
+    storage.clearMark();
+
+    expect(await outcome).toBeInstanceOf(SessionLostError);
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+  });
+
+  it('a renewal with no change in flight awaits nothing: its request goes out at once', () => {
+    storage.access = expiredToken();
+    http.post.mockReturnValueOnce(new Promise(() => {}));
+    void refreshAccessToken();
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('a credential change waits for another tab\'s in flight before it goes out, and a sign-out meanwhile sends nothing', async () => {
+    storage.access = freshToken();
+    markLive();
+    const change = vi.fn(async () => 'changed');
+    const pending = runCredentialChange(change);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(change).not.toHaveBeenCalled();
+    storage.clearMark();
+    await expect(pending).resolves.toBe('changed');
+
+    markLive();
+    const later = vi.fn(async () => 'changed');
+    const refused = runCredentialChange(later);
+    await new Promise((r) => setTimeout(r, 0));
+    endSessionRenewals();
+    storage.clearMark();
+    await expect(refused).rejects.toBeInstanceOf(SessionLostError);
+    expect(later).not.toHaveBeenCalled();
+  });
+});
+
+describe('session — this tab\'s own credential change marks itself in flight', () => {
+  it('after its inline renewal and before its request; removed once its answer is written', async () => {
+    storage.access = expiredToken();
+    http.post.mockResolvedValueOnce(renewed(freshToken(), 'refresh-renewed'));
+    let release!: () => void;
+    const change = vi.fn(() => {
+      // the mark is live while the request is out: every other tab waits for it
+      expect(storage.mark).not.toBeNull();
+      return new Promise<string>((resolve) => { release = () => resolve('changed'); });
+    });
+
+    const pending = runCredentialChange(change);
+    await vi.waitFor(() => expect(change).toHaveBeenCalled());
+    expect(storage.markCredentialChange.mock.invocationCallOrder[0]).toBeGreaterThan(http.post.mock.invocationCallOrder[0]);
+    const [until] = storage.markCredentialChange.mock.calls[0] as [number];
+    expect(until - Date.now()).toBeGreaterThan(CREDENTIAL_CHANGE_MARK_MS - 1_000);
+    expect(until - Date.now()).toBeLessThanOrEqual(CREDENTIAL_CHANGE_MARK_MS);
+
+    release();
+    await expect(pending).resolves.toBe('changed');
+    expect(storage.unmark).toHaveBeenCalledTimes(1);
+    // after the answer's write landed: the other tabs re-read the storage once the mark is gone
+    expect(storage.flushTokenStorage.mock.invocationCallOrder.at(-1)).toBeLessThan(storage.unmark.mock.invocationCallOrder[0]);
+    expect(storage.mark).toBeNull();
+  });
+
+  it('removed when the change fails, and when the session ends while it is out', async () => {
+    storage.access = freshToken();
+    await expect(runCredentialChange(async () => { throw new Error('400'); })).rejects.toThrow('400');
+    expect(storage.unmark).toHaveBeenCalledTimes(1);
+    expect(storage.mark).toBeNull();
+
+    const pending = runCredentialChange(() => new Promise<string>(() => {}));
+    await vi.waitFor(() => expect(storage.markCredentialChange).toHaveBeenCalledTimes(2));
+    endSessionRenewals();
+    expect(storage.unmark).toHaveBeenCalledTimes(2);
+    expect(storage.mark).toBeNull();
+    void pending;
   });
 });
 

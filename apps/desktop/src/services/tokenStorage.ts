@@ -1047,6 +1047,112 @@ export function followSharedSession(): 'followed' | 'reloading' {
   return followRememberedPair(apiOrigin);
 }
 
+// ─── A credential change in flight, as every tab of the browser sees it ─────
+//
+// A password change or "sign out of all other sessions" moves the account to
+// a new token version: once it commits, every refresh token of the old
+// version is refused, and its answer carries the changing tab's new pair.
+// Another tab renewing meanwhile would send an old-version token, be refused,
+// and clear the pair every tab shares. The Web Lock keeps the other tabs'
+// renewals waiting while the change runs under it, but only for its bound
+// (35 s, shorter than a change may take), and an origin without Web Locks
+// has none. So the changing tab writes this mark into localStorage, which
+// every tab of the browser build reads without a lock: "a change is in
+// flight until T". While it is live, a renewal in any tab waits for it, then
+// takes what is stored (services/session.ts). The mark holds T, a time on
+// this device's clock, and nothing else: no token, no account. The tab that
+// wrote it removes it once its answer is stored (or the change failed), and
+// when its session ends; a mark left behind (a tab that crashed) is ignored
+// once T has passed. Nothing of this exists in the desktop app (one webview).
+
+/** The localStorage key of a credential change in flight in a tab of this browser (the Cookie Policy lists it). */
+const CREDENTIAL_CHANGE_MARK_KEY = 'voxium_credential_change';
+/**
+ * A reader takes a mark's T as given only when it is at most this much
+ * further ahead than a mark is ever written with: the device's clock may
+ * have been set between the write and the read. A T further ahead is no mark
+ * this app wrote (or a clock set far back) and is ignored rather than
+ * holding the renewals for longer than a change can take.
+ */
+export const CREDENTIAL_CHANGE_MARK_TOLERANCE_MS = 5_000;
+/** How often a wait for a mark reads it again, besides the `storage` events that tell of its removal. */
+export const CREDENTIAL_CHANGE_MARK_POLL_MS = 250;
+
+/**
+ * Publish, to every tab of the browser build, that a credential change of
+ * this tab is in flight until `until` (a time on this device's clock).
+ * Returns the removal, which removes the mark only while it is still this
+ * one (another change may have written its own since). Null in the desktop
+ * app, and when the page's storage refuses the write (logged).
+ */
+export function markCredentialChange(until: number): (() => void) | null {
+  if (!isWebStore(store)) return null;
+  const value = String(Math.floor(until));
+  try {
+    localStorage.setItem(CREDENTIAL_CHANGE_MARK_KEY, value);
+  } catch (err) {
+    console.warn('[Session] The other tabs could not be told of the credential change:', describe(err));
+    return null;
+  }
+  return () => {
+    try {
+      if (localStorage.getItem(CREDENTIAL_CHANGE_MARK_KEY) === value) localStorage.removeItem(CREDENTIAL_CHANGE_MARK_KEY);
+    } catch (err) {
+      console.warn('[Session] The mark of the credential change could not be removed:', describe(err));
+    }
+  };
+}
+
+/**
+ * The T of a credential change marked in flight in a tab of this browser,
+ * while the mark is live: before T, and T no further ahead than
+ * `maxAheadMs` (the longest a mark is written for) plus the tolerance. Null
+ * otherwise, for anything that is not a time, and in the desktop app.
+ */
+export function credentialChangeInFlightUntil(maxAheadMs: number, now: number = Date.now()): number | null {
+  if (!isWebStore(store)) return null;
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(CREDENTIAL_CHANGE_MARK_KEY);
+  } catch (err) {
+    console.warn('[Session] The mark of a credential change could not be read:', describe(err));
+    return null;
+  }
+  if (raw === null || !/^\d{1,16}$/.test(raw)) return null;
+  const until = Number(raw);
+  if (until <= now || until - now > maxAheadMs + CREDENTIAL_CHANGE_MARK_TOLERANCE_MS) return null;
+  return until;
+}
+
+/**
+ * Wait while a credential change is marked in flight: until its mark is
+ * removed (a `storage` event, or the next read every
+ * CREDENTIAL_CHANGE_MARK_POLL_MS), or its T passes, whichever comes first.
+ * Resolves true when there was a change to wait for, false at once when
+ * there was none (and in the desktop app). Never rejects.
+ */
+export function waitForCredentialChange(maxAheadMs: number): Promise<boolean> {
+  const until = credentialChangeInFlightUntil(maxAheadMs);
+  if (until === null) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    const done = () => {
+      clearTimeout(deadline);
+      clearInterval(poll);
+      window.removeEventListener('storage', onStorage);
+      resolve(true);
+    };
+    const check = () => {
+      if (credentialChangeInFlightUntil(maxAheadMs) === null) done();
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.storageArea === localStorage && (event.key === CREDENTIAL_CHANGE_MARK_KEY || event.key === null)) check();
+    };
+    const deadline = setTimeout(done, Math.max(0, until - Date.now()));
+    const poll = setInterval(check, CREDENTIAL_CHANGE_MARK_POLL_MS);
+    window.addEventListener('storage', onStorage);
+  });
+}
+
 // The desktop app has one webview: nothing to follow there
 if (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) {
   window.addEventListener('storage', followOtherTabs);

@@ -71,6 +71,12 @@ const SESSION_ROWS: StorageRow[] = withFrenchSpacing([
     where: 'Navigateur : à côté des jetons. Application de bureau : dans l’entrée de chaque jeton du gestionnaire d’identifiants',
     duration: 'Supprimée avec le jeton auquel elle se rapporte',
   },
+  {
+    item: 'voxium_credential_change',
+    purpose: 'N’existe que pendant qu’un changement de mot de passe ou une déconnexion de vos autres sessions, fait dans un onglet de ce navigateur, attend sa réponse, afin que les autres onglets attendent la session renouvelée au lieu de renouveler celle qu’il remplace. Elle contient l’heure jusqu’à laquelle cette réponse peut arriver, et rien d’autre',
+    where: 'Navigateur : stockage local',
+    duration: 'Supprimée une fois que le changement a sa réponse ou a échoué, et lorsque vous vous déconnectez dans cet onglet ; ignorée une fois cette heure passée',
+  },
 ]);
 
 const ENCRYPTION_ROWS: StorageRow[] = withFrenchSpacing([
@@ -143,7 +149,7 @@ export function CookiePolicyContentFr() {
   return (
     <>
       <h1 className="text-3xl sm:text-4xl font-bold mb-2">Politique de cookies</h1>
-      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 20 novembre 2026</p>
+      <p className="text-sm text-vox-text-muted mb-10">Dernière mise à jour&nbsp;: 21 novembre 2026</p>
 
       <div className="space-y-8 text-vox-text-secondary leading-relaxed">
         <section>
