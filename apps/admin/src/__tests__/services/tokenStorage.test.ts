@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   getAccessToken, getRefreshToken, setTokens, clearTokens, isRemembered,
   getTrustedDeviceToken, setTrustedDeviceToken, ADMIN_STORAGE_KEYS,
+  getStoredRefreshToken, onStoredSessionChange,
 } from '../../services/tokenStorage';
 
 // The names the web client keeps ITS session under.
@@ -80,5 +81,60 @@ describe('admin tokenStorage key names', () => {
     expect([...ADMIN_STORAGE_KEYS].sort()).toEqual([
       'voxium_admin_access_token', 'voxium_admin_refresh_token', 'voxium_admin_trusted_device',
     ]);
+  });
+});
+
+describe('admin tokenStorage on a renewal', () => {
+  it('replaces both tokens in the storage the session lives in', () => {
+    setTokens('a', 'r', false);
+    setTokens('a2', 'r2');
+    expect(sessionStorage.getItem('voxium_admin_access_token')).toBe('a2');
+    expect(sessionStorage.getItem('voxium_admin_refresh_token')).toBe('r2');
+    expect(localStorage.length).toBe(0);
+    setTokens('a3', 'r3', true);
+    setTokens('a4', 'r4');
+    expect(getRefreshToken()).toBe('r4');
+    expect(localStorage.getItem('voxium_admin_refresh_token')).toBe('r4');
+    expect(sessionStorage.length).toBe(0);
+  });
+});
+
+describe('admin tokenStorage: where the pair was read', () => {
+  it('names the storage the refresh token lives in', () => {
+    expect(getStoredRefreshToken()).toBeNull();
+    setTokens('a', 'r', true);
+    expect(getStoredRefreshToken()).toEqual({ token: 'r', remembered: true });
+    setTokens('a', 'r2', false);
+    expect(getStoredRefreshToken()).toEqual({ token: 'r2', remembered: false });
+  });
+});
+
+describe('admin tokenStorage: changes made by another tab', () => {
+  function fire(key: string | null, storageArea: Storage = localStorage) {
+    window.dispatchEvent(new StorageEvent('storage', { key, storageArea }));
+  }
+
+  it('passes on a change of either token key, and a clear (no key)', () => {
+    const listener = vi.fn();
+    const stop = onStoredSessionChange(listener);
+    fire('voxium_admin_access_token');
+    fire('voxium_admin_refresh_token');
+    fire(null);
+    expect(listener).toHaveBeenCalledTimes(3);
+    stop();
+    fire('voxium_admin_refresh_token');
+    expect(listener).toHaveBeenCalledTimes(3);
+  });
+
+  it("ignores the trusted-device key, the web client's keys, other keys and the per-tab storage", () => {
+    const listener = vi.fn();
+    const stop = onStoredSessionChange(listener);
+    fire('voxium_admin_trusted_device');
+    fire(CLIENT_ACCESS);
+    fire(CLIENT_REFRESH);
+    fire('unrelated');
+    fire('voxium_admin_refresh_token', sessionStorage);
+    expect(listener).not.toHaveBeenCalled();
+    stop();
   });
 });
