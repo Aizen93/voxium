@@ -9,10 +9,13 @@ import { SIGN_OUT_RETRY_MAX_AGE_MS } from './sessionRevocationLimits';
  * A sign-out completes locally at once, whatever the network does
  * (authStore.logout); the server is then told with `POST /auth/logout`
  * `{ refreshToken }`, which ends the session the token names whatever its
- * generation. The call is a plain axios request (never the api instance: its
- * interceptors would renew a session being ended), is never awaited by the
- * sign-out, stores nothing and touches no session epoch: its answer can bring
- * nothing back.
+ * generation. The first try is a `fetch` with `keepalive`, which the browser
+ * carries on after the page goes away: a sign-out followed at once by a
+ * reload (another tab's session taken up, tokenStorage.reloadAfterSessionChange)
+ * is not cut. Later tries are plain axios requests. Neither is the api
+ * instance (its interceptors would renew a session being ended); the call is
+ * never awaited by the sign-out, stores nothing and touches no session
+ * epoch: its answer can bring nothing back.
  *
  * A sign-out that could not reach the server (no answer, a 429, a 5xx) is
  * tried again while the app runs: on the `online` event and after
@@ -59,11 +62,52 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** A keepalive try the server answered with anything but a success. */
+class SignOutAnswerError extends Error {
+  constructor(readonly status: number) {
+    super(`The sign-out was answered with status ${status}`);
+    this.name = 'SignOutAnswerError';
+  }
+}
+
 /** No answer at all (timeout, transport), a 429 or a 5xx: the session may still be live there, worth another try. */
 function worthRetrying(err: unknown): boolean {
+  if (err instanceof SignOutAnswerError) return err.status === 429 || err.status >= 500;
+  // fetch: no answer at all (a TypeError) or the try's own deadline (an abort)
+  if (err instanceof TypeError || (err as { name?: unknown } | null)?.name === 'AbortError') return true;
   if (!axios.isAxiosError(err)) return false;
   const status = err.response?.status;
   return status === undefined || status === 429 || status >= 500;
+}
+
+/**
+ * The first try: a `fetch` the browser carries on after the page goes away
+ * (`keepalive`), with the same body and the same deadline as the others. The
+ * deadline aborts only a try still waiting while the page lives; nothing else
+ * aborts it (dropping the entry when the page goes away does not).
+ */
+async function sendKeepalive(body: LogoutRequest): Promise<void> {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), SIGN_OUT_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${API_BASE}/auth/logout`, {
+      method: 'POST',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: deadline.signal,
+    });
+    if (!response.ok) throw new SignOutAnswerError(response.status);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** One try: the first through sendKeepalive (where the page has fetch), every later one a plain axios request. */
+function send(entry: Entry): Promise<unknown> {
+  const body: LogoutRequest = { refreshToken: entry.refreshToken };
+  if (entry.attempts === 1 && typeof fetch === 'function') return sendKeepalive(body);
+  return axios.post(`${API_BASE}/auth/logout`, body, { timeout: SIGN_OUT_REQUEST_TIMEOUT_MS });
 }
 
 function drop(entry: Entry): void {
@@ -78,8 +122,7 @@ function attempt(entry: Entry): void {
   if (entry.inFlight || !entries.includes(entry)) return;
   entry.inFlight = true;
   entry.attempts++;
-  const body: LogoutRequest = { refreshToken: entry.refreshToken };
-  axios.post(`${API_BASE}/auth/logout`, body, { timeout: SIGN_OUT_REQUEST_TIMEOUT_MS }).then(
+  send(entry).then(
     () => drop(entry),
     (err: unknown) => {
       entry.inFlight = false;

@@ -974,6 +974,15 @@ describe('authStore.logout — the sign-out ends the session on the server too',
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
   });
 
+  it('a sign-out that finds another session stored sends its request BEFORE the page is asked to reload (the first try outlives the page)', () => {
+    storage.clearSessionTokens.mockReturnValueOnce('replaced');
+
+    expect(useAuthStore.getState().logout()).toBe('replaced');
+
+    expect(revocation.endSessionOnServer).toHaveBeenCalledWith('refresh-old');
+    expect(revocation.endSessionOnServer.mock.invocationCallOrder[0]).toBeLessThan(storage.reloadAfterSessionChange.mock.invocationCallOrder[0]);
+  });
+
   it('with nothing held, nothing is sent (the call is a no-op without a token)', () => {
     storage.getRefreshToken.mockReturnValueOnce(null);
     useAuthStore.getState().logout();
