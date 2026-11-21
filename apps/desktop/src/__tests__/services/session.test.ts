@@ -61,11 +61,14 @@ const storage = vi.hoisted(() => ({
   },
   /** Live as tokenStorage.credentialChangeInFlightUntil reads it: before T, and T no further ahead than `maxAheadMs` and 5 s. */
   liveMark: (maxAheadMs: number, now: number = Date.now()): number | null => {
+    // the browser build only: the desktop app writes and reads no mark
+    if (!storage.shared) return null;
     const until = storage.mark;
     if (until === null || until <= now || until - now > maxAheadMs + 5_000) return null;
     return until;
   },
-  markCredentialChange: vi.fn((until: number) => {
+  markCredentialChange: vi.fn((until: number): (() => void) | null => {
+    if (!storage.shared) return null;
     storage.mark = until;
     const id = ++storage.markId;
     // tokenStorage's removal: only while the mark is still this one
@@ -1314,6 +1317,8 @@ describe('session — a credential change answers for the session it was made in
 
 describe('session — a credential change in another tab, marked in the shared storage', () => {
   const markLive = () => { storage.mark = Date.now() + CREDENTIAL_CHANGE_MARK_MS; };
+  // marks exist in the browser build only
+  beforeEach(() => { storage.shared = true; });
 
   it('the mark lasts the change\'s own deadline and a little more', () => {
     expect(CREDENTIAL_CHANGE_MARK_MS).toBe(CREDENTIAL_CHANGE_TIMEOUT_MS + 5_000);
@@ -1644,6 +1649,16 @@ describe('session — a not-remembered tab that asked its twins renews on their 
 });
 
 describe('session — this tab\'s own credential change marks itself in flight', () => {
+  // the browser build: the desktop app has one webview and writes no mark
+  beforeEach(() => { storage.shared = true; });
+
+  it('the desktop app writes none', async () => {
+    storage.shared = false;
+    storage.access = freshToken();
+    await expect(runCredentialChange(async () => 'changed')).resolves.toBe('changed');
+    expect(storage.mark).toBeNull();
+  });
+
   it('after its inline renewal and before its request; removed once its answer is written', async () => {
     storage.access = expiredToken();
     http.post.mockResolvedValueOnce(renewed(freshToken(), 'refresh-renewed'));
@@ -1861,6 +1876,8 @@ describe('session — a renewal never answers another account\'s session', () =>
 describe('session — background renewals after a refresh that got no usable answer', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    // where marks exist (the browser build)
+    storage.shared = true;
   });
 
   it('three of them, 10 s, 30 s and 75 s after the lost answer, inside the grace window', () => {
