@@ -131,6 +131,40 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** A lock manager of one exclusive lock: grants in order, honours the abort signal while waiting. */
+function fakeLocks() {
+  const queue: Array<() => void> = [];
+  let held = false;
+  const options: unknown[] = [];
+  const manager: RefreshLockManager = {
+    request: (name, opts, callback) => {
+      options.push({ name, ...opts });
+      return new Promise((resolve, reject) => {
+        const grant = () => {
+          held = true;
+          Promise.resolve()
+            .then(callback)
+            .then(resolve, reject)
+            .finally(() => {
+              held = false;
+              queue.shift()?.();
+            });
+        };
+        opts.signal.addEventListener('abort', () => {
+          const at = queue.indexOf(grant);
+          if (at >= 0) {
+            queue.splice(at, 1);
+            reject(Object.assign(new Error('The request was aborted'), { name: 'AbortError' }));
+          }
+        });
+        if (held) queue.push(grant);
+        else grant();
+      });
+    },
+  };
+  return { manager, options, hold: () => { held = true; }, release: () => { held = false; queue.shift()?.(); } };
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe('session — reading the access token expiry', () => {
@@ -752,40 +786,6 @@ describe('session — the browser build reads the shared storage again before ev
 });
 
 describe('session — the browser build renews under one Web Lock', () => {
-  /** A lock manager of one exclusive lock: grants in order, honours the abort signal while waiting. */
-  function fakeLocks() {
-    const queue: Array<() => void> = [];
-    let held = false;
-    const options: unknown[] = [];
-    const manager: RefreshLockManager = {
-      request: (name, opts, callback) => {
-        options.push({ name, ...opts });
-        return new Promise((resolve, reject) => {
-          const grant = () => {
-            held = true;
-            Promise.resolve()
-              .then(callback)
-              .then(resolve, reject)
-              .finally(() => {
-                held = false;
-                queue.shift()?.();
-              });
-          };
-          opts.signal.addEventListener('abort', () => {
-            const at = queue.indexOf(grant);
-            if (at >= 0) {
-              queue.splice(at, 1);
-              reject(Object.assign(new Error('The request was aborted'), { name: 'AbortError' }));
-            }
-          });
-          if (held) queue.push(grant);
-          else grant();
-        });
-      },
-    };
-    return { manager, options, hold: () => { held = true; }, release: () => { held = false; queue.shift()?.(); } };
-  }
-
   beforeEach(() => {
     storage.shared = true;
   });
@@ -1025,6 +1025,188 @@ describe('session — a credential change holds the renewals around it', () => {
     await expect(runCredentialChange(change)).resolves.toBe('changed');
     expect(request).toHaveBeenCalledWith(REFRESH_LOCK_NAME, expect.objectContaining({ mode: 'exclusive' }), expect.any(Function));
     expect(CREDENTIAL_CHANGE_TIMEOUT_MS).toBe(75_000);
+  });
+});
+
+describe('session — a credential change answers for the session it was made in, and never outlives it', () => {
+  const fresh = (sid: string) => jwtWith({ userId: 'u-1', sid, exp: Math.floor(Date.now() / 1000) + 15 * 60 });
+  const refreshOf = (sid: string, gen: number) => jwtWith({ userId: 'u-1', sid, gen });
+
+  it('stillCurrent() holds while the stored pair is of the session read as the change went out, at any generation', async () => {
+    storage.access = fresh('s-1');
+    storage.refresh = refreshOf('s-1', 3);
+    const seen: boolean[] = [];
+
+    await runCredentialChange(async (stillCurrent) => {
+      seen.push(stillCurrent());
+      // a twin's rotation, or a tab that renewed without the lock: the same session
+      storage.refresh = refreshOf('s-1', 4);
+      seen.push(stillCurrent());
+      // another tab's new sign-in (as anyone): its pair stands
+      storage.access = fresh('s-2');
+      storage.refresh = refreshOf('s-2', 1);
+      seen.push(stillCurrent());
+      // another tab signed out
+      storage.access = null;
+      storage.refresh = null;
+      seen.push(stillCurrent());
+      // the shared storage holds another account's session: the page reloads onto it
+      storage.access = fresh('s-1');
+      storage.refresh = refreshOf('s-1', 5);
+      storage.follow = 'reloading';
+      seen.push(stillCurrent());
+      return 'changed';
+    });
+
+    expect(seen).toEqual([true, true, false, false, false]);
+  });
+
+  it('it re-reads the shared storage before it answers', async () => {
+    storage.shared = true;
+    _setRefreshLocksForTests(null);
+    storage.access = fresh('s-1');
+    storage.refresh = refreshOf('s-1', 1);
+    const seen: boolean[] = [];
+
+    await runCredentialChange(async (stillCurrent) => {
+      // another tab signed in while the change was out; this tab missed the event
+      storage.page = { access: fresh('s-other'), refresh: refreshOf('s-other', 1) };
+      seen.push(stillCurrent());
+      return 'changed';
+    });
+
+    expect(seen).toEqual([false]);
+  });
+
+  it('for a token issued before sessions, only that very token counts (the answer opens a session of its own for it)', async () => {
+    const beforeSessions = jwtWith({ userId: 'u-1' });
+    storage.access = jwtWith({ userId: 'u-1', exp: Math.floor(Date.now() / 1000) + 15 * 60 });
+    storage.refresh = beforeSessions;
+    const seen: boolean[] = [];
+
+    await runCredentialChange(async (stillCurrent) => {
+      seen.push(stillCurrent());
+      // another tab's new sign-in to the SAME account: not this change's to overwrite
+      storage.access = fresh('s-9');
+      storage.refresh = refreshOf('s-9', 1);
+      seen.push(stillCurrent());
+      storage.refresh = jwtWith({ userId: 'u-1', n: 2 });
+      seen.push(stillCurrent());
+      return 'changed';
+    });
+
+    expect(seen).toEqual([true, false, false]);
+  });
+
+  it('the session is read as the change goes out, after the inline renewal of an expired access token', async () => {
+    // a token issued before sessions, renewed into a session pair on the way
+    storage.access = expiredToken();
+    storage.refresh = jwtWith({ userId: 'u-1' });
+    http.post.mockResolvedValueOnce(renewed(fresh('s-1'), refreshOf('s-1', 0)));
+    const seen: boolean[] = [];
+
+    await runCredentialChange(async (stillCurrent) => {
+      seen.push(stillCurrent());
+      return 'changed';
+    });
+
+    expect(seen).toEqual([true]);
+  });
+
+  it('a sign-out while a change is out releases its hold: the next session renews at once', async () => {
+    storage.access = freshToken();
+    let finish!: () => void;
+    const change = runCredentialChange(() => new Promise<string>((resolve) => { finish = () => resolve('changed'); }));
+    await vi.waitFor(() => expect(finish).toBeDefined());
+
+    endSessionRenewals();
+    storage.access = expiredToken();
+    storage.refresh = 'refresh-next-session';
+    http.post.mockResolvedValueOnce(renewed('access-2', 'refresh-2'));
+    const renewal = refreshAccessToken();
+
+    await vi.waitFor(() => expect(http.post).toHaveBeenCalledTimes(1));
+    expect(http.post.mock.calls[0][1]).toEqual({ refreshToken: 'refresh-next-session', client: 'web' });
+    await expect(renewal).resolves.toBe('access-2');
+    finish();
+    await expect(change).resolves.toBe('changed');
+  });
+
+  it('... and the next session\'s change does not queue behind it', async () => {
+    storage.access = freshToken();
+    const first = runCredentialChange(() => new Promise<string>(() => {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    endSessionRenewals();
+    const second = vi.fn(async () => 'second');
+    await expect(runCredentialChange(second)).resolves.toBe('second');
+    void first;
+  });
+
+  it('... and it lets go of the renewal lock: the next session does not wait for it', async () => {
+    storage.shared = true;
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    storage.access = freshToken();
+    let finish!: () => void;
+    const change = runCredentialChange(() => new Promise<string>((resolve) => { finish = () => resolve('changed'); }));
+    await vi.waitFor(() => expect(finish).toBeDefined());
+
+    endSessionRenewals();
+    storage.access = expiredToken();
+    storage.refresh = 'refresh-next-session';
+    http.post.mockResolvedValueOnce(renewed('access-2', 'refresh-2'));
+    const renewal = refreshAccessToken();
+
+    await vi.waitFor(() => expect(http.post).toHaveBeenCalledTimes(1));
+    await expect(renewal).resolves.toBe('access-2');
+    finish();
+    await change;
+  });
+
+  it('the old change settling releases nothing the next session\'s change holds', async () => {
+    storage.access = freshToken();
+    let finishFirst!: () => void;
+    const first = runCredentialChange(() => new Promise<string>((resolve) => { finishFirst = () => resolve('first'); }));
+    await vi.waitFor(() => expect(finishFirst).toBeDefined());
+    endSessionRenewals();
+    storage.refresh = 'refresh-next-session';
+    let finishSecond!: () => void;
+    const second = runCredentialChange(() => {
+      storage.access = expiredToken();
+      return new Promise<string>((resolve) => { finishSecond = () => resolve('second'); });
+    });
+    await vi.waitFor(() => expect(finishSecond).toBeDefined());
+
+    finishFirst();
+    await first;
+    http.post.mockResolvedValueOnce(renewed('access-2', 'refresh-2'));
+    const renewal = refreshAccessToken();
+    await new Promise((r) => setTimeout(r, 20));
+    // still held by the second change
+    expect(http.post).not.toHaveBeenCalled();
+
+    finishSecond();
+    await second;
+    await expect(renewal).resolves.toBe('access-2');
+  });
+
+  it('a change whose session ended while it waited for the lock sends nothing', async () => {
+    storage.shared = true;
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    locks.hold(); // another tab is renewing
+    storage.access = freshToken();
+    const change = vi.fn(async () => 'changed');
+    const pending = runCredentialChange(change);
+    await Promise.resolve();
+
+    endSessionRenewals();
+    locks.release();
+
+    await expect(pending).rejects.toBeInstanceOf(SessionLostError);
+    expect(change).not.toHaveBeenCalled();
   });
 });
 

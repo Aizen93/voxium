@@ -293,6 +293,106 @@ describe('a refused restore that finds another session stored restores that sess
   });
 });
 
+describe('a credential change stores its answer only for the session it was made in', () => {
+  const x = pairOf('user-x', 's-x', 1);
+  /** The answer: this session re-keyed to the account's new version, at a new generation. */
+  const answer = pairOf('user-x', 's-x', 3);
+
+  beforeEach(async () => {
+    setTokens(x.accessToken, x.refreshToken, true);
+    await flushTokenStorage();
+    useAuthStore.setState({ user: userOf('user-x') as never, isAuthenticated: true });
+  });
+
+  it('another tab signs in as another account while the password change is out: its pair stands, nothing is stored, the page reloads onto it', async () => {
+    const y = pairOf('user-y', 's-y');
+    answers = [async (config) => {
+      otherTabStores(y);
+      return ok(config, { success: true, message: 'changed', data: answer });
+    }];
+
+    await useAuthStore.getState().changePassword('old-pw', 'new-pw');
+
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(y.refreshToken);
+    expect(getRefreshToken()).not.toBe(answer.refreshToken);
+    expect(socket.reconnectSocketAfterCredentialChange).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  });
+
+  it('another tab signs out while the change is out: the session is not put back', async () => {
+    answers = [async (config) => {
+      otherTabStores(null);
+      return ok(config, { success: true, message: 'changed', data: answer });
+    }];
+
+    await useAuthStore.getState().changePassword('old-pw', 'new-pw');
+
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBeNull();
+    expect(getRefreshToken()).toBeNull();
+    expect(socket.reconnectSocketAfterCredentialChange).not.toHaveBeenCalled();
+  });
+
+  it('another tab renewed the SAME session while the change was out: the answer, of the new version, is stored', async () => {
+    answers = [async (config) => {
+      // a renewal that went out before the change, from a tab without the lock: same session, old version
+      otherTabStores(pairOf('user-x', 's-x', 2));
+      return ok(config, { success: true, message: 'changed', data: answer });
+    }];
+
+    await useAuthStore.getState().changePassword('old-pw', 'new-pw');
+
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(answer.refreshToken);
+    expect(socket.reconnectSocketAfterCredentialChange).toHaveBeenCalledWith(answer.accessToken);
+  });
+
+  it('signing out of the other sessions: the trusted-device token of a dropped answer is neither stored nor cleared', async () => {
+    const { setTrustedDeviceToken, getTrustedDeviceToken } = await import('../../services/tokenStorage');
+    setTrustedDeviceToken('trusted-old');
+    await flushTokenStorage();
+    answers = [async (config) => {
+      otherTabStores(pairOf('user-y', 's-y'));
+      return ok(config, { success: true, data: { revoked: 2, ...answer, trustedDeviceToken: 'trusted-new' } });
+    }];
+
+    await expect(useAuthStore.getState().revokeOtherSessions('pw')).resolves.toEqual({ revoked: 2 });
+
+    await flushTokenStorage();
+    expect(getTrustedDeviceToken()).toBe('trusted-old');
+    expect(localStorage.getItem('voxium_trusted_device')).toBe('trusted-old');
+  });
+
+  it('signing out of the other sessions with a stored answer stores its trusted-device token with it', async () => {
+    const { setTrustedDeviceToken, getTrustedDeviceToken } = await import('../../services/tokenStorage');
+    setTrustedDeviceToken('trusted-old');
+    await flushTokenStorage();
+    answers = [async (config) => ok(config, { success: true, data: { revoked: 1, ...answer, trustedDeviceToken: 'trusted-new' } })];
+
+    await useAuthStore.getState().revokeOtherSessions('pw');
+
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(answer.refreshToken);
+    expect(getTrustedDeviceToken()).toBe('trusted-new');
+  });
+
+  it('a session from before sessions: the answer, which opens a session of its own, is stored with its trusted-device token', async () => {
+    const legacy = { accessToken: jwt({ userId: 'user-x', exp: exp() }), refreshToken: jwt({ userId: 'user-x' }) };
+    setTokens(legacy.accessToken, legacy.refreshToken, true);
+    await flushTokenStorage();
+    const opened = pairOf('user-x', 's-new', 0);
+    answers = [async (config) => ok(config, { success: true, data: { revoked: 1, ...opened, trustedDeviceToken: 'trusted-new' } })];
+    const { getTrustedDeviceToken } = await import('../../services/tokenStorage');
+
+    await useAuthStore.getState().revokeOtherSessions('pw');
+
+    await flushTokenStorage();
+    expect(localStorage.getItem(REFRESH)).toBe(opened.refreshToken);
+    expect(getTrustedDeviceToken()).toBe('trusted-new');
+  });
+});
+
 describe('a not-remembered tab that follows another tab\'s remembered sign-in ends the session it held', () => {
   it('its own session goes from its sessionStorage and the server is told to end it', async () => {
     const own = pairOf('user-x', 's-own');

@@ -6,7 +6,7 @@ import {
   followSharedSession, isSharedWithOtherTabs, reloadAfterSessionChange,
 } from './tokenStorage';
 import { accountDeletionSettled } from './accountDeletion';
-import { readTokenClaims, userIdOf } from './tokenClaims';
+import { isSameSession, readTokenClaims, sessionIdOf, userIdOf } from './tokenClaims';
 import { loginPathFor, type LoginReason } from '../utils/loginReasons';
 import { sessionClientHint } from './sessionClient';
 import { claimPageNavigation, _resetPageNavigationForTests } from './pageNavigation';
@@ -216,8 +216,29 @@ export function goToLoginPage(reason: LoginReason | null = null): void {
 export function endSessionRenewals(): void {
   sessionEpoch++;
   refreshInFlight = null;
+  // A credential change still out belongs to the session that ended: its
+  // answer is dropped (its stillCurrent() is false), and nothing of it holds
+  // the next session up: not its hold on the renewals, not the queue of
+  // changes, not the renewal lock (it lets go of it on this signal)
+  renewalHold = null;
+  credentialChangeQueue = Promise.resolve();
+  const ended = sessionEnd;
+  sessionEnd = deferred();
+  ended.resolve();
   cancelBackgroundRenewals();
 }
+
+/** A promise and its resolver. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+// Resolved when the current session's renewals end (endSessionRenewals)
+let sessionEnd = deferred();
 
 /**
  * The session is over: forget the tokens and go to the login page. Idempotent
@@ -433,8 +454,25 @@ export const CREDENTIAL_CHANGE_TIMEOUT_MS = 75_000;
  * change runs under the renewal lock, so no other tab renews meanwhile
  * either, after reading the shared storage again; an access token that has
  * expired is renewed inline, under that lock, before the change goes out.
- * `change` receives `stillCurrent()`, false once the session has ended
- * (logout) since the change began: its answer must then store nothing.
+ *
+ * `change` receives `stillCurrent()`: whether its answer may be stored now.
+ * The refresh token is read under the lock as the change goes out; the
+ * answer belongs to that session only, so stillCurrent() is false once the
+ * session has ended here (logout, a new sign-in: the epoch), and once the
+ * shared storage, read again, no longer holds a pair of that session:
+ * another tab signed in (as anyone) or out meanwhile, and its pair stands.
+ * A pair of the same session at another generation (a twin's, a tab that
+ * renewed without the lock) is still that session: the answer, of the
+ * account's new version, is the one to keep. A token issued before sessions
+ * names no session; only the very same token counts then (the answer opens a
+ * new session for it, and another tab's new sign-in to the same account is
+ * not this change's to overwrite). The caller asks once, before storing
+ * anything of the answer.
+ *
+ * The session ending while the change is out releases everything the
+ * change holds for the next one (endSessionRenewals): the renewals it held,
+ * the queue, and the renewal lock. A change whose session ended while it
+ * waited for the lock sends nothing.
  *
  * The request `change` sends must not renew by itself (the api's
  * `_noRenewal`): a renewal waiting for the change it is part of would never
@@ -450,6 +488,19 @@ export function runCredentialChange<T>(change: (stillCurrent: () => boolean) => 
   return run;
 }
 
+/**
+ * Whether the pair stored now is of the session `startedWith` (the refresh
+ * token a credential change went out with) names: the same sid, or for a
+ * token that names none, that very token.
+ */
+function storedSessionIs(startedWith: string | null): boolean {
+  const accessToken = getAccessToken();
+  const refreshToken = getRefreshToken();
+  if (startedWith === null || accessToken === null || refreshToken === null) return false;
+  if (sessionIdOf(startedWith) === null) return refreshToken === startedWith;
+  return isSameSession({ accessToken, refreshToken }, startedWith);
+}
+
 async function credentialChangeStep<T>(change: (stillCurrent: () => boolean) => Promise<T>): Promise<T> {
   let release!: () => void;
   const hold = new Promise<void>((resolve) => {
@@ -458,6 +509,7 @@ async function credentialChangeStep<T>(change: (stillCurrent: () => boolean) => 
   renewalHold = hold;
   // Started before the hold, so not held by it: its answer is stored first
   const before = refreshInFlight;
+  const ended = sessionEnd.promise;
   try {
     if (before) {
       try {
@@ -468,13 +520,21 @@ async function credentialChangeStep<T>(change: (stillCurrent: () => boolean) => 
       }
     }
     const epoch = sessionEpoch;
-    return await underRefreshLock(async () => {
+    let outcome!: Promise<T>;
+    await underRefreshLock(async () => {
+      if (epoch !== sessionEpoch) throw new SessionLostError('The session ended before the credential change went out');
       followOtherTabsOrStop();
       const token = getAccessToken();
       if (!token) throw new SessionLostError('No session for the credential change');
       if (shouldRenewBeforeSending(token)) await renew(epoch, getRefreshToken());
-      return change(() => epoch === sessionEpoch);
+      // The session this change is made in, read as it goes out
+      const startedWith = getRefreshToken();
+      outcome = change(() => epoch === sessionEpoch && followSharedSession() !== 'reloading' && storedSessionIs(startedWith));
+      // The lock is held until the change has settled, or until the session
+      // it is made in ends: nothing of that session needs it any more
+      await Promise.race([outcome.then(() => undefined, () => undefined), ended]);
     });
+    return await outcome;
   } finally {
     if (renewalHold === hold) renewalHold = null;
     release();
@@ -682,6 +742,7 @@ export function _resetSessionForTests(): void {
   refreshInFlight = null;
   renewalHold = null;
   credentialChangeQueue = Promise.resolve();
+  sessionEnd = deferred();
   loginNavigation = null;
   _resetPageNavigationForTests();
   cancelBackgroundRenewals();

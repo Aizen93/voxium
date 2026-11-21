@@ -93,18 +93,22 @@ function credentialChangeRequest(): AxiosRequestConfig & { _noRenewal: true } {
 }
 
 /**
- * Store the pair a credential change answered, when it carried one and the
- * session the change began in has not ended meanwhile: the server re-keyed
- * this device's session to the new version. The server then disconnects
- * every socket opened with the old tokens, this one included: it reopens
- * with the new access token (never force:logout — the session is valid).
+ * Store the pair a credential change answered, when it carried one and its
+ * answer is still this tab's to store (`current`: the change's
+ * stillCurrent(), asked once before anything of the answer is stored — the
+ * session it was made in has not ended here, and the shared storage still
+ * holds that session: another tab's sign-in or sign-out meanwhile stands).
+ * The server re-keyed this device's session to the new version. The server
+ * then disconnects every socket opened with the old tokens, this one
+ * included: it reopens with the new access token (never force:logout — the
+ * session is valid).
  */
-function storeCredentialChangePair(answer: { accessToken?: unknown; refreshToken?: unknown } | undefined, stillCurrent: () => boolean): void {
+function storeCredentialChangePair(answer: { accessToken?: unknown; refreshToken?: unknown } | undefined, current: boolean): void {
   const accessToken = answer?.accessToken;
   const refreshToken = answer?.refreshToken;
   if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || !accessToken || !refreshToken) return;
-  if (!stillCurrent()) {
-    console.warn('[Auth] The credential change answered after the session ended — its pair is not stored');
+  if (!current) {
+    console.warn('[Auth] The credential change answered after the session it was made in ended or was replaced — its answer is not stored');
     return;
   }
   setTokens(accessToken, refreshToken);
@@ -883,7 +887,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const body: ChangePasswordRequest = { currentPassword, newPassword, rememberMe: isRemembered(), client: sessionClientHint() };
       const { data } = await api.post('/auth/change-password', body, credentialChangeRequest());
       // Store fresh tokens so the current session survives the tokenVersion bump
-      storeCredentialChangePair(data.data, stillCurrent);
+      storeCredentialChangePair(data.data, stillCurrent());
       return data.message;
     });
   },
@@ -905,10 +909,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         '/auth/sessions/revoke-others', body, credentialChangeRequest(),
       );
       const answer: Partial<RevokeOtherSessionsResponse> = data?.data ?? {};
+      // Asked once, before anything of the answer is stored: storing the
+      // pair makes the stored session the answer's own
+      const current = stillCurrent();
       // The pair may be absent (a later server may end the others without
       // moving this device to a new one): only what came back is stored
-      storeCredentialChangePair(answer, stillCurrent);
-      if (stillCurrent()) {
+      storeCredentialChangePair(answer, current);
+      if (current) {
         if (typeof answer.trustedDeviceToken === 'string' && answer.trustedDeviceToken.length > 0) {
           setTrustedDeviceToken(answer.trustedDeviceToken);
         } else if (sentTrustedDeviceToken && getTrustedDeviceToken() === sentTrustedDeviceToken) {
