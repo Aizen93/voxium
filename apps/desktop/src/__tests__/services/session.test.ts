@@ -140,7 +140,7 @@ import {
   endSessionRenewals, isDefinitiveRefreshFailure, SessionLostError, setSessionLostNavigation, _resetSessionForTests,
   _setRefreshLocksForTests, runCredentialChange, goToLoginPage, noteIgnoredSessionEnd, forgetIgnoredSessionEnd, IGNORED_SESSION_END_WINDOW_MS,
   CREDENTIAL_CHANGE_TIMEOUT_MS, CREDENTIAL_CHANGE_MARK_MS, BACKGROUND_RENEWAL_DELAYS_MS, type RefreshLockManager,
-  TOKEN_EXPIRY_SKEW_MS, REFRESH_TIMEOUT_MS, REFRESH_RETRY_DELAY_MS, REFRESH_LOCK_NAME, REFRESH_LOCK_WAIT_MS, API_BASE,
+  TOKEN_EXPIRY_SKEW_MS, GRACE_LOCK_MARGIN_MS, REFRESH_TIMEOUT_MS, REFRESH_RETRY_DELAY_MS, REFRESH_LOCK_NAME, REFRESH_LOCK_WAIT_MS, API_BASE,
 } from '../../services/session';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -2096,5 +2096,148 @@ describe('session — the background chain after its last attempt', () => {
     await vi.advanceTimersByTimeAsync(10_000 - REFRESH_RETRY_DELAY_MS);
     expect(http.post).toHaveBeenCalledTimes(8);
     http.post.mockReset();
+  });
+});
+
+describe('session — a recovering renewal waits for the lock only inside the grace window', () => {
+  const GRACE_MS = 120_000;
+  let t0 = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    storage.shared = true; // the browser build
+    storage.access = expiredToken();
+    t0 = Date.now();
+  });
+
+  /** A refresh request that gets no answer for `afterMs`, then fails as a timeout does. */
+  const lostAfter = (afterMs: number) => new Promise<never>((_, reject) => {
+    setTimeout(() => reject(timeoutError()), afterMs);
+  });
+
+  it('the margin keeps the send clear of the end of the window', () => {
+    expect(GRACE_LOCK_MARGIN_MS).toBeGreaterThan(0);
+    expect(GRACE_LOCK_MARGIN_MS).toBeLessThan(GRACE_MS);
+  });
+
+  it('the last step of the chain, with a lock held past the window, goes out before the window ends', async () => {
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sent: number[] = [];
+    http.post.mockImplementation(() => {
+      sent.push(Date.now() - t0);
+      if (sent.length === 1) return lostAfter(REFRESH_TIMEOUT_MS); // the first request: no answer
+      if (sent.length < 5) return Promise.reject(timeoutError());
+      return Promise.resolve(renewed('access-new', 'refresh-new'));
+    });
+    const settled = refreshAccessToken().catch(() => 'failed');
+    await vi.advanceTimersByTimeAsync(REFRESH_TIMEOUT_MS + REFRESH_RETRY_DELAY_MS);
+    expect(await settled).toBe('failed');
+    // the chain (10, 30, 75 s after the failure at 15 s) is at 25, 45 and 90 s
+    await vi.advanceTimersByTimeAsync(80_000 - REFRESH_TIMEOUT_MS - REFRESH_RETRY_DELAY_MS);
+    locks.hold(); // another tab's credential change takes the lock and keeps it
+    await vi.advanceTimersByTimeAsync(GRACE_MS - GRACE_LOCK_MARGIN_MS - 80_000 - 1);
+    expect(sent).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(sent).toHaveLength(5);
+    expect(sent[4]).toBe(GRACE_MS - GRACE_LOCK_MARGIN_MS);
+    expect(sent[4]).toBeLessThan(GRACE_MS);
+    expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('held the renewal lock too long'));
+    warn.mockRestore();
+  });
+
+  it('a recovering renewal whose window has passed waits for nothing and sends once', async () => {
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sent: number[] = [];
+    http.post.mockImplementation(() => {
+      sent.push(Date.now() - t0);
+      if (sent.length === 1) return lostAfter(100_000); // a first request that hung for 100 s
+      if (sent.length === 2) return Promise.reject(timeoutError());
+      return Promise.resolve(renewed('access-new', 'refresh-new'));
+    });
+    const settled = refreshAccessToken().catch(() => 'failed');
+    await vi.advanceTimersByTimeAsync(100_000 + REFRESH_RETRY_DELAY_MS);
+    expect(await settled).toBe('failed');
+    locks.hold();
+    // the first chain step is due at 110 s: past 120 s - margin, so no wait for the lock
+    await vi.advanceTimersByTimeAsync(10_000 - REFRESH_RETRY_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(sent).toHaveLength(3);
+    expect(sent.slice(0, 2)).toEqual([0, 100_000 + REFRESH_RETRY_DELAY_MS]);
+    expect(sent[2]).toBeLessThan(111_000); // not 35 s later
+    expect(storage.setTokens).toHaveBeenCalledWith('access-new', 'refresh-new');
+    warn.mockRestore();
+  });
+
+  it('an ordinary renewal still waits the whole bound for a held lock', async () => {
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    locks.hold();
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+
+    const pending = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(REFRESH_LOCK_WAIT_MS - 1);
+    expect(http.post).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBe('access-new');
+    warn.mockRestore();
+  });
+
+  it('after a successful answer the first-send time is forgotten: the next wait is the ordinary one', async () => {
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    http.post
+      .mockImplementationOnce(() => lostAfter(100_000))
+      .mockRejectedValueOnce(timeoutError())
+      .mockResolvedValueOnce(renewed('access-2', 'refresh-old')); // chain step at 110 s: answered (same token string kept on purpose)
+    const settled = refreshAccessToken().catch(() => 'failed');
+    await vi.advanceTimersByTimeAsync(100_000 + REFRESH_RETRY_DELAY_MS);
+    await settled;
+    await vi.advanceTimersByTimeAsync(10_000 - REFRESH_RETRY_DELAY_MS);
+    expect(storage.setTokens).toHaveBeenCalledWith('access-2', 'refresh-old');
+    await vi.advanceTimersByTimeAsync(200_000);
+
+    storage.access = expiredToken();
+    locks.hold();
+    http.post.mockReset();
+    http.post.mockResolvedValueOnce(renewed('access-3', 'refresh-3'));
+    const pending = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(REFRESH_LOCK_WAIT_MS - 1);
+    expect(http.post).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBe('access-3');
+    warn.mockRestore();
+  });
+
+  it('after a sign-out the first-send time is forgotten too', async () => {
+    const locks = fakeLocks();
+    _setRefreshLocksForTests(locks.manager);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    http.post.mockImplementationOnce(() => lostAfter(100_000)).mockRejectedValueOnce(timeoutError());
+    const settled = refreshAccessToken().catch(() => 'failed');
+    await vi.advanceTimersByTimeAsync(100_000 + REFRESH_RETRY_DELAY_MS);
+    await settled;
+    endSessionRenewals();
+    await vi.advanceTimersByTimeAsync(200_000);
+
+    // a new sign-in holding the same token text: its renewal is an ordinary one
+    storage.access = expiredToken();
+    locks.hold();
+    http.post.mockReset();
+    http.post.mockResolvedValueOnce(renewed('access-3', 'refresh-3'));
+    const pending = refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(REFRESH_LOCK_WAIT_MS - 1);
+    expect(http.post).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBe('access-3');
+    warn.mockRestore();
   });
 });

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { RefreshRequest } from '@voxium/shared';
+import { SESSIONS, type RefreshRequest } from '@voxium/shared';
 import { API_BASE } from './apiBase';
 import {
   getAccessToken, getRefreshToken, setTokens, clearSessionTokens, flushTokenStorage,
@@ -102,6 +102,17 @@ export const REFRESH_LOCK_NAME = 'voxium-session-refresh';
  * with the re-read of the storage alone (the grace window is the backstop).
  */
 export const REFRESH_LOCK_WAIT_MS = 35_000;
+
+/**
+ * What a renewal that recovers an unanswered token keeps back from the
+ * server's grace window (shared `SESSIONS.REUSE_GRACE_SECONDS`, 120 s) when
+ * it waits for the lock: it waits at most until `firstSentAt + window -
+ * margin`, so that its request, which still has to reach the server, lands
+ * inside the window. 12 s covers a slow link's round trip and the server's
+ * own queueing with room to spare, and still leaves most of the window to a
+ * waiter (the chain's last step is due about 90 s after the first send).
+ */
+export const GRACE_LOCK_MARGIN_MS = 12_000;
 
 /** The part of the Web Locks API the renewal uses (injectable for tests). */
 export interface RefreshLockManager {
@@ -389,7 +400,7 @@ function startRenewal(promptRetry: boolean): Promise<string> {
     // new pair, and a refresh token of the old version would be refused once
     // it commits. Waited for before the lock (the change holds it)
     while (renewalHold) await renewalHold;
-    return underRefreshLock(() => renew(epoch, intended, promptRetry));
+    return underRefreshLock(() => renew(epoch, intended, promptRetry), lockWaitFor(epoch, intended));
   })().finally(() => {
     if (refreshInFlight === run) refreshInFlight = null;
   });
@@ -416,6 +427,8 @@ export const BACKGROUND_RENEWAL_DELAYS_MS: readonly number[] = [10_000, 30_000, 
 interface BackgroundChain {
   epoch: number;
   refreshToken: string;
+  /** When the first request of this token went out: its grace window runs from then. */
+  firstSentAt: number;
   timers: Array<ReturnType<typeof setTimeout>>;
 }
 let backgroundChain: BackgroundChain | null = null;
@@ -430,6 +443,23 @@ function sendsUnansweredToken(epoch: number, refreshToken: string | null): boole
   return refreshToken !== null && backgroundChain !== null && backgroundChain.epoch === epoch && backgroundChain.refreshToken === refreshToken;
 }
 
+/**
+ * How long a renewal for `refreshToken` waits for the lock. The ordinary
+ * bound, except for a renewal that sends an unanswered token: it must not
+ * wait the full bound, which can carry its send past the server's grace
+ * window (a chain step due at 90 s, a lock held another 35 s: 125 s, where
+ * the window ends at 120 s from the first send) and turn the recovery into a
+ * reuse. It waits only until the window less GRACE_LOCK_MARGIN_MS, never
+ * less than nothing; at that bound it goes on without the lock, as at the
+ * ordinary one. What that costs: two tabs may then send the same token
+ * together, which the grace window answers to both.
+ */
+function lockWaitFor(epoch: number, refreshToken: string | null): number {
+  if (!sendsUnansweredToken(epoch, refreshToken) || backgroundChain === null) return REFRESH_LOCK_WAIT_MS;
+  const until = backgroundChain.firstSentAt + SESSIONS.REUSE_GRACE_SECONDS * 1000 - GRACE_LOCK_MARGIN_MS;
+  return Math.max(0, Math.min(REFRESH_LOCK_WAIT_MS, until - Date.now()));
+}
+
 function cancelBackgroundRenewals(): void {
   if (!backgroundChain) return;
   for (const timer of backgroundChain.timers) clearTimeout(timer);
@@ -437,10 +467,10 @@ function cancelBackgroundRenewals(): void {
 }
 
 /** A refresh with `refreshToken` got no usable answer: the background chain for it, unless one is already set. */
-function scheduleBackgroundRenewals(epoch: number, refreshToken: string): void {
+function scheduleBackgroundRenewals(epoch: number, refreshToken: string, firstSentAt: number): void {
   if (backgroundChain && backgroundChain.epoch === epoch && backgroundChain.refreshToken === refreshToken) return;
   cancelBackgroundRenewals();
-  const chain: BackgroundChain = { epoch, refreshToken, timers: [] };
+  const chain: BackgroundChain = { epoch, refreshToken, firstSentAt, timers: [] };
   backgroundChain = chain;
   const last = BACKGROUND_RENEWAL_DELAYS_MS.length - 1;
   chain.timers = BACKGROUND_RENEWAL_DELAYS_MS.map((delay, at) => setTimeout(() => {
@@ -747,10 +777,12 @@ async function renew(epoch: number, intended: string | null, promptRetry = true)
   let newerTried = false;
   for (;;) {
     let answer: { accessToken: string; refreshToken: string };
+    let sentAt = Date.now();
     try {
       // Plain axios on purpose: the api instance's interceptors would try to
       // refresh a refused refresh
       const body: RefreshRequest = { refreshToken, client: sessionClientHint() };
+      sentAt = Date.now();
       const { data } = await axios.post(`${API_BASE}/auth/refresh`, body, { timeout: REFRESH_TIMEOUT_MS });
       answer = refreshAnswerOf(data);
     } catch (err) {
@@ -802,7 +834,7 @@ async function renew(epoch: number, intended: string | null, promptRetry = true)
       }
       // The answer may have been lost after the server rotated the session:
       // renewals go out in the background too, within its grace window
-      if (gotNoUsableAnswer(err)) scheduleBackgroundRenewals(epoch, refreshToken);
+      if (gotNoUsableAnswer(err)) scheduleBackgroundRenewals(epoch, refreshToken, sentAt);
       if (promptRetried || !gotNoUsableAnswer(err) || !mayRetryNow()) throw err;
       promptRetried = true;
       await new Promise<void>((resolve) => setTimeout(resolve, REFRESH_RETRY_DELAY_MS));
@@ -847,15 +879,16 @@ function refreshLocks(): RefreshLockManager | null {
 
 /**
  * Run `work` under the renewal lock where the browser has one, waiting for it
- * at most REFRESH_LOCK_WAIT_MS: past that, or when the lock manager refuses,
+ * at most `waitMs` (REFRESH_LOCK_WAIT_MS, less for a renewal that recovers an
+ * unanswered token: lockWaitFor): past that, or when the lock manager refuses,
  * `work` runs without it. The wait is ended with an abort signal, which
  * cannot touch a lock once granted: no tab ever loses the lock mid-request.
  */
-async function underRefreshLock<T>(work: () => Promise<T>): Promise<T> {
+async function underRefreshLock<T>(work: () => Promise<T>, waitMs = REFRESH_LOCK_WAIT_MS): Promise<T> {
   const locks = refreshLocks();
   if (!locks) return work();
   const waited = new AbortController();
-  const timer = setTimeout(() => waited.abort(), REFRESH_LOCK_WAIT_MS);
+  const timer = setTimeout(() => waited.abort(), waitMs);
   let granted = false;
   try {
     return (await locks.request(REFRESH_LOCK_NAME, { mode: 'exclusive', signal: waited.signal }, () => {

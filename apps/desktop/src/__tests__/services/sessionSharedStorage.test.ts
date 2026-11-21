@@ -493,6 +493,44 @@ describe('a lost answer is recovered within the grace window, whatever mark anot
   });
 });
 
+describe('a recovering renewal waits for the lock only inside the grace window', () => {
+  const noAnswer = () => Object.assign(new Error('timeout of 15000ms exceeded'), { isAxiosError: true, code: 'ECONNABORTED' });
+  const markOf = (until: number, userId: string) => `${until}:${createHash('sha256').update(`voxium-credential-change:${userId}`).digest('hex').slice(0, 12)}`;
+
+  it('another tab holds the lock for good from before the last step of the chain: that step goes out before 120 s, not at 125 s', async () => {
+    vi.useFakeTimers();
+    const t0 = Date.now();
+    localStorage.setItem('voxium_access_token', jwt({ userId: 'u', sid: 's', exp: nowSeconds() - 60 }));
+    localStorage.setItem('voxium_refresh_token', jwt({ userId: 'u', sid: 's', gen: 1 }));
+    await hydrateTokens();
+    const locks = browser.locks();
+    _setRefreshLocksForTests(locks);
+    const sentAt: number[] = [];
+    // the server rotates at the first request, whose answer never arrives (15 s); the next two fail at once
+    post.mockImplementation(() => {
+      sentAt.push(Date.now() - t0);
+      if (sentAt.length === 1) return new Promise((_resolve, reject) => setTimeout(() => reject(noAnswer()), 15_000));
+      if (sentAt.length < 5) return Promise.reject(noAnswer());
+      return Promise.resolve({ data: { data: { accessToken: jwt({ userId: 'u', sid: 's', exp: nowSeconds() + 900 }), refreshToken: jwt({ userId: 'u', sid: 's', gen: 3 }) } } });
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    void refreshAccessToken().catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(80_000);
+    // another tab starts a password change: it takes the lock and keeps it, and its mark is up
+    void locks.request('voxium-session-refresh', { mode: 'exclusive', signal: new AbortController().signal }, () => new Promise(() => {}));
+    localStorage.setItem('voxium_credential_change', markOf(Date.now() + 80_000, 'u'));
+    await vi.advanceTimersByTimeAsync(200_000);
+
+    // the chain: 25, 45 and 90 s after the first send; the last waits for the lock only until 108 s
+    expect(sentAt).toHaveLength(5);
+    expect(sentAt.slice(0, 4)).toEqual([0, 18_000, 25_000, 45_000]);
+    expect(sentAt[4]).toBeLessThan(120_000);
+    expect(sentAt[4]).toBeGreaterThanOrEqual(108_000);
+    expect(getRefreshToken()).toBe(jwt({ userId: 'u', sid: 's', gen: 3 }));
+  });
+});
+
 describe('a renewal while this page reloads onto another session sends nothing', () => {
   it('in the browser build', async () => {
     const p = expiredPair('s-1', 1);
