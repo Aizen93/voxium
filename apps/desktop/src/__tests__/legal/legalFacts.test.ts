@@ -23,7 +23,7 @@ import { formatLegalDate, daysBetween } from '../../components/legal/legalDates'
 import { PRIVACY_CONTENT } from '../../components/legal/PrivacyContent';
 import { TERMS_CONTENT } from '../../components/legal/TermsContent';
 import { COOKIE_POLICY_CONTENT } from '../../components/legal/CookiePolicyContent';
-import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocation';
+import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocationLimits';
 
 /**
  * The legal pages state facts the code implements, pinned to the code.
@@ -281,7 +281,7 @@ const PINS: Record<PageName, Array<{ source: string } & PerLanguage>> = {
       fr: `${TRUSTED_DEVICE_TTL_DAYS} jours ; conservé lorsque vous vous déconnectez`,
     },
     {
-      source: 'SIGN_OUT_RETRY_MAX_AGE_MINUTES (services/sessionRevocation.ts)',
+      source: 'SIGN_OUT_RETRY_MAX_AGE_MINUTES (services/sessionRevocationLimits.ts)',
       en: `for up to ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes to try again`,
       fr: `pendant ${SIGN_OUT_RETRY_MAX_AGE_MINUTES} minutes au plus pour réessayer`,
     },

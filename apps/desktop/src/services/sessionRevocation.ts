@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { LogoutRequest } from '@voxium/shared';
 import { API_BASE } from './apiBase';
+import { SIGN_OUT_RETRY_MAX_AGE_MS } from './sessionRevocationLimits';
 
 /**
  * Ending a session ON THE SERVER, after this device let go of it.
@@ -19,9 +20,11 @@ import { API_BASE } from './apiBase';
  * only, never on disk, at most SIGN_OUT_RETRY_MAX_ENTRIES at once (the oldest
  * goes first), and dropped on any other answer, when the page goes away
  * (`pagehide`) and SIGN_OUT_RETRY_MAX_AGE_MS after the sign-out. The Cookie
- * Policy quotes that bound. Past it the session ends by itself when it has
- * gone unused for its idle window, and every other device of the account
- * lists it and can end it.
+ * Policy quotes that bound in both languages (components/legal/
+ * CookiePolicyContent.en.tsx and .fr.tsx, which read it from
+ * sessionRevocationLimits.ts, the module without imports that defines it).
+ * Past it the session ends by itself when it has gone unused for its idle
+ * window, and every other device of the account lists it and can end it.
  *
  * The same bound holds the refresh token of a session a sign-in replaced
  * (holdReplacedSession): the server is told to end it only once the new
@@ -35,9 +38,8 @@ import { API_BASE } from './apiBase';
 export const SIGN_OUT_REQUEST_TIMEOUT_MS = 10_000;
 /** Sign-outs waiting to reach the server at once; a further one pushes the oldest out. */
 export const SIGN_OUT_RETRY_MAX_ENTRIES = 3;
-/** How long a sign-out that has not reached the server is kept for another try (the Cookie Policy quotes it). */
-export const SIGN_OUT_RETRY_MAX_AGE_MINUTES = 15;
-export const SIGN_OUT_RETRY_MAX_AGE_MS = SIGN_OUT_RETRY_MAX_AGE_MINUTES * 60_000;
+/** How long a sign-out that has not reached the server is kept for another try (defined with the legal pages' other bounds). */
+export { SIGN_OUT_RETRY_MAX_AGE_MINUTES, SIGN_OUT_RETRY_MAX_AGE_MS } from './sessionRevocationLimits';
 /** The waits before each further try, after a failed one; the last repeats until the entry is dropped. */
 export const SIGN_OUT_RETRY_DELAYS_MS: readonly number[] = [5_000, 30_000, 120_000, 300_000];
 

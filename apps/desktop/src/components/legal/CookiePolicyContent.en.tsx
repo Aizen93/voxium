@@ -1,7 +1,7 @@
 import { StorageTable, type StorageRow, type StorageTableHeaders } from './StorageTable';
 import { LEGAL_OPERATOR } from './operator';
 import { MailLink } from './MailLink';
-import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocation';
+import { SIGN_OUT_RETRY_MAX_AGE_MINUTES } from '../../services/sessionRevocationLimits';
 
 /**
  * The Cookie Policy text itself, in English, without page chrome (the public
