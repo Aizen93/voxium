@@ -169,6 +169,44 @@ describe('the end of the session this tab let go of is no end of the one it hold
   });
 });
 
+describe('an end that reached the session held too says why on the sign-in page', () => {
+  const refused = () => Object.assign(new Error('Request failed with status code 401'), { isAxiosError: true, response: { status: 401 } });
+
+  /** "Sign out of all other sessions" from another device: A's socket is told, and Q is dead too. */
+  async function signedOutElsewhere() {
+    const { s, q } = await socketOfSessionA();
+    const axios = (await import('axios')).default;
+    const post = vi.spyOn(axios, 'post').mockRejectedValue(refused());
+    s.fire('force:logout', { reason: 'You were signed out from another device' });
+    serverDisconnect(s);
+    // the socket reopens with Q, which the server refuses: its version is gone
+    await vi.waitFor(() => expect(s.auth).toEqual({ token: q.accessToken }));
+    expect(navigate).not.toHaveBeenCalled();
+    return { s, post };
+  }
+
+  it('the refusal of the session held, within a minute of the end this tab ignored, opens the sign-in page with its reason', async () => {
+    const { s, post } = await signedOutElsewhere();
+
+    s.fire('connect_error', { message: 'Session invalidated' });
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalled());
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledWith('/login?reason=signed-out-elsewhere');
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('... and without one, a minute or more later', async () => {
+    const { s } = await signedOutElsewhere();
+    vi.setSystemTime(Date.now() + 60_001);
+
+    s.fire('connect_error', { message: 'Session invalidated' });
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalled());
+
+    expect(navigate).toHaveBeenCalledWith('/login');
+  });
+});
+
 describe('a ban or a deletion signs out whatever session of the account this tab holds', () => {
   it.each([
     ['Your account has been banned', 'banned'],

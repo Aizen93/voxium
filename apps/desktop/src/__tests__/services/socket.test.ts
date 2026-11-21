@@ -89,6 +89,8 @@ const session = vi.hoisted(() => {
     goToLoginPage: vi.fn((reason: string | null) => {
       window.location.href = reason ? `/login?reason=${reason}` : '/login';
     }),
+    // An ignored force:logout's reason, kept for a later trip (session.ts's own tests)
+    noteIgnoredSessionEnd: vi.fn(),
   };
 });
 vi.mock('../../services/session', () => session);
@@ -1074,6 +1076,8 @@ describe('services/socket — reconnectSocketAfterCredentialChange (the server r
 
       expect(storage.holdsAnotherSessionOf).toHaveBeenCalledWith('access-of-the-session-it-let-go-of');
       expect(authStoreMock.logout).not.toHaveBeenCalled();
+      // kept for a trip to the sign-in page that a refusal of the session held may start
+      expect(session.noteIgnoredSessionEnd).toHaveBeenCalledWith('session-ended');
       expect(window.location.href).toBe('');
       expect(session.getFreshAccessToken).toHaveBeenCalledTimes(1);
       expect(socket.auth).toEqual({ token: 'access-held-now' });

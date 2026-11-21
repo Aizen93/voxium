@@ -10,6 +10,7 @@ import { endSessionOnServer, holdReplacedSession, endReplacedSession } from '../
 import type { AxiosRequestConfig } from 'axios';
 import {
   endSessionRenewals, runCredentialChange, refreshAccessToken, currentSessionEpoch, SessionLostError, CREDENTIAL_CHANGE_TIMEOUT_MS,
+  forgetIgnoredSessionEnd,
 } from '../services/session';
 import { isAuthRefusal } from '../services/authRefusal';
 import { accountDeletionInFlight, accountDeletionSettled, beginAccountDeletion } from '../services/accountDeletion';
@@ -264,6 +265,8 @@ interface AuthState {
  */
 function discardStaleSession(): void {
   holdReplacedSession(getRefreshToken());
+  // An end of a session this tab ignored before says nothing about the new one
+  forgetIgnoredSessionEnd();
   endSessionRestore();
   // A renewal of the OLD session still in flight must store nothing when it
   // lands — and, refused, must not end the NEW session (the stale session is

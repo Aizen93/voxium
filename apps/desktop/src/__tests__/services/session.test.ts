@@ -133,7 +133,8 @@ vi.mock('../../services/tokenStorage', () => ({
 import {
   accessTokenExpiresAt, isAccessTokenFresh, shouldRenewBeforeSending, refreshAccessToken, getFreshAccessToken,
   endSessionRenewals, isDefinitiveRefreshFailure, SessionLostError, setSessionLostNavigation, _resetSessionForTests,
-  _setRefreshLocksForTests, runCredentialChange, goToLoginPage, CREDENTIAL_CHANGE_TIMEOUT_MS, CREDENTIAL_CHANGE_MARK_MS, BACKGROUND_RENEWAL_DELAYS_MS, type RefreshLockManager,
+  _setRefreshLocksForTests, runCredentialChange, goToLoginPage, noteIgnoredSessionEnd, forgetIgnoredSessionEnd, IGNORED_SESSION_END_WINDOW_MS,
+  CREDENTIAL_CHANGE_TIMEOUT_MS, CREDENTIAL_CHANGE_MARK_MS, BACKGROUND_RENEWAL_DELAYS_MS, type RefreshLockManager,
   TOKEN_EXPIRY_SKEW_MS, REFRESH_TIMEOUT_MS, REFRESH_RETRY_DELAY_MS, REFRESH_LOCK_NAME, REFRESH_LOCK_WAIT_MS, API_BASE,
 } from '../../services/session';
 
@@ -1684,6 +1685,51 @@ describe('session — one trip to the sign-in page per page load, the reason kep
 
     await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
     expect(navigate).toHaveBeenCalledWith('/login?reason=session-ended');
+  });
+});
+
+describe('session — a force:logout the tab ignored keeps its reason for a short while', () => {
+  it('a trip to the sign-in page within a minute of it, with no reason of its own, says that reason', async () => {
+    noteIgnoredSessionEnd('signed-out-elsewhere');
+    // the session held now is refused later: no reason of its own
+    http.post.mockRejectedValueOnce(axios401());
+    await expect(refreshAccessToken()).rejects.toBeInstanceOf(SessionLostError);
+
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith('/login?reason=signed-out-elsewhere');
+  });
+
+  it('the window is one minute: a trip that starts later carries no reason', async () => {
+    vi.useFakeTimers();
+    expect(IGNORED_SESSION_END_WINDOW_MS).toBe(60_000);
+    noteIgnoredSessionEnd('session-ended');
+    vi.advanceTimersByTime(60_001);
+    goToLoginPage(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(navigate).toHaveBeenCalledWith('/login');
+  });
+
+  it('... and at its very end the reason still holds', async () => {
+    vi.useFakeTimers();
+    noteIgnoredSessionEnd('session-ended');
+    vi.advanceTimersByTime(60_000);
+    goToLoginPage(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(navigate).toHaveBeenCalledWith('/login?reason=session-ended');
+  });
+
+  it('a trip with a reason of its own says its own', async () => {
+    noteIgnoredSessionEnd('session-ended');
+    goToLoginPage('banned');
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('/login?reason=banned'));
+  });
+
+  it('a sign-in forgets it, and an end with no reason of the list keeps none', async () => {
+    noteIgnoredSessionEnd('signed-out-elsewhere');
+    forgetIgnoredSessionEnd();
+    noteIgnoredSessionEnd(null);
+    goToLoginPage(null);
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('/login'));
   });
 });
 

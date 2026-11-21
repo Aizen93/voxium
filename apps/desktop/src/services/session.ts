@@ -192,6 +192,51 @@ export function setSessionLostNavigation(fn: (path: string) => void): void {
 }
 
 /**
+ * How long the reason of a `force:logout` this tab ignored is kept for its
+ * trip to the sign-in page. The tab ignores one that ends a session it has
+ * let go of to follow another session of the account (services/socket.ts);
+ * when the server ended that other session too ("sign out of all other
+ * sessions" from another device), the tab learns it only when its socket,
+ * reopened with the session held, is refused and the renewal that follows is
+ * refused too. That trip starts within: the reopen's spread after the
+ * server's disconnect (up to 5 s), at most one handshake renewal per 30 s
+ * (socket.ts HANDSHAKE_REFRESH_MIN_INTERVAL_MS), and a refresh request's own
+ * deadline and retry (15 s and 3 s). Twice the handshake renewal's interval
+ * covers them; a trip later than that is not taken to be about that end.
+ */
+export const IGNORED_SESSION_END_WINDOW_MS = 60_000;
+
+// The reason of the last force:logout this tab ignored, and when (memory only)
+let ignoredSessionEnd: { reason: LoginReason; at: number } | null = null;
+
+/**
+ * A `force:logout` with `reason` (a code of the closed list, or null) was
+ * ignored: it ended a session this tab no longer holds. A trip to the sign-in
+ * page that starts within IGNORED_SESSION_END_WINDOW_MS, with no reason of
+ * its own, says that reason. Kept in memory only, and forgotten at a sign-in
+ * (forgetIgnoredSessionEnd).
+ */
+export function noteIgnoredSessionEnd(reason: LoginReason | null): void {
+  if (reason === null) return;
+  ignoredSessionEnd = { reason, at: Date.now() };
+}
+
+/** A new session begins (a sign-in, a registration): an end ignored before it says nothing about it. */
+export function forgetIgnoredSessionEnd(): void {
+  ignoredSessionEnd = null;
+}
+
+/** The reason of a force:logout ignored within the window, else null (and forgotten). */
+function recentlyIgnoredSessionEnd(): LoginReason | null {
+  const noted = ignoredSessionEnd;
+  if (noted === null) return null;
+  const age = Date.now() - noted.at;
+  if (age >= 0 && age <= IGNORED_SESSION_END_WINDOW_MS) return noted.reason;
+  ignoredSessionEnd = null;
+  return null;
+}
+
+/**
  * Go to the sign-in page: ONCE per page load, after the queued writes of the
  * session storage have landed (in the desktop app the OS credential store is
  * written over IPC: a reload that outran the clear would restore the session
@@ -200,7 +245,9 @@ export function setSessionLostNavigation(fn: (path: string) => void): void {
  * `force:logout` and a refusal can land together: every caller after the
  * first only adds its reason when the first gave none, so the sign-in page
  * says why (utils/loginReasons.ts) and a second navigation never replaces
- * the first. The trip is the page's one navigation (services/pageNavigation.ts):
+ * the first. A trip asked for with no reason, within
+ * IGNORED_SESSION_END_WINDOW_MS of a force:logout this tab ignored, says that
+ * one's reason. The trip is the page's one navigation (services/pageNavigation.ts):
  * a reload onto another session asked for before it stands, and this goes
  * nowhere; one asked for after it goes nowhere either.
  */
@@ -210,7 +257,7 @@ export function goToLoginPage(reason: LoginReason | null = null): void {
     return;
   }
   if (!claimPageNavigation('login')) return;
-  const trip: { reason: LoginReason | null } = { reason };
+  const trip: { reason: LoginReason | null } = { reason: reason ?? recentlyIgnoredSessionEnd() };
   loginNavigation = trip;
   void flushTokenStorage()
     .then(() => accountDeletionSettled())
@@ -832,6 +879,7 @@ export function _resetSessionForTests(): void {
   credentialChangeQueue = Promise.resolve();
   sessionEnd = deferred();
   loginNavigation = null;
+  ignoredSessionEnd = null;
   _resetPageNavigationForTests();
   cancelBackgroundRenewals();
   sessionEpoch = 0;

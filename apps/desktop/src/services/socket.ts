@@ -11,7 +11,7 @@ const NOISY_EVENTS = new Set([
   'dm:voice:signal',
   'voice:annotation:ops', 'voice:annotation:live',
 ]);
-import { getFreshAccessToken, refreshAccessToken, isAccessTokenFresh, SessionLostError, goToLoginPage } from './session';
+import { getFreshAccessToken, refreshAccessToken, isAccessTokenFresh, SessionLostError, goToLoginPage, noteIgnoredSessionEnd } from './session';
 
 const SOCKET_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3001';
 
@@ -308,9 +308,12 @@ export function connectSocket(token: string): VoxSocket | null {
     // tokenStorage.followRememberedPair asked the server to end the one it
     // let go of, which is what tells this socket). Nothing here is signed
     // out: the server's disconnect that follows reopens the socket with the
-    // session held now, like any other server disconnect
+    // session held now, like any other server disconnect. The reason is kept
+    // a short while: when the same end reached the session held too, the
+    // trip to the sign-in page its refusal starts says why (session.ts)
     if (!accountEnded && holdsAnotherSessionOf(endedSession)) {
       console.info('[WS] The session this socket was opened with has ended; this tab holds another session of the account — reconnecting with it');
+      noteIgnoredSessionEnd(reason);
       return;
     }
     forceLoggedOut = true;

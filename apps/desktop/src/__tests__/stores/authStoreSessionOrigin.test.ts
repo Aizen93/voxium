@@ -33,6 +33,7 @@ const session = vi.hoisted(() => ({
   /** The session epoch: endSessionRenewals (a logout) moves it */
   epoch: 0,
   currentSessionEpoch: vi.fn((): number => session.epoch),
+  forgetIgnoredSessionEnd: vi.fn(),
 }));
 vi.mock('../../services/session', () => session);
 vi.mock('../../stores/resetStores', () => ({ resetAccountStores: vi.fn() }));

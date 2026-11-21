@@ -81,6 +81,7 @@ const session = vi.hoisted(() => ({
   /** The session epoch: endSessionRenewals (a logout) moves it */
   epoch: 0,
   currentSessionEpoch: vi.fn((): number => session.epoch),
+  forgetIgnoredSessionEnd: vi.fn(),
 }));
 vi.mock('../../services/session', () => session);
 vi.mock('../../stores/resetStores', () => ({ resetAccountStores: vi.fn() }));
@@ -243,6 +244,8 @@ describe('authStore — a sign-in discards the session it replaces FIRST', () =>
     api.post.mockImplementationOnce(async () => {
       expect(storage.clearTokens).toHaveBeenCalledTimes(1);
       expect(socket.disconnectSocket).toHaveBeenCalledTimes(1);
+      // an end of a session ignored before says nothing about this one
+      expect(session.forgetIgnoredSessionEnd).toHaveBeenCalledTimes(1);
       return { data: { data: { user: me, accessToken: 'access-b', refreshToken: 'refresh-b' } } };
     });
 
