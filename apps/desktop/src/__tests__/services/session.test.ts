@@ -619,7 +619,11 @@ describe('session — the prompt retry after a refresh that got no usable answer
   it('nothing is retried while the page says it is offline, nor when it went offline during the wait', async () => {
     vi.stubGlobal('navigator', { onLine: false });
     http.post.mockRejectedValueOnce(networkError());
-    const settledOffline = expect(refreshAccessToken()).rejects.toMatchObject({ message: 'Network Error' });
+    let failed = false;
+    const settledOffline = expect(refreshAccessToken().catch((err: unknown) => { failed = true; throw err; })).rejects.toMatchObject({ message: 'Network Error' });
+    // an offline page fails at once: its callers do not wait out the retry's delay for nothing
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failed).toBe(true);
     await vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAY_MS);
     await settledOffline;
     expect(http.post).toHaveBeenCalledTimes(1);

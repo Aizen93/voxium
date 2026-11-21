@@ -179,6 +179,8 @@ describe('ending a session clears only that session', () => {
     localStorage.setItem(REFRESH, y.refreshToken);
 
     expect(clearSessionTokens(x.accessToken)).toBe('replaced');
+    // at once, before any queued write: a reload right now must not find it
+    expect(sessionStorage.getItem(REFRESH)).toBeNull();
     await flushTokenStorage();
 
     expect(sessionStorage.getItem(REFRESH)).toBeNull();
