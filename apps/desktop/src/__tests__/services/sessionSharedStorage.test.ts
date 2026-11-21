@@ -2,11 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import axios from 'axios';
 import {
   getRefreshToken, setTokens, flushTokenStorage, hydrateTokens, reloadAfterSessionChange, createKeychainSessionStore,
-  TWIN_SYNC_WAIT_MS, _resetTokenStorageForTests, _setPageReloadForTests, _setSessionChannelForTests, type SessionChannel,
+  TWIN_SYNC_WAIT_MS, _resetTokenStorageForTests, _setPageReloadForTests, _setSessionChannelForTests,
 } from '../../services/tokenStorage';
 import {
   refreshAccessToken, goToLoginPage, SessionLostError, setSessionLostNavigation, _resetSessionForTests, _setRefreshLocksForTests,
 } from '../../services/session';
+import { createBrowser, type Browser, type BrowserTab, type TabLocks } from '../helpers/browserTabs';
 
 // The renewal (services/session.ts) over the REAL session storage
 // (services/tokenStorage.ts): what one decides, the other must honour.
@@ -24,8 +25,10 @@ function expiredPair(sid: string, gen: number, userId = 'user-x') {
 const reload = vi.fn();
 const navigate = vi.fn();
 let post: ReturnType<typeof vi.spyOn>;
+let browser: Browser;
 
 beforeEach(() => {
+  browser = createBrowser();
   localStorage.clear();
   sessionStorage.clear();
   _resetTokenStorageForTests();
@@ -41,82 +44,97 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  browser.dispose();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
-// ─── Two tabs of one browser: two module instances over one localStorage ─────
+// ─── Tabs of one browser: one module copy each (helpers/browserTabs.ts) ──────
+//
+// Each tab has its own sessionStorage (a copy of the page's when it opens, as
+// a duplicated or restored tab has), the one localStorage of the origin, and
+// a `storage` event for every change another tab makes to it.
 
 type Tab = {
+  tab: BrowserTab;
   session: typeof import('../../services/session');
   storage: typeof import('../../services/tokenStorage');
   navigate: ReturnType<typeof vi.fn>;
   reload: ReturnType<typeof vi.fn>;
 };
 
-/** A BroadcastChannel between the tabs: a message reaches every OTHER tab's channel, on a later task. */
-function channelBus() {
-  const members: SessionChannel[] = [];
-  return () => {
-    const own: SessionChannel = {
-      postMessage: (message: unknown) => {
-        for (const other of members) {
-          if (other !== own) setTimeout(() => other.onmessage?.({ data: structuredClone(message) }), 0);
-        }
-      },
-      onmessage: null,
-      close: () => {
-        members.splice(members.indexOf(own), 1);
-      },
-    };
-    members.push(own);
-    return own;
-  };
+async function openTab(locks: TabLocks | null, withChannel = false): Promise<Tab> {
+  const tab = browser.openTab(`tab ${browser.tabs.length + 1}`);
+  return tab.run(async () => {
+    vi.resetModules();
+    const storage = tab.bind(await import('../../services/tokenStorage'));
+    const session = tab.bind(await import('../../services/session'));
+    storage._resetTokenStorageForTests();
+    const tabReload = vi.fn();
+    storage._setPageReloadForTests(tabReload);
+    storage._setSessionChannelForTests(withChannel ? browser.channel : null);
+    session._resetSessionForTests();
+    const tabNavigate = vi.fn();
+    session.setSessionLostNavigation(tabNavigate);
+    session._setRefreshLocksForTests(locks);
+    await storage.hydrateTokens();
+    return { tab, session, storage, navigate: tabNavigate, reload: tabReload };
+  });
 }
 
-async function openTab(locks: unknown, bus: (() => SessionChannel) | null = null): Promise<Tab> {
-  vi.resetModules();
-  const storage = await import('../../services/tokenStorage');
-  const session = await import('../../services/session');
-  storage._resetTokenStorageForTests();
-  const tabReload = vi.fn();
-  storage._setPageReloadForTests(tabReload);
-  storage._setSessionChannelForTests(bus);
-  session._resetSessionForTests();
-  const tabNavigate = vi.fn();
-  session.setSessionLostNavigation(tabNavigate);
-  session._setRefreshLocksForTests(locks as never);
-  await storage.hydrateTokens();
-  return { session, storage, navigate: tabNavigate, reload: tabReload };
+/** Each tab's module copy holds one `storage` and one `pageshow` listener, never one more (a wait for a mark removes its own). */
+function expectOneListenerEach(...tabs: Tab[]): void {
+  for (const { tab } of tabs) {
+    expect(tab.listenerCount('storage'), tab.name).toBe(1);
+    expect(tab.listenerCount('pageshow'), tab.name).toBe(1);
+    expect(tab.duplicateAdds, tab.name).toBe(0);
+  }
 }
 
-/** One exclusive lock shared by the tabs: FIFO, honouring the abort signal while waiting (the Web Locks contract). */
-function sharedLocks() {
-  const queue: Array<() => void> = [];
-  let held = false;
-  return {
-    request(_name: string, opts: { signal: AbortSignal }, callback: () => Promise<unknown>) {
-      return new Promise((resolve, reject) => {
-        const grant = () => {
-          held = true;
-          Promise.resolve().then(callback).then(resolve, reject).finally(() => {
-            held = false;
-            queue.shift()?.();
-          });
-        };
-        opts.signal.addEventListener('abort', () => {
-          const at = queue.indexOf(grant);
-          if (at >= 0) {
-            queue.splice(at, 1);
-            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-          }
-        });
-        if (held) queue.push(grant);
-        else grant();
-      });
-    },
-  };
-}
+describe('the tabs of these tests are tabs of one browser', () => {
+  it("a tab reads its own sessionStorage, never another tab's, and starts with a copy of the page's", async () => {
+    const opened = expiredPair('s-1', 1);
+    sessionStorage.setItem('voxium_access_token', opened.accessToken);
+    sessionStorage.setItem('voxium_refresh_token', opened.refreshToken);
+    const a = await openTab(null);
+    sessionStorage.clear();
+    const b = await openTab(null);
+
+    expect(a.storage.getRefreshToken()).toBe(opened.refreshToken);
+    expect(b.storage.getRefreshToken()).toBeNull();
+    const renewed = expiredPair('s-1', 2);
+    a.storage.setTokens(renewed.accessToken, renewed.refreshToken, false);
+    await a.storage.flushTokenStorage();
+
+    expect(a.tab.sessionStorage.getItem('voxium_refresh_token')).toBe(renewed.refreshToken);
+    expect(b.tab.sessionStorage.getItem('voxium_refresh_token')).toBeNull();
+    expect(sessionStorage.getItem('voxium_refresh_token')).toBeNull();
+    expect(b.storage.followSharedSession()).toBe('followed');
+    expect(b.storage.getRefreshToken()).toBeNull();
+  });
+
+  it('a change of localStorage reaches every OTHER tab as a `storage` event, never the tab that made it', async () => {
+    vi.useFakeTimers();
+    const a = await openTab(null);
+    const b = await openTab(null);
+    const heardByA = vi.fn();
+    const heardByB = vi.fn();
+    a.tab.run(() => window.addEventListener('storage', heardByA));
+    b.tab.run(() => window.addEventListener('storage', heardByB));
+
+    const remembered = expiredPair('s-1', 1);
+    a.storage.setTokens(remembered.accessToken, remembered.refreshToken, true);
+    await a.storage.flushTokenStorage();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(heardByA).not.toHaveBeenCalled();
+    expect(heardByB).toHaveBeenCalled();
+    expect(b.storage.getRefreshToken()).toBe(remembered.refreshToken);
+    a.tab.run(() => window.removeEventListener('storage', heardByA));
+    b.tab.run(() => window.removeEventListener('storage', heardByB));
+    expectOneListenerEach(a, b);
+  });
+});
 
 describe('a not-remembered tab restored with an old copy of its session renews with the newest refresh token', () => {
   const pairAt = (gen: number, expired: boolean) => ({
@@ -132,17 +150,16 @@ describe('a not-remembered tab restored with an old copy of its session renews w
   });
 
   it('its twin, still open at a later generation, answers: the restored tab sends that generation, never its own', async () => {
-    const bus = channelBus();
     // the twin, still open: it renewed to generation 3 since the other tab was closed
     const current = pairAt(3, true);
     sessionStorage.setItem('voxium_access_token', current.accessToken);
     sessionStorage.setItem('voxium_refresh_token', current.refreshToken);
-    const twin = await openTab(null, bus);
+    const twin = await openTab(null, true);
     // the restored tab (Ctrl+Shift+T restores its sessionStorage): generation 1
     const stale = pairAt(1, true);
     sessionStorage.setItem('voxium_access_token', stale.accessToken);
     sessionStorage.setItem('voxium_refresh_token', stale.refreshToken);
-    const restored = await openTab(null, bus);
+    const restored = await openTab(null, true);
     expect(restored.storage.getRefreshToken()).toBe(stale.refreshToken);
     post.mockResolvedValueOnce({ data: { data: pairAt(4, false) } });
 
@@ -152,18 +169,18 @@ describe('a not-remembered tab restored with an old copy of its session renews w
 
     expect(sentRefreshTokens()).toEqual([current.refreshToken]);
     expect(twin.navigate).not.toHaveBeenCalled();
+    expectOneListenerEach(twin, restored);
   });
 
   it('a twin whose access token is still fresh: its pair is the answer and nothing is sent', async () => {
-    const bus = channelBus();
     const current = pairAt(3, false);
     sessionStorage.setItem('voxium_access_token', current.accessToken);
     sessionStorage.setItem('voxium_refresh_token', current.refreshToken);
-    await openTab(null, bus);
+    await openTab(null, true);
     const stale = pairAt(1, true);
     sessionStorage.setItem('voxium_access_token', stale.accessToken);
     sessionStorage.setItem('voxium_refresh_token', stale.refreshToken);
-    const restored = await openTab(null, bus);
+    const restored = await openTab(null, true);
 
     const renewal = restored.session.refreshAccessToken();
     await vi.advanceTimersByTimeAsync(50);
@@ -176,7 +193,7 @@ describe('a not-remembered tab restored with an old copy of its session renews w
     const stale = pairAt(1, true);
     sessionStorage.setItem('voxium_access_token', stale.accessToken);
     sessionStorage.setItem('voxium_refresh_token', stale.refreshToken);
-    const alone = await openTab(null, channelBus());
+    const alone = await openTab(null, true);
     post.mockResolvedValueOnce({ data: { data: pairAt(2, false) } });
 
     const renewal = alone.session.refreshAccessToken();
@@ -218,7 +235,7 @@ describe('a credential change in one tab while another tab renews', () => {
     const oldRefresh = r1();
     localStorage.setItem('voxium_access_token', jwt({ userId: 'user-x', sid: 's-1', exp: nowSeconds() - 60, v: 1 }));
     localStorage.setItem('voxium_refresh_token', oldRefresh);
-    const locks = sharedLocks();
+    const locks = browser.locks();
     const tabA = await openTab(locks);
     const tabB = await openTab(locks);
     const state = { committed: false };
@@ -246,6 +263,7 @@ describe('a credential change in one tab while another tab renews', () => {
     expect(tabA.navigate).not.toHaveBeenCalled();
     expect(localStorage.getItem('voxium_refresh_token')).toBe(x2.refreshToken);
     expect(localStorage.getItem('voxium_credential_change')).toBeNull();
+    expectOneListenerEach(tabA, tabB);
   });
 
   it('without Web Locks (an origin served without HTTPS): the other tab\'s renewal waits for the change all the same', async () => {
@@ -270,6 +288,7 @@ describe('a credential change in one tab while another tab renews', () => {
     expect(post).not.toHaveBeenCalled();
     expect(tabB.navigate).not.toHaveBeenCalled();
     expect(localStorage.getItem('voxium_refresh_token')).toBe(x2.refreshToken);
+    expectOneListenerEach(tabA, tabB);
   });
 
   it('without Web Locks, a renewal sent just before the change and refused after its commit is not final: it takes the change\'s pair', async () => {
@@ -298,6 +317,7 @@ describe('a credential change in one tab while another tab renews', () => {
     expect(post).toHaveBeenCalledTimes(1);
     expect(tabB.navigate).not.toHaveBeenCalled();
     expect(localStorage.getItem('voxium_refresh_token')).toBe(x2.refreshToken);
+    expectOneListenerEach(tabA, tabB);
   });
 });
 

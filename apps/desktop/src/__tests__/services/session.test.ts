@@ -48,31 +48,70 @@ const storage = vi.hoisted(() => ({
     return 'cleared';
   }),
   reloadAfterSessionChange: vi.fn(),
+  // ─── The mark of a credential change, as the real module reads it ───────
   /** The T of a credential change marked in flight by some tab of this browser (null: none). */
   mark: null as number | null,
+  /** Which mark is the one written now: a removal removes only its own. */
+  markId: 0,
   markWaiters: [] as Array<() => void>,
   /** The mark goes (its change was answered, or failed): every wait for it ends. */
   clearMark: () => {
     storage.mark = null;
     for (const waiter of storage.markWaiters.splice(0)) waiter();
   },
+  /** Live as tokenStorage.credentialChangeInFlightUntil reads it: before T, and T no further ahead than `maxAheadMs` and 5 s. */
+  liveMark: (maxAheadMs: number, now: number = Date.now()): number | null => {
+    const until = storage.mark;
+    if (until === null || until <= now || until - now > maxAheadMs + 5_000) return null;
+    return until;
+  },
   markCredentialChange: vi.fn((until: number) => {
     storage.mark = until;
-    return storage.unmark;
+    const id = ++storage.markId;
+    // tokenStorage's removal: only while the mark is still this one
+    return () => {
+      storage.unmark();
+      if (storage.markId === id) storage.clearMark();
+    };
   }),
-  unmark: vi.fn(() => storage.clearMark()),
-  credentialChangeInFlightUntil: vi.fn(() => storage.mark),
-  /** This tab asked its twins and no renewal has waited for their answer yet. */
+  /** Called by every removal of a mark of this tab, whether or not it was still the one written. */
+  unmark: vi.fn(),
+  credentialChangeInFlightUntil: vi.fn((maxAheadMs: number, now?: number) => storage.liveMark(maxAheadMs, now)),
+  /** As the real wait: false at once without a live mark; else until the mark goes, or its T at the latest. */
+  waitForCredentialChange: vi.fn((maxAheadMs: number) => {
+    const until = storage.liveMark(maxAheadMs);
+    if (until === null) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(true), until - Date.now());
+      storage.markWaiters.push(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  }),
+  // ─── This tab's question to its twins, as the real module bounds it ──────
+  /** This tab asked its twins (at `twinAskedAt`) and no renewal has waited for their answer yet. */
   twinAsked: false,
+  twinAskedAt: 0,
+  /** Ends the wait now, as a twin's answer does. */
   twinAnswer: null as (() => void) | null,
+  askTwins: () => {
+    storage.twinAsked = true;
+    storage.twinAskedAt = Date.now();
+  },
   twinSyncPending: vi.fn(() => storage.twinAsked),
+  /** As the real wait: once, at most 300 ms (TWIN_SYNC_WAIT_MS) after the question. */
   awaitTwinSync: vi.fn(() => {
+    if (!storage.twinAsked) return Promise.resolve();
     storage.twinAsked = false;
-    return new Promise<void>((resolve) => { storage.twinAnswer = resolve; });
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, Math.max(0, storage.twinAskedAt + 300 - Date.now()));
+      storage.twinAnswer = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
   }),
-  waitForCredentialChange: vi.fn(() => (storage.mark === null
-    ? Promise.resolve(false)
-    : new Promise<boolean>((resolve) => { storage.markWaiters.push(() => resolve(true)); }))),
 }));
 vi.mock('../../services/tokenStorage', () => ({
   getAccessToken: storage.getAccessToken,
@@ -155,8 +194,10 @@ beforeEach(() => {
   storage.follow = 'followed';
   storage.clearOutcome = 'cleared';
   storage.mark = null;
+  storage.markId = 0;
   storage.markWaiters = [];
   storage.twinAsked = false;
+  storage.twinAskedAt = 0;
   storage.twinAnswer = null;
 });
 
@@ -1255,6 +1296,34 @@ describe('session — a credential change in another tab, marked in the shared s
     expect(CREDENTIAL_CHANGE_MARK_MS).toBe(CREDENTIAL_CHANGE_TIMEOUT_MS + 5_000);
   });
 
+  it('a mark past its T, or further ahead than a change can take (80 s and 5 s), holds nothing: the request goes out at once', () => {
+    storage.access = expiredToken();
+    http.post.mockReturnValue(new Promise(() => {}));
+    storage.mark = Date.now() - 1;
+    void refreshAccessToken();
+    expect(http.post).toHaveBeenCalledTimes(1);
+
+    _resetSessionForTests();
+    storage.mark = Date.now() + 80_000 + 5_000 + 1_000;
+    void refreshAccessToken();
+    expect(http.post).toHaveBeenCalledTimes(2);
+    expect(storage.waitForCredentialChange).not.toHaveBeenCalled();
+  });
+
+  it('a mark nobody removes (its tab was closed) holds a renewal until its T, not longer', async () => {
+    vi.useFakeTimers();
+    storage.access = expiredToken();
+    storage.mark = Date.now() + 10_000;
+    http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
+    const renewal = refreshAccessToken();
+
+    await vi.advanceTimersByTimeAsync(10_000 - 1);
+    expect(http.post).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(renewal).resolves.toBe('access-new');
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
   it('a renewal while it is in flight waits for it, then takes the pair it stored: nothing is sent', async () => {
     storage.access = expiredToken();
     markLive();
@@ -1385,7 +1454,7 @@ describe('session — a credential change in another tab, marked in the shared s
 
 describe('session — a not-remembered tab that asked its twins renews on their answer', () => {
   it('its renewal waits for the answer, then sends the newest refresh token it holds', async () => {
-    storage.twinAsked = true;
+    storage.askTwins();
     storage.access = expiredToken();
     http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
     const renewal = refreshAccessToken();
@@ -1402,7 +1471,7 @@ describe('session — a not-remembered tab that asked its twins renews on their 
   });
 
   it('a fresh pair in the answer is the renewal\'s answer: nothing is sent', async () => {
-    storage.twinAsked = true;
+    storage.askTwins();
     storage.access = expiredToken();
     const renewal = refreshAccessToken();
     await Promise.resolve();
@@ -1416,13 +1485,15 @@ describe('session — a not-remembered tab that asked its twins renews on their 
     expect(http.post).not.toHaveBeenCalled();
   });
 
-  it('no answer within the wait: it sends what it holds, as before', async () => {
-    storage.twinAsked = true;
+  it('no answer within the wait: it sends what it holds, 300 ms after the question at the latest', async () => {
+    vi.useFakeTimers();
+    storage.askTwins();
     storage.access = expiredToken();
     http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
     const renewal = refreshAccessToken();
-    await Promise.resolve();
-    storage.twinAnswer!(); // the wait ran out
+    await vi.advanceTimersByTimeAsync(300 - 1);
+    expect(http.post).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
 
     await expect(renewal).resolves.toBe('access-new');
     expect(http.post.mock.calls[0][1]).toEqual({ refreshToken: 'refresh-old', client: 'web' });
@@ -1437,7 +1508,7 @@ describe('session — a not-remembered tab that asked its twins renews on their 
   });
 
   it('a sign-out and a new sign-in during the wait: the old renewal sends nothing for the new session', async () => {
-    storage.twinAsked = true;
+    storage.askTwins();
     storage.access = expiredToken();
     const outcome = refreshAccessToken().then(() => 'resolved', (err: unknown) => err);
     await Promise.resolve();
@@ -1455,7 +1526,7 @@ describe('session — a not-remembered tab that asked its twins renews on their 
     const locks = fakeLocks();
     _setRefreshLocksForTests(locks.manager);
     locks.hold();
-    storage.twinAsked = true;
+    storage.askTwins();
     storage.access = expiredToken();
     http.post.mockResolvedValueOnce(renewed('access-new', 'refresh-new'));
     const renewal = refreshAccessToken();
@@ -1469,7 +1540,7 @@ describe('session — a not-remembered tab that asked its twins renews on their 
   });
 
   it('a credential change waits for the answer too, and goes out on the newest pair of the session', async () => {
-    storage.twinAsked = true;
+    storage.askTwins();
     storage.access = freshToken();
     const seen: boolean[] = [];
     const change = vi.fn(async (stillCurrent: () => boolean) => {
@@ -1527,6 +1598,28 @@ describe('session — this tab\'s own credential change marks itself in flight',
     expect(storage.unmark).toHaveBeenCalledTimes(2);
     expect(storage.mark).toBeNull();
     void pending;
+  });
+
+  it('the change of an ended session, settling later, leaves the next session\'s mark in place: a sign-out still removes that one', async () => {
+    storage.access = freshToken();
+    let releaseOld!: (value: string) => void;
+    const old = runCredentialChange(() => new Promise<string>((resolve) => { releaseOld = resolve; }));
+    await vi.waitFor(() => expect(storage.markCredentialChange).toHaveBeenCalledTimes(1));
+    endSessionRenewals();
+    expect(storage.mark).toBeNull();
+
+    // the next session's change is out: its mark is the one written now
+    const next = runCredentialChange(() => new Promise<string>(() => {}));
+    await vi.waitFor(() => expect(storage.markCredentialChange).toHaveBeenCalledTimes(2));
+    const nextMark = storage.mark;
+    expect(nextMark).not.toBeNull();
+    releaseOld('changed');
+    await expect(old).resolves.toBe('changed');
+    expect(storage.mark).toBe(nextMark);
+
+    endSessionRenewals();
+    expect(storage.mark).toBeNull();
+    void next;
   });
 });
 

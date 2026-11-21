@@ -43,15 +43,17 @@ describe('the mark of a credential change in flight', () => {
     expect(localStorage.getItem(KEY)).toBeNull();
   });
 
-  it('is live before T and while T is no further ahead than a mark is written for, with the tolerance', () => {
+  it('is live before T and while T is no further ahead than a mark is written for, with 5 s of tolerance', () => {
     const now = 1_000_000_000_000;
     localStorage.setItem(KEY, String(now + MAX_AHEAD));
     expect(credentialChangeInFlightUntil(MAX_AHEAD, now)).toBe(now + MAX_AHEAD);
-    expect(credentialChangeInFlightUntil(MAX_AHEAD, now - CREDENTIAL_CHANGE_MARK_TOLERANCE_MS)).toBe(now + MAX_AHEAD);
+    // the device's clock set back by up to 5 s between the write and the read
+    expect(CREDENTIAL_CHANGE_MARK_TOLERANCE_MS).toBe(5_000);
+    expect(credentialChangeInFlightUntil(MAX_AHEAD, now - 5_000)).toBe(now + MAX_AHEAD);
     // past T: a mark left behind (its tab crashed) is ignored
     expect(credentialChangeInFlightUntil(MAX_AHEAD, now + MAX_AHEAD)).toBeNull();
     // further ahead than any change can take: not a mark this app wrote
-    expect(credentialChangeInFlightUntil(MAX_AHEAD, now - CREDENTIAL_CHANGE_MARK_TOLERANCE_MS - 1)).toBeNull();
+    expect(credentialChangeInFlightUntil(MAX_AHEAD, now - 5_001)).toBeNull();
   });
 
   it('anything that is not a time is ignored', () => {
@@ -86,15 +88,18 @@ describe('the mark of a credential change in flight', () => {
     await expect(wait).resolves.toBe(true);
   });
 
-  it('... and at T at the latest, the mark still there', async () => {
+  it('... and at T at the latest, the mark still there (between two reads of it)', async () => {
     vi.useFakeTimers();
-    localStorage.setItem(KEY, String(Date.now() + 30_000));
+    // off the poll's grid: the wait ends at T itself, not at the next read
+    const ahead = 30_000 + Math.floor(CREDENTIAL_CHANGE_MARK_POLL_MS / 2) + 1;
+    localStorage.setItem(KEY, String(Date.now() + ahead));
     let ended = false;
     const wait = waitForCredentialChange(MAX_AHEAD).then((waited) => { ended = true; return waited; });
 
-    await vi.advanceTimersByTimeAsync(30_000 - 1);
+    await vi.advanceTimersByTimeAsync(ahead - 1);
     expect(ended).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
+    expect(ended).toBe(true);
     await expect(wait).resolves.toBe(true);
   });
 

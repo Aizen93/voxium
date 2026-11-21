@@ -25,15 +25,39 @@ vi.mock('../../services/socket', () => ({
 const storage = vi.hoisted(() => ({
   getAccessToken: vi.fn(() => 'access-old' as string | null),
   setTokens: vi.fn(),
-  clearTokens: vi.fn(),
+  // the memory lets go of the pair
+  clearTokens: vi.fn(() => storage.forgetPair()),
   getRefreshToken: vi.fn(() => 'refresh-old' as string | null),
-  // A session-ending clear: 'replaced' when another tab stored a different session meanwhile
-  clearSessionTokens: vi.fn((_endedToken: string | null): 'cleared' | 'replaced' => { storage.clearTokens(); return 'cleared'; }),
+  /** The memory lets go of the pair: nothing is read from it any more. */
+  forgetPair: () => {
+    storage.getAccessToken.mockReturnValue(null);
+    storage.getRefreshToken.mockReturnValue(null);
+  },
+  // A session-ending clear, as the real one decides for these tokens (they
+  // name no session, so only the very same token is of the ended session):
+  // nothing held, or a reload pending → the memory alone lets go; another
+  // token held → 'replaced', the memory lets go and the stored pair stays;
+  // else the pair is cleared
+  clearSessionTokensAsTheModuleDoes: (endedToken: string | null, _options?: { accountWide?: boolean }): 'cleared' | 'replaced' => {
+    const access = storage.getAccessToken();
+    const refresh = storage.getRefreshToken();
+    if (storage.isReloadPending() || (access === null && refresh === null)) return storage.letGoOfSession();
+    if (endedToken !== null && endedToken !== access && endedToken !== refresh) {
+      storage.forgetPair();
+      return 'replaced';
+    }
+    storage.clearTokens();
+    return 'cleared';
+  },
+  clearSessionTokens: vi.fn((endedToken: string | null, options?: { accountWide?: boolean }) => storage.clearSessionTokensAsTheModuleDoes(endedToken, options)),
   reloadAfterSessionChange: vi.fn(),
   announceSessionEnded: vi.fn(),
   // no reload onto another session pending; a sign-out with no session to end lets go of the memory only
   isReloadPending: vi.fn(() => false),
-  letGoOfSession: vi.fn((): 'cleared' | 'replaced' => 'cleared'),
+  letGoOfSession: vi.fn((): 'cleared' | 'replaced' => {
+    storage.forgetPair();
+    return storage.isReloadPending() ? 'replaced' : 'cleared';
+  }),
   // after a 'replaced' restore: what is stored now, taken up (false: the caller reloads onto it)
   takeUpStoredSession: vi.fn(() => false),
   isRemembered: vi.fn(() => true),
@@ -92,7 +116,8 @@ beforeEach(() => {
   _resetSessionRestoreForTests();
   storage.getAccessToken.mockReturnValue('access-old');
   storage.getRefreshToken.mockReturnValue('refresh-old');
-  storage.clearSessionTokens.mockImplementation(() => { storage.clearTokens(); return 'cleared'; });
+  storage.clearSessionTokens.mockImplementation(storage.clearSessionTokensAsTheModuleDoes);
+  storage.isReloadPending.mockReturnValue(false);
   storage.hydrateTokens.mockResolvedValue(true);
   storage.getTrustedDeviceToken.mockReturnValue(null);
   useAuthStore.setState({ user: null, isAuthenticated: true, isLoading: true });
@@ -941,6 +966,41 @@ describe('authStore — a local end of a session clears only that session (anoth
     await useAuthStore.getState().deleteAccount('pw');
 
     expect(storage.clearSessionTokens).toHaveBeenCalledWith('refresh-old', { accountWide: true });
+  });
+
+  it('an account deletion from a tab holding only an access token ends the session that token names', async () => {
+    useAuthStore.setState({ user: me as never, isAuthenticated: true });
+    storage.getRefreshToken.mockReturnValue(null);
+    storage.getAccessToken.mockReturnValue('access-only');
+    api.delete.mockResolvedValueOnce({ data: {} });
+
+    await useAuthStore.getState().deleteAccount('pw');
+
+    expect(storage.clearSessionTokens).toHaveBeenCalledWith('access-only', { accountWide: true });
+    expect(storage.clearTokens).toHaveBeenCalled();
+  });
+
+  it('a sign-out while the page reloads onto another session lets go of the memory only, and reports it replaced', () => {
+    useAuthStore.setState({ user: me as never, isAuthenticated: true });
+    storage.isReloadPending.mockReturnValue(true);
+
+    expect(useAuthStore.getState().logout()).toBe('replaced');
+
+    expect(storage.clearSessionTokens).not.toHaveBeenCalled();
+    expect(storage.letGoOfSession).toHaveBeenCalledTimes(1);
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(revocation.endSessionOnServer).not.toHaveBeenCalled();
+    expect(storage.announceSessionEnded).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  it('a sign-out given a token of another session than the one held ends nothing of the held one', () => {
+    useAuthStore.setState({ user: me as never, isAuthenticated: true });
+
+    expect(useAuthStore.getState().logout({ tellServer: false, endingSession: 'refresh-of-a-session-let-go-of' })).toBe('replaced');
+
+    expect(storage.clearTokens).not.toHaveBeenCalled();
+    expect(storage.reloadAfterSessionChange).toHaveBeenCalledTimes(1);
   });
 
   it('a refused restore ends the session it was made with; a different one stored meanwhile is restored instead', async () => {
