@@ -64,9 +64,10 @@ export function isSameView(a: ChatViewScope | null, b: ChatViewScope | null): bo
 }
 
 /**
- * How long the view remembers the newest version of a row it does not show
- * yet (an edit whose page or insert is still on its way). It is never wrong
- * later (an older version stays older), so the bound only caps memory: an
+ * How long the view remembers a message deleted on the server, or the newest
+ * version of a row it does not show yet (an edit whose insert is still being
+ * decrypted). Neither is ever wrong later (a deleted message never comes
+ * back, an older version stays older), so the bound only caps memory: an
  * entry serves a gate call or a page request that began before its event and
  * ends after it, and every change of view drops them all (startView). A
  * call that outlives it (a long key-share claim, a request on a stalled
@@ -74,19 +75,33 @@ export function isSameView(a: ChatViewScope | null, b: ChatViewScope | null): bo
  * the next fetch.
  */
 export const RECENT_CHANGE_MAX_AGE_MS = 5 * 60_000;
-/** Such entries at most; the oldest goes first beyond. */
+/** Such entries at most (deletes and versions together); the oldest goes first beyond. */
 export const RECENT_CHANGES_MAX = 500;
 
-/** By message id, oldest first: the version not shown yet. */
-const recentChanges = new Map<string, { at: number; row: Message }>();
+/** By message id, oldest first: `row` null for a delete, else the version not shown yet. */
+const recentChanges = new Map<string, { at: number; row: Message | null }>();
+/** Advanced at every change of view (startView): a clear, a fetch of another scope, a logout. */
+let viewEpoch = 0;
+
+/**
+ * The view now: a socket handler notes it when its event arrives and hands it
+ * to addMessage / updateMessage, which apply nothing gated for an earlier
+ * view (the view on screen began after that event, and so did its own fetch).
+ */
+export function chatViewEpoch(): number {
+  return viewEpoch;
+}
 
 /**
  * A new view, of `scope` (a fetch of another channel or conversation than the
  * one recorded) or of none (a clear, a logout): the rows, the reply being
- * composed, the typing line and everything the last view remembered go, and
- * its page in flight is aborted. Synchronous, so a fetch's page is merged
- * with nothing of another scope, and nothing of another scope is shown while
- * it is on its way. With no scope recorded, every writer drops what it brings.
+ * composed, the typing line and everything the last view remembered go, its
+ * page in flight is aborted, and nothing a handler gated for it lands (the
+ * epoch moves on). Synchronous, so a fetch's page is merged with nothing of
+ * another scope, and nothing of another scope is shown while it is on its
+ * way. With no scope recorded, every writer drops what it brings, and the
+ * view on screen fetches its channel or conversation again, which records it
+ * (ChatArea, DMChatArea).
  */
 function startView(scope: ChatViewScope | null): void {
   if (activeFetchController) {
@@ -95,6 +110,7 @@ function startView(scope: ChatViewScope | null): void {
   }
   lastFetchKey = '';
   recentChanges.clear();
+  viewEpoch += 1;
   typingTimers.forEach((timer) => clearTimeout(timer));
   typingTimers.clear();
   useChatStore.setState({
@@ -145,7 +161,7 @@ export function resetChatViewState(): void {
   startView(null);
 }
 
-function rememberChange(messageId: string, row: Message): void {
+function rememberChange(messageId: string, row: Message | null): void {
   recentChanges.delete(messageId);
   recentChanges.set(messageId, { at: Date.now(), row });
   for (const oldest of recentChanges.keys()) {
@@ -154,8 +170,8 @@ function rememberChange(messageId: string, row: Message): void {
   }
 }
 
-/** What the view remembers of a message: a version it does not show yet, or undefined (nothing). */
-function recentChangeOf(messageId: string): Message | undefined {
+/** What the view remembers of a message: null (deleted), a version it does not show yet, or undefined (nothing). */
+function recentChangeOf(messageId: string): Message | null | undefined {
   const now = Date.now();
   // an age below zero (the clock stepped back) keeps an entry: it is never wrong, only old
   for (const [id, change] of recentChanges) {
@@ -183,6 +199,23 @@ function pickVersion(held: Message, incoming: Message, onEven: 'held' | 'incomin
   return onEven === 'held' ? held : incoming;
 }
 
+/** Whether row `a` comes after row `b`: by the server's `createdAt`, compared as times, then by id. */
+function comesAfter(a: Message, b: Message): boolean {
+  const at = Date.parse(a.createdAt);
+  const bt = Date.parse(b.createdAt);
+  // a time that does not parse is compared with nothing: such a row lands
+  // where it arrives, and no row is moved past it
+  if (at !== bt) return at > bt;
+  return a.id > b.id;
+}
+
+/** `messages` with `row` where its time puts it, scanned from the end (an arrival is nearly always the newest). */
+function placedByTime(messages: readonly Message[], row: Message): Message[] {
+  let at = messages.length;
+  while (at > 0 && comesAfter(messages[at - 1], row)) at -= 1;
+  return [...messages.slice(0, at), row, ...messages.slice(at)];
+}
+
 function replacedAt(messages: readonly Message[], index: number, row: Message): Message[] {
   const next = messages.slice();
   next[index] = row;
@@ -192,10 +225,11 @@ function replacedAt(messages: readonly Message[], index: number, row: Message): 
 /**
  * A fetched page as the view takes it, against the rows it shows (always of
  * the page's own channel or conversation: a fetch of another one started a
- * new view first): each row is the copy pickVersion keeps of the page's, a
- * version the view did not show yet (taken now) and the one it shows
- * (`onEven` for the last). A page asked for before an edit and answered
- * after it never puts the older version over the newer one.
+ * new view first): a message deleted since is left out, and each row is the
+ * copy pickVersion keeps of the page's, a version the view did not show yet
+ * (taken now) and the one it shows (`onEven` for the last). A page asked for
+ * before an edit and answered after it never puts the older version over the
+ * newer one.
  */
 function resolvePage(page: readonly Message[], shown: readonly Message[], onEven: 'held' | 'incoming'): Message[] {
   const held = new Map(shown.map((m) => [m.id, m]));
@@ -203,6 +237,7 @@ function resolvePage(page: readonly Message[], shown: readonly Message[], onEven
   const out: Message[] = [];
   for (const row of page) {
     const change = recentChangeOf(row.id);
+    if (change === null) continue;
     let kept = row;
     if (change) {
       kept = pickVersion(change, kept, 'incoming', readOnly);
@@ -221,6 +256,14 @@ function withOlderPage(page: readonly Message[], shown: readonly Message[]): Mes
   const both = new Map(resolved.filter((m) => shownIds.has(m.id)).map((m) => [m.id, m]));
   return [...resolved.filter((m) => !shownIds.has(m.id)), ...shown.map((m) => both.get(m.id) ?? m)];
 }
+
+/**
+ * What addMessage did with a row: `added` (a new row of the view), `held`
+ * (the view shows a row of that id already) or `dropped` (it shows none:
+ * another scope's view or none, a message deleted on the server meanwhile,
+ * or an earlier view's row the view on screen does not hold).
+ */
+export type RowLanding = 'added' | 'held' | 'dropped';
 
 interface ChatState {
   messages: Message[];
@@ -255,21 +298,34 @@ interface ChatState {
   toggleDMReaction: (conversationId: string, messageId: string, emoji: string) => Promise<void>;
   /**
    * A new row written for `scope` (the channel or conversation the caller
-   * sent to, or the socket event names); true when the view took it as a new
-   * row. Nothing for another scope than the view's (or none recorded), or a
-   * copy of a row it shows (it keeps that one unless this is provably newer).
+   * sent to, or the socket event names), where its `createdAt` puts it. It
+   * answers what became of it (RowLanding): `added` as a new row; `held` when
+   * the view shows a row of that id already (kept, unless this copy is
+   * provably newer), also when `view` (chatViewEpoch, noted when the event
+   * arrived) is an earlier view than the one on screen, whose page brought
+   * the row in (nothing of this copy is applied then); `dropped` for another
+   * scope than the view's (or none recorded), a message deleted since, or an
+   * earlier `view` whose row the view on screen does not show. The sender's
+   * own row passes no `view`: it lands in the scope it was sent to whenever
+   * that is the view's.
    */
-  addMessage: (message: Message, scope: ChatViewScope) => boolean;
+  addMessage: (message: Message, scope: ChatViewScope, view?: number) => RowLanding;
   /**
    * A row's new version, written for `scope`; true when the view shows it.
-   * Nothing for another scope (not kept either); a provably newer version
-   * held stands, and a row the view does not show yet is remembered for its
-   * insert or its page.
+   * Nothing for another scope (not kept either) or an earlier `view`; a
+   * provably newer version held stands, a deleted message stays out, and a
+   * row the view does not show yet is remembered for its insert or its page.
    */
-  updateMessage: (message: Message, scope: ChatViewScope) => boolean;
+  updateMessage: (message: Message, scope: ChatViewScope, view?: number) => boolean;
   /** A row's reactions, for `scope` (nothing for another one). */
   updateMessageReactions: (messageId: string, reactions: ReactionGroup[], scope: ChatViewScope) => void;
-  deleteMessage: (messageId: string) => void;
+  /**
+   * Removes a row the view holds. `deletedOnServerIn`: the server deleted it
+   * in that channel or conversation (a socket delete): nothing for another
+   * one, and no insert, edit or page still on its way brings it back to this
+   * view. Without it, a local removal (a cleared floor) that remembers nothing.
+   */
+  deleteMessage: (messageId: string, opts?: { deletedOnServerIn: ChatViewScope }) => void;
   /**
    * Drops every loaded row a webhook posted in a channel (`message:bulk_deleted`,
    * a webhook deleted with purge), when the view is of that channel.
@@ -663,17 +719,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  addMessage: (message: Message, scope: ChatViewScope) => {
+  addMessage: (message: Message, scope: ChatViewScope, view?: number) => {
     // written for another channel or conversation than the view's rows belong to
-    if (!isViewOf(scope)) return false;
+    if (!isViewOf(scope)) return 'dropped';
+    // deleted on the server meanwhile
     const change = recentChangeOf(message.id);
-    const readOnly = viewHeldReadOnly();
+    if (change === null) return 'dropped';
     const { messages } = get();
     const index = messages.findIndex((m) => m.id === message.id);
+    // gated for an earlier view: nothing of this copy applies, but the view
+    // on screen may show the row already (its page brought it in)
+    if (view !== undefined && view !== viewEpoch) return index === -1 ? 'dropped' : 'held';
+    const readOnly = viewHeldReadOnly();
     if (index !== -1) {
       const kept = pickVersion(messages[index], message, 'held', readOnly);
       if (kept !== messages[index]) set({ messages: replacedAt(messages, index, kept) });
-      return false;
+      return 'held';
     }
     let row = message;
     if (change) {
@@ -681,14 +742,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       row = pickVersion(change, message, 'incoming', readOnly);
       recentChanges.delete(message.id);
     }
-    set({ messages: [...messages, row] });
-    return true;
+    set({ messages: placedByTime(messages, row) });
+    return 'added';
   },
 
-  updateMessage: (message: Message, scope: ChatViewScope) => {
+  updateMessage: (message: Message, scope: ChatViewScope, view?: number) => {
     // another channel's or conversation's edit is neither shown nor kept
     if (!isViewOf(scope)) return false;
+    if (view !== undefined && view !== viewEpoch) return false;
     const change = recentChangeOf(message.id);
+    if (change === null) return false;
     const readOnly = viewHeldReadOnly();
     const { messages } = get();
     const index = messages.findIndex((m) => m.id === message.id);
@@ -712,10 +775,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  deleteMessage: (messageId: string) => {
-    set((state) => ({
-      messages: state.messages.filter((m) => m.id !== messageId),
-    }));
+  deleteMessage: (messageId: string, opts?: { deletedOnServerIn: ChatViewScope }) => {
+    if (opts) {
+      // the server's delete in another channel or conversation: nothing here
+      if (!isViewOf(opts.deletedOnServerIn)) return;
+      rememberChange(messageId, null);
+    }
+    const { messages } = get();
+    if (!messages.some((m) => m.id === messageId)) return;
+    set({ messages: messages.filter((m) => m.id !== messageId) });
   },
 
   removeWebhookMessages: (channelId: string, webhookId: string) => {
@@ -738,7 +806,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clearMessages: () => {
     // another view, of nothing until a fetch names its channel or conversation:
-    // the fetch in flight is aborted, and what this one remembered goes
+    // the fetch in flight is aborted, what this one remembered goes, and
+    // nothing gated for it lands
     startView(null);
   },
 

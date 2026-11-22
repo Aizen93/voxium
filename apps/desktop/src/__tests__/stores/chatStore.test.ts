@@ -3,17 +3,21 @@ import type { Message } from '@voxium/shared';
 
 /**
  * What the chat view shows for one message when its copies arrive out of
- * order: a page asked for before an edit and answered after it, an edit that
- * arrives before its row is shown, a view of another scope fetched over it.
- * The rules (stores/chatStore.ts):
+ * order: a page asked for before an edit or a delete and answered after it,
+ * an insert whose decrypt ends after its own edit or delete arrived, two
+ * inserts whose decrypts end in the other order. The rules (stores/chatStore.ts):
  *  - the view holds the rows of ONE channel or conversation, the one its last
  *    fetch asked for: a fetch of another one starts a new view before it asks,
  *    and a writer for another one writes and keeps nothing;
  *  - a row the view shows is never replaced by a provably older version of
  *    itself (isNewerVersion: `editedAt`, the original the oldest), and a
  *    newer version replaces it whatever the gate made of it;
+ *  - a message deleted on the server stays out of the view: no late insert,
+ *    edit or page brings it back (remembered per view, bounded);
  *  - an edit that arrives before its row is shown is what the row shows once
- *    it lands (remembered per view, bounded).
+ *    it lands;
+ *  - rows stand in the order of the server's `createdAt`, then id;
+ *  - nothing gated for an earlier view lands in the view on screen.
  */
 
 const { apiGet, apiPost, channels, dm } = vi.hoisted(() => ({
@@ -53,6 +57,7 @@ vi.mock('../../services/e2e/dmCrypto', async (importOriginal) => {
 
 import {
   useChatStore,
+  chatViewEpoch,
   channelView,
   conversationView,
   resetChatViewState,
@@ -361,7 +366,7 @@ describe('the view holds the rows of one channel or conversation', () => {
     open(channelView('same-id'), [channelsRow]);
     const before = shown();
 
-    expect(state().addMessage(dmRow('Y', { conversationId: 'same-id' }), conversationView('same-id'))).toBe(false);
+    expect(state().addMessage(dmRow('Y', { conversationId: 'same-id' }), conversationView('same-id'))).toBe('dropped');
     expect(state().updateMessage(dmRow('X', { conversationId: 'same-id', content: 'their edit', editedAt: EDIT_1 }), conversationView('same-id'))).toBe(false);
     state().updateMessageReactions('X', [{ emoji: '👍', count: 1, userIds: ['u-bob'] }], conversationView('same-id'));
     expect(shown()).toBe(before);
@@ -456,16 +461,19 @@ describe('the view holds the rows of one channel or conversation', () => {
     open(CH, [row('m1'), row('m2', { createdAt: at(1), reactions: [] })]);
     const before = shown();
 
-    expect(state().addMessage(dmRow('d1'), DM)).toBe(false);
+    expect(state().addMessage(dmRow('d1'), DM)).toBe('dropped');
     expect(state().updateMessage(row('m1', { content: 'their edit', editedAt: EDIT_1 }), DM)).toBe(false);
     expect(state().updateMessage(row('m9', { content: 'their kept edit', editedAt: EDIT_1 }), SEC)).toBe(false);
     state().updateMessageReactions('m2', [{ emoji: '👍', count: 1, userIds: ['u-bob'] }], DM);
+    state().deleteMessage('m1', { deletedOnServerIn: DM });
+    state().deleteMessage('m7', { deletedOnServerIn: SEC });
     state().removeWebhookMessages('ch-2', 'wh-1');
 
     expect(shown()).toBe(before);
-    // nothing of them waits in this view either
-    expect(state().addMessage(row('m9'), CH)).toBe(true);
+    // nothing of them waits in this view either: not the edit, not the delete
+    expect(state().addMessage(row('m9'), CH)).toBe('added');
     expect(byId('m9')?.content).toBe('text of m9');
+    expect(state().addMessage(row('m7', { createdAt: at(2) }), CH)).toBe('added');
   });
 
   it('the same writers for the view\'s scope apply', () => {
@@ -474,6 +482,8 @@ describe('the view holds the rows of one channel or conversation', () => {
     state().updateMessageReactions('m2', reactions, CH);
     expect(byId('m2')?.reactions).toEqual(reactions);
     expect(state().updateMessage(row('m1', { content: 'edited', editedAt: EDIT_1 }), CH)).toBe(true);
+    state().deleteMessage('m2', { deletedOnServerIn: CH });
+    expect(ids()).toEqual(['m1']);
   });
 
   it('a webhook\'s purge applies to the view of its channel only', () => {
@@ -492,19 +502,39 @@ describe('the view holds the rows of one channel or conversation', () => {
   it('with no scope recorded (after a clear), every writer drops what it brings', () => {
     state().clearMessages();
     expect(state().viewScope).toBeNull();
-    expect(state().addMessage(row('m1'), CH)).toBe(false);
+    expect(state().addMessage(row('m1'), CH)).toBe('dropped');
     expect(state().updateMessage(row('m2', { editedAt: EDIT_1 }), CH)).toBe(false);
     expect(shown()).toEqual([]);
     // and the edit was not kept for the channel's next view
     open(CH);
-    expect(state().addMessage(row('m2'), CH)).toBe(true);
+    expect(state().addMessage(row('m2'), CH)).toBe('added');
     expect(byId('m2')?.content).toBe('text of m2');
   });
 
   it('a scope that names no channel or conversation matches none', () => {
     open(channelView(''));
-    expect(state().addMessage(row('m1'), channelView(undefined))).toBe(false);
-    expect(state().addMessage(row('m1'), conversationView(null))).toBe(false);
+    expect(state().addMessage(row('m1'), channelView(undefined))).toBe('dropped');
+    expect(state().addMessage(row('m1'), conversationView(null))).toBe('dropped');
+  });
+
+  it('the scope alone decides: the epoch noted now, another scope, is dropped', () => {
+    open(CH);
+    const view = chatViewEpoch();
+    expect(state().addMessage(dmRow('d1'), DM, view)).toBe('dropped');
+    expect(state().updateMessage(dmRow('d1', { editedAt: EDIT_1 }), DM, view)).toBe(false);
+    expect(shown()).toEqual([]);
+  });
+
+  it('the epoch alone decides: the same scope cleared and recorded again drops what was noted before', async () => {
+    await loadChannel('ch-1', [row('m0')]);
+    const view = chatViewEpoch();
+    state().clearMessages();
+    await loadChannel('ch-1', [row('m0')]);
+
+    expect(state().addMessage(row('m1'), CH, view)).toBe('dropped');
+    expect(state().updateMessage(row('m0', { content: 'edited', editedAt: EDIT_1 }), CH, view)).toBe(false);
+    expect(ids()).toEqual(['m0']);
+    expect(byId('m0')?.content).toBe('text of m0');
   });
 
   it('a page in flight at logout lands for nobody', async () => {
@@ -687,7 +717,7 @@ describe('the newest version of a row is what the view ends up showing', () => {
 
   it('an edit that arrives before its insert lands is what the insert shows', () => {
     expect(state().updateMessage(dmRow('m1', { content: 'edited', editedAt: EDIT_1 }), DM)).toBe(false);
-    expect(state().addMessage(dmRow('m1'), DM)).toBe(true);
+    expect(state().addMessage(dmRow('m1'), DM)).toBe('added');
     expect(byId('m1')).toMatchObject({ content: 'edited', editedAt: EDIT_1 });
   });
 
@@ -710,7 +740,7 @@ describe('the newest version of a row is what the view ends up showing', () => {
   it('an insert of a row the view shows keeps the copy shown (the first to land owns the id)', () => {
     const first = dmRow('m1', { content: 'first copy' });
     state().addMessage(first, DM);
-    expect(state().addMessage(dmRow('m1', { content: 'second copy' }), DM)).toBe(false);
+    expect(state().addMessage(dmRow('m1', { content: 'second copy' }), DM)).toBe('held');
     expect(byId('m1')).toBe(first);
   });
 
@@ -788,14 +818,190 @@ describe('the newest version of a row is what the view ends up showing', () => {
     state().updateMessage(row('m1', { content: 'edited', editedAt: EDIT_1 }), CH);
     state().clearMessages();
     open(CH);
-    expect(state().addMessage(row('m1'), CH)).toBe(true);
+    expect(state().addMessage(row('m1'), CH)).toBe('added');
     expect(byId('m1')?.content).toBe('text of m1');
 
     state().updateMessage(row('m2', { content: 'edited', editedAt: EDIT_1 }), CH);
     resetChatViewState();
     open(CH);
-    expect(state().addMessage(row('m2'), CH)).toBe(true);
+    expect(state().addMessage(row('m2'), CH)).toBe('added');
     expect(byId('m2')?.content).toBe('text of m2');
   });
 });
 
+describe('a message deleted on the server stays out of the view (#178)', () => {
+  beforeEach(() => open(CH));
+
+  it('a late insert of it is dropped, and says so', () => {
+    state().deleteMessage('m1', { deletedOnServerIn: CH });
+    expect(state().addMessage(row('m1'), CH)).toBe('dropped');
+    expect(shown()).toEqual([]);
+  });
+
+  it('a late edit of it is dropped, and leaves nothing for a later insert', () => {
+    open(CH, [row('m1')]);
+    state().deleteMessage('m1', { deletedOnServerIn: CH });
+    expect(ids()).toEqual([]);
+    expect(state().updateMessage(row('m1', { content: 'edited', editedAt: EDIT_1 }), CH)).toBe(false);
+    expect(state().addMessage(row('m1'), CH)).toBe('dropped');
+    expect(shown()).toEqual([]);
+  });
+
+  it('a page asked for before the delete and answered after it leaves it out', async () => {
+    open(CH, [row('m0'), row('m1', { createdAt: at(1) })]);
+    state().deleteMessage('m1', { deletedOnServerIn: CH });
+    apiGet.mockResolvedValue(page([row('m0'), row('m1', { createdAt: at(1) }), row('m2', { createdAt: at(2) })]));
+
+    await state().fetchMessages('ch-1');
+
+    expect(ids()).toEqual(['m0', 'm2']);
+  });
+
+  it('a removal that is not the server\'s delete (a cleared floor) remembers nothing', () => {
+    open(DM, [dmRow('m1')]);
+    state().deleteMessage('m1');
+    expect(ids()).toEqual([]);
+    expect(state().addMessage(dmRow('m1'), DM)).toBe('added');
+  });
+
+  it('a delete of a row the view does not show changes nothing it shows', () => {
+    open(CH, [row('m0')]);
+    const before = shown();
+    state().deleteMessage('m9', { deletedOnServerIn: CH });
+    expect(shown()).toBe(before);
+  });
+
+  it(`remembers at most ${RECENT_CHANGES_MAX} changes: the oldest goes first`, () => {
+    state().deleteMessage('first', { deletedOnServerIn: CH });
+    state().deleteMessage('second', { deletedOnServerIn: CH });
+    for (let i = 0; i < RECENT_CHANGES_MAX - 1; i++) state().deleteMessage(`d${i}`, { deletedOnServerIn: CH });
+
+    expect(state().addMessage(row('first'), CH)).toBe('added');
+    expect(state().addMessage(row('second'), CH)).toBe('dropped');
+    expect(state().addMessage(row(`d${RECENT_CHANGES_MAX - 2}`), CH)).toBe('dropped');
+  });
+
+  it(`remembers a change for ${RECENT_CHANGE_MAX_AGE_MS / 60_000} minutes, and a clock stepped back keeps it`, () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-20T12:00:00.000Z'));
+    state().deleteMessage('m1', { deletedOnServerIn: CH });
+    state().deleteMessage('m2', { deletedOnServerIn: CH });
+
+    // the clock stepped back: the age reads below zero, the entry stays
+    vi.setSystemTime(new Date('2026-11-20T11:00:00.000Z'));
+    expect(state().addMessage(row('m1'), CH)).toBe('dropped');
+
+    vi.setSystemTime(new Date(Date.parse('2026-11-20T12:00:00.000Z') + RECENT_CHANGE_MAX_AGE_MS - 1));
+    expect(state().addMessage(row('m2'), CH)).toBe('dropped');
+
+    vi.setSystemTime(new Date(Date.parse('2026-11-20T12:00:00.000Z') + RECENT_CHANGE_MAX_AGE_MS));
+    expect(state().addMessage(row('m2'), CH)).toBe('added');
+  });
+
+  it('a change of view, and a logout, forget them', () => {
+    state().deleteMessage('m1', { deletedOnServerIn: CH });
+    state().clearMessages();
+    open(CH);
+    expect(state().addMessage(row('m1'), CH)).toBe('added');
+
+    state().deleteMessage('m2', { deletedOnServerIn: CH });
+    resetChatViewState();
+    open(CH);
+    expect(state().addMessage(row('m2'), CH)).toBe('added');
+  });
+});
+
+describe('rows stand in the order of the server\'s time, then id (#178)', () => {
+  beforeEach(() => open(CH));
+
+  it('an insert lands where its createdAt puts it, whatever order the inserts come in', () => {
+    state().addMessage(row('m3', { createdAt: at(3) }), CH);
+    state().addMessage(row('m1', { createdAt: at(1) }), CH);
+    state().addMessage(row('m4', { createdAt: at(4) }), CH);
+    state().addMessage(row('m2', { createdAt: at(2) }), CH);
+    expect(ids()).toEqual(['m1', 'm2', 'm3', 'm4']);
+  });
+
+  it('the same time: by id', () => {
+    state().addMessage(row('b', { createdAt: at(1) }), CH);
+    state().addMessage(row('a', { createdAt: at(1) }), CH);
+    expect(ids()).toEqual(['a', 'b']);
+  });
+
+  it('a time that does not parse lands where it arrives, and nothing is moved past it', () => {
+    state().addMessage(row('m2', { createdAt: at(2) }), CH);
+    state().addMessage(row('odd', { createdAt: 'not a time' }), CH);
+    state().addMessage(row('m1', { createdAt: at(1) }), CH);
+    expect(ids()).toEqual(['m2', 'odd', 'm1']);
+  });
+
+  it('the sender\'s own row lands by its time too', async () => {
+    state().addMessage(row('theirs', { createdAt: at(5) }), CH);
+    apiPost.mockResolvedValue({ data: { data: row('mine', { createdAt: at(4) }) } });
+
+    await state().sendMessage('ch-1', 'hello');
+
+    expect(ids()).toEqual(['mine', 'theirs']);
+  });
+});
+
+describe('nothing gated for an earlier view lands in the view on screen', () => {
+  it('an insert or an edit noted before the view changed is dropped', () => {
+    open(CH);
+    const view = chatViewEpoch();
+    state().clearMessages();
+    expect(chatViewEpoch()).not.toBe(view);
+    open(CH);
+    state().addMessage(row('m0'), CH);
+
+    expect(state().addMessage(row('m1'), CH, view)).toBe('dropped');
+    expect(state().updateMessage(row('m0', { content: 'edited', editedAt: EDIT_1 }), CH, view)).toBe(false);
+    expect(ids()).toEqual(['m0']);
+    expect(byId('m0')?.content).toBe('text of m0');
+    // and the edit was not kept for later either
+    state().clearMessages();
+    open(CH);
+    state().addMessage(row('m0'), CH);
+    expect(byId('m0')?.content).toBe('text of m0');
+  });
+
+  it('noted for an earlier view whose row the page of the view on screen shows: held, and nothing of that copy applies', async () => {
+    open(CH, [row('m0')]);
+    const view = chatViewEpoch();
+    state().clearMessages();
+    const reloaded = row('m1', { content: 'from the page' });
+    apiGet.mockResolvedValueOnce(page([row('m0'), reloaded]));
+    await state().fetchMessages('ch-1');
+
+    expect(state().addMessage(row('m1', { content: 'the gated copy', editedAt: EDIT_1 }), CH, view)).toBe('held');
+    expect(byId('m1')).toBe(reloaded);
+    // a row of that id in another scope's view is no row of this one
+    expect(state().addMessage(row('m0', { channelId: null, conversationId: 'c-1' }), DM)).toBe('dropped');
+    expect(ids()).toEqual(['m0', 'm1']);
+  });
+
+  it('the view noted now is taken', () => {
+    open(CH);
+    const view = chatViewEpoch();
+    expect(state().addMessage(row('m1'), CH, view)).toBe('added');
+    expect(state().updateMessage(row('m1', { content: 'edited', editedAt: EDIT_1 }), CH, view)).toBe(true);
+  });
+
+  it('a fetch of another scope moves the view on, one of the same scope does not', async () => {
+    open(CH);
+    const view = chatViewEpoch();
+    apiGet.mockResolvedValue(page([]));
+    await state().fetchMessages('ch-1');
+    expect(chatViewEpoch()).toBe(view);
+    await state().fetchDMMessages('c-1');
+    expect(chatViewEpoch()).not.toBe(view);
+  });
+
+  it('a logout moves the view on too', () => {
+    open(CH);
+    const view = chatViewEpoch();
+    resetChatViewState();
+    open(CH);
+    expect(state().addMessage(row('m1'), CH, view)).toBe('dropped');
+  });
+});

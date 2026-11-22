@@ -837,12 +837,12 @@ did not vouch for:
      a field of a row. A fetch of another scope (another channel, another
      conversation, or a channel after a conversation and back) starts a new
      view before its request is sent: the rows, the reply being composed, the
-     typing line and the edits kept for the view are dropped, the page still
-     on its way is aborted, and the new page is then taken with nothing to
-     merge with. No row or kept edit of one scope is merged into a page of
-     another, or shown while that page is on its way. Every write names the
-     scope it is for: a send the channel or conversation it was sent to, a
-     socket handler the one its event names.
+     typing line and the edits and deletes kept for the view are dropped,
+     the page still on its way is aborted, and the new page is then taken
+     with nothing to merge with. No row, kept edit or kept delete of one
+     scope is merged into a page of another, or shown while that page is on
+     its way. Every write names the scope it is for: a send the channel or
+     conversation it was sent to, a socket handler the one its event names.
      A write for another scope than the recorded one, or while none is
      recorded (after a clear or a logout, until the next fetch), is dropped
      and kept nowhere. A fetch of the same scope merges with what the view
@@ -866,15 +866,25 @@ did not vouch for:
      row's insert or page lands, the row shows that edit if it is provably
      newer than what landed (or the deleted shape), and what landed
      otherwise.
-  4. The sender's own row lands when the channel or conversation it was
-     sent to is the view's scope as its send is answered (that channel
-     cleared and loaded again included: its page may have been read before
-     the message was stored), and never in another scope.
+  4. A message deleted on the server while its channel or conversation is
+     on screen stays out of the view: no insert, edit or page that began
+     before the delete brings it back, and its late insert plays no sound
+     and marks nothing read.
+  5. Rows stand in the order of the server's `createdAt`, then id, wherever
+     they arrive from.
+  6. A row gated for an earlier view (another channel or conversation
+     fetched, or the same one cleared, while its decrypt ran) lands in none:
+     the view on screen fetched its page after that row's event.
+  7. The sender's own row lands when the channel or conversation it was
+     sent to is the view's scope as its send is answered, whatever happened
+     to the view meanwhile (that channel cleared and loaded again included:
+     its page may have been read before the message was stored), and never
+     in another scope.
 
-  The edits of 3 are kept for the view on screen only, at most 500 of them
-  and for 5 minutes each, and dropped when the view changes and at logout.
-  A gate call or a page request that outlives them shows its row as it was
-  then, until the next fetch.
+  The edits of 3 and the deletes of 4 are kept for the view on screen
+  only, at most 500 of them together and for 5 minutes each, and dropped
+  when the view changes and at logout. A gate call or a page request that
+  outlives them shows its row as it was then, until the next fetch.
 - **Decrypted rows** (`decryptedRow`): text and attachments come out of the
   payload only; the type is pinned to `user` (a notice is never encrypted).
 - **Server-asserted fields** are always dropped (`withoutServerAssertions`):
@@ -2128,12 +2138,18 @@ DMs only.
   same number MANAGE_SERVER already reads from the count endpoint, never
   which ones or whose.
 - The client's `message:new`/`message:update` handlers decrypt asynchronously
-  before touching the store — the same shape the DM handlers have always had.
-  The known consequences are inherited unchanged: two near-simultaneous
-  messages can momentarily render out of order when one resolves from the
-  plaintext cache and the other decrypts, and a delete racing a still-
-  decrypting insert can leave the row until the next fetch. Serializing per
-  channel would add a queue for a cosmetic, refetch-corrected artifact.
+  before touching the store — the same shape the DM handlers have — and are
+  not serialised: their decrypts can end in another order than their events
+  arrived. The view settles what they bring by the rules of §9.1 ("What the
+  view shows when copies of a row cross"): rows stand in the order of the
+  server's time, a delete that arrived while an insert or an edit of that
+  message was decrypting keeps it out, and the newest edit received is what
+  the row shows. A handler names the channel its event is about, and the
+  view takes nothing for another channel or conversation than its own, nor
+  anything gated for an earlier view of it. What remains is bounded by what
+  the view remembers (500 deletes and edits at most, 5 minutes each,
+  dropped at every change of view): a decrypt that outlives it shows its
+  row as it was sent until the next fetch.
 - Message-key backup accepts channel scopes transparently, so a device that
   backed up can restore its own history; there is no cross-member history
   transfer (consistent with no-history-on-join).

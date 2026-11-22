@@ -95,8 +95,9 @@ export function resetAccountStores(): void {
   resetClearedHistory();
   // Media files the leaving account played, held as blobs in memory
   resetMediaCache();
-  // The versions its chat view kept for rows it did not show yet (outside the
-  // slice), and its page in flight (aborted): no page lands after this
+  // The deletes and versions its chat view remembered (outside the slice), and
+  // its page in flight (aborted): no page, and no row a handler gated for its
+  // view, lands after this
   resetChatViewState();
 
   // Free the WASM crypto objects and close the vault. Key material stays in

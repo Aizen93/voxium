@@ -80,7 +80,7 @@ vi.mock('../../stores/settingsStore', async () => {
 
 import { resetAccountStores } from '../../stores/resetStores';
 import { useServerStore } from '../../stores/serverStore';
-import { useChatStore, channelView } from '../../stores/chatStore';
+import { useChatStore, chatViewEpoch, channelView } from '../../stores/chatStore';
 import { useDMStore } from '../../stores/dmStore';
 import { useFriendStore } from '../../stores/friendStore';
 import { useSupportStore } from '../../stores/supportStore';
@@ -291,21 +291,26 @@ describe('resetAccountStores (HIGH-14b)', () => {
     expect(hasDueRows('conv-1')).toBe(false);
   });
 
-  it('drops what the chat view remembered outside the store', () => {
+  it('drops what the chat view remembered outside the store, and lands nothing gated for its view', () => {
     const row = (id: string) =>
       ({ id, content: id, channelId: 'ch-1', author: { id: 'u-prev' }, createdAt: '2026-11-20T10:00:00.000Z', editedAt: null }) as unknown as Message;
     const ch = channelView('ch-1');
     useChatStore.setState({ viewScope: ch });
+    const view = chatViewEpoch();
+    useChatStore.getState().deleteMessage('m-deleted', { deletedOnServerIn: ch });
     useChatStore.getState().updateMessage({ ...row('m-edited'), content: 'edited', editedAt: '2026-11-20T10:05:00.000Z' }, ch);
 
     resetAccountStores();
 
     // the view is of nothing: whatever a handler of the leaving account writes lands nowhere
     expect(useChatStore.getState().viewScope).toBeNull();
-    expect(useChatStore.getState().addMessage(row('m-late'), ch)).toBe(false);
-    // the next account opens the same channel: its view starts with nothing remembered
+    expect(useChatStore.getState().addMessage(row('m-late'), ch)).toBe('dropped');
+    // the next account opens the same channel: a decrypt the leaving account's handler started lands nowhere
     useChatStore.setState({ viewScope: ch });
-    expect(useChatStore.getState().addMessage(row('m-edited'), ch)).toBe(true);
+    expect(useChatStore.getState().addMessage(row('m-late'), ch, view)).toBe('dropped');
+    // and its view starts with nothing remembered
+    expect(useChatStore.getState().addMessage(row('m-deleted'), ch)).toBe('added');
+    expect(useChatStore.getState().addMessage(row('m-edited'), ch)).toBe('added');
     expect(useChatStore.getState().messages.find((m) => m.id === 'm-edited')?.content).toBe('m-edited');
   });
 
