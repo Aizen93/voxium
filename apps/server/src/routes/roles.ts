@@ -1,8 +1,18 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, memberGoneAsNotFound, violatesForeignKey, violatesUniqueIndex } from '../utils/errors';
+import {
+  BadRequestError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  memberGoneAsNotFound,
+  prismaErrorCode,
+  violatesForeignKey,
+  violatesUniqueIndex,
+} from '../utils/errors';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import { isSortPosition, MAX_SORT_POSITION } from '../utils/sortPosition';
 import {
   validateRoleName,
   validateRoleColor,
@@ -58,6 +68,33 @@ async function withUniqueRoleName<T>(write: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * A write on a role row that is gone by the time it runs (a role delete, or a
+ * space delete's cascade, committed since the role was read): no row to
+ * update or delete (P2025), thrown as the 404 of a role that does not exist.
+ * Anything else is thrown as it is.
+ */
+function roleGoneAsNotFound(err: unknown): never {
+  if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Role');
+  throw err;
+}
+
+/** Run a single-statement write on one role row: gone meanwhile, 404 Role. */
+async function roleOrMissing<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    return roleGoneAsNotFound(err);
+  }
+}
+
+/** One entry of a reorder: a role id and its new position. */
+function isRoleOrderEntry(entry: unknown): entry is { id: string; position: number } {
+  if (!entry || typeof entry !== 'object') return false;
+  const { id, position } = entry as Record<string, unknown>;
+  return typeof id === 'string' && isSortPosition(position);
+}
+
 // List all roles in a server
 roleRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
   try {
@@ -90,6 +127,9 @@ roleRouter.put('/reorder', rateLimitRoleManage, async (req: Request<{ serverId: 
     const { order } = req.body;
     if (!Array.isArray(order) || order.length === 0) {
       throw new BadRequestError('order must be a non-empty array');
+    }
+    if (!order.every(isRoleOrderEntry)) {
+      throw new BadRequestError(`Each order entry needs a role id and a whole-number position from 0 to ${MAX_SORT_POSITION}`);
     }
 
     const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
@@ -130,11 +170,28 @@ roleRouter.put('/reorder', rateLimitRoleManage, async (req: Request<{ serverId: 
       throw new BadRequestError('Role positions must be unique');
     }
 
-    await prisma.$transaction(
-      order.map((o: { id: string; position: number }) =>
-        prisma.role.update({ where: { id: o.id }, data: { position: o.position } })
-      )
-    );
+    // Update the positions in one transaction, one row after the other in ONE
+    // fixed order, sorted by id, whatever order the client sent (as the
+    // channel and category reorders do): two reorders of the same roles then
+    // lock them in one order and one waits for the other. A role the
+    // validation saw and that is gone by the update (deleted meanwhile, or
+    // with its space) answers as an unknown one, 404 Role. The long budget
+    // (LOCK_WAIT_TRANSACTION_OPTIONS): a role or space delete holds the row
+    // through its cascade, and a role save or override write holds it while
+    // it checks. The batch is built again for each attempt and run again
+    // whole when PostgreSQL aborts it to break a deadlock: it writes absolute
+    // positions, so a second run writes what the first would have.
+    const sorted = [...order].sort((a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    try {
+      await retryOnTransactionConflict(() => prisma.$transaction(
+        sorted.map((o: { id: string; position: number }) =>
+          prisma.role.update({ where: { id: o.id }, data: { position: o.position } })
+        ),
+        LOCK_WAIT_TRANSACTION_OPTIONS,
+      ), `[Roles] The reorder of roles in ${serverId}`);
+    } catch (err) {
+      roleGoneAsNotFound(err);
+    }
 
     const updated = await prisma.role.findMany({
       where: { serverId },
@@ -296,10 +353,11 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       if (Object.keys(updateData).length === 0) {
         throw new BadRequestError('No fields to update');
       }
-      const updated = await withUniqueRoleName(() => prisma.role.update({
+      // One statement; a role deleted since it was read finds no row: 404 Role
+      const updated = await withUniqueRoleName(() => roleOrMissing(() => prisma.role.update({
         where: { id: roleId },
         data: updateData,
-      }));
+      })));
       getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_UPDATED, {
         serverId,
         role: updated as unknown as Role,
@@ -408,8 +466,10 @@ roleRouter.delete('/:roleId', rateLimitRoleManage, async (req: Request<{ serverI
       throw new ForbiddenError('Cannot delete a role at or above your own position');
     }
 
-    // Cascade: MemberRole and ChannelPermissionOverride are cascade-deleted by Prisma
-    await prisma.role.delete({ where: { id: roleId } });
+    // Cascade: MemberRole and ChannelPermissionOverride are cascade-deleted by
+    // the database. A role another delete removed first (or a space delete's
+    // cascade) finds no row: 404 Role, and nothing is announced
+    await roleOrMissing(() => prisma.role.delete({ where: { id: roleId } }));
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_DELETED, { serverId, roleId });
 

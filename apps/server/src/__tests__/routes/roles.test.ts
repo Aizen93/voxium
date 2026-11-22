@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import { Permissions, permissionsToString, permissionsFromString, ALL_PERMISSIONS, WS_EVENTS } from '@voxium/shared';
-import { lazyStatement } from '../helpers/lazyStatement';
+import { lazyStatement, runBatch } from '../helpers/lazyStatement';
 
 // ─── Mocks (must be before any imports that use them) ───────────────────────
 
@@ -936,6 +936,162 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('position 0');
+    });
+
+    /**
+     * The update has the shape of the channel and category reorders: every
+     * entry checked first, the rows written in id order inside one batch with
+     * the long budget, run again whole on a deadlock, and a row gone meanwhile
+     * answered 404 Role.
+     */
+    describe('the update: id order, the long budget, a row gone meanwhile', () => {
+      const P2025 = () => Object.assign(new Error('No record was found for an update.'), { code: 'P2025' });
+      const reorder = (order: unknown) => request(app).put('/api/v1/servers/srv1/roles/reorder').send({ order });
+      const updatedIds = () => prismaMock.role.update.mock.calls.map(([arg]: any[]) => arg.where.id);
+      let batches: Array<{ size: number; opts: unknown }>;
+
+      beforeEach(() => {
+        mockHasServerPermission.mockResolvedValue(true);
+        mockGetHighestRolePosition.mockResolvedValue(Infinity);
+        prismaMock.role.findMany.mockImplementation(async ({ where }: any) => (where.id
+          ? where.id.in.map((id: string) => ({ id, position: 1, isDefault: false }))
+          : [{ id: 'ra', position: 1 }, { id: 'rb', position: 2 }, { id: 'rc', position: 3 }]));
+        prismaMock.role.update.mockImplementation(async ({ where, data }: any) => ({ id: where.id, ...data }));
+        batches = [];
+        prismaMock.$transaction.mockImplementation(async (statements: unknown[], opts: unknown) => {
+          batches.push({ size: statements.length, opts });
+          return runBatch(statements);
+        });
+      });
+      afterEach(() => {
+        prismaMock.role.findMany.mockReset();
+        prismaMock.role.update.mockReset();
+      });
+
+      it('the rows are written sorted by id, whatever order the client sent, in one batch with the long budget', async () => {
+        const res = await reorder([{ id: 'rc', position: 1 }, { id: 'ra', position: 3 }, { id: 'rb', position: 2 }]);
+
+        expect(res.status).toBe(200);
+        expect(updatedIds()).toEqual(['ra', 'rb', 'rc']);
+        expect(batches).toEqual([{ size: 3, opts: { timeout: 60_000, maxWait: 10_000 } }]);
+        expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.ROLE_REORDERED, expect.objectContaining({ serverId: 'srv1' }));
+      });
+
+      it('a role deleted between the validation and the update: 404 Role, nothing announced', async () => {
+        prismaMock.role.update.mockImplementation(async ({ where, data }: any) => {
+          if (where.id === 'rb') throw P2025();
+          return { id: where.id, ...data };
+        });
+
+        const res = await reorder([{ id: 'ra', position: 2 }, { id: 'rb', position: 1 }]);
+
+        expect({ status: res.status, error: res.body.error }).toEqual({ status: 404, error: 'Role not found' });
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a batch PostgreSQL aborted to break a deadlock is built again and runs again whole', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const real = prismaMock.$transaction.getMockImplementation()!;
+        prismaMock.$transaction
+          .mockImplementationOnce(async () => { throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); })
+          .mockImplementation(real);
+        try {
+          const res = await reorder([{ id: 'rb', position: 1 }, { id: 'ra', position: 2 }]);
+
+          expect(res.status).toBe(200);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+          // one batch per attempt, each in id order
+          expect(updatedIds()).toEqual(['ra', 'rb', 'ra', 'rb']);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('any other failure is still a 500', async () => {
+        const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+        prismaMock.role.update.mockImplementation(async () => { throw Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' }); });
+        try {
+          expect((await reorder([{ id: 'ra', position: 1 }])).status).toBe(500);
+          expect(mockEmit).not.toHaveBeenCalled();
+        } finally {
+          err.mockRestore();
+        }
+      });
+
+      it.each([
+        ['an id that is not a string', { id: 7, position: 1 }],
+        ['a negative position', { id: 'ra', position: -1 }],
+        ['a fractional position', { id: 'ra', position: 1.5 }],
+        ['a position as a string', { id: 'ra', position: '1' }],
+        ['a position past the bound', { id: 'ra', position: 1_000_001 }],
+        ['no position', { id: 'ra' }],
+        ['an entry that is not an object', 'ra'],
+        ['a null entry', null],
+      ])('%s: 400 before anything is read or written', async (_case, entry) => {
+        const res = await reorder([{ id: 'rb', position: 2 }, entry]);
+
+        expect({ status: res.status, error: res.body.error }).toEqual({
+          status: 400,
+          error: 'Each order entry needs a role id and a whole-number position from 0 to 1000000',
+        });
+        expect(mockGetHighestRolePosition).not.toHaveBeenCalled();
+        expect(prismaMock.role.findMany).not.toHaveBeenCalled();
+        expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('a role gone between its read and a one-statement write', () => {
+    const P2025 = () => Object.assign(new Error('No record was found for an update.'), { code: 'P2025' });
+    const role = { id: 'role1', name: 'Old', position: 2, isDefault: false, permissions: '0', color: null, serverId: 'srv1' };
+
+    beforeEach(() => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+    });
+    afterEach(() => {
+      prismaMock.role.findFirst.mockReset();
+      prismaMock.role.update.mockReset();
+      prismaMock.role.delete.mockReset();
+    });
+
+    it.each([
+      ['a rename', { name: 'New' }],
+      ['a colour change', { color: '#00FF00' }],
+    ])('%s (no permissions, one statement): 404 Role, nothing announced', async (_case, body) => {
+      // the role itself, then (for a rename) the duplicate check, which finds none
+      prismaMock.role.findFirst.mockImplementation(async ({ where }: any) => (where.name === undefined ? role : null));
+      prismaMock.role.update.mockRejectedValueOnce(P2025());
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1').send(body);
+
+      expect({ status: res.status, error: res.body.error }).toEqual({ status: 404, error: 'Role not found' });
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('two deletes of one role: the second finds no row, 404 Role, nothing announced, no room re-sync', async () => {
+      prismaMock.role.findFirst.mockResolvedValue(role);
+      prismaMock.role.delete.mockResolvedValueOnce(role).mockRejectedValueOnce(P2025());
+
+      const first = await request(app).delete('/api/v1/servers/srv1/roles/role1');
+      vi.clearAllMocks();
+      const second = await request(app).delete('/api/v1/servers/srv1/roles/role1');
+
+      expect(first.status).toBe(200);
+      expect({ status: second.status, error: second.body.error }).toEqual({ status: 404, error: 'Role not found' });
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockSyncVisibilityRooms).not.toHaveBeenCalled();
+    });
+
+    it('a delete that fails otherwise is still a 500', async () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.role.findFirst.mockResolvedValue(role);
+      prismaMock.role.delete.mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'P1001' }));
+      try {
+        expect((await request(app).delete('/api/v1/servers/srv1/roles/role1')).status).toBe(500);
+      } finally {
+        err.mockRestore();
+      }
     });
   });
 
