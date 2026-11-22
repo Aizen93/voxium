@@ -15,6 +15,9 @@ import {
   type S3ClientConfig,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { describeStoreError } from './loggableError';
+
+export { describeStoreError };
 import {
   CORS_PROBE_KEY,
   PREFLIGHT_HEADER,
@@ -162,36 +165,6 @@ export async function ensureBucketEncryption(timeoutMs = BUCKET_ENCRYPTION_TIMEO
 
 /** How long the check waits for each call to the store (it never holds the boot). */
 export const BUCKET_CORS_CALL_TIMEOUT_MS = 15_000;
-
-/** An error name or code: an identifier, never a sentence. */
-const ERROR_TOKEN_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
-
-/**
- * An error of the store or the network as its name, code and HTTP status.
- * Never its message: a network error's message names the endpoint's host and
- * port (`connect ECONNREFUSED host:port`, `getaddrinfo ENOTFOUND host`), and a
- * store's message can name the bucket. `fetch` hides the system error's code
- * in `cause`, which is read the same way, and the SDK's HTTP handler wraps an
- * abort as an `AbortError` whose `cause` is the signal's reason: that name is
- * appended as `cause <name>` (a timeout reads `AbortError, cause TimeoutError`).
- * A cause that is a plain `Error` says nothing and is left out.
- */
-export function describeStoreError(err: unknown): string {
-  const e = (err ?? {}) as {
-    name?: unknown; code?: unknown; Code?: unknown;
-    cause?: { code?: unknown; name?: unknown } | null;
-    $metadata?: { httpStatusCode?: unknown };
-  };
-  const parts: string[] = [];
-  for (const token of [e.name, e.code, e.Code, e.cause?.code]) {
-    if (typeof token === 'string' && ERROR_TOKEN_RE.test(token) && !parts.includes(token)) parts.push(token);
-  }
-  const causeName = e.cause?.name;
-  if (typeof causeName === 'string' && causeName !== 'Error' && ERROR_TOKEN_RE.test(causeName) && !parts.includes(causeName)) parts.push(`cause ${causeName}`);
-  const status = e.$metadata?.httpStatusCode;
-  if (typeof status === 'number' && Number.isInteger(status)) parts.push(`HTTP ${status}`);
-  return parts.length > 0 ? parts.join(', ') : 'unknown error';
-}
 
 function isNoCorsConfiguration(err: unknown): boolean {
   const e = err as { name?: unknown; Code?: unknown } | null;
