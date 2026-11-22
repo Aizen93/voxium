@@ -685,6 +685,7 @@ export interface ServerToClientEvents {
   'message:update': (message: Message) => void;
   'message:delete': (data: { messageId: string; channelId: string }) => void;
   'message:bulk_deleted': (data: { channelId: string; webhookId: string; count: number }) => void;
+  'webhook:messages_detached': (data: { channelId: string; webhookId: string }) => void;
   'webhook:changed': (data: { serverId: string }) => void;
   'channel:created': (channel: Channel) => void;
   'channel:updated': (channel: Channel) => void;
