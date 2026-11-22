@@ -35,12 +35,14 @@ vi.mock('../../stores/toastStore', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));
 
-// The viewer's server permissions (null: not known yet, which restricts nothing)
-const viewer = vi.hoisted(() => ({ bits: null as bigint | null }));
+// The viewer's server permissions and rank (null: not known yet, which
+// restricts nothing; Infinity: the space's owner)
+const viewer = vi.hoisted(() => ({ bits: null as bigint | null, rank: null as number | null }));
 vi.mock('../../stores/authStore', () => ({ useAuthStore: () => undefined }));
 vi.mock('../../hooks/useViewerPermissions', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../hooks/useViewerPermissions')>()),
   useViewerPermissions: () => viewer.bits,
+  useViewerRolePosition: () => viewer.rank,
 }));
 
 import { AxiosError, type AxiosResponse } from 'axios';
@@ -68,10 +70,14 @@ async function render(channelType: 'text' | 'voice') {
   });
 }
 
+const ONLY_EVERYONE = serverState.roles;
+
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
   viewer.bits = null;
+  viewer.rank = null;
+  serverState.roles = ONLY_EVERYONE;
 });
 
 const offered = (key: string) => (container.textContent ?? '').includes(`permissions.${key}.name`);
@@ -282,5 +288,139 @@ describe('ChannelPermissionsEditor — a toggle the server would refuse', () => 
     } finally {
       err.mockRestore();
     }
+  });
+});
+
+/**
+ * The server refuses every override write on a role at or above the
+ * viewer's own highest one, never on @everyone (the owner stands above every
+ * role), and serves the stored overrides to whoever views the channel. Such a
+ * role stays selectable and readable: its list entry carries a lock titled
+ * with that refusal, and its panel is locked (toggles and Save disabled with
+ * the refusal, which the panel also states). While the viewer's rank is
+ * unknown nothing is locked.
+ */
+describe('ChannelPermissionsEditor — a role at or above the viewer', () => {
+  const role = (id: string, position: number) => ({
+    id, serverId: 's1', name: id, color: null, position, permissions: '0', isDefault: false, createdAt: '2026-01-01T00:00:00.000Z',
+  });
+  const RANKED = [...ONLY_EVERYONE, role('below', 2), role('same', 5), role('above', 9)];
+  const REFUSAL = 'serverErrors.cannotSetHigherOverrides';
+  const roleButton = (name: string) =>
+    [...container.querySelectorAll('button')].find((b) => b.querySelector('span.truncate')?.textContent === name) as HTMLButtonElement;
+  const locked = (name: string) => roleButton(name).querySelector('.lucide-lock') !== null;
+  const selectedHeading = () => container.querySelector('h3')?.textContent;
+  const toggles = () => [...container.querySelectorAll('.group button')] as HTMLButtonElement[];
+  const toggleOf = (key: string) => {
+    const name = [...container.querySelectorAll('p')].find((p) => p.textContent === `permissions.${key}.name`)!;
+    return (name.closest('.group') as HTMLElement).querySelector('button') as HTMLButtonElement;
+  };
+  const saveButton = () => [...container.querySelectorAll('button')].find((b) => b.textContent === 'common.save') as HTMLButtonElement;
+  const panelReason = () => container.querySelector('[data-testid="role-locked-reason"]')?.textContent ?? null;
+
+  afterEach(() => vi.clearAllMocks());
+
+  it('a viewer of rank 5: the roles at 5 and 9 carry a lock titled with the refusal and stay selectable; @everyone and the role below carry none', async () => {
+    serverState.roles = RANKED;
+    viewer.rank = 5;
+    await render('text');
+
+    for (const name of ['same', 'above']) {
+      expect(roleButton(name).disabled).toBe(false);
+      expect(roleButton(name).title).toBe(REFUSAL);
+      expect(locked(name)).toBe(true);
+    }
+    for (const name of ['@everyone', 'below']) {
+      expect(roleButton(name).disabled).toBe(false);
+      expect(roleButton(name).title).toBe('');
+      expect(locked(name)).toBe(false);
+    }
+    // a role below opens editable, with no reason shown
+    act(() => roleButton('below').click());
+    expect(selectedHeading()).toBe('below');
+    expect(toggles().some((b) => b.disabled)).toBe(false);
+    expect(panelReason()).toBeNull();
+  });
+
+  it('a role above the viewer opens and shows its stored override, read-only: every toggle and Save disabled with the refusal, the panel states it', async () => {
+    serverState.roles = RANKED;
+    viewer.rank = 5;
+    serverState.fetchChannelPermissions.mockResolvedValueOnce([
+      { id: 'o1', channelId: 'ch-1', roleId: 'above', allow: String(Permissions.SEND_MESSAGES), deny: String(Permissions.ATTACH_FILES) },
+    ] as never);
+    await render('text');
+
+    act(() => roleButton('above').click());
+
+    expect(selectedHeading()).toBe('above');
+    // the stored override is read: SEND_MESSAGES allowed, ATTACH_FILES denied
+    expect(toggleOf('SEND_MESSAGES').querySelector('.lucide-check')).not.toBeNull();
+    expect(toggleOf('ATTACH_FILES').querySelector('.lucide-x')).not.toBeNull();
+    expect(toggles().every((b) => b.disabled && b.title === REFUSAL)).toBe(true);
+    expect(saveButton().disabled).toBe(true);
+    expect(saveButton().title).toBe(REFUSAL);
+    expect(panelReason()).toBe(REFUSAL);
+    // a click on a locked toggle changes nothing
+    act(() => toggleOf('SEND_MESSAGES').click());
+    expect(container.textContent ?? '').toContain('roles.noUnsavedChanges');
+    expect(serverState.setChannelPermissionOverride).not.toHaveBeenCalled();
+  });
+
+  it('@everyone is never locked, even for a viewer with no role (rank 0)', async () => {
+    serverState.roles = RANKED;
+    viewer.rank = 0;
+    await render('text');
+
+    expect(locked('@everyone')).toBe(false);
+    expect(roleButton('@everyone').title).toBe('');
+    expect(locked('below')).toBe(true);
+    expect(roleButton('below').disabled).toBe(false);
+  });
+
+  it('the owner: no role is locked', async () => {
+    serverState.roles = RANKED;
+    viewer.rank = Infinity;
+    await render('text');
+
+    expect(RANKED.map((r) => locked(r.name))).toEqual([false, false, false, false]);
+  });
+
+  it('the rank not known yet: no role is locked (the server still decides)', async () => {
+    serverState.roles = RANKED;
+    viewer.rank = null;
+    await render('text');
+
+    expect(RANKED.map((r) => locked(r.name))).toEqual([false, false, false, false]);
+    expect(RANKED.map((r) => roleButton(r.name).disabled)).toEqual([false, false, false, false]);
+  });
+
+  it('a role selected before the rank was known, at or above it once known: its toggles and Save are disabled with the refusal, Reset still works', async () => {
+    serverState.roles = RANKED;
+    viewer.rank = null;
+    await render('text');
+    act(() => roleButton('above').click());
+    expect(selectedHeading()).toBe('above');
+    const sendRow = () => {
+      const name = [...container.querySelectorAll('p')].find((p) => p.textContent === 'permissions.SEND_MESSAGES.name')!;
+      return (name.closest('.group') as HTMLElement).querySelector('button') as HTMLButtonElement;
+    };
+    act(() => sendRow().click()); // inherit → allow, before the rank arrived
+    expect(saveButton().disabled).toBe(false);
+
+    // the rank arrives (the next render reads it): below the selected role
+    viewer.rank = 5;
+    act(() => root.render(
+      <ChannelPermissionsEditor serverId="s1" channelId="ch-1" channelName="general" channelType="text" onClose={() => {}} />,
+    ));
+
+    expect(selectedHeading()).toBe('above');
+    expect(toggles().every((b) => b.disabled && b.title === 'serverErrors.cannotSetHigherOverrides')).toBe(true);
+    expect(saveButton().disabled).toBe(true);
+    expect(saveButton().title).toBe('serverErrors.cannotSetHigherOverrides');
+    const reset = [...container.querySelectorAll('button')].find((b) => b.textContent === 'common.reset') as HTMLButtonElement;
+    expect(reset.disabled).toBe(false);
+    act(() => reset.click());
+    expect(container.textContent ?? '').toContain('roles.noUnsavedChanges');
+    expect(serverState.setChannelPermissionOverride).not.toHaveBeenCalled();
   });
 });
