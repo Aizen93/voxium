@@ -10,7 +10,7 @@ import { getOrCreateRouter, createWebRtcTransport, releaseRouter, releaseServerR
 import { RECV_TRANSPORT_MAX_BITRATE, SCREEN_SHARE_RECV_MAX_BITRATE } from '../mediasoup/mediasoupConfig';
 import { getEffectiveLimits } from '../utils/serverLimits';
 import { getRedis, NODE_ID, isNodeAlive, socketExistsInCluster, liveNodeCounts, liveClusterSocketIds } from '../utils/redis';
-import { reapVoiceChannelMirror, reapDeadOwnerChannelMirror } from '../utils/voiceMirror';
+import { reapVoiceChannelMirror, reapDeadOwnerChannelMirror, announceReapedDepartures } from '../utils/voiceMirror';
 import { annotationKey, deleteAnnotationState, getAnnotationState, initAnnotationState } from '../utils/annotationState';
 import {
   getRemoteSession, setRemoteSession, clearRemoteSession,
@@ -262,12 +262,7 @@ export async function clearVoiceState(
     if (occupants === null) continue; // ownership changed under us — hands off
     reapedChannels++;
     reapedUsers += occupants.length;
-    if (io) {
-      for (const { userId: uid, epoch } of occupants) {
-        // With the epoch the ghost's session announced (secure voice), as a live leave carries it
-        io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId: uid, ...(epoch && { epoch }) });
-      }
-    }
+    if (io) announceReapedDepartures(io, channelId, occupants);
   }
 
   // 2. Reap orphaned per-channel keys not reachable from the (updated) active set.
@@ -1422,7 +1417,13 @@ export function handleVoiceEvents(
 
     let ownerNodeId: string;
     try {
-      ownerNodeId = await resolveOrClaimChannelOwner(channelId);
+      // A takeover from a dead owner announces the departures it reaped,
+      // except for a user already holding a session in the channel here
+      ownerNodeId = await resolveOrClaimChannelOwner(
+        io,
+        channelId,
+        (uid) => voiceChannelUsers.get(channelId)?.has(uid) === true,
+      );
     } catch (err) {
       console.error(`[Voice] Channel ownership resolution failed for ${channelId}:`, err);
       socket.emit('voice:error', { message: 'Voice server unavailable. Please try again later.' });

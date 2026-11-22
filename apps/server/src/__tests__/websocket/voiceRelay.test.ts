@@ -22,7 +22,9 @@ vi.mock('../../utils/redis', () => ({
   isNodeAlive: mockIsNodeAlive,
 }));
 
-vi.mock('../../utils/voiceMirror', () => ({
+// The reap is mocked; the departure announcement is the real one
+vi.mock('../../utils/voiceMirror', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/voiceMirror')>()),
   reapVoiceChannelMirror: mockReapMirror,
 }));
 
@@ -60,19 +62,27 @@ function reset() {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe('voiceRelay — resolveOrClaimChannelOwner', () => {
-  beforeEach(reset);
+  let io: ReturnType<typeof createMockIO>;
+  const noSessionHere = () => false;
+  beforeEach(() => {
+    reset();
+    io = createMockIO();
+  });
 
   it('returns self immediately when this node already owns the channel', async () => {
     mockRedis.get.mockResolvedValueOnce('node-A');
-    expect(await resolveOrClaimChannelOwner('ch-1')).toBe('node-A');
+    expect(await resolveOrClaimChannelOwner(io as never, 'ch-1', noSessionHere)).toBe('node-A');
     expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(io.to).not.toHaveBeenCalled();
   });
 
   it('returns a LIVE peer owner without claiming', async () => {
     mockRedis.get.mockResolvedValueOnce('node-B');
     mockIsNodeAlive.mockResolvedValueOnce(true);
-    expect(await resolveOrClaimChannelOwner('ch-1')).toBe('node-B');
+    expect(await resolveOrClaimChannelOwner(io as never, 'ch-1', noSessionHere)).toBe('node-B');
     expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockReapMirror).not.toHaveBeenCalled();
+    expect(io.to).not.toHaveBeenCalled();
   });
 
   it('takes over from a DEAD owner ATOMICALLY (Lua CAS) and reaps the stale mirror', async () => {
@@ -81,7 +91,7 @@ describe('voiceRelay — resolveOrClaimChannelOwner', () => {
     mockIsNodeAlive.mockResolvedValueOnce(false);
     mockRedis.eval.mockResolvedValueOnce(1); // CAS won
 
-    expect(await resolveOrClaimChannelOwner('ch-1')).toBe('node-A');
+    expect(await resolveOrClaimChannelOwner(io as never, 'ch-1', noSessionHere)).toBe('node-A');
     // Compare-and-swap: only claim if the key still records the dead node
     expect(mockRedis.eval).toHaveBeenCalledWith(
       expect.stringContaining("redis.call('get', KEYS[1]) == ARGV[1]"),
@@ -100,22 +110,74 @@ describe('voiceRelay — resolveOrClaimChannelOwner', () => {
     mockRedis.eval.mockResolvedValueOnce(0);         // CAS lost — peer took over first
     mockRedis.get.mockResolvedValueOnce('node-C');   // re-read: the winner
 
-    expect(await resolveOrClaimChannelOwner('ch-1')).toBe('node-C');
+    expect(await resolveOrClaimChannelOwner(io as never, 'ch-1', noSessionHere)).toBe('node-C');
     expect(mockReapMirror).not.toHaveBeenCalled();   // the winner's mirror is untouched
+    expect(io.to).not.toHaveBeenCalled();            // and the winner announces, not us
   });
 
   it('claims an unowned channel atomically (SET NX)', async () => {
     mockRedis.get.mockResolvedValueOnce(null);
     mockRedis.set.mockResolvedValueOnce('OK');
-    expect(await resolveOrClaimChannelOwner('ch-1')).toBe('node-A');
+    expect(await resolveOrClaimChannelOwner(io as never, 'ch-1', noSessionHere)).toBe('node-A');
     expect(mockRedis.set).toHaveBeenCalledWith('voice:channel:node:ch-1', 'node-A', { NX: true, EX: 90 });
+    expect(io.to).not.toHaveBeenCalled();
   });
 
   it('yields to the winner when the NX claim is lost', async () => {
     mockRedis.get.mockResolvedValueOnce(null);   // initial read: unowned
     mockRedis.set.mockResolvedValueOnce(null);   // NX lost
     mockRedis.get.mockResolvedValueOnce('node-C'); // re-read: the winner
-    expect(await resolveOrClaimChannelOwner('ch-1')).toBe('node-C');
+    expect(await resolveOrClaimChannelOwner(io as never, 'ch-1', noSessionHere)).toBe('node-C');
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  describe('a won takeover announces the departures it reaped', () => {
+    function deadOwnerWithCasWon() {
+      mockRedis.get.mockResolvedValueOnce('node-B');
+      mockIsNodeAlive.mockResolvedValueOnce(false);
+      mockRedis.eval.mockResolvedValueOnce(1);
+    }
+
+    it('one voice:user_left per reaped occupant, to the channel room, with the epoch its entry held', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      deadOwnerWithCasWon();
+      mockReapMirror.mockResolvedValueOnce([{ userId: 'u-1' }, { userId: 'u-2', epoch: 'epochAAAA0001' }]);
+
+      expect(await resolveOrClaimChannelOwner(io as never, 'ch-1', noSessionHere)).toBe('node-A');
+
+      // Announced before the claim returns, so ahead of the join that follows
+      expect(io._emit).toHaveBeenCalledTimes(2);
+      expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-1', userId: 'u-1' });
+      expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-1', userId: 'u-2', epoch: 'epochAAAA0001' });
+      // The VIEW_CHANNEL boundary, never the space's room
+      expect(io.to.mock.calls).toEqual([['channel:ch-1'], ['channel:ch-1']]);
+      warnSpy.mockRestore();
+    });
+
+    it('nothing is announced for a user who already holds a session in the channel on this node', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      deadOwnerWithCasWon();
+      mockReapMirror.mockResolvedValueOnce([{ userId: 'u-live' }, { userId: 'u-gone' }]);
+      const holdsSessionHere = vi.fn((userId: string) => userId === 'u-live');
+
+      await resolveOrClaimChannelOwner(io as never, 'ch-1', holdsSessionHere);
+
+      expect(holdsSessionHere).toHaveBeenCalledWith('u-live');
+      expect(io._emit).toHaveBeenCalledTimes(1);
+      expect(io._emit).toHaveBeenCalledWith('voice:user_left', { channelId: 'ch-1', userId: 'u-gone' });
+      warnSpy.mockRestore();
+    });
+
+    it('a failing announcement is logged by its message and never undoes the won claim', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      deadOwnerWithCasWon();
+      mockReapMirror.mockResolvedValueOnce([{ userId: 'u-1' }]);
+      io.to.mockImplementationOnce(() => { throw new Error('adapter closed'); });
+
+      expect(await resolveOrClaimChannelOwner(io as never, 'ch-1', noSessionHere)).toBe('node-A');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[VoiceRelay] Announcing the departures from channel ch-1 failed'), 'adapter closed');
+      warnSpy.mockRestore();
+    });
   });
 });
 

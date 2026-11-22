@@ -1827,6 +1827,35 @@ describe('voiceHandler — multi-node routing (HIGH-15)', () => {
     expect(socket.join).toHaveBeenCalledWith('voice:ch-mn-1'); // local join ran
   });
 
+  it('the owner claim gets the io and asks whether a user holds a session in THAT channel on this node', async () => {
+    const io = createMockIO();
+    const first = createMockSocket('mn-own-1', 'sock-mn-own-1');
+    handleVoiceEvents(io as any, first.socket as any);
+    await first.handlers.get('voice:join')!('ch-mn-own');
+    const other = createMockSocket('mn-own-2', 'sock-mn-own-2');
+    handleVoiceEvents(io as any, other.socket as any);
+    await other.handlers.get('voice:join')!('ch-mn-own-elsewhere');
+
+    // What the claim sees while it runs: the joiner's own join has not run yet,
+    // so a session of theirs the claim reaped is announced as a departure
+    let joinerDuringClaim: boolean | undefined;
+    mockRelay.resolveOrClaimChannelOwner.mockImplementationOnce(async (_io: unknown, _channelId: string, holds: (userId: string) => boolean) => {
+      joinerDuringClaim = holds('mn-own-3');
+      return 'test-node-1';
+    });
+    const joiner = createMockSocket('mn-own-3', 'sock-mn-own-3');
+    handleVoiceEvents(io as any, joiner.socket as any);
+    await joiner.handlers.get('voice:join')!('ch-mn-own');
+    expect(joinerDuringClaim).toBe(false);
+
+    const [claimIo, claimChannel, holdsSessionHere] = mockRelay.resolveOrClaimChannelOwner.mock.calls.at(-1)!;
+    expect(claimIo).toBe(io);
+    expect(claimChannel).toBe('ch-mn-own');
+    expect(holdsSessionHere('mn-own-1')).toBe(true);   // in that channel here
+    expect(holdsSessionHere('mn-own-2')).toBe(false);  // here, but in another channel
+    expect(holdsSessionHere('nobody')).toBe(false);
+  });
+
   it('voice:join relays to a remote owner and records the remote session (no local mediasoup work)', async () => {
     mockRelay.resolveOrClaimChannelOwner.mockResolvedValue('peer-node');
     vi.mocked(prisma.channel.findUnique).mockResolvedValueOnce({ serverId: 's1', type: 'voice', secure: false } as any);

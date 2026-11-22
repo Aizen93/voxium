@@ -899,6 +899,10 @@ async function testOwnerCrashTakeover(redis: any, token1: string, token2: string
   console.log('    Killing node-1 (owner) hard...');
   await killProcessTree(node1, { signal: 'SIGKILL' });
   node1 = null;
+  // What the surviving viewer (bob, in channel:{id} on node-2 throughout) and
+  // the surviving node hear from here on: the departures are judged from these
+  const bobMark = bob.events.length;
+  const node2Mark = (nodeOutput['node-2'] ?? '').length;
 
   // Wait for the heartbeat to expire so the peer can detect the death
   const hbStart = Date.now();
@@ -914,6 +918,44 @@ async function testOwnerCrashTakeover(redis: any, token1: string, token2: string
   await carol.connect();
   try {
     await carol.join(channelId);
+
+    // Every occupant of the dead owner is announced as gone: one voice:user_left
+    // each, with exactly { channelId, userId } (a plaintext channel carries no
+    // epoch), and the departure of the user who joins again (carol is alice's
+    // user) reaches the viewer BEFORE that user's new voice:user_joined, or the
+    // new row would be removed by the dead session's departure. Either path
+    // announces: the takeover, or the 60 s reaper winning the race (it ticks
+    // between the heartbeat expiry and this join).
+    const leftOf = (uid: string) => (d: any) => d?.channelId === channelId && d?.userId === uid;
+    const bobSawAliceGone = await bob.waitFor('voice:user_left', leftOf(alice.userId));
+    const bobSawSelfGone = await bob.waitFor('voice:user_left', leftOf(bob.userId));
+    const bobSawCarol = await bob.waitFor('voice:user_joined', (d) => d?.channelId === channelId && d?.user?.id === carol.userId);
+    const seen = bob.events.slice(bobMark);
+    const departures = seen.filter((e) => e.name === 'voice:user_left' && e.data?.channelId === channelId);
+    const iLeft = seen.findIndex((e) => e.name === 'voice:user_left' && leftOf(alice.userId)(e.data));
+    const iJoined = seen.findIndex((e) => e.name === 'voice:user_joined' && e.data?.channelId === channelId && e.data?.user?.id === carol.userId);
+    const out2 = (nodeOutput['node-2'] ?? '').slice(node2Mark);
+    const tookOver = out2.includes(`Took over channel ${channelId} from dead node node-1`);
+    const reaperFirst = out2.includes(`Reaped voice channel ${channelId} owned by dead node node-1`);
+    assert(tookOver || reaperFirst, 'TAKEOVER: node-2 reaped the dead owner\'s voice state',
+      tookOver ? 'by the takeover' : reaperFirst ? 'by the 60 s reaper (takeover path not exercised this run)' : 'neither line printed');
+    assert(bobSawAliceGone && bobSawSelfGone,
+      'TAKEOVER: the surviving viewer hears that both occupants of the dead owner left',
+      `alice=${bobSawAliceGone} bob=${bobSawSelfGone}`);
+    assert(
+      departures.filter((e) => e.data.userId === alice.userId).length === 1
+        && departures.filter((e) => e.data.userId === bob.userId).length === 1,
+      'TAKEOVER: exactly one departure per reaped occupant',
+      JSON.stringify(departures.map((e) => e.data)));
+    assert(
+      departures.every((e) => Object.keys(e.data).sort().join(',') === 'channelId,userId'),
+      'TAKEOVER: each departure is exactly { channelId, userId } (plaintext channel: no epoch)',
+      JSON.stringify(departures.map((e) => e.data)));
+    assert(
+      bobSawCarol && iLeft >= 0 && iJoined > iLeft,
+      'TAKEOVER: the dead session\'s departure reaches the viewer BEFORE the same user\'s new arrival',
+      `left@${iLeft} joined@${iJoined}`);
+
     const newOwner = await redis.get(ownerKey);
     assert(newOwner === 'node-2', 'TAKEOVER: surviving node claimed the dead owner\'s channel', `owner=${newOwner}`);
     assert(

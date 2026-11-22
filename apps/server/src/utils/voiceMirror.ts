@@ -1,4 +1,5 @@
-import { E2E_CALL_EPOCH_RE } from '@voxium/shared';
+import type { Server as SocketServer } from 'socket.io';
+import { E2E_CALL_EPOCH_RE, type ClientToServerEvents, type ServerToClientEvents } from '@voxium/shared';
 import { getRedis } from './redis';
 import { annotationKey } from './annotationState';
 
@@ -37,6 +38,7 @@ function mirroredEpoch(json: string): string | undefined {
  *
  * Leaf module: used by voiceHandler (boot cleanup), voiceCluster (dead-node
  * reaper), and voiceRelay (dead-owner takeover) without import cycles.
+ * Each of them announces what it reaped through announceReapedDepartures.
  */
 export async function reapVoiceChannelMirror(
   channelId: string,
@@ -63,6 +65,23 @@ export async function reapVoiceChannelMirror(
   }
   await pipeline.exec();
   return occupants;
+}
+
+/**
+ * Tell a channel's viewers that the occupants a reap removed have left: one
+ * voice:user_left per occupant to `channel:{id}` (the VIEW_CHANNEL boundary,
+ * never the space's room), with the epoch the occupant's session announced
+ * when its mirror entry held a well-formed one, as a live leave carries it.
+ * The one place a reaped occupant's departure is sent from.
+ */
+export function announceReapedDepartures(
+  io: Pick<SocketServer<ClientToServerEvents, ServerToClientEvents>, 'to'>,
+  channelId: string,
+  occupants: readonly ReapedVoiceOccupant[],
+): void {
+  for (const { userId, epoch } of occupants) {
+    io.to(`channel:${channelId}`).emit('voice:user_left', { channelId, userId, ...(epoch && { epoch }) });
+  }
 }
 
 /**
