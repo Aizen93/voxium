@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, memberGoneAsNotFound, violatesForeignKey } from '../utils/errors';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, memberGoneAsNotFound, violatesForeignKey, violatesUniqueIndex } from '../utils/errors';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
 import {
   validateRoleName,
@@ -34,6 +34,29 @@ import { planOverrideWrite, readKnownPermissions, readPermissionValue, storedPer
 export const roleRouter = Router({ mergeParams: true });
 
 roleRouter.use(authenticate, requireVerifiedEmail, requireConsent);
+
+const ROLE_NAME_TAKEN_MESSAGE = 'A role with this name already exists';
+
+/** The unique index on a role's name within its space (`@@unique([serverId, name])`). */
+const ROLE_NAME_INDEX = 'roles_server_id_name_key';
+
+/**
+ * Run a write that sets a role's name. The duplicate check before it is the
+ * early answer only: a creation or rename of the same name committed between
+ * the check and the write is refused by the unique index, and that refusal
+ * gets the check's own 409. Anything else is thrown as it is. Given a
+ * transaction run under retryOnTransactionConflict, this wraps the retry, so
+ * a deadlock is retried before the answer is decided (a unique violation is
+ * never retried).
+ */
+async function withUniqueRoleName<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    if (violatesUniqueIndex(err, ROLE_NAME_INDEX)) throw new ConflictError(ROLE_NAME_TAKEN_MESSAGE);
+    throw err;
+  }
+}
 
 // List all roles in a server
 roleRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -144,9 +167,9 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
 
     if (name.toLowerCase() === 'everyone') throw new BadRequestError('Cannot use reserved role name "everyone"');
 
-    // Check for duplicate name
+    // Check for duplicate name (the early answer: withUniqueRoleName below)
     const existing = await prisma.role.findFirst({ where: { serverId, name } });
-    if (existing) throw new ConflictError('A role with this name already exists');
+    if (existing) throw new ConflictError(ROLE_NAME_TAKEN_MESSAGE);
 
     // Check role limit: the roles members create, not the @everyone row every
     // server carries (the client counts the same way, so its "max roles"
@@ -197,7 +220,7 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
       }
     }
 
-    const role = await prisma.role.create({
+    const role = await withUniqueRoleName(() => prisma.role.create({
       data: {
         serverId,
         name,
@@ -205,7 +228,7 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
         position: newPosition,
         permissions: permissionsToString(permissions),
       },
-    });
+    }));
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_CREATED, {
       serverId,
@@ -245,9 +268,10 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       const nameErr = validateRoleName(name);
       if (nameErr) throw new BadRequestError(nameErr);
       if (name.toLowerCase() === 'everyone') throw new BadRequestError('Cannot use reserved role name "everyone"');
-      // Check for duplicate name (exclude current role)
+      // Check for duplicate name (exclude current role; the early answer:
+      // both writes below run through withUniqueRoleName)
       const duplicate = await prisma.role.findFirst({ where: { serverId, name, id: { not: roleId } } });
-      if (duplicate) throw new ConflictError('A role with this name already exists');
+      if (duplicate) throw new ConflictError(ROLE_NAME_TAKEN_MESSAGE);
       updateData.name = name;
     }
 
@@ -272,10 +296,10 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       if (Object.keys(updateData).length === 0) {
         throw new BadRequestError('No fields to update');
       }
-      const updated = await prisma.role.update({
+      const updated = await withUniqueRoleName(() => prisma.role.update({
         where: { id: roleId },
         data: updateData,
-      });
+      }));
       getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_UPDATED, {
         serverId,
         role: updated as unknown as Role,
@@ -319,8 +343,9 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
     // bit outside its own mask that another save had just set (inside its
     // mask the later save decides, as before). The long budget: a space or
     // role delete holds the row through its cascade. Run again whole when
-    // PostgreSQL aborts it to break a deadlock.
-    const { updated, changed } = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+    // PostgreSQL aborts it to break a deadlock; a name taken meanwhile (a
+    // save that also renames) is answered once the retries are done.
+    const { updated, changed } = await withUniqueRoleName(() => retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const [locked] = await tx.$queryRaw<{ permissions: string; position: number }[]>`SELECT permissions, position FROM roles WHERE id = ${roleId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
       if (!locked) throw new NotFoundError('Role');
       const mayManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, tx);
@@ -343,7 +368,7 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
         data: { ...updateData, permissions: permissionsToString(merged) },
       });
       return { updated: row, changed: merged !== stored };
-    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The update of role ${roleId} in ${serverId}`);
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The update of role ${roleId} in ${serverId}`));
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_UPDATED, {
       serverId,

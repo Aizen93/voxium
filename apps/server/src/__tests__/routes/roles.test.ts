@@ -371,6 +371,145 @@ describe('Role Routes', () => {
     });
   });
 
+  /**
+   * The duplicate-name check is the early answer: a creation or rename of
+   * the same name that commits between it and the write is refused by the
+   * unique index on (server_id, name), and that refusal gets the check's own
+   * 409. A unique violation of any other index is not a name conflict.
+   */
+  describe('a role name taken between the duplicate check and the write', () => {
+    /** A P2002 as Prisma 7 raises it behind the pg adapter, naming `index`. */
+    const uniqueViolation = (index: string) => Object.assign(
+      new Error(`Unique constraint failed on the constraint: \`${index}\``),
+      { code: 'P2002', meta: { modelName: 'Role', driverAdapterError: { cause: { kind: 'UniqueConstraintViolation', constraint: { index } } } } },
+    );
+    const NAME_TAKEN = { status: 409, body: { success: false, error: 'A role with this name already exists' } };
+    const answer = (res: request.Response) => ({ status: res.status, body: res.body });
+    const existingRole = { id: 'role1', name: 'OldName', position: 2, isDefault: false, permissions: '0', color: null, serverId: 'srv1' };
+    let errorLog: ReturnType<typeof vi.spyOn>;
+    let warnLog: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      prismaMock.role.count.mockResolvedValue(2);
+      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
+      errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      warnLog = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      errorLog.mockRestore();
+      warnLog.mockRestore();
+    });
+
+    /** The PATCH's reads: the role itself, then the duplicate check (none found). */
+    const renameReads = () => prismaMock.role.findFirst
+      .mockResolvedValueOnce(existingRole)
+      .mockResolvedValueOnce(null);
+
+    it('the early check itself answers the 409 this test compares with', async () => {
+      prismaMock.role.findFirst.mockResolvedValueOnce(existingRole);
+      expect(answer(await request(app).post('/api/v1/servers/srv1/roles').send({ name: 'Taken' }))).toEqual(NAME_TAKEN);
+    });
+
+    it('a creation: the index refusal is the early check\'s 409, nothing announced', async () => {
+      prismaMock.role.findFirst.mockResolvedValueOnce(null);
+      prismaMock.role.create.mockRejectedValueOnce(uniqueViolation('roles_server_id_name_key'));
+
+      const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: 'Taken' });
+
+      expect(answer(res)).toEqual(NAME_TAKEN);
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(errorLog).not.toHaveBeenCalled();
+    });
+
+    it('a creation refused by another unique index: surfaces as itself (500)', async () => {
+      prismaMock.role.findFirst.mockResolvedValueOnce(null);
+      prismaMock.role.create.mockRejectedValueOnce(uniqueViolation('roles_pkey'));
+
+      const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: 'Taken' });
+
+      expect(res.status).toBe(500);
+      expect(errorLog).toHaveBeenCalled();
+    });
+
+    it('a creation that fails otherwise: surfaces as itself (500)', async () => {
+      prismaMock.role.findFirst.mockResolvedValueOnce(null);
+      prismaMock.role.create.mockRejectedValueOnce(Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' }));
+
+      expect((await request(app).post('/api/v1/servers/srv1/roles').send({ name: 'Taken' })).status).toBe(500);
+    });
+
+    it('a rename (name only, no transaction): the index refusal is the early check\'s 409', async () => {
+      renameReads();
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('roles_server_id_name_key'));
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1').send({ name: 'Taken' });
+
+      expect(answer(res)).toEqual(NAME_TAKEN);
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('a rename refused by another unique index: surfaces as itself (500)', async () => {
+      renameReads();
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('another_index_key'));
+
+      expect((await request(app).patch('/api/v1/servers/srv1/roles/role1').send({ name: 'Taken' })).status).toBe(500);
+    });
+
+    it('a rename with permissions (inside the transaction): the 409, after one attempt (a unique violation is not retried)', async () => {
+      renameReads();
+      lockedRole({ position: 2 });
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('roles_server_id_name_key'));
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1')
+        .send({ name: 'Taken', permissions: permissionsToString(Permissions.VIEW_CHANNEL) });
+
+      expect(answer(res)).toEqual(NAME_TAKEN);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockSyncVisibilityRooms).not.toHaveBeenCalled();
+    });
+
+    it('a rename with permissions aborted by a deadlock first: retried, and the index refusal of the retry is the 409', async () => {
+      renameReads();
+      lockedRole({ position: 2 });
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); });
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('roles_server_id_name_key'));
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1')
+        .send({ name: 'Taken', permissions: permissionsToString(Permissions.VIEW_CHANNEL) });
+
+      expect(answer(res)).toEqual(NAME_TAKEN);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+    });
+
+    it('a rename with permissions aborted by deadlocks on every attempt: the conflict still surfaces as itself (500), never a 409', async () => {
+      renameReads();
+      lockedRole({ position: 2 });
+      prismaMock.$transaction.mockImplementation(async () => { throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); });
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1')
+        .send({ name: 'Taken', permissions: permissionsToString(Permissions.VIEW_CHANNEL) });
+
+      expect(res.status).toBe(500);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(3);
+    });
+
+    it('a rename with permissions refused by another unique index: surfaces as itself (500)', async () => {
+      renameReads();
+      lockedRole({ position: 2 });
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('another_index_key'));
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1')
+        .send({ name: 'Taken', permissions: permissionsToString(Permissions.VIEW_CHANNEL) });
+
+      expect(res.status).toBe(500);
+    });
+  });
+
   describe('PATCH /roles/:roleId', () => {
     it('updates role name and color', async () => {
       mockHasServerPermission.mockResolvedValue(true);

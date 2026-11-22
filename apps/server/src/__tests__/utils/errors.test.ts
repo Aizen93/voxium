@@ -9,6 +9,7 @@ import {
   UnsupportedMediaTypeError,
   ServiceUnavailableError,
   parseDateParam,
+  violatesUniqueIndex,
 } from '../../utils/errors';
 
 describe('AppError', () => {
@@ -203,5 +204,40 @@ describe('every subclass is an instance of ITSELF, not only of AppError', () => 
     expect(new ForbiddenError()).not.toBeInstanceOf(UnauthorizedError);
     expect(new UnauthorizedError()).not.toBeInstanceOf(ForbiddenError);
     expect(new AppError('x', 418)).not.toBeInstanceOf(ForbiddenError);
+  });
+});
+
+describe('violatesUniqueIndex', () => {
+  /** A P2002 as Prisma 7 raises it behind the pg adapter: the index named in `meta`. */
+  const adapterViolation = (index: string) => Object.assign(new Error(`Unique constraint failed on the constraint: \`${index}\``), {
+    code: 'P2002',
+    meta: { modelName: 'Role', driverAdapterError: { cause: { kind: 'UniqueConstraintViolation', constraint: { index } } } },
+  });
+
+  it('a name matches that index exactly, as the adapter names it', () => {
+    expect(violatesUniqueIndex(adapterViolation('roles_server_id_name_key'), 'roles_server_id_name_key')).toBe(true);
+    expect(violatesUniqueIndex(adapterViolation('roles_pkey'), 'roles_server_id_name_key')).toBe(false);
+    // never a part of a name
+    expect(violatesUniqueIndex(adapterViolation('roles_server_id_name_key_2'), 'roles_server_id_name_key')).toBe(false);
+    expect(violatesUniqueIndex(adapterViolation('roles_server_id_name_key'), 'roles_server_id')).toBe(false);
+  });
+
+  it('a predicate decides on each name given', () => {
+    const pending = (name: string) => name.startsWith('reports_pending_');
+    expect(violatesUniqueIndex(adapterViolation('reports_pending_user_key'), pending)).toBe(true);
+    expect(violatesUniqueIndex(adapterViolation('reports_pkey'), pending)).toBe(false);
+  });
+
+  it('the index named as a string meta.target (the form without the adapter) counts; a list of fields does not', () => {
+    expect(violatesUniqueIndex(Object.assign(new Error('x'), { code: 'P2002', meta: { target: 'roles_server_id_name_key' } }), 'roles_server_id_name_key')).toBe(true);
+    expect(violatesUniqueIndex(Object.assign(new Error('x'), { code: 'P2002', meta: { target: ['serverId', 'name'] } }), 'roles_server_id_name_key')).toBe(false);
+  });
+
+  it('the message alone, another code, or no error at all is never a match', () => {
+    expect(violatesUniqueIndex(Object.assign(new Error('Unique constraint failed on the constraint: `roles_server_id_name_key`'), { code: 'P2002' }), 'roles_server_id_name_key')).toBe(false);
+    expect(violatesUniqueIndex(Object.assign(adapterViolation('roles_server_id_name_key'), { code: 'P2003' }), 'roles_server_id_name_key')).toBe(false);
+    expect(violatesUniqueIndex(null, 'roles_server_id_name_key')).toBe(false);
+    expect(violatesUniqueIndex(undefined, () => true)).toBe(false);
+    expect(violatesUniqueIndex('P2002', () => true)).toBe(false);
   });
 });
