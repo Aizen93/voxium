@@ -185,7 +185,8 @@ const opened = (row: Message, text: string): Message => ({ ...row, content: text
 
 /** Waits until the handlers have handed `count` rows to the gate (each first awaits a dynamic import). */
 async function gateCalls(count: number): Promise<void> {
-  await vi.waitFor(() => expect(H.gate).toHaveLength(count));
+  // generous: other suites may share the machine, and each handler first awaits a dynamic import
+  await vi.waitFor(() => expect(H.gate).toHaveLength(count), { timeout: 10_000, interval: 5 });
 }
 /** Releases the gate call of row `id` (the `n`-th one of it) with `shown`, and lets its handler finish. */
 async function answer(id: string, shown: Message | null, pending: Promise<unknown>, n = 0): Promise<void> {
@@ -440,7 +441,7 @@ describe('a direct conversation: the view on screen is read after every await', 
     const inserting = fire('dm:message:new', m1);
     await gateCalls(1);
     H.gate[0].resolve(opened(m1, 'hello'));
-    await vi.waitFor(() => expect(H.dm.fetchConversations).toHaveBeenCalled());
+    await vi.waitFor(() => expect(H.dm.fetchConversations).toHaveBeenCalled(), { timeout: 10_000, interval: 5 });
     // the list is on its way; the person opens another conversation meanwhile
     setConversations(['c-1', 'c-2'], 'c-2');
     await act(async () => { listed(); await inserting; });
