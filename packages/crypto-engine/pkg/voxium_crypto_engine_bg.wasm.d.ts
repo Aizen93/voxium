@@ -47,7 +47,6 @@ export const engineinboundgroupsession_fromSessionKey: (a: number, b: number) =>
 export const engineinboundgroupsession_pickle: (a: number, b: number, c: number) => [number, number, number, number];
 export const engineinboundgroupsession_sessionId: (a: number) => [number, number];
 export const enginemasterkey_fromSealed: (a: number, b: number, c: number, d: number) => [number, number, number];
-export const enginemasterkey_fromSecret: (a: number, b: number) => [number, number, number];
 export const enginemasterkey_new: () => number;
 export const enginemasterkey_openSessionKey: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const enginemasterkey_publicKey: (a: number) => [number, number];
