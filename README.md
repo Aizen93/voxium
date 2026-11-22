@@ -625,6 +625,9 @@ Every setting below is in the matching template: `apps/server/.env.example` (dev
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | — | **Required.** PostgreSQL connection string (set by `docker-compose.production.yml` in the Docker deployment) |
+| `DATABASE_POOL_MAX` | `10` | The most connections this process's database pool opens at once: a whole number from 1 to 1000. Unset or empty reads `10`; any other value reads `10` too, with a warning. A parameter in `DATABASE_URL` does not change it |
+| `DATABASE_POOL_IDLE_TIMEOUT_MS` | `10000` | How long an idle connection of the pool stays open, in milliseconds: a whole number from 0 (never closed) to 3600000. Unset or empty reads `10000`; any other value reads `10000` too, with a warning |
+| `DATABASE_POOL_CONNECTION_TIMEOUT_MS` | `0` | How long a request waits for a pool connection, in milliseconds: a whole number from 0 (no limit) to 600000. Unset or empty reads `0`; any other value reads `0` too, with a warning |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection string (set by the compose file in the Docker deployment) |
 | `JWT_SECRET` | — | **Required.** Secret for signing access tokens |
 | `JWT_REFRESH_SECRET` | — | **Required.** Secret for signing refresh tokens; a different value from `JWT_SECRET` (the server logs a warning at start when the two are equal) |
