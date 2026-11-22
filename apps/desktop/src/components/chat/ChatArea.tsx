@@ -39,7 +39,15 @@ export function ChatArea() {
 
   // Join socket channel room and fetch messages when channel changes
   useEffect(() => {
-    if (!activeChannelId || activeChannelId === prevChannelRef.current) return;
+    if (!activeChannelId) {
+      // No channel is open (a space without a text channel, the open channel
+      // deleted): nothing is the loaded channel any more, so the next
+      // selection loads, also when it is the channel that was open before,
+      // and a reconnect re-joins nothing meanwhile.
+      prevChannelRef.current = null;
+      return;
+    }
+    if (activeChannelId === prevChannelRef.current) return;
 
     prevChannelRef.current = activeChannelId;
 
