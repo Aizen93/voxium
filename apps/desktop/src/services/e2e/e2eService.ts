@@ -636,6 +636,18 @@ function errText(err: unknown): string {
 }
 
 /**
+ * Whether `at`, a time this device's clock wrote, lies less than `maxAgeMs`
+ * behind the clock now. An age below zero (the clock was set back since) or
+ * one that is not a finite number never is: what `at` dates counts as
+ * expired, never as fresh until the clock catches up with it.
+ */
+function isYoungerThan(at: number | undefined, maxAgeMs: number): boolean {
+  if (typeof at !== 'number') return false;
+  const age = Date.now() - at;
+  return Number.isFinite(age) && age >= 0 && age < maxAgeMs;
+}
+
+/**
  * The typed reason a restore never left the device: the key failed its own
  * checksum (§15.2). Distinguishing this from "the key did not open the blob"
  * is the entire point of putting a checksum on a recovery key — one is a typo
@@ -2590,14 +2602,16 @@ export class E2EService {
     // onDeviceListChanged: there is no account behind the placeholder. Every
     // path that reaches the server for a peer's list comes through here.
     refuseDeletedParticipant(userId);
-    // `freshness`: false = normal cache, true = force a round trip, or a
-    // max-age in ms. The send path passes a small max-age instead of forcing —
-    // two uncached GETs per message would exhaust the per-user rate limit
-    // during fast typing and start failing sends outright.
+    // `freshness`: false reads through the cache (deviceListCacheMs), true is
+    // never answered from it (the rotation decision forces both of its reads,
+    // ensureGroupSession), a number is a max-age in ms. A read the cache does
+    // not answer joins a request already in flight for the same user. An
+    // entry dated ahead of the clock (set back since) is a miss whatever the
+    // max-age.
     const maxAge =
       freshness === true ? 0 : freshness === false ? this.deviceListCacheMs : freshness;
     const cached = this.deviceListCache.get(userId);
-    if (cached && Date.now() - cached.at < maxAge) return cached.list;
+    if (cached && isYoungerThan(cached.at, maxAge)) return cached.list;
 
     // Coalesce concurrent fetches for the same user (parallel sends, or a send
     // racing the UI refresh) into a single request.

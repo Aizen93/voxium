@@ -1442,6 +1442,81 @@ describe('E2EService (client crypto core)', () => {
     });
   });
 
+  it('a cached device list dated ahead of the clock is a miss: a forced read is never answered from the cache, a fresh entry is still reused', async () => {
+    // The rotation decision forces both reads (§12.4). A clock set back after
+    // a list was cached gives the entry a negative age, which must not let the
+    // cache answer: a device added meanwhile would receive no session key.
+    uniq++;
+    const server = createFakeServer();
+    const aliceId = `alice-${uniq}`;
+    const bobId = `bob-${uniq}`;
+    const bobPhone = makeDevice(server, bobId);
+    const base = server.apiFor(aliceId);
+    let reads = 0;
+    const counting = {
+      ...base,
+      async get(url: string) {
+        if (url === `/e2e/devices/${bobId}`) reads++;
+        return base.get(url);
+      },
+    };
+    const alice = new E2EService(aliceId, {
+      api: counting as unknown as E2EServiceOptions['api'],
+      keyProvider: memoryKeyProvider(),
+      wasmInput: wasmBytes,
+      vaultNamespace: `v${++vaultSeq}`,
+      deviceListCacheMs: 60_000,
+    });
+    liveServices.add(alice);
+    await alice.initialize();
+    await bobPhone.service.initialize();
+    await flushQueue();
+    expect(reads).toBe(0);
+
+    const t0 = Date.now();
+    const HOUR = 3_600_000;
+    // the clock only: IndexedDB and flushQueue keep their own timers
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      await alice.fetchDeviceList(bobId, true);
+      expect(reads).toBe(1);
+      // a fresh entry answers an unforced read and a max-age it is within
+      vi.setSystemTime(t0 + 30_000);
+      await alice.fetchDeviceList(bobId);
+      await alice.fetchDeviceList(bobId, 60_000);
+      expect(reads).toBe(1);
+
+      // set back an hour, and Bob adds a device meanwhile
+      vi.setSystemTime(t0 - HOUR);
+      const tablet = await registerRawDevice(server, bobId, `tablet-${uniq}`);
+      const forced = await alice.fetchDeviceList(bobId, true);
+      expect(reads).toBe(2);
+      expect(forced.devices.map((d) => d.deviceId).sort()).toEqual([bobPhone.service.deviceId, tablet.deviceId].sort());
+
+      // an unforced read and a max-age read are misses too after a step back
+      vi.setSystemTime(t0 - 2 * HOUR);
+      await alice.fetchDeviceList(bobId);
+      expect(reads).toBe(3);
+      vi.setSystemTime(t0 - 3 * HOUR);
+      await alice.fetchDeviceList(bobId, 60_000);
+      expect(reads).toBe(4);
+      // what is cached by the clock read now is reused as before
+      await alice.fetchDeviceList(bobId);
+      expect(reads).toBe(4);
+
+      // a step forward past the window: a miss, as before
+      vi.setSystemTime(t0 + HOUR);
+      await alice.fetchDeviceList(bobId);
+      expect(reads).toBe(5);
+      // and a forced read at an age of zero still reaches the server
+      await alice.fetchDeviceList(bobId, true);
+      expect(reads).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps warning after an injected device is withdrawn again (flap-back)', async () => {
     // The device already holds the session key it was fanned; erasing the
     // warning because the list reverted would hide that entirely.
