@@ -2,15 +2,10 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FileText, Download, Image, Film, Music, Clock, Loader2 } from 'lucide-react';
 import { ImageLightbox } from './ImageLightbox';
+import { DeferredMedia, formatFileSize, describeError } from './DeferredMedia';
 import { toast } from '../../stores/toastStore';
 import { api } from '../../services/api';
 import type { Attachment } from '@voxium/shared';
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function getFileIcon(mimeType: string) {
   if (mimeType.startsWith('image/')) return Image;
@@ -19,10 +14,15 @@ function getFileIcon(mimeType: string) {
   return FileText;
 }
 
+/** Fetch an attachment via the authenticated API (Authorization header only) */
+async function fetchBlob(s3Key: string): Promise<Blob> {
+  const response = await api.get(`/uploads/${s3Key}`, { responseType: 'blob' });
+  return response.data as Blob;
+}
+
 /** Fetch an attachment via the authenticated API and return a blob URL */
 async function fetchBlobUrl(s3Key: string): Promise<string> {
-  const response = await api.get(`/uploads/${s3Key}`, { responseType: 'blob' });
-  return URL.createObjectURL(response.data);
+  return URL.createObjectURL(await fetchBlob(s3Key));
 }
 
 interface Props {
@@ -38,9 +38,10 @@ export function AttachmentDisplay({ attachment }: Props) {
   const isImage = attachment.mimeType.startsWith('image/');
   const isVideo = attachment.mimeType.startsWith('video/');
   const isAudio = attachment.mimeType.startsWith('audio/');
-  const needsBlob = (isImage || isVideo || isAudio) && !attachment.expired;
+  // Only images are fetched on render; video and audio wait for a play request
+  const needsBlob = isImage && !attachment.expired;
 
-  // Fetch blob URL for media elements (they can't set Authorization headers)
+  // Fetch blob URL for images (an <img> can't set Authorization headers)
   useEffect(() => {
     if (!needsBlob) return;
     let revoked = false;
@@ -50,7 +51,8 @@ export function AttachmentDisplay({ attachment }: Props) {
         if (!revoked) setBlobUrl(url);
         else URL.revokeObjectURL(url);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        console.warn('[Attachment] Failed to load image:', describeError(err));
         if (!revoked) setImgError(true);
       })
       .finally(() => {
@@ -77,28 +79,12 @@ export function AttachmentDisplay({ attachment }: Props) {
     );
   }
 
-  const handleDownload = async () => {
-    try {
-      const response = await api.get(`/uploads/${attachment.s3Key}`, { responseType: 'blob' });
-      const blob = response.data as Blob;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = attachment.fileName;
-      a.click();
-      URL.revokeObjectURL(url);
-      toast.success(t('attachment.downloaded'));
-    } catch {
-      toast.error(t('attachment.failedToDownload'));
-    }
-  };
-
-  // Loading state for media
+  // Loading state for images
   if (needsBlob && loading) {
     return (
       <div className="mt-1 inline-flex items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-xs text-vox-text-muted">
         <Loader2 size={16} className="animate-spin shrink-0" />
-        <span>{isImage ? t('attachment.loadingImage') : isVideo ? t('attachment.loadingVideo') : t('attachment.loadingAudio')}</span>
+        <span>{t('attachment.loadingImage')}</span>
       </div>
     );
   }
@@ -135,37 +121,44 @@ export function AttachmentDisplay({ attachment }: Props) {
     );
   }
 
-  if (isVideo && blobUrl) {
+  if (isVideo || isAudio) {
     return (
-      <div className="mt-1">
-        <video
-          src={blobUrl}
-          controls
-          className="max-h-[300px] max-w-[400px] rounded-lg"
-          preload="metadata"
-        />
-        <p className="mt-0.5 text-[10px] text-vox-text-muted">{attachment.fileName} - {formatFileSize(attachment.fileSize)}</p>
-      </div>
+      <DeferredMedia
+        key={attachment.s3Key}
+        kind={isVideo ? 'video' : 'audio'}
+        load={() => fetchBlob(attachment.s3Key)}
+        cacheKey={attachment.s3Key}
+        fileName={attachment.fileName}
+        fileSize={attachment.fileSize}
+        mimeType={attachment.mimeType}
+        fallback={<FileCard attachment={attachment} />}
+      />
     );
   }
 
-  if (isAudio && blobUrl) {
-    return (
-      <div className="mt-1">
-        <div className="flex items-center gap-2 rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2">
-          <Music size={16} className="shrink-0 text-vox-text-muted" />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-xs text-vox-text-primary">{attachment.fileName}</p>
-            <audio src={blobUrl} controls className="mt-1 h-8 w-full" preload="metadata" />
-          </div>
-          <span className="shrink-0 text-[10px] text-vox-text-muted">{formatFileSize(attachment.fileSize)}</span>
-        </div>
-      </div>
-    );
-  }
+  return <FileCard attachment={attachment} />;
+}
 
-  // Generic file card
+/** The generic file card: a download button. */
+function FileCard({ attachment }: Props) {
+  const { t } = useTranslation();
   const FileIcon = getFileIcon(attachment.mimeType);
+
+  const handleDownload = async () => {
+    try {
+      const blob = await fetchBlob(attachment.s3Key);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = attachment.fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(t('attachment.downloaded'));
+    } catch {
+      toast.error(t('attachment.failedToDownload'));
+    }
+  };
+
   return (
     <div className="mt-1">
       <button

@@ -1078,6 +1078,10 @@
     "loadingImage": "画像を読み込み中...",
     "loadingVideo": "動画を読み込み中...",
     "loadingAudio": "音声を読み込み中...",
+    "play": "{{name}} を再生",
+    "loadFailed": "このファイルを読み込めませんでした。",
+    "loadFailedRetry": "{{name}} を読み込めませんでした。もう一度お試しください。",
+    "retry": "再試行",
     "downloadedName": "「{{name}}」をダウンロードしました",
     "image": "画像"
   },

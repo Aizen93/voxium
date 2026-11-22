@@ -1081,6 +1081,10 @@
     "loadingImage": "Loading image...",
     "loadingVideo": "Loading video...",
     "loadingAudio": "Loading audio...",
+    "play": "Play {{name}}",
+    "loadFailed": "Could not load this file.",
+    "loadFailedRetry": "Could not load {{name}}. Try again.",
+    "retry": "Try again",
     "downloadedName": "Downloaded \"{{name}}\"",
     "image": "image"
   },

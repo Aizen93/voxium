@@ -21,6 +21,11 @@ const LOCALE_DIR = fileURLToPath(new URL('../../i18n/locales/', import.meta.url)
 
 const SOURCES = [
   'components/auth/RegisterCodeStep.tsx',
+  'components/chat/AttachmentDisplay.tsx',
+  'components/chat/DeferredMedia.tsx',
+  'components/chat/E2EAttachmentDisplay.tsx',
+  'components/chat/DeferredMedia.tsx',
+  'components/chat/E2EAttachmentDisplay.tsx',
   'components/chat/ImageLightbox.tsx',
   'components/chat/MentionAutocomplete.tsx',
   'components/chat/MessageContent.tsx',
@@ -92,6 +97,7 @@ const NEW_KEYS = [
   'voice.toasts.connectionFailed', 'voice.toasts.connectionLost', 'voice.toasts.connectionFailedManual', 'voice.toasts.establishFailed',
   'voice.toasts.mutedByModerator', 'voice.toasts.deafenedByModerator', 'voice.toasts.screenShareFailed', 'voice.toasts.micIssue',
   'attachment.downloadedName', 'attachment.image',
+  'attachment.play', 'attachment.loadFailed', 'attachment.loadFailedRetry', 'attachment.retry',
   'support.ticketClosed',
   'landing.nav.menu',
   'landing.footer.backToHome',

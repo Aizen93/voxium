@@ -15,6 +15,7 @@ import { resetUndecryptedRows } from '../services/e2e/undecryptedRows';
 import { resetClearedHistory } from '../services/dmClearedHistory';
 import { stopE2EDeviceListWatch } from './e2eStore';
 import { resetServerPermissionsCache } from '../hooks/useServerPermissions';
+import { resetMediaCache } from '../services/mediaBlobCache';
 
 /**
  * Account-scoped stores that MUST be wiped on logout. Without this, the next
@@ -92,6 +93,8 @@ export function resetAccountStores(): void {
   // The floors of the histories it cleared, and the purges still owed for
   // them (a pass still running applies nothing)
   resetClearedHistory();
+  // Media files the leaving account played, held as blobs in memory
+  resetMediaCache();
 
   // Free the WASM crypto objects and close the vault. Key material stays in
   // the vault (device keys persist across logout, like trusted-device tokens).

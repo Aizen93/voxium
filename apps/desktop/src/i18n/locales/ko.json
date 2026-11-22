@@ -1078,6 +1078,10 @@
     "loadingImage": "이미지 로딩 중...",
     "loadingVideo": "비디오 로딩 중...",
     "loadingAudio": "오디오 로딩 중...",
+    "play": "{{name}} 재생",
+    "loadFailed": "이 파일을 불러오지 못했습니다.",
+    "loadFailedRetry": "{{name}}을(를) 불러오지 못했습니다. 다시 시도하세요.",
+    "retry": "다시 시도",
     "downloadedName": "\"{{name}}\"을(를) 다운로드했습니다",
     "image": "이미지"
   },

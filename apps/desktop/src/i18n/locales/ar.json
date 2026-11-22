@@ -1093,6 +1093,10 @@
     "loadingImage": "جارٍ تحميل الصورة...",
     "loadingVideo": "جارٍ تحميل الفيديو...",
     "loadingAudio": "جارٍ تحميل الصوت...",
+    "play": "تشغيل {{name}}",
+    "loadFailed": "تعذّر تحميل هذا الملف.",
+    "loadFailedRetry": "تعذّر تحميل {{name}}. حاول مرة أخرى.",
+    "retry": "إعادة المحاولة",
     "downloadedName": "تم تنزيل \"{{name}}\"",
     "image": "صورة"
   },
