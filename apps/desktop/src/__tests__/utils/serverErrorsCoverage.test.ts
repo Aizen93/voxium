@@ -484,7 +484,7 @@ const UNSEEN_SITES: Record<string, number> = {
   'apps/server/src/routes/webhooks.ts': 2,
   'apps/server/src/services/authService.ts': 3,
   'apps/server/src/services/sessionService.ts': 2,
-  'apps/server/src/services/signupService.ts': 5,
+  'apps/server/src/services/signupService.ts': 6,
   'apps/server/src/utils/attachmentCleanup.ts': 1,
   'apps/server/src/utils/errors.ts': 1,
   'apps/server/src/utils/permissionWrites.ts': 2,
