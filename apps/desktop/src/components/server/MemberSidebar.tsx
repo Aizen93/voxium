@@ -10,7 +10,8 @@ import { UserHoverTarget } from '../common/UserHoverTarget';
 import { MemberContextMenu } from './MemberContextMenu';
 import { MembersDialog } from './MembersDialog';
 import { clsx } from 'clsx';
-import type { ServerMember } from '@voxium/shared';
+import type { Role, ServerMember } from '@voxium/shared';
+import { topRole } from '../../utils/roleOrder';
 import { StaffBadge } from '../common/StaffBadge';
 import { SupporterBadge } from '../common/SupporterBadge';
 import {
@@ -61,24 +62,16 @@ export function MemberSidebar() {
     if (missing.length) useServerStore.getState().ensureMembers(missing);
   }, [members, channels, voicePresence]);
 
-  // Top-role color per member (unchanged from the role-grouped panel).
+  // Top-role color per member (unchanged from the role-grouped panel): the
+  // highest of their roles as the space's list holds it now, roles that share
+  // a position in one fixed order (topRole)
   const topRoleColorMap = useMemo(() => {
-    const roleInfoMap = new Map(
-      roles.filter((r) => !r.isDefault).map((r) => [r.id, { position: r.position, color: r.color }]),
-    );
+    const roleById = new Map(roles.filter((r) => !r.isDefault).map((r) => [r.id, r]));
     const colorMap = new Map<string, string | null>();
     for (const m of members) {
       if (!m.roles?.length) continue;
-      let topColor: string | null = null;
-      let topPosition = -1;
-      for (const r of m.roles) {
-        const info = roleInfoMap.get(r.id);
-        if (info && info.position > topPosition) {
-          topPosition = info.position;
-          topColor = info.color;
-        }
-      }
-      colorMap.set(m.userId, topColor);
+      const held = m.roles.map((r) => roleById.get(r.id)).filter((r): r is Role => r !== undefined);
+      colorMap.set(m.userId, topRole(held)?.color ?? null);
     }
     return colorMap;
   }, [members, roles]);

@@ -1644,6 +1644,7 @@
     "cannotModifyHigherMember": "Não é possível alterar os cargos de um membro com cargo igual ou superior",
     "cannotReorderHigherRoles": "Não é possível reordenar cargos de posição igual ou superior à sua",
     "cannotSetHigherPosition": "Não é possível mover um cargo para a sua posição ou acima",
+    "cannotCreateRoleTooLow": "Seu cargo está baixo demais na ordem dos cargos para criar cargos",
     "cannotModifyHigherOverrides": "Não é possível alterar as substituições de cargos de posição igual ou superior à sua",
     "cannotSetHigherOverrides": "Não é possível definir substituições para cargos de posição igual ou superior à sua",
     "cannotOverrideUnheldPermissions": "Não é possível definir substituições para permissões que você não tem",

@@ -1,8 +1,8 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
-import { Shield, Plus, Trash2, Check, X } from 'lucide-react';
+import { Shield, Plus, Trash2, Check, X, Lock } from 'lucide-react';
 import {
   Permissions,
   PERMISSION_LIST,
@@ -12,7 +12,14 @@ import {
 } from '@voxium/shared';
 import type { Role, PermissionInfo } from '@voxium/shared';
 import { getTranslatedError } from '../../utils/serverErrors';
-import { useViewerPermissions, mayTurnOn } from '../../hooks/useViewerPermissions';
+import {
+  useViewerPermissions,
+  useViewerRolePosition,
+  mayTurnOn,
+  mayEditRole,
+  mayCreateRole,
+} from '../../hooks/useViewerPermissions';
+import { compareRoles } from '../../utils/roleOrder';
 
 interface RoleEditorProps {
   serverId: string;
@@ -29,11 +36,12 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  // Sort roles: highest position first, @everyone always at bottom
+  // Sort roles: highest first (roles sharing a position in one fixed order,
+  // compareRoles), @everyone always at bottom
   const sortedRoles = useMemo(() => {
     const nonDefault = roles
       .filter((r) => !r.isDefault)
-      .sort((a, b) => b.position - a.position);
+      .sort((a, b) => compareRoles(b, a));
     const defaultRole = roles.find((r) => r.isDefault);
     return defaultRole ? [...nonDefault, defaultRole] : nonDefault;
   }, [roles]);
@@ -68,6 +76,15 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
   }, [serverId, t]);
 
   const canCreateRole = roles.filter((r) => !r.isDefault).length < LIMITS.MAX_ROLES_PER_SERVER;
+  // The server refuses a save and a delete of a role at or above the viewer's
+  // own highest one (@everyone included, for a manager with no role) and a
+  // creation by a viewer whose highest position is 0: such a role opens
+  // read-only, its list entry carrying a lock titled with the refusal, and
+  // Create is disabled with its reason (nothing while the rank is unknown)
+  const viewerRank = useViewerRolePosition(serverId);
+  const rankRefusal = t('serverErrors.cannotEditHigherRole');
+  const rankAllowsCreate = mayCreateRole(viewerRank);
+  const createRefusal = t('serverErrors.cannotCreateRoleTooLow');
 
   return (
     <div className="flex gap-4 min-h-[400px]">
@@ -77,7 +94,8 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
         {canManageRoles && (
           <button
             onClick={handleCreate}
-            disabled={creating || !canCreateRole}
+            disabled={creating || !canCreateRole || !rankAllowsCreate}
+            title={rankAllowsCreate ? undefined : createRefusal}
             className="flex items-center justify-center gap-1.5 rounded-lg bg-vox-accent-primary px-3 py-2 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors disabled:opacity-50 mb-3"
           >
             <Plus size={14} />
@@ -89,10 +107,12 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
         <div className="flex-1 overflow-y-auto space-y-0.5">
           {sortedRoles.map((role) => {
             const isSelected = role.id === effectiveSelectedId;
+            const locked = canManageRoles && !mayEditRole(viewerRank, role);
             return (
               <button
                 key={role.id}
                 onClick={() => setSelectedRoleId(role.id)}
+                title={locked ? rankRefusal : undefined}
                 className={`flex items-center gap-2 w-full rounded-lg px-3 py-2 text-left text-sm transition-colors ${
                   isSelected
                     ? 'bg-vox-bg-active text-vox-text-primary'
@@ -106,6 +126,9 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
                 <span className="truncate">
                   {role.isDefault ? '@everyone' : role.name}
                 </span>
+                {locked && (
+                  <Lock size={12} aria-hidden="true" className="ml-auto shrink-0 text-vox-text-muted" />
+                )}
               </button>
             );
           })}
@@ -114,6 +137,11 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
         {!canCreateRole && canManageRoles && (
           <p className="text-[10px] text-vox-text-muted mt-2 px-1">
             {t('roles.maxRolesReached', { max: LIMITS.MAX_ROLES_PER_SERVER })}
+          </p>
+        )}
+        {canCreateRole && !rankAllowsCreate && canManageRoles && (
+          <p data-testid="role-create-refused" className="text-[10px] text-vox-text-muted mt-2 px-1">
+            {createRefusal}
           </p>
         )}
       </div>
@@ -126,6 +154,7 @@ export function RoleEditor({ serverId, roles, canManageRoles }: RoleEditorProps)
             serverId={serverId}
             role={effectiveRole}
             canManageRoles={canManageRoles}
+            lockedReason={canManageRoles && !mayEditRole(viewerRank, effectiveRole) ? rankRefusal : null}
           />
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-vox-text-muted">
@@ -144,10 +173,17 @@ interface RoleDetailEditorProps {
   serverId: string;
   role: Role;
   canManageRoles: boolean;
+  /**
+   * The server's refusal when the role is at or above the viewer (null when
+   * the viewer may edit it): the role opens read-only with this reason. An
+   * edit made before it applied can still be reset, never saved.
+   */
+  lockedReason: string | null;
 }
 
-function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorProps) {
+function RoleDetailEditor({ serverId, role, canManageRoles, lockedReason }: RoleDetailEditorProps) {
   const { t } = useTranslation();
+  const editable = canManageRoles && lockedReason === null;
 
   const CATEGORY_LABELS: Record<PermissionCategory, string> = {
     general: t('roles.categories.general'),
@@ -169,6 +205,13 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // A delete confirmation opened while the role could be deleted closes when
+  // the role becomes locked (the viewer's rank arrived, or a role moved): it
+  // is never shown while locked, and it does not come back by itself when
+  // the lock lifts again
+  useEffect(() => {
+    if (lockedReason !== null) setShowDeleteConfirm(false);
+  }, [lockedReason]);
 
   const hasChanges = useMemo(() => {
     const nameChanged = !role.isDefault && name.trim() !== role.name;
@@ -263,6 +306,12 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
           </span>
         )}
       </div>
+      {lockedReason !== null && (
+        <p data-testid="role-locked-reason" className="-mt-3 flex items-center gap-1.5 text-xs text-vox-text-secondary">
+          <Lock size={12} aria-hidden="true" className="shrink-0" />
+          {lockedReason}
+        </p>
+      )}
 
       {/* Name */}
       {!role.isDefault && (
@@ -275,7 +324,8 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
             value={name}
             onChange={(e) => setName(e.target.value)}
             maxLength={LIMITS.ROLE_NAME_MAX}
-            disabled={!canManageRoles}
+            disabled={!editable}
+            title={lockedReason ?? undefined}
             className="w-full rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm text-vox-text-primary focus:outline-none focus:border-vox-accent-primary disabled:opacity-60"
           />
         </div>
@@ -291,7 +341,8 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
             type="color"
             value={color}
             onChange={(e) => setColor(e.target.value)}
-            disabled={!canManageRoles}
+            disabled={!editable}
+            title={lockedReason ?? undefined}
             className="h-9 w-9 shrink-0 cursor-pointer rounded-lg border border-vox-border bg-transparent p-0.5 disabled:cursor-not-allowed disabled:opacity-60"
           />
           <input
@@ -304,7 +355,8 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
               }
             }}
             maxLength={7}
-            disabled={!canManageRoles}
+            disabled={!editable}
+            title={lockedReason ?? undefined}
             className="w-28 rounded-lg border border-vox-border bg-vox-bg-secondary px-3 py-2 text-sm font-mono text-vox-text-primary focus:outline-none focus:border-vox-accent-primary disabled:opacity-60"
           />
           <div
@@ -343,11 +395,11 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
                     // this edit is no change), and so does one switched on
                     // before the viewer's bits were known, so it can be undone
                     const locked = !isChecked && !mayTurnOn(viewerPermissions, perm.flag) && (storedPermissions & perm.flag) !== perm.flag;
-                    const disabled = !canManageRoles || locked;
+                    const disabled = !editable || locked;
                     return (
                       <label
                         key={perm.key}
-                        title={locked ? t('serverErrors.cannotGrantPermissions') : undefined}
+                        title={lockedReason ?? (locked ? t('serverErrors.cannotGrantPermissions') : undefined)}
                         className={`flex items-start gap-3 px-3 py-2.5 cursor-pointer transition-colors hover:bg-vox-bg-hover ${
                           disabled ? 'opacity-60 cursor-not-allowed' : ''
                         } ${isAdmin ? 'bg-vox-accent-danger/5' : ''}`}
@@ -409,7 +461,8 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
             </button>
             <button
               onClick={handleSave}
-              disabled={saving || (!role.isDefault && name.trim().length < LIMITS.ROLE_NAME_MIN)}
+              disabled={saving || lockedReason !== null || (!role.isDefault && name.trim().length < LIMITS.ROLE_NAME_MIN)}
+              title={lockedReason ?? undefined}
               className="flex items-center gap-1 rounded-lg bg-vox-accent-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors disabled:opacity-50"
             >
               <Check size={14} />
@@ -425,10 +478,12 @@ function RoleDetailEditor({ serverId, role, canManageRoles }: RoleDetailEditorPr
           <h4 className="text-xs font-semibold uppercase tracking-wide text-vox-accent-danger mb-2">
             {t('roles.dangerZone')}
           </h4>
-          {!showDeleteConfirm ? (
+          {!showDeleteConfirm || lockedReason !== null ? (
             <button
               onClick={() => setShowDeleteConfirm(true)}
-              className="flex items-center gap-1.5 rounded-lg border border-vox-accent-danger/50 px-3 py-2 text-xs font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors"
+              disabled={lockedReason !== null}
+              title={lockedReason === null ? undefined : t('serverErrors.cannotDeleteHigherRole')}
+              className="flex items-center gap-1.5 rounded-lg border border-vox-accent-danger/50 px-3 py-2 text-xs font-medium text-vox-accent-danger hover:bg-vox-accent-danger/10 transition-colors disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
             >
               <Trash2 size={14} />
               {t('roles.deleteRole')}

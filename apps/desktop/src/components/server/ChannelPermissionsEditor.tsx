@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useServerStore } from '../../stores/serverStore';
 import { toast } from '../../stores/toastStore';
-import { X, Check, Minus, Shield, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { X, Check, Minus, Shield, ChevronDown, ChevronRight, Loader2, Lock } from 'lucide-react';
 import {
   PERMISSION_LIST,
   permissionsFromString,
@@ -11,7 +11,13 @@ import {
 } from '@voxium/shared';
 import type { ChannelPermissionOverride, PermissionInfo } from '@voxium/shared';
 import { getTranslatedError } from '../../utils/serverErrors';
-import { useViewerPermissions, mayTurnOn } from '../../hooks/useViewerPermissions';
+import { compareRoles } from '../../utils/roleOrder';
+import {
+  useViewerPermissions,
+  useViewerRolePosition,
+  mayTurnOn,
+  mayEditRoleOverrides,
+} from '../../hooks/useViewerPermissions';
 
 interface ChannelPermissionsEditorProps {
   serverId: string;
@@ -108,6 +114,13 @@ export function ChannelPermissionsEditor({
   const fetchChannelPermissions = useServerStore((s) => s.fetchChannelPermissions);
   const setChannelPermissionOverride = useServerStore((s) => s.setChannelPermissionOverride);
   const viewerPermissions = useViewerPermissions(serverId);
+  // The server refuses every override write on a role at or above the
+  // viewer's own highest one (never on @everyone): such a role can still be
+  // opened and read (the server serves its overrides to whoever views the
+  // channel), its list entry carries a lock titled with that refusal, and its
+  // panel is locked (nothing while the rank is unknown)
+  const viewerRank = useViewerRolePosition(serverId);
+  const rankRefusal = t('serverErrors.cannotSetHigherOverrides');
 
   const [overrides, setOverrides] = useState<Record<string, OverrideState>>({});
   const [originalOverrides, setOriginalOverrides] = useState<Record<string, OverrideState>>({});
@@ -118,7 +131,7 @@ export function ChannelPermissionsEditor({
     new Set(relevantCategories.map((c) => c.key)),
   );
 
-  const sortedRoles = [...roles].sort((a, b) => a.position - b.position);
+  const sortedRoles = [...roles].sort(compareRoles);
 
   // Initialize selected role to the first role (usually @everyone)
   useEffect(() => {
@@ -262,6 +275,10 @@ export function ChannelPermissionsEditor({
   })();
 
   const selectedRole = sortedRoles.find((r) => r.id === selectedRoleId);
+  // A role at or above the viewer opens read-only: its toggles and Save are
+  // disabled with the refusal (Reset still undoes an edit made before the
+  // rank was known, or before the role moved to or above the viewer)
+  const selectedEditable = !selectedRole || mayEditRoleOverrides(viewerRank, selectedRole);
   const currentOverride = selectedRoleId
     ? overrides[selectedRoleId] || { allow: 0n, deny: 0n }
     : { allow: 0n, deny: 0n };
@@ -311,6 +328,7 @@ export function ChannelPermissionsEditor({
               <div className="space-y-0.5">
                 {sortedRoles.map((role) => {
                   const isSelected = role.id === selectedRoleId;
+                  const editable = mayEditRoleOverrides(viewerRank, role);
                   const roleOverride = overrides[role.id];
                   const hasOverride =
                     roleOverride &&
@@ -320,6 +338,7 @@ export function ChannelPermissionsEditor({
                     <button
                       key={role.id}
                       onClick={() => setSelectedRoleId(role.id)}
+                      title={editable ? undefined : rankRefusal}
                       className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors ${
                         isSelected
                           ? 'bg-vox-bg-active text-vox-text-primary'
@@ -333,6 +352,9 @@ export function ChannelPermissionsEditor({
                         }}
                       />
                       <span className="truncate">{role.name}</span>
+                      {!editable && (
+                        <Lock size={12} aria-hidden="true" className="shrink-0 text-vox-text-muted" />
+                      )}
                       {hasOverride && (
                         <span className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-vox-accent-primary" />
                       )}
@@ -366,6 +388,12 @@ export function ChannelPermissionsEditor({
                     <p className="mt-1 text-xs text-vox-text-muted">
                       {t('channelPermissions.description')}
                     </p>
+                    {!selectedEditable && (
+                      <p data-testid="role-locked-reason" className="mt-2 flex items-center gap-1.5 text-xs text-vox-text-secondary">
+                        <Lock size={12} aria-hidden="true" className="shrink-0" />
+                        {rankRefusal}
+                      </p>
+                    )}
                   </div>
 
                   {/* Legend */}
@@ -427,10 +455,14 @@ export function ChannelPermissionsEditor({
                                   rolePermissions={permissionsFromString(
                                     selectedRole.permissions,
                                   )}
-                                  locked={
-                                    !mayTurnOn(viewerPermissions, perm.flag) &&
-                                    storedState(selectedRole.id, perm.flag) === 'inherit' &&
-                                    getTriState(perm.flag, currentOverride) === 'inherit'
+                                  lockedReason={
+                                    !selectedEditable
+                                      ? rankRefusal
+                                      : !mayTurnOn(viewerPermissions, perm.flag) &&
+                                          storedState(selectedRole.id, perm.flag) === 'inherit' &&
+                                          getTriState(perm.flag, currentOverride) === 'inherit'
+                                        ? t('serverErrors.cannotOverrideUnheldPermissions')
+                                        : null
                                   }
                                   onToggle={() =>
                                     handleToggle(selectedRole.id, perm.flag)
@@ -471,7 +503,8 @@ export function ChannelPermissionsEditor({
               </button>
               <button
                 onClick={handleSave}
-                disabled={!hasChanges || saving}
+                disabled={!hasChanges || saving || !selectedEditable}
+                title={selectedEditable ? undefined : rankRefusal}
                 className="rounded-lg bg-vox-accent-primary px-4 py-1.5 text-xs font-medium text-white hover:bg-vox-accent-hover transition-colors disabled:opacity-50"
               >
                 {saving ? t('common.saving') : t('common.save')}
@@ -512,14 +545,18 @@ function PermissionRow({
   permission,
   state,
   rolePermissions,
-  locked,
+  lockedReason,
   onToggle,
 }: {
   permission: PermissionInfo;
   state: TriState;
   rolePermissions: bigint;
-  /** A bit the viewer does not hold, stored as inherit: any other state would be refused. */
-  locked: boolean;
+  /**
+   * The server's refusal, shown as the title of a toggle that cannot move
+   * (null when it can): a role at or above the viewer, or a bit the viewer
+   * does not hold stored as inherit (any other state would be refused).
+   */
+  lockedReason: string | null;
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
@@ -551,11 +588,10 @@ function PermissionRow({
 
       <button
         onClick={onToggle}
-        disabled={locked}
+        disabled={lockedReason !== null}
         className="shrink-0 rounded-md p-1 hover:bg-vox-bg-active transition-colors disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-        title={locked
-          ? t('serverErrors.cannotOverrideUnheldPermissions')
-          : `${t('channelPermissions.current')} ${state}. ${t('channelPermissions.clickToCycle')}`}
+        title={lockedReason
+          ?? `${t('channelPermissions.current')} ${state}. ${t('channelPermissions.clickToCycle')}`}
       >
         <TriStateIcon state={state} size={18} />
       </button>

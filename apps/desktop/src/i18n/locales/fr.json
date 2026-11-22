@@ -1644,6 +1644,7 @@
     "cannotModifyHigherMember": "Impossible de modifier les rôles d'un membre de rang égal ou supérieur",
     "cannotReorderHigherRoles": "Impossible de réordonner des rôles de rang égal ou supérieur au vôtre",
     "cannotSetHigherPosition": "Impossible de placer un rôle à votre rang ou au-dessus",
+    "cannotCreateRoleTooLow": "Votre rôle est trop bas dans l’ordre des rôles pour créer des rôles",
     "cannotModifyHigherOverrides": "Impossible de modifier les dérogations des rôles de rang égal ou supérieur au vôtre",
     "cannotSetHigherOverrides": "Impossible de définir des dérogations pour des rôles de rang égal ou supérieur au vôtre",
     "cannotOverrideUnheldPermissions": "Impossible de définir des dérogations pour des autorisations que vous n'avez pas",

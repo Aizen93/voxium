@@ -311,3 +311,20 @@ describe('ChannelSidebar — selecting a text channel', () => {
     expect(S.fetchMessages).not.toHaveBeenCalled();
   });
 });
+
+describe('ChannelSidebar — the colour of a voice occupant\'s name', () => {
+  const user = { id: 'u1', displayName: 'Una', avatarUrl: null, selfMute: false, selfDeaf: false, serverMuted: false, serverDeafened: false, speaking: false };
+  const coloured = (id: string, position: number, color: string): Role => ({ ...role(id, 0n), position, color });
+  const HELD = [coloured('r-low', 1, 'rgb(0, 128, 0)'), coloured('r-a', 4, 'rgb(255, 0, 0)'), coloured('r-b', 4, 'rgb(0, 0, 255)')];
+  const nameColour = () => (document.body.querySelector('[data-testid="voice-user-u1"] span.truncate') as HTMLElement).style.color;
+
+  it('the highest of their roles; two at the top position: the higher id, whatever order the member row holds them in', async () => {
+    occupants = [user];
+    for (const held of [HELD, [...HELD].reverse()]) {
+      viewer(Permissions.VIEW_CHANNEL);
+      members = [...members, { ...meWith('member'), userId: 'u1', roles: held, user: { id: 'u1', username: 'una', displayName: 'Una', avatarUrl: null } } as unknown as ServerMember];
+      await render();
+      expect(nameColour()).toBe('rgb(0, 0, 255)');
+    }
+  });
+});

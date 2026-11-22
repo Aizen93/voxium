@@ -1,8 +1,18 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, memberGoneAsNotFound, violatesForeignKey } from '../utils/errors';
+import {
+  BadRequestError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  memberGoneAsNotFound,
+  prismaErrorCode,
+  violatesForeignKey,
+  violatesUniqueIndex,
+} from '../utils/errors';
 import { LOCK_WAIT_TRANSACTION_OPTIONS, retryOnTransactionConflict } from '../utils/transactionRetry';
+import { isSortPosition, MAX_SORT_POSITION } from '../utils/sortPosition';
 import {
   validateRoleName,
   validateRoleColor,
@@ -24,7 +34,9 @@ import {
   hasChannelPermission,
   getHighestRolePosition,
   getEffectivePermissions,
+  NO_CHANNEL_EFFECTIVE_PERMISSIONS,
   type PermissionReadClient,
+  type ChannelPermissionReadClient,
 } from '../utils/permissionCalculator';
 import { syncChannelVisibilityRooms } from '../utils/channelVisibilityRooms';
 import { planOverrideWrite, readKnownPermissions, readPermissionValue, storedPermissionBits } from '../utils/permissionWrites';
@@ -32,6 +44,77 @@ import { planOverrideWrite, readKnownPermissions, readPermissionValue, storedPer
 export const roleRouter = Router({ mergeParams: true });
 
 roleRouter.use(authenticate, requireVerifiedEmail, requireConsent);
+
+const ROLE_NAME_TAKEN_MESSAGE = 'A role with this name already exists';
+
+/** The unique index on a role's name within its space (`@@unique([serverId, name])`). */
+const ROLE_NAME_INDEX = 'roles_server_id_name_key';
+
+/** A creation by a member whose highest position is 0, @everyone's. */
+const ROLE_TOO_LOW_MESSAGE = 'Your role is too low in the role order to create roles';
+
+/**
+ * Where a new role goes, given its creator's highest position
+ * (getHighestRolePosition: Infinity for the owner) and the highest position
+ * of the space's roles. A creation moves no existing role. The owner's goes
+ * on top, one above the highest role, at most MAX_SORT_POSITION (the bound of
+ * the role reorder: a role already there shares it). Anyone else's
+ * goes one position below their own highest role, so that it is below them
+ * by the rule every later edit, assignment, override and delete of it is
+ * judged by (a role at or above the actor is refused); a role already at
+ * that position shares it, and every rank comparison treats the two as
+ * equal. Null when no position below the creator's exists: their highest is
+ * 0, @everyone's (no role of their own, or only roles at 0).
+ */
+function newRolePosition(creatorHighest: number, highestRolePosition: number | null): number | null {
+  if (creatorHighest === Infinity) return Math.min((highestRolePosition ?? 0) + 1, MAX_SORT_POSITION);
+  return creatorHighest >= 1 ? creatorHighest - 1 : null;
+}
+
+/**
+ * Run a write that sets a role's name. The duplicate check before it is the
+ * early answer only: a creation or rename of the same name committed between
+ * the check and the write is refused by the unique index, and that refusal
+ * gets the check's own 409. Anything else is thrown as it is. Given a
+ * transaction run under retryOnTransactionConflict, this wraps the retry, so
+ * a deadlock is retried before the answer is decided (a unique violation is
+ * never retried).
+ */
+async function withUniqueRoleName<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    if (violatesUniqueIndex(err, ROLE_NAME_INDEX)) throw new ConflictError(ROLE_NAME_TAKEN_MESSAGE);
+    throw err;
+  }
+}
+
+/**
+ * A write on a role row that is gone by the time it runs (a role delete, or a
+ * space delete's cascade, committed since the role was read): no row to
+ * update or delete (P2025), thrown as the 404 of a role that does not exist.
+ * Anything else is thrown as it is.
+ */
+function roleGoneAsNotFound(err: unknown): never {
+  if (prismaErrorCode(err) === 'P2025') throw new NotFoundError('Role');
+  throw err;
+}
+
+/** Run a single-statement write on one role row: gone meanwhile, 404 Role. */
+async function roleOrMissing<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    return roleGoneAsNotFound(err);
+  }
+}
+
+/** One entry of a reorder: a role id and its new position. */
+function isRoleOrderEntry(entry: unknown): entry is { id: string; position: number } {
+  if (!entry || typeof entry !== 'object') return false;
+  const { id, position } = entry as Record<string, unknown>;
+  return typeof id === 'string' && isSortPosition(position);
+}
 
 // List all roles in a server
 roleRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, next: NextFunction) => {
@@ -43,9 +126,10 @@ roleRouter.get('/', async (req: Request<{ serverId: string }>, res: Response, ne
     });
     if (!membership) throw new NotFoundError('Server');
 
+    // id breaks position ties: roles that share a position come in one order
     const roles = await prisma.role.findMany({
       where: { serverId },
-      orderBy: { position: 'asc' },
+      orderBy: [{ position: 'asc' }, { id: 'asc' }],
     });
 
     res.json({ success: true, data: roles });
@@ -65,6 +149,9 @@ roleRouter.put('/reorder', rateLimitRoleManage, async (req: Request<{ serverId: 
     const { order } = req.body;
     if (!Array.isArray(order) || order.length === 0) {
       throw new BadRequestError('order must be a non-empty array');
+    }
+    if (!order.every(isRoleOrderEntry)) {
+      throw new BadRequestError(`Each order entry needs a role id and a whole-number position from 0 to ${MAX_SORT_POSITION}`);
     }
 
     const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
@@ -105,15 +192,32 @@ roleRouter.put('/reorder', rateLimitRoleManage, async (req: Request<{ serverId: 
       throw new BadRequestError('Role positions must be unique');
     }
 
-    await prisma.$transaction(
-      order.map((o: { id: string; position: number }) =>
-        prisma.role.update({ where: { id: o.id }, data: { position: o.position } })
-      )
-    );
+    // Update the positions in one transaction, one row after the other in ONE
+    // fixed order, sorted by id, whatever order the client sent (as the
+    // channel and category reorders do): two reorders of the same roles then
+    // lock them in one order and one waits for the other. A role the
+    // validation saw and that is gone by the update (deleted meanwhile, or
+    // with its space) answers as an unknown one, 404 Role. The long budget
+    // (LOCK_WAIT_TRANSACTION_OPTIONS): a role or space delete holds the row
+    // through its cascade, and a role save or override write holds it while
+    // it checks. The batch is built again for each attempt and run again
+    // whole when PostgreSQL aborts it to break a deadlock: it writes absolute
+    // positions, so a second run writes what the first would have.
+    const sorted = [...order].sort((a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    try {
+      await retryOnTransactionConflict(() => prisma.$transaction(
+        sorted.map((o: { id: string; position: number }) =>
+          prisma.role.update({ where: { id: o.id }, data: { position: o.position } })
+        ),
+        LOCK_WAIT_TRANSACTION_OPTIONS,
+      ), `[Roles] The reorder of roles in ${serverId}`);
+    } catch (err) {
+      roleGoneAsNotFound(err);
+    }
 
     const updated = await prisma.role.findMany({
       where: { serverId },
-      orderBy: { position: 'asc' },
+      orderBy: [{ position: 'asc' }, { id: 'asc' }],
       select: { id: true, position: true },
     });
 
@@ -142,9 +246,9 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
 
     if (name.toLowerCase() === 'everyone') throw new BadRequestError('Cannot use reserved role name "everyone"');
 
-    // Check for duplicate name
+    // Check for duplicate name (the early answer: withUniqueRoleName below)
     const existing = await prisma.role.findFirst({ where: { serverId, name } });
-    if (existing) throw new ConflictError('A role with this name already exists');
+    if (existing) throw new ConflictError(ROLE_NAME_TAKEN_MESSAGE);
 
     // Check role limit: the roles members create, not the @everyone row every
     // server carries (the client counts the same way, so its "max roles"
@@ -164,17 +268,12 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
       color = req.body.color;
     }
 
-    // New roles are created at position just below the actor's highest role
-    const actorHighest = await getHighestRolePosition(req.user!.userId, serverId);
-    // Insert at position 1 (above @everyone which is 0), shift others up if needed
-    const highestPosition = await prisma.role.aggregate({
-      where: { serverId, isDefault: false },
-      _max: { position: true },
-    });
-    const newPosition = Math.min(
-      (highestPosition._max.position ?? 0) + 1,
-      actorHighest === Infinity ? 999 : actorHighest,
-    );
+    // A new role goes strictly below its creator's highest role (the owner's
+    // on top): a creator whose highest position is 0 has no position below
+    // their own (newRolePosition)
+    const actorId = req.user!.userId;
+    const actorHighest = await getHighestRolePosition(actorId, serverId);
+    if (newRolePosition(actorHighest, null) === null) throw new ForbiddenError(ROLE_TOO_LOW_MESSAGE);
 
     // Parse permissions from request (default to 0). A creation stores the
     // bits its client knows from what it sent (see utils/permissionWrites.ts;
@@ -187,7 +286,7 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
       // Cannot grant permissions the actor doesn't have (except owner): every
       // bit a creation stores is one it turns on
       if (actorHighest !== Infinity) {
-        const actorPerms = await getEffectivePermissions(req.user!.userId, serverId);
+        const actorPerms = await getEffectivePermissions(actorId, serverId);
         const actorPermBits = permissionsFromString(actorPerms.permissions);
         if ((permissions & ~actorPermBits) !== 0n) {
           throw new ForbiddenError('Cannot grant permissions you do not have');
@@ -195,15 +294,55 @@ roleRouter.post('/', rateLimitRoleManage, async (req: Request<{ serverId: string
       }
     }
 
-    const role = await prisma.role.create({
-      data: {
-        serverId,
-        name,
-        color,
-        position: newPosition,
-        permissions: permissionsToString(permissions),
-      },
-    });
+    // Everything above is the early answer. Then one transaction whose first
+    // statement locks the space row (FOR UPDATE, as a channel or category
+    // creation takes it): concurrent creations in one space run one after the
+    // other, each counting and placing against every creation committed
+    // before it. Inside it, on the transaction's client and in the order of
+    // the early answer: Manage Roles, the cap and the highest position (one
+    // aggregate), the creator's rank and the position it gives
+    // (newRolePosition), every bit turned on held; then the insert. The space
+    // row is the only existing row it locks, and it writes no existing role.
+    // A role reorder, a role assignment or a role delete by someone else takes
+    // no space row: one that commits between the rank read and the insert can
+    // still leave the new role at or above its creator, and the only
+    // consequence is a role its creator cannot manage (no one gains a power).
+    // Run again whole when PostgreSQL aborts it to break a deadlock; the long
+    // budget (LOCK_WAIT_TRANSACTION_OPTIONS): a space delete holds the space
+    // row through its cascade. A name taken meanwhile is answered once the
+    // retries are done (withUniqueRoleName).
+    const role = await withUniqueRoleName(() => retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+      const space = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM servers WHERE id = ${serverId} FOR UPDATE`;
+      if (space.length === 0) throw new NotFoundError('Server');
+      const mayManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, tx);
+      if (!mayManage) throw new ForbiddenError('You do not have permission to manage roles');
+      const { _count, _max } = await tx.role.aggregate({
+        where: { serverId, isDefault: false },
+        _count: { _all: true },
+        _max: { position: true },
+      });
+      if (_count._all >= LIMITS.MAX_ROLES_PER_SERVER) {
+        throw new BadRequestError(`Server can have at most ${LIMITS.MAX_ROLES_PER_SERVER} roles`);
+      }
+      const highest = await getHighestRolePosition(actorId, serverId, tx);
+      const position = newRolePosition(highest, _max.position);
+      if (position === null) throw new ForbiddenError(ROLE_TOO_LOW_MESSAGE);
+      if (highest !== Infinity && permissions !== 0n) {
+        const actorBits = await computeServerPermissions(actorId, serverId, tx);
+        if ((permissions & ~actorBits) !== 0n) {
+          throw new ForbiddenError('Cannot grant permissions you do not have');
+        }
+      }
+      return tx.role.create({
+        data: {
+          serverId,
+          name,
+          color,
+          position,
+          permissions: permissionsToString(permissions),
+        },
+      });
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] A role creation in ${serverId}`));
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_CREATED, {
       serverId,
@@ -243,9 +382,10 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       const nameErr = validateRoleName(name);
       if (nameErr) throw new BadRequestError(nameErr);
       if (name.toLowerCase() === 'everyone') throw new BadRequestError('Cannot use reserved role name "everyone"');
-      // Check for duplicate name (exclude current role)
+      // Check for duplicate name (exclude current role; the early answer:
+      // both writes below run through withUniqueRoleName)
       const duplicate = await prisma.role.findFirst({ where: { serverId, name, id: { not: roleId } } });
-      if (duplicate) throw new ConflictError('A role with this name already exists');
+      if (duplicate) throw new ConflictError(ROLE_NAME_TAKEN_MESSAGE);
       updateData.name = name;
     }
 
@@ -270,10 +410,11 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
       if (Object.keys(updateData).length === 0) {
         throw new BadRequestError('No fields to update');
       }
-      const updated = await prisma.role.update({
+      // One statement; a role deleted since it was read finds no row: 404 Role
+      const updated = await withUniqueRoleName(() => roleOrMissing(() => prisma.role.update({
         where: { id: roleId },
         data: updateData,
-      });
+      })));
       getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_UPDATED, {
         serverId,
         role: updated as unknown as Role,
@@ -317,8 +458,9 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
     // bit outside its own mask that another save had just set (inside its
     // mask the later save decides, as before). The long budget: a space or
     // role delete holds the row through its cascade. Run again whole when
-    // PostgreSQL aborts it to break a deadlock.
-    const { updated, changed } = await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
+    // PostgreSQL aborts it to break a deadlock; a name taken meanwhile (a
+    // save that also renames) is answered once the retries are done.
+    const { updated, changed } = await withUniqueRoleName(() => retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const [locked] = await tx.$queryRaw<{ permissions: string; position: number }[]>`SELECT permissions, position FROM roles WHERE id = ${roleId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
       if (!locked) throw new NotFoundError('Role');
       const mayManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, tx);
@@ -341,7 +483,7 @@ roleRouter.patch('/:roleId', rateLimitRoleManage, async (req: Request<{ serverId
         data: { ...updateData, permissions: permissionsToString(merged) },
       });
       return { updated: row, changed: merged !== stored };
-    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The update of role ${roleId} in ${serverId}`);
+    }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The update of role ${roleId} in ${serverId}`));
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_UPDATED, {
       serverId,
@@ -381,8 +523,10 @@ roleRouter.delete('/:roleId', rateLimitRoleManage, async (req: Request<{ serverI
       throw new ForbiddenError('Cannot delete a role at or above your own position');
     }
 
-    // Cascade: MemberRole and ChannelPermissionOverride are cascade-deleted by Prisma
-    await prisma.role.delete({ where: { id: roleId } });
+    // Cascade: MemberRole and ChannelPermissionOverride are cascade-deleted by
+    // the database. A role another delete removed first (or a space delete's
+    // cascade) finds no row: 404 Role, and nothing is announced
+    await roleOrMissing(() => prisma.role.delete({ where: { id: roleId } }));
 
     getIO().to(`server:${serverId}`).emit(WS_EVENTS.ROLE_DELETED, { serverId, roleId });
 
@@ -551,6 +695,30 @@ roleRouter.patch(
   }
 );
 
+/**
+ * The channel an override route acts on, read through `db` (the shared
+ * client for the early answer, the transaction's client inside it): one of
+ * this space's, not secure, and one the actor can view. Anything else is the
+ * 404 of a channel that does not exist, so an id the actor cannot see tells
+ * nothing apart from an unknown one: the routes ask it before they read the
+ * role, the body or the override. Secure channels carry no role overrides
+ * (their access is their membership) and are refused on their own line
+ * first: a member of one holds VIEW_CHANNEL there through that membership.
+ * The owner and an ADMINISTRATOR view every other channel.
+ */
+async function assertOverrideChannel(
+  actorId: string,
+  serverId: string,
+  channelId: string,
+  db?: ChannelPermissionReadClient,
+): Promise<void> {
+  const channel = await (db ?? prisma).channel.findFirst({ where: { id: channelId, serverId }, select: { secure: true } });
+  if (!channel || channel.secure) throw new NotFoundError('Channel');
+  if (!await hasChannelPermission(actorId, channelId, serverId, Permissions.VIEW_CHANNEL, db)) {
+    throw new NotFoundError('Channel');
+  }
+}
+
 // Get channel permission overrides for a channel
 roleRouter.get(
   '/channels/:channelId/permissions',
@@ -563,16 +731,9 @@ roleRouter.get(
       });
       if (!membership) throw new NotFoundError('Server');
 
-      const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      // Secure channels have no role overrides and must not be enumerable —
-      // same NotFound as a channel that does not exist. Regular channels
-      // additionally require VIEW_CHANNEL (a member who cannot see a channel
-      // must not read its override list either).
-      if (!channel || channel.secure) throw new NotFoundError('Channel');
-      const canView = await hasChannelPermission(
-        req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL,
-      );
-      if (!canView) throw new NotFoundError('Channel');
+      // A secure channel, or one the member cannot see: the 404 of a channel
+      // that does not exist (assertOverrideChannel)
+      await assertOverrideChannel(req.user!.userId, serverId, channelId);
 
       const overrides = await prisma.channelPermissionOverride.findMany({
         where: { channelId },
@@ -606,18 +767,28 @@ roleRouter.get(
  * update takes it, so an override's key check on it still passes): it is the
  * one row every write of this override takes first, an existing override or
  * not, so two writes of it (or a role save) run one after the other and the
- * value merged over is the value replaced. Then every check of the route made
- * again on the transaction's client, the override read again, and the write.
+ * value merged over is the value replaced. A lock that finds no role row
+ * reads the space first: a space deleted while the write waited answers 404
+ * Server (its roles went with it, and the actor holds nothing in a space that
+ * is gone). Then every check of the route made again on the transaction's
+ * client, in the route's order (manage, the channel as assertOverrideChannel
+ * decides it, the role, the rank: a role found missing by the lock in a space
+ * still there is answered after the channel, so a channel the actor no longer
+ * sees still answers as a missing one), the override read again, and the
+ * write. The checks only read: the role row is the one row locked before the
+ * write. The PUT's answer, the channel's overrides, is read on the same
+ * client before the commit, under the checks that just passed.
  * The long budget: a space, channel or role delete holds these rows through
  * its cascade. Run again whole when PostgreSQL aborts it to break a deadlock:
  * a space delete's cascade reaches the channel before the role, the reverse
  * of this write's order, so the two can meet as a deadlock; both sides run
  * under retryOnTransactionConflict, and whichever is aborted runs again (this
- * write then answers 404 Role, or 200 before the space goes).
+ * write then answers 404 Server, or 200 before the space goes).
  * A write that stores something for a channel deleted while it ran answers
  * 404 Channel; one that leaves nothing to store (a 0/0 write, the DELETE)
  * finds no row to remove and answers as for an override that did not exist.
- * Returns the bits that changed (the room re-sync is decided on them).
+ * Returns the bits that changed (the room re-sync is decided on them) and,
+ * when asked, the channel's overrides after the write.
  */
 async function writeChannelOverride(w: {
   serverId: string;
@@ -629,16 +800,21 @@ async function writeChannelOverride(w: {
   known: bigint;
   /** The route's own answer to a role at or above the actor. */
   rankRefusal: string;
-}): Promise<bigint> {
+  /** Read the channel's overrides back before the commit (the PUT's answer). */
+  readBack: boolean;
+}) {
   const { serverId, channelId, roleId, actorId } = w;
   try {
     return await retryOnTransactionConflict(() => prisma.$transaction(async (tx) => {
       const [locked] = await tx.$queryRaw<{ position: number; is_default: boolean }[]>`SELECT position, is_default FROM roles WHERE id = ${roleId} AND server_id = ${serverId} FOR NO KEY UPDATE`;
-      if (!locked) throw new NotFoundError('Role');
+      if (!locked) {
+        const space = await tx.server.findUnique({ where: { id: serverId }, select: { id: true } });
+        if (!space) throw new NotFoundError('Server');
+      }
       const mayManage = await hasServerPermission(actorId, serverId, Permissions.MANAGE_ROLES, tx);
       if (!mayManage) throw new ForbiddenError('You do not have permission to manage permissions');
-      const stillThere = await tx.channel.findFirst({ where: { id: channelId, serverId }, select: { secure: true } });
-      if (!stillThere || stillThere.secure) throw new NotFoundError('Channel');
+      await assertOverrideChannel(actorId, serverId, channelId, tx);
+      if (!locked) throw new NotFoundError('Role');
       const highest = await getHighestRolePosition(actorId, serverId, tx);
       if (highest !== Infinity && !locked.is_default && locked.position >= highest) {
         throw new ForbiddenError(w.rankRefusal);
@@ -665,7 +841,10 @@ async function writeChannelOverride(w: {
           create: { channelId, roleId, ...values },
         });
       }
-      return plan.changed;
+      const overrides = w.readBack
+        ? await tx.channelPermissionOverride.findMany({ where: { channelId }, include: { role: true } })
+        : null;
+      return { changed: plan.changed, overrides };
     }, LOCK_WAIT_TRANSACTION_OPTIONS), `[Roles] The override of role ${roleId} on channel ${channelId}`);
   } catch (err) {
     // A channel deleted while the transaction ran: the new row's key refused
@@ -699,10 +878,10 @@ roleRouter.put(
       const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_ROLES);
       if (!canManage) throw new ForbiddenError('You do not have permission to manage permissions');
 
-      const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
       // Secure channels are membership-governed: role overrides do not apply
-      // and their existence must not leak — indistinguishable from not-found
-      if (!channel || channel.secure) throw new NotFoundError('Channel');
+      // and their existence must not leak; nor may a channel the actor cannot
+      // see. Both are indistinguishable from not-found (assertOverrideChannel)
+      await assertOverrideChannel(req.user!.userId, serverId, channelId);
 
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');
@@ -737,20 +916,17 @@ roleRouter.put(
         }
       }
 
-      const changed = await writeChannelOverride({
+      // The caller (who holds MANAGE_ROLES and views the channel) gets the
+      // channel's overrides back, read inside the write's transaction
+      const { changed, overrides } = await writeChannelOverride({
         serverId, channelId, roleId, actorId, sentAllow, sentDeny, known,
         rankRefusal: 'Cannot set overrides for roles at or above your own position',
-      });
-
-      // The caller (who holds MANAGE_ROLES) gets the channel's overrides back
-      const allOverrides = await prisma.channelPermissionOverride.findMany({
-        where: { channelId },
-        include: { role: true },
+        readBack: true,
       });
 
       announceOverrideWrite(serverId, channelId, changed);
 
-      res.json({ success: true, data: allOverrides });
+      res.json({ success: true, data: overrides });
     } catch (err) {
       next(err);
     }
@@ -772,9 +948,9 @@ roleRouter.delete(
       const canManage = await hasServerPermission(req.user!.userId, serverId, Permissions.MANAGE_ROLES);
       if (!canManage) throw new ForbiddenError('You do not have permission to manage permissions');
 
-      const channel = await prisma.channel.findFirst({ where: { id: channelId, serverId } });
-      // Same opacity rule as the PUT: secure channels read as not-found
-      if (!channel || channel.secure) throw new NotFoundError('Channel');
+      // Same opacity rule as the PUT: a secure channel, or one the actor
+      // cannot see, reads as not-found
+      await assertOverrideChannel(req.user!.userId, serverId, channelId);
 
       const role = await prisma.role.findFirst({ where: { id: roleId, serverId } });
       if (!role) throw new NotFoundError('Role');
@@ -785,10 +961,11 @@ roleRouter.delete(
         throw new ForbiddenError(rankRefusal);
       }
 
-      const changed = await writeChannelOverride({
+      const { changed } = await writeChannelOverride({
         serverId, channelId, roleId, actorId: req.user!.userId,
         sentAllow: 0n, sentDeny: 0n, known: LEGACY_CLIENT_KNOWN_PERMISSIONS,
         rankRefusal,
+        readBack: false,
       });
 
       announceOverrideWrite(serverId, channelId, changed);
@@ -826,6 +1003,16 @@ roleRouter.get(
           where: { userId_serverId: { userId: targetUserId, serverId } },
         });
         if (!targetMember) throw new NotFoundError('Member');
+      }
+
+      // A channel the caller cannot view (another space's, a secure channel
+      // they are not a member of, one their overrides hide) answers exactly as
+      // an id that names no channel of the space, whoever the target: nothing
+      // of it is read for the target. The caller's view is decided by the
+      // channel calculation, membership first for a secure channel.
+      if (channelId && !await hasChannelPermission(req.user!.userId, channelId, serverId, Permissions.VIEW_CHANNEL)) {
+        res.json({ success: true, data: NO_CHANNEL_EFFECTIVE_PERMISSIONS });
+        return;
       }
 
       const result = await getEffectivePermissions(targetUserId, serverId, channelId);

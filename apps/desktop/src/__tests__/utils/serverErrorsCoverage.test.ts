@@ -185,6 +185,7 @@ const EXACT: Row[] = [
   { msg: 'Cannot modify roles of a member with an equal or higher role', key: 'cannotModifyHigherMember' },
   { msg: 'Cannot reorder roles at or above your own position', key: 'cannotReorderHigherRoles' },
   { msg: 'Cannot set a role position at or above your own', key: 'cannotSetHigherPosition' },
+  { msg: 'Your role is too low in the role order to create roles', key: 'cannotCreateRoleTooLow' },
   { msg: 'Cannot modify overrides for roles at or above your own position', key: 'cannotModifyHigherOverrides' },
   { msg: 'Cannot set overrides for roles at or above your own position', key: 'cannotSetHigherOverrides' },
   { msg: 'Cannot set overrides for permissions you do not have', key: 'cannotOverrideUnheldPermissions' },

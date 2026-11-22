@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate, requireVerifiedEmail, requireConsent } from '../middleware/auth';
 import { rateLimitReport } from '../middleware/rateLimiter';
 import { prisma } from '../utils/prisma';
-import { BadRequestError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ForbiddenError, NotFoundError, violatesUniqueIndex } from '../utils/errors';
 import { sanitizeText } from '../utils/sanitize';
 import { isAboveFloor, readConversationView } from '../utils/conversationVisibility';
 import { getIO } from '../websocket/socketServer';
@@ -15,20 +15,9 @@ const DUPLICATE_REPORT_MESSAGE = 'You already have a pending report against this
 /** The prefix of the three partial unique indexes that allow one pending report per reporter and target. */
 const PENDING_REPORT_INDEX_PREFIX = 'reports_pending_';
 
-/**
- * A unique violation (P2002) of one of the pending-report indexes, as the
- * driver names the index in the error's `meta` (the pg adapter's
- * `driverAdapterError.cause.constraint.index`, or `target` when it is the
- * index name).
- */
+/** A unique violation (P2002) of one of the pending-report indexes. */
 function violatesPendingReportIndex(err: unknown): boolean {
-  const e = err as {
-    code?: unknown;
-    meta?: { target?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } };
-  } | null;
-  if (e?.code !== 'P2002') return false;
-  const named = [e.meta?.driverAdapterError?.cause?.constraint?.index, e.meta?.target];
-  return named.some((v) => typeof v === 'string' && v.startsWith(PENDING_REPORT_INDEX_PREFIX));
+  return violatesUniqueIndex(err, (name) => name.startsWith(PENDING_REPORT_INDEX_PREFIX));
 }
 
 reportsRouter.use(authenticate, requireVerifiedEmail, requireConsent);

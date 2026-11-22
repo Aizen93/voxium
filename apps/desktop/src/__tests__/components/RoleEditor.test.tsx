@@ -27,12 +27,14 @@ vi.mock('../../stores/toastStore', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));
 
-// The viewer's server permissions (null: not known yet, which restricts nothing)
-const viewer = vi.hoisted(() => ({ bits: null as bigint | null }));
+// The viewer's server permissions and rank (null: not known yet, which
+// restricts nothing; Infinity: the space's owner)
+const viewer = vi.hoisted(() => ({ bits: null as bigint | null, rank: null as number | null }));
 vi.mock('../../stores/authStore', () => ({ useAuthStore: () => undefined }));
 vi.mock('../../hooks/useViewerPermissions', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../hooks/useViewerPermissions')>()),
   useViewerPermissions: () => viewer.bits,
+  useViewerRolePosition: () => viewer.rank,
 }));
 
 import { RoleEditor } from '../../components/server/RoleEditor';
@@ -46,12 +48,12 @@ const roles: Role[] = [
 let container: HTMLDivElement;
 let root: Root;
 
-function render(list: Role[] = roles) {
+function render(list: Role[] = roles, canManageRoles = true) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    root.render(<RoleEditor serverId="s1" roles={list} canManageRoles />);
+    root.render(<RoleEditor serverId="s1" roles={list} canManageRoles={canManageRoles} />);
   });
 }
 
@@ -60,6 +62,7 @@ afterEach(() => {
   container.remove();
   vi.clearAllMocks();
   viewer.bits = null;
+  viewer.rank = null;
 });
 
 /** The category panel whose heading reads `label` (the heading's panel, not the whole grid). */
@@ -73,6 +76,21 @@ function categoryPanel(label: string): HTMLElement {
 
 const rowLabels = (panel: HTMLElement) =>
   [...panel.querySelectorAll('label span')].map((s) => s.textContent);
+
+describe('RoleEditor — the order of the list', () => {
+  it('highest first, @everyone last, roles that share a position in one order whatever the order of the space\'s list', () => {
+    const at = (id: string, position: number): Role => ({ ...roles[0], id, name: id, position });
+    const list = [at('tie-a', 3), at('top', 8), roles[1], at('tie-b', 3), at('low', 1)];
+    for (const given of [list, [...list].reverse()]) {
+      render(given);
+      expect([...container.querySelectorAll('button span.truncate')].map((s) => s.textContent))
+        .toEqual(['top', 'tie-b', 'tie-a', 'low', '@everyone']);
+      act(() => root.unmount());
+      container.remove();
+    }
+    render();
+  });
+});
 
 describe('RoleEditor — MANAGE_WEBHOOKS', () => {
   it('renders a row for MANAGE_WEBHOOKS under the general category, exactly once', () => {
@@ -248,5 +266,185 @@ describe('RoleEditor — a toggle the server would refuse', () => {
     viewer.bits = null;
     render(holderOf(0n));
     expect([...container.querySelectorAll('input[type="checkbox"]')].some((box) => (box as HTMLInputElement).disabled)).toBe(false);
+  });
+});
+
+/**
+ * The server refuses a save and a delete of a role at or above the viewer's
+ * own highest one, with no exemption for @everyone, and a creation by a
+ * viewer whose highest position is 0. Such a role stays selectable and
+ * opens read-only: its list entry carries a lock titled with the refusal,
+ * the panel states it, every input and toggle is disabled, Save (for an edit
+ * made before) and Delete are disabled with their reason. While the rank is
+ * unknown nothing is locked.
+ */
+describe('RoleEditor — a role at or above the viewer', () => {
+  const role = (id: string, position: number, isDefault = false): Role => ({
+    id, serverId: 's1', name: id, color: null, position, permissions: String(Permissions.SEND_MESSAGES), isDefault, createdAt: '2026-01-01T00:00:00.000Z',
+  });
+  const RANKED: Role[] = [role('above', 9), role('same', 5), role('below', 2), { ...role('r-everyone', 0, true), name: '@everyone' }];
+  const EDIT_REFUSAL = 'serverErrors.cannotEditHigherRole';
+  const entry = (label: string) =>
+    [...container.querySelectorAll('button')].find((b) => b.querySelector('span.truncate')?.textContent === label) as HTMLButtonElement;
+  const locked = (label: string) => entry(label).querySelector('.lucide-lock') !== null;
+  const open = (label: string) => act(() => entry(label).click());
+  const heading = () => container.querySelector('h3')?.textContent;
+  const panelReason = () => container.querySelector('[data-testid="role-locked-reason"]')?.textContent ?? null;
+  const boxes = () => [...container.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[];
+  const textInputs = () => [...container.querySelectorAll('input[type="text"], input[type="color"]')] as HTMLInputElement[];
+  const button = (text: string) => [...container.querySelectorAll('button')].find((b) => b.textContent?.includes(text)) as HTMLButtonElement | undefined;
+  const updateRole = () => useServerStore.getState().updateRole as unknown as Mock;
+
+  it('a viewer of rank 5: the roles at 5 and 9 carry a lock titled with the refusal and stay selectable; the role below and @everyone do not', () => {
+    viewer.rank = 5;
+    render(RANKED);
+
+    for (const label of ['above', 'same']) {
+      expect(locked(label)).toBe(true);
+      expect(entry(label).title).toBe(EDIT_REFUSAL);
+      expect(entry(label).disabled).toBe(false);
+    }
+    for (const label of ['below', '@everyone']) {
+      expect(locked(label)).toBe(false);
+      expect(entry(label).title).toBe('');
+    }
+  });
+
+  it('a role above the viewer opens read-only and readable: inputs and toggles disabled with the refusal, Delete disabled with its own', () => {
+    viewer.rank = 5;
+    render(RANKED);
+    open('above');
+
+    expect(heading()).toBe('above');
+    expect(panelReason()).toBe(EDIT_REFUSAL);
+    // its stored permissions are shown
+    const send = boxes().find((b) => b.closest('label')!.textContent!.includes('permissions.SEND_MESSAGES.name'))!;
+    expect(send.checked).toBe(true);
+    expect(boxes().every((b) => b.disabled)).toBe(true);
+    expect([...container.querySelectorAll('label[title]')].every((l) => l.getAttribute('title') === EDIT_REFUSAL)).toBe(true);
+    expect(textInputs()).toHaveLength(3);
+    expect(textInputs().every((i) => i.disabled && i.title === EDIT_REFUSAL)).toBe(true);
+    const del = button('roles.deleteRole')!;
+    expect(del.disabled).toBe(true);
+    expect(del.title).toBe('serverErrors.cannotDeleteHigherRole');
+    act(() => send.click());
+    expect(send.checked).toBe(true);
+    expect(button('settings.profile.saveChanges')).toBeUndefined();
+  });
+
+  it('a role below the viewer opens editable, with no reason shown', () => {
+    viewer.rank = 5;
+    render(RANKED);
+    open('below');
+
+    expect(panelReason()).toBeNull();
+    expect(boxes().some((b) => b.disabled)).toBe(false);
+    expect(textInputs().some((i) => i.disabled || i.title !== '')).toBe(false);
+    expect(button('roles.deleteRole')!.disabled).toBe(false);
+  });
+
+  it('@everyone has no exemption: locked for a viewer with no role (rank 0), editable for one above it', () => {
+    viewer.rank = 0;
+    render(RANKED);
+    expect(locked('@everyone')).toBe(true);
+    open('@everyone');
+    expect(panelReason()).toBe(EDIT_REFUSAL);
+    expect(boxes().every((b) => b.disabled)).toBe(true);
+
+    act(() => root.unmount());
+    container.remove();
+    viewer.rank = 1;
+    render(RANKED);
+    expect(locked('@everyone')).toBe(false);
+  });
+
+  it('a delete confirmation opened before the role became locked closes when it does, and does not come back when the lock lifts', async () => {
+    const confirm = () => button('common.confirm');
+    const rerender = () => act(() => root.render(<RoleEditor serverId="s1" roles={RANKED} canManageRoles />));
+    render(RANKED);
+    open('below');
+    act(() => button('roles.deleteRole')!.click());
+    expect(confirm()).toBeDefined();
+
+    // the viewer's rank arrives: the role is at their own position
+    viewer.rank = 2;
+    rerender();
+    expect(confirm()).toBeUndefined();
+    expect(button('roles.deleteRole')!.disabled).toBe(true);
+
+    // ranked above it again: the confirmation stays closed until asked for
+    viewer.rank = 5;
+    rerender();
+    expect(confirm()).toBeUndefined();
+    const del = button('roles.deleteRole')!;
+    expect(del.disabled).toBe(false);
+    await act(async () => del.click());
+    await act(async () => confirm()!.click());
+    expect(useServerStore.getState().deleteRole).toHaveBeenCalledWith('s1', 'below');
+  });
+
+  it('the owner, and a rank not known yet: nothing locked', () => {
+    for (const rank of [Infinity, null]) {
+      viewer.rank = rank;
+      render(RANKED);
+      expect(RANKED.map((r) => locked(r.isDefault ? '@everyone' : r.name))).toEqual([false, false, false, false]);
+      open('above');
+      expect(panelReason()).toBeNull();
+      act(() => root.unmount());
+      container.remove();
+    }
+    render(RANKED);
+  });
+
+  it('a viewer who may not manage roles sees no lock (the editor is read-only for them anyway)', () => {
+    viewer.rank = 0;
+    render(RANKED, false);
+    expect(RANKED.map((r) => locked(r.isDefault ? '@everyone' : r.name))).toEqual([false, false, false, false]);
+    expect(panelReason()).toBeNull();
+  });
+
+  it('an edit made before the rank was known, on a role then found above the viewer: Save disabled with the refusal, Reset undoes it', async () => {
+    viewer.rank = null;
+    render(RANKED);
+    open('above');
+    const typeInto = (input: HTMLInputElement, value: string) => act(() => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    typeInto(container.querySelector('input[type="text"]') as HTMLInputElement, 'Renamed');
+    expect(button('settings.profile.saveChanges')!.disabled).toBe(false);
+
+    // the rank arrives (the next render reads it): below the open role
+    viewer.rank = 5;
+    act(() => root.render(<RoleEditor serverId="s1" roles={RANKED} canManageRoles />));
+
+    const save = button('settings.profile.saveChanges')!;
+    expect(save.disabled).toBe(true);
+    expect(save.title).toBe(EDIT_REFUSAL);
+    await act(async () => save.click());
+    expect(updateRole()).not.toHaveBeenCalled();
+    act(() => button('common.reset')!.click());
+    expect(button('settings.profile.saveChanges')).toBeUndefined();
+  });
+
+  it('Create: disabled with its reason for a viewer whose highest position is 0 (rank 0), usable otherwise', () => {
+    const create = () => button('roles.createRole')!;
+    const note = () => container.querySelector('[data-testid="role-create-refused"]')?.textContent ?? null;
+
+    viewer.rank = 0;
+    render(RANKED);
+    expect(create().disabled).toBe(true);
+    expect(create().title).toBe('serverErrors.cannotCreateRoleTooLow');
+    expect(note()).toBe('serverErrors.cannotCreateRoleTooLow');
+
+    for (const rank of [1, 5, Infinity, null]) {
+      act(() => root.unmount());
+      container.remove();
+      viewer.rank = rank;
+      render(RANKED);
+      expect(create().disabled).toBe(false);
+      expect(create().title).toBe('');
+      expect(note()).toBeNull();
+    }
   });
 });

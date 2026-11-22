@@ -117,6 +117,7 @@ export const ENGLISH_ON_PURPOSE: EnglishGroup[] = [
       'ids must name 1 to ${MEMBER_LIST.LOOKUP_MAX_IDS} users',
       'Each order entry needs a category id and a whole-number position from 0 to ${MAX_SORT_POSITION}',
       'Each order entry needs a channel id and a whole-number position from 0 to ${MAX_SORT_POSITION}',
+      'Each order entry needs a role id and a whole-number position from 0 to ${MAX_SORT_POSITION}',
       'allow and deny cannot have overlapping bits',
       'Colors must be an object',
       'Patterns must be an object',

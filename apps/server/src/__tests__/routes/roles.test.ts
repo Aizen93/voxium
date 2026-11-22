@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import { Permissions, permissionsToString, permissionsFromString, ALL_PERMISSIONS, WS_EVENTS } from '@voxium/shared';
-import { lazyStatement } from '../helpers/lazyStatement';
+import { lazyStatement, runBatch } from '../helpers/lazyStatement';
 
 // ─── Mocks (must be before any imports that use them) ───────────────────────
 
@@ -71,6 +71,7 @@ vi.mock('../../utils/permissionCalculator', () => ({
   hasChannelPermission: (...args: any[]) => mockHasChannelPermission(...args),
   getHighestRolePosition: (...args: any[]) => mockGetHighestRolePosition(...args),
   getEffectivePermissions: (...args: any[]) => mockGetEffectivePermissions(...args),
+  NO_CHANNEL_EFFECTIVE_PERMISSIONS: { permissions: '0', source: 'computed' },
 }));
 
 // Auth middleware — sets req.user on every request
@@ -115,6 +116,9 @@ function createApp() {
 
 describe('Role Routes', () => {
   let app: express.Express;
+  /** What the space row lock (a creation's first statement) and the role row lock answer. */
+  let spaceRow: unknown[];
+  let lockedRoleRow: unknown[];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -124,15 +128,25 @@ describe('Role Routes', () => {
     // and in rolePermissionWrites.test.ts)
     prismaMock.$transaction.mockImplementation(async (fn: (client: unknown) => unknown) => fn(prismaMock));
     prismaMock.channelPermissionOverride.findUnique.mockResolvedValue(null);
-    // No role row to lock unless a test names one (lockedRole)
-    prismaMock.$queryRaw.mockResolvedValue([]);
+    // The raw statements, answered by their text: the space row a creation
+    // locks is there unless a test deletes it (spaceRow); no role row to lock
+    // unless a test names one (lockedRole)
+    spaceRow = [{ id: 'srv1' }];
+    lockedRoleRow = [];
+    prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) =>
+      (strings.join('?').startsWith('SELECT id FROM servers') ? spaceRow : lockedRoleRow));
     mockComputeServerPermissions.mockReset();
+    // The actor sees the channel unless a test says otherwise (clearAllMocks
+    // keeps the last test's answer)
+    mockHasChannelPermission.mockReset();
+    mockHasChannelPermission.mockResolvedValue(true);
     app = createApp();
   });
 
   /** The role row the transaction locks: what its SELECT … FOR NO KEY UPDATE answers. */
-  const lockedRole = (row: { permissions?: string; position: number; isDefault?: boolean }) =>
-    prismaMock.$queryRaw.mockResolvedValue([{ permissions: row.permissions ?? '0', position: row.position, is_default: row.isDefault ?? false }]);
+  const lockedRole = (row: { permissions?: string; position: number; isDefault?: boolean }) => {
+    lockedRoleRow = [{ permissions: row.permissions ?? '0', position: row.position, is_default: row.isDefault ?? false }];
+  };
 
   // ── GET /api/v1/servers/:serverId/roles ────────────────────────────────
 
@@ -156,6 +170,14 @@ describe('Role Routes', () => {
       expect(res.body.data[1].name).toBe('Moderator');
     });
 
+    it('orders the roles by position, then id: roles that share a position come in one order', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user1', serverId: 'srv1' });
+      prismaMock.role.findMany.mockResolvedValue([]);
+
+      expect((await request(app).get('/api/v1/servers/srv1/roles')).status).toBe(200);
+      expect(prismaMock.role.findMany).toHaveBeenCalledWith({ where: { serverId: 'srv1' }, orderBy: [{ position: 'asc' }, { id: 'asc' }] });
+    });
+
     it('returns 404 for non-member', async () => {
       prismaMock.serverMember.findUnique.mockResolvedValue(null);
 
@@ -172,7 +194,7 @@ describe('Role Routes', () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity); // owner
       prismaMock.role.count.mockResolvedValue(2);
-      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
+      prismaMock.role.aggregate.mockResolvedValue({ _count: { _all: 2 }, _max: { position: 1 } });
       prismaMock.role.create.mockResolvedValue({
         id: 'role-new',
         name: 'Moderator',
@@ -259,7 +281,7 @@ describe('Role Routes', () => {
       mockHasServerPermission.mockResolvedValue(true);
       mockGetHighestRolePosition.mockResolvedValue(Infinity);
       prismaMock.role.count.mockResolvedValue(1);
-      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 0 } });
+      prismaMock.role.aggregate.mockResolvedValue({ _count: { _all: 2 }, _max: { position: 0 } });
       const perms = Permissions.MANAGE_CHANNELS | Permissions.KICK_MEMBERS;
       prismaMock.role.create.mockResolvedValue({
         id: 'role-new',
@@ -320,7 +342,7 @@ describe('Role Routes', () => {
       mockGetHighestRolePosition.mockResolvedValue(Infinity);
       prismaMock.role.findFirst.mockResolvedValueOnce(null);
       prismaMock.role.count.mockResolvedValue(2);
-      prismaMock.role.aggregate.mockResolvedValue({ _max: { position: 1 } });
+      prismaMock.role.aggregate.mockResolvedValue({ _count: { _all: 2 }, _max: { position: 1 } });
       prismaMock.role.create.mockResolvedValue(created);
 
       const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: `Mod${ZWSP}era${RLO}tor` });
@@ -363,6 +385,145 @@ describe('Role Routes', () => {
       expect(res.status).toBe(200);
       expect(prismaMock.role.findFirst.mock.calls[1][0].where.name).toBe('New Name');
       expect(prismaMock.role.update.mock.calls[0][0].data.name).toBe('New Name');
+    });
+  });
+
+  /**
+   * The duplicate-name check is the early answer: a creation or rename of
+   * the same name that commits between it and the write is refused by the
+   * unique index on (server_id, name), and that refusal gets the check's own
+   * 409. A unique violation of any other index is not a name conflict.
+   */
+  describe('a role name taken between the duplicate check and the write', () => {
+    /** A P2002 as Prisma 7 raises it behind the pg adapter, naming `index`. */
+    const uniqueViolation = (index: string) => Object.assign(
+      new Error(`Unique constraint failed on the constraint: \`${index}\``),
+      { code: 'P2002', meta: { modelName: 'Role', driverAdapterError: { cause: { kind: 'UniqueConstraintViolation', constraint: { index } } } } },
+    );
+    const NAME_TAKEN = { status: 409, body: { success: false, error: 'A role with this name already exists' } };
+    const answer = (res: request.Response) => ({ status: res.status, body: res.body });
+    const existingRole = { id: 'role1', name: 'OldName', position: 2, isDefault: false, permissions: '0', color: null, serverId: 'srv1' };
+    let errorLog: ReturnType<typeof vi.spyOn>;
+    let warnLog: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      prismaMock.role.count.mockResolvedValue(2);
+      prismaMock.role.aggregate.mockResolvedValue({ _count: { _all: 2 }, _max: { position: 1 } });
+      errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      warnLog = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      errorLog.mockRestore();
+      warnLog.mockRestore();
+    });
+
+    /** The PATCH's reads: the role itself, then the duplicate check (none found). */
+    const renameReads = () => prismaMock.role.findFirst
+      .mockResolvedValueOnce(existingRole)
+      .mockResolvedValueOnce(null);
+
+    it('the early check itself answers the 409 this test compares with', async () => {
+      prismaMock.role.findFirst.mockResolvedValueOnce(existingRole);
+      expect(answer(await request(app).post('/api/v1/servers/srv1/roles').send({ name: 'Taken' }))).toEqual(NAME_TAKEN);
+    });
+
+    it('a creation: the index refusal is the early check\'s 409, nothing announced', async () => {
+      prismaMock.role.findFirst.mockResolvedValueOnce(null);
+      prismaMock.role.create.mockRejectedValueOnce(uniqueViolation('roles_server_id_name_key'));
+
+      const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: 'Taken' });
+
+      expect(answer(res)).toEqual(NAME_TAKEN);
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(errorLog).not.toHaveBeenCalled();
+    });
+
+    it('a creation refused by another unique index: surfaces as itself (500)', async () => {
+      prismaMock.role.findFirst.mockResolvedValueOnce(null);
+      prismaMock.role.create.mockRejectedValueOnce(uniqueViolation('roles_pkey'));
+
+      const res = await request(app).post('/api/v1/servers/srv1/roles').send({ name: 'Taken' });
+
+      expect(res.status).toBe(500);
+      expect(errorLog).toHaveBeenCalled();
+    });
+
+    it('a creation that fails otherwise: surfaces as itself (500)', async () => {
+      prismaMock.role.findFirst.mockResolvedValueOnce(null);
+      prismaMock.role.create.mockRejectedValueOnce(Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' }));
+
+      expect((await request(app).post('/api/v1/servers/srv1/roles').send({ name: 'Taken' })).status).toBe(500);
+    });
+
+    it('a rename (name only, no transaction): the index refusal is the early check\'s 409', async () => {
+      renameReads();
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('roles_server_id_name_key'));
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1').send({ name: 'Taken' });
+
+      expect(answer(res)).toEqual(NAME_TAKEN);
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('a rename refused by another unique index: surfaces as itself (500)', async () => {
+      renameReads();
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('another_index_key'));
+
+      expect((await request(app).patch('/api/v1/servers/srv1/roles/role1').send({ name: 'Taken' })).status).toBe(500);
+    });
+
+    it('a rename with permissions (inside the transaction): the 409, after one attempt (a unique violation is not retried)', async () => {
+      renameReads();
+      lockedRole({ position: 2 });
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('roles_server_id_name_key'));
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1')
+        .send({ name: 'Taken', permissions: permissionsToString(Permissions.VIEW_CHANNEL) });
+
+      expect(answer(res)).toEqual(NAME_TAKEN);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockSyncVisibilityRooms).not.toHaveBeenCalled();
+    });
+
+    it('a rename with permissions aborted by a deadlock first: retried, and the index refusal of the retry is the 409', async () => {
+      renameReads();
+      lockedRole({ position: 2 });
+      prismaMock.$transaction
+        .mockImplementationOnce(async () => { throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); });
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('roles_server_id_name_key'));
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1')
+        .send({ name: 'Taken', permissions: permissionsToString(Permissions.VIEW_CHANNEL) });
+
+      expect(answer(res)).toEqual(NAME_TAKEN);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+    });
+
+    it('a rename with permissions aborted by deadlocks on every attempt: the conflict still surfaces as itself (500), never a 409', async () => {
+      renameReads();
+      lockedRole({ position: 2 });
+      prismaMock.$transaction.mockImplementation(async () => { throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); });
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1')
+        .send({ name: 'Taken', permissions: permissionsToString(Permissions.VIEW_CHANNEL) });
+
+      expect(res.status).toBe(500);
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(3);
+    });
+
+    it('a rename with permissions refused by another unique index: surfaces as itself (500)', async () => {
+      renameReads();
+      lockedRole({ position: 2 });
+      prismaMock.role.update.mockRejectedValueOnce(uniqueViolation('another_index_key'));
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1')
+        .send({ name: 'Taken', permissions: permissionsToString(Permissions.VIEW_CHANNEL) });
+
+      expect(res.status).toBe(500);
     });
   });
 
@@ -708,6 +869,12 @@ describe('Role Routes', () => {
         WS_EVENTS.ROLE_REORDERED,
         expect.objectContaining({ serverId: 'srv1' }),
       );
+      // the positions announced are read back by position, then id
+      expect(prismaMock.role.findMany).toHaveBeenLastCalledWith({
+        where: { serverId: 'srv1' },
+        orderBy: [{ position: 'asc' }, { id: 'asc' }],
+        select: { id: true, position: true },
+      });
     });
 
     it('returns 400 when order is not an array', async () => {
@@ -792,6 +959,162 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain('position 0');
+    });
+
+    /**
+     * The update has the shape of the channel and category reorders: every
+     * entry checked first, the rows written in id order inside one batch with
+     * the long budget, run again whole on a deadlock, and a row gone meanwhile
+     * answered 404 Role.
+     */
+    describe('the update: id order, the long budget, a row gone meanwhile', () => {
+      const P2025 = () => Object.assign(new Error('No record was found for an update.'), { code: 'P2025' });
+      const reorder = (order: unknown) => request(app).put('/api/v1/servers/srv1/roles/reorder').send({ order });
+      const updatedIds = () => prismaMock.role.update.mock.calls.map(([arg]: any[]) => arg.where.id);
+      let batches: Array<{ size: number; opts: unknown }>;
+
+      beforeEach(() => {
+        mockHasServerPermission.mockResolvedValue(true);
+        mockGetHighestRolePosition.mockResolvedValue(Infinity);
+        prismaMock.role.findMany.mockImplementation(async ({ where }: any) => (where.id
+          ? where.id.in.map((id: string) => ({ id, position: 1, isDefault: false }))
+          : [{ id: 'ra', position: 1 }, { id: 'rb', position: 2 }, { id: 'rc', position: 3 }]));
+        prismaMock.role.update.mockImplementation(async ({ where, data }: any) => ({ id: where.id, ...data }));
+        batches = [];
+        prismaMock.$transaction.mockImplementation(async (statements: unknown[], opts: unknown) => {
+          batches.push({ size: statements.length, opts });
+          return runBatch(statements);
+        });
+      });
+      afterEach(() => {
+        prismaMock.role.findMany.mockReset();
+        prismaMock.role.update.mockReset();
+      });
+
+      it('the rows are written sorted by id, whatever order the client sent, in one batch with the long budget', async () => {
+        const res = await reorder([{ id: 'rc', position: 1 }, { id: 'ra', position: 3 }, { id: 'rb', position: 2 }]);
+
+        expect(res.status).toBe(200);
+        expect(updatedIds()).toEqual(['ra', 'rb', 'rc']);
+        expect(batches).toEqual([{ size: 3, opts: { timeout: 60_000, maxWait: 10_000 } }]);
+        expect(mockEmit).toHaveBeenCalledWith(WS_EVENTS.ROLE_REORDERED, expect.objectContaining({ serverId: 'srv1' }));
+      });
+
+      it('a role deleted between the validation and the update: 404 Role, nothing announced', async () => {
+        prismaMock.role.update.mockImplementation(async ({ where, data }: any) => {
+          if (where.id === 'rb') throw P2025();
+          return { id: where.id, ...data };
+        });
+
+        const res = await reorder([{ id: 'ra', position: 2 }, { id: 'rb', position: 1 }]);
+
+        expect({ status: res.status, error: res.body.error }).toEqual({ status: 404, error: 'Role not found' });
+        expect(mockEmit).not.toHaveBeenCalled();
+      });
+
+      it('a batch PostgreSQL aborted to break a deadlock is built again and runs again whole', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const real = prismaMock.$transaction.getMockImplementation()!;
+        prismaMock.$transaction
+          .mockImplementationOnce(async () => { throw Object.assign(new Error('Transaction failed due to a write conflict or a deadlock.'), { code: 'P2034' }); })
+          .mockImplementation(real);
+        try {
+          const res = await reorder([{ id: 'rb', position: 1 }, { id: 'ra', position: 2 }]);
+
+          expect(res.status).toBe(200);
+          expect(prismaMock.$transaction).toHaveBeenCalledTimes(2);
+          // one batch per attempt, each in id order
+          expect(updatedIds()).toEqual(['ra', 'rb', 'ra', 'rb']);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('any other failure is still a 500', async () => {
+        const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+        prismaMock.role.update.mockImplementation(async () => { throw Object.assign(new Error('Foreign key constraint violated'), { code: 'P2003' }); });
+        try {
+          expect((await reorder([{ id: 'ra', position: 1 }])).status).toBe(500);
+          expect(mockEmit).not.toHaveBeenCalled();
+        } finally {
+          err.mockRestore();
+        }
+      });
+
+      it.each([
+        ['an id that is not a string', { id: 7, position: 1 }],
+        ['a negative position', { id: 'ra', position: -1 }],
+        ['a fractional position', { id: 'ra', position: 1.5 }],
+        ['a position as a string', { id: 'ra', position: '1' }],
+        ['a position past the bound', { id: 'ra', position: 1_000_001 }],
+        ['no position', { id: 'ra' }],
+        ['an entry that is not an object', 'ra'],
+        ['a null entry', null],
+      ])('%s: 400 before anything is read or written', async (_case, entry) => {
+        const res = await reorder([{ id: 'rb', position: 2 }, entry]);
+
+        expect({ status: res.status, error: res.body.error }).toEqual({
+          status: 400,
+          error: 'Each order entry needs a role id and a whole-number position from 0 to 1000000',
+        });
+        expect(mockGetHighestRolePosition).not.toHaveBeenCalled();
+        expect(prismaMock.role.findMany).not.toHaveBeenCalled();
+        expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('a role gone between its read and a one-statement write', () => {
+    const P2025 = () => Object.assign(new Error('No record was found for an update.'), { code: 'P2025' });
+    const role = { id: 'role1', name: 'Old', position: 2, isDefault: false, permissions: '0', color: null, serverId: 'srv1' };
+
+    beforeEach(() => {
+      mockHasServerPermission.mockResolvedValue(true);
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+    });
+    afterEach(() => {
+      prismaMock.role.findFirst.mockReset();
+      prismaMock.role.update.mockReset();
+      prismaMock.role.delete.mockReset();
+    });
+
+    it.each([
+      ['a rename', { name: 'New' }],
+      ['a colour change', { color: '#00FF00' }],
+    ])('%s (no permissions, one statement): 404 Role, nothing announced', async (_case, body) => {
+      // the role itself, then (for a rename) the duplicate check, which finds none
+      prismaMock.role.findFirst.mockImplementation(async ({ where }: any) => (where.name === undefined ? role : null));
+      prismaMock.role.update.mockRejectedValueOnce(P2025());
+
+      const res = await request(app).patch('/api/v1/servers/srv1/roles/role1').send(body);
+
+      expect({ status: res.status, error: res.body.error }).toEqual({ status: 404, error: 'Role not found' });
+      expect(mockEmit).not.toHaveBeenCalled();
+    });
+
+    it('two deletes of one role: the second finds no row, 404 Role, nothing announced, no room re-sync', async () => {
+      prismaMock.role.findFirst.mockResolvedValue(role);
+      prismaMock.role.delete.mockResolvedValueOnce(role).mockRejectedValueOnce(P2025());
+
+      const first = await request(app).delete('/api/v1/servers/srv1/roles/role1');
+      vi.clearAllMocks();
+      const second = await request(app).delete('/api/v1/servers/srv1/roles/role1');
+
+      expect(first.status).toBe(200);
+      expect({ status: second.status, error: second.body.error }).toEqual({ status: 404, error: 'Role not found' });
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockSyncVisibilityRooms).not.toHaveBeenCalled();
+    });
+
+    it('a delete that fails otherwise is still a 500', async () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      prismaMock.role.findFirst.mockResolvedValue(role);
+      prismaMock.role.delete.mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'P1001' }));
+      try {
+        expect((await request(app).delete('/api/v1/servers/srv1/roles/role1')).status).toBe(500);
+      } finally {
+        err.mockRestore();
+      }
     });
   });
 
@@ -1210,7 +1533,7 @@ describe('Role Routes', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data).toHaveLength(1);
       expect(mockHasChannelPermission).toHaveBeenCalledWith(
-        'user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL,
+        'user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, undefined,
       );
     });
 
@@ -1743,6 +2066,126 @@ describe('Role Routes', () => {
     });
   });
 
+  // ── Every override route: a channel the actor cannot see ────────────────
+
+  /**
+   * An actor who may manage roles but cannot view a channel gets, on every
+   * override route of it, exactly the answer of a channel id that names
+   * nothing: decided before the role, the body or the override is read, so
+   * nothing (which role ids exist, their rank, what the override holds, the
+   * order of the other refusals) tells the two apart. A secure channel
+   * answers the same for everyone, the owner and a member of it included.
+   */
+  describe('override routes on a channel the actor cannot see', () => {
+    const ROLES: Record<string, { position: number; isDefault: boolean } | null> = {
+      'r-everyone': { position: 0, isDefault: true },
+      r2: { position: 2, isDefault: false },
+      'r-high': { position: 9, isDefault: false },
+      'r-none': null,
+    };
+
+    beforeEach(() => {
+      mockHasServerPermission.mockResolvedValue(true); // MANAGE_ROLES
+      mockGetHighestRolePosition.mockResolvedValue(5);
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user1', serverId: 'srv1' });
+      prismaMock.channel.findFirst.mockImplementation(async ({ where }: any) => {
+        if (where.id === 'ch-hidden' || where.id === 'ch1') return { secure: false };
+        if (where.id === 'ch-sec') return { secure: true };
+        return null;
+      });
+      // ch-hidden: the actor lacks VIEW_CHANNEL there; a secure channel's
+      // member holds it (by membership), and is still refused
+      mockHasChannelPermission.mockImplementation(async (_u: string, channelId: string) => channelId !== 'ch-hidden');
+      prismaMock.role.findFirst.mockImplementation(async ({ where }: any) => {
+        const role = ROLES[where.id];
+        return role ? { id: where.id, serverId: 'srv1', permissions: '0', ...role } : null;
+      });
+      mockGetEffectivePermissions.mockResolvedValue({ permissions: permissionsToString(Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES), source: 'computed' });
+      mockComputeServerPermissions.mockResolvedValue(Permissions.VIEW_CHANNEL | Permissions.MANAGE_ROLES);
+      lockedRole({ position: 2 });
+      prismaMock.channelPermissionOverride.findMany.mockResolvedValue([]);
+      prismaMock.channelPermissionOverride.upsert.mockResolvedValue({});
+      prismaMock.channelPermissionOverride.deleteMany.mockResolvedValue({ count: 0 });
+    });
+
+    const base = '/api/v1/servers/srv1/roles/channels';
+    const send: Record<string, (channelId: string, roleId: string) => request.Test> = {
+      GET: (ch) => request(app).get(`${base}/${ch}/permissions`),
+      PUT: (ch, role) => request(app).put(`${base}/${ch}/permissions/${role}`).send({ allow: permissionsToString(Permissions.VIEW_CHANNEL), deny: '0' }),
+      'PUT turning on a bit the actor lacks': (ch, role) => request(app).put(`${base}/${ch}/permissions/${role}`).send({ allow: permissionsToString(Permissions.KICK_MEMBERS), deny: '0' }),
+      'PUT with a body it refuses': (ch, role) => request(app).put(`${base}/${ch}/permissions/${role}`).send({ allow: 1, deny: 'x' }),
+      DELETE: (ch, role) => request(app).delete(`${base}/${ch}/permissions/${role}`),
+    };
+    const answer = async (req: request.Test) => {
+      const res = await req;
+      return { status: res.status, body: res.body };
+    };
+
+    it.each(Object.keys(send))('%s: the same status and body as an unknown channel id, whatever the role id', async (route) => {
+      const unknown = await answer(send[route]('ch-none', 'r2'));
+      expect(unknown).toEqual({ status: 404, body: { success: false, error: 'Channel not found' } });
+      vi.clearAllMocks();
+
+      for (const roleId of Object.keys(ROLES)) {
+        expect(await answer(send[route]('ch-hidden', roleId))).toEqual(unknown);
+        expect(await answer(send[route]('ch-none', roleId))).toEqual(unknown);
+      }
+      // the visibility was asked of the actor on that channel; nothing after it was read
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch-hidden', 'srv1', Permissions.VIEW_CHANNEL, undefined);
+      expect(prismaMock.role.findFirst).not.toHaveBeenCalled();
+      expect(mockGetHighestRolePosition).not.toHaveBeenCalled();
+      expect(prismaMock.channelPermissionOverride.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.channelPermissionOverride.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(mockEmit).not.toHaveBeenCalled();
+      expect(mockSyncVisibilityRooms).not.toHaveBeenCalled();
+    });
+
+    it.each(Object.keys(send))('%s: a secure channel answers as an unknown one, for the owner too and although a member of it views it', async (route) => {
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      const unknown = await answer(send[route]('ch-none', 'r2'));
+      const secure = await answer(send[route]('ch-sec', 'r2'));
+      expect(secure).toEqual(unknown);
+      expect(secure.status).toBe(404);
+      expect(prismaMock.channelPermissionOverride.upsert).not.toHaveBeenCalled();
+      expect(prismaMock.channelPermissionOverride.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('a channel the actor sees: the routes answer as before (the rank, then the write)', async () => {
+      expect((await answer(send.PUT('ch1', 'r-high'))).body.error).toBe('Cannot set overrides for roles at or above your own position');
+      expect((await answer(send.DELETE('ch1', 'r-none'))).body.error).toBe('Role not found');
+      const get = await answer(send.GET('ch1', 'r2'));
+      expect(get).toEqual({ status: 200, body: { success: true, data: [] } });
+      const put = await answer(send.PUT('ch1', 'r2'));
+      expect(put.status).toBe(200);
+      expect(prismaMock.channelPermissionOverride.upsert).toHaveBeenCalledTimes(1);
+      // asked on the shared client first, then again on the transaction's
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, undefined);
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, prismaMock);
+    });
+
+    it('the owner, who views every plaintext channel, edits its overrides as before', async () => {
+      mockGetHighestRolePosition.mockResolvedValue(Infinity);
+      lockedRole({ position: 9 });
+
+      const res = await answer(send.PUT('ch1', 'r-high'));
+
+      expect(res.status).toBe(200);
+      expect(prismaMock.channelPermissionOverride.upsert).toHaveBeenCalledTimes(1);
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL, undefined);
+    });
+
+    it('an actor without Manage Roles gets the same refusal on a channel they cannot see as on any other', async () => {
+      mockHasServerPermission.mockResolvedValue(false);
+      for (const route of ['PUT', 'DELETE']) {
+        const hidden = await answer(send[route]('ch-hidden', 'r2'));
+        expect(hidden).toEqual(await answer(send[route]('ch-none', 'r2')));
+        expect(hidden).toEqual(await answer(send[route]('ch1', 'r2')));
+        expect(hidden.status).toBe(403);
+      }
+    });
+  });
+
   // ── GET /permissions/effective ─────────────────────────────────────────
 
   describe('GET /roles/permissions/effective', () => {
@@ -1785,6 +2228,32 @@ describe('Role Routes', () => {
 
       expect(res.status).toBe(200);
       expect(mockGetEffectivePermissions).toHaveBeenCalledWith('user1', 'srv1', 'ch1');
+      // the caller's own view of the channel is asked first
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch1', 'srv1', Permissions.VIEW_CHANNEL);
+    });
+
+    it('a channel the caller cannot view: the answer of an unknown channel, the target never read', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user1', serverId: 'srv1' });
+      mockHasServerPermission.mockResolvedValue(true);
+      mockHasChannelPermission.mockResolvedValue(false);
+
+      const self = await request(app).get('/api/v1/servers/srv1/roles/permissions/effective?channelId=ch-hidden');
+      const other = await request(app).get('/api/v1/servers/srv1/roles/permissions/effective?channelId=ch-hidden&userId=other-user');
+
+      for (const res of [self, other]) {
+        expect({ status: res.status, body: res.body }).toEqual({ status: 200, body: { success: true, data: { permissions: '0', source: 'computed' } } });
+      }
+      expect(mockHasChannelPermission).toHaveBeenCalledWith('user1', 'ch-hidden', 'srv1', Permissions.VIEW_CHANNEL);
+      expect(mockGetEffectivePermissions).not.toHaveBeenCalled();
+    });
+
+    it('no channel: the caller\'s view of a channel is not asked', async () => {
+      prismaMock.serverMember.findUnique.mockResolvedValue({ userId: 'user1', serverId: 'srv1' });
+      mockHasServerPermission.mockResolvedValue(false);
+      mockGetEffectivePermissions.mockResolvedValue({ permissions: '0', source: 'computed' });
+
+      expect((await request(app).get('/api/v1/servers/srv1/roles/permissions/effective')).status).toBe(200);
+      expect(mockHasChannelPermission).not.toHaveBeenCalled();
     });
 
     it('returns 404 for non-member', async () => {
