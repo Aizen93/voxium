@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { LIMITS } from '@voxium/shared';
 
 // The admin resource-limit routes (GET/PUT /admin/limits/global, GET/PUT/DELETE
 // /admin/limits/servers/:serverId): every hand-written field map carries
@@ -476,5 +477,76 @@ describe('the secure-channel limit (maxSecureChannelsPerServer)', () => {
     prismaMock.serverLimits.findUnique.mockResolvedValue({ serverId: 'srv-1', ...NULL_OVERRIDES, maxSecureChannelsPerServer: 0 });
     const res = await request(app).get('/api/v1/admin/limits/servers/srv-1').set(auth());
     expect(res.body.data).toEqual({ ...NULL_OVERRIDES, maxSecureChannelsPerServer: 0 });
+  });
+});
+
+describe('the voice users limit (maxVoiceUsersPerChannel) stops at the administrator maximum', () => {
+  const putGlobal = (body: object) => request(app).put('/api/v1/admin/limits/global').set(auth()).send(body);
+  const putServer = (body: object) => request(app).put('/api/v1/admin/limits/servers/srv-1').set(auth()).send(body);
+
+  it('the maximum is 100 and the tested figure is 25, from the shared constants', () => {
+    expect(LIMITS.MAX_VOICE_USERS_PER_CHANNEL_ADMIN_MAX).toBe(100);
+    expect(LIMITS.VOICE_USERS_PER_CHANNEL_LOAD_TESTED).toBe(25);
+  });
+
+  it.each([
+    [500, 100],
+    [101, 100],
+    [100, 100],
+    [1, 1],
+    [0, 1],
+    ['7', 7],
+  ])('global: clamps %s to %s', async (input, expected) => {
+    const res = await putGlobal({ maxVoiceUsersPerChannel: input });
+    expect(res.status).toBe(200);
+    expect(globalWrite().update).toEqual({ maxVoiceUsersPerChannel: expected });
+    expect(res.body.data.maxVoiceUsersPerChannel).toBe(expected);
+  });
+
+  it.each([['abc'], [null], [2.5]])('global: refuses %s with a 400', async (input) => {
+    const res = await putGlobal({ maxVoiceUsersPerChannel: input });
+    expect(res.status).toBe(400);
+    expect(prismaMock.globalConfig.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [500, 100],
+    [101, 100],
+    [100, 100],
+    [1, 1],
+    [0, 1],
+    [null, null],
+  ])('per space: maps %s to %s', async (input, expected) => {
+    const res = await putServer({ maxVoiceUsersPerChannel: input });
+    expect(prismaMock.serverLimits.upsert.mock.calls[0][0].update).toEqual({ maxVoiceUsersPerChannel: expected });
+    expect(res.body.data.maxVoiceUsersPerChannel).toBe(expected);
+  });
+
+  it('per space: a fraction is a 400', async () => {
+    const res = await putServer({ maxVoiceUsersPerChannel: 2.5 });
+    expect(res.status).toBe(400);
+  });
+
+  // GET /limits/global runs the real getGlobalLimits (utils/serverLimits is not
+  // mocked; only the prisma upsert under it is), and the per-space GET is the
+  // route's own findUnique read
+  it('a value stored above 100 is served as stored, globally and per space', async () => {
+    prismaMock.globalConfig.upsert.mockResolvedValue({ ...GLOBAL_ROW, maxVoiceUsersPerChannel: 300 });
+    const g = await request(app).get('/api/v1/admin/limits/global').set(auth());
+    expect(g.body.data.maxVoiceUsersPerChannel).toBe(300);
+    prismaMock.serverLimits.findUnique.mockResolvedValue({ serverId: 'srv-1', ...NULL_OVERRIDES, maxVoiceUsersPerChannel: 250 });
+    const s = await request(app).get('/api/v1/admin/limits/servers/srv-1').set(auth());
+    expect(s.body.data.maxVoiceUsersPerChannel).toBe(250);
+  });
+
+  it('a write of another field leaves a stored 300 out of the write and audits it unchanged', async () => {
+    prismaMock.globalConfig.upsert.mockResolvedValue({ ...GLOBAL_ROW, maxVoiceUsersPerChannel: 300, maxChannelsPerServer: 30 });
+    const res = await putGlobal({ maxChannelsPerServer: 30 });
+    expect(globalWrite().update).toEqual({ maxChannelsPerServer: 30 });
+    expect(res.body.data.maxVoiceUsersPerChannel).toBe(300);
+    const { before, after } = audit.mock.calls[0][0].metadata as Record<string, Record<string, number>>;
+    expect(audit.mock.calls[0][0].action).toBe('limits.update_global');
+    expect(before.maxVoiceUsersPerChannel).toBe(300);
+    expect(after.maxVoiceUsersPerChannel).toBe(300);
   });
 });

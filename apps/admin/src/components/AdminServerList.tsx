@@ -7,11 +7,12 @@ import { DirectoryChips } from './DirectoryChips';
 import { AdminServerWebhooksModal } from './AdminServerWebhooksModal';
 import { toast } from '../stores/toastStore';
 import { apiErrorMessage, logMessage } from '../utils/apiError';
+import { LIMITS } from '@voxium/shared';
 import type { AdminServer, ResourceLimits, ServerResourceLimits } from '@voxium/shared';
 
 const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; description: string; min: number; max: number }> = [
   { key: 'maxChannelsPerServer', label: 'Max Channels / Server', description: 'Maximum text + voice channels per server (secure channels are counted separately)', min: 1, max: 500 },
-  { key: 'maxVoiceUsersPerChannel', label: 'Max Voice Users / Channel', description: 'Maximum users in a single voice channel', min: 1, max: 500 },
+  { key: 'maxVoiceUsersPerChannel', label: 'Max Voice Users / Channel', description: 'Maximum users in a single voice channel', min: 1, max: LIMITS.MAX_VOICE_USERS_PER_CHANNEL_ADMIN_MAX },
   { key: 'maxCategoriesPerServer', label: 'Max Categories / Server', description: 'Maximum channel categories per server', min: 1, max: 200 },
   { key: 'maxMembersPerServer', label: 'Max Members / Server', description: 'Maximum members per server (0 = unlimited)', min: 0, max: 100000 },
   { key: 'maxWebhooksPerServer', label: 'Max Webhooks / Server', description: 'Maximum incoming webhooks per server (0 freezes creation)', min: 0, max: 100 },
@@ -19,6 +20,31 @@ const LIMIT_FIELDS: Array<{ key: keyof ResourceLimits; label: string; descriptio
 ];
 
 type LimitKey = keyof ResourceLimits;
+
+const TESTED_VOICE_USERS = LIMITS.VOICE_USERS_PER_CHANNEL_LOAD_TESTED;
+
+/**
+ * The warning shown under a limit field, or null. Voice channels have only
+ * been load-tested up to TESTED_VOICE_USERS users; a value above it (typed, or
+ * stored before the maximum was lowered) is allowed up to the maximum but
+ * untested.
+ */
+function limitWarning(key: LimitKey, text: string): string | null {
+  if (key !== 'maxVoiceUsersPerChannel') return null;
+  const value = parseLimit(text);
+  if (value === null || value <= TESTED_VOICE_USERS) return null;
+  const stored = value > LIMITS.MAX_VOICE_USERS_PER_CHANNEL_ADMIN_MAX
+    ? ` Values above ${LIMITS.MAX_VOICE_USERS_PER_CHANNEL_ADMIN_MAX} can no longer be saved; this one stays as stored until it is changed.`
+    : '';
+  return `Above ${TESTED_VOICE_USERS} users, the most this has been load-tested with. Larger channels are untested and may degrade.${stored}`;
+}
+
+/** Refusal text for a typed value over the field's maximum, else null. */
+function overMaximum(field: { label: string; max: number }, value: number, stored: number | null | undefined): string | null {
+  // An old stored value above the maximum is left alone, not rewritten
+  if (value <= field.max || value === stored) return null;
+  return `${field.label} must be at most ${field.max}`;
+}
 
 const WHOLE_NUMBER_RE = /^[0-9]+$/;
 const NOT_A_WHOLE_NUMBER = 'Every limit needs a whole number';
@@ -341,6 +367,11 @@ export function AdminServerList() {
   );
 }
 
+function LimitWarning({ text }: { text: string | null }) {
+  if (!text) return null;
+  return <p role="status" className="text-[10px] text-vox-accent-warning mt-0.5">{text}</p>;
+}
+
 // ─── Global Limits Editor ──────────────────────────────────────────────────
 
 function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave: (l: Partial<ResourceLimits>) => Promise<void> }) {
@@ -354,7 +385,7 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
   const hasChanges = LIMIT_FIELDS.some((f) => parseLimit(draft[f.key]) !== limits[f.key]);
 
   const handleSave = async () => {
-    const values = {} as ResourceLimits;
+    const values: Partial<ResourceLimits> = {};
     for (const f of LIMIT_FIELDS) {
       const value = isUnreadable(f.key) ? null : parseLimit(draft[f.key]);
       // Every global limit is required: there is no lower layer to fall back to
@@ -362,6 +393,14 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
         toast.error(NOT_A_WHOLE_NUMBER);
         return;
       }
+      const tooBig = overMaximum(f, value, limits[f.key]);
+      if (tooBig) {
+        toast.error(tooBig);
+        return;
+      }
+      // A stored value above the maximum is not sent back (the server would
+      // clamp it): it stays as stored
+      if (value > f.max) continue;
       values[f.key] = value;
     }
     setSaving(true);
@@ -389,6 +428,7 @@ function GlobalLimitsEditor({ limits, onSave }: { limits: ResourceLimits; onSave
               className="w-full rounded-md bg-vox-bg-hover border border-vox-border text-sm text-vox-text-primary px-3 py-1.5 focus:outline-none focus:border-vox-accent-primary"
             />
             <p className="text-[10px] text-vox-text-muted mt-0.5">{field.description}</p>
+            <LimitWarning text={limitWarning(field.key, draft[field.key])} />
           </div>
         ))}
       </div>
@@ -451,7 +491,7 @@ function ServerLimitsModal({
   }, [serverLimits, setDraft]);
 
   const handleSave = async () => {
-    const updates = {} as ServerResourceLimits;
+    const updates: Partial<ServerResourceLimits> = {};
     for (const f of LIMIT_FIELDS) {
       const text = draft[f.key].trim();
       // '' is "use the global default" here, unless the input holds text it could not parse
@@ -464,6 +504,13 @@ function ServerLimitsModal({
         toast.error(NOT_A_WHOLE_NUMBER);
         return;
       }
+      const tooBig = overMaximum(f, value, serverLimits?.[f.key]);
+      if (tooBig) {
+        toast.error(tooBig);
+        return;
+      }
+      // A stored override above the maximum is not sent back: it stays as stored
+      if (value > f.max) continue;
       updates[f.key] = value;
     }
     setSaving(true);
@@ -526,6 +573,7 @@ function ServerLimitsModal({
                     placeholder={String(globalVal)}
                     className="w-full rounded-md bg-vox-bg-hover border border-vox-border text-sm text-vox-text-primary px-3 py-1.5 placeholder:text-vox-text-muted/50 focus:outline-none focus:border-vox-accent-primary"
                   />
+                  <LimitWarning text={limitWarning(field.key, draft[field.key])} />
                 </div>
               );
             })}

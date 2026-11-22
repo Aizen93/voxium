@@ -369,6 +369,64 @@ describe('AdminServerList — the limits editors take whole numbers only', () =>
       expect(toast.error).not.toHaveBeenCalled();
     });
 
+    it('the voice users field stops at 100 and warns above the tested 25, not at or below it', async () => {
+      await openGlobal();
+      const input = inputUnder('Max Voice Users / Channel');
+      expect(input.max).toBe('100');
+      expect(document.body.textContent).not.toContain('load-tested');
+      await typeInto(input, '25');
+      expect(document.body.textContent).not.toContain('load-tested');
+      await typeInto(input, '26');
+      expect(document.body.textContent).toContain('Above 25 users, the most this has been load-tested with');
+    });
+
+    it('a typed value above 100 is refused with its limit and nothing is sent', async () => {
+      await openGlobal();
+      await typeInto(inputUnder('Max Voice Users / Channel'), '101');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('Max Voice Users / Channel must be at most 100');
+      expect(store.updateGlobalLimits).not.toHaveBeenCalled();
+      await typeInto(inputUnder('Max Voice Users / Channel'), '100');
+      await save();
+      expect(store.updateGlobalLimits).toHaveBeenCalledWith({ ...GLOBAL, maxVoiceUsersPerChannel: 100 });
+    });
+
+    it('a stored 300 is shown with the warning, kept out of a save of another field, and not changeable to 200', async () => {
+      store.globalLimits = { ...GLOBAL, maxVoiceUsersPerChannel: 300 };
+      store.updateGlobalLimits.mockResolvedValue(undefined);
+      await render();
+      await act(async () => { qa('button').find((b) => b.textContent?.includes('Global Resource Limits'))!.click(); });
+      expect(inputUnder('Max Voice Users / Channel').value).toBe('300');
+      expect(document.body.textContent).toContain('can no longer be saved');
+      await typeInto(inputUnder('Max Webhooks / Server'), '7');
+      await save();
+      const sent = store.updateGlobalLimits.mock.calls[0][0];
+      expect(sent.maxWebhooksPerServer).toBe(7);
+      expect('maxVoiceUsersPerChannel' in sent).toBe(false);
+      await typeInto(inputUnder('Max Voice Users / Channel'), '200');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('Max Voice Users / Channel must be at most 100');
+      expect(store.updateGlobalLimits).toHaveBeenCalledTimes(1);
+    });
+
+    it('the rule holds for every field: a changed value above its maximum is refused, an unchanged stored one is left out', async () => {
+      store.globalLimits = { ...GLOBAL, maxChannelsPerServer: 600 };
+      store.updateGlobalLimits.mockResolvedValue(undefined);
+      await render();
+      await act(async () => { qa('button').find((b) => b.textContent?.includes('Global Resource Limits'))!.click(); });
+      await typeInto(inputUnder('Max Categories / Server'), '201');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('Max Categories / Server must be at most 200');
+      expect(store.updateGlobalLimits).not.toHaveBeenCalled();
+      await typeInto(inputUnder('Max Categories / Server'), '12');
+      await typeInto(inputUnder('Max Webhooks / Server'), '7');
+      await save();
+      const sent = store.updateGlobalLimits.mock.calls[0][0];
+      expect(sent.maxWebhooksPerServer).toBe(7);
+      expect(sent.maxCategoriesPerServer).toBe(12);
+      expect('maxChannelsPerServer' in sent).toBe(false);
+    });
+
     it('a server refusal shows its own reason', async () => {
       const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
       await openGlobal();
@@ -409,6 +467,32 @@ describe('AdminServerList — the limits editors take whole numbers only', () =>
       await save();
       expect(toast.error).toHaveBeenCalledWith('Every limit needs a whole number');
       expect(store.updateServerLimits).not.toHaveBeenCalled();
+    });
+
+    it('per server: the override warns above 25, refuses a new 101, and leaves a stored 300 out of the save', async () => {
+      await openServer({ ...NO_OVERRIDES, maxVoiceUsersPerChannel: 300 });
+      expect(document.body.textContent).toContain('can no longer be saved');
+      await save();
+      const sent = store.updateServerLimits.mock.calls[0][1];
+      expect('maxVoiceUsersPerChannel' in sent).toBe(false);
+      await typeInto(inputUnder('Max Voice Users / Channel'), '101');
+      await save();
+      expect(toast.error).toHaveBeenCalledWith('Max Voice Users / Channel must be at most 100');
+      expect(store.updateServerLimits).toHaveBeenCalledTimes(1);
+      await typeInto(inputUnder('Max Voice Users / Channel'), '25');
+      expect(document.body.textContent).not.toContain('load-tested');
+      await typeInto(inputUnder('Max Voice Users / Channel'), '40');
+      expect(document.body.textContent).toContain('load-tested');
+      await save();
+      expect(store.updateServerLimits).toHaveBeenLastCalledWith('listed', expect.objectContaining({ maxVoiceUsersPerChannel: 40 }));
+    });
+
+    it('per server: clearing an override stored above 100 is sent as null, not refused', async () => {
+      await openServer({ ...NO_OVERRIDES, maxVoiceUsersPerChannel: 300 });
+      await typeInto(inputUnder('Max Voice Users / Channel'), '');
+      await save();
+      expect(toast.error).not.toHaveBeenCalled();
+      expect(store.updateServerLimits).toHaveBeenCalledWith('listed', NO_OVERRIDES);
     });
 
     it('a fraction is refused', async () => {

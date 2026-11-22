@@ -1521,7 +1521,7 @@ adminRouter.put('/limits/global', async (req: Request, res: Response, next: Next
       return Math.max(min, Math.min(max, n));
     };
     if (maxChannelsPerServer !== undefined) data.maxChannelsPerServer = limit('maxChannelsPerServer', maxChannelsPerServer, 1, 500);
-    if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = limit('maxVoiceUsersPerChannel', maxVoiceUsersPerChannel, 1, 500);
+    if (maxVoiceUsersPerChannel !== undefined) data.maxVoiceUsersPerChannel = limit('maxVoiceUsersPerChannel', maxVoiceUsersPerChannel, 1, LIMITS.MAX_VOICE_USERS_PER_CHANNEL_ADMIN_MAX);
     if (maxCategoriesPerServer !== undefined) data.maxCategoriesPerServer = limit('maxCategoriesPerServer', maxCategoriesPerServer, 1, 200);
     if (maxMembersPerServer !== undefined) data.maxMembersPerServer = limit('maxMembersPerServer', maxMembersPerServer, 0, 100000);
     if (maxWebhooksPerServer !== undefined) data.maxWebhooksPerServer = limit('maxWebhooksPerServer', maxWebhooksPerServer, 0, 100);
@@ -1599,7 +1599,7 @@ adminRouter.put('/limits/servers/:serverId', async (req: Request<{ serverId: str
 
     const data = {
       maxChannelsPerServer: maxChannelsPerServer !== undefined ? (toInt(maxChannelsPerServer) !== null ? Math.max(1, Math.min(500, toInt(maxChannelsPerServer)!)) : null) : undefined,
-      maxVoiceUsersPerChannel: maxVoiceUsersPerChannel !== undefined ? (toInt(maxVoiceUsersPerChannel) !== null ? Math.max(1, Math.min(500, toInt(maxVoiceUsersPerChannel)!)) : null) : undefined,
+      maxVoiceUsersPerChannel: maxVoiceUsersPerChannel !== undefined ? (toInt(maxVoiceUsersPerChannel) !== null ? Math.max(1, Math.min(LIMITS.MAX_VOICE_USERS_PER_CHANNEL_ADMIN_MAX, toInt(maxVoiceUsersPerChannel)!)) : null) : undefined,
       maxCategoriesPerServer: maxCategoriesPerServer !== undefined ? (toInt(maxCategoriesPerServer) !== null ? Math.max(1, Math.min(200, toInt(maxCategoriesPerServer)!)) : null) : undefined,
       maxMembersPerServer: maxMembersPerServer !== undefined ? (toInt(maxMembersPerServer) !== null ? Math.max(0, Math.min(100000, toInt(maxMembersPerServer)!)) : null) : undefined,
       // 0 freezes webhook creation on this one server; null falls back to global
