@@ -532,7 +532,7 @@ export async function copyS3Object(sourceKey: string, destKey: string): Promise<
     await getS3Client().send(new CopyObjectCommand({
       Bucket: getBucket(),
       Key: destKey,
-      CopySource: `${getBucket()}/${sourceKey.split('/').map(encodeURIComponent).join('/')}`,
+      CopySource: copySourceOf(sourceKey),
       MetadataDirective: 'COPY',
     }));
     return true;
@@ -540,6 +540,28 @@ export async function copyS3Object(sourceKey: string, destKey: string): Promise<
     if (isMissingObjectError(err)) return false;
     throw err;
   }
+}
+
+/** A CopySource for `key` in the bucket: each path segment encoded, the slashes kept. */
+function copySourceOf(key: string): string {
+  return `${getBucket()}/${key.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/**
+ * Set the stored type of an object in place: a copy onto its own key with
+ * the metadata REPLACED by `contentType` alone (all the metadata a presigned
+ * upload stores, see generatePresignedPutUrl). The bytes are not touched.
+ * No encryption header: the bucket's default applies to this write as to
+ * every other. Every failure is rethrown.
+ */
+export async function setS3ObjectContentType(key: string, contentType: string): Promise<void> {
+  await getS3Client().send(new CopyObjectCommand({
+    Bucket: getBucket(),
+    Key: key,
+    CopySource: copySourceOf(key),
+    MetadataDirective: 'REPLACE',
+    ContentType: contentType,
+  }));
 }
 
 /**

@@ -8,13 +8,15 @@ import {
   validateEmail, validatePassword, validateUsername, canonicalizeEmail, isDisposableEmailDomain,
   emailDomain, isCommonEmailProvider,
 } from '@voxium/shared';
-import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, TooManyRequestsError } from '../utils/errors';
 import { sanitizeLabel } from '../utils/sanitize';
 import {
   sendSignupCodeEmail, sendSignupExistingAccountEmail, describeEmailError, MailSuppressedError,
 } from '../utils/email';
 import { isMailSuppressed, mailboxDigest } from '../utils/mailSuppression';
-import { getDomainRegistrationCount, countDomainRegistration, domainRegistrationCap, normalizeIp } from '../middleware/rateLimiter';
+import {
+  getDomainRegistrationCount, chargeDomainRegistration, refundRateLimit, domainRegistrationCap, normalizeIp,
+} from '../middleware/rateLimiter';
 import { deleteUserAccount } from '../utils/accountDeletion';
 import { isReservedUsername } from '../utils/deletedParticipant';
 import { CONSENT_SELECT, withConsentFlag } from './authService';
@@ -378,59 +380,75 @@ export async function completeRegistration(
     await refundAttempt();
     throw new ConflictError(SIGNUP_EMAIL_REGISTERED_MESSAGE);
   }
-  for (const legacy of holders) {
-    try {
-      await deleteUserAccount(legacy.id, { reason: 'superseded by a verified sign-up', logPrefix: '[Signup]' });
-    } catch (err) {
-      // A parallel completion with the same code deleted it first: already
-      // gone (the deletion answers it as an unknown account)
-      if (!(err instanceof NotFoundError) && (err as { code?: string })?.code !== 'P2025') throw err;
-      console.warn('[Signup] Legacy account already deleted by a parallel completion');
-    }
+
+  // A novel domain's daily budget is charged here, atomically, before the
+  // first step that cannot be undone (the legacy deletion): the start's read
+  // is only its early answer, and concurrent completions must each count the
+  // ones charged before them. Over the cap: the limiters' 429, the guess given
+  // back (the code was right). Every way out below that creates no account
+  // gives the point back.
+  const domain = emailDomain(row.email);
+  const domainCharge = isCommonEmailProvider(domain) ? null : await chargeDomainRegistration(domain);
+  if (domainCharge && !domainCharge.allowed) {
+    await refundAttempt();
+    throw new TooManyRequestsError(Math.ceil(domainCharge.msBeforeNext / 1000));
   }
 
-  // The account and its first session in ONE transaction: a session write
-  // that fails leaves no account behind, so the code is still unused and the
-  // completion can be tried again.
   let user;
   let tokens: SessionTokens;
   try {
-    ({ user, tokens } = await prisma.$transaction(async (tx) => {
-      const created = await tx.user.create({
-        data: {
-          username,
-          email: row.email,
-          emailCanonical: row.email_canonical,
-          displayName: row.display_name,
-          password: row.password_hash,
-          emailVerified: true,
-          emailVerifiedAt: new Date(),
-          termsAcceptedAt: row.terms_accepted_at,
-          privacyAcceptedAt: row.privacy_accepted_at,
-        },
-        select: USER_RESULT_SELECT,
-      });
-      await tx.pendingRegistration.delete({ where: { id: row.id } });
-      // A new account has no other session to trim
-      const opened = await openSession(
-        tx,
-        { userId: created.id, username: created.username, role: created.role, tokenVersion: created.tokenVersion },
-        { rememberMe: true, label, accountGoneMessage: 'User not found' },
-      );
-      return { user: created, tokens: opened.tokens };
-    }));
-  } catch (err) {
-    // The unique indexes are the real enforcement (two completions racing).
-    if ((err as { code?: string })?.code === 'P2002') {
-      await refundAttempt();
-      if (/email/i.test(uniqueViolationTarget(err))) throw new ConflictError(SIGNUP_EMAIL_REGISTERED_MESSAGE);
-      throw new ConflictError(USERNAME_TAKEN_MESSAGE);
+    for (const legacy of holders) {
+      try {
+        await deleteUserAccount(legacy.id, { reason: 'superseded by a verified sign-up', logPrefix: '[Signup]' });
+      } catch (err) {
+        // A parallel completion with the same code deleted it first: already
+        // gone (the deletion answers it as an unknown account)
+        if (!(err instanceof NotFoundError) && (err as { code?: string })?.code !== 'P2025') throw err;
+        console.warn('[Signup] Legacy account already deleted by a parallel completion');
+      }
     }
+
+    // The account and its first session in ONE transaction: a session write
+    // that fails leaves no account behind, so the code is still unused and the
+    // completion can be tried again.
+    try {
+      ({ user, tokens } = await prisma.$transaction(async (tx) => {
+        const created = await tx.user.create({
+          data: {
+            username,
+            email: row.email,
+            emailCanonical: row.email_canonical,
+            displayName: row.display_name,
+            password: row.password_hash,
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+            termsAcceptedAt: row.terms_accepted_at,
+            privacyAcceptedAt: row.privacy_accepted_at,
+          },
+          select: USER_RESULT_SELECT,
+        });
+        await tx.pendingRegistration.delete({ where: { id: row.id } });
+        // A new account has no other session to trim
+        const opened = await openSession(
+          tx,
+          { userId: created.id, username: created.username, role: created.role, tokenVersion: created.tokenVersion },
+          { rememberMe: true, label, accountGoneMessage: 'User not found' },
+        );
+        return { user: created, tokens: opened.tokens };
+      }));
+    } catch (err) {
+      // The unique indexes are the real enforcement (two completions racing).
+      if ((err as { code?: string })?.code === 'P2002') {
+        await refundAttempt();
+        if (/email/i.test(uniqueViolationTarget(err))) throw new ConflictError(SIGNUP_EMAIL_REGISTERED_MESSAGE);
+        throw new ConflictError(USERNAME_TAKEN_MESSAGE);
+      }
+      throw err;
+    }
+  } catch (err) {
+    if (domainCharge?.charged) await refundRateLimit('registerDomain', domain);
     throw err;
   }
-
-  const domain = emailDomain(row.email);
-  if (!isCommonEmailProvider(domain)) await countDomainRegistration(domain);
 
   // The registration address is the one the start came from (the request
   // that solved the proof-of-work); the completing one only when the start's

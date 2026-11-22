@@ -35,7 +35,12 @@ const h = vi.hoisted(() => {
     sendExisting: vi.fn(),
     mailSuppressed: vi.fn(),
     domainCount: vi.fn(),
-    domainConsume: vi.fn(),
+    domainCharge: vi.fn(),
+    limiterRefund: vi.fn(),
+    // The real limiter helpers over an in-memory store (rate-limiter-flexible
+    // is mocked below), for the tests that run completions concurrently
+    realLimiter: null as null | Pick<typeof import('../../middleware/rateLimiter'),
+      'chargeDomainRegistration' | 'refundRateLimit' | 'getDomainRegistrationCount' | 'getAllRateLimits'>,
     deleteUserAccount: vi.fn(),
     geoLookup: vi.fn(),
     bcryptHash: vi.fn(),
@@ -66,14 +71,23 @@ vi.mock('../../utils/redis', () => ({
   getRedis: () => ({ incr: vi.fn(), expire: vi.fn(), get: vi.fn() }),
 }));
 
+// The limiter module's own store, in memory: RateLimiterMemory keeps the
+// consume/reward/get contract of the Redis one, atomically per call.
+vi.mock('rate-limiter-flexible', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('rate-limiter-flexible')>();
+  return { ...actual, RateLimiterRedis: actual.RateLimiterMemory };
+});
+
 vi.mock('../../middleware/rateLimiter', async (importOriginal) => {
   // normalizeIp is pure: the real one is what ban matching and the IP record
   // must agree with, so it is NOT stubbed.
   const actual = await importOriginal<typeof import('../../middleware/rateLimiter')>();
+  h.realLimiter = actual;
   return {
     normalizeIp: actual.normalizeIp,
     getDomainRegistrationCount: (...a: unknown[]) => h.domainCount(...a),
-    countDomainRegistration: (...a: unknown[]) => h.domainConsume(...a),
+    chargeDomainRegistration: (...a: unknown[]) => h.domainCharge(...a),
+    refundRateLimit: (...a: unknown[]) => h.limiterRefund(...a),
     domainRegistrationCap: () => 10,
     consumeMailCap: vi.fn().mockResolvedValue(true),
   };
@@ -100,6 +114,7 @@ vi.mock('bcryptjs', async (importOriginal) => {
 import { prisma } from '../../utils/prisma';
 import { mailboxDigest } from '../../utils/mailSuppression';
 import { MailSuppressedError } from '../../utils/email';
+import { TooManyRequestsError } from '../../utils/errors';
 import {
   startRegistration, completeRegistration, resendRegistrationCode, claimSignupMailSlot,
   purgeExpiredSignupState, signupCodeHash,
@@ -153,7 +168,8 @@ beforeEach(() => {
   h.sendExisting.mockResolvedValue(undefined);
   h.mailSuppressed.mockResolvedValue(false);
   h.domainCount.mockResolvedValue(0);
-  h.domainConsume.mockResolvedValue(undefined);
+  h.domainCharge.mockResolvedValue({ allowed: true, charged: true, msBeforeNext: 0 });
+  h.limiterRefund.mockResolvedValue(undefined);
   h.deleteUserAccount.mockResolvedValue(undefined);
   h.geoLookup.mockReturnValue(null);
 });
@@ -376,8 +392,8 @@ describe('startRegistration — the same answer after the same work on every bra
     expect(row.codeExpiresAt.getTime() - before).toBeLessThanOrEqual(SIGNUP.CODE_TTL_MINUTES * MINUTE + 5000);
     expect(row.codeHash).toMatch(/^[0-9a-f]{64}$/);
 
-    // Nothing is counted against the domain until an account exists
-    expect(h.domainConsume).not.toHaveBeenCalled();
+    // The start only READS the domain budget: it is charged by a completion
+    expect(h.domainCharge).not.toHaveBeenCalled();
 
     expect(ledgerCalls()).toHaveLength(s.ledger ? 1 : 0);
     if (s.ledger) {
@@ -931,7 +947,8 @@ describe('completeRegistration', () => {
       h.tx.$queryRaw.mockRejectedValueOnce(new Error('connection reset'));
       await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL)).rejects.toThrow('connection reset');
       // The domain and the address are counted only for an account that exists
-      expect(h.domainConsume).not.toHaveBeenCalled();
+      expect(h.limiterRefund).toHaveBeenCalledTimes(1);
+      expect(h.limiterRefund).toHaveBeenCalledWith('registerDomain', 'smallcorp.example');
       expect(prisma.ipRecord.create).not.toHaveBeenCalled();
     });
 
@@ -947,14 +964,18 @@ describe('completeRegistration', () => {
       });
     });
 
-    it('counts a novel domain only once the account exists; a common provider never', async () => {
+    it('charges a novel domain once, before the account is created, and keeps the charge; a common provider never', async () => {
       await completeRegistration(ID, CODE, undefined, undefined, LABEL);
-      expect(h.domainConsume).toHaveBeenCalledWith('smallcorp.example');
+      expect(h.domainCharge).toHaveBeenCalledTimes(1);
+      expect(h.domainCharge).toHaveBeenCalledWith('smallcorp.example');
+      expect(h.domainCharge.mock.invocationCallOrder[0]).toBeLessThan(h.tx.user.create.mock.invocationCallOrder[0]);
+      expect(h.limiterRefund).not.toHaveBeenCalled();
 
       vi.clearAllMocks();
       h.prisma.$queryRaw.mockResolvedValueOnce([pendingRow({ email: 'human@gmail.com', email_canonical: 'human@gmail.com' })]);
       await completeRegistration(ID, CODE, undefined, undefined, LABEL);
-      expect(h.domainConsume).not.toHaveBeenCalled();
+      expect(h.domainCharge).not.toHaveBeenCalled();
+      expect(h.limiterRefund).not.toHaveBeenCalled();
     });
 
     it('records the address the START came from, not the completing one, and reads it from the guess update', async () => {
@@ -1125,6 +1146,8 @@ describe('completeRegistration', () => {
       const result = await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(result.user.id).toBe('user-1');
       expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');
+      // the account IS created: its point stays charged
+      expect(h.limiterRefund).not.toHaveBeenCalled();
     });
 
     it("a legacy holder the deletion finds gone under its lock (404 User) counts as gone too", async () => {
@@ -1135,6 +1158,8 @@ describe('completeRegistration', () => {
       const result = await completeRegistration(ID, CODE, undefined, undefined, LABEL);
       expect(result.user.id).toBe('user-1');
       expect(warn).toHaveBeenCalledWith('[Signup] Legacy account already deleted by a parallel completion');
+      // the account IS created: its point stays charged
+      expect(h.limiterRefund).not.toHaveBeenCalled();
     });
 
     it('two parallel completions over one legacy holder: one account, the other a 409, no 500', async () => {
@@ -1188,20 +1213,145 @@ describe('completeRegistration', () => {
       ['adapter index users_username_key', adapterP2002('users_username_key'), USERNAME_TAKEN_MESSAGE],
       ['adapter fields (email)', adapterP2002({ fields: ['email'] }), SIGNUP_EMAIL_REGISTERED_MESSAGE],
       ['adapter fields (username)', adapterP2002({ fields: ['username'] }), USERNAME_TAKEN_MESSAGE],
-    ])('%s maps to its 409, refunds the attempt, counts nothing', async (_label, err, message) => {
+    ])('%s maps to its 409, refunds the attempt, gives the domain point back', async (_label, err, message) => {
       h.tx.user.create.mockRejectedValueOnce(err);
       await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL))
         .rejects.toMatchObject({ statusCode: 409, message });
       refund();
-      expect(h.domainConsume).not.toHaveBeenCalled();
+      expect(h.limiterRefund).toHaveBeenCalledTimes(1);
+      expect(h.limiterRefund).toHaveBeenCalledWith('registerDomain', 'smallcorp.example');
       expect(prisma.ipRecord.create).not.toHaveBeenCalled();
     });
 
-    it('any other database error surfaces as itself, with no refund', async () => {
+    it('any other database error surfaces as itself, with no attempt refund, the domain point given back', async () => {
       h.tx.user.create.mockRejectedValueOnce(new Error('connection reset'));
       await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL)).rejects.toThrow('connection reset');
       expect(prisma.pendingRegistration.update).not.toHaveBeenCalled();
-      expect(h.domainConsume).not.toHaveBeenCalled();
+      expect(h.limiterRefund).toHaveBeenCalledTimes(1);
+      expect(h.limiterRefund).toHaveBeenCalledWith('registerDomain', 'smallcorp.example');
+    });
+  });
+
+  describe('the novel-domain budget', () => {
+    const legacy = (id: string) => ({ id, emailVerified: false, role: 'user', ownedServers: [] as Array<{ id: string }> });
+    const LIMITER_REFUSAL = 'Too many requests. Please try again later.';
+
+    it('a domain whose budget is spent answers the limiters\' 429: the guess given back, nothing deleted or created', async () => {
+      h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
+      h.domainCharge.mockResolvedValueOnce({ allowed: false, charged: false, msBeforeNext: 5_400_500 });
+
+      const err = await completeRegistration(ID, CODE, undefined, undefined, LABEL).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(TooManyRequestsError);
+      expect(err).toMatchObject({ statusCode: 429, message: LIMITER_REFUSAL, retryAfterSeconds: 5401 });
+      refund();
+      expect(h.deleteUserAccount).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      // The helper already gave its refused point back: nothing is held here
+      expect(h.limiterRefund).not.toHaveBeenCalled();
+      // The pending row stays, like every refusal after a right code
+      expect(prisma.pendingRegistration.delete).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a wrong code', () => {}, '000000'],
+      ['a taken username', () => users({ nameTaken: true }), CODE],
+      ['a verified holder', () => h.prisma.user.findMany.mockResolvedValueOnce([{ id: 'u-v', emailVerified: true }]), CODE],
+      ['a holder that owns a space', () => h.prisma.user.findMany.mockResolvedValueOnce([
+        { id: 'u-o', emailVerified: false, role: 'user', ownedServers: [{ id: 'srv-1' }] },
+      ]), CODE],
+    ])('%s is refused before the domain is charged', async (_label, arrange, code) => {
+      arrange();
+      await expect(completeRegistration(ID, code, undefined, undefined, LABEL)).rejects.toBeDefined();
+      expect(h.domainCharge).not.toHaveBeenCalled();
+      expect(h.limiterRefund).not.toHaveBeenCalled();
+    });
+
+    it('is charged before the legacy deletion, and a failing deletion gives the point back', async () => {
+      h.prisma.user.findMany.mockResolvedValueOnce([legacy('u-legacy-1')]);
+      h.deleteUserAccount.mockRejectedValueOnce(new Error('db gone'));
+
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL)).rejects.toThrow('db gone');
+      expect(h.domainCharge.mock.invocationCallOrder[0]).toBeLessThan(h.deleteUserAccount.mock.invocationCallOrder[0]);
+      expect(h.limiterRefund).toHaveBeenCalledTimes(1);
+      expect(h.limiterRefund).toHaveBeenCalledWith('registerDomain', 'smallcorp.example');
+    });
+
+    it('a charge that allowed with nothing held creates the account, and a failed creation gives nothing back', async () => {
+      h.domainCharge.mockResolvedValue({ allowed: true, charged: false, msBeforeNext: 0 });
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL)).resolves.toHaveProperty('accessToken');
+
+      h.tx.user.create.mockRejectedValueOnce(new Error('connection reset'));
+      await expect(completeRegistration(ID, CODE, undefined, undefined, LABEL)).rejects.toThrow('connection reset');
+      expect(h.limiterRefund).not.toHaveBeenCalled();
+    });
+
+    describe('over the real limiter, completions running at once', () => {
+      /** The real charge and refund, over the in-memory store. */
+      function useRealLimiter(): number {
+        const real = h.realLimiter!;
+        h.domainCharge.mockImplementation((domain: string) => real.chargeDomainRegistration(domain));
+        h.limiterRefund.mockImplementation((name: string, key: string) => real.refundRateLimit(name, key));
+        return real.getAllRateLimits().find((l) => l.name === 'registerDomain')!.points;
+      }
+
+      /** One pending row per id, all on `domain`; each creation yields to the others first. */
+      function pendingRowsOn(domain: string): void {
+        h.prisma.$queryRaw.mockImplementation(async (_strings: TemplateStringsArray, id: string) => [pendingRow({
+          id, username: `u_${id}`, email: `${id}@${domain}`, email_canonical: `${id}@${domain}`, code_hash: signupCodeHash(id, CODE),
+        })]);
+        const create = h.tx.user.create.getMockImplementation()!;
+        h.tx.user.create.mockImplementation(async (args: { data: Record<string, unknown> }) => {
+          await new Promise((r) => setImmediate(r));
+          return create(args);
+        });
+      }
+
+      const completeAll = (ids: string[]) => Promise.allSettled(ids.map((id) => completeRegistration(id, CODE, undefined, undefined, LABEL)));
+      const ids = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}-${i}`);
+
+      it('creates at most the cap of accounts on one domain; every other completion is the 429 and keeps its guess', async () => {
+        const cap = useRealLimiter();
+        pendingRowsOn('burst-a.example');
+
+        const results = await completeAll(ids('burst-a', cap * 3));
+
+        expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(cap);
+        expect(h.tx.user.create).toHaveBeenCalledTimes(cap);
+        const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+        expect(refused).toHaveLength(cap * 2);
+        for (const r of refused) {
+          expect(r.reason).toBeInstanceOf(TooManyRequestsError);
+          expect(r.reason).toMatchObject({ statusCode: 429, message: LIMITER_REFUSAL });
+          expect((r.reason as TooManyRequestsError).retryAfterSeconds).toBeGreaterThan(0);
+        }
+        // Each refused completion's guess is given back; the budget reads exactly the cap
+        expect(vi.mocked(prisma.pendingRegistration.update)).toHaveBeenCalledTimes(cap * 2);
+        expect(await h.realLimiter!.getDomainRegistrationCount('burst-a.example')).toBe(cap);
+      });
+
+      it('completions whose creation fails give their points back, so the whole budget is still there afterwards', async () => {
+        const cap = useRealLimiter();
+        pendingRowsOn('burst-b.example');
+        const create = h.tx.user.create.getMockImplementation()!;
+        h.tx.user.create.mockImplementation(async () => {
+          await new Promise((r) => setImmediate(r));
+          throw Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { target: ['users_username_lower_key'] } });
+        });
+
+        // Every charge is taken before any creation fails: the cap of them reach
+        // the creation (409), the rest are refused (429)
+        const failed = await completeAll(ids('burst-b-fail', cap * 2));
+        const statuses = failed.map((r) => (r.status === 'rejected' ? (r.reason as { statusCode?: number }).statusCode : 201));
+        expect(statuses.filter((s) => s === 409)).toHaveLength(cap);
+        expect(statuses.filter((s) => s === 429)).toHaveLength(cap);
+        // Neither kept a point: the failed creations and the refused charges gave theirs back
+        expect(await h.realLimiter!.getDomainRegistrationCount('burst-b.example')).toBe(0);
+
+        h.tx.user.create.mockImplementation(create);
+        const later = await completeAll(ids('burst-b-ok', cap + 1));
+        expect(later.filter((r) => r.status === 'fulfilled')).toHaveLength(cap);
+        expect(later.filter((r) => r.status === 'rejected')).toHaveLength(1);
+      });
     });
   });
 });

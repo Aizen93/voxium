@@ -13,7 +13,7 @@
 import { LIMITS } from '@voxium/shared';
 import { prisma } from './prisma';
 import crypto from 'crypto';
-import { headS3Object, getS3ObjectRange, deleteFromS3, copyS3Object } from './s3';
+import { headS3Object, getS3ObjectRange, deleteFromS3, copyS3Object, setS3ObjectContentType } from './s3';
 import { imageDimensions } from './imageHeader';
 import { BadRequestError } from './errors';
 
@@ -74,26 +74,40 @@ function isPng(buf: Buffer): boolean {
     && buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a;
 }
 
+/** The type of an avatar/icon header: WebP, PNG, or null for anything else. */
+function imageTypeOf(buf: Buffer): 'image/webp' | 'image/png' | null {
+  if (isWebp(buf)) return 'image/webp';
+  if (isPng(buf)) return 'image/png';
+  return null;
+}
+
+type AdoptedImageCheck =
+  | { ok: false; reason: string }
+  /** `contentType` is what the bytes are; `storedType` what the copy is labelled */
+  | { ok: true; contentType: 'image/webp' | 'image/png'; storedType: string | null };
+
 /**
  * The size and header checks of an adopted copy: the reason it is refused, or
- * null when it passes. S3 failures other than "no such object" are rethrown.
+ * the type its header shows next to the type it is stored with. S3 failures
+ * other than "no such object" are rethrown.
  */
-async function checkAdoptedImage(key: string, maxSize: number): Promise<string | null> {
+async function checkAdoptedImage(key: string, maxSize: number): Promise<AdoptedImageCheck> {
   const head = await headS3Object(key);
   if (!head || head.size <= 0 || head.size > maxSize) {
-    return `stored size ${head?.size ?? 'missing'}, cap ${maxSize}`;
+    return { ok: false, reason: `stored size ${head?.size ?? 'missing'}, cap ${maxSize}` };
   }
 
   const header = await getS3ObjectRange(key, 0, IMAGE_HEADER_PROBE_BYTES - 1);
-  const dims = header && (isWebp(header) || isPng(header)) ? imageDimensions(header) : null;
+  const contentType = header ? imageTypeOf(header) : null;
+  const dims = header && contentType ? imageDimensions(header) : null;
   if (
-    !dims
+    !contentType || !dims
     || dims.width < 1 || dims.height < 1
     || dims.width > LIMITS.MAX_IMAGE_ASSET_EDGE || dims.height > LIMITS.MAX_IMAGE_ASSET_EDGE
   ) {
-    return dims ? `dimensions ${dims.width}x${dims.height}` : 'not a WebP/PNG image';
+    return { ok: false, reason: dims ? `dimensions ${dims.width}x${dims.height}` : 'not a WebP/PNG image' };
   }
-  return null;
+  return { ok: true, contentType, storedType: head.contentType };
 }
 
 /**
@@ -105,6 +119,9 @@ async function checkAdoptedImage(key: string, maxSize: number): Promise<string |
  * exactly what is served, whatever happens to the uploaded key afterwards. The copy must weigh at most `maxSize` bytes and start with a WebP
  * header (or a PNG one: a webview without a WebP encoder hands the client a PNG
  * for `image/webp`) whose dimensions are at most `LIMITS.MAX_IMAGE_ASSET_EDGE`.
+ * A copy that passes is stored with the type its header shows (`image/webp`
+ * or `image/png`): the type the store serves behind the avatar and icon
+ * redirect.
  * The uploaded key is deleted either way; a refused copy too, and so is a copy
  * whose check a store error interrupted (the error is rethrown). Refuses with
  * `errorMessage` (400). A caller whose row write then fails deletes the
@@ -124,17 +141,27 @@ export async function adoptImageAssetUpload(
     console.warn(`[Uploads] Failed to delete the uploaded original ${uploadedKey}:`, err instanceof Error ? err.message : err);
   });
 
-  let refusal: string | null;
+  let check: AdoptedImageCheck;
   try {
-    refusal = await checkAdoptedImage(adoptedKey, maxSize);
+    check = await checkAdoptedImage(adoptedKey, maxSize);
   } catch (err) {
     // A store error mid-check: nothing references the copy, so it goes before the error does
     await discardUpload(adoptedKey, 'the check could not complete');
     throw err;
   }
-  if (refusal) {
-    await discardUpload(adoptedKey, refusal);
+  if (!check.ok) {
+    await discardUpload(adoptedKey, check.reason);
     throw new BadRequestError(errorMessage);
+  }
+  // The copy kept the type the upload was signed for (the client declares
+  // image/webp, whatever its encoder produced): it is labelled with the type
+  // of its own bytes. Best effort: the checks above are what the adoption
+  // rests on, so a copy whose label could not be set is still adopted.
+  if (check.storedType !== check.contentType) {
+    const contentType = check.contentType;
+    await setS3ObjectContentType(adoptedKey, contentType).catch((err) => {
+      console.warn(`[Uploads] Could not set the type of the adopted ${adoptedKey} to ${contentType}:`, err instanceof Error ? err.message : err);
+    });
   }
   return adoptedKey;
 }

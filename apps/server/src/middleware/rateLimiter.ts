@@ -114,9 +114,11 @@ const DEFAULTS: Record<string, RateLimitDef> = {
   // treadmill. Generous: a legit flow needs exactly one per registration.
   powChallenge:   { keyPrefix: 'rl:powchal',  points: 30,  duration: 60,  blockDuration: 0,   keyType: 'ip',     label: 'Registration Challenge' },
   // Novel-domain budget: keyed by EMAIL DOMAIN (major consumer providers are
-  // exempt in the service). NOT used as route middleware — consumed only
-  // after a successful create (authService), so garbage attempts cannot burn
-  // a legitimate small-org domain's budget and lock its employees out.
+  // exempt in the service). NOT used as route middleware — charged by the
+  // completion of a sign-up whose code is right, right before the account is
+  // created, and REFUNDED when no account comes of it (signupService), so
+  // garbage attempts cannot burn a legitimate small-org domain's budget and
+  // lock its employees out.
   registerDomain: { keyPrefix: 'rl:regdom',   points: 10,  duration: 86400, blockDuration: 0, keyType: 'domain',     label: 'Register (daily per email domain)' },
   // Per-INBOX daily mail caps, keyed on the CANONICAL address. The per-IP and
   // per-user limiters bound the burst rate; these bound how much mail one real
@@ -969,12 +971,15 @@ export async function consumeMailCap(name: 'verifyMail' | 'resetMail', inbox: st
 }
 
 /**
- * Novel-domain registration budget, split into READ (pre-create check) and
- * CONSUME (post-create count) so failed attempts never charge the domain —
- * see the `registerDomain` config note. A limiter bucket rather than a bare
- * Redis counter on purpose: the `rl:` prefix keeps it inside every existing
- * clearing path (test fixtures, admin resets), and the admin rate-limit API
- * can tune or raise it live like any other bucket.
+ * Novel-domain registration budget — see the `registerDomain` config note. A
+ * limiter bucket rather than a bare Redis counter on purpose: the `rl:` prefix
+ * keeps it inside every existing clearing path (test fixtures, admin resets),
+ * and the admin rate-limit API can tune or raise it live like any other bucket.
+ *
+ * The start of a sign-up READS it (`getDomainRegistrationCount`) for its early
+ * answer only: a read is not a reservation, so the bound itself is the
+ * completion's atomic charge (`chargeDomainRegistration`), taken right before
+ * the account is created and given back (`refundRateLimit`) when none is.
  */
 export async function getDomainRegistrationCount(domain: string): Promise<number> {
   try {
@@ -986,16 +991,44 @@ export async function getDomainRegistrationCount(domain: string): Promise<number
   }
 }
 
-export async function countDomainRegistration(domain: string): Promise<void> {
-  try {
-    await getLimiter('registerDomain').consume(domain);
-  } catch (err) {
-    if (err instanceof RateLimiterRes) return; // over-consume past the cap is fine — reads gate, this only counts
-    console.warn('[RateLimit] Domain budget count failed:', err instanceof Error ? err.message : err);
-  }
+/** The outcome of `chargeDomainRegistration`. */
+export interface DomainRegistrationCharge {
+  /** false: the domain's daily budget is spent, and nothing stays charged */
+  allowed: boolean;
+  /** a point is held that the caller gives back if no account is created */
+  charged: boolean;
+  /** when the budget has room again (0 unless refused) */
+  msBeforeNext: number;
 }
 
-/** The registration cap applied to non-provider domains (read-side gate). */
+/**
+ * Take one point of the domain's daily budget for an account about to be
+ * created: ONE atomic consume, so concurrent completions each count the ones
+ * charged before them. A refused consume incremented too and is given back at
+ * once, so the bucket never sits past its cap. Like every bucket this one is a
+ * `RateLimiterRedis` with an in-memory insurance limiter: when the store fails,
+ * the insurance limiter answers in this process, charges and decides. An error
+ * that still reaches this function charges nothing and allows (logged); the
+ * decision is made outside the try.
+ */
+export async function chargeDomainRegistration(domain: string): Promise<DomainRegistrationCharge> {
+  let rejection: RateLimiterRes | null = null;
+  let charged = false;
+  try {
+    await getLimiter('registerDomain').consume(domain);
+    charged = true;
+  } catch (err) {
+    if (err instanceof RateLimiterRes) rejection = err;
+    else console.warn('[RateLimit] Domain budget charge failed (allowing the registration):', err instanceof Error ? err.message : err);
+  }
+  if (rejection) {
+    await refundRateLimit('registerDomain', domain);
+    return { allowed: false, charged: false, msBeforeNext: rejection.msBeforeNext };
+  }
+  return { allowed: true, charged, msBeforeNext: 0 };
+}
+
+/** The registration cap applied to non-provider domains (the start's early answer reads it). */
 export function domainRegistrationCap(): number {
   return getConfig('registerDomain').points;
 }

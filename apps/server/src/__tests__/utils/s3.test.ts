@@ -544,6 +544,42 @@ describe('utils/s3 — copyS3Object', () => {
   });
 });
 
+describe('utils/s3 — setS3ObjectContentType', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockSend.mockReset();
+    process.env.S3_ASSETS_BUCKET = 'test-bucket';
+  });
+
+  it('copies the object onto its own key with the metadata REPLACED by the type alone', async () => {
+    const { CopyObjectCommand } = await import('@aws-sdk/client-s3');
+    vi.mocked(CopyObjectCommand).mockClear();
+    mockSend.mockResolvedValue({});
+    const { setS3ObjectContentType } = await import('../../utils/s3');
+
+    await expect(setS3ObjectContentType('avatars/u 1-2-abc.webp', 'image/png')).resolves.toBeUndefined();
+    // Exactly these fields: no encryption header (bucket default), nothing kept from the upload
+    expect(CopyObjectCommand).toHaveBeenCalledWith({
+      Bucket: 'test-bucket',
+      Key: 'avatars/u 1-2-abc.webp',
+      CopySource: 'test-bucket/avatars/u%201-2-abc.webp',
+      MetadataDirective: 'REPLACE',
+      ContentType: 'image/png',
+    });
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a missing object', Object.assign(new Error('missing'), { name: 'NoSuchKey' })],
+    ['any other store failure', new Error('AccessDenied')],
+  ])('rethrows %s', async (_label, err) => {
+    mockSend.mockRejectedValue(err);
+    const { setS3ObjectContentType } = await import('../../utils/s3');
+
+    await expect(setS3ObjectContentType('avatars/u1-2.webp', 'image/png')).rejects.toBe(err);
+  });
+});
+
 describe('utils/s3 — deleteMultipleFromS3', () => {
   beforeEach(() => {
     vi.resetModules();

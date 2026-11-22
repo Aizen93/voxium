@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import { AppError } from '../utils/errors';
+import { AppError, TooManyRequestsError } from '../utils/errors';
 import { redactedPath } from '../utils/redactUrl';
 import { describeEmailError } from '../utils/email';
 
@@ -111,6 +111,8 @@ function loggableError(err: unknown): LoggableError {
 
 export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
   if (err instanceof AppError) {
+    // A limiter's refusal thrown from a service: the same shape as the middleware's
+    if (err instanceof TooManyRequestsError && err.retryAfterSeconds !== null) res.set('Retry-After', String(err.retryAfterSeconds));
     return res.status(err.statusCode).json({
       success: false,
       error: err.message,
