@@ -74,6 +74,15 @@ interface DMState {
   removedAt: Record<string, number>;
   /** Counts the removals applied this session: a list fetch or a call setup takes it as its mark (wasRemovedSince). */
   removalSeq: number;
+  /**
+   * Conversations added to the store locally this session (an open or an add
+   * of one it did not hold), per conversation: the value of `openSeq` that
+   * each took. A list whose request started before it still shows the entry
+   * when the list lacks it (withLocalOpens). Reset at logout.
+   */
+  openedAt: Record<string, number>;
+  /** Counts the local opens this session: a list fetch takes it as its mark. */
+  openSeq: number;
 
   fetchConversations: () => Promise<void>;
   setActiveConversation: (conversationId: string) => void;
@@ -145,6 +154,31 @@ export function isConversationReadOnly(conversationId: string | null | undefined
  */
 export function wasRemovedSince(conversationId: string, mark: number): boolean {
   return (useDMStore.getState().removedAt[conversationId] ?? -1) > mark;
+}
+
+// List requests take a ticket when they start; an answer older than a list
+// already applied is dropped (the newer request began later, so it is the
+// fresher). Monotonic, so a logout needs no reset.
+let _listTicket = 0;
+let _listAppliedTicket = 0;
+
+/**
+ * A list whose request began before a local open (openDM, addConversation:
+ * an entry the store did not hold) does not lose that entry: each entry the
+ * store holds that was added after `mark` (a value of openSeq) and that the
+ * list lacks goes in front of the list's rows. A row the list has stands as
+ * the list serves it (a conversation's answer to POST /dm carries no preview);
+ * one the store no longer holds (a removal since) is not brought back.
+ */
+function withLocalOpens(
+  conversations: Conversation[],
+  mark: number,
+  openedAt: Readonly<Record<string, number>>,
+  held: readonly Conversation[],
+): Conversation[] {
+  const listed = new Set(conversations.map((c) => c.id));
+  const added = held.filter((c) => (openedAt[c.id] ?? -1) > mark && !listed.has(c.id));
+  return added.length === 0 ? conversations : [...added, ...conversations];
 }
 
 // Dedup: prevent redundant mark-as-read API calls (same pattern as serverStore)
@@ -306,9 +340,14 @@ export const useDMStore = create<DMState>((set, get) => ({
   readOnlyPending: {},
   removedAt: {},
   removalSeq: 0,
+  openedAt: {},
+  openSeq: 0,
 
   fetchConversations: async () => {
     set({ isLoading: true });
+    const ticket = ++_listTicket;
+    // the local opens before the request: one after it is not undone by its answer
+    const openMark = get().openSeq;
     // a purge of a cleared history that failed, or waited for the encryption
     // to start, is tried again at every list fetch (listed or not: a removed
     // conversation is off the list)
@@ -336,8 +375,10 @@ export const useDMStore = create<DMState>((set, get) => ({
       // what the list itself says, before this session's own knowledge joins it
       served = fetched.filter(isParticipantDeleted).map((c) => c.id);
       servedLive = fetched.filter((c) => !isParticipantDeleted(c)).map((c) => c.id);
+      // the local opens joined in BEFORE the read-only reconciliation, so
+      // the flags, the id set and the statuses below all follow the final list
       ({ conversations, transitions, applied } = reconcileReadOnly(
-        fetched,
+        withLocalOpens(fetched, openMark, get().openedAt, get().conversations),
         get().conversations,
         get().readOnlyPending,
         // the signed-in account, as the E2E layer reads it (no store import:
@@ -350,6 +391,16 @@ export const useDMStore = create<DMState>((set, get) => ({
       set({ isLoading: false });
       return;
     }
+
+    // Another account is signed in now: this answer is not its to apply
+    if ((currentE2ESessionUser() ?? null) !== (askedBy ?? null)) {
+      if (ticket === _listTicket) set({ isLoading: false });
+      return;
+    }
+    // An answer older than a list already applied is dropped: that list began
+    // later and set isLoading itself.
+    if (ticket < _listAppliedTicket) return;
+    _listAppliedTicket = ticket;
 
     // The reader's floors, before anything of the list reaches the store:
     // those of the removed conversations it leaves out (`cleared`), then those
@@ -516,10 +567,16 @@ export const useDMStore = create<DMState>((set, get) => ({
       // opened again: its earlier removal no longer keeps a list from showing it
       get().forgetRemoval(conversation.id);
 
-      // Add to list if not already present
+      // Add to list if not already present; a list begun before this open
+      // keeps the entry (withLocalOpens)
+      // (opening one the store holds adds nothing and records no mark)
       set((state) => {
         if (state.conversations.some((c) => c.id === conversation.id)) return state;
-        return { conversations: [conversation, ...state.conversations] };
+        return {
+          openSeq: state.openSeq + 1,
+          openedAt: { ...state.openedAt, [conversation.id]: state.openSeq + 1 },
+          conversations: [conversation, ...state.conversations],
+        };
       });
 
       return conversation.id;
@@ -533,7 +590,11 @@ export const useDMStore = create<DMState>((set, get) => ({
     const [conversation] = withClearedFloors([withLockedPreview(incoming)], currentE2ESessionUser());
     set((state) => {
       if (state.conversations.some((c) => c.id === conversation.id)) return state;
-      return { conversations: [conversation, ...state.conversations] };
+      return {
+        openSeq: state.openSeq + 1,
+        openedAt: { ...state.openedAt, [conversation.id]: state.openSeq + 1 },
+        conversations: [conversation, ...state.conversations],
+      };
     });
   },
 
